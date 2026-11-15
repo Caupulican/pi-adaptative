@@ -49,10 +49,11 @@ when one is set. A turn is stopped once the window's spend (its own and its work
 the bound on the bot's model; each worker run is held to the bound on its own model less what the bot's turns spent in
 the window, shared with the window's other workers. On a model no bound applies to (a subscription with no ceiling set)
 its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the
-reset and continues on its own. The windows are kept in `bots/<id>/spend-windows.json` (the newest 64). A turn is bounded
+reset and continues on its own. The windows are kept in the bot's spend ledger, `bots/<id>/spend.json` (the newest 64). A turn is bounded
 in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is. What the bot's session spends is added
-to the main session's cost at each turn's end and each time a worker's usage reaches it, from a watermark kept in its
-transcript, so a reopen or a crash charges no range twice and loses none. A turn's spend counts, with its model calls, the
+to the main session's cost at each turn's end and each time a worker's usage reaches it, from a watermark kept in the same
+ledger: each charge's range is written there before it is reported and kept until the main session's file holds it, so a
+reopen or a crash charges no range twice and loses none. A turn's spend counts, with its model calls, the
 compactions that serve it: one while it runs or between its runs, and one just before its first run in the same
 submission (the threshold check before your message's run). A compaction after a turn's last run counts toward no turn's
 bound; it is charged with the session's next charge. The bot compacts its own context with `self_compact` as the main session

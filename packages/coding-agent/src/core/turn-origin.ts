@@ -39,7 +39,6 @@ import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
 	BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
 } from "./background-tool-task-controller.ts";
-import { BOT_CHARGE_MARK_CUSTOM_TYPE } from "./bots/bot-turn-report.ts";
 import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import { CHAT_EXTENSION_NAME } from "./chat/constants.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
@@ -339,7 +338,6 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		PIPELINE_RUN_CUSTOM_TYPE,
 		SPAWNED_USAGE_CUSTOM_TYPE,
 		SEMANTIC_USAGE_CUSTOM_TYPE,
-		BOT_CHARGE_MARK_CUSTOM_TYPE,
 		COMPACTION_PREPARED_CUSTOM_TYPE,
 		RETENTION_AUDIT_CUSTOM_TYPE,
 		SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE,

@@ -10,21 +10,19 @@
  * retries, its verifier and the children it starts carry). An entry that is no outside input (a continuation, a host
  * steer, a notice) belongs to the window before it; the transcript's first entry opens one when nothing later did.
  *
- * Kept beside the bot's transcript in `bots/<id>/spend-windows.json`, the newest windows only, written atomically and
- * private (0600): a reopened session resumes a window's foreground spend. A worker's spend is never copied: it is read
- * from the delegation ledger's per-attempt usage each time. A record that does not read is set aside (`.unreadable`) and
- * the owner told; the windows then start empty.
+ * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`), the newest windows only: a reopened session
+ * resumes a window's foreground spend. A worker's spend is never copied: it is read from the delegation ledger's
+ * per-attempt usage each time.
  */
 
-import { existsSync, readFileSync, renameSync } from "node:fs";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginKind } from "../../kernel/turn-origin-stamp.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { entryTurnOrigin } from "../turn-origin.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
 
 /** Windows kept, the newest: the current request's, and enough before it for a late worker's handoff to find its own. */
 const MAX_WINDOWS_KEPT = 64;
@@ -43,36 +41,6 @@ const OPENING_KINDS: ReadonlySet<TurnOriginKind> = new Set<TurnOriginKind>([
 	"proactive-review",
 ]);
 
-/** One window as it is kept. */
-interface SpendWindowRecord {
-	/** `<session id>/<entry id>`: the window's identity, and the run id its workers' spend bound shares. */
-	readonly id: string;
-	/** The input that opened it: the owner input id it delivered, else its transcript entry's id. */
-	readonly input: string;
-	/** What kind of input opened it (`TurnOriginKind`), or `transcript` for the transcript's first entry. */
-	readonly kind: string;
-	/** The session's own spend while serving it, in dollars. */
-	foregroundUsd: number;
-	/** The attempts found to serve it (their spend is read from the delegation ledger, never kept here). */
-	attemptIds: string[];
-	/** When it last changed (ms since the epoch): the oldest windows are dropped first. */
-	updatedAt: number;
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-function parseWindow(value: unknown): SpendWindowRecord | undefined {
-	if (!isPlainRecord(value)) return undefined;
-	const { id, input, kind, foregroundUsd, attemptIds, updatedAt } = value;
-	if (typeof id !== "string" || typeof input !== "string" || typeof kind !== "string") return undefined;
-	if (typeof foregroundUsd !== "number" || !Number.isFinite(foregroundUsd) || foregroundUsd < 0) return undefined;
-	if (typeof updatedAt !== "number" || !Array.isArray(attemptIds)) return undefined;
-	if (!attemptIds.every((attemptId) => typeof attemptId === "string")) return undefined;
-	return { id, input, kind, foregroundUsd, attemptIds: [...attemptIds], updatedAt };
-}
-
 /** The attempt ids a worker-result entry delivers (`records[].attemptId` of its details, a parent input's unwrapped). */
 function deliveredAttemptIds(entry: SessionEntry): string[] {
 	const raw =
@@ -88,48 +56,36 @@ function deliveredAttemptIds(entry: SessionEntry): string[] {
 	);
 }
 
-/** What the windows read of the bot's session, and tell the owner. */
+/** What the windows read of the bot's session. */
 export interface BotSpendWindowPorts {
 	/** The delegation ledger's projection of the session's workers; undefined before the session started any. */
 	snapshot(): TaskRuntimeProjection | undefined;
 	now(): number;
-	/** A record that could not be read or written, in the owner's words. */
-	notRead(reason: string): void;
-	notWritten(reason: string): void;
 }
 
 /** The bot's spend windows over its session's transcript (see the module comment). */
 export class BotSpendWindows {
-	private readonly windows = new Map<string, SpendWindowRecord>();
+	/** The windows kept, the ledger's own. */
+	private readonly windows: Map<string, SpendWindowRecord>;
 	/** The window an attempt serves (`null`: none of this session's), as found from its receipt origin. */
 	private readonly attemptWindows = new Map<string, string | null>();
 	/** The window id each walked entry belongs to. */
 	private readonly entryWindows = new Map<string, string>();
-	/** A change not yet written. */
-	private dirty = false;
-	/** A write failed and the owner was told; told again only after a write succeeds. */
-	private writeFailed = false;
-
-	private readonly file: string;
+	private readonly ledger: BotSpendLedger;
 	private readonly transcript: Pick<SessionManager, "getEntry" | "getLeafId" | "getSessionId">;
 	private readonly ports: BotSpendWindowPorts;
 
 	constructor(
-		file: string,
+		ledger: BotSpendLedger,
 		transcript: Pick<SessionManager, "getEntry" | "getLeafId" | "getSessionId">,
 		ports: BotSpendWindowPorts,
 	) {
-		this.file = file;
+		this.ledger = ledger;
+		this.windows = ledger.windows;
 		this.transcript = transcript;
 		this.ports = ports;
-		try {
-			for (const window of this.read()) {
-				this.windows.set(window.id, window);
-				for (const attemptId of window.attemptIds) this.attemptWindows.set(attemptId, window.id);
-			}
-		} catch (error) {
-			ports.notRead(errorText(error));
-		}
+		for (const window of this.windows.values())
+			for (const attemptId of window.attemptIds) this.attemptWindows.set(attemptId, window.id);
 	}
 
 	/**
@@ -146,7 +102,7 @@ export class BotSpendWindows {
 		if (addedUsd > 0) {
 			window.foregroundUsd += addedUsd;
 			window.updatedAt = this.ports.now();
-			this.dirty = true;
+			this.ledger.touch();
 		}
 		const spentUsd = window.foregroundUsd + this.workerSpend(window, snapshot);
 		this.flush();
@@ -199,7 +155,7 @@ export class BotSpendWindows {
 		const window = windowId === undefined ? undefined : this.windows.get(windowId);
 		if (window && !window.attemptIds.includes(attempt.attemptId)) {
 			window.attemptIds.push(attempt.attemptId);
-			this.dirty = true;
+			this.ledger.touch();
 		}
 		return windowId;
 	}
@@ -286,48 +242,16 @@ export class BotSpendWindows {
 		return window;
 	}
 
-	/**
-	 * The windows kept, oldest first. A record that is not a list of windows is set aside (renamed `.unreadable`) and
-	 * thrown, so it is reported once and the next write starts a new one; a file that cannot be read is thrown and kept.
-	 */
-	private read(): SpendWindowRecord[] {
-		if (!existsSync(this.file)) return [];
-		const text = readFileSync(this.file, "utf8");
-		try {
-			const value: unknown = JSON.parse(text);
-			if (!isPlainRecord(value) || value.v !== 1 || !Array.isArray(value.windows))
-				throw new Error("not a record of spend windows");
-			return value.windows.map((item) => {
-				const window = parseWindow(item);
-				if (!window) throw new Error("a spend window does not read");
-				return window;
-			});
-		} catch (error) {
-			renameSync(this.file, `${this.file}.unreadable`);
-			throw new Error(`${this.file} was set aside as ${this.file}.unreadable: ${errorText(error)}`);
-		}
-	}
-
-	/**
-	 * Writes the changes, keeping the newest windows and dropping the oldest beyond the kept many; a failure is told once
-	 * until a write succeeds, and the changes stay to be written with the next.
-	 */
+	/** Writes the changes with the ledger, keeping the newest windows and dropping the oldest beyond the kept many. */
 	private flush(): void {
-		if (!this.dirty) return;
 		const kept = [...this.windows.values()].sort((a, b) => a.updatedAt - b.updatedAt).slice(-MAX_WINDOWS_KEPT);
 		if (kept.length < this.windows.size) {
 			const keptIds = new Set(kept.map((window) => window.id));
 			for (const id of this.windows.keys()) if (!keptIds.has(id)) this.windows.delete(id);
 			for (const [attemptId, windowId] of this.attemptWindows)
 				if (windowId !== null && !keptIds.has(windowId)) this.attemptWindows.delete(attemptId);
+			this.ledger.touch();
 		}
-		try {
-			writeFileAtomicSync(this.file, `${JSON.stringify({ v: 1, windows: kept })}\n`, { mode: 0o600 });
-			this.dirty = false;
-			this.writeFailed = false;
-		} catch (error) {
-			if (!this.writeFailed) this.ports.notWritten(errorText(error));
-			this.writeFailed = true;
-		}
+		this.ledger.flush();
 	}
 }

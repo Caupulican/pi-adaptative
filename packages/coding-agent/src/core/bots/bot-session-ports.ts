@@ -9,6 +9,7 @@
 import { join } from "node:path";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { ExhaustedProviderRegistry } from "../billing-failover-controller.ts";
+import { deliverSpawnedUsageReceipt } from "../cost/spawned-usage-receipt.ts";
 import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
@@ -16,7 +17,6 @@ import type { WorkerDelegationController } from "../delegation/worker-delegation
 import { interfaceText } from "../language/interface-text.ts";
 import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
-import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 
@@ -127,16 +127,16 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				undefined,
 			);
 		},
-		reportUsage: (usage, report) => {
-			// The session's own usage ledger takes spawned work by report id, as it takes a worker's.
-			const reporter: SpawnedUsageReporter = deps;
-			reporter.addSpawnedUsage(usage, {
+		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
+		// only once read back from its file.
+		reportUsage: (usage, report) =>
+			deliverSpawnedUsageReceipt(deps.getSessionManager(), deps, usage, {
+				parentSessionId: deps.getSessionId(),
 				label: "bot-session",
 				sourceSessionId: report.sessionId,
 				reportId: report.reportId,
 				provider: report.provider,
 				model: report.model,
-			});
-		},
+			}),
 	};
 }

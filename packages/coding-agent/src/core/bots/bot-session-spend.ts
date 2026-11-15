@@ -2,12 +2,13 @@
  * A loaded bot session's spend, as its host composes it once per session: the bound on spend made on a model (the root's
  * and the bot's own ceilings), the bot's spend windows over its transcript (`BotSpendWindows`), the bound each of its
  * workers' runs takes from them, the bound and the spend its turns read, and the accounting that charges its spend to the
- * root and records each turn's outcome (`BotTurnAccounting`).
+ * root and records each turn's outcome (`BotTurnAccounting`). The windows and the charges share one ledger
+ * (`BotSpendLedger`), so one write advances both.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import { botSpendWindowsFile } from "../agent-paths.ts";
+import { botSpendLedgerFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -16,6 +17,7 @@ import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import { type BotSessionTurnPorts, type BotTurnSpendBound, botSpendBound } from "./bot-session-turns.ts";
+import { BotSpendLedger } from "./bot-spend-ledger.ts";
 import { BotSpendWindows } from "./bot-spend-window.ts";
 import { BotTurnAccounting, type BotTurnAccountingPorts } from "./bot-turn-report.ts";
 
@@ -49,7 +51,7 @@ export class BotSessionSpend {
 	private readonly definition: Pick<BotSessionDefinition, "model" | "spendBudget">;
 	private readonly registry: ModelRegistry;
 	private readonly ports: BotSessionSpendPorts;
-	private readonly transcript: SessionManager;
+	private readonly ledger: BotSpendLedger;
 	private readonly windows: BotSpendWindows;
 
 	constructor(
@@ -64,13 +66,14 @@ export class BotSessionSpend {
 		this.definition = definition;
 		this.registry = registry;
 		this.ports = ports;
-		this.transcript = transcript;
 		const words = () => interfaceText().botTeam;
-		this.windows = new BotSpendWindows(botSpendWindowsFile(agentDir, agentId), transcript, {
+		this.ledger = new BotSpendLedger(botSpendLedgerFile(agentDir, agentId), {
+			notRead: (reason) => ports.warn(words().botSpendLedgerNotRead(agentId, reason)),
+			notWritten: (reason) => ports.warn(words().botSpendLedgerNotWritten(agentId, reason)),
+		});
+		this.windows = new BotSpendWindows(this.ledger, transcript, {
 			snapshot: () => ports.snapshot(),
 			now: () => ports.now(),
-			notRead: (reason) => ports.warn(words().botSpendWindowsNotRead(agentId, reason)),
-			notWritten: (reason) => ports.warn(words().botSpendWindowsNotWritten(agentId, reason)),
 		});
 	}
 
@@ -99,6 +102,6 @@ export class BotSessionSpend {
 
 	/** The accounting of the built session's charges and turns. */
 	accounting(session: AgentSession, ports: BotTurnAccountingPorts): BotTurnAccounting {
-		return new BotTurnAccounting(this.agentId, session, this.transcript, ports);
+		return new BotTurnAccounting(this.agentId, session, this.ledger, ports);
 	}
 }

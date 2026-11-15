@@ -116,10 +116,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: um aviso não pôde ser guardado no chat dele (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: há um aviso no chat dele, mas a lista não pôde marcá-lo como não lido (${reason}).`,
-	botSpendWindowsNotRead: (agentId: string, reason: string) =>
-		`Bot ${agentId}: o registro de gasto por pedido não pôde ser lido (${reason}); o gasto do pedido atual conta a partir de agora.`,
-	botSpendWindowsNotWritten: (agentId: string, reason: string) =>
-		`Bot ${agentId}: o registro de gasto por pedido não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto.`,
+	botSpendLedgerNotRead: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o registro de gasto dele não pôde ser lido (${reason}); o gasto do pedido atual e as cobranças à sessão principal contam a partir de agora.`,
+	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o registro de gasto dele não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto, e o gasto é cobrado quando for.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o registro dos avisos que a sessão dele já deu não pôde ser lido ou gravado (${reason}); algum pode ser dado de novo.`,
 	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>

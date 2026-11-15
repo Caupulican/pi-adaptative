@@ -5,70 +5,12 @@
  */
 
 import type { Usage } from "@caupulican/pi-ai";
-import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { isUsage } from "../cost/session-usage.ts";
+import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import { usageSince } from "../cost/usage-delta.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
-
-/** One turn's charge, as the main session's ledger takes it. */
-export interface BotTurnUsageReport {
-	readonly agentId: string;
-	readonly reportId: string;
-	/** The bot's own session id. */
-	readonly sessionId: string;
-	readonly provider: string;
-	readonly model: string;
-}
-
-/**
- * The custom entry of a bot's own transcript that marks how much of the session's cumulative usage its charges cover
- * (`BotChargeMark`). Never sent to a model.
- */
-export const BOT_CHARGE_MARK_CUSTOM_TYPE = "pi_bot_charge_mark";
-
-/** One charge of the session's spend, as the main session's ledger takes it. */
-interface BotCharge {
-	readonly usage: Usage;
-	readonly report: BotTurnUsageReport;
-}
-
-/**
- * The watermark of a bot session's charges, kept in its own transcript so a reopen resumes from it. `through` is the
- * session's cumulative usage its charges cover. A mark written before its charge is reported carries the charge: while no
- * later mark follows it, that charge is reported again (under the same report id, which the main session's ledger takes
- * once).
- */
-interface BotChargeMark {
-	readonly v: 1;
-	readonly through: Usage;
-	readonly charge?: BotCharge;
-}
-
-function chargeMarkOf(entry: SessionEntry): BotChargeMark | undefined {
-	if (entry.type !== "custom" || entry.customType !== BOT_CHARGE_MARK_CUSTOM_TYPE) return undefined;
-	const data = entry.data;
-	if (!isPlainRecord(data) || data.v !== 1 || !isUsage(data.through)) return undefined;
-	const charge = data.charge;
-	if (charge === undefined) return { v: 1, through: data.through };
-	if (!isPlainRecord(charge) || !isUsage(charge.usage) || !isPlainRecord(charge.report)) return undefined;
-	const { agentId, reportId, sessionId, provider, model } = charge.report;
-	if (![agentId, reportId, sessionId, provider, model].every((field) => typeof field === "string")) return undefined;
-	return { v: 1, through: data.through, charge: charge as unknown as BotCharge };
-}
-
-/** The newest readable charge mark of a transcript; undefined when it has none. */
-function latestChargeMark(entries: readonly SessionEntry[]): BotChargeMark | undefined {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index];
-		const mark = entry ? chargeMarkOf(entry) : undefined;
-		if (mark) return mark;
-	}
-	return undefined;
-}
+import type { BotCharge, BotChargeReport, BotChargeState, BotSpendLedger } from "./bot-spend-ledger.ts";
 
 /**
  * The charge of what the session spent since its cumulative usage was `from`, with the cumulative usage it reaches:
@@ -124,65 +66,76 @@ export function lastAssistantText(messages: readonly AgentMessage[], since: numb
 
 /** Where one bot session's turns report: the root's cost view, the store's outcome, and the owner's warnings. */
 export interface BotTurnAccountingPorts {
-	/** Records a charge with the cost view of the root the bot answers now; throws a failure to record it. */
-	charge(usage: Usage, report: BotTurnUsageReport): void;
-	/** A charge was not recorded: the owner is told why (it is reported again before the next one). */
+	/**
+	 * Delivers a charge to the cost view of the root the bot answers now, once per report id: `persisted` once the root's
+	 * file holds it (`deliverSpawnedUsageReceipt`). Throws a failure to record it.
+	 */
+	charge(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
+	/** A charge was not recorded: the owner is told why (it is delivered again with the next charge). */
 	chargeNotRecorded(reason: string): void;
 	/** Records a turn's last words as the bot's outcome: its roster summary and unread mark. */
 	outcome(summary: string): void;
 }
 
 /**
- * One bot session's spend and turns as its host counts them. The charge follows the session's usage entries, not its
- * turns: what the session spent since its charge watermark (`BotChargeMark`, kept in its own transcript) is charged at
- * each turn end and each time the session records spawned usage (a worker's usage receipt), so spend that lands between
- * turns, a compaction between runs, or a turn cut by a crash is charged once, whenever it lands. Each charge writes its
- * mark with the charge first, then reports it, then writes the settled mark: a crash or a refused report between the two
- * leaves the charge to be reported again under the same report id, which the root's ledger and the daily brake take once
- * (`deriveSpawnedUsageReportId`). The turn's last words written since its start are its outcome, reported once per turn on
- * the boundary every per-turn count of the session reads (`observeSessionTurns`).
+ * One bot session's spend and turns as its host counts them. The charge follows the session's cumulative usage, not its
+ * turns: what the session spent since the watermark of its spend ledger (`BotChargeState`) is charged at each turn end
+ * and each time the session records spawned usage (a worker's usage receipt), so spend that lands between turns, a
+ * compaction between runs, or a turn cut by a crash is charged once, whenever it lands. Each charge fixes its range first:
+ * the charge (its usage and the report id its range derives) joins the ledger's pending charges and the watermark moves
+ * to the range's end, in one write, before the charge is delivered; it leaves the pending charges only once the root's
+ * file holds it. A reopen delivers the pending charges again under their own ids, which the root's ledger and the daily
+ * brake take once (`deriveSpawnedUsageReportId`), and charges only what the session spent past the watermark, under a new
+ * range's id. The turn's last words written since its start are its outcome, reported once per turn on the boundary
+ * every per-turn count of the session reads (`observeSessionTurns`).
  */
 export class BotTurnAccounting {
 	private readonly agentId: string;
 	private readonly session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">;
-	private readonly transcript: Pick<SessionManager, "appendCustomEntry">;
+	private readonly ledger: BotSpendLedger;
 	private readonly ports: BotTurnAccountingPorts;
-	/** The session's cumulative usage the charges cover: the next charge starts there. */
-	private chargedThrough: Usage;
-	/** A charge whose mark is written and whose report was not recorded: reported again before the next charge. */
-	private unreported: BotCharge | undefined;
-	/** The transcript had no mark when the session was loaded: the first is written at `resume`. */
-	private unmarked: boolean;
+	/** The watermark: set at construction, the ledger's own. */
+	private readonly state: BotChargeState;
+	/** The watermark was set at this open and is written at `resume`. */
+	private seeded = false;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
 	private startedAt: number | undefined;
 
 	/**
-	 * Reads the watermark from the newest charge mark of `transcript`. A transcript with none (a new session, or one an
-	 * earlier build charged per turn) starts at what the session has spent now: an earlier build charged its turns already.
+	 * Reads the watermark from the ledger. A ledger with none (a new bot, a record set aside), or one that reads another
+	 * session (a bot that opened a new session file), starts this session's at what it has spent now, keeping the pending
+	 * charges of the one before: an earlier build charged the turns this session spent before.
 	 */
 	constructor(
 		agentId: string,
 		session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">,
-		transcript: Pick<SessionManager, "getEntries" | "appendCustomEntry">,
+		ledger: BotSpendLedger,
 		ports: BotTurnAccountingPorts,
 	) {
 		this.agentId = agentId;
 		this.session = session;
-		this.transcript = transcript;
+		this.ledger = ledger;
 		this.ports = ports;
-		const mark = latestChargeMark(transcript.getEntries());
-		this.chargedThrough = structuredClone(mark?.through ?? session.getCumulativeUsage());
-		this.unreported = mark?.charge;
-		this.unmarked = mark === undefined;
+		const kept = ledger.charge;
+		if (kept && kept.sessionId === session.sessionId) this.state = kept;
+		else {
+			this.state = {
+				sessionId: session.sessionId,
+				through: structuredClone(session.getCumulativeUsage()),
+				pending: kept?.pending ?? [],
+			};
+			ledger.charge = this.state;
+			this.seeded = true;
+		}
 	}
 
 	/**
-	 * The session is ready to report (its ports reach a root): a charge a reopen found unreported is reported again, a
-	 * transcript with no mark gets its first, and what the session spent since the watermark is charged.
+	 * The session is ready to report (its ports reach a root): a watermark set at this open is written, the pending charges
+	 * are delivered again, and what the session spent since the watermark is charged.
 	 */
 	resume(): void {
-		if (this.unmarked && hasReportableUsage(this.chargedThrough)) this.mark({ v: 1, through: this.chargedThrough });
-		this.unmarked = false;
+		if (this.seeded) this.ledger.write();
+		this.seeded = false;
 		this.charge();
 	}
 
@@ -206,42 +159,53 @@ export class BotTurnAccounting {
 	}
 
 	/**
-	 * Charges what the session spent since the watermark, once: an unreported charge first (under its own report id), then
-	 * the new range's mark, its report and the settled mark. A mark that cannot be written charges nothing now; the range
-	 * is charged by the next charge.
+	 * Delivers the pending charges again, then charges what the session spent since the watermark: its range is fixed in
+	 * the ledger first, then delivered. A ledger that cannot be written charges nothing now; the range is charged by the
+	 * next charge. A reading below the watermark (the session's accounting history still loading) charges nothing until it
+	 * reaches it.
 	 */
 	charge(): void {
-		if (this.unreported && !this.report(this.unreported)) return;
-		const charge = botTurnCharge(this.agentId, this.session, this.chargedThrough);
+		this.deliverPending();
+		const now = this.session.getCumulativeUsage();
+		const { through, pending } = this.state;
+		if (now.totalTokens < through.totalTokens || now.cost.total < through.cost.total) return;
+		const charge = botTurnCharge(this.agentId, this.session, through);
 		if (!charge) return;
-		const { through, ...reported } = charge;
-		if (!this.mark({ v: 1, through, charge: reported })) return;
-		this.chargedThrough = through;
-		this.unreported = reported;
-		this.report(reported);
+		const { through: reached, ...fixed } = charge;
+		pending.push(fixed);
+		this.state.through = reached;
+		if (!this.ledger.write()) {
+			pending.pop();
+			this.state.through = through;
+			return;
+		}
+		if (this.deliver(fixed)) this.settle([fixed]);
 	}
 
-	/** Reports a charge whose mark is written; once recorded, the settled mark follows. True when it was recorded. */
-	private report(charge: BotCharge): boolean {
-		try {
-			this.ports.charge(charge.usage, charge.report);
-		} catch (error) {
-			this.ports.chargeNotRecorded(error instanceof Error ? error.message : String(error));
-			return false;
+	/** Delivers each pending charge again, oldest first, and drops the ones the root's file holds now. */
+	private deliverPending(): void {
+		const held: BotCharge[] = [];
+		for (const charge of this.state.pending) {
+			const persisted = this.deliver(charge);
+			if (persisted === undefined) break;
+			if (persisted) held.push(charge);
 		}
-		this.unreported = undefined;
-		this.mark({ v: 1, through: this.chargedThrough });
-		return true;
+		if (held.length > 0) this.settle(held);
 	}
 
-	/** Writes a charge mark into the session's transcript; a failure to write it is told to the owner. */
-	private mark(mark: BotChargeMark): boolean {
+	/** Delivers one charge: true once the root's file holds it, false while it does not yet, undefined when it failed. */
+	private deliver(charge: BotCharge): boolean | undefined {
 		try {
-			this.transcript.appendCustomEntry(BOT_CHARGE_MARK_CUSTOM_TYPE, mark);
-			return true;
+			return this.ports.charge(charge.usage, charge.report) === "persisted";
 		} catch (error) {
 			this.ports.chargeNotRecorded(error instanceof Error ? error.message : String(error));
-			return false;
+			return undefined;
 		}
+	}
+
+	/** Drops charges the root's file holds from the pending ones and writes the ledger. */
+	private settle(held: readonly BotCharge[]): void {
+		this.state.pending = this.state.pending.filter((charge) => !held.includes(charge));
+		this.ledger.write();
 	}
 }

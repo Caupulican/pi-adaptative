@@ -43,6 +43,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
+import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
@@ -84,7 +85,8 @@ import {
 } from "./bot-session-profile.ts";
 import { BotSessionSpend, botSpendBoundOn } from "./bot-session-spend.ts";
 import { type BotTurnSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
-import type { BotTurnAccounting, BotTurnUsageReport } from "./bot-turn-report.ts";
+import type { BotChargeReport } from "./bot-spend-ledger.ts";
+import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -137,8 +139,11 @@ export interface BotSender {
 	hostSessionId(): string;
 	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
 	warn(message: string): void;
-	/** Records what a bot's turn spent with the root session's cost view, once per `reportId`. */
-	reportUsage(usage: Usage, report: BotTurnUsageReport): void;
+	/**
+	 * Delivers a charge of the bot's spend to the root session's cost view, once per `reportId`: `persisted` once the
+	 * root's file holds it.
+	 */
+	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 }
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */

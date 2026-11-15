@@ -126,11 +126,11 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a notice could not be kept in its chat (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a notice is in its chat, but the roster could not mark it unread (${reason}).`,
-	/** The record of the bot's spend per request (`bots/<id>/spend-windows.json`) could not be read; it starts over. */
-	botSpendWindowsNotRead: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its spend per request could not be read (${reason}); its current request's spend counts from now.`,
-	botSpendWindowsNotWritten: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its spend per request could not be written (${reason}); it is written again with its next spend.`,
+	/** The bot's spend ledger (`bots/<id>/spend.json`) could not be read; it starts over. */
+	botSpendLedgerNotRead: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its spend record could not be read (${reason}); its current request's spend and its charges to the main session count from now.`,
+	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its spend record could not be written (${reason}); it is written again with its next spend, and its spend is charged once it is.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the record of the notices its session already told could not be read or written (${reason}); one may be told again.`,
 	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
