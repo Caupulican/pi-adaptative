@@ -1021,10 +1021,10 @@ export class BotSessionHost {
 
 	/**
 	 * The owner's stop of the bot's session (`bot-stop.ts`), written to its home dated now (`requestBotStop`) and taken by
-	 * whichever process can: here when this host runs it (its turn and workers stopped; `stopped` says whether it was
-	 * working), else by this process while no process hosts it, else by the process hosting it, which `elsewhere` names
-	 * for the owner. A bot that runs as no session of its own is not written to. A stop that could not be written is told to
-	 * the owner, and the turn this host runs stops all the same.
+	 * whichever process can: here when this host runs it (its turn and workers stopped; `stopped` says whether it held a
+	 * turn, input or a worker lane in flight to stop), else by this process while no process hosts it, else by the process
+	 * hosting it, which `elsewhere` names for the owner. A bot that runs as no session of its own is not written to. A stop
+	 * that could not be written is told to the owner, and the turn this host runs stops all the same.
 	 */
 	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);
@@ -1041,10 +1041,12 @@ export class BotSessionHost {
 		}
 		if (entry) {
 			const working = this.isBusy(entry);
+			// What the stop ends besides the turn: every worker lane in flight, a worker waiting for its retry included.
+			const workers = entry.session.getSessionWorkState().workerLanes.kind !== "none";
 			// The turn it runs stops at once, whether or not the stop was written and taken (a stop not taken is tried again).
 			if (!(written && this.takeStops(agentId))) this.stopTurn(entry);
 			this.takeInbox(agentId);
-			return { stopped: working };
+			return { stopped: working || workers };
 		}
 		if (!written) return { stopped: false };
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
