@@ -977,9 +977,13 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionDir = this.sessionManager.getSessionDir();
-		const roots = newSessionStorageRoots(this.sessionManager.getStorageRoots(), sessionDir);
-		const sessionManager = SessionManager.create(this.cwd, roots, sessionDir);
+		// The new session keeps the current one's persistence, as a fork does: one that keeps no file (--no-session, an
+		// in-memory SDK session) starts one that keeps none, in its home, never a file in the default session directory.
+		const current = this.sessionManager;
+		const sessionDir = current.getSessionDir();
+		const sessionManager = current.isPersisted()
+			? SessionManager.create(this.cwd, newSessionStorageRoots(current.getStorageRoots(), sessionDir), sessionDir)
+			: SessionManager.inMemory(current.getStorageRoots(), this.cwd);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
