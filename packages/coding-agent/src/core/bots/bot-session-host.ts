@@ -1,9 +1,9 @@
 /**
  * Hosts each bot as an `AgentSession` of its own, in this process: one session per bot, created on its first message
- * (`createAgentSession`, as the daemon's channel sessions are), continued from the session its home's pointer records
- * (`bot-session-open.ts`: one conversation per bot, whatever the working directory, with its bundle, leases and
- * transcripts in the bot's own `orchestration/`), kept while a turn runs or input is
- * queued, and closed after `BOT_SESSION_IDLE_BOUND_MS` of idleness or when the host stops.
+ * (`createAgentSession`, as the daemon's channel sessions are) and loaded under its lock by `bot-session-load.ts`,
+ * continued from the session its home's pointer records (`bot-session-open.ts`: one conversation per bot, whatever the
+ * working directory, with its bundle, leases and transcripts in the bot's own `orchestration/`), kept while a turn runs
+ * or input is queued, and closed after `BOT_SESSION_IDLE_BOUND_MS` of idleness or when the host stops.
  *
  * The session runs on the bot's own model (a profile bot's on the binding its profile admits), never replaced by another: a model that is missing, has no credentials, or that
  * the worker admission refuses (a metered model the owner did not choose, one the owner's model policy disallows) refuses
@@ -37,9 +37,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import type { AgentSession } from "../agent-session.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
 	BotDeliveryOptions,
@@ -51,7 +49,6 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { HostLock } from "../remote/host-lock.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -64,7 +61,7 @@ import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
-import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
+import type { BotSessionState } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
 	type BotInboxRefusal,
@@ -76,23 +73,16 @@ import {
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
-import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
+import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
+import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRelease } from "./bot-release.ts";
 import { BotRemoteView, remoteHostActive, savedSessionFile } from "./bot-remote-view.ts";
 import { BotSessionAdmission } from "./bot-session-admission.ts";
-import { createBotAgentSession } from "./bot-session-build.ts";
-import { openHostedBotSession } from "./bot-session-open.ts";
-import {
-	BotOwedWork,
-	cancelOtherSessionsWatches,
-	owesWatchWork,
-	type SavedUsageResumeRules,
-} from "./bot-session-owed-work.ts";
-import { type BotSessionDefinition, botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
-import { BotSessionSpend } from "./bot-session-spend.ts";
-import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
+import { type BotSessionEntry, BotSessionLoader } from "./bot-session-load.ts";
+import { BotOwedWork, owesWatchWork, type SavedUsageResumeRules } from "./bot-session-owed-work.ts";
+import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
+import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
 import {
 	type BotStopPorts,
@@ -101,7 +91,6 @@ import {
 	type UnrecordedBotStops,
 	writeOwnerStop,
 } from "./bot-stop.ts";
-import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -179,44 +168,11 @@ export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun
 	deliver(agentId: string, message: string, options: BotDeliveryOptions): Promise<BotOperatorMessageDispatchResult>;
 }
 
-interface BotSessionEntry {
-	readonly agentId: string;
-	readonly session: AgentSession;
-	/** The session's transcript and storage roots (its bundle's orchestration home). */
-	readonly sessionManager: SessionManager;
-	readonly lock: HostLock;
-	/** Ends the following of the main session's settings. */
-	readonly releaseSettings: () => void;
-	/** Publishes the session's state for the other processes. */
-	readonly stateWriter: BotHostStateWriter;
-	readonly modelRef: string;
-	/** The root its last message came from: its turns' spend goes there. */
-	sender: BotSender;
-	/** The root it was built for: what defines it is compiled, and its settings read, as that root's (another root's message does not rebuild it). */
-	readonly builtFor: BotSender;
-	/** What defined the session when it was built (`BotSessionDefinition.key`). */
-	readonly profileKey: string;
-	/** The bot's own dollar ceilings (`BotSessionDefinition.spendBudget`). */
-	readonly spendBudget: BotSessionDefinition["spendBudget"];
-	unsubscribe: () => void;
-	/** Prompts submitted and not yet settled. */
-	inFlight: number;
-	/** The end of the turn the owner's stop last aborted: the words given next wait on it, not steering a dying turn. */
-	turnEnding: Promise<void>;
-	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
-	recheckWhenIdle: boolean;
-	/** Its turns' spend and outcome, each reported once per turn. */
-	readonly turns: BotTurnAccounting;
-	idleTimer: unknown;
-}
-
 export class BotSessionHost {
 	private readonly ports: BotSessionHostPorts;
 	/** The bot's earlier worker conversations, indexed in its home. */
 	private readonly history: BotHistory;
 	private readonly entries = new Map<string, BotSessionEntry>();
-	/** Why each bot's session state was told as kept in the owner's home: each bot's reason told once per process. */
-	private readonly toldNotMoved = new Set<string>();
 	/** Bots whose change the host noticed itself was not applied (`applyRecordChange`): told once until one applies. */
 	private readonly toldChangeNotApplied = new Set<string>();
 	/** Bots whose home's session did not read at the last roster count: told once until it reads again. */
@@ -255,6 +211,8 @@ export class BotSessionHost {
 	private readonly previousStop: Promise<void>;
 	/** Takes the inboxes of the bots this host runs: the owner's messages sent from other processes. */
 	private readonly inbox: BotInboxDrain;
+	/** Builds the bots' sessions this host loads. */
+	private readonly loader: BotSessionLoader;
 
 	/**
 	 * `unrecorded` holds the owner's stops its process could not record, kept for the process and agent directory across
@@ -351,6 +309,31 @@ export class BotSessionHost {
 			changed: (agentId) => this.changed(agentId),
 			close: (agentId) => this.close(agentId),
 		});
+		this.loader = new BotSessionLoader(
+			{
+				agentDir: () => ports.agentDir(),
+				store: () => ports.store(),
+				modelRegistry: () => ports.modelRegistry(),
+				systemOne: () => ports.systemOne(),
+				timers: () => ports.timers(),
+				idleTimers: () => this.idleTimers(),
+				spendCeilings: () => ports.spendCeilings(),
+				warn: (message) => ports.warn(message),
+				admission: this.admission,
+				owed: this.owed,
+				takeLock: (agentId) => this.view.takeLock(agentId),
+				stopPorts: () => this.stopPorts(),
+				notify: (agentId, text, mark, deliveryId) => this.notify(agentId, text, mark, deliveryId),
+				recordOutcome: (agentId, summary) => this.recordOutcome(agentId, summary),
+				settle: (entry) => this.settle(entry),
+				register: (entry, continued) => this.register(entry, continued),
+				drainInbox: (agentId) => this.inbox.drain(agentId),
+				forget: (entry) => {
+					if (this.entries.get(entry.agentId) === entry) this.entries.delete(entry.agentId);
+				},
+			},
+			this.holder,
+		);
 	}
 
 	/** Takes the owner's stops waiting for the bot this host runs: false when its session is not loaded here or they failed. */
@@ -673,7 +656,7 @@ export class BotSessionHost {
 		}
 		const pending = this.loading.get(agentId);
 		if (pending) return pending;
-		const built = this.load(record, sender).finally(() => this.loading.delete(agentId));
+		const built = this.loader.load(record, sender).finally(() => this.loading.delete(agentId));
 		this.loading.set(agentId, built);
 		return built;
 	}
@@ -692,191 +675,23 @@ export class BotSessionHost {
 		}
 	}
 
-	private async load(record: PersistentBotRecord, sender: BotSender): Promise<BotSessionEntry> {
-		const agentDir = this.ports.agentDir();
-		const { agentId } = record;
-		const words = interfaceText().botTeam;
-		const { home, profile } = ensureBotHome(agentDir, record);
-		const definition = this.admission.define(record, sender);
-		const { model, cwd } = definition;
-		// A model refused now builds no session and takes no lock.
-		this.admission.admit(agentId, model, definition, sender);
-		const taken = this.view.takeLock(agentId);
-		if (!taken.held) {
-			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
-			throw new BotSessionHeldError(words.botSessionHeld(agentId, taken.owner.pid, sessionId));
-		}
-		const { lock } = taken;
-		let session: AgentSession | undefined;
-		let settings: ReturnType<BotSender["settings"]> | undefined;
-		let built: BotSessionEntry | undefined;
-		// Until its file is open, a failure is a read of the bot's session store; after, only one in its orchestration home
-		// (its lease) is (`storeFailure`).
-		let storeWithin: string | undefined;
-		try {
-			// The owner's stop waiting for it is applied to its closed session under the lock first: nothing it stopped resumes.
-			this.owed.unrecorded.underLock(agentId, this.stopPorts());
-			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
-			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
-				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
-				notMoved: (kept) => {
-					const told = `${agentId}\0${kept.reason}`;
-					if (this.toldNotMoved.has(told)) return;
-					this.toldNotMoved.add(told);
-					this.ports.warn(
-						kept.reason === "in-both-homes"
-							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
-							: kept.reason === "worker-records"
-								? words.botSessionStateKeptForWorkers(agentId)
-								: kept.reason === "still-held"
-									? words.botSessionStateStillHeld(agentId, kept.pids.join(", "))
-									: words.botSessionStateNotMoved(agentId),
-					);
-				},
-			});
-			storeWithin = sessionManager.getStorageRoots().orchestrationHome.root;
-			const cancelled = cancelOtherSessionsWatches(
-				this.ports.store(),
-				home.sessionsDir,
-				sessionManager.getSessionId(),
-				this.idleTimers().now(),
-			);
-			if (cancelled > 0) this.ports.warn(interfaceText().botTeam.botWatchesCancelled(agentId, cancelled));
-			settings = sender.settings();
-			const settingsManager = settings.settings;
-			const registry = this.ports.modelRegistry();
-			// The bot's spend per request it serves: its turns and the runs of the workers they start share one bound.
-			const spend = new BotSessionSpend(agentId, home, sessionManager, definition, registry, {
-				rootCeilings: () => this.ports.spendCeilings(),
-				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
-				now: () => this.idleTimers().now(),
-				warn: (message) => this.ports.warn(message),
-			});
-			session = await createBotAgentSession({
-				agentId,
-				agentDir,
-				definition,
-				displayName: profile.displayName,
-				memoryBlock: this.ports.store().composeBotUnifiedMemoryContext(agentId, undefined, undefined, "session")
-					.promptBlock,
-				sessionManager,
-				settingsManager,
-				registry,
-				systemOne: () => this.ports.systemOne(),
-				timers: this.ports.timers(),
-				host: {
-					workerRunCostBound: spend.workerRunCostBound,
-					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
-					ownerNoticeLine: botNoticeLine(agentDir, agentId, {
-						keep: (text, deliveryId) => this.notify(agentId, text, true, deliveryId),
-						warn: (line) => this.ports.warn(line),
-					}),
-					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
-					admitRun: () => {
-						try {
-							this.admission.admit(agentId, session?.model, definition, sender);
-						} catch (error) {
-							// The wakes it holds are refused with this run, for this cause: they are taken up again once it clears.
-							this.owed.refused(agentId, definition.key, sessionManager, error);
-							throw error;
-						}
-						this.owed.admitted(agentId);
-					},
-					onClosingWarnings: (warnings) => {
-						for (const warning of warnings)
-							this.notify(agentId, interfaceText().botTeam.botWarning(agentId, warning));
-					},
-				},
-			});
-			const entry: BotSessionEntry = {
-				agentId,
-				session,
-				sessionManager,
-				lock,
-				releaseSettings: settings.release,
-				stateWriter: new BotHostStateWriter(agentDir, {
-					agentId,
-					hostKind: "session",
-					hostSessionId: sender.hostSessionId(),
-					botSessionId: session.sessionId,
-					holder: this.holder,
-				}),
-				modelRef: `${model.provider}/${model.id}`,
-				sender,
-				builtFor: sender,
-				profileKey: definition.key,
-				spendBudget: definition.spendBudget,
-				unsubscribe: () => {},
-				inFlight: 0,
-				turnEnding: Promise.resolve(),
-				recheckWhenIdle: false,
-				turns: spend.accounting(session, {
-					charge: (usage, report) => entry.sender.reportUsage(usage, report),
-					chargesHeld: (sessionId, instance, since) => entry.sender.chargesHeld(sessionId, instance, since),
-					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
-					rootSessionId: () => entry.sender.hostSessionId(),
-					rootKeepsFile: () => entry.sender.hostKeepsFile(),
-					chargeNotRecorded: (reason) =>
-						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
-					chargesUnread: (named, more) =>
-						entry.sender.warn(interfaceText().botTeam.botChargeFilesUnread(agentId, named, more)),
-					markNotKept: (reason) =>
-						entry.sender.warn(interfaceText().botTeam.botChargeMarkNotKept(agentId, reason)),
-					outcome: (summary) => this.recordOutcome(agentId, summary),
-				}),
-				idleTimer: undefined,
-			};
-			built = entry;
-			entry.unsubscribe = observeBotSessionTurns(session, entry.turns, {
-				agentId,
-				role: definition.role,
-				cwd,
-				timers: this.idleTimers(),
-				...spend.turnBound(),
-				maxWallClockMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
-				notify: (text, mark) => this.notify(agentId, text, mark),
-				settle: () => this.settle(entry),
-			});
-			session.startBackgroundInputs();
-			// A stop made since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
-			const loadStop = this.owed.unrecorded.loaded(agentId, { session, sessionManager }, this.stopPorts());
-			if (loadStop.failure) throw loadStop.failure.cause;
-			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
-			session.restoreGoalRuntimeAfterResume();
-			session.backgroundLanes.drainQueuedWorkerDelegations();
-			this.entries.set(agentId, entry);
-			this.owed.loaded(agentId);
-			this.publishState(entry);
-			// A saved note an earlier holder left (pending or compacted) is handed off now, on the bounds and relay above.
-			session.resumeSelfCompaction();
-			this.armIdle(entry);
-			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued }));
-			this.changed(agentId);
-			// What other processes sent while another host held the bot is given first, before the message that opened it;
-			// the home watch announces the next ones (the timer reads them while it does not run).
-			this.view.watch();
-			this.inbox.arm();
-			await this.inbox
-				.drain(agentId)
-				.catch((error: unknown) => this.ports.warn(words.botInboxNotTaken(agentId, errorText(error))));
-			return entry;
-		} catch (error) {
-			// Released as a close releases, in its order and every step whatever an earlier one threw, the lock last: a
-			// session still disposing never loses its lock to the next one built.
-			if (built && this.entries.get(agentId) === built) this.entries.delete(agentId);
-			await runAsyncReleaseSteps(
-				[
-					() => built?.unsubscribe(),
-					() => session?.disposeAndWait(),
-					() => settings?.release(),
-					() => built?.stateWriter.clear(),
-					() => lock.release(),
-				],
-				words.botSessionNotClosed,
-				{ error },
-			);
-			throw storeFailure(agentId, error, storeWithin);
-		}
+	/**
+	 * Puts a bot's session just built (`BotSessionLoader`) to work here: kept, its state published, its saved note handed
+	 * off, its idle bound armed, and the home watch and the inbox timer on.
+	 */
+	private register(entry: BotSessionEntry, continued: boolean): void {
+		const { agentId, session } = entry;
+		this.entries.set(agentId, entry);
+		this.owed.loaded(agentId);
+		this.publishState(entry);
+		// A saved note an earlier holder left (pending or compacted) is handed off now, on the bounds and relay above.
+		session.resumeSelfCompaction();
+		this.armIdle(entry);
+		harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued }));
+		this.changed(agentId);
+		// The home watch announces the inbox's next messages (the timer reads them while it does not run).
+		this.view.watch();
+		this.inbox.arm();
 	}
 
 	/** After an event: a busy session is not idle, an idle one starts its bound. */
