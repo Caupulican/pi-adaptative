@@ -1,14 +1,15 @@
 /**
  * The orchestration homes of an agent directory (the owner's, then one per bot home that has an orchestration directory)
- * and which of them holds a session. A session file's home is decided by where the file lies: one outside a bot's
- * `sessions/` is the owner's, and one in it its bot's unless only the owner's home holds its session (state an earlier
- * build kept there), so opening a file never enumerates the bot homes. A reference to
- * another session by id (its lease, its parent context, a specialist it built) is read in the home that holds that
- * session, and a session follows one only when that home is its own: a root or away controller never takes an attempt
- * from a bot's home, and a bot's controller never one from the owner's or another bot's.
+ * and the one rule that says which of them a session's state lives in ({@link resolveSessionHome}), asked by every
+ * opener, lease and by-id lookup alike: a bot's home whenever it holds anything of the session, else the owner's when it
+ * does (a bot session's state an earlier build kept there, until its host moves it), else the home the session's file or
+ * bundle lies in. Where a path lies is judged by its real path (a symlinked agent directory, the case of a Windows path),
+ * while the homes are spelled from the caller's agent directory, so they compare with the homes the hosts spell. A
+ * session follows a reference into another home only when that home is its own: a root or away controller never takes an
+ * attempt from a bot's home, and a bot's controller never one from the owner's or another bot's.
  */
 import { type Dirent, existsSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { orchestrationHomeHoldsSession, type SessionHomeNow } from "../kernel/session/session-bundle-lifecycle.ts";
 import {
 	botHomeOrchestrationHome,
@@ -21,7 +22,8 @@ import {
 import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../kernel/storage/atomic-file.ts";
-import { botHomeSessionsDir, botsDir } from "./agent-paths.ts";
+import { botsDir } from "./agent-paths.ts";
+import { safeRealpathSync } from "./autonomy/path-scope.ts";
 
 /**
  * The owner's home, then the home of every bot directory that has an orchestration directory (with or without a
@@ -46,79 +48,109 @@ export function orchestrationHomes(agentDir: string): OrchestrationHome[] {
 	return homes;
 }
 
-/**
- * The home that holds the session: the owner's when it holds the session's bundle, tombstone or leases, else the bot
- * home that does, else the owner's (the home of every session no bot's holds). The owner's is asked first, so an owner
- * session's lookup never reads the bot homes.
- */
-export function orchestrationHomeOfSession(agentDir: string, sessionId: string): OrchestrationHome {
-	const owner = ownerOrchestrationHome(agentDir);
-	if (orchestrationHomeHoldsSession(owner, sessionId)) return owner;
-	return orchestrationHomes(agentDir).find((home) => orchestrationHomeHoldsSession(home, sessionId)) ?? owner;
+/** A path's real spelling, case-folded where the file system ignores case. */
+function canonicalPath(path: string): string {
+	const real = safeRealpathSync(path, { native: true });
+	return process.platform === "win32" ? real.toLowerCase() : real;
 }
 
 /**
- * `own` unless another home holds the session, then undefined: a reference into another home is not followed, so a
- * session's workers stay inside its own ceiling and spend window. A session no home holds any more (its bundle,
- * tombstone and leases gone) is still `own`'s: a reference to it was written in `own`, by a session of that home.
+ * The bot home whose `sessions/` directory is `dir`, or whose `orchestration/` holds it (a bundle and its workers'
+ * transcripts), judged by real path and spelled from `agentDir`; undefined for any other directory.
+ */
+function botHomeOfDir(agentDir: string, dir: string): OrchestrationHome | undefined {
+	const bots = botsDir(agentDir);
+	const real = safeRealpathSync(dir, { native: true });
+	const offset = relative(canonicalPath(bots), canonicalPath(dir));
+	if (offset === "" || offset.startsWith("..") || isAbsolute(offset)) return undefined;
+	const depth = offset.split(sep).length;
+	// The real path's own segments keep the bot directory's spelling; the folded ones only locate it.
+	const [name, area] = real.split(sep).slice(-depth);
+	if (name === undefined || !((area === "sessions" && depth === 2) || area === "orchestration")) return undefined;
+	return botHomeOrchestrationHome(join(bots, name));
+}
+
+/**
+ * The one rule for which home holds session `sessionId`. `place` is the bot home its file or bundle lies in, if any
+ * (undefined for a lookup by id alone, or a file outside every bot home). A bot's home that holds anything of the
+ * session (`place`, or for a lookup by id any bot home) is its home; else the owner's when it holds anything of it; else
+ * `place`, or the owner's for a session no home holds and no bot home contains.
+ */
+export function resolveSessionHome(
+	agentDir: string,
+	sessionId: string,
+	place: OrchestrationHome | undefined,
+): OrchestrationHome {
+	const owner = ownerOrchestrationHome(agentDir);
+	const bot =
+		place ??
+		orchestrationHomes(agentDir)
+			.slice(1)
+			.find((home) => orchestrationHomeHoldsSession(home, sessionId));
+	if (bot && orchestrationHomeHoldsSession(bot, sessionId)) return bot;
+	if (orchestrationHomeHoldsSession(owner, sessionId)) return owner;
+	return bot ?? owner;
+}
+
+/** The home that holds the session, by its id alone ({@link resolveSessionHome}). */
+export function orchestrationHomeOfSession(agentDir: string, sessionId: string): OrchestrationHome {
+	return resolveSessionHome(agentDir, sessionId, undefined);
+}
+
+/**
+ * `own` when the session is `own`'s by {@link resolveSessionHome}, else undefined: a reference into another home is not
+ * followed, so a session's workers stay inside its own ceiling and spend window. A session no home holds any more is
+ * still `own`'s: a reference to it was written in `own`, by a session of that home.
  */
 export function followedOrchestrationHome(
 	agentDir: string,
 	own: OrchestrationHome,
 	sessionId: string,
 ): OrchestrationHome | undefined {
-	if (orchestrationHomeHoldsSession(own, sessionId)) return own;
-	const elsewhere = orchestrationHomes(agentDir).some(
-		(home) => !sameOrchestrationHome(home, own) && orchestrationHomeHoldsSession(home, sessionId),
-	);
-	return elsewhere ? undefined : own;
+	const place = sameOrchestrationHome(own, ownerOrchestrationHome(agentDir)) ? undefined : own;
+	return sameOrchestrationHome(resolveSessionHome(agentDir, sessionId, place), own) ? own : undefined;
 }
 
 /**
- * The storage roots of the sessions written to `sessionDir`: a bot's (`<agentDir>/bots/<name>/sessions`, its home's
- * orchestration directory) or else the owner's. Decided by the path alone, so it reads nothing and cannot fail: the roots
- * a new session in that directory is created in.
+ * The storage roots of a new session written to `sessionDir`: a bot's (its `sessions/`, or under its
+ * `orchestration/`) or else the owner's.
  */
 export function sessionStorageRootsOfDir(agentDir: string, sessionDir: string): SessionStorageRoots {
-	const dir = resolve(sessionDir);
-	const homeDir = dirname(dir);
-	if (dirname(homeDir) === resolve(botsDir(agentDir)) && botHomeSessionsDir(homeDir) === dir)
-		return { agentDir, orchestrationHome: botHomeOrchestrationHome(homeDir) };
-	return ownerSessionStorageRoots(agentDir);
+	const place = botHomeOfDir(agentDir, sessionDir);
+	return place ? { agentDir, orchestrationHome: place } : ownerSessionStorageRoots(agentDir);
 }
 
 /**
- * The storage roots of the session file `file`: those of the directory it lies in ({@link sessionStorageRootsOfDir}),
- * and for a bot's file the ones {@link botSessionStorageRoots} finds for the session its header names (a file whose
- * header does not read is opened in its bot's, where the open itself refuses it).
+ * The storage roots of the session file `file`: the owner's for a file outside every bot home; for one inside a bot's,
+ * the home {@link resolveSessionHome} finds for the session its header names (a file whose header does not read is
+ * opened in its bot's, where the open itself refuses it).
  */
 export function sessionStorageRootsOfFile(agentDir: string, file: string): SessionStorageRoots {
-	const roots = sessionStorageRootsOfDir(agentDir, dirname(resolve(file)));
-	if (sameOrchestrationHome(roots.orchestrationHome, ownerOrchestrationHome(agentDir))) return roots;
+	const place = botHomeOfDir(agentDir, dirname(resolve(file)));
+	if (!place) return ownerSessionStorageRoots(agentDir);
 	const header = readSessionHeaderResult(resolve(file));
-	return header.ok ? botSessionStorageRoots(agentDir, roots.orchestrationHome, header.header.id) : roots;
+	const home = header.ok ? resolveSessionHome(agentDir, header.header.id, place) : place;
+	return { agentDir, orchestrationHome: home };
 }
 
 /**
  * The home the session of `sessionFile`, opened in `roots`, belongs in now, derived again as its open derived it: a
- * bot's session file by {@link botSessionStorageRoots}, any other in `roots` (an owner's or a worker's session never
+ * file inside a bot's home by {@link resolveSessionHome}, any other in `roots` (a session outside every bot home never
  * moves, so nothing is read). A lease is taken only while this still names the home it is taken in.
  */
 export function sessionHomeNow(roots: SessionStorageRoots, sessionFile: string, sessionId: string): OrchestrationHome {
-	const byDir = sessionStorageRootsOfDir(roots.agentDir, dirname(resolve(sessionFile)));
-	if (sameOrchestrationHome(byDir.orchestrationHome, ownerOrchestrationHome(roots.agentDir)))
-		return roots.orchestrationHome;
-	return botSessionStorageRoots(roots.agentDir, byDir.orchestrationHome, sessionId).orchestrationHome;
+	const place = botHomeOfDir(roots.agentDir, dirname(resolve(sessionFile)));
+	return place ? resolveSessionHome(roots.agentDir, sessionId, place) : roots.orchestrationHome;
 }
 
 /**
  * The storage roots of a new session written to `sessionDir` by a session opened in `roots` (its /new, fork or clone):
- * a bot's `sessions/` gives its bot's, as {@link sessionHomeNow} derives for a session no home holds yet; any other
- * directory keeps `roots`.
+ * a directory inside a bot's home gives that bot's, as {@link sessionHomeNow} derives for a session no home holds yet;
+ * any other keeps `roots`.
  */
 export function newSessionStorageRoots(roots: SessionStorageRoots, sessionDir: string): SessionStorageRoots {
-	const byDir = sessionStorageRootsOfDir(roots.agentDir, sessionDir);
-	return sameOrchestrationHome(byDir.orchestrationHome, ownerOrchestrationHome(roots.agentDir)) ? roots : byDir;
+	const place = botHomeOfDir(roots.agentDir, sessionDir);
+	return place ? { agentDir: roots.agentDir, orchestrationHome: place } : roots;
 }
 
 /** {@link sessionHomeNow} of a persisted session's manager, for its lease (`acquireSessionBundleLease`'s `homeNow`). */
@@ -131,22 +163,15 @@ export function managerSessionHomeNow(
 }
 
 /**
- * The storage roots of bot session `sessionId`, whose bot's home is `botHome`: the bot's, unless only the owner's home
- * holds the session (its bundle, tombstone or leases), as a bot session's state an earlier build kept there does until its
- * host moves it (`moveBotSessionBundle`), and as one whose move failed across devices keeps it. Every opener of a bot
- * session, its host and another process alike, asks this, and asks it again under the lease's lock (`sessionHomeNow`),
- * so all take its lease in the same home: an opener that chose the owner's just before the host moved the state is
- * refused (`SessionHomeChangedError`) and opens it again.
+ * The storage roots of bot session `sessionId`, whose bot's home is `botHome` ({@link resolveSessionHome}). Its host and
+ * every other opener ask this, and ask it again under the lease's lock (`sessionHomeNow`), so all take its lease in the
+ * same home: an opener that chose the owner's just before the host moved the state is refused
+ * (`SessionHomeChangedError`) and opens it again.
  */
 export function botSessionStorageRoots(
 	agentDir: string,
 	botHome: OrchestrationHome,
 	sessionId: string,
 ): SessionStorageRoots {
-	if (
-		!orchestrationHomeHoldsSession(botHome, sessionId) &&
-		orchestrationHomeHoldsSession(ownerOrchestrationHome(agentDir), sessionId)
-	)
-		return ownerSessionStorageRoots(agentDir);
-	return { agentDir, orchestrationHome: botHome };
+	return { agentDir, orchestrationHome: resolveSessionHome(agentDir, sessionId, botHome) };
 }
