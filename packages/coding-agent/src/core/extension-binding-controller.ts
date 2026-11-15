@@ -156,14 +156,26 @@ const EXTENSION_USAGE_REPORT_FIELDS: ReadonlySet<string> = new Set(["label", "so
  * session's charged ranges are the bot host's alone, so an extension's report cannot mask or reshape a bot's charges.
  */
 function extensionUsageReport(opts: ExtensionUsageReport | undefined): ExtensionUsageReport {
-	for (const [field, value] of Object.entries(opts ?? {})) {
-		if (value === undefined) continue;
-		if (!EXTENSION_USAGE_REPORT_FIELDS.has(field))
-			throw new Error(`reportSpawnedUsage: an extension's report cannot carry "${field}".`);
-		// A String object passes `===` against a string: only a primitive string is taken.
-		if (typeof value !== "string") throw new Error(`reportSpawnedUsage: "${field}" must be a string.`);
-	}
-	const { label, sourceSessionId, reportId } = opts ?? {};
+	if (opts === undefined) return {};
+	if (typeof opts !== "object" || opts === null) throw new Error("reportSpawnedUsage: its options must be an object.");
+	for (const key of Reflect.ownKeys(opts))
+		if (typeof key === "symbol" || !EXTENSION_USAGE_REPORT_FIELDS.has(key))
+			throw new Error(`reportSpawnedUsage: an extension's report cannot carry "${String(key)}".`);
+	// Each field is read once, as an own data property: a getter could answer the checks and the record differently, and
+	// a String object passes `===` against a string, so only a primitive string is taken.
+	const field = (name: keyof ExtensionUsageReport): string | undefined => {
+		const descriptor = Object.getOwnPropertyDescriptor(opts, name);
+		if (descriptor === undefined) return undefined;
+		if (!("value" in descriptor))
+			throw new Error(`reportSpawnedUsage: "${name}" must be a plain value, not an accessor.`);
+		const value: unknown = descriptor.value;
+		if (value === undefined) return undefined;
+		if (typeof value !== "string") throw new Error(`reportSpawnedUsage: "${name}" must be a string.`);
+		return value;
+	};
+	const label = field("label");
+	const sourceSessionId = field("sourceSessionId");
+	const reportId = field("reportId");
 	if (reportId?.startsWith(spawnedUsageReportIdPrefix(BOT_SESSION_USAGE_LABEL)))
 		throw new Error(
 			`reportSpawnedUsage: report ids starting "${spawnedUsageReportIdPrefix(BOT_SESSION_USAGE_LABEL)}" are reserved for bot session charges.`,

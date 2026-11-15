@@ -68,10 +68,12 @@ range delivered to two main sessions counts in each one's view. The daily brake 
 within the day and counts a range once across them, on the earliest day a charge covering it among those files was
 recorded; a range fixed again whose earlier charge lies only in a file not changed that day counts again on the later
 charge's day. Every charge delivers the ones still held first, in order, so a range a main session lost is recorded
-again before any later one. A charge counts as held once a main session's file holds it. A main session that keeps no
-file (`--no-session`, an in-memory SDK session) holds a charge as it holds its own spend: the charge is settled when
-that session takes it, counts in that session's views while it lives and in nothing after it ends, and is never
-delivered again to a later session. A session with no watermark (a new bot, a new session file, a
+again before any later one. A charge counts as held once a main session's file holds it. A charge fixed while a main session that keeps no
+file (`--no-session`, an in-memory SDK session) answers is held by it as it holds its own spend: the charge is settled
+when that session takes it, with the charge mark kept at once, counts in that session's views while it lives and in
+nothing after it ends, and is never delivered again to a later session. A charge left pending from before (by a main
+session with a file in an earlier process, or taken back from another main session's unwritten entries) is not given to
+a main session without a file: it waits for one with a file. A session with no watermark (a new bot, a new session file, a
 lost record) starts at zero when it recorded no spend, with nothing read, and otherwise at the furthest of how far the
 main sessions of the process hold its charges, the charge mark in its own transcript and the charges the ledger still
 holds for it. Only the main sessions' files changed since the bot's session began, or since its last charge mark, are

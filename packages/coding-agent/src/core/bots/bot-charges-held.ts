@@ -21,7 +21,7 @@
  * report id, all of them together reaching as far as their sum.
  */
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
@@ -80,6 +80,8 @@ export interface UnwrittenBotCharge {
 /** A root's session file or directory the read-back could not read, and why. */
 export interface BotChargeUnread {
 	readonly path: string;
+	/** The path's one identity: its real path when it resolves, else its absolute path. */
+	readonly key: string;
 	readonly reason: string;
 }
 
@@ -93,12 +95,29 @@ export interface BotChargesHeld {
 	readonly unread: readonly BotChargeUnread[];
 }
 
-function unreadOf(path: string, error: unknown): BotChargeUnread {
+/** An unread path as it is met, before its identity is resolved. */
+type UnreadPath = Omit<BotChargeUnread, "key">;
+
+function unreadOf(path: string, error: unknown): UnreadPath {
 	return { path, reason: error instanceof Error ? error.message : String(error) };
 }
 
+/**
+ * Each unread path once, by its identity (`BotChargeUnread.key`): a path met twice (a directory two roots keep, a file
+ * listed twice, a link and its target) is named once.
+ */
+async function unreadKeyed(unread: readonly UnreadPath[]): Promise<BotChargeUnread[]> {
+	const keyed = new Map<string, BotChargeUnread>();
+	for (const entry of unread) {
+		// A path that cannot be read may not resolve either: its absolute path is then its identity.
+		const key = await realpath(entry.path).catch(() => resolve(entry.path));
+		if (!keyed.has(key)) keyed.set(key, { ...entry, key });
+	}
+	return [...keyed.values()];
+}
+
 /** The names in `directory`; none when it does not exist yet, or cannot be listed (named in `unread`). */
-async function namesIn(directory: string, directories: boolean, unread: BotChargeUnread[]): Promise<string[]> {
+async function namesIn(directory: string, directories: boolean, unread: UnreadPath[]): Promise<string[]> {
 	try {
 		const found = await readdir(directory, { withFileTypes: true });
 		return found
@@ -111,7 +130,7 @@ async function namesIn(directory: string, directories: boolean, unread: BotCharg
 }
 
 /** The session directories the holders keep their files in, each once. */
-async function directoriesOf(holders: readonly BotChargeHolder[], unread: BotChargeUnread[]): Promise<string[]> {
+async function directoriesOf(holders: readonly BotChargeHolder[], unread: UnreadPath[]): Promise<string[]> {
 	const directories = new Map<string, string>();
 	for (const holder of holders) {
 		const found = holder.root
@@ -130,7 +149,7 @@ async function readFileCharges(
 	file: string,
 	sessionId: string,
 	take: (entry: SessionEntry) => void,
-	unread: BotChargeUnread[],
+	unread: UnreadPath[],
 ): Promise<boolean> {
 	for (let read = 1; ; read++) {
 		const taken: SessionEntry[] = [];
@@ -184,7 +203,7 @@ export async function botChargesHeld(
 		if (isUsage(data.through)) reach = usageReach(reach, data.through);
 		else if (isUsage(data.usage) && typeof data.reportId === "string") unranged.set(data.reportId, data.usage);
 	};
-	const unread: BotChargeUnread[] = [];
+	const unread: UnreadPath[] = [];
 	const live = new Set(holders.flatMap(({ live: root }) => (root.file === undefined ? [] : [resolve(root.file)])));
 	for (const directory of await directoriesOf(holders, unread))
 		for (const name of await namesIn(directory, false, unread)) {
@@ -225,7 +244,6 @@ export async function botChargesHeld(
 	return {
 		through: usageReach(reach, combineUsage(...unranged.values())),
 		unwritten: [...unwritten.values()],
-		// A path met twice (a directory two roots keep, a file listed twice) is named once.
-		unread: [...new Map(unread.map((entry) => [resolve(entry.path), entry])).values()],
+		unread: await unreadKeyed(unread),
 	};
 }

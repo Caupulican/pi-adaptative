@@ -178,6 +178,11 @@ export class BotTurnAccounting {
 	private recoverAfter = 0;
 	/** The pending charges a root holds unwritten, by report id, with that root's session. */
 	private readonly awaiting = new Map<string, string>();
+	/**
+	 * The root each charge this process fixed answered when it was fixed, by report id: a root that keeps no file settles
+	 * only the charges fixed while it answers (in memory alone; a charge left from before stays for a root with a file).
+	 */
+	private readonly fixedFor = new Map<string, string>();
 	/** The root whose writes are watched for the awaited charges, and the unsubscribe. */
 	private watching: { readonly root: string; readonly stop: () => void } | undefined;
 	/** How far the root's files hold this session's charges past its transcript's last mark: marked at the turn's end. */
@@ -270,7 +275,8 @@ export class BotTurnAccounting {
 			state.through = through;
 			return;
 		}
-		if (delivered && this.deliver(charge, keepsFile)) this.settle([charge]);
+		this.fixedFor.set(charge.report.reportId, this.ports.rootSessionId());
+		if (delivered && this.deliver(charge, keepsFile)) this.settled([charge], keepsFile);
 	}
 
 	/**
@@ -311,8 +317,8 @@ export class BotTurnAccounting {
 					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
 					if (!this.adopt(sessionId, held)) return;
 					// Told only once the watermark it lowered is adopted: a read-back dropped changes nothing.
-					const newly = held.unread.filter(({ path }) => !this.unreadTold.has(path));
-					for (const { path } of newly) this.unreadTold.add(path);
+					const newly = held.unread.filter(({ key }) => !this.unreadTold.has(key));
+					for (const { key } of newly) this.unreadTold.add(key);
 					if (newly.length > 0)
 						this.ports.chargesUnread(newly.slice(0, UNREAD_NAMED), Math.max(0, newly.length - UNREAD_NAMED));
 					this.charge();
@@ -357,13 +363,17 @@ export class BotTurnAccounting {
 	/**
 	 * Delivers each pending charge again, oldest first, and drops the ones the root's file holds now: one the answering root
 	 * holds is found through its report-id index and not appended again, and one a root lost (a reopen of its file drops
-	 * what it never wrote) is appended again before any later one. False when one failed to be delivered: the ones after it
-	 * wait.
+	 * what it never wrote) is appended again before any later one. A root that keeps no file is given only the charges
+	 * fixed while it answers: any other (one a root with a file of an earlier process left, or one taken back from another
+	 * root's unwritten entries) waits for a root with a file, never counted in this one's views. False when one failed to be
+	 * delivered: the ones after it wait.
 	 */
 	private deliverPending(keepsFile: boolean): boolean {
 		const held: BotCharge[] = [];
 		let delivered = true;
+		const root = this.ports.rootSessionId();
 		for (const charge of this.ledger.charge?.pending ?? []) {
+			if (!keepsFile && this.fixedFor.get(charge.report.reportId) !== root) continue;
 			const persisted = this.deliver(charge, keepsFile);
 			if (persisted === undefined) {
 				delivered = false;
@@ -371,13 +381,22 @@ export class BotTurnAccounting {
 			}
 			if (persisted) held.push(charge);
 		}
-		if (held.length > 0) this.settle(held);
+		if (held.length > 0) this.settled(held, keepsFile);
 		return delivered;
 	}
 
 	/**
-	 * Delivers one charge: true once the root holds it for good (its file holds it, or it keeps no file: it holds the charge
-	 * as it holds its own spend, while it lives, and the charge is settled at take), false while the root holds it unwritten
+	 * Settles charges the root holds for good; a root that keeps no file took them now, so the mark is kept at once: a crash
+	 * before the turn's end then does not charge their ranges again.
+	 */
+	private settled(held: readonly BotCharge[], keepsFile: boolean): void {
+		if (this.settle(held) && !keepsFile) this.keepMark();
+	}
+
+	/**
+	 * Delivers one charge: true once the root holds it for good (its file holds it, or it keeps no file and the charge was
+	 * fixed while it answers: it holds the charge as it holds its own spend, while it lives, and the charge is settled at
+	 * take, `deliverPending`), false while the root holds it unwritten
 	 * (its write is awaited), undefined when it did not reach the root (a failure, or a root on another session file than
 	 * the one the charge was sent to).
 	 */
@@ -438,26 +457,35 @@ export class BotTurnAccounting {
 	}
 
 	/**
-	 * Drops charges the root's file holds from the pending ones and writes the ledger; the range end up to which every
-	 * charge of this session is held now is marked in its transcript at the turn's end (`keepMark`).
+	 * Drops charges the root holds for good from the pending ones and writes the ledger; the range end up to which every
+	 * charge of this session is held now is marked in its transcript at the turn's end (`keepMark`). A ledger that cannot be
+	 * written keeps them pending, unsettled, to be delivered again with the next charge. True when the mark moved.
 	 */
-	private settle(held: readonly BotCharge[]): void {
-		for (const charge of held) this.awaiting.delete(charge.report.reportId);
-		if (this.awaiting.size === 0) this.unwatch();
+	private settle(held: readonly BotCharge[]): boolean {
 		const state = this.ledger.charge;
-		if (!state) return;
+		if (!state) return false;
+		const pending = state.pending;
+		state.pending = pending.filter((charge) => !held.includes(charge));
+		if (!this.ledger.write()) {
+			state.pending = pending;
+			return false;
+		}
+		for (const charge of held) {
+			this.awaiting.delete(charge.report.reportId);
+			this.fixedFor.delete(charge.report.reportId);
+		}
+		if (this.awaiting.size === 0) this.unwatch();
 		const sessionId = this.session.sessionId;
 		let settled: Usage | undefined;
-		for (const charge of state.pending) {
+		for (const charge of pending) {
 			if (charge.report.sessionId !== sessionId) continue;
 			if (!held.includes(charge)) break;
 			settled = charge.report.through;
 		}
-		state.pending = state.pending.filter((charge) => !held.includes(charge));
-		this.ledger.write();
-		if (!settled) return;
+		if (!settled) return false;
 		const kept = this.unmarked?.sessionId === sessionId ? this.unmarked.through : undefined;
 		this.unmarked = { sessionId, through: kept ? usageReach(kept, settled) : settled };
+		return true;
 	}
 
 	/**
