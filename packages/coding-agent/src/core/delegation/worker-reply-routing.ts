@@ -1,5 +1,6 @@
 /** Routes a worker's reply to its requester, another worker or the session root: source-side acknowledgement reservations, the delivery of each reply, and the reconciliation that settles a reply left half-routed. */
 
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
@@ -19,7 +20,7 @@ import type { TaskBearingReconciliation } from "./worker-task-reconciliation.ts"
 export type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
 
 interface WorkerReplyRoutingOptions {
-	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
 	readonly parentSessionId: string;
 	getLifecycle(): WorkerLifecycle;
 	warn?(message: string): void;
@@ -513,7 +514,7 @@ export class WorkerReplyRouting {
 		sourceMailbox.abandonReplyAcknowledgement(request.messageId, replyMessageId, "reply_dead_lettered", (settled) => {
 			try {
 				recordDiscardedObligations({
-					agentDir: this.options.agentDir,
+					orchestrationHome: this.options.orchestrationHome,
 					parentSessionId: this.options.parentSessionId,
 					kind: "reply_dead_lettered",
 					agentId: sourceAgentId,

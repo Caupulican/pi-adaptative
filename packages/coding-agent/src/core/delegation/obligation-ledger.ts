@@ -1,12 +1,20 @@
-import { stateFile } from "../agent-paths.ts";
+import { join } from "node:path";
+import type { OrchestrationHome } from "../agent-paths.ts";
 import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "../util/bounded-jsonl.ts";
 
 /**
  * The ledger of mailbox obligations the harness settled as failed instead of delivering: the startup
- * retention sweep's expiries and a forced retire's discards share this one file, so nothing a mailbox
- * gives up on is silent. Records are bounded; each carries only a content head, never the full message.
+ * retention sweep's expiries and a forced retire's discards share one file per orchestration home, the home of the
+ * mailboxes they settle (the owner's `state/orchestration/`, a bot's `bots/<id>/orchestration/`), so nothing a mailbox
+ * gives up on is silent and a bot's records stay, and go, with its home. Records are bounded; each carries only a
+ * content head, never the full message.
  */
 export const OBLIGATION_LEDGER_NAME = "expired-obligations.jsonl";
+
+/** `<home>/expired-obligations.jsonl` -- the obligation ledger of the mailboxes of orchestration home `home`. */
+export function obligationLedgerFile(home: OrchestrationHome): string {
+	return join(home.root, OBLIGATION_LEDGER_NAME);
+}
 const MAX_LEDGER_ITEMS_PER_RECORD = 8;
 const OBLIGATION_LEDGER_LIMITS: BoundedJsonlLimits = {
 	maxBytes: 1024 * 1024,
@@ -16,7 +24,8 @@ const OBLIGATION_LEDGER_LIMITS: BoundedJsonlLimits = {
 
 /** Append one bounded, attributed record of settled obligations. Throws when the ledger cannot be written. */
 export function recordDiscardedObligations(input: {
-	agentDir: string;
+	/** The orchestration home of the mailbox that settled them: its ledger takes the record. */
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	kind: string;
 	/** Absent for a session-root mailbox, which belongs to no single agent. */
@@ -29,7 +38,7 @@ export function recordDiscardedObligations(input: {
 	at?: string;
 }): void {
 	appendBoundedJsonLineSync(
-		stateFile(input.agentDir, "orchestration", OBLIGATION_LEDGER_NAME),
+		obligationLedgerFile(input.orchestrationHome),
 		{
 			at: input.at ?? new Date().toISOString(),
 			...(input.bundle ? { bundle: input.bundle } : {}),

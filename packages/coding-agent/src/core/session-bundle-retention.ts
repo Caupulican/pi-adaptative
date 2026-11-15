@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
 import { sameOrchestrationHome } from "../kernel/session/session-bundle-paths.ts";
 import {
@@ -14,7 +14,7 @@ import {
 } from "./agent-paths.ts";
 import { historyReferencedSessionIds } from "./bots/bot-history.ts";
 import { type BotHomeUnknown, type BotSessionHolds, readBotSessionHolds } from "./bots/bot-session-holds.ts";
-import { OBLIGATION_LEDGER_NAME, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
+import { obligationLedgerFile, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
 import { PersistentBotTeamStore } from "./delegation/persistent-bot-team-store.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
@@ -414,7 +414,7 @@ function settleExpiredObligations(
 	const at = new Date(now).toISOString();
 	const record = (kind: string, agentId: string | undefined, settled: readonly object[]): void =>
 		recordDiscardedObligations({
-			agentDir,
+			orchestrationHome: home,
 			parentSessionId,
 			kind,
 			...(agentId ? { agentId } : {}),
@@ -499,6 +499,8 @@ interface SweepRun {
 	readonly historyHeld: ReadonlySet<string>;
 	readonly transcripts: ReadonlyMap<string, readonly string[]>;
 	readonly result: SessionBundleRetentionResult;
+	/** The obligation ledgers this sweep recorded expiries in, one per home that settled any. */
+	readonly obligationLedgers: Set<string>;
 	report(message: string): void;
 }
 
@@ -610,6 +612,7 @@ async function sweepHomeBundles(run: SweepRun, { home, names, labelOf, resumeOnl
 						reservation,
 					);
 					result.expiredObligations += settled;
+					if (settled > 0) run.obligationLedgers.add(obligationLedgerFile(home));
 					if (settled === 0 || bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
 						continue;
 					}
@@ -665,6 +668,7 @@ export async function sweepSessionBundles(
 		uncertainRoutineRuns: 0,
 		diagnostics: [],
 	};
+	const obligationLedgers = new Set<string>();
 	const report = (message: string): void => {
 		if (result.diagnostics.length < MAX_DIAGNOSTICS) result.diagnostics.push(message.slice(0, MAX_DIAGNOSTIC_CHARS));
 	};
@@ -719,6 +723,7 @@ export async function sweepSessionBundles(
 			historyHeld: history.sessionIds,
 			transcripts,
 			result,
+			obligationLedgers,
 			report,
 		};
 		for (const sweep of homes) {
@@ -730,7 +735,7 @@ export async function sweepSessionBundles(
 	}
 	if (result.expiredObligations > 0) {
 		result.diagnostics = [
-			`settled ${result.expiredObligations} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: <agentDir>/state/orchestration/${OBLIGATION_LEDGER_NAME}`,
+			`settled ${result.expiredObligations} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: ${[...obligationLedgers].map((ledger) => `<agentDir>/${relative(agentDir, ledger)}`).join(", ")}`,
 			...result.diagnostics,
 		].slice(0, MAX_DIAGNOSTICS);
 	}

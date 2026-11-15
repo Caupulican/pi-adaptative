@@ -1386,7 +1386,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			mailbox.deadLetterPending("retired_with_force", (discarded) => {
 				try {
 					recordDiscardedObligations({
-						agentDir: this.options.agentDir,
+						orchestrationHome: this.options.orchestrationHome,
 						parentSessionId: this.options.parentSessionId,
 						kind: "forced_retire",
 						agentId: target.agentId,
