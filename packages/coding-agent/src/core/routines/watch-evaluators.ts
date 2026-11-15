@@ -59,7 +59,7 @@ interface PathSnapshot {
 export interface WatchSamplerDeps {
 	readonly admission: Pick<
 		WatchAdmission,
-		"authorize" | "commandScratch" | "cwd" | "commandEnvironment" | "readsContent" | "webPolicy"
+		"authorize" | "commandScratch" | "cwd" | "commandEnvironment" | "commandExposure" | "readsContent" | "webPolicy"
 	>;
 	readonly agentDir: () => string;
 	readonly now: () => number;
@@ -70,9 +70,12 @@ function digest(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-/** The bounded, redacted words a watched thing wrote, flattened so a fence line cannot be forged from them. */
-function excerptOf(text: string): string | undefined {
-	const flat = redactKnownSecrets(text)
+/**
+ * The bounded words a watched thing wrote, masked by `mask` (a command's: its shell's output mask; a page's: secret shapes)
+ * before they are flattened so a fence line cannot be forged from them.
+ */
+function excerptOf(text: string, mask: (text: string) => string): string | undefined {
+	const flat = mask(text)
 		.replace(/[\p{Cc}\s]+/gu, " ")
 		.trim();
 	return flat.length === 0 ? undefined : boundedText(flat, MAX_WATCH_EXCERPT_CHARS);
@@ -348,6 +351,9 @@ export class WatchSampler {
 		worker: WorkerWatchAuthority | undefined,
 		scratch: WatchCommandScratch | undefined,
 	): Promise<WatchSample | undefined> {
+		// Met by the session's credential guard as its shell meets the command: a refusal is the watch's, as `authorize`'s is.
+		const exposure = await this.deps.admission.commandExposure(condition.command, worker, signal);
+		if (exposure.refusal) throw new Error(`A watched command was refused. ${exposure.refusal}`);
 		const result = await runRequirementCheck(
 			{
 				command: condition.command,
@@ -369,7 +375,13 @@ export class WatchSampler {
 		if (result.exitCode === null) return undefined;
 		return {
 			observation: { truth: result.passed },
-			event: this.event("command", "matched", "", { exitCode: result.exitCode }, excerptOf(result.output)),
+			event: this.event(
+				"command",
+				"matched",
+				"",
+				{ exitCode: result.exitCode },
+				excerptOf(result.output, exposure.mask),
+			),
 		};
 	}
 
@@ -407,6 +419,7 @@ export class WatchSampler {
 							Math.max(0, at - EXCERPT_CONTEXT_CHARS),
 							at + condition.bodyContains.length + EXCERPT_CONTEXT_CHARS,
 						),
+						redactKnownSecrets,
 					)
 				: undefined;
 		return {

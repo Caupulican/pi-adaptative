@@ -5,8 +5,10 @@
  *   content is digested only where the session's read scope and the credential policy allow reading it;
  * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection,
  *   edge classification against the session's edge grants, and the read-only line of a session whose shell edits
- *   nothing), non-interactively: whatever would ask the owner is refused, since a watch cannot ask. It runs with a
- *   bounded environment, closed further as the session's own commands are where they carry restrictions (a bot's session);
+ *   nothing), non-interactively: whatever would ask the owner is refused, since a watch cannot ask. Before each run the
+ *   session's credential guard meets it as the shell's meets the command (`commandExposure`), and the excerpt it keeps is
+ *   masked as the shell's output is. It runs with a bounded environment, closed further as the session's own commands are
+ *   where they carry restrictions (a bot's session);
  * - a managed process is a process-matrix entry that has not ended yet, and an operating-system process must be running.
  * Ports, pages and the cadence are bounded by the condition's own schema; a page's address is checked again at fetch.
  * A watch a worker runtime armed is admitted under the session's authority and the worker's together
@@ -50,8 +52,10 @@ import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.t
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { readEntrySync } from "../process-matrix/store.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
+import { assessCommandOutputExposure, type CommandOutputExposure } from "../secrets/command-output-exposure.ts";
 import {
 	type CredentialExposureBoundary,
+	type CredentialExposureMode,
 	credentialToolBlockReason,
 	isProtectedCredentialPath,
 } from "../secrets/credential-exposure-guard.ts";
@@ -69,7 +73,7 @@ export interface WatchAdmissionHost {
 	 * judges a watched command at arming and at every run, the roots it reads in, which a watched path's content stays in,
 	 * and the environment its own commands run in, which a watched command runs in.
 	 */
-	getSessionConfinement?(): SessionConfinement | undefined;
+	getSessionConfinement(): SessionConfinement;
 	/**
 	 * The session's edge grants, as the owner's own shell calls read them: what was allowed ahead, never a prompt answered
 	 * for one call; `standingOnly` keeps the owner's standing grants alone, all a run carrying a third party's words may use.
@@ -151,7 +155,7 @@ export class WatchAdmission {
 	 */
 	commandEnvironment(worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): NodeJS.ProcessEnv {
 		const env = watchCommandEnvironment();
-		if (!worker) return this.host.getSessionConfinement?.()?.commandEnvironment?.(env) ?? env;
+		if (!worker) return this.host.getSessionConfinement().commandEnvironment?.(env) ?? env;
 		const { scope } = worker;
 		return {
 			...env,
@@ -166,7 +170,7 @@ export class WatchAdmission {
 	}
 
 	private scope(): SessionReadScope {
-		const confined = this.host.getSessionConfinement?.()?.readScope;
+		const confined = this.host.getSessionConfinement().readScope;
 		if (confined) return confined;
 		return sessionReadScope({
 			cwd: this.host.getCwd(),
@@ -258,6 +262,25 @@ export class WatchAdmission {
 	}
 
 	/**
+	 * How the session's credential guard meets a watched command now, before it runs, as its shell meets the same command:
+	 * one that reaches an owner credential is refused where the commands keep credentials out (`deny`), and the excerpt it
+	 * keeps is masked as the shell's output of it is. Rejects when the guard cannot assess it.
+	 */
+	commandExposure(
+		command: string,
+		worker: WorkerWatchAuthority | undefined,
+		signal: AbortSignal,
+	): Promise<CommandOutputExposure> {
+		const mode = this.credentialExposure(worker);
+		return assessCommandOutputExposure(command, this.cwd(worker), this.boundary(this.scope()), mode, signal);
+	}
+
+	/** How a watched command meets an owner credential: a worker's as the worker's own shell does (`deny`), the session's as its own. */
+	private credentialExposure(worker: WorkerWatchAuthority | undefined): CredentialExposureMode {
+		return worker ? "deny" : this.host.getSessionConfinement().credentialExposure;
+	}
+
+	/**
 	 * Whether the session may read what `absolutePath` holds: inside its read scope and not private to the harness or
 	 * credential-bearing. Only then is a path's content digested; elsewhere it is observed by metadata alone.
 	 */
@@ -298,7 +321,7 @@ export class WatchAdmission {
 		}
 		const credential = credentialToolBlockReason("bash", args, cwd, this.boundary(scope));
 		if (credential) return credential;
-		const sessionShell = this.host.getSessionConfinement?.()?.readOnlyShell;
+		const sessionShell = this.host.getSessionConfinement().readOnlyShell;
 		const sessionViolation =
 			sessionShell && readOnlyShellViolation(command, cwd, { lane: sessionShell, dialect: "posix" });
 		if (sessionViolation) return `This session has a read-only shell: ${sessionViolation}.`;
