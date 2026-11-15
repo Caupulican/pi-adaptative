@@ -56,7 +56,11 @@ import {
 import { branchPoolPolicyReader, ModelPoolPolicyView } from "../model-router/owner-model-policy.ts";
 import { isLocalOrManagedRouterModel } from "../model-router/tool-escalation.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import {
+	type AttemptRuntimeState,
+	attemptAwaitsDispatch,
+	type TaskRuntimeProjection,
+} from "../orchestration/task-runtime-state.ts";
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 import { followedOrchestrationHome, sessionHomeNow, sessionHomes } from "../orchestration-homes.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
@@ -362,14 +366,15 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		// The file an earlier build named this controller's fleet queue metadata by is its own only when its ledger claims
-		// every entry: a queued attempt of that lane, with the entry's flow.
+		// every entry: an attempt of that lane its dispatch starts or resumes (the attempt its dispatch token names), with
+		// the entry's flow.
 		const asideFleetQueue = settleEarlierAwayFleetQueue(
 			orchestrationHome,
 			parentSessionId,
 			(entry) => {
 				const flow = lifecycle.getLaneFlow(entry.id);
 				return (
-					selectedWorkerAttempt(lifecycle.getTaskRuntimeSnapshot(), entry.id)?.status === "queued" &&
+					attemptAwaitsDispatch(selectedWorkerAttempt(lifecycle.getTaskRuntimeSnapshot(), entry.id)) &&
 					flow?.objectiveId === entry.objectiveId &&
 					flow.subtreeId === entry.subtreeId
 				);

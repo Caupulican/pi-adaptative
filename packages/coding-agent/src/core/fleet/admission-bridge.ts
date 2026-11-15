@@ -22,7 +22,7 @@ import {
 	type WorkerWriteReservationAdmission,
 } from "../delegation/worker-write-reservation-coordinator.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
-import type { AttemptDispatchReadiness } from "../orchestration/task-runtime-state.ts";
+import { type AttemptDispatchReadiness, attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
 import type { SessionFleetScheduler } from "./fleet-scheduler.ts";
 
@@ -77,7 +77,7 @@ export function decideWorkerDispatch<A extends { ok: true }>(
 	if (port.deferRetryIfNeeded(record, request)) return { action: "wait" };
 	const attempt = port.getActiveAttempt(record.laneId);
 	if (!attempt) return { action: "cancel", reasonCode: "orchestration_attempt_missing" };
-	const pending = attempt.status === "queued" || attempt.status === "suspended";
+	const pending = attemptAwaitsDispatch(attempt);
 	if (pending) {
 		const readiness = port.getAttemptDispatchReadiness(attempt.attemptId);
 		if (readiness.state === "waiting") return readinessWait(readiness.reasonCode);

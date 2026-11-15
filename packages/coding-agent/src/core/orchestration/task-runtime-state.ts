@@ -302,6 +302,16 @@ export function terminalAttemptStatus(status: AttemptStatus): boolean {
 	return ["completed", "partial", "blocked", "failed", "cancelled", "expired"].includes(status);
 }
 
+/**
+ * An attempt a dispatch starts or resumes: a queued one, or a suspended one waiting to go on. Its id is its lane's
+ * dispatch token, its readiness is read only then, and a lane whose attempt is one still owns the work it queued.
+ */
+export function attemptAwaitsDispatch<T extends Pick<AttemptRuntimeState, "status">>(
+	attempt: T | undefined,
+): attempt is T {
+	return attempt?.status === "queued" || attempt?.status === "suspended";
+}
+
 /** A queued attempt, or a suspended one with no lease: nothing runs for it, so cancelling it only settles its record. */
 export function attemptAwaitingLease(attempt: Pick<AttemptRuntimeState, "status" | "lease">): boolean {
 	return attempt.status === "queued" || (attempt.status === "suspended" && attempt.lease === undefined);

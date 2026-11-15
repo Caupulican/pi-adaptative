@@ -31,6 +31,7 @@ import {
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
@@ -1998,10 +1999,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// durable dispatch status and, for a queued attempt, the reason it has not started.
 		// A suspended attempt waiting in the queue to resume (a retry, or a resume held for the foreground)
 		// has a wait state too.
-		const waitState =
-			attempt?.status === "queued" || attempt?.status === "suspended"
-				? this.options.scheduler.getWaitState?.(attempt.taskId)
-				: undefined;
+		const waitState = attemptAwaitsDispatch(attempt)
+			? this.options.scheduler.getWaitState?.(attempt.taskId)
+			: undefined;
 		// The reconciled independent verification of this exact generation, when its result asked for one.
 		const verification =
 			attempt?.result?.nextAction === "independent_verification_required"

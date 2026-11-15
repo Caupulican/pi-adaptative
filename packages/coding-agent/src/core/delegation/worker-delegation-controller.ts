@@ -109,7 +109,7 @@ import {
 	TaskProfileWriter,
 } from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { attemptAwaitingLease } from "../orchestration/task-runtime-state.ts";
+import { attemptAwaitingLease, attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
 import { successorOf } from "../orchestration/task-successor.ts";
 import { isCurrentVerificationSubject } from "../orchestration/verification-identity.ts";
 import { type VerifierVerdict, verdictOfReasonCode, verdictReasonCode } from "../orchestration/verification-verdict.ts";
@@ -634,9 +634,7 @@ export class WorkerDelegationController {
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
 			getDispatchToken: (laneId) => {
 				const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
-				return attempt && (attempt.status === "queued" || attempt.status === "suspended")
-					? attempt.attemptId
-					: undefined;
+				return attemptAwaitsDispatch(attempt) ? attempt.attemptId : undefined;
 			},
 			run: (request, record) => this.runOnce(request, undefined, record, this.schedulerPreflight),
 			cancel: (laneId, reasonCode, attemptId, detail) =>
@@ -4739,7 +4737,7 @@ export class WorkerDelegationController {
 	/** Would admission park this lane's current attempt on the foreground hold? Resolves the model as admission does. */
 	private laneHeldForLocalForeground(laneId: string): boolean {
 		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
-		if (!attempt || (attempt.status !== "queued" && attempt.status !== "suspended")) return false;
+		if (!attemptAwaitsDispatch(attempt)) return false;
 		const admission = this.resolveWorkerAdmission(
 			this.recovery.recoveredRequest(attempt),
 			attempt.dispatch.executionContract,

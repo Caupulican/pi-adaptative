@@ -41,6 +41,7 @@ import type {
 	AttemptRuntimeState,
 	TaskRuntimeProjection,
 } from "../orchestration/task-runtime.ts";
+import { attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
 import {
 	attemptVerification,
 	currentTaskTerminalOverride,
@@ -678,12 +679,7 @@ export class WorkerLifecycle {
 			if (record) this.enqueueTerminalNotification(record);
 			return { cancelled: true, record };
 		}
-		if (
-			!attempt ||
-			!expectedAttempt ||
-			attempt.lease ||
-			(attempt.status !== "queued" && attempt.status !== "suspended")
-		) {
+		if (!attempt || !expectedAttempt || attempt.lease || !attemptAwaitsDispatch(attempt)) {
 			return { cancelled: false, record };
 		}
 		try {
@@ -702,9 +698,7 @@ export class WorkerLifecycle {
 			}
 			const current = selectedWorkerAttempt(currentSnapshot, laneId);
 			const stillOwned =
-				current?.attemptId === attempt.attemptId &&
-				!current.lease &&
-				(current.status === "queued" || current.status === "suspended");
+				current?.attemptId === attempt.attemptId && !current.lease && attemptAwaitsDispatch(current);
 			if (stillOwned) throw error;
 			return { cancelled: false, record: projectWorkerLaneRecord(currentSnapshot, laneId) };
 		}
