@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { expect } from "vitest";
 import { configFile, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
@@ -16,7 +16,9 @@ import {
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
 import { type CiSubject, createCiAttemptTerminalEvent } from "../../../../src/core/events/host-event-contract.ts";
+import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fleet-queue-store.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeKind } from "../../../../src/core/harness-notice.ts";
+import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
@@ -892,6 +894,28 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			expect(stoppedStatus.lastEnd?.reason, "its end is recorded").toBe("signal");
 			expect(spendReports(stoppedStatus), "its reports outlive it").toHaveLength(1);
 
+			// A fleet queue file under the name an earlier build gave this parent's away runs' (`<id>.away.json`), which a
+			// build up to 0.104.64 never removed with its session: a stopped queue whose entry no attempt of this parent's
+			// ledger claims. Its name alone proves nothing, so the away runs set it aside and tell the owner once; adopted,
+			// its stop would hold the run below for good.
+			const earlierAwayFleet = resolve(
+				earlierAwayFleetQueueMetadataPath(ownerOrchestrationHome(agentDir), root.sessionManager.getSessionId()),
+			);
+			const plantedAwayFleet = `${JSON.stringify({
+				v: 1,
+				stopped: true,
+				entries: [
+					{
+						id: "worker-planted",
+						objectiveId: "objective-planted",
+						subtreeId: "subtree-planted",
+						priority: 1,
+						enqueuedAt: 0,
+					},
+				],
+			})}\n`;
+			world.io.seed(earlierAwayFleet, plantedAwayFleet);
+
 			// Room for one run again, and the daemon comes back by itself: another session's start revives it while a
 			// routine is enabled, and it runs this parent's due slot away. That other session saves its own routine and
 			// closes; when its slot comes due while this parent's run still holds the day's room, it is refused and claims
@@ -986,6 +1010,21 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				"the revived daemon reports the contending run's refusal once and the first run's none",
 			).toHaveLength(1);
 			expect(storeDiagnostics, "the observing store read every write").toEqual([]);
+			const asideAwayFleet = [...world.io.fileEntries(dirname(earlierAwayFleet)).keys()].filter((path) =>
+				path.startsWith(`${earlierAwayFleet}.unowned-`),
+			);
+			expect(
+				{
+					earlier: world.io.peekFile(earlierAwayFleet),
+					aside: asideAwayFleet.map((path) => world.io.peekFile(path)),
+					told: daemonStatus().reports.filter((report) =>
+						asideAwayFleet.some((path) =>
+							report.message.includes(interfaceText().sessions.awayFleetQueueSetAside(path)),
+						),
+					).length,
+				},
+				"the away runs set the earlier-named queue file nothing of theirs claims aside, kept whole, tell the owner once and run regardless of its stop",
+			).toEqual({ earlier: undefined, aside: [plantedAwayFleet], told: 1 });
 			const contenderRuns = awayStore.listRoutineOccurrences({ routineId: contenderId });
 			expect(
 				contenderRuns.map((occurrence) => [

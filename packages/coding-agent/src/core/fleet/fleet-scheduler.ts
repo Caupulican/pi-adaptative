@@ -176,6 +176,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 	private queue: FleetQueue<unknown> | undefined;
 	private pass: FactsPass | undefined;
 	private stopped = false;
+	/** A node a previous process left queued has been claimed, and the windows ramped for it. */
+	private restartRamped = false;
 	private revision = 0;
 	private roomNotifyPending = false;
 	private lastReleaseAt: number | undefined;
@@ -198,17 +200,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 		});
 		const metadata = this.store.load();
 		if (metadata) {
+			// An entry acts only once a recovered node claims it (`claimRestored`): one no attempt claims ramps and wakes nothing.
 			for (const entry of metadata.entries) this.restored.set(entry.id, entry);
 			if (metadata.stopped) {
 				this.stopped = true;
 				this.observer.record("running", "stopped", "restored");
 			}
-			// A restarted fleet releases half of each account window until its first success, as after a resume.
-			this.claims.rampAll();
-			const now = deps.timers.now();
-			for (const entry of metadata.entries)
-				if (entry.retryAt !== undefined && entry.retryAt > now && entry.lastReason)
-					this.armAlarm(entry.lastReason, entry.retryAt);
 			harnessLog.info("fleet", "fleet queue metadata restored", {
 				entries: metadata.entries.length,
 				stopped: metadata.stopped,
@@ -253,7 +250,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 	createQueue<P>(): FleetQueue<P> {
 		const queue = new FleetQueue<P>({
 			now: () => this.deps.timers.now(),
-			enqueuedAtFor: (id) => this.restored.get(id)?.enqueuedAt,
+			claimRestored: (id) => this.claimRestored(id),
 			onRemove: (id) => {
 				this.waits.release(id);
 				this.lastWait.delete(id);
@@ -264,9 +261,22 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return queue;
 	}
 
-	/** The queued node's flow and priority as a previous process of this session left them. */
-	restoredEntry(id: string): FleetQueueMetadataEntry | undefined {
-		return this.restored.get(id);
+	/**
+	 * Node `id` joins the queue: when a previous process of this session left it queued, it is claimed here, once. The
+	 * first claim releases half of each account window until its first success, as after a resume, and the node's recorded
+	 * reopen time is armed again; its first enqueue time is given back, so its aging resumes.
+	 */
+	private claimRestored(id: string): number | undefined {
+		const entry = this.restored.get(id);
+		if (entry === undefined) return undefined;
+		this.restored.delete(id);
+		if (!this.restartRamped) {
+			this.restartRamped = true;
+			this.claims.rampAll();
+		}
+		if (entry.retryAt !== undefined && entry.retryAt > this.deps.timers.now() && entry.lastReason)
+			this.armAlarm(entry.lastReason, entry.retryAt);
+		return entry.enqueuedAt;
 	}
 
 	// ---- local admission ----

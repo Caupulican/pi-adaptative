@@ -20,6 +20,7 @@ import { BOT_HOME_COALESCE_MS } from "../../../../src/core/bots/bot-home-watch.t
 import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
 import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
 import { continueBotSession } from "../../../../src/core/bots/bot-session-open.ts";
+import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fleet-queue-store.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { managerSessionHomeNow } from "../../../../src/core/orchestration-homes.ts";
 import { processLockHolder } from "../../../../src/core/remote/host-lock.ts";
@@ -288,14 +289,29 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	mkdirSync(ownerPieces[bundle] as string, { recursive: true });
 	mkdirSync(dirname(ownerPieces[fleet] as string), { recursive: true });
 	writeFileSync(ownerPieces[fleet] as string, `${JSON.stringify(PLANTED_FLEET)}\n`);
+	// The away runs' queue file under the name an earlier build gave it, standing where their own file is absent: whose it
+	// is only their ledger can prove, so the move carries it under that name for their controller to settle, never adopting it.
+	const awayFleet = 3;
+	const earlierAwayInOwner = earlierAwayFleetQueueMetadataPath(owner, sessionId());
+	const earlierAwayInBot = earlierAwayFleetQueueMetadataPath(home.orchestrationHome, sessionId());
+	writeFileSync(earlierAwayInOwner, `${JSON.stringify(PLANTED_FLEET)}\n`);
 	expect(
 		{
 			ownerHomeHolds: orchestrationHomeHoldsSession(owner, sessionId()),
 			botHomeHolds: orchestrationHomeHoldsSession(home.orchestrationHome, sessionId()),
 			inOwnerHome: [...planted].sort().map((index) => existsSync(ownerPieces[index] as string)),
+			earlierAway: {
+				inOwnerHome: existsSync(earlierAwayInOwner),
+				ownInOwnerHome: existsSync(ownerPieces[awayFleet] as string),
+			},
 		},
 		"the bot session's bundle and fleet queue file stand in the owner's home and nothing of it in the bot's, as an earlier build left them",
-	).toEqual({ ownerHomeHolds: true, botHomeHolds: false, inOwnerHome: [...planted].map(() => true) });
+	).toEqual({
+		ownerHomeHolds: true,
+		botHomeHolds: false,
+		inOwnerHome: [...planted].map(() => true),
+		earlierAway: { inOwnerHome: true, ownInOwnerHome: false },
+	});
 	const moveMark = world.warnings.length;
 	const thirdMode = await ask(
 		THIRD_QUESTION,
@@ -311,11 +327,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			inOwnerHome: ownerPieces.filter((piece) => existsSync(piece)),
 			ownerHomeHolds: orchestrationHomeHoldsSession(owner, sessionId()),
 			fleet: JSON.parse(readFileSync(botPieces[fleet] as string, "utf8")),
+			earlierAway: {
+				inOwnerHome: existsSync(earlierAwayInOwner),
+				underItsName: JSON.parse(readFileSync(earlierAwayInBot, "utf8")),
+				underTheAwayName: existsSync(botPieces[awayFleet] as string),
+			},
 			holders: holdersIn(home.orchestrationHome, sessionId()),
 			ownerHolders: holdersIn(owner, sessionId()),
 			warnings: world.warnings.slice(moveMark),
 		},
-		"the host's open moves the session's state into the bot's home, its fleet queue file included, leaves none of it in the owner's home and continues the conversation there, telling nothing",
+		"the host's open moves the session's state into the bot's home, its fleet queue file included and the away runs' file an earlier build named carried under that name, leaves none of it in the owner's home and continues the conversation there, telling nothing",
 	).toEqual({
 		mode: "followed_up",
 		carried: { secondQuestion: true, secondAnswer: true, third: true },
@@ -323,6 +344,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		inOwnerHome: [],
 		ownerHomeHolds: false,
 		fleet: PLANTED_FLEET,
+		earlierAway: { inOwnerHome: false, underItsName: PLANTED_FLEET, underTheAwayName: false },
 		holders: [{ role: "bot-host", self: true }],
 		ownerHolders: [],
 		warnings: [],

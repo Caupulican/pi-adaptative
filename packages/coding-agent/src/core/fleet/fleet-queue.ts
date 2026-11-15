@@ -52,8 +52,11 @@ interface Flow<P> {
 
 export interface FleetQueueOptions {
 	now(): number;
-	/** A recovered entry's first enqueue time, from the restart metadata; aging resumes from it. */
-	enqueuedAtFor?(id: string): number | undefined;
+	/**
+	 * Called once as node `id` joins the queue: a node the restart metadata holds is claimed by it, and its first enqueue
+	 * time is given back, so aging resumes from it.
+	 */
+	claimRestored?(id: string): number | undefined;
 	/** Membership or order changed: an entry joined, left or was dispatched. */
 	onChange?(): void;
 	/** An entry left the queue by any path. */
@@ -94,6 +97,7 @@ export class FleetQueue<P> {
 	/** Adds an entry at the back of its flow; false when the id is already queued. */
 	push(input: FleetQueueEntryInput<P>): boolean {
 		if (this.entries.has(input.id)) return false;
+		const restoredAt = this.options.claimRestored?.(input.id);
 		const flowKey = fleetFlowKey(input.objectiveId, input.subtreeId);
 		let flow = this.flows.get(flowKey);
 		if (!flow) {
@@ -109,7 +113,7 @@ export class FleetQueue<P> {
 			priority: input.priority,
 			weight: input.weight,
 			criticalPath: input.criticalPath === true,
-			enqueuedAt: input.enqueuedAt ?? this.options.enqueuedAtFor?.(input.id) ?? this.options.now(),
+			enqueuedAt: input.enqueuedAt ?? restoredAt ?? this.options.now(),
 			seq: this.seq++,
 		};
 		flow.entries.set(entry.id, entry);

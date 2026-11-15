@@ -21,6 +21,9 @@ export const SESSIONS = {
 		/** A holder's machine whose record names no hostname (only a machine id). */
 		otherMachine: "another machine",
 	},
+	/** A fleet queue file under the name an earlier build gave a session's away runs' was not theirs to adopt. */
+	awayFleetQueueSetAside: (path: string) =>
+		`A queue file left by an earlier session was set aside, not adopted: ${path}.`,
 	/** The startup sweep of old session bundles (`session-bundle-retention.ts`), for the owner's home and the run. */
 	retention: {
 		/** The owner's session files did not list: which session a bundle belongs to is unknown. */

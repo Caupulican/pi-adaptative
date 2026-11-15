@@ -7,9 +7,9 @@
  * one for its away controller, `<sessionId>@away.json`; bounded, written atomically and at most once per microtask; an
  * empty, running fleet removes it. Entries no recovered attempt claims are dropped by the first write. An earlier build
  * named the away controller's file `<sessionId>.away.json`, the name a session whose id is `<sessionId>.away` keeps as its
- * own; its content (the stop and the entries) names neither, so whose it is is told by whether the home holds that
- * session's orchestration state ({@link earlierAwayFleetQueueMetadataFile}), and the away controller adopts it
- * ({@link openFleetQueueStore}) when it is the controller's.
+ * own; its content (the stop and the entries) names neither, so whose it may be is told by whether the home holds that
+ * session's orchestration state ({@link earlierAwayFleetQueueMetadataFile}), and the away controller adopts it only once
+ * its own ledger claims every entry ({@link settleEarlierAwayFleetQueue}).
  */
 
 import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
@@ -75,9 +75,9 @@ export function earlierAwayFleetQueueMetadataPath(home: OrchestrationHome, sessi
  * state of the session whose id is `<sessionId>.away`, whose own file the same name is (its bundle directory, tombstone
  * or lease registry: `orchestrationHomeHoldsSession`); undefined otherwise. A fleet queue file of key
  * `<sessionId>.away` is written only by that session's fleet scheduler, which runs inside its orchestration bundle in
- * the same home, so a live or retained session of that id always leaves that state there. The away controller adopts
- * the file, the retention that removes the session's bundle removes it, and the bot bundle move carries it, each by this
- * rule.
+ * the same home, so a live or retained session of that id always leaves that state there. The away controller settles
+ * the file ({@link settleEarlierAwayFleetQueue}: adopted only on its ledger's claim), the retention that removes the
+ * session's bundle removes it, and the bot bundle move carries it under its name, each by this rule.
  */
 export function earlierAwayFleetQueueMetadataFile(home: OrchestrationHome, sessionId: string): string | undefined {
 	const path = earlierAwayFleetQueueMetadataPath(home, sessionId);
@@ -86,27 +86,56 @@ export function earlierAwayFleetQueueMetadataFile(home: OrchestrationHome, sessi
 }
 
 /**
- * The store of fleet queue `key` in `home`. An away controller's store first settles the file an earlier build left
- * ({@link earlierAwayFleetQueueMetadataFile}) under its own file's lock, the rule checked again inside it: with no file
- * of its own it adopts that one by one rename (retried while Windows holds the file a moment), so a fleet stopped before
- * the upgrade stays stopped; with one, which is the file it loads, it removes the earlier one, logged. A rename that
- * fails is thrown: the stop it carries is not dropped.
+ * Settles the file an earlier build left for session `sessionId`'s away controller ({@link earlierAwayFleetQueueMetadataFile})
+ * before that controller opens its store, under the controller's own file's lock, the rule checked again inside it. With
+ * a file of its own, which is the one it loads, the earlier one is removed, logged. Without one, the earlier file is
+ * adopted by one rename (retried while Windows holds the file a moment) only when it proves to be the controller's: it
+ * parses, holds entries, and the controller's ledger claims every one (`claims`). Its name alone proves nothing: a build
+ * up to 0.104.64 never removed a fleet queue file with its session, so the file may be one an earlier session of the same
+ * id left, or a session's whose id ends in `.away`. A file that fails is renamed aside to `<name>.unowned-<now>` (kept,
+ * never adopted) and that path is returned, for the owner to be told; the rename happens once, so they are told once. A
+ * rename that fails is thrown.
  */
-export function openFleetQueueStore(home: OrchestrationHome, key: string): FleetQueueStore {
-	const path = fleetQueueMetadataPath(home, key);
-	const sessionId = key.endsWith(AWAY_SUFFIX) ? key.slice(0, -AWAY_SUFFIX.length) : undefined;
-	if (sessionId !== undefined && earlierAwayFleetQueueMetadataFile(home, sessionId) !== undefined)
-		withFileLockSync(path, () => {
-			const earlier = earlierAwayFleetQueueMetadataFile(home, sessionId);
-			if (earlier === undefined) return;
-			if (!existsSync(path)) {
-				retryTransientWin32Sync(() => renameSync(earlier, path));
-				return;
-			}
+export function settleEarlierAwayFleetQueue(
+	home: OrchestrationHome,
+	sessionId: string,
+	claims: (entry: FleetQueueMetadataEntry) => boolean,
+	now: number,
+): string | undefined {
+	if (earlierAwayFleetQueueMetadataFile(home, sessionId) === undefined) return undefined;
+	const path = fleetQueueMetadataPath(home, awayFleetQueueKey(sessionId));
+	return withFileLockSync(path, () => {
+		const earlier = earlierAwayFleetQueueMetadataFile(home, sessionId);
+		if (earlier === undefined) return undefined;
+		if (existsSync(path)) {
 			rmSync(earlier, { force: true });
 			harnessLog.info("fleet", "the earlier away fleet queue file was removed: the away controller's own is loaded");
-		});
-	return new FleetQueueStore(path);
+			return undefined;
+		}
+		const metadata = readFleetQueueMetadata(earlier);
+		if (metadata !== undefined && metadata.entries.length > 0 && metadata.entries.every(claims)) {
+			retryTransientWin32Sync(() => renameSync(earlier, path));
+			return undefined;
+		}
+		const aside = `${earlier}.unowned-${now}`;
+		retryTransientWin32Sync(() => renameSync(earlier, aside));
+		harnessLog.warn(
+			"fleet",
+			"an earlier away fleet queue file was set aside: the away controller's ledger does not claim it",
+			{
+				aside,
+			},
+		);
+		return aside;
+	});
+}
+
+/**
+ * The store of fleet queue `key` in `home`. An away controller's earlier-named file is settled before its store opens
+ * (`away-parent-context.ts`, {@link settleEarlierAwayFleetQueue}).
+ */
+export function openFleetQueueStore(home: OrchestrationHome, key: string): FleetQueueStore {
+	return new FleetQueueStore(fleetQueueMetadataPath(home, key));
 }
 
 export class FleetQueueStore {
@@ -120,13 +149,7 @@ export class FleetQueueStore {
 
 	/** The metadata a previous process of this session left; undefined when there is none or it does not parse. */
 	load(): FleetQueueMetadata | undefined {
-		if (!existsSync(this.path)) return undefined;
-		try {
-			return parseFleetQueueMetadata(JSON.parse(readFileSync(this.path, "utf8")));
-		} catch {
-			harnessLog.warn("fleet", "the fleet queue metadata did not parse; it is dropped");
-			return undefined;
-		}
+		return readFleetQueueMetadata(this.path);
 	}
 
 	/** Writes the latest metadata once the current synchronous work ends; repeated calls in one microtask write once. */
@@ -163,6 +186,17 @@ export class FleetQueueStore {
 				error: error instanceof Error ? error.name : "unknown",
 			}));
 		}
+	}
+}
+
+/** The metadata file `path` holds; undefined when there is none or it does not parse. */
+function readFleetQueueMetadata(path: string): FleetQueueMetadata | undefined {
+	if (!existsSync(path)) return undefined;
+	try {
+		return parseFleetQueueMetadata(JSON.parse(readFileSync(path, "utf8")));
+	} catch {
+		harnessLog.warn("fleet", "a fleet queue metadata file did not parse", { path });
+		return undefined;
 	}
 }
 

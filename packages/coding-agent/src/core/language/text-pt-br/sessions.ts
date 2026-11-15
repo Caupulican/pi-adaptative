@@ -45,6 +45,8 @@ export const SESSIONS = {
 			`Esta sessão é a conversa do próprio bot; o host dele em ${machine} (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo naquela máquina para abrir a sessão aqui; um host que terminou lá sem liberá-la é liberado quando o pi naquela máquina abrir a sessão.`,
 		otherMachine: "outra máquina",
 	},
+	awayFleetQueueSetAside: (path: string) =>
+		`Um arquivo de fila deixado por uma sessão anterior foi separado, não adotado: ${path}.`,
 	retention: {
 		ownerFilesUnlisted:
 			"Seus arquivos de sessão não puderam ser listados, então os pacotes de sessão antigos das suas sessões não são limpos até poderem (uma remoção já começada ainda termina), e o trabalho de rotinas das sessões apagadas não é resolvido.",

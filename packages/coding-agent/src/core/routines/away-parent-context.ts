@@ -40,10 +40,12 @@ import type { ParentExecutionSettingsSource } from "../delegation/parent-executi
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { createWorkerEdgePolicy } from "../delegation/worker-edge-policy.ts";
+import { selectedWorkerAttempt } from "../delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "../delegation/worker-notification-coordinator.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
-import { awayFleetQueueKey } from "../fleet/fleet-queue-store.ts";
+import { awayFleetQueueKey, settleEarlierAwayFleetQueue } from "../fleet/fleet-queue-store.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import { resolveModelScopeWithDiagnostics } from "../model-resolver.ts";
 import {
@@ -359,6 +361,22 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			return { runId, maxCostUsd: input.maxUsdPerRun(), includes, unpriced: "refused" as const };
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
+		// The file an earlier build named this controller's fleet queue metadata by is its own only when its ledger claims
+		// every entry: a queued attempt of that lane, with the entry's flow.
+		const asideFleetQueue = settleEarlierAwayFleetQueue(
+			orchestrationHome,
+			parentSessionId,
+			(entry) => {
+				const flow = lifecycle.getLaneFlow(entry.id);
+				return (
+					selectedWorkerAttempt(lifecycle.getTaskRuntimeSnapshot(), entry.id)?.status === "queued" &&
+					flow?.objectiveId === entry.objectiveId &&
+					flow.subtreeId === entry.subtreeId
+				);
+			},
+			orchestrationClock.now(),
+		);
+		if (asideFleetQueue !== undefined) input.report(interfaceText().sessions.awayFleetQueueSetAside(asideFleetQueue));
 		const workers = new WorkerDelegationController(
 			{
 				...writes,
