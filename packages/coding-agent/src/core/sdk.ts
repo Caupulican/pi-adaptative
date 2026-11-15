@@ -70,11 +70,7 @@ import {
 	assertOrchestrationProfileOwnsOptions,
 	validateOrchestrationProfile,
 } from "./orchestration/profile-registry.ts";
-import {
-	acquireSessionBundleLease,
-	ownerSessionStorageRoots,
-	type SessionLeaseRole,
-} from "./orchestration/session-bundle-lifecycle.ts";
+import { ownerSessionStorageRoots, type SessionLeaseRole } from "./orchestration/session-bundle-lifecycle.ts";
 import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
 	SessionTaskProfileStore,
@@ -82,7 +78,7 @@ import {
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
-import { canonicalPath, managerSessionHomeNow } from "./orchestration-homes.ts";
+import { canonicalPath } from "./orchestration-homes.ts";
 import { currentProviderLane } from "./provider-admission/lane-context.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import { getAttributionHeaders } from "./provider-attribution-headers.ts";
@@ -93,6 +89,7 @@ import { applyResourceProfileOptions } from "./resource-profile-blocks.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
+import { acquireOpeningSessionLease, tellReleasedInterruptedRetention } from "./session-open-lease.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { resolveSessionStanding, type SessionStanding, sessionCapabilities } from "./session-standing.ts";
 import type {
@@ -402,13 +399,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// The session's home is its manager's: its own writes are admitted against the bundle lease taken there.
 	const { orchestrationHome } = sessionManager.getStorageRoots();
 	// An AgentSession never opens a session a channel or bot host holds (`SessionHostedError`); theirs is that host's own.
-	const bundleLease = sessionManager.isPersisted()
-		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
-				role: options.bundleLeaseRole ?? "session",
-				refuseHosted: true,
-				homeNow: managerSessionHomeNow(sessionManager),
-			})
-		: undefined;
+	// It releases an interrupted cleanup of the session, told once the session is built.
+	const bundleLease = acquireOpeningSessionLease(sessionManager, options.bundleLeaseRole ?? "session");
 	let bundleTransferred = false;
 	try {
 		if (!resourceLoader) {
@@ -1280,6 +1272,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const extensionsResult = resourceLoader.getExtensions();
 			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			session.startBackgroundInputs();
+			tellReleasedInterruptedRetention(sessionManager, (message) => session.emitHostWarning(message));
 
 			return {
 				session,

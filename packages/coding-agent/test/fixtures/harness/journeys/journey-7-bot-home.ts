@@ -405,7 +405,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	).toEqual({ sessionId: sessionId(), inBotHome: true });
 	const lease = acquireSessionBundleLease(roots.orchestrationHome, sessionId(), {
 		role: "session",
-		refuseHosted: true,
+		opening: true,
 		homeNow: managerSessionHomeNow(manager),
 	});
 	try {

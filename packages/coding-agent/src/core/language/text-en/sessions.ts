@@ -46,6 +46,9 @@ export const SESSIONS = {
 			count === 1
 				? "1 deletion record of your old session bundles could not be read; its bundle stays until it can."
 				: `${count} deletion records of your old session bundles could not be read; their bundles stay until they can.`,
+		/** An open of the session released a cleanup of its stored state that an earlier version began and did not finish. */
+		interruptedRetentionReleased: (session: string) =>
+			`Session ${session}: an earlier version of pi began cleaning up this session's stored state and was interrupted. Opening the session cancelled that cleanup, but it may already have removed some or all of its worker and plan state.`,
 		/** Warnings about single homes past the ones shown; each is in the harness log. */
 		homeWarningsOmitted: (count: number) =>
 			count === 1

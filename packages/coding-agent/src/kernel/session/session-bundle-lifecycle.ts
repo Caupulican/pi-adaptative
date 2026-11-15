@@ -445,7 +445,7 @@ export function sessionExclusiveHost(home: OrchestrationHome, parentSessionId: s
 
 /**
  * Refuse, before anything is opened or written, to open a session a channel or bot host holds: the check the AgentSession
- * acquire makes ({@link acquireSessionBundleLease} with `refuseHosted`), read-only. An unreadable registry throws.
+ * acquire makes ({@link acquireSessionBundleLease} `opening`), read-only. An unreadable registry throws.
  */
 export function refuseHostedSession(home: OrchestrationHome, parentSessionId: string): void {
 	const host = sessionExclusiveHost(home, parentSessionId);
@@ -485,10 +485,11 @@ export function acquireSessionBundleLease(
 	home: OrchestrationHome,
 	parentSessionId: string,
 	/**
-	 * `refuseHosted`: a `session` hold is refused while a channel or bot host holds the session (the AgentSession open).
+	 * `opening`: the AgentSession open of the session. A `session` hold is then refused while a channel or bot host holds
+	 * the session, and an interrupted retention of it is released ({@link takeReleasedInterruptedRetention}).
 	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease.
 	 */
-	options: { role?: SessionLeaseRole; refuseHosted?: boolean; homeNow: SessionHomeNow },
+	options: { role?: SessionLeaseRole; opening?: boolean; homeNow: SessionHomeNow },
 ): SessionBundleLease {
 	const resolvedHome = resolvedOrchestrationHome(home);
 	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
@@ -499,13 +500,21 @@ export function acquireSessionBundleLease(
 		processInstanceId: PROCESS_INSTANCE_ID,
 		role: options.role ?? "session",
 	};
-	withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
-		const current = options.homeNow();
-		if (!sameOrchestrationHome(current, resolvedHome))
-			throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
-		const holders = liveHolders(file, parentSessionId);
-		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
-	});
+	const opening = options.opening === true;
+	const admission = admitSessionBundle(
+		resolvedHome,
+		parentSessionId,
+		() => {
+			const current = options.homeNow();
+			if (!sameOrchestrationHome(current, resolvedHome))
+				throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
+			const holders = liveHolders(file, parentSessionId);
+			writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, opening));
+		},
+		undefined,
+		opening ? "open" : "write",
+	);
+	if (!admission.admitted) throw new Error(BUNDLE_DELETION_RESERVED);
 	const state: BundleLeaseState = { home: resolvedHome, parentSessionId, holder, claimed: false, status: "held" };
 	const lease: SessionBundleLease = Object.freeze({
 		release() {
@@ -558,20 +567,20 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 
 /**
  * Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. The
- * hold of a session asking `refuseHosted` (the one being opened) refuses it while a channel or bot host holds it
- * (`SessionHostedError`), as the AgentSession open it bridges does, so the refusal comes before the current session is
- * closed; the session being left is held as it is.
+ * hold of the session being opened (`opening`) refuses it while a channel or bot host holds it (`SessionHostedError`)
+ * and releases an interrupted retention of it, as the AgentSession open it bridges does, so the refusal comes before the
+ * current session is closed; the session being left is held as it is.
  */
 export async function withSessionBundleLeases<T>(
 	/**
 	 * Each session in the home its manager's roots name, with that home derived again (`homeNow`); one held twice is
-	 * leased once, refusing a hosted session when either asks.
+	 * leased once, as the one opened when either is.
 	 */
 	sessions: readonly {
 		readonly home: OrchestrationHome;
 		readonly sessionId: string;
 		readonly homeNow: SessionHomeNow;
-		readonly refuseHosted: boolean;
+		readonly opening: boolean;
 	}[],
 	operation: () => Promise<T>,
 ): Promise<T> {
@@ -584,10 +593,10 @@ export async function withSessionBundleLeases<T>(
 		for (const session of sessions) {
 			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(session.home), session.sessionId);
 			const first = held.get(key);
-			held.set(key, first ? { ...first, refuseHosted: first.refuseHosted || session.refuseHosted } : session);
+			held.set(key, first ? { ...first, opening: first.opening || session.opening } : session);
 		}
-		for (const { home, sessionId, homeNow, refuseHosted } of held.values())
-			leases.push(acquireSessionBundleLease(home, sessionId, { refuseHosted, homeNow }));
+		for (const { home, sessionId, homeNow, opening } of held.values())
+			leases.push(acquireSessionBundleLease(home, sessionId, { opening, homeNow }));
 		result = await operation();
 	} catch (error) {
 		operationFailure = { error };
@@ -752,6 +761,15 @@ function isReleasableRetention(home: OrchestrationHome, marker: DeletionMarker):
 	);
 }
 
+/** Whether a tombstone is a retention no live remover holds whose removal may have begun before this build recorded it. */
+function isInterruptedRetention(home: OrchestrationHome, marker: DeletionMarker, parentSessionId: string): boolean {
+	return (
+		marker.policy === "retention" &&
+		tombstonePhase(home, parentSessionId, marker) === "unrecorded" &&
+		(!marker.operation || canRecoverOperation(marker.operation))
+	);
+}
+
 /**
  * What the session's retention tombstone in `home` asks of an expiry, judged under its lock: `none` (no retention: an
  * index entry left by a settled or upgraded tombstone is pruned), `released` (a `reserved` one no live remover holds
@@ -852,6 +870,8 @@ export type SessionBundleLockOptions = Pick<
 
 type BundleAdmissionResult<T> = { admitted: false } | { admitted: true; value: T };
 
+const BUNDLE_DELETION_RESERVED = "Worker session bundle deletion has been reserved.";
+
 /** Lock order is bundle admission, then transcript. No filesystem lock spans asynchronous removal. */
 export function withSessionBundleAdmission<T>(
 	home: OrchestrationHome,
@@ -859,8 +879,8 @@ export function withSessionBundleAdmission<T>(
 	operation: () => T,
 	options?: SessionBundleLockOptions,
 ): T {
-	const result = admitSessionBundle(home, parentSessionId, operation, options, true);
-	if (!result.admitted) throw new Error("Worker session bundle deletion has been reserved.");
+	const result = admitSessionBundle(home, parentSessionId, operation, options, "write");
+	if (!result.admitted) throw new Error(BUNDLE_DELETION_RESERVED);
 	return result.value;
 }
 
@@ -871,15 +891,41 @@ export function withSessionBundleMaintenance<T>(
 	operation: () => T,
 	options?: SessionBundleLockOptions,
 ): BundleAdmissionResult<T> {
-	return admitSessionBundle(home, parentSessionId, operation, options, false);
+	return admitSessionBundle(home, parentSessionId, operation, options, "maintenance");
 }
+
+/**
+ * The tombstones of sessions whose open released an interrupted retention, by tombstone path: kept in this process until
+ * an open of the session takes them ({@link takeReleasedInterruptedRetention}).
+ */
+const releasedInterruptedRetentions = new Set<string>();
+
+/**
+ * Whether an open of the session in `home` released an `unrecorded` retention of it since this was last asked: an
+ * earlier build's removal, or one whose wholeness proof does not read, that may have removed part of the bundle before
+ * it was interrupted. True once per release, so the owner is told once.
+ */
+export function takeReleasedInterruptedRetention(home: OrchestrationHome, parentSessionId: string): boolean {
+	return releasedInterruptedRetentions.delete(
+		orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), parentSessionId),
+	);
+}
+
+/**
+ * How a session's bundle is admitted over its tombstone: `maintenance` never past one; `write` past a retention that
+ * never began removing (`reserved`) or whose bundle is gone, when no live remover holds it; `open` (the AgentSession
+ * open) past an `unrecorded` one no live remover holds as well, released once the open's own write succeeded: the
+ * owner's open wins over an interrupted cleanup, every file left of the bundle is a whole file, and a reader takes a
+ * missing one as absent. A retention whose removal this build began (`removing`) is never admitted past.
+ */
+type BundleAdmissionMode = "maintenance" | "write" | "open";
 
 function admitSessionBundle<T>(
 	home: OrchestrationHome,
 	parentSessionId: string,
 	operation: () => T,
 	options: SessionBundleLockOptions | undefined,
-	recoverCompletedRetention: boolean,
+	mode: BundleAdmissionMode,
 ): BundleAdmissionResult<T> {
 	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
 	if (hasCurrentSessionBundleAdmission(home, parentSessionId)) return { admitted: true, value: operation() };
@@ -887,8 +933,10 @@ function admitSessionBundle<T>(
 		tombstone,
 		() => {
 			const marker = readMarker(tombstone, parentSessionId);
-			if (marker) {
-				if (!recoverCompletedRetention) return { admitted: false };
+			const interrupted =
+				marker !== undefined && mode === "open" && isInterruptedRetention(home, marker, parentSessionId);
+			if (marker && !interrupted) {
+				if (mode === "maintenance") return { admitted: false };
 				// A retention that never began removing leaves the bundle whole: opening the session releases it.
 				let removalConfirmed = isReleasableRetention(home, marker);
 				if (
@@ -911,11 +959,21 @@ function admitSessionBundle<T>(
 			const scope = currentSynchronousFileLockScope(tombstone)!;
 			const key = scope.lockfilePath;
 			admittedBundles.set(key, scope);
+			let value: T;
 			try {
-				return { admitted: true, value: operation() };
+				value = operation();
 			} finally {
 				admittedBundles.delete(key);
 			}
+			if (interrupted) {
+				removeTombstone(home, tombstone, parentSessionId);
+				releasedInterruptedRetentions.add(tombstone);
+				harnessLog.warn("sessions", "an open released an interrupted retention of its session", {
+					session: parentSessionId,
+					tombstone,
+				});
+			}
+			return { admitted: true, value };
 		},
 		{
 			retries: options?.retries,
