@@ -90,10 +90,11 @@ export function takeHostedBotStops(
 		agentDir,
 		agentId,
 		(stop) => {
-			const outcome = stopHere(stop);
+			// Read before acting: a home that does not list leaves the stop waiting with nothing done.
 			const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "follow").filter(
 				(id) => id !== sessionId,
 			);
+			const outcome = stopHere(stop);
 			endPlacedJobsOfSessions(agentDir, new Set(others), jobCancelReasonOf(stop.reasonCode));
 			return outcome;
 		},
