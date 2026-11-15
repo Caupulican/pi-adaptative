@@ -667,18 +667,13 @@ export class WorkerDelegationController {
 					try {
 						const attempt = lifecycle.getActiveAttempt(laneId);
 						if (!attempt) continue;
-						if (attemptAwaitingLease(attempt)) {
-							this.cancelScheduledWorker(laneId, reasonCode, attempt.attemptId);
-						} else if (
-							attempt.agentId &&
-							lifecycle.getTaskRuntimeSnapshot().agents[attempt.agentId]?.activeAttemptId === attempt.attemptId
-						) {
-							this.agentControl.cancelWorkerAgent(attempt.agentId, reasonCode);
-						} else {
-							this.cancelAndPublish(lifecycle, laneId, reasonCode);
-						}
+						const agent = attempt.agentId ? lifecycle.getAgent(attempt.agentId) : undefined;
+						if (attemptAwaitingLease(attempt)) this.cancelScheduledWorker(laneId, reasonCode, attempt.attemptId);
+						else if (agent?.activeAttemptId === attempt.attemptId)
+							this.agentControl.cancelAgentAttempt(agent, attempt, reasonCode);
+						else this.cancelAndPublish(lifecycle, laneId, reasonCode);
 					} catch (error) {
-						harnessLog.warn("fleet", "a plan lane could not be cancelled; the other lanes are cancelled", {
+						harnessLog.warn("fleet", "a lane could not be cancelled; the other lanes are cancelled", {
 							laneId,
 							reasonCode,
 							error: boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)),

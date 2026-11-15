@@ -1230,13 +1230,13 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return { started: true, record, ...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}) };
 	}
 
-	cancelWorkerAgent(
-		agentId: string,
-		reasonCode = "agent_cancelled",
-		scope: WorkerAgentControlScope = {},
-	): LaneRecord | undefined {
+	cancelWorkerAgent(agentId: string, reasonCode = "agent_cancelled", scope: WorkerAgentControlScope = {}) {
 		const { agent, attempt } = this.controlledAgentAttempt(agentId, scope);
-		if (!attempt) return undefined;
+		return attempt && this.cancelAgentAttempt(agent, attempt, reasonCode);
+	}
+
+	/** Ends `agent`'s `attempt` without the model-facing control gate, for the fleet's cancel (an owner's stop). */
+	cancelAgentAttempt(agent: AgentBindingContract, attempt: AttemptRuntimeState, reasonCode: string) {
 		// Steers were addressed to the task being cancelled. They settle with it, before the terminal
 		// record publishes: publishing reconciles the mailbox, and an undelivered steer would otherwise
 		// start as a brand-new turn the owner just cancelled.
