@@ -116,32 +116,9 @@ export class UsageResetResume {
 		return { until: restored.at, goal: goalStopped };
 	}
 
-	/**
-	 * The wait a kept stop calls for: the goal's recorded stop first, classified against the model whose refusal it
-	 * recorded (a stop recorded without one is read from the transcript instead), else the refusal the transcript ends on.
-	 */
-	private restoredStop(
-		goal: GoalState | undefined,
-	): { readonly resume: Omit<PendingResume, "at" | "alarm">; readonly at: number } | undefined {
-		const stop = goal ? goalUsageStop(goal) : undefined;
-		const model = stop?.refusedBy && this.deps.modelRegistry.find(stop.refusedBy.provider, stop.refusedBy.id);
-		if (stop && model) {
-			const resetMs = this.resetWaitMs(classifyFailure({ message: stop.refusal, provider: model.provider }), model);
-			if (resetMs !== undefined)
-				return {
-					resume: { ref: `${model.provider}/${model.id}`, provider: model.provider },
-					at: stop.at + resetMs,
-				};
-		}
-		const refusal = this.deps.lastMessage();
-		if (refusal?.role !== "assistant" || refusal.stopReason !== "error" || !refusal.errorMessage) return undefined;
-		const refusalModel = this.deps.modelRegistry.find(refusal.provider, refusal.model);
-		if (!refusalModel) return undefined;
-		const classified = classifyFailure({ message: refusal.errorMessage, provider: refusal.provider });
-		const resetMs = this.resetWaitMs(classified, refusalModel);
-		if (resetMs === undefined) return undefined;
-		const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
-		return { resume, at: refusal.timestamp + resetMs };
+	/** The wait a kept stop calls for ({@link restoredUsageStop}); none in a worker process's session. */
+	private restoredStop(goal: GoalState | undefined): RestoredUsageStop | undefined {
+		return this.deps.enabled ? restoredUsageStop(this.deps.lastMessage(), goal, this.deps) : undefined;
 	}
 
 	/** The owner redeemed a usage reset for `provider`: a wait on it ends now, and a later limit is offered again. */
@@ -156,12 +133,9 @@ export class UsageResetResume {
 		this.pending = undefined;
 	}
 
-	/** The usage reset a refusal on `model` is waited out for here; a rate limit the turn's own retry waits out is not. */
+	/** The usage reset a refusal on `model` is waited out for here ({@link usageResetWait}); none in a worker process's session. */
 	private resetWaitMs(classified: ClassifiedError, model: Model<Api>): number | undefined {
-		if (!this.deps.enabled) return undefined;
-		const resetMs = usageResetWaitMs(classified, this.deps.modelRegistry.isUsingSubscription(model));
-		if (resetMs === undefined) return undefined;
-		return classified.reason === "rate_limit" && resetMs <= this.deps.inRunRetryMaxMs() ? undefined : resetMs;
+		return this.deps.enabled ? usageResetWait(classified, model, this.deps) : undefined;
 	}
 
 	/** Arms the wait once the stopped run has settled and nothing moved the work on from the refusal. */
@@ -238,6 +212,62 @@ export class UsageResetResume {
 			this.resetChecking.delete(provider);
 		}
 	}
+}
+
+/** What the rule of a kept stop reads: the refusing model, whether it runs on a subscription, and the in-run retry's bound. */
+export interface RestoredUsageRules {
+	readonly modelRegistry: Pick<UsageResetResumeDeps["modelRegistry"], "find" | "isUsingSubscription">;
+	/** The longest stated delay the turn's own retry waits out (`retry.provider.maxRetryDelayMs`). */
+	inRunRetryMaxMs(): number;
+}
+
+/** A kept stop's wait: what continues at its end (the model's ref, its provider and the refusal the turn stopped on), and when. */
+export interface RestoredUsageStop {
+	readonly resume: { readonly ref: string; readonly provider: string; readonly refusal?: AssistantMessage };
+	readonly at: number;
+}
+
+/**
+ * The wait a kept stop calls for, read from what a session keeps (no alarm, no clock): the goal's recorded stop first,
+ * classified against the model whose refusal it recorded (a stop recorded without one is read from the transcript
+ * instead), else the refusal `lastMessage`, the transcript's last message, is. The same rule as a live stop's
+ * ({@link usageResetWait}); undefined when it calls for none. A reset the provider admission recorded later is not folded in.
+ */
+export function restoredUsageStop(
+	lastMessage: AgentMessage | undefined,
+	goal: GoalState | undefined,
+	rules: RestoredUsageRules,
+): RestoredUsageStop | undefined {
+	const stop = goal ? goalUsageStop(goal) : undefined;
+	const model = stop?.refusedBy && rules.modelRegistry.find(stop.refusedBy.provider, stop.refusedBy.id);
+	if (stop && model) {
+		const resetMs = usageResetWait(
+			classifyFailure({ message: stop.refusal, provider: model.provider }),
+			model,
+			rules,
+		);
+		if (resetMs !== undefined)
+			return { resume: { ref: `${model.provider}/${model.id}`, provider: model.provider }, at: stop.at + resetMs };
+	}
+	const refusal = lastMessage;
+	if (refusal?.role !== "assistant" || refusal.stopReason !== "error" || !refusal.errorMessage) return undefined;
+	const refusalModel = rules.modelRegistry.find(refusal.provider, refusal.model);
+	if (!refusalModel) return undefined;
+	const resetMs = usageResetWait(
+		classifyFailure({ message: refusal.errorMessage, provider: refusal.provider }),
+		refusalModel,
+		rules,
+	);
+	if (resetMs === undefined) return undefined;
+	const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
+	return { resume, at: refusal.timestamp + resetMs };
+}
+
+/** The usage reset a refusal on `model` is waited out for; a rate limit the turn's own retry waits out is not. */
+function usageResetWait(classified: ClassifiedError, model: Model<Api>, rules: RestoredUsageRules): number | undefined {
+	const resetMs = usageResetWaitMs(classified, rules.modelRegistry.isUsingSubscription(model));
+	if (resetMs === undefined) return undefined;
+	return classified.reason === "rate_limit" && resetMs <= rules.inRunRetryMaxMs() ? undefined : resetMs;
 }
 
 /** The transcript still ends on the refusal: nothing ran after it. */
