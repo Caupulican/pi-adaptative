@@ -783,7 +783,13 @@ export class BotOwedWork {
 		if (!again) return;
 		// Only listings asked: answered as the listing answers, not while the bot's next attempt is armed.
 		if (again.swept && this.openRetries.pending(agentId)) return;
-		this.openIfOwed(agentId, again.swept);
+		// No caller waits on this pass (it runs as the one before it settles, or after its open did): a read that throws
+		// is told to the owner as the pass's own reads that fail are.
+		try {
+			this.openIfOwed(agentId, again.swept);
+		} catch (error) {
+			this.tellWaits(agentId, this.waitsText(agentId, botFailureText(agentId, error)));
+		}
 	}
 
 	/** Reads the bot and opens its session when it is owed; the open it started, if any. */
