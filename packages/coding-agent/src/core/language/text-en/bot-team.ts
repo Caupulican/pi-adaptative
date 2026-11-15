@@ -155,6 +155,9 @@ export const BOT_TEAM = {
 	/** The owner's stop of a bot hosted here could not be recorded or taken, and ending its workers directly failed too. */
 	botStopWorkersNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not end its workers (${reason}); they keep running until a stop of it is applied.`,
+	/** The owner's stop, applied here without its record, ended the bot's work but could not hold its goal or usage wait. */
+	botStopGoalNotHeld: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop, applied here without its record, ended its turn and workers but could not hold its goal or decline its usage-limit wait (${reason}); its goal may go on by itself until you pause it.`,
 	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,

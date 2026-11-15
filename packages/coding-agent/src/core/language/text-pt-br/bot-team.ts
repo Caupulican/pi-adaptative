@@ -140,6 +140,8 @@ export const BOT_TEAM = {
 		`Deixado na caixa de entrada de ${agentId} atrás da parada dele, que ainda não pôde ser aplicada: suas palavras chegam ao bot quando a parada for aplicada.`,
 	botStopWorkersNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde encerrar os workers dele (${reason}); eles continuam rodando até que uma parada dele seja aplicada.`,
+	botStopGoalNotHeld: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada do dono, aplicada aqui sem o registro dela, encerrou o turno e os workers dele, mas não pôde reter o objetivo nem recusar a espera pelo limite de uso (${reason}); o objetivo pode seguir sozinho até você pausá-lo.`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>

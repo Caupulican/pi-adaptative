@@ -51,6 +51,8 @@ export interface WorkerStopOutcome {
 	readonly managed: readonly AttemptRuntimeState[];
 	/** Local lanes a cancel did not end. */
 	readonly failed: readonly AttemptRuntimeState[];
+	/** How many of the worker lanes in flight when the stop began it ended, or handed to the remote backend to end. */
+	readonly stopped: number;
 }
 
 /** The plan executor's close of every open plan; its running steps stop for `reasonCode`. */
@@ -63,7 +65,8 @@ export interface OpenPlansStop {
  * executor, which also releases the plan's prepared dispatches and placed jobs; else in the store, for a session that runs
  * none), then every unended worker attempt cancelled through `cancel` (true when the remote backend took the cancel),
  * both for `reasonCode`. Plans close first, so no
- * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why.
+ * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why, and how many lanes in
+ * flight it stopped.
  */
 export function stopSessionWorkers(
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "closePlan">,
@@ -71,6 +74,7 @@ export function stopSessionWorkers(
 	cancel: (attempt: AttemptRuntimeState) => boolean,
 	reasonCode: string,
 ): WorkerStopOutcome {
+	const inFlight = unendedWorkerAttempts(runtime.getSnapshot()).length;
 	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode);
 	else
 		for (const [planId, plan] of Object.entries(runtime.getSnapshot().plans))
@@ -80,10 +84,12 @@ export function stopSessionWorkers(
 		if (cancel(attempt)) handed.add(attempt.attemptId);
 	const unended = unendedSelectedAttempts(runtime.getSnapshot());
 	const own = unended.filter((attempt) => !isManagedWorkerAttempt(attempt));
+	const failed = own.filter((attempt) => !handed.has(attempt.attemptId));
 	return {
 		remote: own.filter((attempt) => handed.has(attempt.attemptId)),
 		managed: unended.filter(isManagedWorkerAttempt),
-		failed: own.filter((attempt) => !handed.has(attempt.attemptId)),
+		failed,
+		stopped: Math.max(0, inFlight - failed.length),
 	};
 }
 

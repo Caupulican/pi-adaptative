@@ -1337,7 +1337,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The owner's stop (`stopSessionWorkers`): plans closed, unended worker lanes cancelled; what it left unended, by why. */
 	cancelOwnFleet(reasonCode: string): WorkerStopOutcome {
-		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [] };
+		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [], stopped: 0 };
 		const fleet = () => this._getWorkerController().getFleet();
 		return stopSessionWorkers(
 			this._getWorkerLifecycle().ledger.runtime,

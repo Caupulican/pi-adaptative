@@ -69,13 +69,21 @@ export interface HostedBotStopSession {
  */
 export function applyOwnerStopToSession(
 	session: HostedBotStopSession,
-	stop: BotInboxStop,
+	stop: OwnerStop,
 	now: number,
 ): WorkerStopOutcome {
 	const outcome = session.fleet.cancelOwnFleet(stop.reasonCode);
+	holdForOwnerStop(session, stop, now);
+	return outcome;
+}
+
+/** What applying an owner's stop reads of it: when it was made, and the reason its cancelled work ends with. */
+type OwnerStop = Pick<BotInboxStop, "at" | "reasonCode">;
+
+/** The bot's goal held and its usage wait declined at `now`, as of when the owner's stop was made. */
+function holdForOwnerStop(session: Omit<HostedBotStopSession, "fleet">, stop: OwnerStop, now: number): void {
 	holdPersistedGoalForOwnerStop(session.goal, stop.at, new Date(now).toISOString());
 	declineUsageWaitForOwner(session.transcript, stop.at, now);
-	return outcome;
 }
 
 /**
@@ -157,28 +165,38 @@ export function endLoadedBotWork(
 }
 
 /**
- * The owner's stop of bot `agentId`, whose session this process hosts, when it could not be recorded or taken: what needs
- * no record ends all the same, its foreground turn (`stopTurn`) and its own work ({@link endLoadedBotWork}). Its goal hold
- * and usage-wait decline are dated by the stop's record and wait for it (a stop written and not taken is tried again).
- * Whether its workers were ended; a failure to end them is told to the owner with its cause.
+ * The owner's stop of bot `agentId`, whose session this process hosts, when it was not taken from its record: its
+ * foreground turn (`stopTurn`) and its own work ({@link endLoadedBotWork}) end all the same. A stop held in memory
+ * (`stop`: one that could not be recorded, or whose record no longer reads) also holds the bot's goal and declines its
+ * usage wait as of when it was made, as a stop taken from its record does; a stop recorded and not taken (`stop` absent)
+ * leaves those to its record, which is tried again. What it left unended; undefined when its workers could not be ended.
+ * Each failure is told to the owner with its cause.
  */
 export function endUnrecordedStopWork(
 	agentDir: string,
 	agentId: string,
-	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
+	loaded: LoadedBotSession,
 	stopTurn: () => void,
-	warn: (message: string) => void,
-): boolean {
+	stop: OwnerStop | undefined,
+	ports: BotStopPorts,
+): WorkerStopOutcome | undefined {
 	stopTurn();
+	let outcome: WorkerStopOutcome | undefined;
 	try {
-		const outcome = endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON, warn);
+		outcome = endLoadedBotWork(agentDir, agentId, loaded.session, OWNER_STOPPED_REASON, ports.warn);
 		if (outcome.failed.length > 0 || outcome.managed.length > 0)
-			warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
-		return true;
+			ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
 	} catch (error) {
-		warn(interfaceText().botTeam.botStopWorkersNotEnded(agentId, botFailureText(agentId, error)));
-		return false;
+		ports.warn(interfaceText().botTeam.botStopWorkersNotEnded(agentId, botFailureText(agentId, error)));
 	}
+	if (stop) {
+		try {
+			holdForOwnerStop(hostedStopSession(loaded), stop, ports.now());
+		} catch (error) {
+			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
+		}
+	}
+	return outcome;
 }
 
 /**
@@ -255,42 +273,51 @@ export interface LoadedBotSession {
 		AgentSession,
 		"sessionId" | "getGoalStateSnapshot" | "saveGoalStateSnapshot" | "backgroundLanes"
 	>;
-	readonly transcript: UsageWakeLog & UsageWakeWriter;
+	readonly sessionManager: UsageWakeLog & UsageWakeWriter;
+}
+
+/** A loaded bot session as the owner's stop reaches it: its goal, the transcript it writes and its fleet. */
+function hostedStopSession({ session, sessionManager }: LoadedBotSession): HostedBotStopSession {
+	return {
+		goal: {
+			getGoalStateSnapshot: () => session.getGoalStateSnapshot(),
+			saveGoalStateSnapshot: (state, expected) => session.saveGoalStateSnapshot(state, expected),
+		},
+		transcript: sessionManager,
+		fleet: session.backgroundLanes,
+	};
 }
 
 /**
  * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it runs
  * stopped for the owner by `stopTurn` (the host's, which the words it gives next wait on until the turn ended), then
- * {@link applyOwnerStopToSession}. The stop applied, undefined when none waits; a failure throws with the stops left waiting.
+ * {@link applyOwnerStopToSession}. The stop applied with what it left unended, undefined when none reads; a failure throws
+ * with the stops left waiting.
  */
 export function stopLoadedBot(
 	agentDir: string,
 	agentId: string,
-	{ session, transcript }: LoadedBotSession,
+	loaded: LoadedBotSession,
 	stopTurn: () => void,
 	ports: BotStopPorts,
-): BotInboxStop | undefined {
-	const live: HostedBotStopSession = {
-		goal: {
-			getGoalStateSnapshot: () => session.getGoalStateSnapshot(),
-			saveGoalStateSnapshot: (state, expected) => session.saveGoalStateSnapshot(state, expected),
-		},
-		transcript,
-		fleet: session.backgroundLanes,
-	};
-	return takeHostedBotStops(
+): { readonly stop: BotInboxStop; readonly outcome: WorkerStopOutcome } | undefined {
+	const live = hostedStopSession(loaded);
+	let outcome: WorkerStopOutcome = NOTHING_LEFT;
+	const stop = takeHostedBotStops(
 		agentDir,
 		agentId,
-		session.sessionId,
-		(stop) => {
+		loaded.session.sessionId,
+		(taken) => {
 			stopTurn();
-			return applyOwnerStopToSession(live, stop, ports.now());
+			outcome = applyOwnerStopToSession(live, taken, ports.now());
+			return outcome;
 		},
 		ports,
 	);
+	return stop && { stop, outcome };
 }
 
-const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [] };
+const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [], stopped: 0 };
 
 /**
  * The stop applied to a closed bot's own work, its host lock held: its saved session's transcript read first, then its
