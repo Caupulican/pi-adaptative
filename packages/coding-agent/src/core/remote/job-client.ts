@@ -1036,6 +1036,10 @@ export class RemoteJobClient {
 	private chargeLateUsage(record: PlacerJobRecord): void {
 		const terminal = placedJobTerminal(record);
 		if (!record.outcome?.usage || !terminal || this.usageSent.has(record.jobId)) return;
+		// Only the ended attempt the job ran as takes it: a lane the session no longer holds, or one that now runs another
+		// attempt, would take the outcome as a new end or refuse it as an unknown worker.
+		const binding = this.session.managedLaneBindings().get(record.laneId);
+		if (!binding?.ended || (record.attemptId !== undefined && binding.attemptId !== record.attemptId)) return;
 		this.usageSent.add(record.jobId);
 		void this.recordEnd(record, terminal).catch((error: unknown) => {
 			harnessLog.warn("placement", "a placed job's reported usage could not be charged on its ended lane", {
