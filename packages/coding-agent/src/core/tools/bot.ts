@@ -51,13 +51,19 @@ export const LEAD_PROPERTIES = {
 
 const schema = Type.Object(
 	{
-		action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("ask"), Type.Literal("lead")]),
+		action: Type.Union([
+			Type.Literal("create"),
+			Type.Literal("list"),
+			Type.Literal("ask"),
+			Type.Literal("lead"),
+			Type.Literal("retire"),
+		]),
 		agentId: Type.Optional(
 			Type.String({
 				minLength: 1,
 				maxLength: 128,
 				description:
-					"The bot's id. For create, leave it out to have the harness name the bot from its purpose. For lead, the leader to use; leave it out to appoint a goal leader.",
+					"The bot's id. For create, leave it out to have the harness name the bot from its purpose. For lead, the leader to use; leave it out to appoint a goal leader. For retire, the bot to retire.",
 			}),
 		),
 		soul: Type.Optional(
@@ -95,8 +101,8 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 		name: BOT_TOOL_NAME,
 		label: "Bots",
 		description:
-			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite; forLeader makes it a leader's own bot), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader. Only you create bots: a leader asks you for a bot of its own with a question (create it with forLeader naming that leader, then tell the leader its id with ask), and every other bot asks its leader or you.",
-		promptSnippet: "Create, list or message bots, or hand a goal to a leader",
+			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite; forLeader makes it a leader's own bot), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), retire a bot (action retire: agentId; as the owner's /bot retire does, its workers and session end and it stays retired; a bot that leads an open goal or still works is refused), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader. Only you create bots: a leader asks you for a bot of its own with a question (create it with forLeader naming that leader, then tell the leader its id with ask), and every other bot asks its leader or you.",
+		promptSnippet: "Create, list, message or retire bots, or hand a goal to a leader",
 		parameters: schema,
 		async execute(_toolCallId, input, signal) {
 			if (signal?.aborted) throw signal.reason;
@@ -119,6 +125,15 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 				await port.ask(input.agentId, input.message);
 				const sent = { sent: true, agentId: input.agentId };
 				return { content: [{ type: "text", text: JSON.stringify(sent) }], details: sent };
+			}
+			if (input.action === "retire") {
+				const extra = CREATE_FIELDS.filter((field) => input[field] !== undefined);
+				if (!input.agentId || extra.length > 0 || input.message !== undefined)
+					throw new Error("Retire requires agentId, and accepts nothing else.");
+				const result = port.retire(input.agentId);
+				if (!result.retired) throw new Error(result.detail);
+				const retired = { retired: true, agentId: input.agentId, detail: result.detail };
+				return { content: [{ type: "text", text: JSON.stringify(retired) }], details: retired };
 			}
 			if (input.action === "list") {
 				if (input.agentId || input.soul || input.model || input.canWrite !== undefined || input.forLeader)

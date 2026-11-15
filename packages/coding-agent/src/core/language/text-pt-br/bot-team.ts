@@ -66,9 +66,9 @@ export const BOT_TEAM = {
 	notABotWorker: (agentId: string) =>
 		`${agentId} é um worker de delegação, não um bot, então não pode ser retirado aqui; cancele-o com a ferramenta delegate (cancel ${agentId}).`,
 	botLeadsOpenGoal: (agentId: string) =>
-		`O bot ${agentId} lidera um objetivo aberto; cancele antes (/lead cancel ${agentId}).`,
+		`O bot ${agentId} lidera um objetivo aberto; pode ser retirado quando esse objetivo terminar (o dono o encerra antes com /lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>
-		`O bot ${agentId} ainda está em atendimento direto ou em equipe; pare antes com /bot stop ${agentId}.`,
+		`O bot ${agentId} ainda está em atendimento direto ou em equipe; pode ser retirado quando esse trabalho terminar (o dono o encerra antes com /bot stop ${agentId}).`,
 	botModelUnavailable: (agentId: string, modelRef: string) =>
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>

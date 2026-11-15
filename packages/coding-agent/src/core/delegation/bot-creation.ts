@@ -83,4 +83,6 @@ export interface BotToolPort {
 	lead(request: LeadRequest): LeadResult;
 	/** The bots the roster holds, each by the id the caller asks it by and the name its record shows. */
 	list(): readonly BotToolListEntry[];
+	/** Retires a bot as the owner's `/bot retire` does; `detail` says what happened or why it was refused. */
+	retire(agentId: string): { retired: boolean; detail: string };
 }

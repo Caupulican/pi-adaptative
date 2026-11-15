@@ -57,9 +57,9 @@ export const BOT_TEAM = {
 	notABotWorker: (agentId: string) =>
 		`${agentId} is a delegate worker, not a bot, so it cannot be retired here; cancel it with the delegate tool (cancel ${agentId}).`,
 	botLeadsOpenGoal: (agentId: string) =>
-		`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`,
+		`Bot ${agentId} leads an open goal; it can be retired once that goal ends (the owner ends it sooner with /lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>
-		`Bot ${agentId} still has active team or direct work; run /bot stop ${agentId} first.`,
+		`Bot ${agentId} still has active team or direct work; it can be retired once that work ends (the owner ends it sooner with /bot stop ${agentId}).`,
 	/** A bot's own session cannot start: its model is gone or has no credentials. */
 	botModelUnavailable: (agentId: string, modelRef: string) =>
 		`Bot ${agentId} runs on ${modelRef}, which is not available or has no credentials. Sign in to that provider or change the bot's model, then message it again.`,

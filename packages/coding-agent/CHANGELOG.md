@@ -18,6 +18,7 @@
 ### Added
 
 - The orchestrator's `bot` tool creates a bot for a leader: `action create` with `forLeader` (a standing or goal leader's id) makes the new bot that leader's own, as a bot the leader created was: its record names the leader as creator (no new field), it writes only when the leader can, it counts toward the 12 bots a leader keeps, and the leader's send to it starts it under the leader's running goal.
+- The orchestrator's `bot` tool retires a bot: `action retire` with `agentId` goes through what the owner's `/bot retire` does (its workers and its own session end, its record stays retired, and a bot that leads an open goal or still has work under way is refused), with the reason worded for the model. The refusals for an open goal and for work under way now say the bot can be retired once that goal or work ends, and how the owner ends it sooner, in English and pt-BR.
 
 ### Fixed
 

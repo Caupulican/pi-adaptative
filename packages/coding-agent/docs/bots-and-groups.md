@@ -315,7 +315,8 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
   not passed on to the bots it starts.
 - Stopping a leader stops the bots it owns. The stop interrupts their work and leaves the goal open: each stopped bot's
   report still reaches the leader, and the leader's next turn ends the goal. To hold a goal instead, pause it
-  (`/lead pause <leader>`). A leader leading an open goal cannot be retired; cancel the goal first.
+  (`/lead pause <leader>`). A leader leading an open goal cannot be retired until the goal ends; cancel it first to end it sooner.
+- The orchestrator retires a bot with its `bot` tool (`action retire`, `agentId`), as `/bot retire` does, under the same refusals.
 - A paused goal holds the messages it filed to its bots, in order, and starts them again when it resumes. The goal closes
   only once none of its messages is still waiting.
 - The goal lives in this session's orchestration store, so a restart resumes every open goal where it stood.

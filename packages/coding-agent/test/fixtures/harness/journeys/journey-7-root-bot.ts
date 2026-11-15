@@ -38,8 +38,9 @@ const ANSWER = "The retry limit is three.";
 const HANDOFF_HEADER = "Background worker terminal handoff:";
 
 /**
- * Leg 1: the root creates a bot and asks it. Creation records the bot and starts nothing; the ask starts it with its soul
- * and the question, and the answer comes back to the root as the event that starts the root's next turn.
+ * Leg 1: the root creates a bot, asks it and retires it. Creation records the bot and starts nothing; the ask starts it
+ * with its soul and the question, and the answer comes back to the root as the event that starts the root's next turn;
+ * once it answered, the root's bot retire retires it as the owner's /bot retire does.
  */
 export async function runJourney7RootBotPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -63,6 +64,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		botRequest: {} as Record<string, unknown>,
 		wakeLines: [] as string[],
 		list: {} as Record<string, unknown>,
+		retired: {} as Record<string, unknown>,
+		// The record as creation left it, read before anything else changes it.
+		record: undefined as ReturnType<typeof botRecord> | undefined,
 		// Read in the request that follows the create call, before anything asks the bot to work.
 		afterCreate: { requests: -1, agents: -1 },
 		// Read while the bot works: the lane its work is recorded under, which its handoff names.
@@ -119,6 +123,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 				if (result === undefined) throw new Error("the latest batch carries no bot create result");
 				seen.create = fencedToolOutput(result.text);
 				seen.created = acceptedJson(request, BOT_TOOL_NAME);
+				seen.record = botRecord(session, BOT_ID);
 				seen.afterCreate = {
 					requests: world.provider.requests.filter((entry) => entry.model.id === MODEL_ID.retry).length,
 					agents: agentsOn(session, MODEL_ID.retry).length,
@@ -170,7 +175,25 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			check: (request) => {
 				seen.list = acceptedJson(request, BOT_TOOL_NAME);
 			},
-			reply: { content: [{ type: "text", text: "The listing is read." }] },
+			// Its answer is in and its worker idle, so the root retires the bot it no longer needs.
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-root-retire-1",
+						name: BOT_TOOL_NAME,
+						arguments: { action: "retire", agentId: BOT_ID },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-root-retired",
+			check: (request) => {
+				seen.retired = acceptedJson(request, BOT_TOOL_NAME);
+			},
+			reply: { content: [{ type: "text", text: "The bot is retired." }] },
 		},
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-root-bot", PHASE_JUDGMENTS);
@@ -183,7 +206,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	await withDeadline(
 		trace,
 		"J7 leg 1: the bot answered the root",
-		world.provider.whenReached(reached(TRACK.root, "j7-root-list")),
+		world.provider.whenReached(reached(TRACK.root, "j7-root-retired")),
 	);
 	await withDeadline(trace, "J7 leg 1: the root is idle", session.waitForForegroundIdle());
 
@@ -195,7 +218,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		text: { agentId: BOT_ID, modelRef: modelOf(MODEL_ID.retry), canWrite: false, createdBy: "root" },
 		details: { agentId: BOT_ID, modelRef: modelOf(MODEL_ID.retry), canWrite: false, createdBy: "root" },
 	});
-	const record = botRecord(session, BOT_ID);
+	const record = seen.record;
+	if (record === undefined) throw new Error("the record was not read after creation");
 	expect(
 		{
 			agentId: record.agentId,
@@ -279,4 +303,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		allBots(session).map((bot) => bot.agentId),
 		"the store holds the one bot this leg made",
 	).toEqual([BOT_ID]);
+	expect(
+		{ result: seen.retired, retired: botRecord(session, BOT_ID).retired === true },
+		"bot retire retires the bot as the owner's /bot retire does, says so in the model's words, and the record stays, retired",
+	).toEqual({ result: { retired: true, agentId: BOT_ID, detail: `Bot ${BOT_ID} retired.` }, retired: true });
 }

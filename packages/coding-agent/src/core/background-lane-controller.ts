@@ -1969,7 +1969,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					delegationObjectiveId: this.runningDelegationOf(agentId),
 				});
 			},
-			create: (request, forLeader) => this._botLifecycle.createBot(request, forLeader),
+			...this._botLifecycle.botToolLifecycle(),
 			lead: (request) => this.getLeaders().delegate(request),
 			list: () => this.getBotTeamStore().listBots({ includeRetired: true }).map(botToolListEntry),
 		});

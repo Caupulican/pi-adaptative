@@ -57,7 +57,7 @@ function listPeersCall(id: string): ScriptedReply {
 }
 
 /** Retiring a leader that leads an open goal is refused in the product's words: its goal would be orphaned. */
-const OPEN_GOAL = `Bot ${STOP_LEADER} leads an open goal; cancel it first (/lead cancel ${STOP_LEADER}).`;
+const OPEN_GOAL = `Bot ${STOP_LEADER} leads an open goal; it can be retired once that goal ends (the owner ends it sooner with /lead cancel ${STOP_LEADER}).`;
 
 /**
  * Leg 6: retire and stop. A leader with an open goal cannot be retired; an idle bot runs as a session of its own, is retired

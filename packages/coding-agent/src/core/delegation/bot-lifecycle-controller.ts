@@ -8,11 +8,11 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
-import { type BotCreationRequest, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./bot-creation.ts";
+import { type BotCreationRequest, type BotToolPort, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./bot-creation.ts";
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import { createBotMessageDirectory, createSessionScopedBotMessageDirectory } from "./bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./bot-naming.ts";
@@ -281,11 +281,22 @@ export class BotLifecycleController {
 	}
 
 	/**
+	 * The orchestrator's `bot` tool's lifecycle actions, worded for its model: `create` and `retire`, which retires a bot
+	 * as the owner's `/bot retire` does.
+	 */
+	botToolLifecycle(): Pick<BotToolPort, "create" | "retire"> {
+		return {
+			create: (request, forLeader) => this.createBot(request, forLeader),
+			retire: (agentId) => this.retire(agentId, englishText().botTeam),
+		};
+	}
+
+	/**
 	 * The orchestrator's `bot create`: a bot of its own, or with `forLeader` a bot of that leader's (the leader asked for
 	 * it). The record names the leader as creator, so the leader's send starts it under the leader's goal; it writes only
 	 * when the leader can, and counts toward the bots the leader keeps.
 	 */
-	createBot(request: BotCreationRequest, forLeader: string | undefined): CreatedBotView {
+	private createBot(request: BotCreationRequest, forLeader: string | undefined): CreatedBotView {
 		const store = this.host.getBotTeamStore();
 		store.reload();
 		if (forLeader === undefined) return this.saveNewBot(store, request, { createdBy: "root", mayWrite: true }, false);
@@ -369,7 +380,16 @@ export class BotLifecycleController {
 		};
 	}
 
+	/** The owner's `/bot retire`, worded in the interface's language. */
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
+		return this.retire(agentId, interfaceText().botTeam);
+	}
+
+	/**
+	 * Retires a bot whoever asked (the owner or the orchestrator), in `words`: its workers and its own session end and its
+	 * record stays retired; a bot that leads an open goal or has work under way is refused.
+	 */
+	private retire(agentId: string, words: InterfaceText["botTeam"]): { retired: boolean; detail: string } {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
 			// Only a bot record is retired: a delegate worker (or any id the store does not hold) is not a bot, and it is
@@ -377,9 +397,7 @@ export class BotLifecycleController {
 			if (!this.host.getBotTeamStore().getBot(agentId))
 				return {
 					retired: false,
-					detail: isGeneratedWorkerLaneId(agentId)
-						? interfaceText().botTeam.notABotWorker(agentId)
-						: interfaceText().botTeam.botMissing(agentId),
+					detail: isGeneratedWorkerLaneId(agentId) ? words.notABotWorker(agentId) : words.botMissing(agentId),
 				};
 			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
 			if (
@@ -387,7 +405,7 @@ export class BotLifecycleController {
 				this.deps.standing.managesBots &&
 				this.host.getLeaders().leadsOpenDelegation(agentId)
 			)
-				throw new Error(interfaceText().botTeam.botLeadsOpenGoal(agentId));
+				throw new Error(words.botLeadsOpenGoal(agentId));
 			this.host.assertBotDispatchIdle(agentId);
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
 			const workers = this.host.hasWorkerState()
@@ -397,7 +415,7 @@ export class BotLifecycleController {
 				this.host.botSessions.isActive(agentId) ||
 				workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle")
 			)
-				throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
+				throw new Error(words.botHasActiveWork(agentId));
 			// Its session's release reads what it changes first: a read that fails retires nothing.
 			const release = this.host.botSessions.prepareRelease(agentId);
 			for (const worker of workers) this.host.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
@@ -405,7 +423,7 @@ export class BotLifecycleController {
 			release();
 			return {
 				retired: bot !== undefined,
-				detail: bot ? interfaceText().botTeam.botRetired(agentId) : interfaceText().botTeam.botMissing(agentId),
+				detail: bot ? words.botRetired(agentId) : words.botMissing(agentId),
 			};
 		} catch (error) {
 			return { retired: false, detail: error instanceof Error ? error.message : String(error) };
