@@ -13,7 +13,6 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botSpendLedgerFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
@@ -21,6 +20,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import type { BotSessionTurnPorts, BotSpendCeiling } from "./bot-session-turns.ts";
 import { BotSpendLedger } from "./bot-spend-ledger.ts";
@@ -84,7 +84,7 @@ export class BotSessionSpend {
 
 	constructor(
 		agentId: string,
-		agentDir: string,
+		home: Pick<BotHome, "spendFile">,
 		transcript: SessionManager,
 		definition: Pick<BotSessionDefinition, "model" | "spendBudget">,
 		registry: ModelRegistry,
@@ -96,7 +96,7 @@ export class BotSessionSpend {
 		this.ports = ports;
 		this.transcript = transcript;
 		const words = () => interfaceText().botTeam;
-		this.ledger = new BotSpendLedger(botSpendLedgerFile(agentDir, agentId), {
+		this.ledger = new BotSpendLedger(home.spendFile, {
 			now: () => ports.now(),
 			held: (reason, setAsideError) => ports.warn(words().botSpendLedgerHeld(agentId, reason, setAsideError)),
 			setAside: (file, reason, chargesKept) =>

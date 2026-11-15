@@ -317,11 +317,11 @@ export function botNoticesDir(agentDir: string, botId: string): string {
 }
 
 /**
- * `<agentDir>/bots/<id>/spend.json` -- the bot's spend ledger: its charge watermark and its spend per outside input it
- * served (`bots/bot-spend-ledger.ts`).
+ * `<home>/spend.json` -- the spend ledger of the bot whose home is `homeDir`: its charge watermark and its spend per
+ * outside input it served (`bots/bot-spend-ledger.ts`).
  */
-export function botSpendLedgerFile(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "spend.json");
+export function botHomeSpendLedgerFile(homeDir: string): string {
+	return join(homeDir, "spend.json");
 }
 
 /** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */

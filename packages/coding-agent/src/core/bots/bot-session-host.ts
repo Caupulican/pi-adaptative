@@ -721,7 +721,7 @@ export class BotSessionHost {
 			const settingsManager = settings.settings;
 			const registry = this.ports.modelRegistry();
 			// The bot's spend per request it serves: its turns and the runs of the workers they start share one bound.
-			const spend = new BotSessionSpend(agentId, agentDir, sessionManager, definition, registry, {
+			const spend = new BotSessionSpend(agentId, home, sessionManager, definition, registry, {
 				rootCeilings: () => this.ports.spendCeilings(),
 				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
 				now: () => this.idleTimers().now(),

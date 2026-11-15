@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { botHomeOrchestrationHome, type OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
-import { botHomeDir, botHomeProfileFile, botHomeSessionsDir } from "../agent-paths.ts";
+import { botHomeDir, botHomeProfileFile, botHomeSessionsDir, botHomeSpendLedgerFile } from "../agent-paths.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 
@@ -54,6 +54,8 @@ export interface BotHome {
 	readonly pointerFile: string;
 	/** `<home>/orchestration` -- where the bundles and leases of the bot's sessions and their workers live. */
 	readonly orchestrationHome: OrchestrationHome;
+	/** `<home>/spend.json` -- the bot's spend ledger: its charge watermark and spend windows (`BotSpendLedger`). */
+	readonly spendFile: string;
 }
 
 export function botHomeOf(agentDir: string, botId: string): BotHome {
@@ -68,6 +70,7 @@ export function botHomeAt(dir: string): BotHome {
 		sessionsDir: botHomeSessionsDir(dir),
 		pointerFile: join(dir, "session.json"),
 		orchestrationHome: botHomeOrchestrationHome(dir),
+		spendFile: botHomeSpendLedgerFile(dir),
 	};
 }
 
