@@ -306,6 +306,7 @@ import { SessionSemanticPlaneController } from "./session-semantic-plane-control
 import { hasRunningBackgroundedToolCall, isSessionSettled } from "./session-settlement.ts";
 import { createSessionShutdownTracker, settleClosingSessionMemory } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
+import { type SessionCapabilities, sessionCapabilities } from "./session-standing.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionSystemPromptController } from "./session-system-prompt-controller.ts";
 import { SessionTreeNavigator, type TreeNavigationResult } from "./session-tree-navigator.ts";
@@ -659,7 +660,7 @@ export class AgentSession {
 		goals: () => this._goals,
 		isDisposed: () => this._disposed,
 	});
-	private readonly _caps: AgentSessionConfig["capabilities"];
+	private readonly _caps: SessionCapabilities;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private readonly _worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	private readonly _shellOperations?: BashOperations;
@@ -717,7 +718,7 @@ export class AgentSession {
 	private _systemSwitchAvailabilityQueued = false;
 
 	constructor(config: AgentSessionConfig) {
-		this._caps = config.capabilities;
+		this._caps = sessionCapabilities(config.standing);
 		// One source for the session's directories: its manager's storage roots.
 		const { agentDir, orchestrationHome } = config.sessionManager.getStorageRoots();
 		const bundleLease = claimSessionBundleLease(
@@ -751,10 +752,7 @@ export class AgentSession {
 			steeringPlane: config.steeringPlane,
 		});
 		this._adaptiveReadiness = config.adaptiveReadiness;
-		this._ownerRules = new DurableOwnerRuleStore({
-			agentDir,
-			projectKey: config.cwd,
-		});
+		this._ownerRules = new DurableOwnerRuleStore({ agentDir, projectKey: config.cwd });
 		this._cache = new SessionCacheController({
 			getSessionManager: () => this.sessionManager,
 			getSessionId: () => this.sessionId,
@@ -790,6 +788,7 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
 			standing: this._caps,
+			sessionStanding: config.standing,
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,

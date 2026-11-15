@@ -59,7 +59,7 @@ import type { SubscriptionAllowancePort } from "./provider-admission/subscriptio
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import type { SessionCapabilities } from "./session-standing.ts";
+import type { SessionStanding } from "./session-standing.ts";
 import type { ResourceProfileFilterSettings } from "./settings/settings-schema.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
@@ -207,8 +207,11 @@ export interface AgentSessionConfig {
 	isExplicitModel?: boolean;
 	/** Preserve an explicit launch-time thinking level across profile reloads. */
 	isExplicitThinking?: boolean;
-	/** What the standing may do, resolved once by `createAgentSession`; the worker tool ceiling stays the process's. */
-	capabilities: SessionCapabilities;
+	/**
+	 * What the session is, resolved once by `createAgentSession`: what it may do is `sessionCapabilities(standing)`, and a
+	 * bot's names its home. The worker tool ceiling stays the process's.
+	 */
+	standing: SessionStanding;
 	/** Alternate base tool instances for embedded/custom runtimes. */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable bridge used by the agent loop to reach the current extension generation. */

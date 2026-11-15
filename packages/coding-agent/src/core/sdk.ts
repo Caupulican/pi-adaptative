@@ -389,9 +389,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	configureHarnessLog(agentDir, settingsManager);
 	bindSavedBedrockScope(settingsManager, modelRegistry);
-	const capabilities = sessionCapabilities(resolveSessionStanding(options));
-	const defaultServiceTier = options.serviceTier;
-	const orchestrationProfile = options.orchestrationProfile;
+	const standing = resolveSessionStanding(options);
+	const capabilities = sessionCapabilities(standing);
+	const { serviceTier: defaultServiceTier, orchestrationProfile } = options;
 	if (orchestrationProfile) {
 		validateOrchestrationProfile(orchestrationProfile);
 		assertOrchestrationProfileOwnsOptions(orchestrationProfile, options);
@@ -877,7 +877,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				isExplicitThinking: orchestrationProfile
 					? true
 					: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
-				capabilities,
+				standing,
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
 				capabilityEnvelope: options.capabilityEnvelope,

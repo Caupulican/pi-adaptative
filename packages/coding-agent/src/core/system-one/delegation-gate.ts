@@ -19,7 +19,9 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
+import { botHomeOf } from "../bots/bot-home.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import type { SessionStanding } from "../session-standing.ts";
 import { ACCEPT_ABSENCE_AT, ACCEPT_AT, noulProbability } from "./answer-acceptance.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 import { OPERATION_JUDGMENT_TIMEOUT_MS } from "./operation-gate.ts";
@@ -72,13 +74,27 @@ export interface DelegationGateDeps {
 	notify(message: string): void;
 }
 
+/** What {@link orchestrationDirectoriesOf} reads of a session. */
+export interface DirectorySource {
+	/** What the session is: a bot's standing names the home that is its own. */
+	readonly sessionStanding: SessionStanding;
+	getAgentDir(): string;
+	getSessionManager(): Pick<SessionManager, "getStorageRoots">;
+	getCwd(): string;
+}
+
 /**
- * Where a session's agent definitions and instruction files live: the home its orchestration state belongs to (the
- * owner's agent directory, or a bot's home) and the project's `.pi`. A bot's session never counts the owner's agent
- * directory as its own.
+ * Where a session's agent definitions and instruction files live: its own home and the project's `.pi`. A bot's own
+ * home is its bot home (`botHomeOf`), also while its orchestration state stays in the owner's home, so a bot's session
+ * never counts the owner's agent directory as its own; any other session's is the home its state belongs to.
  */
-export function orchestrationDirectoriesOf(manager: Pick<SessionManager, "getStorageRoots">, cwd: string): string[] {
-	return [manager.getStorageRoots().orchestrationHome.homeDir, nodePath.join(cwd, CONFIG_DIR_NAME)];
+export function orchestrationDirectoriesOf(session: DirectorySource): string[] {
+	const standing = session.sessionStanding;
+	const home =
+		standing.kind === "bot"
+			? botHomeOf(session.getAgentDir(), standing.agentId).dir
+			: session.getSessionManager().getStorageRoots().orchestrationHome.homeDir;
+	return [home, nodePath.join(session.getCwd(), CONFIG_DIR_NAME)];
 }
 
 export interface DelegationRefusal {

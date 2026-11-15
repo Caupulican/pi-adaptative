@@ -79,7 +79,7 @@ import {
 	USER_REQUEST_RULE_BUDGET,
 	type UserRequestClassificationOutcome,
 } from "./system-one/controller.ts";
-import { DelegationGate, orchestrationDirectoriesOf } from "./system-one/delegation-gate.ts";
+import { DelegationGate, type DirectorySource, orchestrationDirectoriesOf } from "./system-one/delegation-gate.ts";
 import type { OperationCaller, OperationGate } from "./system-one/operation-gate.ts";
 import { createSessionOperationGate, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type PendingOwnerRequest } from "./system-one/owner-policy-queue.ts";
@@ -193,7 +193,7 @@ interface StagedOptionalIntent {
 	judging?: AbortController;
 }
 
-export interface SessionEdgeIntentControllerDeps {
+export interface SessionEdgeIntentControllerDeps extends DirectorySource {
 	getSessionManager(): SessionManager;
 	getSettingsManager(): SettingsManager;
 	getModelRegistry(): ModelRegistry;
@@ -505,8 +505,7 @@ export class SessionEdgeIntentController {
 			getEngine: () => this.gateEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),
-			getOrchestrationDirectories: () =>
-				orchestrationDirectoriesOf(this.deps.getSessionManager(), this.deps.getCwd()),
+			getOrchestrationDirectories: () => orchestrationDirectoriesOf(this.deps),
 			notify: (message) => this.deps.emitWarning(message),
 		});
 		return this.delegationGateInstance;
