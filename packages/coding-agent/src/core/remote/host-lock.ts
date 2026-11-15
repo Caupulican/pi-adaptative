@@ -136,6 +136,22 @@ export function takeProcessLock(path: string, holder?: string): HostLockResult {
 }
 
 /**
+ * Removes a lock file whose process is proven gone on this host ({@link judgeOwner} `dead`), under the file's lock, as
+ * {@link takeProcessLock} would replace it: the start sweep's, for a host that ended without letting go. A live owner,
+ * one on another host, one that cannot be judged and a file that names no owner all stay. True when it was removed.
+ */
+export function removeDeadProcessLock(path: string): boolean {
+	if (!existsSync(path)) return false;
+	return withFileLockSync(path, () => {
+		const current = readRecord(path);
+		if (!current || judgeOwner(current) !== "dead") return false;
+		rmSync(path, { force: true });
+		harnessLog.info("link", "a lock whose process is gone was removed", { pid: current.pid });
+		return true;
+	});
+}
+
+/**
  * The process holding a lock file and how it stands, as another process reads it, with the hold's token (each take writes
  * a new one, so two holds of one process differ by it); undefined when no live holder is named.
  */

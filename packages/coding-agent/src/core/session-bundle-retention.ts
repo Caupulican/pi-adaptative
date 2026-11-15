@@ -3,8 +3,10 @@ import { readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
 import { isValidSessionId } from "../kernel/session/session-identity.ts";
+import { sweepSessionLeaseRegistries } from "../kernel/session/session-lease-sweep.ts";
 import {
 	BOTS_DIR_NAME,
+	botHomeHostLockFile,
 	capabilityArtifactsDir,
 	type OrchestrationHome,
 	orchestrationSessionDir,
@@ -37,16 +39,20 @@ import {
 	inspectSessionBundleRetention,
 	markSessionBundleRemoving,
 	pendingSessionBundleRetention,
+	readSessionLeaseHolders,
 	type SessionBundleDeletionPhase,
 	type SessionBundleDeletionReservation,
 	sessionBundleRetentionsInFlight,
+	sessionLeaseHolderRef,
 	settleSessionBundleDeletion,
 	withSessionBundleRetention,
 } from "./orchestration/session-bundle-lifecycle.ts";
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import { workerReceiptPublicationPending } from "./orchestration/worker-receipt-publication.ts";
 import { listEntries } from "./process-matrix/store.ts";
+import { removeDeadProcessLock } from "./remote/host-lock.ts";
 import { type GoneSessionSettlement, settleGoneSessionRoutines } from "./routines/routine-origin-settlement.ts";
+import { holderPlace } from "./session-switch-failures.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 /**
@@ -110,7 +116,13 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * naming the session, and it stays only while its bundle does not read. Opening its session releases it as well, and a
  * removal that began and stopped too (`session-bundle-lifecycle.ts`, admission mode `open`).
  *
-* Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
+ * Before any bundle, every home's holds of processes that ended without letting go (a crash) are swept, whatever its
+ * bundles: each lease registry's holders proven dead on this host (`sweepSessionLeaseRegistries`) and a bot home's
+ * `host.lock` whose process is (`removeDeadProcessLock`); nothing is ended by age, and a holder on another machine is kept.
+ * Such a holder keeps a bundle the gates would remove; the owner is told on which machine, where its hold ends when pi
+ * runs there again.
+ *
+ * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
  * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
  * releases, and removals that began, before the bot history is read; the others once it reads; all within the removal
  * budget and from a window the clock rotates across the homes. Then it scans every home's bundles as one list, starting
@@ -749,7 +761,10 @@ async function sweepBundle(
 
 		// The tombstone excludes new worker contexts for this session while the checks and removal run.
 		const reservation = reserveWorkerBundleDeletion(agentDir, home, parentSessionId, "retention", resumingDeletion);
-		if (!reservation) return;
+		if (!reservation) {
+			reportKeptElsewhere(home, parentSessionId, label, report);
+			return;
+		}
 		// A deferral before anything of the bundle is touched releases a `reserved` tombstone (the bundle is whole) and
 		// keeps an `unrecorded` one: how far an earlier removal went is not known.
 		let outcome: "removed" | "deferred" | "retained" | "released" = "deferred";
@@ -852,6 +867,40 @@ async function sweepBundle(
 	} catch (error) {
 		report(`session bundle ${label} retained: ${describe(error)}`);
 	}
+}
+
+/** Removes a bot home's host lock whose process is proven gone here; one that cannot be judged or locked is left, logged. */
+function sweepBotHostLock(homeDir: string): void {
+	try {
+		removeDeadProcessLock(botHomeHostLockFile(homeDir));
+	} catch (error) {
+		harnessLog.warn("sessions", "a bot home's host lock was not swept; it is left", {
+			home: homeDir,
+			detail: describe(error),
+		});
+	}
+}
+
+/**
+ * Names the machine of each holder on another machine that keeps the session's bundle from its retention: only a process
+ * there can prove it gone (the start sweep there, `sweepSessionLeaseRegistries`), so the owner is told where.
+ */
+function reportKeptElsewhere(
+	home: OrchestrationHome,
+	parentSessionId: string,
+	label: string,
+	report: (message: string) => void,
+): void {
+	const words = interfaceText().sessions.retention;
+	const places = new Map<string, ReturnType<typeof holderPlace>>();
+	for (const holder of readSessionLeaseHolders(home, parentSessionId)) {
+		if (holder.standing !== "foreign") continue;
+		const { elsewhere } = sessionLeaseHolderRef(holder, holder.standing);
+		if (!elsewhere) continue;
+		const place = holderPlace(elsewhere);
+		places.set(place.at, place);
+	}
+	for (const place of places.values()) report(words.keptElsewhere(label, place));
 }
 
 /**
@@ -997,6 +1046,12 @@ export async function sweepSessionBundles(
 	try {
 		// The bot homes are read once per run: their sessions, which homes exist and which session files they hold.
 		const bots = readBotSessionHolds(agentDir);
+		// Every home's holds of processes proven gone here first, whatever its bundles: lease holders, and a bot's host lock.
+		await sweepSessionLeaseRegistries(owner, owner.root);
+		for (const hold of bots.homes) {
+			await sweepSessionLeaseRegistries(hold.home.orchestrationHome, hold.home.dir);
+			sweepBotHostLock(hold.home.dir);
+		}
 		const index = indexSessionFiles(agentDir, bots, reportHome);
 		const transcripts = index.files;
 		const matrix = await protectedSessionIds(agentDir, currentSessionId, botHeldSessionIds(bots, transcripts));

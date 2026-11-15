@@ -1,0 +1,70 @@
+/**
+ * The start sweep of one orchestration home's lifetime lease registries (`deletions/<session-key>.json.leases.json`,
+ * `session-bundle-lifecycle.ts`). A process that ends without releasing its hold (a crash) stays recorded as a holder
+ * until a process on its host proves it gone, and only an acquisition of that same session pruned it; meanwhile the
+ * registry's presence reads as the home holding the session (`orchestrationHomeHoldsSession`) and it is never removed.
+ * Each registry is pruned here under its tombstone's lock, as every acquisition and release takes it, of the holders
+ * proven dead on this host ({@link liveHolders}: `judgeOwner` `dead`); no holder is ended by age, and a registry left with
+ * none is removed. A holder on another machine, or one that cannot be judged yet, is kept: only a process on its own host
+ * proves it gone, which this same sweep does there when pi starts on that machine. A registry that does not read, or that
+ * names a session whose tombstone it is not beside, is left as it is and logged.
+ */
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+import { harnessLog } from "../harness-log.ts";
+import { isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
+import { liveHolders, readLeaseRegistry } from "./session-bundle-lifecycle.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionDeletionFile,
+	orchestrationSessionDeletionsDir,
+} from "./session-bundle-paths.ts";
+
+const LEASE_REGISTRY_SUFFIX = ".leases.json";
+
+/** Prunes the holders proven dead of every lease registry in `home`; `logName` names the home in the harness log. */
+export async function sweepSessionLeaseRegistries(home: OrchestrationHome, logName: string): Promise<void> {
+	const dir = orchestrationSessionDeletionsDir(home);
+	let names: string[];
+	try {
+		names = readdirSync(dir).filter((name) => name.endsWith(LEASE_REGISTRY_SUFFIX));
+	} catch (error) {
+		// No deletions directory: no registry. Any other failure is the retention's to tell (`sessionBundleRetentionsInFlight`).
+		if (!isMissingFileError(error))
+			harnessLog.warn("sessions", "a home's lease registries do not list", {
+				home: logName,
+				detail: describe(error),
+			});
+		return;
+	}
+	for (const [index, name] of names.entries()) {
+		// The pruning is synchronous: yield now and then.
+		if (index % 64 === 63) await new Promise<void>((resolve) => setImmediate(resolve));
+		const file = join(dir, name);
+		const tombstone = file.slice(0, -LEASE_REGISTRY_SUFFIX.length);
+		try {
+			withFileLockSync(tombstone, () => {
+				const registry = readLeaseRegistry(file);
+				if (!registry) return;
+				if (orchestrationSessionDeletionFile(home, registry.parentSessionId) !== tombstone) {
+					harnessLog.warn("sessions", "a lease registry names a session it does not belong to; it is left", {
+						home: logName,
+						file,
+					});
+					return;
+				}
+				liveHolders(file, registry.parentSessionId);
+			});
+		} catch (error) {
+			harnessLog.warn("sessions", "a lease registry was not swept; it is left", {
+				home: logName,
+				file,
+				detail: describe(error),
+			});
+		}
+	}
+}
+
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}

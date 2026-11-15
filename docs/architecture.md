@@ -100,6 +100,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-header.ts` | (no header comment) |
 | `kernel/session/session-id-generation.ts` | Session and entry id generation: fresh session ids, the auto-learn session id test, and the entry id space that keeps generated ids unique within one transcript. |
 | `kernel/session/session-identity.ts` | Defines the one session id rule and the validators that admit a session id read from a record or a session file header. |
+| `kernel/session/session-lease-sweep.ts` | The start sweep of one orchestration home's lifetime lease registries (`deletions/<session-key>.json.leases.json`, `session-bundle-lifecycle.ts`). |
 | `kernel/session/session-listing.ts` | Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. |
 | `kernel/session/session-manager-types.ts` | Public record types of the session transcript: the header and entry file union, the context and tree views, session info, and persisted-entry events and listeners. |
 | `kernel/session/session-manager.ts` | (no header comment) |

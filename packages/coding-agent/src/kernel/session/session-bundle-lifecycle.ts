@@ -224,7 +224,7 @@ export class SessionHostedError extends Error {
 	}
 }
 
-interface BundleHolder {
+export interface BundleHolder {
 	token: string;
 	/** The holding process, judged by {@link judgeOwner}; only a `dead` holder stops serving the session. */
 	owner: ProcessOwner;
@@ -286,9 +286,13 @@ const MAX_BUNDLE_HOLDERS = 64;
 const MAX_HOLDER_BYTES = 64 * 1024;
 const bundleLeases = new WeakMap<SessionBundleLease, BundleLeaseState>();
 
-function readHolders(file: string, parentSessionId: string): BundleHolder[] {
+/**
+ * A lease registry as recorded: the session it names and its holders, or undefined when the file is absent. One that
+ * does not read throws ({@link SessionLeaseRegistryError}).
+ */
+export function readLeaseRegistry(file: string): { parentSessionId: string; holders: BundleHolder[] } | undefined {
 	const text = readOptionalBoundedTextFileSync(file, MAX_HOLDER_BYTES, "Session bundle lifetime leases");
-	if (text === undefined) return [];
+	if (text === undefined) return undefined;
 	const value: unknown = JSON.parse(text);
 	if (
 		!isPlainRecord(value) ||
@@ -296,7 +300,7 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 		(value.schemaVersion !== 1 &&
 			value.schemaVersion !== HOLDERS_SCHEMA_VERSION &&
 			value.schemaVersion !== ROLE_HOLDERS_SCHEMA_VERSION) ||
-		value.parentSessionId !== parentSessionId ||
+		typeof value.parentSessionId !== "string" ||
 		!Array.isArray(value.holders) ||
 		value.holders.length > MAX_BUNDLE_HOLDERS
 	)
@@ -333,7 +337,14 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 			role: role ?? "session",
 		});
 	}
-	return holders;
+	return { parentSessionId: value.parentSessionId, holders };
+}
+
+function readHolders(file: string, parentSessionId: string): BundleHolder[] {
+	const registry = readLeaseRegistry(file);
+	if (registry && registry.parentSessionId !== parentSessionId)
+		throw new SessionLeaseRegistryError(file, "Session bundle lifetime leases require inspection.");
+	return registry?.holders ?? [];
 }
 
 function writeHolders(file: string, parentSessionId: string, holders: BundleHolder[]): void {
@@ -352,7 +363,7 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 }
 
 /** Prunes only holders PROVEN gone; an `alive`, `foreign` or `unknown` holder keeps serving the session. */
-function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
+export function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const holders = readHolders(file, parentSessionId);
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
 	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
