@@ -15,7 +15,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
+import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import {
 	nextWorkerDueAt,
 	owesWorkerExecutionAt,
@@ -46,7 +46,7 @@ import {
 	applyUnhostedBotStop,
 	type BotStopPorts,
 	type OwnerStopRequest,
-	readWorkMark,
+	readStopScope,
 	type UnrecordedBotStops,
 	writeOwnerStop,
 } from "./bot-stop.ts";
@@ -304,7 +304,7 @@ export function cancelOtherSessionsWatches(
  * home, some WSL mounts), a message left waiting is taken up within this, not at the owner's next send or the session's
  * idle close.
  */
-const OWED_INBOX_SWEEP_MS = 60 * 1000;
+export const OWED_INBOX_SWEEP_MS = 60 * 1000;
 
 /** What the opening of owed sessions reads from its host. */
 export interface BotOwedWorkPorts {
@@ -717,7 +717,8 @@ export class BotOwedWork {
 
 	/**
 	 * One bot of the periodic listing ({@link sweepInboxes}); whether its inbox listed clean (false when it did not list and a
-	 * held stop's failed take told why).
+	 * held stop's failed take told why). While another process hosts the bot, a stop held here is recorded for that host to
+	 * take ({@link UnrecordedBotStops.recordLate}).
 	 */
 	private sweepBot(agentDir: string, agentId: string): boolean {
 		if (this.ports.hostedHere(agentId)) {
@@ -744,7 +745,7 @@ export class BotOwedWork {
 				if (stop?.failed) return false;
 				throw unlisted;
 			}
-		}
+		} else this.unrecorded.recordLate(agentId, (line) => this.ports.warn(line));
 		const waiting = botInboxWaiting(agentDir, agentId);
 		if (
 			!this.openRetries.pending(agentId) &&
@@ -980,14 +981,15 @@ export class BotOwedWork {
 	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
 	 * alarms end with it. `inbox` names the stops waiting in its inbox, as the caller listed them (undefined when they did
 	 * not list: only a stop held here is applied then). A stop it could not apply keeps waiting, holding back the work it
-	 * stops, and the owner is told once per stops waiting and cause (not of a held stop the failed take dropped, which no
-	 * longer waits); a stop that does not read stops nothing and holds nothing back;
+	 * stops, and the owner is told once per stops waiting and cause (a failed take keeps a held stop held); a stop that does
+	 * not read stops nothing and holds nothing back;
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open (`retrying`). The owner's
 	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and asks the bot open ({@link ownerStopped}),
 	 * which calls this; a host holding the bot takes it instead. A stop that could not be written is held
 	 * (`UnrecordedBotStops`) and applied with the ones waiting, the messages sent before it refused, here or by this
-	 * process's open of the bot, while the bot's work stands where it was when the stop was made.
+	 * process's open of the bot, ending the work there was when it was made; while another process holds the bot's lock, it
+	 * is recorded late for that process to take (`UnrecordedBotStops.recordLate`).
 	 */
 	applyOwnerStop(agentId: string, swept: boolean, inbox: readonly string[] | undefined): OwnerStopOutcome {
 		const none: OwnerStopOutcome = { waits: false, failed: false, retrying: false };
@@ -1014,7 +1016,8 @@ export class BotOwedWork {
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote to the session the
 			// take read (a saved session that is a symbolic link is left, and the rest of the stop applies all the same).
 			const taken = applyUnhostedBotStop(agentDir, agentId, this.ports.stopPorts(), this.unrecorded);
-			if (taken !== "held" && taken.stop) {
+			if (taken === "held") this.unrecorded.recordLate(agentId, (line) => this.ports.warn(line));
+			else if (taken.stop) {
 				this.forgetOwedTimes(agentId);
 				this.armUsageWait(
 					agentId,
@@ -1026,12 +1029,6 @@ export class BotOwedWork {
 			// left in place or not, so nothing waits after it.
 			return { waits: taken === "held" ? waits : false, failed: false, retrying: false };
 		} catch (error) {
-			// The take may have dropped the stop held (its mark moved, or its re-mark after the failure did not read; the owner
-			// was told it was dropped): only the stops that still wait are owed, and with none left nothing waits.
-			if (nothingWaits()) {
-				this.failedStops.delete(agentId);
-				return none;
-			}
 			// Told once for the stops that wait and the cause, and again once either changes (a new stop, one taken or dropped,
 			// an inbox that stopped listing, another cause); the listing asks again only once the stops change.
 			const key = waiting();
@@ -1048,21 +1045,30 @@ export class BotOwedWork {
 	}
 
 	/**
-	 * The owner's stop of a bot this process does not host, made from `from`: dated now, with where the bot's work stands as
-	 * it is dated (`readWorkMark`), and written (`requestBotStop`), or held when it cannot be (told to the owner, then
-	 * {@link UnrecordedBotStops.hold}); the bot is asked open, which applies the stops waiting first. A written stop is
+	 * The owner's stop of a bot this process does not host, made from `from`: dated now, with the work there is as it is
+	 * dated (`readStopScope`), and written (`requestBotStop`), which covers a stop held for the bot ({@link
+	 * UnrecordedBotStops.drop}), or held scoped to that work when it cannot be (told to the owner, then {@link
+	 * UnrecordedBotStops.hold}; dropped and told when that work did not read); the bot is asked open, which applies the
+	 * stops waiting first. A written stop is
 	 * taken by the host running the bot, if one does: that host is returned, for the owner to be told where the stop went.
 	 * It never throws, so the owner's stop of this process's other work goes on: a read that fails is told to the owner, the
 	 * open's as a later pass's is, the host's as the one place the stop went that could not be named.
 	 */
 	ownerStopped(agentId: string, from: OwnerStopRequest["from"]): RemoteBotHost | undefined {
 		const agentDir = this.ports.agentDir();
-		const mark = readWorkMark(agentDir, agentId);
+		const [words, made] = [interfaceText().botTeam, readStopScope(agentDir, agentId)];
 		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() };
-		const unwritten = writeOwnerStop(agentDir, stop, (message) => this.ports.warn(message));
-		if (unwritten !== undefined) {
-			this.ports.warn(interfaceText().botTeam.botStopNotRecorded(agentId, unwritten));
-			this.unrecorded.hold(agentId, { stop, mark }, (message) => this.ports.warn(message));
+		const unwritten = writeOwnerStop(agentDir, { ...stop, scope: WHOLE_FLEET_STOP_SCOPE }, (line) =>
+			this.ports.warn(line),
+		);
+		if (unwritten === undefined) this.unrecorded.drop(agentId);
+		else {
+			this.ports.warn(words.botStopNotRecorded(agentId, unwritten));
+			if ("scope" in made) this.unrecorded.hold({ ...stop, scope: made.scope });
+			else {
+				const why = words.botStopDropReasons.workUnread(botFailureText(agentId, made.unread));
+				this.ports.warn(words.botStopDropped(agentId, why));
+			}
 		}
 		try {
 			this.openIfOwed(agentId);

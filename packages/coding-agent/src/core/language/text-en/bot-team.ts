@@ -144,11 +144,18 @@ export const BOT_TEAM = {
 	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string, maxMinutes: number) =>
 		`Bot ${agentId}: ${record} could not be read (${reason}) nor set aside (${file}); it stays in place, is not counted as waiting, and is read again at most ${maxMinutes} minutes apart until it reads, told only this once.`,
 	/**
-	 * The owner's stop could not be written to the bot's home: only this running process holds it (quitting it drops the
-	 * stop), and applies it only while the bot's work stands where it was when the stop was made.
+	 * The owner's stop could not be written to the bot's home: this process holds it and records it again until it lands
+	 * (told then), applies it while no process hosts the bot, and tells whether it landed when it quits; wherever it is
+	 * applied, it ends only the work there was when it was made.
 	 */
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); only this running process holds it, so it reaches no other process, is dropped if this process quits, and is applied here only while the bot's work is unchanged since the stop.`,
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); this process holds it and records it again until it is, applying it itself while no process hosts the bot, and if this process quits first you are told whether it was recorded. Wherever it is applied, it ends only the work there was when you stopped the bot.`,
+	/** A stop held because it could not be recorded is now recorded in the bot's home, for whichever process takes it. */
+	botStopRecordedLate: (agentId: string) =>
+		`Bot ${agentId}: the owner's stop that could not be recorded earlier is now recorded; it ends only the work there was when you stopped the bot.`,
+	/** A stop held because it could not be recorded could not be recorded as this process quit: it is lost. */
+	botStopLostAtQuit: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop that could not be recorded was lost as this process quit (${reason}); send it again if it is still wanted.`,
 	/** The owner's stop of a bot this process runs could not be written to its home: it applies to this process's work only. */
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and applies only to the bot's work in this process.`,
@@ -198,7 +205,6 @@ export const BOT_TEAM = {
 	botStopDropped: (agentId: string, why: string) =>
 		`Bot ${agentId}: the owner's stop that could not be recorded was dropped: ${why}; send it again.`,
 	botStopDropReasons: {
-		workChanged: "the bot's work changed since it was made",
 		workUnread: (reason: string) => `where the bot's work stands could not be read (${reason})`,
 	},
 	/** The owner's stop was written, but the process hosting the bot, which takes it, could not be read to name it. */

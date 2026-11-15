@@ -1,7 +1,7 @@
 /**
  * Stopping a session's own workers. The owner's stop (`owner_stopped`) closes every plan the session runs and cancels every
- * worker lane it started, queued, suspended until a retry, leased or running; its ends wake no one, since the owner already
- * sees the stop. The same stop reaches a session no process hosts through its bundle alone. And the lanes a disposing
+ * worker lane it started, queued, suspended until a retry, leased or running (a stop applied after it was made, only those
+ * there were when it was made: `FleetStopScope`); its ends wake no one, since the owner already sees the stop. The same stop reaches a session no process hosts through its bundle alone. And the lanes a disposing
  * session's own tracker still holds (research, review) end as `session_disposed`.
  */
 
@@ -55,34 +55,55 @@ export interface WorkerStopOutcome {
 	readonly stopped: number;
 }
 
-/** The plan executor's close of every open plan; its running steps stop for `reasonCode`. */
+/** The plan executor's close of the open plans `covers` names; their running steps stop for `reasonCode`. */
 export interface OpenPlansStop {
-	cancelOpenPlans(reason: string, reasonCode: string): void;
+	cancelOpenPlans(reason: string, reasonCode: string, covers: (planId: string) => boolean): void;
 }
 
 /**
- * The owner's stop of a session's workers: every open plan closed as cancelled (through `plans`, the session's plan
- * executor, which also releases the plan's prepared dispatches and placed jobs; else in the store, for a session that runs
- * none), then every unended worker attempt cancelled through `cancel` (true when the remote backend took the cancel),
- * both for `reasonCode`. Plans close first, so no
- * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why, and how many lanes in
- * flight it stopped.
+ * What an owner's stop of a session's workers ends: everything unended when it is applied (`whole`), or only the work
+ * there was when it was made, applied later (`scoped`): the worker attempts unended then and the plans open then, by id.
+ */
+export type FleetStopScope =
+	| { readonly kind: "whole" }
+	| { readonly kind: "scoped"; readonly attempts: readonly string[]; readonly plans: readonly string[] };
+
+/** The owner's stop of a session's workers: the reason its ends carry, and what it ends. */
+export interface FleetStop {
+	readonly reasonCode: string;
+	readonly scope: FleetStopScope;
+}
+
+/** The stop of everything unended when it is applied. */
+export const WHOLE_FLEET_STOP_SCOPE: FleetStopScope = { kind: "whole" };
+
+/**
+ * The owner's stop of a session's workers, of what `stop.scope` covers: each open plan it covers closed as cancelled
+ * (through `plans`, the session's plan executor, which also releases the plan's prepared dispatches and placed jobs; else
+ * in the store, for a session that runs none), then each unended worker attempt it covers cancelled through `cancel` (true
+ * when the remote backend took the cancel), both for `stop.reasonCode`. Plans close first, so no step is dispatched again
+ * for a lane this stop ends. Returns what it covers that is still unended after it, by why, and how many lanes in flight it
+ * stopped: work a scoped stop leaves is neither counted nor reported.
  */
 export function stopSessionWorkers(
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "closePlan">,
 	plans: OpenPlansStop | undefined,
 	cancel: (attempt: AttemptRuntimeState) => boolean,
-	reasonCode: string,
+	{ reasonCode, scope }: FleetStop,
 ): WorkerStopOutcome {
-	const inFlight = unendedWorkerAttempts(runtime.getSnapshot()).length;
-	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode);
+	const covers = (attempt: AttemptRuntimeState) =>
+		scope.kind === "whole" || scope.attempts.includes(attempt.attemptId);
+	const coversPlan = (planId: string) => scope.kind === "whole" || scope.plans.includes(planId);
+	const inFlight = unendedWorkerAttempts(runtime.getSnapshot()).filter(covers).length;
+	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode, coversPlan);
 	else
 		for (const [planId, plan] of Object.entries(runtime.getSnapshot().plans))
-			if (!plan.closed) runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
+			if (!plan.closed && coversPlan(planId))
+				runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
 	const handed = new Set<string>();
-	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot()))
+	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot()).filter(covers))
 		if (cancel(attempt)) handed.add(attempt.attemptId);
-	const unended = unendedSelectedAttempts(runtime.getSnapshot());
+	const unended = unendedSelectedAttempts(runtime.getSnapshot()).filter(covers);
 	const own = unended.filter((attempt) => !isManagedWorkerAttempt(attempt));
 	const failed = own.filter((attempt) => !handed.has(attempt.attemptId));
 	return {

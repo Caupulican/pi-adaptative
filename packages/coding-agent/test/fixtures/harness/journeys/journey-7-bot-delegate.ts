@@ -4,7 +4,7 @@ import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
-import { OWNER_STOPPED_REASON } from "../../../../src/core/delegation/worker-fleet-stop.ts";
+import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
 import { workerTerminalNotificationId } from "../../../../src/core/orchestration/worker-terminal-notification.ts";
@@ -490,7 +490,10 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 		);
 		const stored = session.getBotTeamStore().getBot(workerId) !== undefined;
 		const requestsAtStop = world.provider.requests.length;
-		const stop = session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON);
+		const stop = session.backgroundLanes.cancelOwnFleet({
+			reasonCode: OWNER_STOPPED_REASON,
+			scope: WHOLE_FLEET_STOP_SCOPE,
+		});
 		await withDeadline(trace, "J7 bot delegate: the root's stopped worker's request ended", workerEnded.promise);
 		// An end the fleet stop made for `owner_stopped` is recorded delivered at once and wakes no one.
 		const attempts = () => {

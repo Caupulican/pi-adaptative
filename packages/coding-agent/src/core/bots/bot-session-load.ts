@@ -14,6 +14,7 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { HostLock } from "../remote/host-lock.ts";
+import { observeSessionTurns } from "../session-turn-boundary.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
@@ -60,6 +61,8 @@ export interface BotSessionEntry {
 	inFlight: number;
 	/** The end of the turn the owner's stop last aborted: the words given next wait on it, not steering a dying turn. */
 	turnEnding: Promise<void>;
+	/** When the turn running began, on the wall clock a stop's `at` is on (`observeSessionTurns`); undefined between turns. */
+	turnSince: number | undefined;
 	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
 	recheckWhenIdle: boolean;
 	/** Its turns' spend and outcome, each reported once per turn. */
@@ -235,6 +238,7 @@ export class BotSessionLoader {
 				unsubscribe: () => {},
 				inFlight: 0,
 				turnEnding: Promise.resolve(),
+				turnSince: undefined,
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
@@ -253,7 +257,16 @@ export class BotSessionLoader {
 				idleTimer: undefined,
 			};
 			built = entry;
-			entry.unsubscribe = observeBotSessionTurns(session, entry.turns, {
+			const unobserveSince = observeSessionTurns(session, {
+				started: () => {
+					entry.turnSince = Date.now();
+				},
+				ended: () => {
+					entry.turnSince = undefined;
+				},
+			});
+			entry.unsubscribe = unobserveSince;
+			const unobserveTurns = observeBotSessionTurns(session, entry.turns, {
 				agentId,
 				role: definition.role,
 				cwd,
@@ -263,6 +276,10 @@ export class BotSessionLoader {
 				notify: (text, mark) => this.ports.notify(agentId, text, mark),
 				settle: () => this.ports.settle(entry),
 			});
+			entry.unsubscribe = () => {
+				unobserveTurns();
+				unobserveSince();
+			};
 			session.startBackgroundInputs();
 			// A stop made since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
 			const loadStop = this.ports.owed.unrecorded.loaded(

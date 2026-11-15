@@ -17,7 +17,10 @@
  *
  * Order: a stop ends the work there is when it is made. An inbox message whose `at` is at or before the stop's (sent before
  * it, or in the same millisecond, which the stop is read to cover) is refused with the owner-stopped reason; one after it is
- * the owner's next words and waits for the session.
+ * the owner's next words and waits for the session. A stop recorded after it was made (`scoped`: this process could not
+ * record it then, `UnrecordedBotStops`) ends only the work there was then: the worker attempts unended and the plans open
+ * when it was made, the turn running since then, and the jobs placed by then or by those attempts; what started after it
+ * goes on.
  */
 
 import { existsSync, statSync } from "node:fs";
@@ -28,9 +31,12 @@ import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import {
+	type FleetStop,
+	type FleetStopScope,
 	OWNER_STOPPED_REASON,
 	stopSessionWorkers,
 	unendedWorkerAttempts,
+	WHOLE_FLEET_STOP_SCOPE,
 	type WorkerStopOutcome,
 } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
@@ -41,7 +47,7 @@ import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
-import { endPlacedJobsOfSessions, placedJobsOfSessionsLeft } from "../remote/job-client.ts";
+import { endPlacedJobsOfSessions, type PlacedJobCover, placedJobsOfSessionsLeft } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { MAX_ROUTINE_OCCURRENCES } from "../routines/routine-contract.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
@@ -151,26 +157,39 @@ export type LinkNoticePorts = Pick<BotStopPorts, "warn" | "links">;
 export interface HostedBotStopSession {
 	readonly goal: PersistedGoalStateHost;
 	readonly transcript: UsageWakeLog & UsageWakeWriter;
-	readonly fleet: { cancelOwnFleet(reasonCode: string): WorkerStopOutcome };
+	readonly fleet: { cancelOwnFleet(stop: FleetStop): WorkerStopOutcome };
 }
 
 /**
- * The stop applied at `now` to a hosted bot's live session (its foreground turn already stopped by the host): its whole
- * fleet cancelled (`cancelOwnFleet`), then its goal held and its usage wait declined as of when the stop was made. What it
- * left unended, by why.
+ * The stop applied at `now` to a hosted bot's live session (its foreground turn already stopped by the host): the fleet
+ * work it covers cancelled (`cancelOwnFleet`), then its goal held and its usage wait declined as of when the stop was
+ * made. What it left unended, by why.
  */
 export function applyOwnerStopToSession(
 	session: HostedBotStopSession,
 	stop: OwnerStop,
 	now: number,
 ): WorkerStopOutcome {
-	const outcome = session.fleet.cancelOwnFleet(stop.reasonCode);
+	const outcome = session.fleet.cancelOwnFleet(stop);
 	holdForOwnerStop(session, stop, now);
 	return outcome;
 }
 
-/** What applying an owner's stop reads of it: when it was made, and the reason its cancelled work ends with. */
-export type OwnerStop = Pick<BotInboxStop, "at" | "reasonCode">;
+/** What applying an owner's stop reads of it: when it was made, the reason its cancelled work ends with, and what it ends. */
+export type OwnerStop = Pick<BotInboxStop, "at" | "reasonCode" | "scope">;
+
+/**
+ * The jobs placed on other machines that `stop` ends: every one for a whole stop, else those placed by the time it was made
+ * (the placer's clock, the wall clock its `at` is on) or by an attempt it ends.
+ */
+function placedJobsOf(stop: OwnerStop): PlacedJobCover {
+	const { scope } = stop;
+	if (scope.kind === "whole") return EVERY_PLACED_JOB;
+	return (job) => job.createdAt <= stop.at || (job.attemptId !== undefined && scope.attempts.includes(job.attemptId));
+}
+
+/** Every job placed: what a whole stop and a release end. */
+const EVERY_PLACED_JOB: PlacedJobCover = () => true;
 
 /** The bot's goal held and its usage wait declined at `now`, as of when the owner's stop was made. */
 function holdForOwnerStop(session: Omit<HostedBotStopSession, "fleet">, stop: OwnerStop, now: number): void {
@@ -179,7 +198,7 @@ function holdForOwnerStop(session: Omit<HostedBotStopSession, "fleet">, stop: Ow
 }
 
 /**
- * Takes the stops waiting for the bot this process hosts in session `sessionId`: the newest is applied through `stopHere`
+ * Takes the stops waiting for the bot this process hosts in session `sessionId`, as one ({@link takeStops}), applied through `stopHere`
  * (the host stops the foreground turn and calls {@link applyOwnerStopToSession}), the jobs the home's other sessions placed
  * are ended (no client of theirs runs: the host holds the bot), the messages it covers are refused, and every stop read is
  * deleted ({@link takeStops}). A stop held in memory (`memory`) is taken with them. The stop applied, undefined when none
@@ -203,6 +222,7 @@ export function takeHostedBotStops(
 				agentId,
 				(ids) => ids.filter((id) => id !== sessionId),
 				stop.reasonCode,
+				placedJobsOf(stop),
 				stopOperation(stop.at),
 				ports,
 			),
@@ -212,10 +232,10 @@ export function takeHostedBotStops(
 }
 
 /**
- * Ends the jobs the sessions of bot `agentId`'s home placed on other machines, for `reasonCode` (no client of theirs runs:
- * the caller holds the bot): the home listed now ({@link homeSessionIds}), `placedBy` choosing which of its sessions (the
- * one the caller ended through its live client left out, a closed session's own added), for `operation` (the stop or the
- * release that ends them). It runs after the bot's own work ended and never holds that back: a failure is told to the
+ * Ends the jobs the sessions of bot `agentId`'s home placed on other machines that `covers` names, for `reasonCode` (no
+ * client of theirs runs: the caller holds the bot): the home listed now ({@link homeSessionIds}), `placedBy` choosing which
+ * of its sessions (the one the caller ended through its live client left out, a closed session's own added), for
+ * `operation` (the stop or the release that ends them). It runs after the bot's own work ended and never holds that back: a failure is told to the
  * owner with its cause, and the stop or release goes on.
  */
 function endHomePlacedJobs(
@@ -223,12 +243,13 @@ function endHomePlacedJobs(
 	agentId: string,
 	placedBy: (homeSessionIds: readonly string[]) => readonly string[],
 	reasonCode: string,
+	covers: PlacedJobCover,
 	operation: LinkedSessionOperation,
 	ports: LinkNoticePorts,
 ): void {
 	try {
 		const sessions = new Set(placedBy(homeSessionIds(agentDir, agentId, operation, ports)));
-		endPlacedJobsOfSessions(agentDir, sessions, jobCancelReasonOf(reasonCode));
+		endPlacedJobsOfSessions(agentDir, sessions, jobCancelReasonOf(reasonCode), covers);
 	} catch (error) {
 		ports.warn(interfaceText().botTeam.botPlacedJobsNotEnded(agentId, botFailureText(agentId, error)));
 	}
@@ -267,9 +288,9 @@ export function endLoadedBotWork(
 	operation: LinkedSessionOperation,
 	ports: LinkNoticePorts,
 ): WorkerStopOutcome {
-	const outcome = session.backgroundLanes.cancelOwnFleet(reasonCode);
+	const outcome = session.backgroundLanes.cancelOwnFleet({ reasonCode, scope: WHOLE_FLEET_STOP_SCOPE });
 	const placedBy = (ids: readonly string[]) => ids.filter((id) => id !== session.sessionId);
-	endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, operation, ports);
+	endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, EVERY_PLACED_JOB, operation, ports);
 	return outcome;
 }
 
@@ -340,8 +361,8 @@ function refuseMessagesBeforeStop(agentDir: string, agentId: string, at: number,
  * only its home's placed jobs, its messages and its stops to take; one whose saved session is a symbolic link
  * ({@link ClosedBotSession}) has its session's work left, the owner told. `held` when another process holds the lock (its
  * host takes the stop), else what the take applied. A failure throws, the lock released and the stop left waiting. A stop
- * this process could not record is applied with them, as the newest when it is, while the bot's work stands where it was
- * when the stop was made ({@link UnrecordedBotStops}).
+ * this process could not record is applied with them, scoped to the work there was when it was made
+ * ({@link UnrecordedBotStops}).
  */
 export function applyUnhostedBotStop(
 	agentDir: string,
@@ -384,8 +405,16 @@ function applyBotStopUnderLock(
 			return NOTHING_LEFT;
 		},
 		(stop) => {
-			const placedBy = (ids: readonly string[]) => (saved ? [...ids, saved.id] : ids);
-			endHomePlacedJobs(agentDir, agentId, placedBy, stop.reasonCode, stopOperation(stop.at), ports);
+			const placedBy = (ids: readonly string[]) => closedPlacers(ids, saved);
+			endHomePlacedJobs(
+				agentDir,
+				agentId,
+				placedBy,
+				stop.reasonCode,
+				placedJobsOf(stop),
+				stopOperation(stop.at),
+				ports,
+			);
 		},
 		ports,
 		memory,
@@ -450,7 +479,7 @@ export function stopLoadedBot(
 	agentDir: string,
 	agentId: string,
 	loaded: LoadedBotSession,
-	stopTurn: () => void,
+	stopTurn: (stop: OwnerStop) => void,
 	ports: BotStopPorts,
 	memory?: OwnerStop,
 ): LoadedBotStop {
@@ -462,7 +491,7 @@ export function stopLoadedBot(
 			agentId,
 			loaded.session.sessionId,
 			(taken) => {
-				stopTurn();
+				stopTurn(taken);
 				outcome = applyOwnerStopToSession(live, taken, ports.now());
 				endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, taken, ports);
 				return outcome;
@@ -478,56 +507,40 @@ export function stopLoadedBot(
 
 const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [], stopped: 0 };
 
-/**
- * Where a closed bot's own work stood: its saved session as its stop reads it (none, or the link it is), and the last event
- * of that session's bundle (0 when it has none). A process that runs the bot moves one of them before any work it starts
- * there: a worker it starts, a plan it opens or a job it places is an event of that bundle, and a new session is a new one.
- */
-interface BotWorkMark {
-	readonly session: string | undefined;
-	readonly linked: string | undefined;
-	readonly head: number;
-}
-
-/**
- * Where bot `agentId`'s closed session `session`, as its home on disk holds it, stands now ({@link BotWorkMark}): its
- * bundle's last event read from the store's file names (`lastCommittedOrdinal`), without replaying the bundle.
- */
-function workMarkOf(agentDir: string, agentId: string, session: ClosedBotSession): BotWorkMark {
-	if ("linked" in session) return { session: undefined, linked: session.linked, head: 0 };
-	const store = closedBundleStore(agentDir, agentId, session.saved);
-	return {
-		session: session.saved?.id,
-		linked: undefined,
-		head: store ? store.lastCommittedOrdinal() : 0,
-	};
-}
-
-const sameWorkMark = (a: BotWorkMark, b: BotWorkMark): boolean =>
-	a.session === b.session && a.linked === b.linked && a.head === b.head;
-
 /** Bot `agentId`'s closed session as its home on disk holds it now: never a view's cache, which may lag a change. */
 function closedSessionOnDisk(agentDir: string, agentId: string): ClosedBotSession {
 	return readClosedBotSession(() => botSessionOnDisk(agentDir, agentId));
 }
 
-/** Where a bot's work stood when a stop was made ({@link BotWorkMark}), or why that did not read. */
-export type WorkMarkReading = { readonly mark: BotWorkMark } | { readonly unread: unknown };
-
-function markReading(read: () => BotWorkMark): WorkMarkReading {
-	try {
-		return { mark: read() };
-	} catch (error) {
-		return { unread: error };
-	}
+/** The worker attempts unended and the plans open in a bundle, by id, read without writing it. */
+function bundleWork(store: OrchestrationEventStore): Extract<FleetStopScope, { kind: "scoped" }> {
+	const snapshot = readTaskRuntimeProjection(store);
+	return {
+		kind: "scoped",
+		attempts: unendedWorkerAttempts(snapshot).map((attempt) => attempt.attemptId),
+		plans: Object.entries(snapshot.plans)
+			.filter(([, plan]) => !plan.closed)
+			.map(([planId]) => planId),
+	};
 }
 
 /**
- * Where bot `agentId`'s work stands now, read from its home on disk without writing it, as the owner's stop is made (its
- * `at` stamped): a read that fails is handed back, for the stop that could not be recorded to be dropped and told.
+ * The work of bot `agentId` there is now, read from its home on disk without writing it, as the owner's stop is made (its
+ * `at` stamped next): the worker attempts unended and the plans open in its saved session's bundle (none for a bot with no
+ * saved session or bundle, or whose saved session is a symbolic link, whose work no stop ends). What a stop recorded late
+ * ends ({@link UnrecordedBotStops}); `unread` the failure when it does not read.
  */
-export function readWorkMark(agentDir: string, agentId: string): WorkMarkReading {
-	return markReading(() => workMarkOf(agentDir, agentId, closedSessionOnDisk(agentDir, agentId)));
+export function readStopScope(
+	agentDir: string,
+	agentId: string,
+): { readonly scope: FleetStopScope } | { readonly unread: unknown } {
+	try {
+		const session = closedSessionOnDisk(agentDir, agentId);
+		const store = "saved" in session ? closedBundleStore(agentDir, agentId, session.saved) : undefined;
+		return { scope: store ? bundleWork(store) : { kind: "scoped", attempts: [], plans: [] } };
+	} catch (error) {
+		return { unread: error };
+	}
 }
 
 /** The owner's stop as `requestBotStop` writes it. */
@@ -553,18 +566,6 @@ export function writeOwnerStop(
 	return undefined;
 }
 
-/** The owner's stop that could not be recorded, with where the bot's work stood when it was made ({@link readWorkMark}). */
-export interface UnrecordedOwnerStop {
-	readonly stop: OwnerStop;
-	readonly mark: WorkMarkReading;
-}
-
-/** A stop held in memory, with where the bot's work stood when it was made. */
-interface HeldOwnerStop {
-	readonly stop: OwnerStop;
-	readonly mark: BotWorkMark;
-}
-
 /** A take of the stops waiting for a closed bot under its host lock: the stop it applied, if any, and its session as it read it. */
 export interface LockedBotStop {
 	readonly stop?: OwnerStop;
@@ -574,109 +575,99 @@ export interface LockedBotStop {
 /**
  * The owner's stops this process could not record (`requestBotStop` failed) for bots it does not host, the newest per bot,
  * kept for the process and agent directory across its hosts in turn (`bot-session-registry.ts`: a root session replaced by
- * a new or resumed one keeps them), held until a take of the bot's stops applies one: the unhosted application
- * ({@link applyUnhostedBotStop}), or this process's open of the bot's session, under its lock before the session is built
- * ({@link underLock}) and once it is built ({@link loaded}), so a stop made while the open runs is taken by it. A take that
- * applied it, or a newer stop that covers it, ends the hold; a failed one keeps it for the next.
- *
- * No other process learns of it, so it ends only the work there was when it was made: each stop is held with where the
- * bot's work stood as it was stamped ({@link readWorkMark}), and a take under the lock reads the bot's session from its home
- * on disk once, for that comparison and for the stop it applies, and drops the stop when the work moved, since a process
- * ran the bot since and what is there now came after the stop. Its own failed take marks it again where that take left the
- * bot. A read that fails inside a take keeps the stop held and fails the take. A stop held while this process opens or
- * closes the bot is marked where it found the bot then: the open's take once the session is built applies it under the same
- * lock, and what an open that failed, or a close, wrote after drops it. One whose mark does not read (as it was made, or
- * after its own take failed) is not held. A stop dropped either way is told to the owner once (`botStopDropped`), with the
- * way to make it again.
+ * a new or resumed one keeps them). Each is scoped to the work there was when it was made (`readStopScope`), so wherever
+ * and whenever it is applied it ends that work and nothing started after it. It is held until one of these ends it:
+ * - a take of the bot's stops applies it with the ones waiting, while no process hosts the bot: the unhosted application
+ *   under the bot's lock ({@link applyUnhostedBotStop}, {@link underLock}), or this process's open of the bot's session
+ *   once it is built ({@link loaded}), so a stop made while the open runs is taken by it; a failed take keeps it;
+ * - its record lands late while another process hosts the bot ({@link recordLate}): that host takes it, scoped as it was
+ *   made, and the owner is told it is recorded now;
+ * - a stop of the bot made later is recorded, which covers it ({@link drop});
+ * - this process quits ({@link recordAtQuit}): it is recorded one last time, and the owner told it is recorded or lost.
  */
 export class UnrecordedBotStops {
-	private readonly held = new Map<string, HeldOwnerStop>();
+	private readonly held = new Map<string, OwnerStopRequest>();
 	private readonly agentDir: string;
 
 	constructor(agentDir: string) {
 		this.agentDir = agentDir;
 	}
 
-	/**
-	 * Holds the stop for the bot, marked where its work stood when it was made, unless a newer one is held. One whose mark
-	 * did not read is dropped, the owner told, and leaves an older stop held as it was.
-	 */
-	hold(agentId: string, unrecorded: UnrecordedOwnerStop, warn: (message: string) => void): void {
-		const held = this.held.get(agentId);
-		if (held && unrecorded.stop.at < held.stop.at) return;
-		if ("mark" in unrecorded.mark) this.held.set(agentId, { stop: unrecorded.stop, mark: unrecorded.mark.mark });
-		else tellUnreadDrop(agentId, unrecorded.mark.unread, warn);
+	/** Holds the stop for its bot, unless a newer one is held. */
+	hold(stop: OwnerStopRequest): void {
+		const held = this.held.get(stop.agentId);
+		if (held && stop.at < held.at) return;
+		this.held.set(stop.agentId, stop);
 	}
 
 	/** The stop held for the bot. */
 	of(agentId: string): OwnerStop | undefined {
-		return this.held.get(agentId)?.stop;
+		return this.held.get(agentId);
 	}
 
-	/** The bot was released (retired, or off the session path): no stop is held for it. */
+	/** The bot was released (retired, or off the session path), or a later stop of it was recorded: none is held for it. */
 	drop(agentId: string): void {
 		this.held.delete(agentId);
 	}
 
 	/**
 	 * {@link applyBotStopUnderLock} under the lock the caller just took, on the bot's session as its home on disk holds it,
-	 * the stop held for the bot taken with the ones waiting while the bot's work stands where it was when the stop was made,
-	 * and dropped otherwise (see the class).
+	 * the stop held for the bot taken with the ones waiting. A failure throws with the stop still held.
 	 */
 	underLock(agentId: string, ports: BotStopPorts): LockedBotStop {
 		const session = closedSessionOnDisk(this.agentDir, agentId);
-		const marked = this.held.get(agentId);
-		if (marked && !sameWorkMark(marked.mark, workMarkOf(this.agentDir, agentId, session))) {
-			this.held.delete(agentId);
-			const text = interfaceText().botTeam;
-			ports.warn(text.botStopDropped(agentId, text.botStopDropReasons.workChanged));
-		}
 		const memory = this.held.get(agentId);
-		try {
-			const stop = applyBotStopUnderLock(this.agentDir, agentId, session, ports, memory?.stop);
-			this.taken(agentId, memory);
-			return { stop, session };
-		} catch (error) {
-			// What the take ended before it failed is this process's own move of the bot's work.
-			if (memory) {
-				const mark = markReading(() => workMarkOf(this.agentDir, agentId, session));
-				this.keep(agentId, { stop: memory.stop, mark }, ports.warn);
-			}
-			throw error;
-		}
+		const stop = applyBotStopUnderLock(this.agentDir, agentId, session, ports, memory);
+		this.taken(agentId, memory);
+		return { stop, session };
 	}
 
 	/**
-	 * {@link stopLoadedBot} of a session just built, no turn running yet, under the lock its open took: the held stop was
-	 * made since the take under it ({@link underLock}), so it ends the session's whole work; it is kept when the take failed.
+	 * {@link stopLoadedBot} of a session just built, no turn running yet, under the lock its open took: the stop held is
+	 * taken with the ones waiting, and kept when the take failed.
 	 */
 	loaded(agentId: string, loaded: LoadedBotSession, ports: BotStopPorts): LoadedBotStop {
 		const memory = this.held.get(agentId);
-		const taken = stopLoadedBot(this.agentDir, agentId, loaded, () => {}, ports, memory?.stop);
+		const taken = stopLoadedBot(this.agentDir, agentId, loaded, () => {}, ports, memory);
 		if (taken.failure === undefined) this.taken(agentId, memory);
 		return taken;
 	}
 
-	/** A take that read `held` (the one held when it began) applied it or a newer one: it is held no longer. */
-	private taken(agentId: string, held: HeldOwnerStop | undefined): void {
+	/**
+	 * Records the stop held for the bot (`requestBotStop`), dated, sent and scoped as it was made, for the process hosting
+	 * the bot to take: the hold ends and the owner is told it is recorded now. A write that fails again keeps it held and
+	 * tells nothing more (the owner was told when it was made).
+	 */
+	recordLate(agentId: string, warn: (message: string) => void): void {
+		const held = this.held.get(agentId);
+		if (!held || writeOwnerStop(this.agentDir, held, warn) !== undefined) return;
+		this.taken(agentId, held);
+		warn(interfaceText().botTeam.botStopRecordedLate(agentId));
+	}
+
+	/**
+	 * This process quits: every stop held is recorded one last time ({@link recordLate}) and none is held after it. What the
+	 * owner is told of each: that it is recorded now, or that it is lost and why. Never throws.
+	 */
+	recordAtQuit(): string[] {
+		const text = interfaceText().botTeam;
+		const told: string[] = [];
+		for (const held of this.held.values()) {
+			const unwritten = writeOwnerStop(this.agentDir, held, (message) => told.push(message));
+			told.push(
+				unwritten === undefined
+					? text.botStopRecordedLate(held.agentId)
+					: text.botStopLostAtQuit(held.agentId, unwritten),
+			);
+		}
+		this.held.clear();
+		return told;
+	}
+
+	/** A take or a write that read `held` (the one held when it began) applied or recorded it: it is held no longer. */
+	private taken(agentId: string, held: OwnerStopRequest | undefined): void {
 		if (held !== undefined && this.held.get(agentId) === held) this.held.delete(agentId);
 	}
-
-	/** Holds the stop at its mark; one whose mark did not read is dropped, and the owner told (see the class). */
-	private keep(agentId: string, { stop, mark }: UnrecordedOwnerStop, warn: (message: string) => void): void {
-		if ("mark" in mark) {
-			this.held.set(agentId, { stop, mark: mark.mark });
-			return;
-		}
-		this.held.delete(agentId);
-		tellUnreadDrop(agentId, mark.unread, warn);
-	}
-}
-
-/** The owner is told a stop was dropped because where the bot's work stands did not read (`unread`). */
-function tellUnreadDrop(agentId: string, unread: unknown, warn: (message: string) => void): void {
-	const text = interfaceText().botTeam;
-	warn(text.botStopDropped(agentId, text.botStopDropReasons.workUnread(botFailureText(agentId, unread))));
 }
 
 /**
@@ -695,7 +686,7 @@ function stopClosedSession(
 	const bundle = closedBundle(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
 	const store = closedBundleStore(agentDir, agentId, saved);
-	const outcome = store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, stop.reasonCode);
+	const outcome = store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, stop);
 	if (transcript) {
 		const now = ports.now();
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
@@ -785,8 +776,10 @@ export function endClosedBotWork(
 			ports.links.tell(agentId, RELEASE_OPERATION, "workers", [session.linked], sentence, ports.warn);
 		}
 		const store = closedBundleStore(agentDir, agentId, saved);
-		const outcome = store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, reasonCode);
-		endHomePlacedJobs(agentDir, agentId, (ids) => closedPlacers(ids, saved), reasonCode, RELEASE_OPERATION, ports);
+		const outcome =
+			store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, { reasonCode, scope: WHOLE_FLEET_STOP_SCOPE });
+		const placedBy = (ids: readonly string[]) => closedPlacers(ids, saved);
+		endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, EVERY_PLACED_JOB, RELEASE_OPERATION, ports);
 		return outcome;
 	} finally {
 		taken.lock.release();
@@ -832,25 +825,43 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
  * sessions placed are ended, so no open dispatches a lane again for a job that end reaches. The caller holds the bot's host
  * lock, so no process runs what it cancels. What it left unended.
  */
-function cancelBundleWorkers(store: OrchestrationEventStore, reasonCode: string): WorkerStopOutcome {
+function cancelBundleWorkers(store: OrchestrationEventStore, stop: FleetStop): WorkerStopOutcome {
 	const runtime = new DurableTaskRuntime({ store });
 	return stopSessionWorkers(
 		runtime,
 		undefined,
 		(attempt) => {
-			runtime.cancelAttempt(attempt.attemptId, reasonCode);
+			runtime.cancelAttempt(attempt.attemptId, stop.reasonCode);
 			return false;
 		},
-		reasonCode,
+		stop,
 	);
 }
 
 /**
- * Takes the stops waiting for bot `agentId`: the newest is applied to the bot's own work by `ownWork`, which must end it (a
- * failure throws with the stops left waiting, and what it told the owner is dropped, so a retry tells it once); then the
- * stop is taken (the messages it covers refused, every stop read deleted) and what `ownWork` told is told; then the jobs
- * the home's sessions placed are ended by `placedJobs`, which never keeps the stop. A stop that could not be recorded
- * (`memory`) is taken with them, applied when it is the newest; it covers the messages sent before it all the same.
+ * The stop that covers every stop in `stops` taken together: made when the newest was, for its reason, ending everything
+ * unended when one of them does (`whole`), else the work any of them was made over. None for none.
+ */
+function coveringStop(stops: readonly OwnerStop[]): OwnerStop | undefined {
+	if (stops.length === 0) return undefined;
+	const newest = stops.reduce((last, stop) => (stop.at > last.at ? stop : last));
+	const scoped = stops.flatMap((stop) => (stop.scope.kind === "scoped" ? [stop.scope] : []));
+	if (scoped.length < stops.length)
+		return { at: newest.at, reasonCode: newest.reasonCode, scope: WHOLE_FLEET_STOP_SCOPE };
+	const union = (ids: (scope: (typeof scoped)[number]) => readonly string[]) => [...new Set(scoped.flatMap(ids))];
+	return {
+		at: newest.at,
+		reasonCode: newest.reasonCode,
+		scope: { kind: "scoped", attempts: union((scope) => scope.attempts), plans: union((scope) => scope.plans) },
+	};
+}
+
+/**
+ * Takes the stops waiting for bot `agentId`, applied together as the one that covers them all ({@link coveringStop}): it is
+ * applied to the bot's own work by `ownWork`, which must end it (a failure throws with the stops left waiting, and what it
+ * told the owner is dropped, so a retry tells it once); then the stop is taken (the messages it covers refused, every stop
+ * read deleted) and what `ownWork` told is told; then the jobs the home's sessions placed are ended by `placedJobs`, which
+ * never keeps the stop. A stop that could not be recorded (`memory`) is taken with them.
  * Once it applied, what the owner was told of the stop's links ends with it (`LinkedSessionNotices.done`): a take of it
  * tried again after a failure told them already. A stop that does not read has no date to order it by and stops nothing: it is set aside and told as a stop, or, when it
  * could not be set aside, told once as one left in place, a leftover (`bot-home-records.ts`) no listing counts as
@@ -872,8 +883,7 @@ function takeStops(
 				: words.botInboxStopNotSetAside(agentId, file, reason, LEFTOVER_REREAD_MAX_MINUTES),
 		),
 	);
-	const recorded = stops.at(-1)?.message;
-	const newest = memory && (!recorded || memory.at > recorded.at) ? memory : recorded;
+	const newest = coveringStop([...stops.map((stop) => stop.message), ...(memory ? [memory] : [])]);
 	if (!newest) return undefined;
 	const told: string[] = [];
 	const outcome = ownWork(newest, (message) => told.push(message));

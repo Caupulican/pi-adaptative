@@ -4,6 +4,7 @@ import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import { recordHeldBotStopsAtQuit } from "./bots/bot-session-registry.ts";
 import { pathNotice } from "./cost/path-notice.ts";
 import {
 	type DiscardDisposition,
@@ -234,9 +235,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	sessionStartEvent?: SessionStartEvent;
 }) => Promise<PreparedAgentSessionRuntime>;
 
-/**
- * Thrown when /import references a JSONL file path that does not exist.
- */
+/** Thrown when /import references a JSONL file path that does not exist. */
 export class SessionImportFileNotFoundError extends Error {
 	readonly filePath: string;
 
@@ -1181,8 +1180,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				invalidateHost: true,
 				progress: this.disposeProgress,
 			});
-			// The quitting session's held warnings have no live session left to show them: they go to the terminal sink.
-			this.discardedWarnings.push(...this._session.takeUndeliveredWarnings());
+			// The quitting session's held warnings, and what its process's bot stops held unrecorded became as it quits
+			// (recorded one last time, or lost), have no live session left to show them: they go to the terminal sink.
+			this.discardedWarnings.push(...this._session.takeUndeliveredWarnings(), ...recordHeldBotStopsAtQuit());
 			this.terminalWarnings(this.takeDiscardedWarnings());
 			if (errors.length === 1) throw errors[0];
 			if (errors.length > 1) throw new AggregateError(errors, "Session runtime disposal failed.");

@@ -292,9 +292,12 @@ export function placedJobsOfSessionsLeft(agentDir: string, sessionIds: ReadonlyS
 	return false;
 }
 
+/** Which placed jobs an end names, by when each was placed and the attempt that placed it. */
+export type PlacedJobCover = (job: Pick<PlacerJobRecord, "createdAt" | "attemptId">) => boolean;
+
 /**
- * Ends every job the sessions `sessionIds` placed whose record reads, with no client of those sessions running (they are
- * closed): the owner's stop of a bot's placed jobs, of every session its home holds. A session's lanes end from these
+ * Ends every job the sessions `sessionIds` placed that `covers` names whose record reads, with no client of those
+ * sessions running (they are closed): the owner's stop of a bot's placed jobs, of every session its home holds. A session's lanes end from these
  * records when it opens again, and the executor is told by the process that follows the placed jobs. A record this build
  * cannot read names no session and is left. Returns how many jobs it ended.
  */
@@ -302,6 +305,7 @@ export function endPlacedJobsOfSessions(
 	agentDir: string,
 	sessionIds: ReadonlySet<string>,
 	cancel: JobCancelReason,
+	covers: PlacedJobCover,
 ): number {
 	if (sessionIds.size === 0) return 0;
 	const store = new JobStore(agentDir);
@@ -310,6 +314,7 @@ export function endPlacedJobsOfSessions(
 	for (const record of [...placed.valid.values()])
 		if (
 			sessionIds.has(record.ownerSession) &&
+			covers(record) &&
 			endPlacedRecord(agentDir, store, record.executorId, record.jobId, endingOfCancel(cancel), cancel)
 		)
 			ended += 1;

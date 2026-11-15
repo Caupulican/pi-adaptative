@@ -68,6 +68,14 @@ const hosts = new Map<string, SharedHost>();
  */
 const processKeeps = new Map<string, BotHostProcessKeeps>();
 
+/**
+ * This process quits: the owner's stops its root sessions' hosts hold unrecorded are recorded one last time
+ * (`UnrecordedBotStops.recordAtQuit`), and none is held after it. What the owner is told of each. Never throws.
+ */
+export function recordHeldBotStopsAtQuit(): string[] {
+	return [...processKeeps.values()].flatMap((keeps) => keeps.unrecorded.recordAtQuit());
+}
+
 /** What the hosts of agent directory `key` keep in this process: a root's are shared, a child host's are its own. */
 function keepsFor(key: string, root: boolean): BotHostProcessKeeps {
 	const kept = root ? processKeeps.get(key) : undefined;

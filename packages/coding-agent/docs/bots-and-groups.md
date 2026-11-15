@@ -135,16 +135,17 @@ are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every 
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
 taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also pauses its
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
-stop that could not be recorded for a bot no process hosts is held in memory by the process that made it, across the
-root sessions it runs in turn (a new, resumed or forked session keeps it; quitting the process drops it), until a take
-there applies it whole under the bot's host lock (a retry, or that process's open of the bot, a stop made during the
-open included), the messages sent before it refused. No other process learns of it, so it ends only the work there was
-when it was made: where the bot's work stands is read as the stop is dated, and each take reads the bot's saved session
-from its home on disk under the lock, for that comparison and for the stop it applies. The stop is dropped once a
-process ran the bot since (the bot's saved session, or that session's worker records, moved), and it is not held when
-where the bot's work stands cannot be read as the stop is made or after a take of it failed (an older stop already held
-stays held then); either way you are told once that it was dropped, and why, to send it again. A read that fails inside
-a take keeps the stop held and fails that take, for the next. For a bot this process hosts, a stop that could not be
+stop that could not be recorded for a bot no process hosts is held by the process that made it, across the root
+sessions it runs in turn (a new, resumed or forked session keeps it), scoped to the work there was when it was made: the
+workers then unended, the plans then open, the turn running since then and the jobs placed on other machines by then or
+by those workers. Wherever and whenever it is applied, it ends that work and nothing started after it. While no process
+hosts the bot, a take in that process applies it under the bot's host lock (a retry, or that process's open of the bot,
+a stop made during the open included), the messages sent before it refused; a take that fails keeps it held. While
+another process hosts the bot, the periodic check records it again in the bot's home until the write lands, for that
+host to take, and you are told it is recorded now. A stop of the bot recorded later covers it. When the process quits
+with the stop still held, it is recorded one last time and you are told whether it was recorded or lost. It is not held
+when the work there is cannot be read as the stop is made: you are told it was dropped, and why, to send it again. A
+host of an older build never takes a stop recorded late, which then waits until a host of this build takes it. For a bot this process hosts, a stop that could not be
 recorded applies only to the bot's work in this process, and you are told so. A worker the owner stopped opens no turn
 of the bot. A profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since
 `assign` runs `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A
@@ -219,9 +220,9 @@ stopped worker's watches end with it) and settles the results of its watches tha
 yet, recorded by a note in its conversation, and you are told how many of each it ended; a watch the bot arms after the
 stop is kept and wakes it as usual. A watch's wake its conversation had already taken before the stop is not withdrawn:
 it still runs when the bot next opens or is next sent words. A stop that cannot be written to the bot's home
-is not recorded: you are told it is held only by this running process (quitting it drops the stop), reaches no other
-process and is applied here only while the bot's work is unchanged (for a bot this process hosts, that it applies only
-to the bot's work in this process), and to send it again once it is dropped. A session started after every other one
+is not recorded: you are told this process holds it and records it again until it lands, and that wherever it is applied
+it ends only the work there was when it was made (for a bot this process hosts, that it applies only to the bot's work in
+this process). A session started after every other one
 closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the

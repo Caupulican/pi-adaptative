@@ -312,12 +312,12 @@ export class PlanExecutor implements PlanExecutorPort {
 	}
 
 	/**
-	 * Closes every open plan as cancelled for `reason` (the owner's stop, `stopSessionWorkers`): its running steps, prepared
-	 * dispatches and placed jobs stop for `reasonCode`, as a planner's cancel stops them for `plan_closed`.
+	 * Closes every open plan `covers` names as cancelled for `reason` (the owner's stop, `stopSessionWorkers`): its running
+	 * steps, prepared dispatches and placed jobs stop for `reasonCode`, as a planner's cancel stops them for `plan_closed`.
 	 */
-	cancelOpenPlans(reason: string, reasonCode: string): void {
+	cancelOpenPlans(reason: string, reasonCode: string, covers: (planId: string) => boolean): void {
 		for (const [planId, plan] of Object.entries(this.deps.runtime().getSnapshot().plans))
-			if (!plan.closed) this.closePlan(planId, "cancelled", reason, reasonCode);
+			if (!plan.closed && covers(planId)) this.closePlan(planId, "cancelled", reason, reasonCode);
 	}
 
 	/** The terminal route's predicate: the task runs (or ran) a step of a retained plan. */

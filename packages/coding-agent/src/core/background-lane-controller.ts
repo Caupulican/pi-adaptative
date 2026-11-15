@@ -1327,15 +1327,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._agentControl().cancelWorkerAgent(agentId, reasonCode, scope);
 	}
 
-	/** The owner's stop (`stopSessionWorkers`): plans closed, unended worker lanes cancelled; what it left unended, by why. */
-	cancelOwnFleet(reasonCode: string): WorkerStopOutcome {
+	/** The owner's `stop` (`stopSessionWorkers`): the plans and unended worker lanes it covers ended; what it left, by why. */
+	cancelOwnFleet(stop: Parameters<typeof stopSessionWorkers>[3]): WorkerStopOutcome {
 		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [], stopped: 0 };
 		const fleet = () => this._getWorkerController().getFleet();
 		return stopSessionWorkers(
 			this._getWorkerLifecycle().ledger.runtime,
 			this._planExecutor,
-			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, reasonCode).length > 0,
-			reasonCode,
+			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, stop.reasonCode).length > 0,
+			stop,
 		);
 	}
 

@@ -5,14 +5,17 @@
  * refused record with its reason (the newest few), so every session's chat with the bot shows what happened to it.
  *
  * Files: `<at>-<id>.json` waiting, `<at>-<id>.refused.json` refused, `<at>-<id>.stop.json` the owner's stop of the bot's
- * work, `<name>.unreadable` a file that did not read as a record, set aside so it neither blocks the queue nor is lost.
+ * work, `<at>-<id>.scoped.stop.json` a stop recorded after it was made (the process that made it could not record it then),
+ * which ends only the work there was when it was made, `<name>.unreadable` a file that did not read as a record, set aside
+ * so it neither blocks the queue nor is lost.
  *
  * Suffix rule: every kind has its own suffix after `<at>-<id>` and its own reader, and a reader lists only its suffix, so a
  * kind a build does not know is never read as another (a build that knows no stop record leaves it where it is). A stop
  * record is no message: the queue's caps do not count it, the bot's chat does not show it, and it never opens a bot. Only
- * the newest is kept, since one stop ends all the work there is: the process holding `host.lock` takes it and stops the
- * bot's foreground turn and its whole worker fleet. Every write is an atomic replace, so a reader never sees a
- * partial message. Delivery is at least once: a host killed after its session accepted a message and before it deleted the
+ * the newest whole stop is kept, since one ends all the work there is: the process holding `host.lock` takes it and stops
+ * the bot's foreground turn and its whole worker fleet. A scoped stop has a suffix of its own, so a build that knows only
+ * the whole stop never lists, takes or counts it; every scoped stop is kept until a take, each naming the work it ends.
+ * Every write is an atomic replace, so a reader never sees a partial message. Delivery is at least once: a host killed after its session accepted a message and before it deleted the
  * file gives it again at the next open.
  *
  * The directory is private harness storage like the session files beside it: a worker's and a bot session's file and
@@ -23,6 +26,7 @@ import { rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
+import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
@@ -44,6 +48,9 @@ const MAX_REFUSED_KEPT = 8;
 const WAITING = /^\d{15}-[0-9a-f-]{36}\.json$/;
 const REFUSED = /^\d{15}-[0-9a-f-]{36}\.refused\.json$/;
 const STOP = /^\d{15}-[0-9a-f-]{36}\.stop\.json$/;
+const SCOPED_STOP = /^\d{15}-[0-9a-f-]{36}\.scoped\.stop\.json$/;
+/** Either kind of stop. */
+const ANY_STOP = /^\d{15}-[0-9a-f-]{36}\.(?:scoped\.)?stop\.json$/;
 
 /** How the owner asked the words to reach a running turn (`BotOperatorMessageOptions.mode`). */
 export type BotInboxMode = "follow_up" | "queue" | "start";
@@ -79,6 +86,11 @@ export interface BotInboxStop {
 	readonly reasonCode: string;
 	readonly at: number;
 	readonly from: BotInboxSender;
+	/**
+	 * What it ends: everything of the bot's when it is taken (`whole`, a `.stop.json`), or, recorded after it was made, only
+	 * the work there was then (`scoped`, a `.scoped.stop.json`).
+	 */
+	readonly scope: FleetStopScope;
 }
 
 /** A message as the inbox holds it: the file it is in and what it says. */
@@ -111,7 +123,7 @@ function parseRefusal(value: unknown, agentId: string): BotInboxRefusal | undefi
 	return { ...message, refusedAt: value.refusedAt, reason: value.reason };
 }
 
-function parseStop(value: unknown, agentId: string): BotInboxStop | undefined {
+function parseStop(value: unknown, agentId: string, scoped: boolean): BotInboxStop | undefined {
 	if (
 		!isPlainRecord(value) ||
 		value.version !== 1 ||
@@ -122,8 +134,18 @@ function parseStop(value: unknown, agentId: string): BotInboxStop | undefined {
 	)
 		return undefined;
 	const from = parseSender(value.from);
-	if (!from) return undefined;
-	return { version: 1, id: value.id, agentId, reasonCode: value.reasonCode, at: value.at, from };
+	const scope = scoped ? parseScope(value.scope) : WHOLE_FLEET_STOP_SCOPE;
+	if (!from || !scope) return undefined;
+	return { version: 1, id: value.id, agentId, reasonCode: value.reasonCode, at: value.at, from, scope };
+}
+
+const isIdList = (value: unknown): value is string[] =>
+	Array.isArray(value) && value.every((item) => typeof item === "string");
+
+/** A scoped stop's `scope`: the attempt and plan ids it ends. */
+function parseScope(value: unknown): FleetStopScope | undefined {
+	if (!isPlainRecord(value) || !isIdList(value.attempts) || !isIdList(value.plans)) return undefined;
+	return { kind: "scoped", attempts: value.attempts, plans: value.plans };
 }
 
 /** The messages waiting for the bot's session, oldest first. */
@@ -149,13 +171,20 @@ export function botInboxWaiting(agentDir: string, agentId: string): boolean {
 	return homeRecordNames(botInboxDir(agentDir, agentId), WAITING).length > 0;
 }
 
-/** The stops waiting for the process that hosts the bot's session, oldest first (one, unless two writers raced). */
+/**
+ * The stops waiting for the process that hosts the bot's session, oldest first: the newest whole stop (another, if two
+ * writers raced) and every scoped stop.
+ */
 export function readBotInboxStops(
 	agentDir: string,
 	agentId: string,
 	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotHomeRecord<BotInboxStop>[] {
-	return readHomeRecords(botInboxDir(agentDir, agentId), STOP, (value) => parseStop(value, agentId), unreadable);
+	const dir = botInboxDir(agentDir, agentId);
+	return [
+		...readHomeRecords(dir, STOP, (value) => parseStop(value, agentId, false), unreadable),
+		...readHomeRecords(dir, SCOPED_STOP, (value) => parseStop(value, agentId, true), unreadable),
+	].sort((a, b) => a.message.at - b.message.at);
 }
 
 /** Whether a stop waits for the process that hosts the bot's session; read from the names alone. */
@@ -163,32 +192,40 @@ export function botInboxStopWaiting(agentDir: string, agentId: string): boolean 
 	return botInboxStopNames(agentDir, agentId).length > 0;
 }
 
-/** The file names of the stops waiting, oldest first: which stops wait, read from the names alone. */
+/** The file names of the stops waiting (both kinds), oldest first: which stops wait, read from the names alone. */
 export function botInboxStopNames(agentDir: string, agentId: string): readonly string[] {
-	return homeRecordNames(botInboxDir(agentDir, agentId), STOP);
+	return homeRecordNames(botInboxDir(agentDir, agentId), ANY_STOP);
 }
 
 /**
  * Writes the owner's stop of the bot's work for the process that hosts its session (one that holds `host.lock` while the
- * sender does not), and drops the older stops: the newest says all of them. Once written the stop is recorded, whatever
- * becomes of the older ones: a drop that failed is handed back (`olderLeft`), the older stops then taken with it.
+ * sender does not). A whole stop drops the older whole stops: the newest says all of them. Once written the stop is
+ * recorded, whatever becomes of the older ones: a drop that failed is handed back (`olderLeft`), the older stops then
+ * taken with it. A scoped stop drops none: it names only the work there was when it was made, and a whole stop is never
+ * replaced by it.
  */
 export function requestBotStop(
 	agentDir: string,
-	input: { agentId: string; reasonCode: string; from: BotInboxSender; at: number },
+	input: { agentId: string; reasonCode: string; from: BotInboxSender; at: number; scope: FleetStopScope },
 ): { readonly record: BotHomeRecord<BotInboxStop>; readonly olderLeft?: unknown } {
 	const dir = botInboxDir(agentDir, input.agentId);
-	const stop: BotInboxStop = {
+	const id = randomUUID();
+	const head = {
 		version: 1,
-		id: randomUUID(),
+		id,
 		agentId: input.agentId,
 		reasonCode: input.reasonCode,
 		at: input.at,
 		from: input.from,
 	};
-	const file = join(dir, `${String(input.at).padStart(15, "0")}-${stop.id}.stop.json`);
-	writeFileAtomicSync(file, `${JSON.stringify(stop)}\n`, { mode: 0o600 });
-	const record = { file, message: stop };
+	const { scope } = input;
+	const name = `${String(input.at).padStart(15, "0")}-${id}${scope.kind === "whole" ? "" : ".scoped"}.stop.json`;
+	const file = join(dir, name);
+	// A whole stop is written as every build reads it; a scoped one carries the ids of the work it ends.
+	const body = scope.kind === "whole" ? head : { ...head, scope: { attempts: scope.attempts, plans: scope.plans } };
+	writeFileAtomicSync(file, `${JSON.stringify(body)}\n`, { mode: 0o600 });
+	const record = { file, message: { ...head, version: 1 as const, scope } };
+	if (scope.kind !== "whole") return { record };
 	try {
 		keepNewestHomeRecords(dir, STOP, 1);
 	} catch (error) {

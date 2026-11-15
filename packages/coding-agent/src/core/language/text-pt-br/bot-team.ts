@@ -131,7 +131,11 @@ export const BOT_TEAM = {
 	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string, maxMinutes: number) =>
 		`Bot ${agentId}: não foi possível ler ${record} (${reason}) nem separar o arquivo ${file}; ele continua no lugar, não conta como esperando e é lido de novo, com no máximo ${maxMinutes} minutos de intervalo, até ser lido; este aviso é dado só uma vez.`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); só este processo em execução a mantém, então ela não chega a nenhum outro processo, é descartada se este processo for encerrado e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
+		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); este processo a mantém e tenta registrá-la de novo até conseguir, aplicando-a ele mesmo enquanto nenhum processo hospeda o bot, e se este processo for encerrado antes você é avisado se ela foi registrada. Onde quer que seja aplicada, ela encerra só o trabalho que existia quando você parou o bot.`,
+	botStopRecordedLate: (agentId: string) =>
+		`Bot ${agentId}: a parada do dono que antes não pôde ser registrada agora está registrada; ela encerra só o trabalho que existia quando você parou o bot.`,
+	botStopLostAtQuit: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada do dono que não pôde ser registrada se perdeu quando este processo foi encerrado (${reason}); envie-a de novo se ainda a quiser.`,
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e se aplica só ao trabalho do bot neste processo.`,
 	botInboxStopUnreadable: (agentId: string, file: string, reason: string) =>
@@ -163,7 +167,6 @@ export const BOT_TEAM = {
 	botStopDropped: (agentId: string, why: string) =>
 		`Bot ${agentId}: a parada do dono que não pôde ser registrada foi descartada: ${why}; envie-a outra vez.`,
 	botStopDropReasons: {
-		workChanged: "o trabalho do bot mudou desde que ela foi feita",
 		workUnread: (reason: string) => `não foi possível ler onde está o trabalho do bot (${reason})`,
 	},
 	botStopHostUnread: (agentId: string, reason: string) =>

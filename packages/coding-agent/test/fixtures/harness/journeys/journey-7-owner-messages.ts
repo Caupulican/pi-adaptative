@@ -1,14 +1,21 @@
 import "../builtin-install.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { expect } from "vitest";
 import { botHostLockFile, botInboxDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { LEFTOVER_REREAD_MAX_MINUTES } from "../../../../src/core/bots/bot-home-records.ts";
 import { BotHostStateWriter } from "../../../../src/core/bots/bot-host-state.ts";
-import { botInboxWaiting, readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
+import {
+	botInboxStopNames,
+	botInboxWaiting,
+	readBotInbox,
+	readBotInboxStops,
+} from "../../../../src/core/bots/bot-inbox.ts";
 import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
+import { OWED_INBOX_SWEEP_MS } from "../../../../src/core/bots/bot-session-owed-work.ts";
+import { OWNER_STOPPED_REASON } from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { takeProcessLock } from "../../../../src/core/remote/host-lock.ts";
 import { createBarrier } from "../scripted-provider.ts";
@@ -60,6 +67,8 @@ const LEFTOVER_ANSWER = "A cache entry lives for ten minutes.";
 /** Another bot session host: in another process, or another host in this one, the lock names it the same way. */
 const OTHER_HOST = "j7-other-host";
 const OTHER_HOST_SESSION = "0f1e2d3c-4b5a-4968-8776-655443322110";
+const LATE = "late-stop";
+const LATE_SOUL = "You answer owner questions about the queue depth with one short sentence.";
 
 /**
  * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its own session (no worker stands
@@ -68,7 +77,8 @@ const OTHER_HOST_SESSION = "0f1e2d3c-4b5a-4968-8776-655443322110";
  * mention narrows it to one, and a mention of a bot outside the group is refused before anything is delivered. None of it
  * starts a root turn: the owner talks to the bots, not through the orchestrator. A message to a bot another host holds
  * waits in the bot's inbox, naming that host's session and process, and builds nothing here; once that host gives the bot
- * back, this host takes the message and the bot answers it here, once.
+ * back, this host takes the message and the bot answers it here, once. A stop of a bot another host holds that the bot's
+ * home refused is held here and recorded by the periodic check once the home takes writes again, for that host to take.
  */
 export async function runJourney7OwnerMessagesPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -317,6 +327,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 
 	await sendToBotHeldElsewhere(world, session);
 	await leftoverInInbox(world, session);
+	await stopRecordedLate(world, session);
 }
 
 /**
@@ -501,6 +512,96 @@ async function sendToBotHeldElsewhere(world: HarnessWorld, session: AgentSession
 		},
 		"once the other host gave the bot back, this host took the waiting message: the bot's own session opened here and answered it, delivered once and taken out of the inbox",
 	).toEqual({ asked: 1, requests: 1, inbox: 0, answered: true, stored: 1 });
+}
+
+/**
+ * The owner's stop of a bot another host holds, made while the bot's home refuses the write, is held by this process,
+ * the owner told it could not be recorded. Once the home takes writes again, the periodic check records it for that host
+ * to take, dated and sent as it was made and scoped to the work there was then (a bot that never ran has none), and the
+ * owner is told it is recorded now. Once the other host gives the bot back, this host takes the stop and nothing waits.
+ */
+async function stopRecordedLate(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const words = interfaceText().botTeam;
+	createOwnerBot(session, LATE, MODEL_ID.held, LATE_SOUL);
+	const inbox = resolve(botInboxDir(world.agentDir, LATE));
+	const taken = takeProcessLock(botHostLockFile(world.agentDir, LATE), OTHER_HOST);
+	if (!taken.held) throw new Error("the other host could not take the bot's lock");
+	const otherState = new BotHostStateWriter(world.agentDir, {
+		agentId: LATE,
+		hostKind: "session",
+		hostSessionId: OTHER_HOST_SESSION,
+		botSessionId: "j7-late-stop-session",
+		holder: OTHER_HOST,
+	});
+	otherState.publish("idle");
+	const [notRecordedHead, notRecordedTail] = words.botStopNotRecorded(LATE, "\0").split("\0");
+	const shapes = (warnings: readonly string[]) =>
+		warnings.map((warning) =>
+			warning.startsWith(notRecordedHead ?? "") && warning.endsWith(notRecordedTail ?? "") ? "notRecorded" : warning,
+		);
+	const mark = world.warnings.length;
+	try {
+		const unwritable = world.io.denyUntilCleared({
+			name: "j7-late-stop-unwritten",
+			kind: "write",
+			matches: (operation) => resolve(operation.path).startsWith(inbox),
+			code: "EACCES",
+		});
+		const madeFrom = Date.now();
+		try {
+			session.stopPersistentBot(LATE);
+		} finally {
+			unwritable.clear();
+		}
+		const madeBy = Date.now();
+		expect(
+			{ stops: botInboxStopNames(world.agentDir, LATE), warnings: shapes(world.warnings.slice(mark)) },
+			"a stop the bot's home refused is not recorded, and the owner is told it is held here",
+		).toEqual({ stops: [], warnings: ["notRecorded"] });
+		const recorded = world.io.waitForMutation(() => botInboxStopNames(world.agentDir, LATE).length > 0);
+		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
+		await withDeadline(world.trace, "J7 leg 2: the periodic check recorded the stop held here", recorded);
+		const stops = readBotInboxStops(world.agentDir, LATE, (file, reason) => {
+			throw new Error(`the bot's inbox holds an unreadable stop ${file}: ${reason}`);
+		});
+		expect(
+			{
+				stops: stops.map((item) => ({
+					scopedFile: item.file.endsWith(".scoped.stop.json"),
+					madeThen: item.message.at >= madeFrom && item.message.at <= madeBy,
+					from: { pid: item.message.from.pid, sessionId: item.message.from.sessionId },
+					reasonCode: item.message.reasonCode,
+					scope: item.message.scope,
+				})),
+				warnings: shapes(world.warnings.slice(mark)),
+			},
+			"while another host holds the bot, the periodic check records the stop held here, dated and sent as it was made and scoped to the work there was then, and the owner is told it is recorded now",
+		).toEqual({
+			stops: [
+				{
+					scopedFile: true,
+					madeThen: true,
+					from: { pid: process.pid, sessionId: session.sessionId },
+					reasonCode: OWNER_STOPPED_REASON,
+					scope: { kind: "scoped", attempts: [], plans: [] },
+				},
+			],
+			warnings: ["notRecorded", words.botStopRecordedLate(LATE)],
+		});
+	} finally {
+		// The other host gives the bot back: its state is cleared and its lock released.
+		otherState.clear();
+		taken.lock.release();
+	}
+	await withDeadline(
+		world.trace,
+		"J7 leg 2: this host took the stop recorded late once the other host gave the bot back",
+		world.io.waitForMutation(() => botInboxStopNames(world.agentDir, LATE).length === 0),
+	);
+	expect(
+		shapes(world.warnings.slice(mark)),
+		"the stop recorded late is taken here once the bot is given back, and the owner is told nothing more",
+	).toEqual(["notRecorded", words.botStopRecordedLate(LATE)]);
 }
 
 /** How many user messages of a conversation carry `text`: the owner's words delivered once are in one of them. */
