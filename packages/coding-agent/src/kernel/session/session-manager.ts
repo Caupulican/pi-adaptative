@@ -77,7 +77,7 @@ import {
 	type SessionAppendReceipt,
 	SessionAppendUncertainError,
 } from "./session-append-receipt.ts";
-import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
+import { sessionExclusiveHost } from "./session-bundle-lifecycle.ts";
 import type { SessionStorageRoots } from "./session-bundle-paths.ts";
 import {
 	buildSessionContext,
@@ -3318,10 +3318,10 @@ export class SessionManager {
 		const defaultDirs = getDefaultSessionDirCandidates(cwd, roots.agentDir);
 		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
 		const searchDirs = sessionDir ? [dir] : defaultDirs;
-		// The phone session the bot daemon hosts is skipped: opening it here is refused while the daemon holds it.
+		// A session a channel or bot host holds is skipped: opening it here is refused while that host holds it.
 		const hosted = (id: string): boolean => {
 			try {
-				return sessionChannelHost(roots.orchestrationHome, id) !== undefined;
+				return sessionExclusiveHost(roots.orchestrationHome, id) !== undefined;
 			} catch {
 				return false; // An unreadable registry is reported by the open's own lease acquisition.
 			}

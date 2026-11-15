@@ -154,7 +154,7 @@ export interface CreateAgentSessionOptions
 	/** @deprecated Pass `standing`. True makes the session a worker (`{ kind: "worker" }`), false a root. */
 	isChildSession?: boolean;
 	/** Removed: pass `standing: { kind: "bot", agentId }`. */ holdsOwnWatches?: never;
-	/** The role of the session's lifetime lease; default `session`. The bot daemon's phone session holds `channel-host`. */
+	/** The role of the session's lifetime lease; default `session`. The phone session holds `channel-host`, a bot's own `bot-host`. */
 	bundleLeaseRole?: SessionLeaseRole;
 	/**
 	 * `daemon`: the bot daemon's channel host serves this session's channels, so the session starts none, takes no channel
@@ -403,7 +403,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, ownerSessionStorageRoots(agentDir));
 	// The session's home is its manager's: its own writes are admitted against the bundle lease taken there.
 	const { orchestrationHome } = sessionManager.getStorageRoots();
-	// An AgentSession never opens a session the bot daemon hosts (`SessionHostedError`); the daemon's own hold is `channel-host`.
+	// An AgentSession never opens a session a channel or bot host holds (`SessionHostedError`); theirs is that host's own.
 	const bundleLease = sessionManager.isPersisted()
 		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
 				role: options.bundleLeaseRole ?? "session",

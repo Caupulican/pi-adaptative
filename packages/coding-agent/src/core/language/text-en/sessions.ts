@@ -7,6 +7,13 @@
  */
 
 export const SESSIONS = {
+	/** A session another process hosts is refused here: by the daemon as the phone session, or by its bot's host. */
+	hosted: {
+		phone: (pid: number) =>
+			`This is the phone session; the background daemon (pid ${pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
+		bot: (pid: number) =>
+			`This session is a bot's own conversation; its host (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process to open the session here.`,
+	},
 	model: {
 		chosen: (modelId: string) => `Model: ${modelId}`,
 		defaultChosen: (modelId: string) => `Default model: ${modelId}`,

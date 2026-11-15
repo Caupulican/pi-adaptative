@@ -51,6 +51,7 @@ import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
 import { refuseHostedSession, SessionHostedError } from "../../core/orchestration/session-bundle-lifecycle.ts";
 import { sessionStorageRootsOfFile } from "../../core/orchestration-homes.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
+import { hostedSessionRefusal } from "../../core/session-switch-failures.ts";
 import type { ModelFavorite } from "../../core/settings/settings-schema.ts";
 import { parseTaskCommand } from "../../core/tasks/task-command.ts";
 import {
@@ -522,15 +523,15 @@ export function showSessionSelector(host: SessionFlowHost): void {
 				renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
 					const next = (nextName ?? "").trim();
 					if (!next) return;
-					// A session the bot daemon hosts is never written from here (`SessionHostedError`), asked in the home
-					// the file is opened in.
+					// A session a channel or bot host holds is never written from here (`SessionHostedError`), asked in the
+					// home the file is opened in.
 					const roots = sessionStorageRootsOfFile(agentDir, sessionFilePath);
 					const header = readSessionHeaderResult(sessionFilePath);
 					try {
 						if (header.ok) refuseHostedSession(roots.orchestrationHome, header.header.id);
 					} catch (error) {
 						if (!(error instanceof SessionHostedError)) throw error;
-						host.showError(error.message);
+						host.showError(hostedSessionRefusal(error));
 						return;
 					}
 					const mgr = SessionManager.open(sessionFilePath, roots);

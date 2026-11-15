@@ -1,12 +1,13 @@
 /**
  * The failures of a session switch (`AgentSessionRuntime`'s replacement boundary): a teardown, activation or admission
  * failure with its rollback outcome, and a follow-up step that failed after the replacement committed. Each carries the
- * owner-facing message; the phase name itself stays in the debug log. A file the bot daemon hosts is refused here, as
- * an admission failure, before anything is opened.
+ * owner-facing message; the phase name itself stays in the debug log. A file a channel or bot host holds is refused
+ * here, as an admission failure, before anything is opened.
  */
 import { harnessLog } from "../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { resolvePath } from "../utils/paths.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import {
 	refuseHostedSession,
 	SessionHostedError,
@@ -36,11 +37,16 @@ export class SessionReplacementRuntimeError extends Error {
 		recoveryError?: unknown,
 		undeliveredWarnings: readonly string[] = [],
 	) {
-		const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
+		const transitionMessage =
+			transitionError instanceof SessionHostedError
+				? hostedSessionRefusal(transitionError)
+				: transitionError instanceof Error
+					? transitionError.message
+					: String(transitionError);
 		const warnings = undeliveredWarnings.length > 0 ? `. ${undeliveredWarnings.join(" ")}` : "";
 		harnessLog.debug("ui", "a session switch failed", () => ({ phase, recovered }));
 		super(
-			// A session the bot daemon hosts is refused with its own one message; nothing was opened.
+			// A session a channel or bot host holds is refused with its own one message; nothing was opened.
 			phase === "admission" && transitionError instanceof SessionHostedError
 				? transitionMessage
 				: phase === "admission"
@@ -72,8 +78,14 @@ export class SessionReplacementCallbackError extends Error {
 	}
 }
 
+/** The owner's words for a session another process hosts: the phone session the daemon hosts, or a bot's own session. */
+export function hostedSessionRefusal(error: SessionHostedError): string {
+	const words = interfaceText().sessions.hosted;
+	return error.holder.role === "bot-host" ? words.bot(error.holder.pid) : words.phone(error.holder.pid);
+}
+
 /**
- * Refuse a session file the bot daemon hosts in `roots`, the home it is opened in, before it is opened or copied: a
+ * Refuse a session file a channel or bot host holds in `roots`, the home it is opened in, before it is opened or copied: a
  * recovered admission failure (the previous session stays active) whose message is the hosted one; nothing is written.
  */
 export function refuseHostedSessionFile(roots: SessionStorageRoots, path: string): void {

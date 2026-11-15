@@ -34,6 +34,12 @@ function goalStatusWord(status: string): string {
 }
 
 export const SESSIONS = {
+	hosted: {
+		phone: (pid: number) =>
+			`Esta é a sessão do telefone; o daemon em segundo plano (pid ${pid}) a hospeda. Pare o daemon para abri-la aqui (\`/bot daemon stop\`).`,
+		bot: (pid: number) =>
+			`Esta sessão é a conversa do próprio bot; o host dele (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo para abrir a sessão aqui.`,
+	},
 	model: {
 		chosen: (modelId: string) => `Modelo: ${modelId}`,
 		defaultChosen: (modelId: string) => `Modelo padrão: ${modelId}`,

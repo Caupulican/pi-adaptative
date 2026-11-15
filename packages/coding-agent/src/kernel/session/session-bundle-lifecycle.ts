@@ -70,10 +70,16 @@ export function hasCurrentSessionBundleAdmission(home: OrchestrationHome, parent
  * What a hold serves: `session`, an open session of the parent (the foreground, or an SDK session); `away-host`, the
  * bot daemon running the parent's routine runs while it is closed. An away host keeps the bundle alive but is no session:
  * it never takes back a collaboration job, so it never blocks another session's adoption of one. `channel-host`, the bot
- * daemon hosting the owner's phone session: it is the session's only open holder, so it is admitted only while no
- * session or other channel host holds the session, and an AgentSession open is refused while it holds it.
+ * daemon hosting the owner's phone session, and `bot-host`, a bot's host running the bot's own session: each is its
+ * session's only open holder ({@link isExclusiveHostRole}), so it is admitted only while no session or other such host
+ * holds the session, and an AgentSession open is refused while it holds it.
  */
-export type SessionLeaseRole = "session" | "away-host" | "channel-host";
+export type SessionLeaseRole = "session" | "away-host" | "channel-host" | "bot-host";
+
+/** A role that hosts its session alone: the phone session's channel host and a bot's host. */
+export function isExclusiveHostRole(role: SessionLeaseRole): boolean {
+	return role === "channel-host" || role === "bot-host";
+}
 
 /** A holder named in a refusal: its process id and what it serves. */
 export interface SessionLeaseHolderRef {
@@ -81,15 +87,18 @@ export interface SessionLeaseHolderRef {
 	readonly role: SessionLeaseRole;
 }
 
-/** A channel host was refused: the session is open (or held by a process that cannot be judged dead). */
+/** A channel or bot host (`refused`) was refused: the session is open (or held by a process that cannot be judged dead). */
 export class SessionHeldError extends Error {
 	readonly holders: readonly SessionLeaseHolderRef[];
-	constructor(parentSessionId: string, holders: readonly SessionLeaseHolderRef[]) {
+	readonly refused: SessionLeaseRole;
+	constructor(parentSessionId: string, holders: readonly SessionLeaseHolderRef[], refused: SessionLeaseRole) {
+		const host = refused === "bot-host" ? "the bot's host runs" : "the daemon hosts";
 		super(
-			`Session ${parentSessionId} is open (pid ${holders.map((holder) => holder.pid).join(", ")}); the daemon hosts it once it is closed.`,
+			`Session ${parentSessionId} is open (pid ${holders.map((holder) => holder.pid).join(", ")}); ${host} it once it is closed.`,
 		);
 		this.name = "SessionHeldError";
 		this.holders = holders;
+		this.refused = refused;
 	}
 }
 
@@ -113,12 +122,17 @@ export class SessionHomeChangedError extends Error {
 	}
 }
 
-/** An AgentSession open was refused: the bot daemon hosts the session as the owner's phone session. */
+/**
+ * An AgentSession open was refused: the bot daemon hosts the session as the owner's phone session (`channel-host`), or
+ * a bot's host runs it as the bot's own (`bot-host`). The owner reads it in their language (`hostedSessionRefusal`).
+ */
 export class SessionHostedError extends Error {
 	readonly holder: SessionLeaseHolderRef;
 	constructor(holder: SessionLeaseHolderRef) {
 		super(
-			`This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
+			holder.role === "bot-host"
+				? `This session is a bot's own conversation; its host (pid ${holder.pid}) runs it.`
+				: `This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
 		);
 		this.name = "SessionHostedError";
 		this.holder = holder;
@@ -135,9 +149,10 @@ interface BundleHolder {
 
 /**
  * Schema 2 records each holder as a {@link ProcessOwner}; schema 1 (`host` + `pid`) is still read. Schema 3 adds a
- * `role` key to an away-host or channel-host holder; the registry is written as schema 3 only while it holds one, so a
- * build that predates roles refuses (as needing inspection) only a parent such a host holds right now, and a build that
- * knows only `away-host` refuses a channel-host holder (its key count is that of no holder it reads).
+ * `role` key to an away-host, channel-host or bot-host holder; the registry is written as schema 3 only while it holds
+ * one, so a build that predates roles refuses (as needing inspection) only a parent such a host holds right now, and a
+ * build that does not know a role refuses its holder (its key count is that of no holder it reads): a bot session its
+ * host holds is refused, not opened beside it, by a build older than the `bot-host` role.
  */
 const HOLDERS_SCHEMA_VERSION = 2;
 const ROLE_HOLDERS_SCHEMA_VERSION = 3;
@@ -207,9 +222,11 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const holders: BundleHolder[] = [];
 	for (const holder of value.holders) {
 		const owner = isPlainRecord(holder) ? parseRecordedOwner(holder, legacy) : undefined;
-		// Only an away or channel host records its role; a holder without one is a session.
+		// Only an away, channel or bot host records its role; a holder without one is a session.
 		const role =
-			roles && isPlainRecord(holder) && (holder.role === "away-host" || holder.role === "channel-host")
+			roles &&
+			isPlainRecord(holder) &&
+			(holder.role === "away-host" || holder.role === "channel-host" || holder.role === "bot-host")
 				? holder.role
 				: undefined;
 		if (
@@ -266,9 +283,9 @@ const holderRef = (holder: {
 });
 
 /**
- * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel host is
- * refused while a session or another channel host holds the session, a session asking `refuseHosted` while a channel
- * host does; every other admission is bounded by capacity alone.
+ * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel or bot
+ * host is refused while a session or another such host holds the session, a session asking `refuseHosted` while such
+ * a host does; every other admission is bounded by capacity alone.
  */
 function admitHolder(
 	parentSessionId: string,
@@ -277,11 +294,11 @@ function admitHolder(
 	refuseHosted: boolean,
 ): BundleHolder[] {
 	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
-	if (holder.role === "channel-host") {
-		const open = holders.filter((entry) => entry.role === "session" || entry.role === "channel-host");
-		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef));
+	if (isExclusiveHostRole(holder.role)) {
+		const open = holders.filter((entry) => entry.role === "session" || isExclusiveHostRole(entry.role));
+		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef), holder.role);
 	}
-	const host = refuseHosted && holder.role === "session" && holders.find((entry) => entry.role === "channel-host");
+	const host = refuseHosted && holder.role === "session" && holders.find((entry) => isExclusiveHostRole(entry.role));
 	if (host) throw new SessionHostedError(holderRef(host));
 	return [...holders, holder];
 }
@@ -328,19 +345,22 @@ export function orchestrationHomeHoldsSession(home: OrchestrationHome, parentSes
 	);
 }
 
-/** The channel host holding the session that is not proven dead, if any; read-only like {@link readSessionLeaseHolders}. */
-export function sessionChannelHost(home: OrchestrationHome, parentSessionId: string): SessionLeaseHolder | undefined {
+/**
+ * The channel or bot host holding the session that is not proven dead, if any; read-only like
+ * {@link readSessionLeaseHolders}.
+ */
+export function sessionExclusiveHost(home: OrchestrationHome, parentSessionId: string): SessionLeaseHolder | undefined {
 	return readSessionLeaseHolders(home, parentSessionId).find(
-		(holder) => holder.role === "channel-host" && holder.standing !== "dead",
+		(holder) => isExclusiveHostRole(holder.role) && holder.standing !== "dead",
 	);
 }
 
 /**
- * Refuse, before anything is opened or written, to open a session the bot daemon hosts: the check the AgentSession
+ * Refuse, before anything is opened or written, to open a session a channel or bot host holds: the check the AgentSession
  * acquire makes ({@link acquireSessionBundleLease} with `refuseHosted`), read-only. An unreadable registry throws.
  */
 export function refuseHostedSession(home: OrchestrationHome, parentSessionId: string): void {
-	const host = sessionChannelHost(home, parentSessionId);
+	const host = sessionExclusiveHost(home, parentSessionId);
 	if (host) throw new SessionHostedError(holderRef(host));
 }
 
@@ -373,7 +393,7 @@ export function acquireSessionBundleLease(
 	home: OrchestrationHome,
 	parentSessionId: string,
 	/**
-	 * `refuseHosted`: a `session` hold is refused while a channel host holds the session (the AgentSession open path).
+	 * `refuseHosted`: a `session` hold is refused while a channel or bot host holds the session (the AgentSession open).
 	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease
 	 * ({@link SessionHomeChangedError}).
 	 */

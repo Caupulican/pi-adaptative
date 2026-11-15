@@ -92,6 +92,7 @@ import {
 } from "./core/session-manager-factory.ts";
 import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
+import { hostedSessionRefusal } from "./core/session-switch-failures.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { describeCause, neutralizeControls, TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -775,12 +776,12 @@ export async function main(args: string[], options?: MainOptions) {
 			refuseInvocation(new MissingSessionCwdError(missingSessionCwdIssue).message);
 		}
 	}
-	// A session the bot daemon hosts is refused with its one message before `--name` or the session writes to it.
+	// A session a channel or bot host holds is refused with its one message before `--name` or the session writes to it.
 	try {
 		if (sessionManager.isPersisted())
 			refuseHostedSession(sessionManager.getStorageRoots().orchestrationHome, sessionManager.getSessionId());
 	} catch (error) {
-		if (error instanceof SessionHostedError) refuseInvocation(error.message);
+		if (error instanceof SessionHostedError) refuseInvocation(hostedSessionRefusal(error));
 		throw error;
 	}
 	if (parsed.name !== undefined) {

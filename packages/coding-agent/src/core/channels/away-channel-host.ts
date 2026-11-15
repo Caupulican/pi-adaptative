@@ -448,6 +448,7 @@ export class AwayChannelHosts {
 				throw new SessionHeldError(
 					recorded.sessionId,
 					open.map((holder) => ({ pid: holder.owner.pid, role: holder.role })),
+					"channel-host",
 				);
 			const header = readSessionHeaderResult(recorded.file);
 			let lost = header.ok ? "it holds another session" : `it cannot be read (${header.reason})`;
