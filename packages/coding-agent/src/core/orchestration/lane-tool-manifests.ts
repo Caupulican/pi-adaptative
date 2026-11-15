@@ -30,7 +30,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	SYSTEM_ONE_TOOL_NAME,
 ] as const;
 /**
- * The tools a profile may name. The director tools (`delegate`, `assign`) are held only by a session whose standing
+ * The tools a profile may name. The director tools (`delegate`, `assign`, `plan`) are held only by a session whose standing
  * directs workers (a bot made from the profile); a worker of the profile never holds them: its grant drops every tool that
  * needs `workflow.delegate` (`worker-authority-resolver.ts`) and the worker floor forbids them (`WORKER_FORBIDDEN_TOOLS`).
  */

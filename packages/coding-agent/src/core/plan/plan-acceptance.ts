@@ -1,8 +1,8 @@
 /**
  * Acceptance of one `plan` tool call (start or revise), design PG 3.3, as ordered code decisions:
  *
- * 1. code facts F1-F7 (and F10's goal-dependency edges, added first), the step shapes and the ids a merge reserves refuse
- *    with every fix listed; nothing is recorded;
+ * 1. code facts F1-F7 (and F10's goal-dependency edges, added first), the step shapes, the ids a merge reserves and F11
+ *    (files named in a session that lends its workers no writes) refuse with every fix listed; nothing is recorded;
  * 2. System One absent or failing -> recorded on code facts alone (`unjudged`);
  * 3. J2 and its paired J3 accepted (>= 0.90) for a pair -> the edge is added; the version is re-checked on code facts
  *    with the edges, and a refusal then names the edges that caused it;
@@ -46,7 +46,7 @@ import {
 	thinSteps,
 	withEdges,
 } from "./plan-revision.ts";
-import { checkWriteFacts, unverifiedWriteSteps } from "./plan-write-facts.ts";
+import { checkWriteFacts, unlentWriteRefusals, unverifiedWriteSteps } from "./plan-write-facts.ts";
 
 const REQUEST_MAX_BYTES = 4 * 1024;
 /** The planner's recent conversation, baked into a step's note at acceptance; the header lets a later pass see it. */
@@ -61,6 +61,8 @@ export interface PlanAcceptanceContext {
 	/** The plan being revised; absent for a start. */
 	readonly current?: { readonly record: PlanRecord; readonly runtime: PlanRuntimeState };
 	readonly headroom: { readonly tasks: number; readonly attempts: number };
+	/** Whether the session lends its workers writes (`ceilingLendsWrites`); false refuses every step that names files (F11). */
+	readonly workersWrite: boolean;
 	readonly engine: OperationEffectEngine | undefined;
 	/** The root's session branch, root to leaf. */
 	readonly entries: readonly unknown[];
@@ -168,6 +170,8 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 	}
 	const reserved = reservedLandIdProblems(proposed, current, new Set((input.steps ?? []).map((step) => step.id)));
 	if (reserved.length > 0) return { ok: false, problems: reserved };
+	const unlent = unlentWriteRefusals(proposed, context.workersWrite);
+	if (unlent.length > 0) return { ok: false, problems: unlent.map((refusal) => refusal.fix) };
 	const goal = context.goal;
 	const goalEdges = goal ? goalDependencyEdges(proposed, goal.requirements) : [];
 	proposed = withEdges(proposed, goalEdges, "after");

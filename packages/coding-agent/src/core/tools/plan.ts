@@ -148,8 +148,8 @@ function failed(text: string): AgentToolResult<{ readonly ok: false }> {
 /**
  * The root's one call from a goal to a running parallel graph. The tool only carries the call: the executor checks the
  * code facts, asks System One the plan graph's judgments, applies the ordered exits, records the plan and releases its
- * first ready layer, and answers in the comms codes (`h PLAN_STARTED` and one plain line per step). Root-only: the
- * worker tool ceiling forbids it, and only a root session is given a definition.
+ * first ready layer, and answers in the comms codes (`h PLAN_STARTED` and one plain line per step). Held by a session
+ * that directs workers (the root, a bot): the worker tool ceiling forbids it, and only such a session is given a definition.
  */
 export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undefined): ToolDefinition<typeof schema> {
 	return {

@@ -175,6 +175,11 @@ export function workerCeilingOf(
 	return standing.lendsOwnerReach ? "unbounded" : sessionWorkerCeiling(source);
 }
 
+/** Whether a worker under `ceiling` may change files at all: the owner's reach, or a session that writes somewhere. */
+export function ceilingLendsWrites(ceiling: WorkerCeiling): boolean {
+	return ceiling === "unbounded" || !ceiling.readOnly;
+}
+
 /** Where a worker's directory lies among the worktree lanes (`WorkerLaneIsolation`). */
 export interface WorkerLanePlacement {
 	/**

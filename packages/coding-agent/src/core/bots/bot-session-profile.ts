@@ -72,14 +72,15 @@ export interface BotSessionDefinition {
 /**
  * The tools of a bot of its own: the read tools, System One's tool (as a worker holds it; it is registered only while
  * System One is on), `task_watch` for its own waits, `self_compact` for its own context and the director tools
- * (`delegate`, `assign`) for its own workers always, the file and process tools only when the bot may write.
+ * (`delegate`, `assign`, `plan`) for its own workers always, the file and process tools only when the bot may write.
  */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
 	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`),
 	// and so is a watched command, at arming and at every check (`WatchAdmission`), so `task_watch` widens nothing;
 	// `self_compact` touches only the session's own context. A read-only bot's workers are read-only too: their parent
-	// ceiling is the bot's own write reach (`worker-parent-ceiling.ts`), so directing them widens nothing.
+	// ceiling is the bot's own write reach (`worker-parent-ceiling.ts`), so directing them widens nothing, and its plans name no
+	// files (`plan-write-facts.ts`, F11), so every step is planned as the read-only work its worker does.
 	const own = [TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, ...BOT_DIRECTOR_TOOL_NAMES];
 	return canWrite
 		? [...reads, ...own, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
@@ -179,8 +180,9 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
 	// It arms its own waits as a worker's host does, and compacts its own context, outside the granted surface. The worker
 	// ceiling the plan was compiled under forbids the director tools, so they come from the profile itself: a profile that
-	// names either directs its own workers, held to its own ceiling. They are one unit (`assign` runs `delegate`, and the
-	// director role, the delegation gate and worker control key on `delegate`), so naming one holds both.
+	// names any of them directs its own workers, held to its own ceiling. They are one unit (`assign` runs `delegate`, `plan`
+	// runs its steps on workers through the same fleet, and the director role, the delegation gate and worker control key on
+	// `delegate`), so naming one holds all three.
 	const named = mapToolNamesForPlatform(profile.toolNames);
 	const director = BOT_DIRECTOR_TOOL_NAMES.some((name) => named.includes(name)) ? BOT_DIRECTOR_TOOL_NAMES : [];
 	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, ...director];

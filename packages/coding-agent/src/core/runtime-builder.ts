@@ -464,8 +464,8 @@ export interface RuntimeBuilderDeps {
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
 	/**
-	 * The root-only lane tools (routine, bot, channel reply, plan): none in a child session, and a lane whose tool is not
-	 * open is absent. The builder offers each one the access policy allows, under the tool's own name.
+	 * The lane tools the session's standing is given: a root's routine, bot, channel reply and plan, a bot's `task_watch`
+	 * and `plan`; a lane whose tool is not open is absent. The builder offers each the access policy allows, by its name.
 	 */
 	getBackgroundLaneTools?(): readonly ToolDefinition[];
 	/** Lazily resolve durable image storage only for a persisted/configured session. */

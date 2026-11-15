@@ -175,7 +175,7 @@ export function directorRolePrompt(options: {
 		"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
 		...(options.plan
 			? [
-					"- For work with several parts, call plan once with every step, its files and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.",
+					`- For work with several parts, call plan once with every step${workersWrite ? ", its files" : ""} and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.`,
 				]
 			: []),
 		`- You orchestrate; you do not execute. ${yours}. ${theirs}: start or reuse a suitable worker, and never duplicate running work.`,

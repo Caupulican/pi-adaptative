@@ -125,7 +125,7 @@ function requestsOf(world: HarnessWorld, soul: string): number {
 
 /**
  * Leg: a bot directs workers of its own. The owner asks a writing bot a question; in its own session the bot holds
- * `delegate`, `assign` and `task_watch` and no `plan`, starts a worker, and the worker's terminal handoff opens the
+ * `delegate`, `assign`, `plan` and `task_watch`, starts a worker, and the worker's terminal handoff opens the
  * bot's next turn, in which it answers. The worker's conversation lies in the bot's home, under the bot's session, and
  * nothing of that session is in the owner's orchestration home; the worker's spend reaches the main session as the bot
  * session's charge. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
@@ -272,14 +272,14 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 				),
 				charged: charged(),
 			},
-			"a bot's own session holds the director tools and no plan, starts a worker whose conversation lies in the bot's home, answers on the worker's handoff, and the worker's spend is charged to the main session as the bot's",
+			"a bot's own session holds the director tools, plan among them, starts a worker whose conversation lies in the bot's home, answers on the worker's handoff, and the worker's spend is charged to the main session as the bot's",
 		).toEqual({
 			sent: "started",
 			otherSessions: 0,
 			holdsDelegate: true,
 			holdsAssign: true,
 			holdsTaskWatch: true,
-			holdsPlan: false,
+			holdsPlan: true,
 			workerTranscriptInBotHome: true,
 			botSessionInOwnerHome: false,
 			charged: expect.closeTo(WORKER_USAGE.cost.total, 10),

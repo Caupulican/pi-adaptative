@@ -9,7 +9,7 @@
 		"packages/coding-agent/src/modes/interactive/interactive-mode.ts": 3058,
 		"packages/coding-agent/src/core/settings-manager.ts": 3244,
 		"packages/coding-agent/src/core/delegation/persistent-bot-team-store.ts": 2365,
-		"packages/coding-agent/src/core/background-lane-controller.ts": 2339,
+		"packages/coding-agent/src/core/background-lane-controller.ts": 2337,
 		"packages/coding-agent/src/core/memory/transcript-summary-store.ts": 3702,
 		"packages/coding-agent/src/core/memory-controller.ts": 3610,
 		"packages/coding-agent/src/modes/interactive/components/settings-selector.ts": 3349,

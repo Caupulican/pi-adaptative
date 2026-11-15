@@ -108,6 +108,8 @@ export interface PlanExecutorDeps {
 	/** Fires after every orchestration store commit. */
 	readonly subscribeStore: (listener: () => void) => () => void;
 	readonly fleet: () => PlanFleet;
+	/** Whether the session lends its workers writes, read at each plan call (`ceilingLendsWrites`). */
+	readonly workersWrite: () => boolean;
 	readonly engine: () => OperationEffectEngine | undefined;
 	readonly goal: () => GoalState | undefined;
 	readonly sessionId: () => string;
@@ -353,6 +355,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			goal,
 			...(current ? { current } : {}),
 			headroom: runtime.getProjectionCapacity().headroom,
+			workersWrite: this.deps.workersWrite(),
 			engine: this.deps.engine(),
 			entries: this.deps.rootEntries(),
 			now: nowIso,

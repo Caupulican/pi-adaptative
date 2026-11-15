@@ -137,7 +137,7 @@ import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
-import { workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
+import { ceilingLendsWrites, workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { WorkerTerminalReport } from "./delegation/worker-terminal-report.ts";
@@ -2003,9 +2003,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Every lane tool, the one list the runtime builder offers: a root session's routine, bot, channel reply and plan, and a
-	 * child session's routine tool alone where it has one (a bot's own `task_watch`). A lane whose tool is not open (no
-	 * routine store, no channel policy) is left out.
+	 * Every lane tool, the one list the runtime builder offers: a root session's routine, bot, channel reply and plan, a bot's
+	 * own `task_watch` and `plan` (a session that directs workers is given `plan`; its tool list decides whether it is
+	 * active), and a worker's routine tool alone where it has one. A lane whose tool is not open (no routine store, no channel
+	 * policy) is left out.
 	 */
 	createBackgroundLaneTools(): ToolDefinition[] {
 		const routine = this.createRoutineToolDefinition();
@@ -2014,12 +2015,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			routine,
 			managesBots ? this.createBotToolDefinition() : undefined,
 			this.createChannelReplyToolDefinition(),
-			directsWorkers ? this.createPlanToolDefinition() : undefined,
+			directsWorkers ? createPlanToolDefinition(() => this._getPlanExecutor()) : undefined,
 		].filter((definition): definition is ToolDefinition => definition !== undefined);
-	}
-
-	private createPlanToolDefinition(): ToolDefinition {
-		return createPlanToolDefinition(() => this._getPlanExecutor());
 	}
 
 	/** The root's plan executor; reaching it builds the worker runtime that composes it. */
@@ -2039,6 +2036,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			runtime: () => lifecycle.ledger.runtime,
 			subscribeStore: (listener) => store.subscribe(listener),
 			fleet: () => this._getWorkerController().getFleet(),
+			workersWrite: () => ceilingLendsWrites(workerCeilingOf(this.deps.standing, this.deps)),
 			engine: () => this.deps.systemOne.semanticDecisionEngine(),
 			goal: () => this.deps.getGoalStateSnapshot(),
 			sessionId: () => this.deps.getSessionId(),

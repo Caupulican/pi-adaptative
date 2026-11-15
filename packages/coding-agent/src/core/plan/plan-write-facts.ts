@@ -1,6 +1,7 @@
 /**
- * The write facts of one plan call, F8 and F9. F8: a step that changes files names what proves it (a requirement or a
- * proof). F9: two steps that may change the same files at the same time are ordered, or are members of one merge.
+ * The write facts of one plan call, F8, F9 and F11. F8: a step that changes files names what proves it (a requirement or a
+ * proof). F9: two steps that may change the same files at the same time are ordered, or are members of one merge. F11: a
+ * session that lends its workers no writes plans no step that names files.
  * Pure code over the steps stated at this call's version; a host revision (verify wrap, placement, merge land) never
  * passes through here, so it never trips them. Unverified write steps are a doubt, not a refusal.
  */
@@ -8,7 +9,7 @@
 import { type PlanNodeSpec, planPathExists, writeScopesOverlap } from "./plan-graph.ts";
 
 export interface WriteFactRefusal {
-	readonly fact: "F8" | "F9";
+	readonly fact: "F8" | "F9" | "F11";
 	/** One plain-words fix line. */
 	readonly fix: string;
 }
@@ -54,6 +55,22 @@ export function checkWriteFacts(nodes: readonly PlanNodeSpec[], changed: Readonl
 		}
 	}
 	return refusals;
+}
+
+/**
+ * F11: the refusal of every step that names files, when the session lends its workers no writes (`ceilingLendsWrites`: a
+ * read-only bot). Its ceiling would start such a step's worker read-only, under a plan that orders, isolates, proves and
+ * lands the step as a writer; refused, every step is planned as the read-only work its worker does. A merge, whose steps
+ * must name their files, cannot be planned there either.
+ */
+export function unlentWriteRefusals(nodes: readonly PlanNodeSpec[], workersWrite: boolean): WriteFactRefusal[] {
+	if (workersWrite) return [];
+	return nodes
+		.filter((node) => node.writeScope.length > 0)
+		.map((node) => ({
+			fact: "F11",
+			fix: `step "${node.id}" names files, but this session changes no files and neither do its workers; leave out files`,
+		}));
 }
 
 /** Work steps that change files and have no verify step downstream of them: a doubt on each, never a refusal. */
