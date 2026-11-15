@@ -198,7 +198,7 @@ export const NOTICES = {
 			`O CI falhou em ${sha}: uma correção diagnosticada pelo log do CI (a etapa que falhou não roda de novo localmente) está pronta em ${where}, ${files} arquivo(s); \`${command}\` passa com ela. Diga "aplique" para aplicá-la.`,
 	},
 	systemOneNoEngine: (_cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
-		"O System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido, então as chamadas de ferramenta rodam só sob as travas determinísticas, sem a revisão dos efeitos delas pelo System One. As mensagens também não são lidas em busca de uma meta duradoura; para definir uma, diga isso de forma explícita, por exemplo: defina uma meta: <meta>.",
+		'O System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido, então as chamadas de ferramenta rodam só sob as travas determinísticas, sem a revisão dos efeitos delas pelo System One, e metas ditas com suas próprias palavras não são reconhecidas; "defina uma meta: <texto>" ainda define uma.',
 	delegationGate: {
 		refused: (subject: string) => `Esta sessão delega o trabalho da tarefa: ${subject}`,
 		unjudged: (cause: string) =>
