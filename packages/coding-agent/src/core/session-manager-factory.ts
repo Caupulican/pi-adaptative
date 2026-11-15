@@ -1,31 +1,45 @@
 import { getAgentDir, getSessionsDir } from "../config.ts";
+import { ownerSessionStorageRoots, type SessionStorageRoots } from "../kernel/session/session-bundle-paths.ts";
 import {
 	type NewSessionOptions,
 	type SessionInfo,
 	type SessionListProgress,
 	SessionManager,
 } from "../kernel/session/session-manager.ts";
+import { sessionStorageRootsOfDir, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
 
 /**
  * Host-layer defaulting for SessionManager.
  *
- * SessionManager itself is config-agnostic: its constructor and statics take the agent/sessions
- * directories explicitly (the kernel-promotion seam). These thin wrappers are the single visible,
- * host-owned place that closes over the app's config-resolved `getAgentDir()` / `getSessionsDir()`
- * and delegates to the explicit kernel API. Call sites that already hold their own agent dir (e.g.
- * the SDK, the session runtime) should call `SessionManager` directly with that dir instead of these.
+ * SessionManager itself is config-agnostic: its constructor and statics take the storage roots and sessions
+ * directory explicitly (the kernel-promotion seam). These thin wrappers are the single visible, host-owned place
+ * that closes over the app's config-resolved `getAgentDir()` / `getSessionsDir()` and delegates to the explicit
+ * kernel API. A session's roots follow where its file lies (`sessionStorageRootsOfDir`): one in a bot's
+ * `sessions/` is that bot's, any other the owner's. Call sites that already hold their own roots (e.g. the SDK, the
+ * session runtime) should call `SessionManager` directly with them instead of these.
  */
 
+/** The roots of the sessions written to `sessionDir`; the default sessions directory is the owner's. */
+function rootsOfDir(sessionDir: string | undefined): SessionStorageRoots {
+	const agentDir = getAgentDir();
+	return sessionDir ? sessionStorageRootsOfDir(agentDir, sessionDir) : ownerSessionStorageRoots(agentDir);
+}
+
 export function createSession(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
-	return SessionManager.create(cwd, getAgentDir(), sessionDir, options);
+	return SessionManager.create(cwd, rootsOfDir(sessionDir), sessionDir, options);
 }
 
 export function openSession(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-	return SessionManager.open(path, getAgentDir(), sessionDir, cwdOverride);
+	return SessionManager.open(path, sessionStorageRootsOfFile(getAgentDir(), path), sessionDir, cwdOverride);
 }
 
 export function continueRecentSession(cwd: string, sessionDir?: string): SessionManager {
-	return SessionManager.continueRecent(cwd, getAgentDir(), sessionDir);
+	return SessionManager.continueRecent(cwd, rootsOfDir(sessionDir), sessionDir);
+}
+
+/** A session that writes no file, in the owner's roots: the session of a run that saves nothing. */
+export function inMemorySession(cwd: string): SessionManager {
+	return SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir()), cwd);
 }
 
 export function forkSession(
@@ -34,7 +48,7 @@ export function forkSession(
 	sessionDir?: string,
 	options?: NewSessionOptions,
 ): SessionManager {
-	return SessionManager.forkFrom(sourcePath, targetCwd, getAgentDir(), sessionDir, options);
+	return SessionManager.forkFrom(sourcePath, targetCwd, rootsOfDir(sessionDir), sessionDir, options);
 }
 
 export function listSessions(

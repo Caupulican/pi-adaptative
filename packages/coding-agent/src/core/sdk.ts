@@ -15,7 +15,7 @@ import { Agent } from "../kernel/agent.ts";
 import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentStreamOptions } from "../kernel/loop-config.ts";
 import { convertToLlm } from "../kernel/messages.ts";
-import { getDefaultSessionDir, SessionManager } from "../kernel/session/session-manager.ts";
+import { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { createProductionAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
@@ -28,13 +28,7 @@ import {
 	RealWorkerDispatcher,
 } from "./adaptive/index.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
-import {
-	capabilityArtifactsDir,
-	configFile,
-	type OrchestrationHome,
-	ownerOrchestrationHome,
-	steeringCertificatesFile,
-} from "./agent-paths.ts";
+import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
 import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -76,7 +70,11 @@ import {
 	assertOrchestrationProfileOwnsOptions,
 	validateOrchestrationProfile,
 } from "./orchestration/profile-registry.ts";
-import { acquireSessionBundleLease, type SessionLeaseRole } from "./orchestration/session-bundle-lifecycle.ts";
+import {
+	acquireSessionBundleLease,
+	ownerSessionStorageRoots,
+	type SessionLeaseRole,
+} from "./orchestration/session-bundle-lifecycle.ts";
 import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
 	SessionTaskProfileStore,
@@ -128,7 +126,7 @@ export interface CreateAgentSessionOptions
 	extends Pick<AgentSessionConfig, "admitRun" | "ownerNoticeLine" | "workerRunCostBound"> {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
-	/** Global config directory. Default: ~/.pi/agent */
+	/** Global config directory. Default: the session manager's (its storage roots), else ~/.pi/agent; never another. */
 	agentDir?: string;
 
 	/** Auth storage for credentials. Default: AuthStorage.create(agentDir/auth.json) */
@@ -231,8 +229,6 @@ export interface CreateAgentSessionOptions
 	systemOneFetch?: typeof fetch;
 	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
 	systemOneEvidenceDir?: string;
-	/** Where the session's bundle, lease and workers' state live (default: the owner's); its SessionManager's home too. */
-	orchestrationHome?: OrchestrationHome;
 	/**
 	 * The System One of the session hosting this one (a bot's host), followed in place of the options above: its on/off
 	 * decides the controller (not this session's settings at this moment) and is read with its provider at each use.
@@ -258,7 +254,7 @@ export interface CreateAgentSessionOptions
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
 
-	/** Session manager. Default: SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir)) */
+	/** Session manager; its storage roots name the session's home. Default: an owner's session in the cwd's default dir. */
 	sessionManager?: SessionManager;
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
@@ -369,7 +365,7 @@ export {
  *   model: myModel,
  *   tools: ["read", "bash"],
  *   resourceLoader: loader,
- *   sessionManager: SessionManager.inMemory(),
+ *   sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
  * });
  * ```
  */
@@ -377,7 +373,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// The SDK root: a session is the program for an embedder, so it owns built-in provider registration.
 	registerBuiltInApiProviders();
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
+	// One agent directory: the session manager's storage roots name it, and `agentDir` only where no manager is given.
+	const agentDir = resolvePath(
+		options.sessionManager?.getStorageRoots().agentDir ?? options.agentDir ?? getAgentDir(),
+	);
+	if (options.agentDir && resolvePath(options.agentDir) !== agentDir)
+		throw new Error("createAgentSession: agentDir is not the directory its session manager's storage roots name.");
 	let resourceLoader = options.resourceLoader;
 
 	// Use provided or create AuthStorage and ModelRegistry
@@ -398,10 +399,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		settingsManager.setRuntimeResourceProfiles([...orchestrationProfile.resourceProfileNames]);
 	}
 	const needsProfileReload = applyResourceProfileOptions(settingsManager, options, orchestrationProfile !== undefined);
-	const sessionManager =
-		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
-
-	const orchestrationHome = options.orchestrationHome ?? ownerOrchestrationHome(agentDir);
+	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, ownerSessionStorageRoots(agentDir));
+	// The session's home is its manager's: its own writes are admitted against the bundle lease taken there.
+	const { orchestrationHome } = sessionManager.getStorageRoots();
 	// An AgentSession never opens a session the bot daemon hosts (`SessionHostedError`); the daemon's own hold is `channel-host`.
 	const bundleLease = sessionManager.isPersisted()
 		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
@@ -855,7 +855,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				ownerNoticeLine: options.ownerNoticeLine,
 				workerRunCostBound: options.workerRunCostBound,
 				sessionManager,
-				orchestrationHome,
 				bundleLease,
 				settingsManager,
 				cwd,

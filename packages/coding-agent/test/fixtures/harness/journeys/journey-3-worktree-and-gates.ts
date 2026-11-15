@@ -1,3 +1,4 @@
+import { ownerSessionStorageRoots } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
 import "../builtin-install.ts";
 import { basename } from "node:path";
 import { expect } from "vitest";
@@ -3034,7 +3035,7 @@ function reopenWarnings(world: HarnessWorld, from: number): string[] {
 
 /** A fresh root session over `goal`, persisted as its only goal state. */
 async function sessionOverGoal(world: HarnessWorld, goal: GoalState): Promise<AgentSession> {
-	const manager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	const manager = SessionManager.inMemory(ownerSessionStorageRoots(world.agentDir), HARNESS_PROJECT_CWD);
 	appendGoalStateSnapshot(manager, goal);
 	const session = (await world.createRootSession("root", { sessionManager: manager })).session;
 	expect(session.getGoalStateSnapshot()?.status, "the persisted goal starts completed").toBe("completed");

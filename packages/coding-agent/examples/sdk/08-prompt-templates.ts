@@ -9,6 +9,7 @@ import {
 	createSyntheticSourceInfo,
 	DefaultResourceLoader,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	type PromptTemplate,
 	SessionManager,
 	SettingsManager,
@@ -47,7 +48,7 @@ for (const template of discovered) {
 
 const { session } = await createAgentSession({
 	resourceLoader: loader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log(`Session created with ${discovered.length + 1} prompt templates`);
 session.dispose();

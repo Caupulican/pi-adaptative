@@ -16,6 +16,7 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	prepareAgentSessionRuntime,
 	SessionManager,
 } from "@caupulican/pi-adaptative";
@@ -38,7 +39,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
-	sessionManager: SessionManager.create(process.cwd(), getAgentDir()),
+	sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 let unsubscribe: (() => void) | undefined;

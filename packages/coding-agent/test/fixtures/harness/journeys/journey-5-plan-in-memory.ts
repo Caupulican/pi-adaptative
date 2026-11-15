@@ -1,3 +1,4 @@
+import { ownerSessionStorageRoots } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import {
@@ -73,7 +74,7 @@ async function waitUntil(trace: HarnessWorld["trace"], label: string, predicate:
 export async function runJourney5PlanInMemoryPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
 	const savedFleet = world.settingsManager.getGlobalSettings().fleet ?? {};
-	const sessionManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	const sessionManager = SessionManager.inMemory(ownerSessionStorageRoots(world.agentDir), HARNESS_PROJECT_CWD);
 	expect(sessionManager.isPersisted(), "the root session starts purely in memory").toBe(false);
 	expect(sessionManager.getSessionFile(), "an in-memory session has no backing file").toBeUndefined();
 	expect(sessionManager.getLeafId(), "the fresh in-memory branch starts empty").toBeNull();

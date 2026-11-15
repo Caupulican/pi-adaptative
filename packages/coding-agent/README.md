@@ -478,12 +478,19 @@ packages are private and are not published to npm. See the source setup in
 [docs/sdk.md](docs/sdk.md) before using these imports.
 
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@caupulican/pi-adaptative";
+import {
+  AuthStorage,
+  createAgentSession,
+  getAgentDir,
+  ModelRegistry,
+  ownerSessionStorageRoots,
+  SessionManager,
+} from "@caupulican/pi-adaptative";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   authStorage,
   modelRegistry,
 });

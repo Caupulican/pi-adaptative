@@ -11,6 +11,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	SessionManager,
 	SettingsManager,
 } from "@caupulican/pi-adaptative";
@@ -35,7 +36,7 @@ for (const file of discovered) {
 
 const { session } = await createAgentSession({
 	resourceLoader: loader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log(`Session created with ${discovered.length + 1} context files`);
 session.dispose();

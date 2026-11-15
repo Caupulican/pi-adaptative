@@ -16,6 +16,7 @@ import {
 	updateJournal,
 } from "../src/core/cost/semantic-usage-journal.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../src/core/cost/usage-records.ts";
+import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import type { TypeSafeUsageReceipt } from "../src/core/review/system-one-review-port.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 
@@ -42,7 +43,11 @@ vi.mock("../src/kernel/session/session-file-reading.ts", async (importOriginal) 
 
 function fixture() {
 	const directory = mkdtempSync(join(tmpdir(), "pi-summary-recovery-race-"));
-	const manager = SessionManager.create(directory, join(directory, "agent"), join(directory, "sessions"));
+	const manager = SessionManager.create(
+		directory,
+		ownerSessionStorageRoots(join(directory, "agent")),
+		join(directory, "sessions"),
+	);
 	manager.appendMessage({ role: "user", content: "Account for a summary.", timestamp: 1 });
 	manager.flushBufferedEntries();
 	const delivery = sessionSemanticUsageOf(manager, { now: () => 1, setTimeout: () => 1, clearTimeout: () => {} });

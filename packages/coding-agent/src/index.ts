@@ -347,10 +347,12 @@ export {
 	acquireSessionBundleLease,
 	type OrchestrationHome,
 	ownerOrchestrationHome,
+	ownerSessionStorageRoots,
 	type SessionBundleLease,
 	SessionHeldError,
 	SessionHostedError,
 	type SessionLeaseRole,
+	type SessionStorageRoots,
 } from "./core/orchestration/session-bundle-lifecycle.ts";
 export * from "./core/orchestration/task-runtime.ts";
 export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";

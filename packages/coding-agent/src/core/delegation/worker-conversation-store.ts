@@ -2124,7 +2124,11 @@ export class WorkerConversationStore {
 					claim?.parentSessionId !== parentSessionId
 				)
 					throw new Error("Worker mailbox project claim is missing or foreign.");
-				assertProjectConversationAccess(metadata, SessionManager.openReadOnly(file, agentDir), claim);
+				assertProjectConversationAccess(
+					metadata,
+					SessionManager.openReadOnly(file, { agentDir, orchestrationHome }),
+					claim,
+				);
 				return operation();
 			},
 			EXISTING_WORKER_FILE_LOCK_OPTIONS,
@@ -2182,7 +2186,7 @@ export class WorkerConversationStore {
 					options.expectedLogicalAgentId,
 				);
 				this.openExisting(options, { recoverBirthContextPrefix: false });
-				const enrollment = projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, options.agentDir));
+				const enrollment = projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, options));
 				if (enrollment !== metadata.projectContext?.specializationKey)
 					throw new Error("Worker project enrollment changed.");
 				if (!metadata.projectContext) return undefined;
@@ -2267,7 +2271,10 @@ export class WorkerConversationStore {
 						);
 						if (conversation.hasActiveTranscriptCommit())
 							throw new Error("Worker transcript commit is still active.");
-						if (projectEnrollmentKey(SessionManager.openReadOnly(file, agentDir)) !== project?.specializationKey)
+						if (
+							projectEnrollmentKey(SessionManager.openReadOnly(file, { agentDir, orchestrationHome })) !==
+							project?.specializationKey
+						)
 							throw new Error("Worker allocation enrollment evidence changed.");
 					}
 					const claim = { ...input.owner, generation: 1 };
@@ -2431,11 +2438,7 @@ export class WorkerConversationStore {
 						const conversation = this.openExisting(options, { recoverBirthContextPrefix: false });
 						if (conversation.hasActiveTranscriptCommit())
 							throw new Error("Worker transcript commit is still active.");
-						assertProjectConversationAccess(
-							metadata,
-							SessionManager.openReadOnly(sessionFile, options.agentDir),
-							claim,
-						);
+						assertProjectConversationAccess(metadata, SessionManager.openReadOnly(sessionFile, options), claim);
 						options.assertSettled();
 						writeWorkerConversationMetadata(file, {
 							...metadata,
@@ -2517,7 +2520,7 @@ export class WorkerConversationStore {
 		// SessionManager intentionally defers a brand-new header until its first assistant message.
 		// A worker must be resumable after its first user/tool message, so atomically seed the exact
 		// SessionManager header and immediately reopen it through SessionManager for all later writes.
-		const seed = SessionManager.create(resumeContext.cwd, options.agentDir, sessionDir, {
+		const seed = SessionManager.create(resumeContext.cwd, options, sessionDir, {
 			id: resumeContext.sessionId,
 		});
 		const header = seed.getHeader();
@@ -2659,7 +2662,7 @@ export class WorkerConversationStore {
 		if (birthContext.recoverBirthContextPrefix) {
 			assertProjectConversationAccess(
 				readWorkerConversationMetadata(metadataFile).metadata,
-				SessionManager.openReadOnly(sessionFile, options.agentDir),
+				SessionManager.openReadOnly(sessionFile, options),
 				options.projectClaim,
 			);
 		}

@@ -77,8 +77,8 @@ import {
 	type SessionAppendReceipt,
 	SessionAppendUncertainError,
 } from "./session-append-receipt.ts";
-import { ownerOrchestrationHome, sessionChannelHost } from "./session-bundle-lifecycle.ts";
-import { ownerSessionStorageRoots, type SessionStorageRoots } from "./session-bundle-paths.ts";
+import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
+import type { SessionStorageRoots } from "./session-bundle-paths.ts";
 import {
 	buildSessionContext,
 	cloneSessionContext,
@@ -302,10 +302,11 @@ export class SessionManager {
 	/**
 	 * Where the session's durable state lives: its agent config dir (e.g. ~/.pi/agent), which gives the default
 	 * session-dir candidates of usesDefaultSessionDir(), and the orchestration home whose bundle admits every write of its
-	 * file. Injected explicitly by the caller — SessionManager never resolves them from app config. Absent for in-memory
-	 * sessions (nothing is written and no default dir applies).
+	 * file and holds the session's own state. Injected explicitly by the caller (SessionManager never resolves them from
+	 * app config) and carried by an in-memory session too: its session's orchestration state lives there, though the
+	 * manager itself writes no file.
 	 */
-	private readonly roots: SessionStorageRoots | undefined;
+	private readonly roots: SessionStorageRoots;
 	private persist: boolean;
 	private readonly readOnly: boolean;
 	private readonly canonicalOnly: boolean;
@@ -366,14 +367,15 @@ export class SessionManager {
 		sessionDir: string,
 		sessionFile: string | undefined,
 		persist: boolean,
-		roots: SessionStorageRoots | undefined,
+		roots: SessionStorageRoots,
 		newSessionOptions?: NewSessionOptions,
 		readOnly = false,
 		canonicalOnly = false,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
-		this.roots = roots;
+		// A copy: the caller's object (an options bag, a record that names this manager) is never held.
+		this.roots = Object.freeze({ agentDir: roots.agentDir, orchestrationHome: roots.orchestrationHome });
 		this.persist = persist;
 		this.readOnly = readOnly;
 		this.canonicalOnly = canonicalOnly;
@@ -530,7 +532,8 @@ export class SessionManager {
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
-			if (loaded.unterminatedTail && !this.readOnly) {
+			// An in-memory manager writes no file: the tail stays as it is, as a migration is not rewritten (`_rewriteFile`).
+			if (loaded.unterminatedTail && this.persist && !this.readOnly) {
 				sourceRevision = withSessionFileMutation(
 					this.getStorageRoots(),
 					this.sessionFile,
@@ -826,15 +829,11 @@ export class SessionManager {
 	}
 
 	usesDefaultSessionDir(): boolean {
-		return (
-			this.roots !== undefined &&
-			getDefaultSessionDirCandidates(this.cwd, this.roots.agentDir).includes(this.sessionDir)
-		);
+		return this.persist && getDefaultSessionDirCandidates(this.cwd, this.roots.agentDir).includes(this.sessionDir);
 	}
 
-	/** Where the persisted session's state lives; the admission of a write to its file names these roots. */
+	/** Where the session's state lives; the admission of a write to its file names these roots. */
 	getStorageRoots(): SessionStorageRoots {
-		if (!this.roots) throw new Error("An in-memory session has no storage roots.");
 		return this.roots;
 	}
 
@@ -3192,20 +3191,26 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session of the owner's orchestration home.
+	 * Create a new session.
 	 * @param cwd Working directory (stored in session header)
-	 * @param agentDir Agent config dir used to compute the default session dir and default-dir candidates.
+	 * @param roots Where its state lives (`ownerSessionStorageRoots(agentDir)` for the owner's); its agent dir gives the
+	 * default session dir and default-dir candidates.
 	 * @param sessionDir Optional session directory. If omitted, uses default (<agentDir>/sessions/<encoded-cwd>/).
 	 */
-	static create(cwd: string, agentDir: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
-		return new SessionManager(cwd, dir, undefined, true, ownerSessionStorageRoots(agentDir), options);
+	static create(
+		cwd: string,
+		roots: SessionStorageRoots,
+		sessionDir?: string,
+		options?: NewSessionOptions,
+	): SessionManager {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, roots.agentDir);
+		return new SessionManager(cwd, dir, undefined, true, roots, options);
 	}
 
 	/** Materialize only a known never-persisted empty session; callers must validate its independent identity evidence. */
 	static materializeMissingEmptySession(args: {
 		cwd: string;
-		agentDir: string;
+		roots: SessionStorageRoots;
 		sessionFile: string;
 		id: string;
 		timestamp: string;
@@ -3222,16 +3227,7 @@ export class SessionManager {
 		const expectedName = `${args.timestamp.replace(/[:.]/g, "-")}_${args.id}.jsonl`;
 		if (basename(sessionFile) !== expectedName || existsSync(sessionFile))
 			throw new Error("Original session path is invalid or already exists");
-		const manager = new SessionManager(
-			args.cwd,
-			dirname(sessionFile),
-			undefined,
-			true,
-			ownerSessionStorageRoots(args.agentDir),
-			{
-				id: args.id,
-			},
-		);
+		const manager = new SessionManager(args.cwd, dirname(sessionFile), undefined, true, args.roots, { id: args.id });
 		manager.sessionFile = sessionFile;
 		manager.fileEntries = [
 			{ type: "session", version: args.version, id: args.id, timestamp: args.timestamp, cwd: manager.cwd },
@@ -3241,19 +3237,19 @@ export class SessionManager {
 	}
 
 	/**
-	 * Open a specific session file as a session of the owner's orchestration home.
+	 * Open a specific session file.
 	 * @param path Path to session file
-	 * @param agentDir Agent config dir used to compute default-dir candidates for usesDefaultSessionDir().
+	 * @param roots Where its state lives; its agent dir gives the default-dir candidates of usesDefaultSessionDir().
 	 * @param sessionDir Optional session directory for /new or /branch. If omitted, derives from file's parent.
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
-	static open(path: string, agentDir: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-		return SessionManager._open(path, ownerSessionStorageRoots(agentDir), sessionDir, cwdOverride, false, false);
+	static open(path: string, roots: SessionStorageRoots, sessionDir?: string, cwdOverride?: string): SessionManager {
+		return SessionManager._open(path, roots, sessionDir, cwdOverride, false, false);
 	}
 
 	/** Inspect existing history without repairing, migrating or creating any file on disk. */
-	static openReadOnly(path: string, agentDir: string): ReadonlySessionManager {
-		return SessionManager._open(path, ownerSessionStorageRoots(agentDir), undefined, undefined, true, false);
+	static openReadOnly(path: string, roots: SessionStorageRoots): ReadonlySessionManager {
+		return SessionManager._open(path, roots, undefined, undefined, true, false);
 	}
 
 	/** Existing worker histories are canonical; opening them never repairs storage. `roots` name the parent's home. */
@@ -3281,38 +3277,33 @@ export class SessionManager {
 	/**
 	 * Continue the most recent session, or create new if none.
 	 * @param cwd Working directory
-	 * @param agentDir Agent config dir used to compute the default session dir and default-dir candidates.
+	 * @param roots Where its state lives; its agent dir gives the default session dir and default-dir candidates.
 	 * @param sessionDir Optional session directory. If omitted, uses default (<agentDir>/sessions/<encoded-cwd>/).
 	 */
-	static continueRecent(cwd: string, agentDir: string, sessionDir?: string): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
-		const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
+	static continueRecent(cwd: string, roots: SessionStorageRoots, sessionDir?: string): SessionManager {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, roots.agentDir);
+		const defaultDirs = getDefaultSessionDirCandidates(cwd, roots.agentDir);
 		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
 		const searchDirs = sessionDir ? [dir] : defaultDirs;
 		// The phone session the bot daemon hosts is skipped: opening it here is refused while the daemon holds it.
 		const hosted = (id: string): boolean => {
 			try {
-				return sessionChannelHost(ownerOrchestrationHome(agentDir), id) !== undefined;
+				return sessionChannelHost(roots.orchestrationHome, id) !== undefined;
 			} catch {
 				return false; // An unreadable registry is reported by the open's own lease acquisition.
 			}
 		};
 		const mostRecent = findMostRecentSessionInDirs(searchDirs, filterCwd ? cwd : undefined, hosted);
-		if (mostRecent) {
-			return new SessionManager(
-				cwd,
-				resolve(mostRecent, ".."),
-				mostRecent,
-				true,
-				ownerSessionStorageRoots(agentDir),
-			);
-		}
-		return new SessionManager(cwd, dir, undefined, true, ownerSessionStorageRoots(agentDir));
+		if (mostRecent) return new SessionManager(cwd, resolve(mostRecent, ".."), mostRecent, true, roots);
+		return new SessionManager(cwd, dir, undefined, true, roots);
 	}
 
-	/** Create an in-memory session (no file persistence). No agent dir applies (usesDefaultSessionDir is false). */
-	static inMemory(cwd: string = process.cwd()): SessionManager {
-		return new SessionManager(cwd, "", undefined, false, undefined);
+	/**
+	 * Create an in-memory session (no file persistence: usesDefaultSessionDir is false). `roots` name where the session's
+	 * orchestration state lives (`ownerSessionStorageRoots(agentDir)` for the owner's).
+	 */
+	static inMemory(roots: SessionStorageRoots, cwd: string = process.cwd()): SessionManager {
+		return new SessionManager(cwd, "", undefined, false, roots);
 	}
 
 	/**
@@ -3320,13 +3311,13 @@ export class SessionManager {
 	 * Creates a new session in the target cwd with the full history from the source session.
 	 * @param sourcePath Path to the source session file
 	 * @param targetCwd Target working directory (where the new session will be stored)
-	 * @param agentDir Agent config dir used to compute the default session dir for targetCwd.
+	 * @param roots Where the new session's state lives; its agent dir gives the default session dir for targetCwd.
 	 * @param sessionDir Optional session directory. If omitted, uses default for targetCwd.
 	 */
 	static forkFrom(
 		sourcePath: string,
 		targetCwd: string,
-		agentDir: string,
+		roots: SessionStorageRoots,
 		sessionDir?: string,
 		options?: NewSessionOptions,
 	): SessionManager {
@@ -3342,7 +3333,7 @@ export class SessionManager {
 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
 		}
 
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd, agentDir);
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd, roots.agentDir);
 		// Create new session file with new ID but forked content
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
@@ -3361,7 +3352,6 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		const roots = ownerSessionStorageRoots(agentDir);
 		withSessionFileMutation(roots, newSessionFile, newSessionId, "create", () => {
 			const fd = openSync(newSessionFile, "wx");
 			try {

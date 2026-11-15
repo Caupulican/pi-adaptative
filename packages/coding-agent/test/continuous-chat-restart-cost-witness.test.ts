@@ -11,6 +11,7 @@ import {
 	ContinuousChatSpendMeter,
 	type ContinuousChatSpendOwnerPort,
 } from "../src/core/memory/continuous-chat-spend.ts";
+import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import type { TimerPort } from "../src/core/util/timer-port.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 import { type FaultableFs, nodeFs } from "../src/kernel/storage/faultable-fs.ts";
@@ -56,7 +57,7 @@ describe("summary accounting crash between durable receipt and shared settlement
 			const agentDir = join(directory, "agent"),
 				sessionDir = join(directory, "sessions"),
 				spendFile = join(directory, "spend.json");
-			const manager = SessionManager.create(directory, agentDir, sessionDir);
+			const manager = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 			manager.appendMessage({ role: "user", content: "Run the old task.", timestamp: 1 });
 			manager.flushBufferedEntries();
 			const now = Date.UTC(2026, 0, 1, 12);
@@ -108,7 +109,7 @@ describe("summary accounting crash between durable receipt and shared settlement
 				manager.getEntries().some((entry) => entry.type === "custom" && entry.customType === "semantic_usage"),
 			).toBe(true);
 			expect(readSummarySpendReceipt(identity, token).kind).toBe("unresolved");
-			const otherSession = SessionManager.create(directory, agentDir, sessionDir);
+			const otherSession = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 			otherSession.appendMessage({ role: "user", content: "Run another task.", timestamp: 2 });
 			otherSession.flushBufferedEntries();
 			expect(otherSession.getSessionId()).not.toBe(identity.sessionId);
@@ -128,7 +129,7 @@ describe("summary accounting crash between durable receipt and shared settlement
 			const agentDir = join(directory, "agent"),
 				sessionDir = join(directory, "sessions"),
 				spendFile = join(directory, "spend.json");
-			const manager = SessionManager.create(directory, agentDir, sessionDir);
+			const manager = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 			manager.appendMessage({ role: "user", content: "Run the task.", timestamp: 1 });
 			manager.flushBufferedEntries();
 			const timers: TimerPort = { now: () => 1000, setTimeout: () => 1, clearTimeout: () => {} };
@@ -192,7 +193,7 @@ describe("summary accounting crash between durable receipt and shared settlement
 					nodeFs.renameSync(from, to);
 				},
 			};
-			const manager = SessionManager.create(directory, agentDir, sessionDir);
+			const manager = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 			manager.appendMessage({ role: "user", content: "Run the task.", timestamp: 1 });
 			manager.flushBufferedEntries();
 			const sessionFile = manager.getSessionFile()!;
@@ -227,14 +228,14 @@ describe("summary accounting crash between durable receipt and shared settlement
 				timestamp: now,
 			};
 			ticket!.complete(message);
-			const reopened = SessionManager.open(sessionFile, agentDir, sessionDir);
+			const reopened = SessionManager.open(sessionFile, ownerSessionStorageRoots(agentDir), sessionDir);
 			const retained = reopened
 				.getEntries()
 				.filter((entry) => entry.type === "custom" && entry.customType === "semantic_usage");
 			expect(retained).toHaveLength(1);
 			expect(retained[0]).toMatchObject({ data: { route: "history_summary", usage: { cost: { total: 0.25 } } } });
 			oldDead = true;
-			const otherSession = SessionManager.create(directory, agentDir, sessionDir);
+			const otherSession = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 			otherSession.appendMessage({ role: "user", content: "A different session.", timestamp: 2 });
 			otherSession.flushBufferedEntries();
 			expect(otherSession.getSessionId()).not.toBe(reopened.getSessionId());

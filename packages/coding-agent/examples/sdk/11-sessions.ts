@@ -4,25 +4,25 @@
  * Control session persistence: in-memory, new file, continue, or open specific.
  */
 
-import { createAgentSession, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
+import { createAgentSession, getAgentDir, ownerSessionStorageRoots, SessionManager } from "@caupulican/pi-adaptative";
 
 // In-memory (no persistence)
 const { session: inMemory } = await createAgentSession({
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log("In-memory session:", inMemory.sessionFile ?? "(none)");
 inMemory.dispose();
 
 // New persistent session
 const { session: newSession } = await createAgentSession({
-	sessionManager: SessionManager.create(process.cwd(), getAgentDir()),
+	sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 console.log("New session file:", newSession.sessionFile);
 newSession.dispose();
 
 // Continue most recent session (or create new if none)
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-	sessionManager: SessionManager.continueRecent(process.cwd(), getAgentDir()),
+	sessionManager: SessionManager.continueRecent(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 if (modelFallbackMessage) console.log("Note:", modelFallbackMessage);
 console.log("Continued session:", continued.sessionFile);
@@ -37,7 +37,7 @@ for (const info of sessions.slice(0, 3)) {
 
 if (sessions.length > 0) {
 	const { session: opened } = await createAgentSession({
-		sessionManager: SessionManager.open(sessions[0].path, getAgentDir()),
+		sessionManager: SessionManager.open(sessions[0].path, ownerSessionStorageRoots(getAgentDir())),
 	});
 	console.log(`\nOpened: ${opened.sessionId}`);
 	opened.dispose();
@@ -46,7 +46,7 @@ if (sessions.length > 0) {
 // Custom session directory (no cwd encoding)
 // const customDir = "/path/to/my-sessions";
 // const { session } = await createAgentSession({
-//   sessionManager: SessionManager.create(process.cwd(), getAgentDir(), customDir),
+//   sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir()), customDir),
 // });
 // SessionManager.list(process.cwd(), getAgentDir(), customDir);
-// SessionManager.continueRecent(process.cwd(), getAgentDir(), customDir);
+// SessionManager.continueRecent(process.cwd(), ownerSessionStorageRoots(getAgentDir()), customDir);

@@ -103,7 +103,7 @@ function canDeleteWorkerBundleArtifacts(
 						if (inspectedBytes > 32 * 1024 * 1024) return false;
 						scanWorkerSessionFile(sessionFile, metadata.resumeContext.sessionId, metadata.resumeContext.cwd);
 						return (
-							projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, agentDir)) ===
+							projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, { agentDir, orchestrationHome })) ===
 							metadata.projectContext?.specializationKey
 						);
 					},

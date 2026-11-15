@@ -10,6 +10,7 @@ import {
 	createSyntheticSourceInfo,
 	DefaultResourceLoader,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	SessionManager,
 	SettingsManager,
 	type Skill,
@@ -51,7 +52,7 @@ if (diagnostics.length > 0) {
 
 const { session } = await createAgentSession({
 	resourceLoader: loader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log("Session created with filtered skills");
 session.dispose();

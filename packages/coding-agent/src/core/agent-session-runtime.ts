@@ -1,6 +1,5 @@
 import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
@@ -22,15 +21,15 @@ import type {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
-import {
-	ownerOrchestrationHome,
-	SessionBundleLeaseReleaseError,
-	withSessionBundleLeases,
-} from "./orchestration/session-bundle-lifecycle.ts";
-import { refuseHostedSessionInItsHome } from "./orchestration-homes.ts";
+import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
+import { sessionStorageRootsOfFile } from "./orchestration-homes.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "./session-switch-failures.ts";
+import {
+	refuseHostedSessionFile,
+	SessionReplacementCallbackError,
+	SessionReplacementRuntimeError,
+} from "./session-switch-failures.ts";
 import { writeTerminalWarnings } from "./terminal-warnings.ts";
 
 /**
@@ -322,20 +321,6 @@ export class SessionImportFileNotFoundError extends Error {
 interface RestoreFailure {
 	readonly error: unknown;
 	readonly undeliveredWarnings: readonly string[];
-}
-
-/**
- * Refuse a session file the bot daemon hosts before it is opened or copied: a recovered admission failure (the previous
- * session stays active) whose message is the hosted one; nothing is written.
- */
-function refuseHostedSessionFile(agentDir: string, path: string): void {
-	const header = readSessionHeaderResult(resolvePath(path));
-	if (!header.ok) return;
-	try {
-		refuseHostedSessionInItsHome(agentDir, header.header.id);
-	} catch (error) {
-		throw new SessionReplacementRuntimeError("admission", error, true);
-	}
 }
 
 /** What a fork did, and the user message text it puts back in the editor for a fork before that message. */
@@ -679,14 +664,13 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
 		const previous = this.snapshot();
-		const ownerHome = ownerOrchestrationHome(previous.services.agentDir);
-		const heldSessionIds = [previous.sessionManager, prepared.sessionManager]
+		const held = [previous.sessionManager, prepared.sessionManager]
 			.filter((manager) => manager.isPersisted())
-			.map((manager) => manager.getSessionId());
+			.map((manager) => ({ home: manager.getStorageRoots().orchestrationHome, sessionId: manager.getSessionId() }));
 		let entered = false;
 		let completed = false;
 		try {
-			return await withSessionBundleLeases(ownerHome, heldSessionIds, async () => {
+			return await withSessionBundleLeases(held, async () => {
 				entered = true;
 				try {
 					await this.teardownCurrent(options.reason, options.targetSessionFile);
@@ -1009,14 +993,15 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		sessionPath: string,
 		options?: AgentSessionSwitchOptions,
 	): Promise<{ cancelled: boolean }> {
-		refuseHostedSessionFile(this.services.agentDir, sessionPath);
+		const roots = sessionStorageRootsOfFile(this.services.agentDir, sessionPath);
+		refuseHostedSessionFile(roots, sessionPath);
 		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionManager = SessionManager.open(sessionPath, this.services.agentDir, undefined, options?.cwdOverride);
+		const sessionManager = SessionManager.open(sessionPath, roots, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		const prepared = await this.prepareReplacement(
 			sessionManager,
@@ -1052,7 +1037,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 
 		const previousSessionFile = this.session.sessionFile;
 		const sessionDir = this.sessionManager.getSessionDir();
-		const sessionManager = SessionManager.create(this.cwd, this.services.agentDir, sessionDir);
+		const sessionManager = SessionManager.create(this.cwd, this.sessionManager.getStorageRoots(), sessionDir);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
@@ -1129,8 +1114,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				throw new Error("Persisted session is missing a session file");
 			}
 			const sessionDir = this.sessionManager.getSessionDir();
+			const roots = this.sessionManager.getStorageRoots();
 			if (!targetLeafId) {
-				const sessionManager = SessionManager.create(this.cwd, this.services.agentDir, sessionDir);
+				const sessionManager = SessionManager.create(this.cwd, roots, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
 				await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, undefined);
 				return { cancelled: false, ...selected };
@@ -1141,7 +1127,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				);
 			}
 
-			const sourceSessionManager = SessionManager.open(currentSessionFile, this.services.agentDir, sessionDir);
+			const sourceSessionManager = SessionManager.open(currentSessionFile, roots, sessionDir);
 			const sessionManager = sourceSessionManager.createBranchedSessionManager(targetLeafId);
 			const forkedSessionPath = sessionManager.getSessionFile();
 			if (!forkedSessionPath) {
@@ -1159,7 +1145,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		let sessionManager: SessionManager;
 		let copyBaseline: CopyBaseline | undefined;
 		if (!targetLeafId) {
-			sessionManager = SessionManager.inMemory(this.cwd);
+			sessionManager = SessionManager.inMemory(this.sessionManager.getStorageRoots(), this.cwd);
 			sessionManager.newSession({ parentSession: this.session.sessionFile });
 		} else {
 			sessionManager = this.sessionManager.createBranchedSessionManager(targetLeafId);
@@ -1185,8 +1171,8 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		if (!existsSync(resolvedPath)) {
 			throw new SessionImportFileNotFoundError(resolvedPath);
 		}
-		refuseHostedSessionFile(this.services.agentDir, resolvedPath);
-
+		const roots = this.sessionManager.getStorageRoots();
+		refuseHostedSessionFile(roots, resolvedPath);
 		const sessionDir = this.sessionManager.getSessionDir();
 		const destinationPath = join(sessionDir, basename(resolvedPath));
 		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
@@ -1205,7 +1191,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		let copyBaseline: CopyBaseline | undefined;
 		let sessionManager: SessionManager;
 		try {
-			sessionManager = SessionManager.open(destinationPath, this.services.agentDir, sessionDir, cwdOverride);
+			sessionManager = SessionManager.open(destinationPath, roots, sessionDir, cwdOverride);
 			assertSessionCwdExists(sessionManager, this.cwd);
 		} catch (error) {
 			if (copied) this.removeCreatedSessionFile(destinationPath);

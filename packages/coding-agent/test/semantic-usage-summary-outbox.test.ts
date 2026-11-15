@@ -16,6 +16,7 @@ import {
 } from "../src/core/cost/semantic-usage-journal.ts";
 import type { SemanticUsageLedgerIdentity } from "../src/core/cost/session-ledger-port.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "../src/core/cost/usage-records.ts";
+import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import type { TypeSafeUsageReceipt } from "../src/core/review/system-one-review-port.ts";
 import { parseTypeSafeUsageReceipt } from "../src/core/review/typesafe-usage-receipt-codec.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
@@ -33,7 +34,7 @@ function fixture() {
 	const directory = mkdtempSync(join(tmpdir(), "pi-summary-outbox-"));
 	const agentDir = join(directory, "agent"),
 		sessionDir = join(directory, "sessions");
-	const manager = SessionManager.create(directory, agentDir, sessionDir);
+	const manager = SessionManager.create(directory, ownerSessionStorageRoots(agentDir), sessionDir);
 	manager.appendMessage({ role: "user", content: "Summarize history.", timestamp: 1 });
 	manager.flushBufferedEntries();
 	const delivery = sessionSemanticUsageOf(manager, { now: () => 1, setTimeout: () => 1, clearTimeout: () => {} });

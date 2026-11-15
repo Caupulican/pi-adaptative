@@ -10,9 +10,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@caupulican/pi-tui";
-import { ownerOrchestrationHome } from "../../../core/agent-paths.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
+import { sessionStorageRootsOfFile } from "../../../core/orchestration-homes.ts";
 import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
 import { harnessLog } from "../../../kernel/harness-log.ts";
 import type { SessionInfo, SessionListProgress } from "../../../kernel/node.ts";
@@ -809,8 +809,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			try {
 				const result = await deleteForegroundSessionBundle({
 					agentDir: options.agentDir,
-					// The picker lists the owner's sessions: their bundles live in the owner's home.
-					orchestrationHome: ownerOrchestrationHome(options.agentDir),
+					// The bundle lives in the home of the directory the file lies in.
+					orchestrationHome: sessionStorageRootsOfFile(options.agentDir, sessionPath).orchestrationHome,
 					parentSessionId: selected.id,
 					sessionPath,
 				});

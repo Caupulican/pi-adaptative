@@ -1,10 +1,17 @@
 /**
  * The failures of a session switch (`AgentSessionRuntime`'s replacement boundary): a teardown, activation or admission
  * failure with its rollback outcome, and a follow-up step that failed after the replacement committed. Each carries the
- * owner-facing message; the phase name itself stays in the debug log.
+ * owner-facing message; the phase name itself stays in the debug log. A file the bot daemon hosts is refused here, as
+ * an admission failure, before anything is opened.
  */
 import { harnessLog } from "../kernel/harness-log.ts";
-import { SessionHostedError } from "./orchestration/session-bundle-lifecycle.ts";
+import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
+import { resolvePath } from "../utils/paths.ts";
+import {
+	refuseHostedSession,
+	SessionHostedError,
+	type SessionStorageRoots,
+} from "./orchestration/session-bundle-lifecycle.ts";
 
 /** Owner words for the step a session switch failed in; the phase name itself stays in the debug log. */
 const SWITCH_STEP_WORDS: Readonly<Record<SessionReplacementRuntimeError["phase"], string>> = {
@@ -62,5 +69,19 @@ export class SessionReplacementCallbackError extends Error {
 		super(`Switching sessions completed, but ${stage} failed: ${callbackMessage}`);
 		this.name = "SessionReplacementCallbackError";
 		this.callbackError = callbackError;
+	}
+}
+
+/**
+ * Refuse a session file the bot daemon hosts in `roots`, the home it is opened in, before it is opened or copied: a
+ * recovered admission failure (the previous session stays active) whose message is the hosted one; nothing is written.
+ */
+export function refuseHostedSessionFile(roots: SessionStorageRoots, path: string): void {
+	const header = readSessionHeaderResult(resolvePath(path));
+	if (!header.ok) return;
+	try {
+		refuseHostedSession(roots.orchestrationHome, header.header.id);
+	} catch (error) {
+		throw new SessionReplacementRuntimeError("admission", error, true);
 	}
 }

@@ -1,3 +1,4 @@
+import { ownerSessionStorageRoots } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import {
@@ -159,7 +160,7 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 			expect(await withDeadline(world.trace, `${label}: switch settles`, replacement)).toEqual({ cancelled: false });
 			expect(activations, "the replacement activates exactly once after retirement").toBe(2);
 			await withDeadline(world.trace, `${label}: active session settled`, runtime.session.waitForForegroundIdle());
-			const reopened = SessionManager.open(file, agentDir);
+			const reopened = SessionManager.open(file, ownerSessionStorageRoots(agentDir));
 			const observations = {
 				order,
 				originalAtPrepare,

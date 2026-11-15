@@ -64,8 +64,7 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
-import { SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
-import { refuseHostedSessionInItsHome } from "./core/orchestration-homes.ts";
+import { refuseHostedSession, SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
@@ -86,6 +85,7 @@ import {
 	continueRecentSession,
 	createSession,
 	forkSession,
+	inMemorySession,
 	listAllSessions,
 	listSessions,
 	openSession,
@@ -100,7 +100,7 @@ import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts"
 import { getBoundWorktreeLaneKey } from "./core/worktree-sync/lane-binding.ts";
 import { CiSessionResource } from "./host/ci/ci-session-resource.ts";
 import { probeProcessLiveness } from "./kernel/reliability/process-tree.ts";
-import { assertValidSessionId, SessionManager } from "./kernel/session/session-manager.ts";
+import { assertValidSessionId, type SessionManager } from "./kernel/session/session-manager.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -314,7 +314,7 @@ async function createSessionManager(
 	hasHumanUI: boolean,
 ): Promise<SessionManager> {
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
-		return SessionManager.inMemory(cwd);
+		return inMemorySession(cwd);
 	}
 
 	if (parsed.fork) {
@@ -777,7 +777,8 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	// A session the bot daemon hosts is refused with its one message before `--name` or the session writes to it.
 	try {
-		if (sessionManager.isPersisted()) refuseHostedSessionInItsHome(agentDir, sessionManager.getSessionId());
+		if (sessionManager.isPersisted())
+			refuseHostedSession(sessionManager.getStorageRoots().orchestrationHome, sessionManager.getSessionId());
 	} catch (error) {
 		if (error instanceof SessionHostedError) refuseInvocation(error.message);
 		throw error;

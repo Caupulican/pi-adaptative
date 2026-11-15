@@ -52,6 +52,7 @@ import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { ownerSessionStorageRoots } from "../orchestration/session-bundle-lifecycle.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -676,8 +677,8 @@ export class BotSessionHost {
 			// The newest session file of the bot, whatever directory it worked in: a bot keeps one conversation.
 			const newest = findMostRecentSessionInDirs([home.sessionsDir]);
 			const sessionManager = newest
-				? SessionManager.open(newest, agentDir, home.sessionsDir, cwd)
-				: SessionManager.create(cwd, agentDir, home.sessionsDir);
+				? SessionManager.open(newest, ownerSessionStorageRoots(agentDir), home.sessionsDir, cwd)
+				: SessionManager.create(cwd, ownerSessionStorageRoots(agentDir), home.sessionsDir);
 			const cancelled = cancelOtherSessionsWatches(
 				this.ports.store(),
 				home.sessionsDir,

@@ -132,18 +132,39 @@ function assertCanonicalWritePath(file: string): void {
 	}
 }
 
-/** The file's owner in the writer's home: a worker transcript of a bundle there, else the writing session itself. */
+/**
+ * The orchestration root whose bundle a worker transcript path lies in (`<root>/sessions/<key>/worker-conversations/
+ * <file>`, the layout of {@link workerConversationSessionsDir}), else undefined: decided by the path alone.
+ */
+function workerTranscriptRoot(file: string): string | undefined {
+	const conversations = dirname(file);
+	if (basename(conversations) !== "worker-conversations") return;
+	const sessions = dirname(dirname(conversations));
+	return basename(sessions) === "sessions" ? dirname(sessions) : undefined;
+}
+
+/**
+ * The file's owner in the writer's home: a worker transcript of a bundle there, else the writing session itself. A
+ * worker transcript of another home's bundle is refused: its writes are admitted only against the lease of its own
+ * home, which this writer does not hold.
+ */
 function fileOwner(roots: SessionStorageRoots, file: string, sessionId: string): FileOwner {
 	assertCanonicalWritePath(resolve(roots.agentDir));
 	assertCanonicalWritePath(file);
 	const home = roots.orchestrationHome;
-	const inside = relative(resolve(orchestrationSessionsDir(home)), file);
+	const sessionsDir = resolve(orchestrationSessionsDir(home));
+	const inside = relative(sessionsDir, file);
 	const isWorker =
 		inside !== "" &&
 		inside !== ".." &&
 		!inside.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
 		!isAbsolute(inside);
-	if (!isWorker) return { home, parentSessionId: sessionId };
+	if (!isWorker) {
+		const foreign = workerTranscriptRoot(file);
+		if (foreign !== undefined && foreign !== dirname(sessionsDir))
+			throw new Error("A worker transcript of another orchestration home is not written from this session's home.");
+		return { home, parentSessionId: sessionId };
+	}
 	assertWorkerConversationFile(home, file, sessionId);
 	const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(file)).metadata;
 	if (

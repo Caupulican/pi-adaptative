@@ -14,6 +14,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { sessionStorageRootsOfFile } from "../orchestration-homes.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
@@ -52,7 +53,7 @@ export function readTranscriptMessages(file: string, agentDir: string): AgentMes
 export function readSessionSnapshot<T>(file: string, agentDir: string, read: (view: ReadonlySessionManager) => T): T {
 	for (let attempt = 1; ; attempt++) {
 		try {
-			return read(SessionManager.openReadOnly(file, agentDir));
+			return read(SessionManager.openReadOnly(file, sessionStorageRootsOfFile(agentDir, file)));
 		} catch (error) {
 			if (!(error instanceof FileSnapshotChangedError) || attempt >= SNAPSHOT_READS) throw error;
 		}

@@ -153,10 +153,12 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 	// session another home holds is not followed.
 	const orchestrationHome = followedOrchestrationHome(agentDir, ownerOrchestrationHome(agentDir), parentSessionId);
 	if (!orchestrationHome) throw new AwayParentUnavailable("it is held by another orchestration home.");
+	// The parent's file is read, and the run's model-call vehicle kept, in the parent's own roots.
+	const roots = { agentDir, orchestrationHome };
 	let current: { reader: ReadonlySessionManager; stamp: string };
 	try {
 		const stamp = fileStamp(sessionFile);
-		current = { reader: SessionManager.openReadOnly(sessionFile, agentDir), stamp };
+		current = { reader: SessionManager.openReadOnly(sessionFile, roots), stamp };
 	} catch (error) {
 		throw new AwayParentUnavailable(
 			`its session file cannot be read (${error instanceof Error ? error.message : String(error)}).`,
@@ -174,7 +176,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		}
 		if (stamp === current.stamp) return current.reader;
 		try {
-			current = { reader: SessionManager.openReadOnly(sessionFile, agentDir), stamp };
+			current = { reader: SessionManager.openReadOnly(sessionFile, roots), stamp };
 		} catch (error) {
 			// A file caught mid-replacement is read again on its next change; the last whole read stays current.
 			input.report(
@@ -233,7 +235,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				modelRegistry,
 				settingsManager: ephemeralSettings,
 				resourceLoader: ephemeralLoader,
-				sessionManager: SessionManager.inMemory(cwd),
+				sessionManager: SessionManager.inMemory(roots, cwd),
 				standing: { kind: "vehicle" },
 				disableSystemOne: true,
 				noTools: "all",

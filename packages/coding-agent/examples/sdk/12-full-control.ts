@@ -8,7 +8,9 @@ import {
 	AuthStorage,
 	createAgentSession,
 	createExtensionRuntime,
+	getAgentDir,
 	ModelRegistry,
+	ownerSessionStorageRoots,
 	type ResourceLoader,
 	SessionManager,
 	SettingsManager,
@@ -70,7 +72,7 @@ const { session } = await createAgentSession({
 	modelRegistry,
 	resourceLoader,
 	tools: ["read", "bash"],
-	sessionManager: SessionManager.inMemory(cwd),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir()), cwd),
 	settingsManager,
 });
 

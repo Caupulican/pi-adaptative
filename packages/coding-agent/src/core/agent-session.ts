@@ -719,7 +719,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this._caps = config.capabilities;
 		const agentDir = config.agentDir ?? getAgentDir();
-		const { orchestrationHome } = config;
+		const { orchestrationHome } = config.sessionManager.getStorageRoots();
 		const bundleLease = claimSessionBundleLease(
 			config.bundleLease,
 			orchestrationHome,

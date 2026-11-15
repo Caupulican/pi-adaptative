@@ -8,6 +8,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	SessionManager,
 	SettingsManager,
 } from "@caupulican/pi-adaptative";
@@ -29,7 +30,7 @@ await loader1.reload();
 
 const { session: session1 } = await createAgentSession({
 	resourceLoader: loader1,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 
 try {
@@ -60,7 +61,7 @@ await loader2.reload();
 
 const { session: session2 } = await createAgentSession({
 	resourceLoader: loader2,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 
 try {

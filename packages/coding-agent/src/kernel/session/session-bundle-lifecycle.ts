@@ -20,7 +20,12 @@ import {
 } from "./session-bundle-paths.ts";
 
 /** Every operation here addresses a bundle inside an orchestration home; callers name the home they mean. */
-export { type OrchestrationHome, ownerOrchestrationHome } from "./session-bundle-paths.ts";
+export {
+	type OrchestrationHome,
+	ownerOrchestrationHome,
+	ownerSessionStorageRoots,
+	type SessionStorageRoots,
+} from "./session-bundle-paths.ts";
 
 export type SessionBundleDeletionPolicy = "retention" | "permanent";
 
@@ -408,8 +413,8 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 
 /** Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. */
 export async function withSessionBundleLeases<T>(
-	home: OrchestrationHome,
-	sessionIds: readonly string[],
+	/** Each session in the home its manager's roots name; one held twice is leased once. */
+	sessions: readonly { readonly home: OrchestrationHome; readonly sessionId: string }[],
 	operation: () => Promise<T>,
 ): Promise<T> {
 	const leases: SessionBundleLease[] = [];
@@ -417,7 +422,13 @@ export async function withSessionBundleLeases<T>(
 	let operationFailure: { error: unknown } | undefined;
 	let result: T | undefined;
 	try {
-		for (const id of new Set(sessionIds)) leases.push(acquireSessionBundleLease(home, id));
+		const held = new Set<string>();
+		for (const { home, sessionId } of sessions) {
+			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), sessionId);
+			if (held.has(key)) continue;
+			held.add(key);
+			leases.push(acquireSessionBundleLease(home, sessionId));
+		}
 		result = await operation();
 	} catch (error) {
 		operationFailure = { error };

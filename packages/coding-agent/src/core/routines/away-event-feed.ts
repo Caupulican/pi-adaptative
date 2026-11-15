@@ -162,7 +162,7 @@ export class AwayEventFeed {
 		if (!orchestrationHome) throw new AwayEventFeedUnavailable("it is held by another orchestration home.");
 		let reader: ReadonlySessionManager;
 		try {
-			reader = SessionManager.openReadOnly(sessionFile, agentDir);
+			reader = SessionManager.openReadOnly(sessionFile, { agentDir, orchestrationHome });
 		} catch (error) {
 			throw new AwayEventFeedUnavailable(`its session file cannot be read (${errorText(error)}).`);
 		}

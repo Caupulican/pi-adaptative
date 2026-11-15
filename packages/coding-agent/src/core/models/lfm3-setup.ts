@@ -13,6 +13,7 @@ import { resolveCliModel, resolveProfileModelSettings } from "../model-resolver.
 import { resolveRouterCandidatePool } from "../model-router/candidate-pool.ts";
 import { evaluateSurfaceFitness } from "../model-router/fitness-gate.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
+import { ownerSessionStorageRoots } from "../orchestration/session-bundle-lifecycle.ts";
 import { type Lfm3FitnessModality, runLfm3ModalityFitness } from "../research/lfm3-modality-fitness.ts";
 import { isProbeAllFailed, projectModelFitnessReport } from "../research/model-fitness.ts";
 import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
@@ -102,7 +103,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 		{ getSystemOneSettings: () => ({ ...settings.getSystemOneSettings(), enabled: true }) },
 		auth,
 	);
-	const manager = SessionManager.create(options.cwd, options.agentDir);
+	const manager = SessionManager.create(options.cwd, ownerSessionStorageRoots(options.agentDir));
 	options.log(`Fitness session ${manager.getSessionId()} in ${options.cwd}`);
 	const reviewer = new SystemOneReviewer({
 		access,

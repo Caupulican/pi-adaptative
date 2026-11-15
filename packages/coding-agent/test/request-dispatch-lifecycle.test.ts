@@ -12,6 +12,7 @@ import {
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { ForegroundLifecycleAdapter } from "../src/core/foreground-lifecycle-adapter.ts";
+import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 
@@ -35,7 +36,11 @@ describe.each([false, true])("durable dispatch lifecycle, text protocol=%s", (te
 			const directory = mkdtempSync(join(tmpdir(), "pi-dispatch-lifecycle-"));
 			try {
 				const agentDir = join(directory, "agent");
-				const manager = SessionManager.create(directory, agentDir, join(directory, "sessions"));
+				const manager = SessionManager.create(
+					directory,
+					ownerSessionStorageRoots(agentDir),
+					join(directory, "sessions"),
+				);
 				let current = true;
 				let committed = false;
 				let commits = 0;
@@ -112,7 +117,7 @@ describe.each([false, true])("durable dispatch lifecycle, text protocol=%s", (te
 				expect(physical).toBe(stage === "healthy" ? 1 : 0);
 				const file = manager.getSessionFile()!;
 				expect(readFileSync(file, "utf8")).toContain(observedRequestId);
-				const reopened = SessionManager.openReadOnly(file, agentDir);
+				const reopened = SessionManager.openReadOnly(file, ownerSessionStorageRoots(agentDir));
 				const entries = reopened.getEntries();
 				const requests = entries.filter((entry) => entry.type === "request_snapshot");
 				const terminals = entries.filter((entry) => entry.type === "provider_request_terminal");

@@ -16,14 +16,14 @@ See [examples/sdk/](../examples/sdk/) for working examples from basic setup to f
 ## Quick Start
 
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@caupulican/pi-adaptative";
+import { AuthStorage, createAgentSession, ModelRegistry, ownerSessionStorageRoots, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
 
 // Set up credential storage and model registry
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   authStorage,
   modelRegistry,
 });
@@ -59,7 +59,7 @@ The main factory function for a single `AgentSession`.
 `createAgentSession()` uses a `ResourceLoader` to supply extensions, skills, prompt templates, themes, and context files. If you do not provide one, it uses `DefaultResourceLoader` with standard discovery.
 
 ```typescript
-import { createAgentSession, SessionManager } from "@caupulican/pi-adaptative";
+import { createAgentSession, ownerSessionStorageRoots, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
 
 // Defaults with DefaultResourceLoader
 const { session } = await createAgentSession();
@@ -68,7 +68,7 @@ const { session } = await createAgentSession();
 const { session } = await createAgentSession({
   model: myModel,
   tools: ["read", "bash"],
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 ```
 
@@ -151,6 +151,7 @@ import {
   createAgentSessionServices,
   prepareAgentSessionRuntime,
   getAgentDir,
+  ownerSessionStorageRoots,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
@@ -173,7 +174,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 ```
 
@@ -360,7 +361,7 @@ const { session } = await createAgentSession({
   // Working directory for DefaultResourceLoader discovery
   cwd: process.cwd(), // default
   
-  // Global config directory
+  // Global config directory: the session manager's (its storage roots) when one is given, else this
   agentDir: "~/.pi/agent", // default (expands ~)
 });
 ```
@@ -439,14 +440,14 @@ API key resolution priority (handled by AuthStorage):
 4. Fallback resolver (for custom provider keys from `models.json`)
 
 ```typescript
-import { AuthStorage, ModelRegistry } from "@caupulican/pi-adaptative";
+import { AuthStorage, ModelRegistry, ownerSessionStorageRoots, getAgentDir } from "@caupulican/pi-adaptative";
 
 // Default: uses ~/.pi/agent/auth.json and ~/.pi/agent/models.json
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   authStorage,
   modelRegistry,
 });
@@ -459,7 +460,7 @@ const customAuth = AuthStorage.create("/my/app/auth.json");
 const customRegistry = ModelRegistry.create(customAuth, "/my/app/models.json");
 
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   authStorage: customAuth,
   modelRegistry: customRegistry,
 });
@@ -523,21 +524,21 @@ const { session } = await createAgentSession({
 When you pass a custom `cwd`, `createAgentSession()` builds selected built-in tools for that cwd.
 
 ```typescript
-import { createAgentSession, SessionManager } from "@caupulican/pi-adaptative";
+import { createAgentSession, ownerSessionStorageRoots, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
 
 const cwd = "/path/to/project";
 
 // Use default tools for custom cwd
 const { session } = await createAgentSession({
   cwd,
-  sessionManager: SessionManager.inMemory(cwd),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir()), cwd),
 });
 
 // Or pick specific tools for custom cwd
 const { session } = await createAgentSession({
   cwd,
   tools: ["read", "bash", "grep"],
-  sessionManager: SessionManager.inMemory(cwd),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir()), cwd),
 });
 ```
 
@@ -730,7 +731,7 @@ Harness notices (a lost watch, System One without an engine, a held outward acti
 
 A host that bounds the spend of each run of the session's workers passes `workerRunCostBound` to `createAgentSession` (`ParentExecutionPolicy.runCostBound`): it is asked for each attempt as it starts and answers with a `RunCostBound`, whose `includes` names the attempts of the same run (their spend seeds it); they share its dollar budgets, checked before each provider request on top of the attempt's own budgets: `maxCostUsd` over the run's whole spend, and `maxMeteredCostUsd` over its metered spend, which only its metered attempts are held to (either may be left out). Its required `unpriced` decides an attempt on a model that declares no price, whose requests cannot be priced: `refused` refuses them, `unbounded` holds it to no dollar run bound (as the main session's workers on such a model run). A bot's host answers `unbounded`, with the request the attempt serves and that request's remaining ceilings; absent, a worker is held to its own budgets only.
 
-A host whose session keeps its orchestration state outside the owner's passes `orchestrationHome` to `createAgentSession` (`OrchestrationHome`): the session's bundle and its lease, its workers' transcripts, the project specialists they build and its fleet queue live there, and a reference by id to a session another home holds is not followed. Pi's bot host passes the bot's (`<agentDir>/bots/<id>/orchestration`); absent, the session uses the owner's (`ownerOrchestrationHome(agentDir)`, `<agentDir>/state/orchestration`, with its fleet queue under `<agentDir>/state/fleet/queue`). The session's `SessionManager` must be opened in the same home: its own writes are admitted against the bundle lease of the home its storage roots name (`getStorageRoots()`), and `SessionManager.create` and `open` name the owner's.
+A session's orchestration state lives in the home its `SessionManager`'s storage roots name (`SessionStorageRoots { agentDir, orchestrationHome }`, read with `getStorageRoots()`): the session's bundle and its lease, its workers' transcripts, the project specialists they build and its fleet queue live there, and a reference by id to a session another home holds is not followed. Every `SessionManager` factory takes the roots (`create`, `open`, `openReadOnly`, `continueRecent`, `forkFrom` and `inMemory`, whose session writes no file but keeps its orchestration state in that home); `ownerSessionStorageRoots(agentDir)` names the owner's (`<agentDir>/state/orchestration`, with its fleet queue under `<agentDir>/state/fleet/queue`). `createAgentSession` takes the home and the agent directory from its manager, takes its bundle lease there and admits the session's own writes against it; an `agentDir` option that names another directory than the manager's roots is refused.
 
 ### Session Management
 
@@ -745,22 +746,23 @@ import {
   createAgentSessionServices,
   prepareAgentSessionRuntime,
   getAgentDir,
+  ownerSessionStorageRoots,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
 // In-memory (no persistence)
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 
 // New persistent session
 const { session: persisted } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 // Continue most recent
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-  sessionManager: SessionManager.continueRecent(process.cwd()),
+  sessionManager: SessionManager.continueRecent(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 if (modelFallbackMessage) {
   console.log("Note:", modelFallbackMessage);
@@ -768,7 +770,7 @@ if (modelFallbackMessage) {
 
 // Open specific file
 const { session: opened } = await createAgentSession({
-  sessionManager: SessionManager.open("/path/to/session.jsonl"),
+  sessionManager: SessionManager.open("/path/to/session.jsonl", ownerSessionStorageRoots(getAgentDir())),
 });
 
 // List sessions
@@ -795,7 +797,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 // Replace the active session with a fresh one
@@ -816,7 +818,7 @@ await runtime.fork("entry-id", { position: "at" });
 **SessionManager tree API:**
 
 ```typescript
-const sm = SessionManager.open("/path/to/session.jsonl");
+const sm = SessionManager.open("/path/to/session.jsonl", ownerSessionStorageRoots(getAgentDir()));
 
 // Session listing
 const currentProjectSessions = await SessionManager.list(process.cwd());
@@ -845,7 +847,7 @@ sm.createBranchedSession(leafId);       // Extract path to new file
 ### Settings Management
 
 ```typescript
-import { createAgentSession, SettingsManager, SessionManager } from "@caupulican/pi-adaptative";
+import { createAgentSession, SettingsManager, ownerSessionStorageRoots, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
 
 // Default: loads from files (global + project merged)
 const { session } = await createAgentSession({
@@ -863,7 +865,7 @@ const { session } = await createAgentSession({ settingsManager });
 // In-memory (no file I/O, for testing)
 const { session } = await createAgentSession({
   settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 
 // Custom directories
@@ -958,6 +960,7 @@ import {
   DefaultResourceLoader,
   defineTool,
   ModelRegistry,
+  ownerSessionStorageRoots,
   SessionManager,
   SettingsManager,
 } from "@caupulican/pi-adaptative";
@@ -1015,7 +1018,7 @@ const { session } = await createAgentSession({
   customTools: [statusTool],
   resourceLoader: loader,
 
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots("/custom/agent")),
   settingsManager,
 });
 
@@ -1045,6 +1048,7 @@ import {
   prepareAgentSessionRuntime,
   getAgentDir,
   InteractiveMode,
+  ownerSessionStorageRoots,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
@@ -1066,7 +1070,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 const mode = new InteractiveMode(runtime, {
@@ -1093,6 +1097,7 @@ import {
   prepareAgentSessionRuntime,
   getAgentDir,
   runPrintMode,
+  ownerSessionStorageRoots,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
@@ -1114,7 +1119,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 await runPrintMode(runtime, {
@@ -1138,6 +1143,7 @@ import {
   prepareAgentSessionRuntime,
   getAgentDir,
   runRpcMode,
+  ownerSessionStorageRoots,
   SessionManager,
 } from "@caupulican/pi-adaptative";
 
@@ -1159,7 +1165,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, 
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd(), ownerSessionStorageRoots(getAgentDir())),
 });
 
 await runRpcMode(runtime);

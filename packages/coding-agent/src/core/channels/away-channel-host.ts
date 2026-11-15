@@ -42,6 +42,7 @@ import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
 	ownerOrchestrationHome,
+	ownerSessionStorageRoots,
 	readSessionLeaseHolders,
 	SessionHeldError,
 } from "../orchestration/session-bundle-lifecycle.ts";
@@ -365,7 +366,7 @@ export class AwayChannelHosts {
 		};
 		let session: AgentSession | undefined;
 		let owner: AwayOwnerSession | undefined;
-		const sessionManager = SessionManager.inMemory(cwd);
+		const sessionManager = SessionManager.inMemory(ownerSessionStorageRoots(agentDir), cwd);
 		try {
 			// The directory's own owner-written layers decide the session's model, as for a parent opened away.
 			const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
@@ -452,7 +453,7 @@ export class AwayChannelHosts {
 			let lost = header.ok ? "it holds another session" : `it cannot be read (${header.reason})`;
 			if (header.ok && header.header.id === recorded.sessionId) {
 				try {
-					sessionManager = SessionManager.open(recorded.file, agentDir);
+					sessionManager = SessionManager.open(recorded.file, ownerSessionStorageRoots(agentDir));
 				} catch (error) {
 					lost = `it cannot be opened (${errorText(error)})`;
 				}
@@ -463,7 +464,7 @@ export class AwayChannelHosts {
 				);
 		}
 		const fresh = !sessionManager;
-		sessionManager ??= SessionManager.create(cwd, agentDir);
+		sessionManager ??= SessionManager.create(cwd, ownerSessionStorageRoots(agentDir));
 		const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 		const resourceLoader = new DefaultResourceLoader({
 			cwd,

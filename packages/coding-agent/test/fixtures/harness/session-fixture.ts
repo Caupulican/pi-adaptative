@@ -43,6 +43,7 @@ import { type MemoryLifecycleDiagnostic, MemoryManager } from "../../../src/core
 import { resolveTranscriptSummarizer } from "../../../src/core/memory/transcript-summarizer.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
+import { ownerSessionStorageRoots } from "../../../src/core/orchestration/session-bundle-lifecycle.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { getInFlightWorkUnits } from "../../../src/core/reload-blockers.ts";
 import { resetRepoIdentityCache } from "../../../src/core/remote/repo-identity.ts";
@@ -3723,7 +3724,9 @@ export class HarnessWorld {
 		extensionsResult: CreateAgentSessionResult["extensionsResult"];
 	}> {
 		const cwd = options.cwd ?? HARNESS_PROJECT_CWD;
-		const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
+		const sessionManager =
+			options.sessionManager ??
+			SessionManager.inMemory(ownerSessionStorageRoots(options.agentDir ?? this.agentDir), cwd);
 		const modelRegistry = options.modelRegistry ?? this.modelRegistry;
 		const routerModels = SCRIPTED_TRACKS.map((id) => {
 			if (options.modelRegistry === undefined) return { model: this.provider.model(id) };
@@ -3912,12 +3915,12 @@ export class HarnessWorld {
 	}
 
 	createSessionManager(agentDir = this.agentDir, cwd = HARNESS_PROJECT_CWD): SessionManager {
-		return SessionManager.create(cwd, agentDir);
+		return SessionManager.create(cwd, ownerSessionStorageRoots(agentDir));
 	}
 
 	/** Reopens a session file written earlier in this world, as its owner would after a restart. */
 	openSessionManager(file: string, agentDir = this.agentDir): SessionManager {
-		return SessionManager.open(file, agentDir);
+		return SessionManager.open(file, ownerSessionStorageRoots(agentDir));
 	}
 
 	/** Reads a descriptor the scenario opened earlier: a positional read sees the node the descriptor was opened on. */
@@ -5760,7 +5763,7 @@ async function disposalSdkCreation(
 ): Promise<SdkDisposalFailureOutcome> {
 	const memoryFaultName = `sdk-disposal-memory-read-${label}`;
 	const leaseFaultName = `sdk-disposal-lease-write-${label}`;
-	const sessionManager = SessionManager.inMemory(HARNESS_PROJECT_CWD);
+	const sessionManager = SessionManager.inMemory(ownerSessionStorageRoots(world.agentDir), HARNESS_PROJECT_CWD);
 	const artifactsDir = seedToolArtifactStore(world, sessionManager.getSessionId());
 	const seeded = world.io.captureTree(artifactsDir).files.size;
 	armSdkMemoryReadFault(world, memoryFaultName);

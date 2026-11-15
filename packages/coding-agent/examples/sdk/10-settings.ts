@@ -4,7 +4,13 @@
  * Override settings using SettingsManager.
  */
 
-import { createAgentSession, SessionManager, SettingsManager } from "@caupulican/pi-adaptative";
+import {
+	createAgentSession,
+	getAgentDir,
+	ownerSessionStorageRoots,
+	SessionManager,
+	SettingsManager,
+} from "@caupulican/pi-adaptative";
 
 const cwd = process.cwd();
 
@@ -21,7 +27,7 @@ settingsManager.applyOverrides({
 
 const { session: customSettingsSession } = await createAgentSession({
 	settingsManager,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log("Session created with custom settings");
 customSettingsSession.dispose();
@@ -47,7 +53,7 @@ const inMemorySettings = SettingsManager.inMemory({
 
 const { session: testSession } = await createAgentSession({
 	settingsManager: inMemorySettings,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 console.log("Test session created with in-memory settings");
 testSession.dispose();

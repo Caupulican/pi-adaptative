@@ -37,7 +37,9 @@ import {
   AuthStorage,
   createAgentSession,
   DefaultResourceLoader,
+  getAgentDir,
   ModelRegistry,
+  ownerSessionStorageRoots,
   SessionManager,
   SettingsManager,
 } from "@caupulican/pi-adaptative";
@@ -65,7 +67,7 @@ const { session } = await createAgentSession({ tools: ["read", "grep", "find", "
 
 // In-memory
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   authStorage,
   modelRegistry,
 });
@@ -91,7 +93,7 @@ const { session } = await createAgentSession({
   resourceLoader,
   tools: ["read", "bash", "my_tool"],
   customTools: [myTool],
-  sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
   settingsManager: SettingsManager.inMemory(),
 });
 
@@ -117,7 +119,7 @@ await session.prompt("Hello");
 | `tools` | `["read", "bash", "edit", "write"]` built-ins | Allowlist tool names across built-in, extension, and custom tools |
 | `customTools` | `[]` | Additional tool definitions |
 | `resourceLoader` | DefaultResourceLoader | Resource loader for extensions, skills, prompts, themes |
-| `sessionManager` | `SessionManager.create(cwd)` | Persistence |
+| `sessionManager` | `SessionManager.create(cwd, ownerSessionStorageRoots(agentDir))` | Persistence; its storage roots name the session's agent directory and orchestration home |
 | `settingsManager` | `SettingsManager.create(cwd, agentDir)` | Settings overrides |
 
 ## Events

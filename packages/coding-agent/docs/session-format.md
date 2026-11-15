@@ -411,11 +411,13 @@ for (const line of lines) {
 Key methods for working with sessions programmatically.
 
 ### Static Creation Methods
-- `SessionManager.create(cwd, sessionDir?)` - New session
-- `SessionManager.open(path, sessionDir?)` - Open existing session file
-- `SessionManager.continueRecent(cwd, sessionDir?)` - Continue most recent or create new
-- `SessionManager.inMemory(cwd?)` - No file persistence
-- `SessionManager.forkFrom(sourcePath, targetCwd, sessionDir?)` - Fork session from another project
+- `SessionManager.create(cwd, roots, sessionDir?)` - New session
+- `SessionManager.open(path, roots, sessionDir?)` - Open existing session file
+- `SessionManager.continueRecent(cwd, roots, sessionDir?)` - Continue most recent or create new
+- `SessionManager.inMemory(roots, cwd?)` - No file persistence
+- `SessionManager.forkFrom(sourcePath, targetCwd, roots, sessionDir?)` - Fork session from another project
+
+`roots` (`SessionStorageRoots`) name the agent directory and the orchestration home the session's state lives in; `ownerSessionStorageRoots(agentDir)` names the owner's.
 
 ### Static Listing Methods
 - `SessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory

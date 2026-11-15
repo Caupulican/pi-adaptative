@@ -17,6 +17,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
+	ownerSessionStorageRoots,
 	SessionManager,
 	SettingsManager,
 } from "@caupulican/pi-adaptative";
@@ -41,7 +42,7 @@ await resourceLoader.reload();
 
 const { session } = await createAgentSession({
 	resourceLoader,
-	sessionManager: SessionManager.inMemory(),
+	sessionManager: SessionManager.inMemory(ownerSessionStorageRoots(getAgentDir())),
 });
 
 try {

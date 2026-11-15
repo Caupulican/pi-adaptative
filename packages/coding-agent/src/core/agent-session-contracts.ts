@@ -50,7 +50,7 @@ import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
-import type { OrchestrationHome, SessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
+import type { SessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import type { OwnerInputEnd } from "./owner-input-ledger.ts";
 import type { PendingInputHandle } from "./pending-input-queue-controller.ts";
 import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
@@ -172,10 +172,12 @@ export interface AgentSessionConfig {
 	 * workers serving one request to that request's spend bound. Absent, a worker is held to its own budgets only.
 	 */
 	workerRunCostBound?: ParentExecutionPolicy["runCostBound"];
+	/**
+	 * The session's transcript; its storage roots (`getStorageRoots()`) name where the session's orchestration state lives:
+	 * its bundle, its lease, its workers' transcripts and specialists.
+	 */
 	sessionManager: SessionManager;
-	/** Where the session's orchestration state lives: its bundle, its lease, its workers' transcripts and specialists. */
-	orchestrationHome: OrchestrationHome;
-	/** Required for persisted sessions, taken in `orchestrationHome`; acquire before construction and transfer once. */
+	/** Required for persisted sessions, taken in the manager's home; acquire before construction and transfer once. */
 	bundleLease?: SessionBundleLease;
 	settingsManager: SettingsManager;
 	cwd: string;
