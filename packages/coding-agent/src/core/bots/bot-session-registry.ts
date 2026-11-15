@@ -61,9 +61,10 @@ const hosts = new Map<string, SharedHost>();
 
 /**
  * What each agent directory's hosts in this process keep across one another (`BotHostProcessKeeps`): the owner's stops the
- * process could not record, and what the owner was told of the work a stop or release left behind a symbolic link. A
- * root's host and the one that replaces it (a new, resumed or forked session detaches the old root before the new one
- * attaches) hold the same, kept for the process, so a replaced host neither loses a stop nor tells a notice again.
+ * process could not record, what the owner was told of the work a stop or release left behind a symbolic link, and why
+ * each bot's session state was told as kept in the owner's home. A root's host and the one that replaces it (a new,
+ * resumed or forked session detaches the old root before the new one attaches) hold the same, kept for the process, so a
+ * replaced host neither loses a stop nor tells a notice again.
  */
 const processKeeps = new Map<string, BotHostProcessKeeps>();
 
@@ -71,7 +72,11 @@ const processKeeps = new Map<string, BotHostProcessKeeps>();
 function keepsFor(key: string, root: boolean): BotHostProcessKeeps {
 	const kept = root ? processKeeps.get(key) : undefined;
 	if (kept) return kept;
-	const keeps = { unrecorded: new UnrecordedBotStops(key), links: new LinkedSessionNotices() };
+	const keeps = {
+		unrecorded: new UnrecordedBotStops(key),
+		links: new LinkedSessionNotices(),
+		notMoved: new Set<string>(),
+	};
 	if (root) processKeeps.set(key, keeps);
 	return keeps;
 }

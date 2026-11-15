@@ -6,6 +6,7 @@ import {
 	readdirSync,
 	readFileSync,
 	renameSync,
+	rmSync,
 	symlinkSync,
 	unlinkSync,
 	writeFileSync,
@@ -68,6 +69,10 @@ const FIFTH_QUESTION = "When does the release freeze start?";
 const FIFTH_ANSWER = "The release freeze starts on Monday.";
 /** Sent just before the owner's stop, which covers it: refused by the stop, so no turn ever carries it. */
 const STOPPED_QUESTION = "Which branch holds the release fixes?";
+const SIXTH_QUESTION = "Which channel announces the release?";
+const SIXTH_ANSWER = "The release is announced in the releases channel.";
+const SEVENTH_QUESTION = "Who keeps the release checklist?";
+const SEVENTH_ANSWER = "The release manager keeps the release checklist.";
 /** The fleet queue file an earlier build left beside the bot session's state in the owner's home: a stopped, empty queue. */
 const PLANTED_FLEET = { v: 1, stopped: true, entries: [] };
 
@@ -119,15 +124,54 @@ function holdersIn(home: BotHome["orchestrationHome"], sessionId: string): Array
  */
 export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void> {
 	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
+	let ownerBundle: string;
 	try {
-		await runLeg(world, session);
+		ownerBundle = await runLeg(world, session);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the root session disposes cleanly").toBeUndefined();
 	}
+	await replacedHostTellsNothing(world, ownerBundle);
 	world.trace.mark("root", "j7.bot-home");
 }
 
-async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void> {
+/**
+ * Leg: a root session replaced by another (the first disposed, then a new one created, as a new, resumed or forked session
+ * does) gives the bots a new host, which keeps what the process told: the bot's session state standing in both homes,
+ * told when the first root's host opened the bot's session (`ownerBundle`, the owner's copy left unused), is told no
+ * more when the new host opens it.
+ */
+async function replacedHostTellsNothing(world: HarnessWorld, ownerBundle: string): Promise<void> {
+	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
+	const hostLock = resolve(botHostLockFile(world.agentDir, KEEPER));
+	try {
+		const mark = world.warnings.length;
+		const sent = await session.sendOperatorMessageToBot(KEEPER, SEVENTH_QUESTION);
+		await withDeadline(
+			world.trace,
+			"J7 bot home: the bot answered through the host that replaced the first root's",
+			world.provider.whenReached(reached(TRACK.homeBot, "j7-home-replaced")),
+		);
+		await waitForBotRosterState(world, session, KEEPER, "idle");
+		expect(
+			{ mode: sent.mode, warnings: world.warnings.slice(mark) },
+			"the host that replaced the first root's opens the bot's session beside its state in both homes and tells nothing the process told already",
+		).toEqual({ mode: "followed_up", warnings: [] });
+		expect(
+			session.retirePersistentBot(KEEPER),
+			"retiring the bot through the replacing root closes its session",
+		).toEqual({ retired: true, detail: `Bot ${KEEPER} retired.` });
+		await withDeadline(
+			world.trace,
+			"J7 bot home: the replacing root's host let the bot's session go",
+			world.io.waitForMutation(() => processLockHolder(hostLock) === undefined),
+		);
+	} finally {
+		rmSync(ownerBundle, { recursive: true, force: true });
+		expect(await world.disposeSessionInBody(session), "the replacing root session disposes cleanly").toBeUndefined();
+	}
+}
+
+async function runLeg(world: HarnessWorld, session: AgentSession): Promise<string> {
 	const trace = world.trace;
 	const words = interfaceText().botTeam;
 	const home = botHomeOf(world.agentDir, KEEPER);
@@ -182,6 +226,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			},
 			reply: { content: [{ type: "text", text: FIFTH_ANSWER }] },
 		},
+		{ name: "j7-home-both", reply: { content: [{ type: "text", text: SIXTH_ANSWER }] } },
+		{ name: "j7-home-replaced", reply: { content: [{ type: "text", text: SEVENTH_ANSWER }] } },
 	);
 	// Each owner message reaches a closed session, so its turn, which calls no tool, leaves its words unjudged and nothing
 	// settles them: no System One question is asked in this leg (as for the bot-spend leg).
@@ -595,4 +641,22 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	unlinkSync(linkedSession);
 	unlinkSync(linkedTarget);
 	await retire("J7 bot home: after the released answer");
+
+	// Step 7: the session's state standing in both homes (a bundle of it left in the owner's home beside the bot's) is
+	// told once per process: this root's host tells it as it opens the bot's session, and the host that replaces it
+	// (`replacedHostTellsNothing`) tells it no more.
+	const ownerBundle = ownerPieces[bundle] as string;
+	mkdirSync(ownerBundle, { recursive: true });
+	const bothMark = world.warnings.length;
+	const sixthMode = await ask(
+		SIXTH_QUESTION,
+		"j7-home-both",
+		"J7 bot home: the bot answered beside its state in both homes",
+	);
+	expect(
+		{ mode: sixthMode, warnings: world.warnings.splice(bothMark) },
+		"the bot's session opens on its own home's state beside the owner's copy, the owner told once where that copy stays unused",
+	).toEqual({ mode: "followed_up", warnings: [words.botSessionStateInBothHomes(KEEPER, ownerBundle)] });
+	await retire("J7 bot home: after the answer beside both homes");
+	return ownerBundle;
 }

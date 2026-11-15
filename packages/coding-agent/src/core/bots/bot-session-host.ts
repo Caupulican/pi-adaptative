@@ -108,6 +108,8 @@ export interface BotHostProcessKeeps {
 	readonly unrecorded: UnrecordedBotStops;
 	/** What the owner was told of the work a stop or a release left behind a symbolic link. */
 	readonly links: LinkedSessionNotices;
+	/** Why each bot's session state was told as kept in the owner's home (`BotSessionLoadPorts.toldNotMoved`). */
+	readonly notMoved: Set<string>;
 }
 
 export type { BotSessionState };
@@ -231,7 +233,8 @@ export class BotSessionHost {
 
 	/**
 	 * `keeps` is what its process keeps for the agent directory across its hosts (`bot-session-registry.ts`): the owner's
-	 * stops it could not record, and what the owner was told of the work a stop or release left behind a symbolic link.
+	 * stops it could not record, what the owner was told of the work a stop or release left behind a symbolic link, and
+	 * why each bot's session state was told as kept in the owner's home.
 	 */
 	constructor(ports: BotSessionHostPorts, keeps: BotHostProcessKeeps, previousStop?: Promise<void>) {
 		this.ports = ports;
@@ -341,6 +344,7 @@ export class BotSessionHost {
 				owed: this.owed,
 				takeLock: (agentId) => this.view.takeLock(agentId),
 				stopPorts: () => this.stopPorts(),
+				toldNotMoved: keeps.notMoved,
 				notify: (agentId, text, mark, deliveryId) => this.notify(agentId, text, mark, deliveryId),
 				recordOutcome: (agentId, summary) => this.recordOutcome(agentId, summary),
 				settle: (entry) => this.settle(entry),

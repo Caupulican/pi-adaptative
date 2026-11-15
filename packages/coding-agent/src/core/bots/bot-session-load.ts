@@ -88,6 +88,11 @@ export interface BotSessionLoadPorts {
 	takeLock: BotRemoteView["takeLock"];
 	/** What applying a stop reads. */
 	stopPorts(): BotStopPorts;
+	/**
+	 * Why each bot's session state was told as kept in the owner's home (`<agentId>\0<reason>`), kept by the process for
+	 * its agent directory across its hosts (`BotHostProcessKeeps.notMoved`): each bot's reason is told once per process.
+	 */
+	readonly toldNotMoved: Set<string>;
 	/** Tells the owner what the bot's own session raised, in its chat (marked unread unless `mark` is false); true if kept. */
 	notify(agentId: string, text: string, mark?: boolean, deliveryId?: string): boolean;
 	/** A turn ended with words: the bot's summary in the roster. */
@@ -106,8 +111,6 @@ export interface BotSessionLoadPorts {
 export class BotSessionLoader {
 	private readonly ports: BotSessionLoadPorts;
 	private readonly holder: string;
-	/** Why each bot's session state was told as kept in the owner's home: each bot's reason told once per process. */
-	private readonly toldNotMoved = new Set<string>();
 
 	constructor(ports: BotSessionLoadPorts, holder: string) {
 		this.ports = ports;
@@ -144,8 +147,8 @@ export class BotSessionLoader {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
 				notMoved: (kept) => {
 					const told = `${agentId}\0${kept.reason}`;
-					if (this.toldNotMoved.has(told)) return;
-					this.toldNotMoved.add(told);
+					if (this.ports.toldNotMoved.has(told)) return;
+					this.ports.toldNotMoved.add(told);
 					this.ports.warn(
 						kept.reason === "in-both-homes"
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
