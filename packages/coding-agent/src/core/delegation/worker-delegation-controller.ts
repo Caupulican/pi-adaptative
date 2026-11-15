@@ -643,10 +643,6 @@ export class WorkerDelegationController {
 		});
 		this.fleet.bindLocal({
 			runningCount: () => this.runningSlotCount(),
-			runningWriterCount: () =>
-				this.getWorkerLifecycle()
-					.getRunningLaneFlows()
-					.filter((lane) => lane.writes).length,
 			drain: () => this.scheduler.drain(),
 			runningLanes: () => this.getWorkerLifecycle().getRunningLaneFlows(),
 			laneIdsOfPlan: (planId) => {
@@ -679,6 +675,8 @@ export class WorkerDelegationController {
 					}
 				}
 			},
+			isLaneLive: (laneId) =>
+				NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(this.getWorkerLifecycle().getActiveAttempt(laneId)?.status ?? ""),
 			isAttemptLive: (attemptId) =>
 				NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(
 					this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId]?.status ?? "",

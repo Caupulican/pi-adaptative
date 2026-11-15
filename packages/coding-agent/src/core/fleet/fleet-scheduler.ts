@@ -37,7 +37,12 @@ import { bindingTerm, ceilingTerm, decideRoom } from "./capacity/room.ts";
 import { FLEET_STOP_MACHINE } from "./fleet-admission-machine.ts";
 import { FleetLocalClaims, type SpendBrakeState } from "./fleet-local-claims.ts";
 import { FleetQueue } from "./fleet-queue.ts";
-import { type FleetQueueMetadataEntry, type FleetQueueStore, openFleetQueueStore } from "./fleet-queue-store.ts";
+import {
+	type FleetQueueMetadataEntry,
+	type FleetQueueStore,
+	MAX_PERSISTED_FLEET_QUEUE_ENTRIES,
+	openFleetQueueStore,
+} from "./fleet-queue-store.ts";
 import type {
 	AdmitDecision,
 	FleetDispatch,
@@ -80,12 +85,12 @@ const NO_LOCAL_STARTS: FleetRefusal = {
 export interface FleetLocalPort {
 	/** Local workers holding a running slot (running minus those yielded while they wait). */
 	runningCount(): number;
-	/** Running local workers that hold write paths. */
-	runningWriterCount(): number;
 	/** Re-runs the local selection pass (the dispatch queue's drain). */
 	drain(): void;
-	/** Running local lanes with their flow, for a scope cancel. */
-	runningLanes(): readonly { laneId: string; objectiveId: string; subtreeId: string }[];
+	/** Running local lanes with their flow and whether they hold write paths: a scope cancel's lanes, the writer count. */
+	runningLanes(): readonly { laneId: string; objectiveId: string; subtreeId: string; writes: boolean }[];
+	/** The lane's attempt has not reached a terminal state. */
+	isLaneLive(laneId: string): boolean;
 	/** The lanes a plan's nodes were released to, live or retired, from the durable plan projection. */
 	laneIdsOfPlan(planId: string): readonly string[];
 	/** Cancels queued or running lanes through the controller's durable cancel path. */
@@ -279,6 +284,23 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return entry.enqueuedAt;
 	}
 
+	/**
+	 * Drops the restored entries no recovered node can claim any more, those whose lane's attempt ended (finished,
+	 * cancelled, or never recovered): swept, while any remain, when a lane starts, a run ends or a scope is cancelled.
+	 * The map is filled once, at construction, from at most {@link MAX_PERSISTED_FLEET_QUEUE_ENTRIES} entries, and only
+	 * shrinks: by a claim, a start, or such a sweep.
+	 */
+	private pruneRestored(): void {
+		const local = this.local;
+		if (this.restored.size === 0 || !local) return;
+		for (const id of this.restored.keys()) if (!local.isLaneLive(id)) this.restored.delete(id);
+	}
+
+	/** Running local workers that hold write paths. */
+	private runningWriters(): number {
+		return this.local?.runningLanes().filter((lane) => lane.writes).length ?? 0;
+	}
+
 	// ---- local admission ----
 
 	/**
@@ -288,7 +310,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 	 */
 	localRoom(input: LocalRoomInput): FleetRoomDecision {
 		const running = this.local?.runningCount() ?? 0;
-		const writers = input.writes ? (this.local?.runningWriterCount() ?? 0) : 0;
+		const writers = input.writes ? this.runningWriters() : 0;
 		const pass = this.factsPass();
 		const objectiveId =
 			input.objectiveId ||
@@ -320,6 +342,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 	 * account's window and reserves its metered estimate against the goal's and the day's budgets until it is released.
 	 */
 	noteAdmitted(laneId: string, attemptId: string, model: Model<Api>, objectiveId: string | undefined): void {
+		// A lane that starts no longer resumes the place a previous process left it in.
+		this.restored.delete(laneId);
+		this.pruneRestored();
 		this.waits.release(laneId);
 		this.lastWait.delete(laneId);
 		this.claims.admitted(attemptId, model, objectiveId);
@@ -348,6 +373,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		}
 		this.lastReleaseAt = now;
 		harnessLog.debug("fleet", "a node is released", { attemptId });
+		this.pruneRestored();
 		this.changed();
 	}
 
@@ -505,6 +531,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		}
 		harnessLog.info("fleet", "a fleet scope is cancelled", { scope: scope.kind, lanes: localIds.length, reasonCode });
 		local.cancelLanes(localIds, reasonCode);
+		this.pruneRestored();
 		return handed;
 	}
 
@@ -543,7 +570,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 	room(query: RoomQuery): RoomSnapshot {
 		const running = this.local?.runningCount() ?? 0;
 		const writes = query.weight === "write" || query.weight === "heavy";
-		const writers = writes ? (this.local?.runningWriterCount() ?? 0) : 0;
+		const writers = writes ? this.runningWriters() : 0;
 		const terms = this.localTerms({ writes }, running, writers);
 		const decision = decideRoom(terms);
 		const queue = this.queue;
@@ -765,7 +792,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		if (model) {
 			const writes = dispatch.writeScope.length > 0;
 			const running = this.local?.runningCount() ?? 0;
-			const writers = writes ? (this.local?.runningWriterCount() ?? 0) : 0;
+			const writers = writes ? this.runningWriters() : 0;
 			const terms = this.localTerms(
 				{
 					model,
