@@ -48,6 +48,8 @@ export const MODEL_ID = {
 	idle: "worker-c",
 	stopLeader: "worker-a",
 	stopHelper: "worker-b",
+	/** The owner's bot whose priced answers are charged to the main session; its soul tells it apart on the shared model. */
+	spender: "worker-b",
 	/** An appointed goal leader runs on the session's own model, so it shares the root's model and is told apart by its soul. */
 	goalLeader: "root",
 } as const;
@@ -85,6 +87,7 @@ export const TRACK = {
 	stopLeader: "j7-stop-leader",
 	stopHelper: "j7-stop-helper",
 	goalLeader: "j7-goal-leader",
+	spender: "j7-spender",
 } as const;
 
 /**
