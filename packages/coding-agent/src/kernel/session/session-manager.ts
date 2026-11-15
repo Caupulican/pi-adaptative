@@ -49,7 +49,6 @@ import {
 	MAX_PARENT_WAKE_INPUTS,
 	MAX_PENDING_PARENT_INPUTS,
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
-	PARENT_INPUT_DECLINED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
 	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_CUSTOM_TYPE,
@@ -62,7 +61,6 @@ import {
 	type ParentInputOrigin,
 	type ParentInputWake,
 	type ParentNoteSelection,
-	type ParentWakeInput,
 	type PersistedParentInput,
 	parentInputMetadataOfMessage,
 	parentNoteMarker,
@@ -2091,7 +2089,7 @@ export class SessionManager {
 		return this.parentInputReceipts.find(deliveryId);
 	}
 
-	/** Inputs that never reach the model on this branch: held ones their producer skipped, turn ones a stop declined. */
+	/** Held inputs their producer skipped on this branch; their saved bodies never reach the model. */
 	getSkippedParentInputIds(): ReadonlySet<string> {
 		return this._parentInputIndex().skippedInputs();
 	}
@@ -2102,36 +2100,29 @@ export class SessionManager {
 	 * that is not pending on this branch.
 	 */
 	skipPendingParentInput(deliveryId: string, reason: string): boolean {
-		return this._withdrawPendingParentInput(deliveryId, "next-owner-turn", reason);
-	}
-
-	/**
-	 * Records that the owner's stop declined a turn input accepted on this branch whose wake never ran: it wakes the session
-	 * no more and never reaches the model. One the open wake holds stays: the result is `false`, as for one not pending.
-	 */
-	declinePendingParentInput(deliveryId: string, reason: string): boolean {
-		return this._withdrawPendingParentInput(deliveryId, "turn", reason);
-	}
-
-	private _withdrawPendingParentInput(deliveryId: string, mode: ParentInputMode, reason: string): boolean {
-		const named = (inputs?: readonly ParentWakeInput[]) =>
-			inputs?.some((item) => item.deliveryId === deliveryId) === true;
-		const held = () => this.getPendingParentInputs(mode).find((input) => input.metadata.deliveryId === deliveryId);
-		const owners = () => [...(this.parentNoteAdmission?.owners.values() ?? [])].map((owner) => owner.selection);
-		const kept = () =>
-			mode === "turn"
-				? named(this.getParentInputWake()?.inputs)
-				: [this.plannedParentNotes, ...owners()].some((notes) => named(notes?.inputs)) ||
-					this._parentInputIndex().bound(deliveryId);
+		const held = () =>
+			this._parentInputIndex()
+				.pendingInputs("next-owner-turn")
+				.find((input) => input.metadata.deliveryId === deliveryId);
+		const selected = () =>
+			[
+				this.plannedParentNotes,
+				...[...(this.parentNoteAdmission?.owners.values() ?? [])].map((owner) => owner.selection),
+			].some((selection) => selection?.inputs.some((input) => input.deliveryId === deliveryId)) ||
+			this._parentInputIndex().bound(deliveryId);
 		const input = held();
-		if (!input || kept()) return false;
+		if (!input || selected()) return false;
 		return this._withParentInputMutation(input.metadata.origin, () => {
 			const current = held();
-			if (!current || kept()) return false;
-			const type = mode === "turn" ? PARENT_INPUT_DECLINED_CUSTOM_TYPE : PARENT_INPUT_SKIPPED_CUSTOM_TYPE;
-			const [entryId, payloadDigest] = [current.entryId, current.metadata.payloadDigest];
-			const id = this.appendCustomEntry(type, { version: 1, deliveryId, entryId, payloadDigest, reason });
-			if (!this.isEntryDurableForSession(id)) throw new Error(`Parent input ${type} was not physically persisted.`);
+			if (!current || selected()) return false;
+			const id = this.appendCustomEntry(PARENT_INPUT_SKIPPED_CUSTOM_TYPE, {
+				version: 1,
+				deliveryId,
+				entryId: current.entryId,
+				payloadDigest: current.metadata.payloadDigest,
+				reason,
+			});
+			if (!this.isEntryDurableForSession(id)) throw new Error("Parent input skip was not physically persisted.");
 			return true;
 		});
 	}

@@ -221,11 +221,8 @@ or applied in place when no process does. It also ends the watches the bot's ses
 stopped worker's watches end with it) and settles the results it had not read yet that fired by then, or that those
 watches fired after the stop while it waited to be taken, recorded by a note in its conversation (or, when the session has
 no conversation written yet, in the bot's watch records alone), and you are told how many of each it ended; while the stop
-waits, no watch result wakes the bot. A watch the bot arms after the stop is kept and wakes it as usual. Every report its conversation had
-received by the time of the stop and not acted on yet (a helper's, a watch's result, any other wake it was sent) is declined (a `parent_input_declined` record names each), so none
-wakes the bot or opens it again to run the stopped work and none reaches the model, and you are told how many; one a turn
-the stop cut was already answering stays with that turn and runs again when the bot next opens or is next sent words. A
-build older than the decline still reads the conversation and runs a declined report. A stop that cannot be written to the bot's home
+waits, no watch result wakes the bot. A watch the bot arms after the stop is kept and wakes it as usual. A watch's wake its conversation had already taken before the stop is not withdrawn:
+it still runs when the bot next opens or is next sent words. A stop that cannot be written to the bot's home
 is not recorded: you are told this process holds it and records it again until it lands, and that wherever it is applied
 it ends only the work there was when it was made (for a bot this process hosts, that it applies only to the bot's work in
 this process). A session started after every other one

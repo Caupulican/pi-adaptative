@@ -18,7 +18,6 @@ export const LABELS = {
 		"routine-intake": "Routine",
 		"routine-completion": "Routine result",
 		parent_input_consumed: "Helper message read",
-		parent_input_declined: "Helper message declined by the bot's stop",
 		parent_input_skipped: "Helper message skipped",
 		parent_input_wake: "Helper message",
 		parent_input_wake_request: "Helper message",
