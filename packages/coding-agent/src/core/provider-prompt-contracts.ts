@@ -117,30 +117,54 @@ function commsGlossaryPrompt(plan: boolean): string {
 	].join("\n");
 }
 
-/** The director's standing duties, after how it splits work. */
-const ROOT_DIRECTOR_DUTIES = [
-	"- You orchestrate; you do not execute. Reading, searching, planning, reviewing, and writing agent definitions and instruction files are yours. Building, testing, changing project files and running programs are the workers': start or reuse a suitable worker, and never duplicate running work.",
-	"- Brief each worker with scope, the evidence you expect and the files it may write. For a long brief, write the instructions to a file and tell the worker to read and follow it.",
-	"- Keep working while workers run; wait only at a true dependency.",
-	"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
-	"- You own integration, verification, security, approvals and every message to the owner.",
-] as const;
+/** The words of the director role that differ between the root and a bot (`directorRolePrompt`). */
+interface DirectorWords {
+	readonly role: string;
+	/** What the director writes itself, after reading, searching, planning and reviewing. */
+	readonly writes: string;
+	/** What the director owns at the end. */
+	readonly owns: string;
+}
 
 /**
- * The root's role in every root prompt that can delegate (full class, worker delegation on, `delegate` active).
- * It states how the root directs; the work-lifecycle rule hook carries only the delegation detail this does not.
- * `plan`: the `plan` tool is active, so the role says when to use it and the glossary carries its codes.
+ * The root writes agent definitions and instruction files and answers to the owner, approvals included. A bot's writes
+ * are confined away from the harness resources agent definitions live in, and it holds no approval (it never asks the
+ * owner live), so it owns the answers of its own conversation.
  */
-export function rootDirectorRolePrompt(options: { readonly plan: boolean }): string {
+const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
+	root: {
+		role: "ROLE: root, the director of a team of workers",
+		writes: "writing agent definitions and instruction files are yours",
+		owns: "integration, verification, security, approvals and every message to the owner",
+	},
+	bot: {
+		role: "ROLE: director of a team of workers",
+		writes: "writing instruction files inside your write scope are yours",
+		owns: "integration, verification, security and every answer in this conversation",
+	},
+};
+
+/**
+ * The director's role in every prompt of a session that can delegate (full class, worker delegation on, `delegate`
+ * active): the root's, or a bot's (`root: false`). It states how the session directs; the work-lifecycle rule hook
+ * carries only the delegation detail this does not. `plan`: the `plan` tool is active, so the role says when to use
+ * it and the glossary carries its codes.
+ */
+export function directorRolePrompt(options: { readonly plan: boolean; readonly root: boolean }): string {
+	const words = DIRECTOR_WORDS[options.root ? "root" : "bot"];
 	return [
-		"ROLE: root, the director of a team of workers",
+		words.role,
 		"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
 		...(options.plan
 			? [
 					"- For work with several parts, call plan once with every step, its files and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.",
 				]
 			: []),
-		...ROOT_DIRECTOR_DUTIES,
+		`- You orchestrate; you do not execute. Reading, searching, planning, reviewing, and ${words.writes}. Building, testing, changing project files and running programs are the workers': start or reuse a suitable worker, and never duplicate running work.`,
+		"- Brief each worker with scope, the evidence you expect and the files it may write. For a long brief, write the instructions to a file and tell the worker to read and follow it.",
+		"- Keep working while workers run; wait only at a true dependency.",
+		"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
+		`- You own ${words.owns}.`,
 		commsGlossaryPrompt(options.plan),
 	].join("\n");
 }

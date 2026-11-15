@@ -4,6 +4,9 @@
  * bot, hand a part of its goal to a leader, update a leader it handed a goal to). It is built per attempt from a host of
  * the coordinator's ports; the coordinator's private members are reached through arrow functions in its own method, never
  * through a cast. `createBotMessageBroker` turns the directory into the broker the bot_message tool calls.
+ *
+ * A session that manages no bots (a bot's own session, the away vehicle) gets `createSessionScopedBotMessageDirectory`:
+ * its workers stay inside it, so they reach no bot and no group, and answer only their session root.
  */
 
 import type { SessionManager } from "../../kernel/node.ts";
@@ -43,13 +46,67 @@ export interface BotMessageDirectoryHost {
 	): Promise<BotOwnedStartOutcome>;
 }
 
+/** Whether `sender`'s attempt `attemptId` still runs on the session and branch the directory was built on; throws otherwise. */
+function senderFence(
+	host: Pick<BotMessageDirectoryHost, "getSessionManager" | "isDisposed" | "listWorkerAgents">,
+	sender: string,
+	attemptId: string,
+): () => void {
+	const manager = host.getSessionManager();
+	const assertBranch = manager.captureBranchContext();
+	return () => {
+		if (host.isDisposed() || host.getSessionManager() !== manager)
+			throw new Error("Bot messaging session is no longer current.");
+		assertBranch();
+		const source = host.listWorkerAgents().find((agent) => agent.agentId === sender);
+		if (source?.attemptId !== attemptId || source.dispatch !== "running")
+			throw new Error("Bot messaging sender generation is no longer current.");
+	};
+}
+
+/**
+ * The directory of a worker of a session that manages no bots: it lists nothing, resolves no bot, and authorizes a reply
+ * only to its own session root. No leader move is offered.
+ */
+export function createSessionScopedBotMessageDirectory(
+	host: Pick<BotMessageDirectoryHost, "getSessionManager" | "isDisposed" | "listWorkerAgents">,
+	sender: string,
+	attemptId: string,
+): BotMessageDirectory {
+	const manager = host.getSessionManager();
+	const assertCurrent = senderFence(host, sender, attemptId);
+	return {
+		assertCurrent,
+		leaderIds: () => [],
+		ownLeader: () => undefined,
+		list: () => {
+			assertCurrent();
+			return { groups: [], totalGroups: 0, peers: [], total: 0 };
+		},
+		resolve: () => {
+			assertCurrent();
+			throw new Error("This session's workers reach no bot or group: they answer only their session root.");
+		},
+		threadId: () => {
+			assertCurrent();
+			return undefined;
+		},
+		authorizeReply: (_thread, requester) => {
+			assertCurrent();
+			if (requester !== sessionRootAddress(manager.getSessionId()))
+				throw new Error("Reply requester is outside this session.");
+		},
+		recordSent: () => {},
+	};
+}
+
 export function createBotMessageDirectory(
 	host: BotMessageDirectoryHost,
 	sender: string,
 	attemptId: string,
 ): BotMessageDirectory {
 	const manager = host.getSessionManager();
-	const assertBranch = manager.captureBranchContext();
+	const assertSender = senderFence(host, sender, attemptId);
 	const context = host.botBindings.generationContext(sender);
 	const sourceAlias = context.agentId;
 	const thread = context.teamId ? `team:${context.teamId}:${context.teamIncarnationId}` : undefined;
@@ -75,12 +132,7 @@ export function createBotMessageDirectory(
 		return team;
 	};
 	const assertCurrent = () => {
-		if (host.isDisposed() || host.getSessionManager() !== manager)
-			throw new Error("Bot messaging session is no longer current.");
-		assertBranch();
-		const source = host.listWorkerAgents().find((agent) => agent.agentId === sender);
-		if (source?.attemptId !== attemptId || source.dispatch !== "running")
-			throw new Error("Bot messaging sender generation is no longer current.");
+		assertSender();
 		if (
 			sourceAlias &&
 			host.getBotTeamStore().getBot(sourceAlias) &&

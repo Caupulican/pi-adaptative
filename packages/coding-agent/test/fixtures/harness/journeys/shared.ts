@@ -17,9 +17,11 @@ import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { CONTINUOUS_CHAT_FOREGROUND_QUIET_MS } from "../../../../src/core/memory/continuous-chat-runtime.ts";
 import { KNOWLEDGE_JUDGMENT_TOOL_NAME } from "../../../../src/core/memory/knowledge-judgment-runner.ts";
+import { servesLaneMemoryFor } from "../../../../src/core/memory/memory-provider.ts";
 import type { AgentBindingContract } from "../../../../src/core/orchestration/contracts.ts";
 import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
 import { SERIAL_CALL_HINT_PREFIX } from "../../../../src/core/serial-call-hint.ts";
+import { sessionCapabilities } from "../../../../src/core/session-standing.ts";
 import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/settings-rules.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
 import type { ExecutionState } from "../../../../src/core/system-one/types.ts";
@@ -1327,6 +1329,9 @@ export function goalCompletionFacts(session: AgentSession): string {
 	return JSON.stringify({ status: goal?.status, requirements: goal?.requirements, evidence: goal?.evidence });
 }
 
+/** The rule facts of a root session, the session these rule checks read: it lends its workers memory reads. */
+const ROOT_RULE_FACTS = { servesLaneMemory: servesLaneMemoryFor(sessionCapabilities({ kind: "root" })) };
+
 /**
  * The first model-driven completion of a context that passed every deterministic completion check is refused once, before the
  * completion is judged, with the host's noticed-items rule: an error result whose whole text is the rule block that production
@@ -1339,7 +1344,7 @@ export function assertCompletionRuleRefusal(
 	session: AgentSession,
 	factsBefore: string | undefined,
 ): void {
-	const hook = loadRuleHooks().find((candidate) => candidate.topic === "noticed-items");
+	const hook = loadRuleHooks(ROOT_RULE_FACTS).find((candidate) => candidate.topic === "noticed-items");
 	if (hook === undefined) throw new Error(`${label}: the noticed-items rule does not exist`);
 	const instruction = "Review your proof output for relevant noticed items; resolve them, then call complete again.";
 	const expected = `${formatRuleHook(hook, { packageRoot: "" })}\n\n${instruction}`;
@@ -1371,7 +1376,7 @@ export function assertCompletionRuleRefusal(
  * durable branch by tool call id.
  */
 export function assertWorkRulesDelivered(sessionManager: SessionManager, toolCallId: string, label: string): void {
-	const hooks = loadRuleHooks().filter(
+	const hooks = loadRuleHooks(ROOT_RULE_FACTS).filter(
 		(hook) => hook.topic === "work-lifecycle" || hook.topic === "delegation" || hook.topic === "plan",
 	);
 	if (hooks.length !== 3) throw new Error(`${label}: the catalog holds ${hooks.length} work rules, not three`);

@@ -214,6 +214,15 @@ export const NOTICES = {
 	/** System One is configured but has no engine (`session-edge-intent-controller.ts`); its English cause is the domain's own. */
 	systemOneNoEngine: (cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
 		`${cause}, so tool calls run under the deterministic gates only, without System One's review of their effects.`,
+	/**
+	 * The delegation gate's notices (`system-one/delegation-gate.ts`): a call of a session that directs workers was refused
+	 * as task work (`subject` is the refused operation), or System One could not judge one (`cause` is the error's own words).
+	 */
+	delegationGate: {
+		refused: (subject: string) => `This session delegates task work: ${subject}`,
+		unjudged: (cause: string) =>
+			`System One could not judge whether this session's call is task work (${cause}); it runs.`,
+	},
 	/** CI results a session never received (`host-event-session-controller.ts`). */
 	ciResults: {
 		gap: (count: number, reason: HostEventReplayGap["reason"]) =>

@@ -18,6 +18,15 @@ export const MAX_RULE_HOOK_CHARS = 4096;
 const TOPIC_PATTERN = /^[a-z][a-z0-9-]{0,39}$/;
 const TOOL_PATTERN = /^[a-z][a-z0-9_]*$/;
 
+/**
+ * Facts of the receiving session a rule's text depends on. Each set of facts renders its own text and so its own ids:
+ * an id never describes a text other than the one its session receives.
+ */
+export interface RuleHookFacts {
+	/** The session lends its workers memory reads (`servesLaneMemoryFor`, memory/memory-provider.ts). */
+	readonly servesLaneMemory: boolean;
+}
+
 /** Values a rule body may depend on at delivery time. */
 export interface RuleHookContext {
 	/** Directory of the installed harness package (README.md, docs/, examples/). */
@@ -56,10 +65,10 @@ export interface RuleHookSource {
 	/** Delivered only while this tool is active: a rule about a tool is never sent to a session that lacks it. */
 	readonly requiresTool?: string;
 	/**
-	 * The rule text. A function renders it from the delivery context; the id is derived from the text it renders
-	 * for {@link TEMPLATE_CONTEXT}, so it stays stable while the context varies.
+	 * The rule text. A function renders it from the delivery context and the session's facts; the id is derived from
+	 * the text it renders for {@link TEMPLATE_CONTEXT} and those facts, so it stays stable while the context varies.
 	 */
-	readonly body: string | ((context: RuleHookContext) => string);
+	readonly body: string | ((context: RuleHookContext, facts: RuleHookFacts) => string);
 }
 
 export interface RuleHook extends Omit<RuleHookSource, "body"> {
@@ -88,7 +97,7 @@ function normalizeBody(topic: string, text: string): string {
 }
 
 /** Validates one rule; an invalid constant is a programming error and fails the first delivery loudly. */
-export function buildRuleHook(source: RuleHookSource): RuleHook {
+export function buildRuleHook(source: RuleHookSource, facts: RuleHookFacts): RuleHook {
 	const { topic, trigger, standing, requiresTool } = source;
 	if (!TOPIC_PATTERN.test(topic)) throw new Error(`Rule hook topic ${topic} must be kebab-case.`);
 	if (trigger.kind === "tool-call") {
@@ -104,28 +113,30 @@ export function buildRuleHook(source: RuleHookSource): RuleHook {
 		throw new Error(`Rule hook ${topic} requires an invalid tool name.`);
 	}
 	const body = source.body;
-	const template = normalizeBody(topic, typeof body === "string" ? body : body(TEMPLATE_CONTEXT));
+	const template = normalizeBody(topic, typeof body === "string" ? body : body(TEMPLATE_CONTEXT, facts));
 	return {
 		topic,
 		trigger,
 		id: ruleHookId(topic, template),
 		template,
-		render: (context) => normalizeBody(topic, typeof body === "string" ? body : body(context)),
+		render: (context) => normalizeBody(topic, typeof body === "string" ? body : body(context, facts)),
 		...(standing !== undefined ? { standing } : {}),
 		...(requiresTool !== undefined ? { requiresTool } : {}),
 	};
 }
 
-let catalog: readonly RuleHook[] | undefined;
+const catalogs = new Map<string, readonly RuleHook[]>();
 
-/** Every rule, in declaration order and validated once. */
-export function loadRuleHooks(): readonly RuleHook[] {
-	if (catalog) return catalog;
-	const hooks = RULE_HOOKS.map(buildRuleHook);
+/** Every rule as a session of these facts receives it, in declaration order and validated once per set of facts. */
+export function loadRuleHooks(facts: RuleHookFacts): readonly RuleHook[] {
+	const key = JSON.stringify([facts.servesLaneMemory]);
+	const cached = catalogs.get(key);
+	if (cached) return cached;
+	const hooks = RULE_HOOKS.map((source) => buildRuleHook(source, facts));
 	if (new Set(hooks.map((hook) => hook.topic)).size !== hooks.length) {
 		throw new Error("Rule hook topics must be unique.");
 	}
-	catalog = hooks;
+	catalogs.set(key, hooks);
 	return hooks;
 }
 

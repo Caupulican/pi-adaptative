@@ -155,7 +155,7 @@ import {
 	TRANSCRIPT_SOURCE_LABEL,
 } from "./memory/lane-memory-records.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
-import type { MemoryStanding } from "./memory/memory-provider.ts";
+import { type MemoryStanding, servesLaneMemoryFor } from "./memory/memory-provider.ts";
 import {
 	assertMemoryReadActive,
 	INCOMPLETE_MEMORY_READ,
@@ -901,7 +901,7 @@ export class MemoryController {
 
 	/** Whether this session lends its workers memory reads: it holds the owner's history or the owner's memory. */
 	servesLaneMemory(): boolean {
-		return this.deps.standing.ownsHistory || this.deps.standing.readsOwnerMemory;
+		return servesLaneMemoryFor(this.deps.standing);
 	}
 
 	/** Whether `generation` serves a lane's memory read: live, in a session that lends its workers memory reads. */

@@ -199,6 +199,11 @@ export const NOTICES = {
 	},
 	systemOneNoEngine: (_cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
 		"O System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido, então as chamadas de ferramenta rodam só sob as travas determinísticas, sem a revisão dos efeitos delas pelo System One.",
+	delegationGate: {
+		refused: (subject: string) => `Esta sessão delega o trabalho da tarefa: ${subject}`,
+		unjudged: (cause: string) =>
+			`O System One não conseguiu julgar se a chamada desta sessão é trabalho da tarefa (${cause}); a chamada roda.`,
+	},
 	ciResults: {
 		gap: (count: number, reason: HostEventReplayGap["reason"]) =>
 			`Até ${count} ${count === 1 ? "resultado de CI nunca foi entregue" : "resultados de CI nunca foram entregues"} a esta sessão: ${GAP_CAUSES[reason]}. Consulte o CI diretamente para ver os resultados desse período.`,

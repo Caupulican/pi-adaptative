@@ -86,7 +86,10 @@ export interface SystemPromptBuilderDeps {
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** The work lifecycle prompt is for a session conversing with the owner; the director role for one directing workers. */
-	readonly standing: Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers" | "readsOwnerMemory">;
+	readonly standing: Pick<
+		SessionCapabilities,
+		"ownsWorkLifecycle" | "directsWorkers" | "readsOwnerMemory" | "lendsOwnerReach"
+	>;
 	/**
 	 * The owner's replacement for the whole generated prompt, scoped to this session. Read fresh on
 	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
@@ -432,11 +435,13 @@ export class SystemPromptBuilder {
 			date: this._promptDate,
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
-			directorRole:
-				modelCapability.class === "full" &&
-				this.deps.standing.directsWorkers &&
-				validToolNames.includes("delegate") &&
-				this.deps.getSettingsManager().getWorkerDelegationSettings().enabled,
+			// The root carries the owner's reach (agent definitions, approvals); a bot directs inside its own scope.
+			...(modelCapability.class === "full" &&
+			this.deps.standing.directsWorkers &&
+			validToolNames.includes("delegate") &&
+			this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
+				? { directorRole: { root: this.deps.standing.lendsOwnerReach } }
+				: {}),
 			agentName: identity?.name,
 			principles:
 				modelCapability.class === "full"

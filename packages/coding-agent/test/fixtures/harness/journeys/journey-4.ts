@@ -38,7 +38,7 @@ export async function runJourney4(): Promise<void> {
 			settings: { orchestrator: { delegationGate: true } },
 			warningAllowances: [
 				// Each refusal of the delegation gate is disclosed once to the owner: exact prefix, the refused operation after it.
-				/^The root delegates task work: .+$/,
+				/^This session delegates task work: .+$/,
 			],
 			files: { [LIMITS_PATH]: "export const MAX_RETRIES = 3;\n" },
 		},

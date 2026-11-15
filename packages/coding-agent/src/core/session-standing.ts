@@ -158,12 +158,19 @@ const WORKER: SessionStanding = Object.freeze({ kind: "worker" });
  * The session's standing, resolved once where the session is built. An explicit `standing` wins; otherwise the
  * deprecated `isChildSession` (true: a worker), or when that is absent `PI_CHILD_SESSION=1` (an external marker a
  * launcher may set), makes it a worker. A worker process turns a root into a worker; a bot or a vehicle keeps its
- * standing there.
+ * standing there, and a standing that directs workers is refused there.
  */
 export function resolveSessionStanding(
 	input: { readonly standing?: SessionStanding; readonly isChildSession?: boolean },
 	env: NodeJS.ProcessEnv = process.env,
 ): SessionStanding {
 	const declared = input.standing ?? ((input.isChildSession ?? env.PI_CHILD_SESSION === "1") ? WORKER : ROOT);
-	return declared.kind === "root" && isWorkerSession(env) ? WORKER : declared;
+	if (!isWorkerSession(env)) return declared;
+	// A worker process holds the worker tool surface whatever its sessions are (the process ceiling, which nothing sheds),
+	// so a standing that directs workers would hold no tool to direct them with: such a session is hosted only outside one.
+	if (sessionCapabilities(declared).directsWorkers && declared.kind !== "root")
+		throw new Error(
+			`A ${declared.kind} session directs workers, which a worker process never does; it is hosted only outside one.`,
+		);
+	return declared.kind === "root" ? WORKER : declared;
 }

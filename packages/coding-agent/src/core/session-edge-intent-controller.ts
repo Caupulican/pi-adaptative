@@ -4,9 +4,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
-import { CONFIG_DIR_NAME } from "../config.ts";
 import type { ToolCallStartContext } from "../kernel/index.ts";
 import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
@@ -81,7 +79,7 @@ import {
 	USER_REQUEST_RULE_BUDGET,
 	type UserRequestClassificationOutcome,
 } from "./system-one/controller.ts";
-import { DelegationGate } from "./system-one/delegation-gate.ts";
+import { DelegationGate, orchestrationDirectoriesOf } from "./system-one/delegation-gate.ts";
 import type { OperationCaller, OperationGate } from "./system-one/operation-gate.ts";
 import { createSessionOperationGate, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import { OwnerPolicyQueue, type PendingOwnerRequest } from "./system-one/owner-policy-queue.ts";
@@ -507,7 +505,8 @@ export class SessionEdgeIntentController {
 			getEngine: () => this.gateEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),
-			getOrchestrationDirectories: () => [this.deps.getAgentDir(), join(this.deps.getCwd(), CONFIG_DIR_NAME)],
+			getOrchestrationDirectories: () =>
+				orchestrationDirectoriesOf(this.deps.getSessionManager(), this.deps.getCwd()),
 			notify: (message) => this.deps.emitWarning(message),
 		});
 		return this.delegationGateInstance;

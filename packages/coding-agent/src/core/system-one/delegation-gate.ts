@@ -1,22 +1,25 @@
 /**
- * The delegation gate: the root orchestrates, workers carry out the work.
+ * The delegation gate: a session that directs workers (the root, a bot) orchestrates, its workers carry out the work.
  *
- * The root keeps every tool, because it must author agent definitions and the instruction files its workers
- * read and follow. What it may not do is carry out the owner's task itself: a single session that can execute
- * does so and is interrupted by every new message (the Router/Worker split exists to prevent that). So each
- * root call is checked here, after the edge, and a call that is task work is refused with the way to delegate it.
+ * Such a session keeps every tool, because it must author the instruction files its workers read and follow (the root
+ * agent definitions too). What it may not do is carry out the owner's task itself: a single session that can execute
+ * does so and is interrupted by every new message (the Router/Worker split exists to prevent that). So each of its
+ * calls is checked here, after the edge, and a call that is task work is refused with the way to delegate it.
  *
  * Deterministic by contract and path where code can decide: a typed write is orchestration when it lands in an
  * orchestration directory (agent definitions, instructions, harness state), task work anywhere else. A shell or
  * code call is only known by reading it, so System One is asked one question. Reversible work is never stopped by
  * a doubt or an outage (see authority-line.ts): only an established answer refuses, and without an engine the
- * call runs. The gate never applies to a worker, and not when the root has no worker to delegate to.
+ * call runs. The gate never applies to a worker, and not when the session has no worker to delegate to.
  */
 
 import nodePath from "node:path";
+import { CONFIG_DIR_NAME } from "../../config.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { SessionManager } from "../../kernel/node.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { ACCEPT_ABSENCE_AT, ACCEPT_AT, noulProbability } from "./answer-acceptance.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 import { OPERATION_JUDGMENT_TIMEOUT_MS } from "./operation-gate.ts";
@@ -40,7 +43,8 @@ const DRIVING_QUESTIONS: Readonly<Record<Exclude<DelegationExit, "unasked">, rea
 export const DELEGATION_PROGRAM = {
 	schema_version: "2.0",
 	program_id: "JEV-ROOT-DELEGATION",
-	description: "Whether one root operation carries out the owner's task itself instead of orchestrating it.",
+	description:
+		"Whether one operation of a session that directs workers carries out the owner's task itself instead of orchestrating it.",
 	decisions: [
 		{
 			id: "performs_task_work",
@@ -56,16 +60,25 @@ export const DELEGATION_PROGRAM = {
 } as const;
 
 export interface DelegationGateDeps {
-	/** The setting is on, this is the owner-facing root, and a worker can be started (the `delegate` tool is active). */
+	/** The setting is on, the session directs workers, and a worker can be started (the `delegate` tool is active). */
 	isActive(): boolean;
 	getEngine(): OperationEffectEngine | undefined;
 	/** The owner's request this turn serves. */
 	getRequest(): string;
 	/** Identity of the current user turn; a new one forgets cached verdicts. */
 	getTurnKey(): string;
-	/** Where agent definitions and instruction files live: the harness agent directory and the project's `.pi`. */
+	/** Where agent definitions and instruction files live: the session's home directory and the project's `.pi`. */
 	getOrchestrationDirectories(): readonly string[];
 	notify(message: string): void;
+}
+
+/**
+ * Where a session's agent definitions and instruction files live: the home its orchestration state belongs to (the
+ * owner's agent directory, or a bot's home) and the project's `.pi`. A bot's session never counts the owner's agent
+ * directory as its own.
+ */
+export function orchestrationDirectoriesOf(manager: Pick<SessionManager, "getStorageRoots">, cwd: string): string[] {
+	return [manager.getStorageRoots().orchestrationHome.homeDir, nodePath.join(cwd, CONFIG_DIR_NAME)];
 }
 
 export interface DelegationRefusal {
@@ -148,14 +161,14 @@ export class DelegationGate {
 			else if (taskWork >= ACCEPT_AT) exit = "task_work";
 			else if (taskWork <= ACCEPT_ABSENCE_AT) exit = "not_task_work";
 			else exit = "open";
-			harnessLog.info("delegation", "a root call was judged for task work", () => ({
+			harnessLog.info("delegation", "a directing session's call was judged for task work", () => ({
 				tool: toolName,
 				exit,
 				taskWork: taskWork ?? null,
 				evidenceSufficient: sufficient ?? null,
 			}));
 			noteDecisionTrace(engine, evaluation, {
-				decision: `root delegation gate: ${exit}`,
+				decision: `delegation gate: ${exit}`,
 				drove: exit === "unasked" ? [] : DRIVING_QUESTIONS[exit],
 			});
 			return exit === "task_work";
@@ -164,12 +177,12 @@ export class DelegationGate {
 			// Reversible work is never stopped by an outage: the call runs, and the doubt is shown once.
 			if (!this.outageReported) {
 				this.outageReported = true;
-				harnessLog.warn("delegation", "a root call could not be judged; the call runs", () => ({
+				harnessLog.warn("delegation", "a directing session's call could not be judged; the call runs", () => ({
 					tool: toolName,
 					error: error instanceof Error ? error.name : typeof error,
 				}));
 				this.deps.notify(
-					`System One could not judge whether the root's call is task work (${error instanceof Error ? error.message : String(error)}); it runs.`,
+					interfaceText().notices.delegationGate.unjudged(error instanceof Error ? error.message : String(error)),
 				);
 			}
 			return false;
@@ -179,10 +192,10 @@ export class DelegationGate {
 	private refusal(operation: string): DelegationRefusal {
 		const shown = operation.replace(/\s+/g, " ").trim();
 		const subject = shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`;
-		this.deps.notify(`The root delegates task work: ${subject}`);
+		this.deps.notify(interfaceText().notices.delegationGate.refused(subject));
 		return {
 			block: true,
-			reason: `The root orchestrates and does not carry out task work itself: ${subject} is task work. Start a worker for it: delegate {"action":"start","task":"<what to do, with the file paths>"}, then continue with other work. The worker's handoff arrives as an event.`,
+			reason: `This session orchestrates and does not carry out task work itself: ${subject} is task work. Start a worker for it: delegate {"action":"start","task":"<what to do, with the file paths>"}, then continue with other work. The worker's handoff arrives as an event.`,
 		};
 	}
 

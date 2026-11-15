@@ -61,10 +61,14 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 		topic: "delegation",
 		trigger: ROOT_WORK_TRIGGER,
 		standing: "directsWorkers",
-		// One owner per rule: the root prompt's director role holds the identity and the decision to delegate, the delegate
+		// One owner per rule: the prompt's director role holds the identity and the decision to delegate, the delegate
 		// tool text holds the mechanics (reuse, event-driven handoffs, never poll, forkTurns default none, parallelWork,
-		// slices, race, interrupt/cancel/retire), and this holds the policy for how to delegate well.
-		body: `- Delegate when the work is independent, bounded and parallelizable, a read- or context-heavy exploration, a disjoint write scope, or a separate review. The benefit must exceed coordination plus context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Also local: interactive work, a couple of tool calls.
+		// slices, race, interrupt/cancel/retire), and this holds the policy for how to delegate well. The worker memory
+		// line is told only where the session lends its workers memory reads: a bot's workers get none.
+		body: (
+			_context,
+			facts,
+		) => `- Delegate when the work is independent, bounded and parallelizable, a read- or context-heavy exploration, a disjoint write scope, or a separate review. The benefit must exceed coordination plus context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Also local: interactive work, a couple of tool calls.
 - Split by independence and write ownership: no two workers write the same files (overlapping write scopes wait for each other); slice so each result verifies alone; fan out only as wide as the work is independent. Workers cannot delegate: never chain.
 - Reuse: one specialist per role; retire a worker when its line of work is done.
 - Right-size each worker: readOnly unless it must write; only the tools and paths it needs; the cheapest model and thinkingLevel that can do the task (exploration cheap, design and review strong). Token, cost and wall-clock ceilings come only from host settings or an owner-authored profileId.
@@ -72,8 +76,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 - Start independent workers in the same turn; the fleet runs as many as it has room for (account allowance, machine memory) and queues the rest.
 - Review in proportion: spot-check cheap claims against files, diffs and check commands; verify risky ones with an independent verifier (a fresh readOnly worker). Send back the specific delta; never redo the work yourself.
 - Steer early: follow_up with a targeted message at the first drift, interrupt when off track, cancel when obsolete. A blocked report is your decision: decide, follow up once, never re-dispatch the identical task.
-- Cost: do not spawn for work smaller than its coordination; batch related questions to one worker. Respect explicit user restrictions and granted authority. On an admission failure use the reported reason and continue locally or report the blocker; never change settings to force a worker.
-- Worker memory is read-only (memory_read broker; root memory owns mutation).
+- Cost: do not spawn for work smaller than its coordination; batch related questions to one worker. Respect explicit user restrictions and granted authority. On an admission failure use the reported reason and continue locally or report the blocker; never change settings to force a worker.${facts.servesLaneMemory ? "\n- Worker memory is read-only (memory_read broker; root memory owns mutation)." : ""}
 - Integrate: merge results, resolve overlaps, run the final checks, then deliver.`,
 	},
 	{

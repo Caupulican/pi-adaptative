@@ -12,6 +12,11 @@ export interface MemoryCapabilities {
 /** What the session's memory may do, from its standing (`session-standing.ts`); every provider is initialized with it. */
 export type MemoryStanding = Pick<SessionCapabilities, "readsOwnerMemory" | "ownsMemoryWrites" | "ownsHistory">;
 
+/** Whether a session of this standing lends its workers memory reads: it holds the owner's history or the owner's memory. */
+export function servesLaneMemoryFor(standing: Pick<MemoryStanding, "ownsHistory" | "readsOwnerMemory">): boolean {
+	return standing.ownsHistory || standing.readsOwnerMemory;
+}
+
 export interface MemoryLifecycleContext extends MemoryStanding {
 	agentDir: string;
 	cwd: string;

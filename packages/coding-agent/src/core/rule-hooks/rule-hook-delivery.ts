@@ -3,6 +3,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import { getReadmePath } from "../../config.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { RULE_IDS_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
+import { type MemoryStanding, servesLaneMemoryFor } from "../memory/memory-provider.ts";
 import { isRecordObject, isStringArray } from "../util/value-guards.ts";
 import {
 	formatRuleHook,
@@ -19,8 +20,11 @@ export interface RuleHookDeliveryDeps {
 	 * windowing is `continuousChatRequestHistory`), so a rule delivered in an earlier turn is not in context any more.
 	 */
 	getMessages(): readonly AgentMessage[];
-	/** The session's standing capabilities a rule can be for (`RuleHookSource.standing`, session-standing.ts). */
-	standing(): Readonly<Record<RuleHookStanding, boolean>>;
+	/**
+	 * The session's standing capabilities a rule can be for (`RuleHookSource.standing`, session-standing.ts), and the
+	 * memory standing its rule facts are read from (`RuleHookFacts`).
+	 */
+	standing(): Readonly<Record<RuleHookStanding, boolean>> & Pick<MemoryStanding, "ownsHistory" | "readsOwnerMemory">;
 	/** Whether a tool is active now; a rule that `requiresTool` is delivered only when this says so. */
 	isToolActive?(toolName: string): boolean;
 	/** The harness package directory; defaults to the directory of the installed README. */
@@ -103,7 +107,7 @@ export class RuleHookDelivery {
 	 * the check and the pending record cannot interleave with a sibling call's.
 	 */
 	collect(call: RuleHookDeliveryCall): RuleHookBlock[] {
-		const triggered = loadRuleHooks().filter(
+		const triggered = this.hooks().filter(
 			(hook) =>
 				hook.trigger.kind === "tool-call" &&
 				hook.trigger.tools.includes(call.toolName) &&
@@ -133,7 +137,7 @@ export class RuleHookDelivery {
 	 * pointer to it instead of repeating the rule, and lists no id.
 	 */
 	refusalFor(topic: string, toolCallId: string): RuleHookRefusal | undefined {
-		const hook = loadRuleHooks().find(
+		const hook = this.hooks().find(
 			(candidate) => candidate.topic === topic && candidate.trigger.kind === "preflight",
 		);
 		if (!hook) throw new Error(`Rule hook ${topic} is not a preflight rule.`);
@@ -155,6 +159,11 @@ export class RuleHookDelivery {
 			this.pending.set(hook.id, { toolCallId, assistantTimestamp: last.timestamp });
 		}
 		return { text: formatRuleHook(hook, { packageRoot: this.packageRoot }), ruleIds: [hook.id] };
+	}
+
+	/** Every rule as this session receives it: its texts and ids follow the session's facts. */
+	private hooks(): readonly RuleHook[] {
+		return loadRuleHooks({ servesLaneMemory: servesLaneMemoryFor(this.deps.standing()) });
 	}
 
 	/** Whether this session may receive the rule: its role, and the tool the rule is about. */

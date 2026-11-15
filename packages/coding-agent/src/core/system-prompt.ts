@@ -7,11 +7,11 @@ import { getExtensionDescription, getExtensionDisplayName } from "./extension-me
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import { enforceModelCapabilitySystemPromptBudget } from "./model-capability.ts";
 import {
+	directorRolePrompt,
 	normalizeSteStrictness,
 	ORIENTATION_SURVEY_RULE,
 	OWNER_AUTHORIZATION_RULE,
 	renderExplanationStyleRule,
-	rootDirectorRolePrompt,
 } from "./provider-prompt-contracts.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
@@ -327,8 +327,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 				: "Pi-Adaptative concise chat assistant. No execution tools active.";
 	// The plan lines are told only where the tool is active, like the lookup rule.
 	const directorRole =
-		fullPrompt && options.directorRole === true
-			? `\n\n${rootDirectorRolePrompt({ plan: activeTools.includes(PLAN_TOOL_NAME) })}`
+		fullPrompt && options.directorRole !== undefined
+			? `\n\n${directorRolePrompt({ plan: activeTools.includes(PLAN_TOOL_NAME), root: options.directorRole.root })}`
 			: "";
 	// The host rejects calls to tools that are not active, so only the constrained classes are told.
 	const toolSurfaceRule = fullPrompt

@@ -9,7 +9,7 @@ import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults, NO_DELIVERY_CLAI
 const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTAKE_JUDGMENTS;
 
 /** The text the delegation gate's refusal opens with; the refused call's result carries it. */
-const REFUSAL = "The root orchestrates and does not carry out task work itself";
+const REFUSAL = "This session orchestrates and does not carry out task work itself";
 const ORIGINAL_LIMITS = "export const MAX_RETRIES = 3;\n";
 
 /**

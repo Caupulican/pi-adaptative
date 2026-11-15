@@ -18,7 +18,7 @@ import {
 	mayNotCreateBotsText,
 } from "./bot-creation.ts";
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
-import { createBotMessageDirectory } from "./bot-message-directory.ts";
+import { createBotMessageDirectory, createSessionScopedBotMessageDirectory } from "./bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./bot-naming.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import { leaderOwnedBotRuntimeId } from "./bot-runtime-id.ts";
@@ -200,7 +200,21 @@ export class BotLifecycleController {
 		};
 	}
 
+	/**
+	 * The directory a worker of this session messages through: the owner's bots and groups where the session manages
+	 * them (the root), and only its session root anywhere else, so a bot's workers stay inside their bot.
+	 */
 	createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
+		if (!this.deps.standing.managesBots)
+			return createSessionScopedBotMessageDirectory(
+				{
+					getSessionManager: () => this.deps.getSessionManager(),
+					isDisposed: () => this.deps.isDisposed(),
+					listWorkerAgents: () => this.host.listWorkerAgents(),
+				},
+				sender,
+				attemptId,
+			);
 		return createBotMessageDirectory(
 			{
 				getSessionManager: () => this.deps.getSessionManager(),

@@ -18,27 +18,32 @@ export interface OrchestrationHome {
 	 * `<agentDir>/state`, and a bot's home orchestration directory itself.
 	 */
 	readonly stateDir: string;
+	/**
+	 * The home this state belongs to, where its sessions' agent definitions and instruction files live: the owner's agent
+	 * directory, and a bot's home directory.
+	 */
+	readonly homeDir: string;
 	readonly [orchestrationHomeBrand]: true;
 }
 
-function orchestrationHomeAt(root: string, stateDir: string): OrchestrationHome {
-	return Object.freeze({ root, stateDir, [orchestrationHomeBrand]: true as const });
+function orchestrationHomeAt(root: string, stateDir: string, homeDir: string): OrchestrationHome {
+	return Object.freeze({ root, stateDir, homeDir, [orchestrationHomeBrand]: true as const });
 }
 
 /** `<agentDir>/state/orchestration` -- the owner's orchestration home. */
 export function ownerOrchestrationHome(agentDir: string): OrchestrationHome {
-	return orchestrationHomeAt(stateFile(agentDir, "orchestration"), stateDir(agentDir));
+	return orchestrationHomeAt(stateFile(agentDir, "orchestration"), stateDir(agentDir), agentDir);
 }
 
 /** `<botHomeDir>/orchestration` -- the orchestration home of the bot whose home is `botHomeDir` (core/bots/bot-home.ts). */
 export function botHomeOrchestrationHome(botHomeDir: string): OrchestrationHome {
 	const root = join(botHomeDir, "orchestration");
-	return orchestrationHomeAt(root, root);
+	return orchestrationHomeAt(root, root, botHomeDir);
 }
 
 /** The same home with absolute paths, for state compared or recorded across working directories. */
 export function resolvedOrchestrationHome(home: OrchestrationHome): OrchestrationHome {
-	return orchestrationHomeAt(resolve(home.root), resolve(home.stateDir));
+	return orchestrationHomeAt(resolve(home.root), resolve(home.stateDir), resolve(home.homeDir));
 }
 
 /** Whether two homes are one directory, however their paths were spelled. */
