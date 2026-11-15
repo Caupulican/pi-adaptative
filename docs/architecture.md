@@ -154,7 +154,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-121 kernel modules, 62 with a header comment.
+120 kernel modules, 61 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 
