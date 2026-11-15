@@ -36,6 +36,7 @@ import {
 	validateNotes,
 	verifiedBreakingEvidence,
 } from "./release-steward-rules.mjs";
+import { releaseCandidateSubjects } from "./release-staging.mjs";
 
 const NOTES_MARKER = "<!-- release-steward:summary -->";
 const MODEL_TIMEOUT_MS = 60_000;
@@ -262,10 +263,10 @@ async function decide() {
 	const preparedUntagged = safe("release history", () => {
 		if (packageVersion === undefined || tags === undefined)
 			throw new Error("the package version or the tags are unknown");
-		const subjects = git("log", "--format=%s", `--grep=elease v${packageVersion}`, sha).split("\n");
-		const prepared = subjects.some(
-			(subject) => subject === `Release v${packageVersion}` || subject === `Repair release v${packageVersion}`,
-		);
+		const candidates = releaseCandidateSubjects(packageVersion);
+		const greps = candidates.map((subject) => `--grep=${subject}`);
+		const subjects = git("log", "--format=%s", "-F", ...greps, sha).split("\n");
+		const prepared = subjects.some((subject) => candidates.includes(subject));
 		return prepared && !tags.includes(`v${packageVersion}`);
 	});
 	const latestTagPublished = latestTag ? releasePublished(repo, latestTag) : undefined;
