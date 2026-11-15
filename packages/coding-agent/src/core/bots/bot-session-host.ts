@@ -880,7 +880,7 @@ export class BotSessionHost {
 
 	private armIdle(entry: BotSessionEntry): void {
 		this.touch(entry);
-		if (this.stopped) return;
+		if (this.stopped || this.entries.get(entry.agentId) !== entry) return;
 		// A home watch that failed since the session loaded leaves the inbox to the timer.
 		this.inbox.arm();
 		entry.idleTimer = this.idleTimers().setTimeout(() => {
