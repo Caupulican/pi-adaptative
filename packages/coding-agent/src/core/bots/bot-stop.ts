@@ -311,11 +311,21 @@ function hostedStopSession({ session, sessionManager }: LoadedBotSession): Hoste
 	};
 }
 
+/** A take of the stops waiting for a hosted bot (`stopLoadedBot`). */
+export interface LoadedBotStop {
+	/** The stop applied; absent when none read or the take failed. */
+	readonly stop?: BotInboxStop;
+	/** What the stop ended and left unended, a failed take's up to its failure included; nothing when none read. */
+	readonly outcome: WorkerStopOutcome;
+	/** Why the take failed, the stops left waiting. */
+	readonly failure?: { readonly cause: unknown };
+}
+
 /**
  * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it runs
  * stopped for the owner by `stopTurn` (the host's, which the words it gives next wait on until the turn ended), then
- * {@link applyOwnerStopToSession}. The stop applied with what it left unended, undefined when none reads; a failure throws
- * with the stops left waiting.
+ * {@link applyOwnerStopToSession}. A failure is handed back with what the stop had already ended, never thrown, so the
+ * lanes its cancel ended before the failure are counted with what a fallback ends after it.
  */
 export function stopLoadedBot(
 	agentDir: string,
@@ -323,21 +333,25 @@ export function stopLoadedBot(
 	loaded: LoadedBotSession,
 	stopTurn: () => void,
 	ports: BotStopPorts,
-): { readonly stop: BotInboxStop; readonly outcome: WorkerStopOutcome } | undefined {
-	const live = hostedStopSession(loaded);
+): LoadedBotStop {
 	let outcome: WorkerStopOutcome = NOTHING_LEFT;
-	const stop = takeHostedBotStops(
-		agentDir,
-		agentId,
-		loaded.session.sessionId,
-		(taken) => {
-			stopTurn();
-			outcome = applyOwnerStopToSession(live, taken, ports.now());
-			return outcome;
-		},
-		ports,
-	);
-	return stop && { stop, outcome };
+	try {
+		const live = hostedStopSession(loaded);
+		const stop = takeHostedBotStops(
+			agentDir,
+			agentId,
+			loaded.session.sessionId,
+			(taken) => {
+				stopTurn();
+				outcome = applyOwnerStopToSession(live, taken, ports.now());
+				return outcome;
+			},
+			ports,
+		);
+		return stop ? { stop, outcome } : { outcome };
+	} catch (cause) {
+		return { outcome, failure: { cause } };
+	}
 }
 
 const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [], stopped: 0 };

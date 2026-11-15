@@ -48,7 +48,7 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { OWNER_STOPPED_REASON, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
+import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { HostLock } from "../remote/host-lock.ts";
@@ -341,27 +341,25 @@ export class BotSessionHost {
 	/** Takes the owner's stops waiting for the bot this host runs: false when its session is not loaded here or they failed. */
 	private takeStops(agentId: string): boolean {
 		const entry = this.entries.get(agentId);
-		return entry !== undefined && this.applyWaitingStops(agentId, entry) !== "failed";
+		return entry !== undefined && this.applyWaitingStops(agentId, entry).failure === undefined;
 	}
 
 	/**
-	 * Takes the owner's stops waiting for the bot whose session `entry` holds (`stopLoadedBot`): what the stop applied left
-	 * unended, `none` when no stop reads, `failed` when they could not be taken (told to the owner, tried again later).
+	 * Takes the owner's stops waiting for the bot whose session `entry` holds (`stopLoadedBot`), with what the stop ended;
+	 * a take that failed is told to the owner and tried again later.
 	 */
-	private applyWaitingStops(agentId: string, entry: BotSessionEntry): WorkerStopOutcome | "none" | "failed" {
-		try {
-			const end = () => this.stopTurn(entry);
-			const taken = stopLoadedBot(this.ports.agentDir(), agentId, entry, end, this.stopPorts());
+	private applyWaitingStops(agentId: string, entry: BotSessionEntry): ReturnType<typeof stopLoadedBot> {
+		const taken = stopLoadedBot(this.ports.agentDir(), agentId, entry, () => this.stopTurn(entry), this.stopPorts());
+		if (taken.failure === undefined) {
 			this.stopRetries.forget(agentId);
 			this.stopTold.delete(agentId);
-			return taken?.outcome ?? "none";
-		} catch (error) {
-			const message = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, error));
-			if (this.stopTold.get(agentId) !== message) this.ports.warn(message);
-			this.stopTold.set(agentId, message);
-			this.stopRetries.arm(agentId, false);
-			return "failed";
+			return taken;
 		}
+		const message = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, taken.failure.cause));
+		if (this.stopTold.get(agentId) !== message) this.ports.warn(message);
+		this.stopTold.set(agentId, message);
+		this.stopRetries.arm(agentId, false);
+		return taken;
 	}
 
 	/** Aborts the turn the bot's session works on, for the owner's stop; the words given next wait for its end. */
@@ -828,7 +826,8 @@ export class BotSessionHost {
 			});
 			session.startBackgroundInputs();
 			// A stop written since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
-			stopLoadedBot(agentDir, agentId, { session, sessionManager }, () => {}, this.stopPorts());
+			const loadStop = stopLoadedBot(agentDir, agentId, { session, sessionManager }, () => {}, this.stopPorts());
+			if (loadStop.failure) throw loadStop.failure.cause;
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
 			session.backgroundLanes.drainQueuedWorkerDelegations();
@@ -1050,15 +1049,15 @@ export class BotSessionHost {
 			// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).
 			const turn = entry.inFlight > 0 || entry.session.deliverablePendingMessageCount > 0 || state.busyBesideWorkers;
 			// Not taken from its record, the stop still ends the turn and own work; held in memory, it also applies whole.
-			const taken = written ? this.applyWaitingStops(agentId, entry) : "none";
-			const memory = taken === "none" ? stop : undefined;
+			const taken = written ? this.applyWaitingStops(agentId, entry) : undefined;
+			const memory = taken?.stop || taken?.failure ? undefined : stop;
 			const [dir, end] = [this.ports.agentDir(), () => this.stopTurn(entry)];
-			const outcome =
-				typeof taken === "object"
-					? taken
-					: endUnrecordedStopWork(dir, agentId, entry, end, memory, this.stopPorts());
+			// What a failed take ended before it failed counts with what the fallback ends after it.
+			const rest = taken?.stop
+				? undefined
+				: endUnrecordedStopWork(dir, agentId, entry, end, memory, this.stopPorts());
 			this.takeInbox(agentId);
-			return { stopped: turn || (outcome?.stopped ?? 0) > 0 };
+			return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
 		}
 		if (!written) return { stopped: false };
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
