@@ -8,6 +8,7 @@
  */
 import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
+import { errorText } from "./bot-error-text.ts";
 import {
 	type BotInboxMessage,
 	botInboxStopWaiting,
@@ -41,10 +42,6 @@ export interface BotInboxDrainPorts {
 	warn(message: string): void;
 	/** The bot's chat changed (a message left the queue). */
 	changed(agentId: string): void;
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 export class BotInboxDrain {

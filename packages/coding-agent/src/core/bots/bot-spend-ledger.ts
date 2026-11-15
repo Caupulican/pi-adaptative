@@ -23,6 +23,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import { isUsage } from "../cost/session-usage.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { errorText } from "./bot-error-text.ts";
 
 /** One window as it is kept (`BotSpendWindows`). */
 export interface SpendWindowRecord {
@@ -101,10 +102,6 @@ interface ReadRecord {
 	readonly windows: readonly SpendWindowRecord[];
 	readonly charge: BotChargeState | undefined;
 	readonly problems: readonly string[];
-}
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function parseWindow(value: unknown): SpendWindowRecord | undefined {

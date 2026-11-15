@@ -15,6 +15,7 @@ import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-s
 import type { OwnerNoticeLine } from "../harness-notice.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { errorText } from "./bot-error-text.ts";
 import { type BotHomeRecord, keepNewestHomeRecords, parseHomeRecordHead, readHomeRecords } from "./bot-home-records.ts";
 
 /** Notices kept, the newest: what the chat shows of what the bot's session told the owner. */
@@ -27,10 +28,6 @@ const MAX_NOTICES_KEPT = 16;
  */
 const DELIVERED_FILE = "delivered.json";
 const MAX_DELIVERIES_KEPT = 512;
-
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
 
 const NOTICE = /^\d{15}-[0-9a-f-]{36}\.json$/;
 

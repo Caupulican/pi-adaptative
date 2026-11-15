@@ -10,9 +10,10 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { OWNER_STOPPED_REASON, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
+import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { type BotInboxItem, refuseBotInboxMessage } from "./bot-inbox.ts";
-import { BotOpenRetries, errorText } from "./bot-open-retry.ts";
+import { BotOpenRetries } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
 import { endClosedBotWork, endLoadedBotWork } from "./bot-stop.ts";
