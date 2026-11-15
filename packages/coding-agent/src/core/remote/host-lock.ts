@@ -134,16 +134,24 @@ export function takeProcessLock(path: string, holder?: string): HostLockResult {
 	});
 }
 
-/** The process holding a lock file and how it stands, as another process reads it; undefined when no live holder is named. */
-export function processLockHolder(
-	path: string,
-): { readonly owner: ProcessOwner; readonly standing: OwnerStanding; readonly holder?: string } | undefined {
+/**
+ * The process holding a lock file and how it stands, as another process reads it, with the hold's token (each take writes
+ * a new one, so two holds of one process differ by it); undefined when no live holder is named.
+ */
+export function processLockHolder(path: string):
+	| {
+			readonly owner: ProcessOwner;
+			readonly standing: OwnerStanding;
+			readonly token: string;
+			readonly holder?: string;
+	  }
+	| undefined {
 	const record = readRecord(path);
 	if (!record) return undefined;
 	const standing = judgeOwner(record);
 	return standing === "dead"
 		? undefined
-		: { owner: record, standing, ...(record.holder ? { holder: record.holder } : {}) };
+		: { owner: record, standing, token: record.token, ...(record.holder ? { holder: record.holder } : {}) };
 }
 
 /** The session hosting the link here, when one other than this process holds the lock. */

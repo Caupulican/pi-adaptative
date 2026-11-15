@@ -49,6 +49,8 @@ export interface RemoteBotHost {
 	/** The process as its lock names it: judged again to tell a host that was killed, which publishes nothing. */
 	readonly owner: ProcessOwner;
 	readonly standing: OwnerStanding;
+	/** The hold's token (`processLockHolder`): a new hold of the lock, even by the same host, has a new one. */
+	readonly lockToken: string;
 	/** What the host says its session is doing; undefined while the host has not written it yet. */
 	readonly state: BotSessionState | undefined;
 	readonly hostKind: BotHostKind | undefined;
@@ -105,6 +107,7 @@ export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: 
 		pid: holder.owner.pid,
 		owner: holder.owner,
 		standing: holder.standing,
+		lockToken: holder.token,
 		state: own?.state,
 		hostKind: own?.hostKind,
 		hostSessionId: own?.hostSessionId,

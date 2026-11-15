@@ -92,7 +92,6 @@ export const BOT_TEAM = {
 	/** Another process holds the bot's session: two processes would write one conversation (a message goes to its inbox). */
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
 		`Bot ${agentId} is open in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}).`,
-	/** A session of the owner (`pids`) holds the bot's conversation open: the bot's host opens it once that one closes it. */
 	/** A bot's session did not open: `holders` (each one of the holder words below) keep its host out. */
 	botSessionOpenElsewhere: (agentId: string, holders: string) =>
 		`bot ${agentId}'s conversation is open in ${holders}; its host opens it once that closes it`,

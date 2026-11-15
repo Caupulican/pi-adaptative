@@ -290,7 +290,7 @@ export class BotSessionHost {
 			warn: (message) => ports.warn(message),
 			stopped: () => this.stopped,
 			hostedHere: (agentId) => this.entries.has(agentId),
-			heldElsewhere: (agentId) => readRemoteBotHost(ports.agentDir(), agentId, this.holder) !== undefined,
+			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
 			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),

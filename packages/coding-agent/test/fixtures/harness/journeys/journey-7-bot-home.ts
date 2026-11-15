@@ -17,6 +17,7 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionStatePieces } from "../../../../src/core/bots/bot-bundle-move.ts";
 import { type BotHome, botHomeOf } from "../../../../src/core/bots/bot-home.ts";
 import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
+import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
 import { continueBotSession } from "../../../../src/core/bots/bot-session-open.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { managerSessionHomeNow } from "../../../../src/core/orchestration-homes.ts";
@@ -414,16 +415,22 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			holders: [{ role: "session", self: true }],
 			requests: 3,
 		});
-		// The host asks again while the session still holds it (its retry, or the home watch reading its own lock churn):
-		// the owner was told by the send, and is told nothing more.
-		await withDeadline(
-			trace,
-			"J7 bot home: the host asked again for the held session",
-			world.io.waitForOperation((operation) => operation.kind === "rm" && operation.path === hostLock),
-		);
+		// The host asks again while the session still holds it: its retry, due the backoff's first step after the send's
+		// own attempt, finds the session held and arms the next at twice that. Its own take and release of the bot's lock
+		// on each attempt ask nothing more (the home watch tells them from another host's), and the owner, told by the
+		// send, is told nothing more.
+		const asked = world.io.waitForOperation((operation) => operation.kind === "rm" && operation.path === hostLock);
+		const rearmed = world.timers.nextArmed("provider-admission");
+		world.timers.advance("provider-admission", BOT_OPEN_RETRY_FIRST_MS);
+		await withDeadline(trace, "J7 bot home: the host asked again for the held session", asked);
+		expect(
+			await withDeadline(trace, "J7 bot home: the host armed its next attempt", rearmed),
+			"the held session's retry arms the next attempt one backoff step later, no other attempt having doubled it",
+		).toBe(2 * BOT_OPEN_RETRY_FIRST_MS);
 	} finally {
 		lease.release();
 	}
+	world.timers.advance("provider-admission", 2 * BOT_OPEN_RETRY_FIRST_MS);
 	await withDeadline(
 		trace,
 		"J7 bot home: the host opened the released session and answered the waiting message",

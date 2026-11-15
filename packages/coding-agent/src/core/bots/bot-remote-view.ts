@@ -98,7 +98,10 @@ export interface BotRemoteViewPorts {
 	warn(message: string): void;
 	/** Whether the host runs the bot itself: the changes its own session writes are not news. */
 	runsLocally(agentId: string): boolean;
-	/** Another host's hold on the bot changed (taken, given back, its state published). */
+	/**
+	 * Another host's hold on the bot changed: taken or given back (a new hold is a new token). This host's own takes and
+	 * releases of the lock are not one, nor a state the same hold published.
+	 */
 	hostChanged(agentId: string): void;
 	/** Bots whose remote state, saved session or conversation changed. */
 	changed(agentIds: readonly string[]): void;
@@ -112,6 +115,13 @@ export class BotRemoteView {
 	private readonly holder: string;
 	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
 	private readonly remote = new Map<string, RemoteBotHost | undefined>();
+	/**
+	 * The token of the hold another host had on each bot's lock as this host last took it up (undefined: none): a change
+	 * of a host file is another host's change only when the hold differs from it. The lock's notices name no writer, and
+	 * this host writes the same files when it takes and gives back a bot's lock (a load that fails), so the hold itself,
+	 * not the notice, tells another host's change from this host's own.
+	 */
+	private readonly holds = new Map<string, string | undefined>();
 	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
 	private readonly saved = new Map<string, SavedBotSession | undefined>();
 	/** The conversation of the one bot whose chat was read last, with the file state it was read at. */
@@ -137,6 +147,7 @@ export class BotRemoteView {
 			this.homeWatchFailed = true;
 			this.remote.clear();
 			this.saved.clear();
+			this.holds.clear();
 			this.ports.warn(interfaceText().botTeam.botHomesNotWatched(reason));
 		};
 		try {
@@ -170,7 +181,8 @@ export class BotRemoteView {
 						if (this.ports.runsLocally(agentId) && (hostFile || isSessionChange(file))) continue;
 						if (hostFile) {
 							this.remote.delete(agentId);
-							this.ports.hostChanged(agentId);
+							const hold = this.otherHold(agentId);
+							if (hold !== this.holds.get(agentId)) this.tookUp(agentId, hold);
 						}
 						changed.add(agentId);
 					}
@@ -178,6 +190,10 @@ export class BotRemoteView {
 				},
 				(error) => failed(error.message),
 			);
+			// Each bot's hold as the watch starts, read once it runs: a change after this read comes in a batch judged
+			// against it, and a change before it is in it.
+			for (const bot of this.ports.store().listBots({ includeRetired: true }))
+				this.holds.set(bot.agentId, this.otherHold(bot.agentId));
 		} catch (error) {
 			failed(error instanceof Error ? error.message : String(error));
 		}
@@ -200,8 +216,29 @@ export class BotRemoteView {
 		this.remote.set(agentId, host);
 		this.armRecheck();
 		// A host held here was killed: it publishes nothing, so this is when the bot's waits are taken up again.
-		if (cached !== undefined) this.ports.hostChanged(agentId);
+		if (cached !== undefined) this.tookUp(agentId, host?.lockToken);
 		return host;
+	}
+
+	/**
+	 * Whether another host holds the bot's lock now. A host that finds it held leaves the bot to that hold and takes the
+	 * bot up again when the hold changes, so the hold read here is the one a later change is judged against.
+	 */
+	heldElsewhere(agentId: string): boolean {
+		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
+		if (host !== undefined) this.holds.set(agentId, host.lockToken);
+		return host !== undefined;
+	}
+
+	/** The token of another host's hold on the bot's lock now; undefined when none holds it or the hold is this host's. */
+	private otherHold(agentId: string): string | undefined {
+		return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder)?.lockToken;
+	}
+
+	/** Another host's hold on the bot changed to `hold`: the host takes the bot's waits up again. */
+	private tookUp(agentId: string, hold: string | undefined): void {
+		this.holds.set(agentId, hold);
+		this.ports.hostChanged(agentId);
 	}
 
 	/** The bot's own session as its home holds it now (see {@link botSessionOnDisk}). */
@@ -257,7 +294,7 @@ export class BotRemoteView {
 					changed.push(agentId);
 				}
 				// A killed host's watches are sampled by no one until a process takes the bot up (`hostChanged`).
-				for (const agentId of changed) this.ports.hostChanged(agentId);
+				for (const agentId of changed) this.tookUp(agentId, this.remote.get(agentId)?.lockToken);
 				if (changed.length > 0) this.ports.changed(changed);
 				this.armRecheck();
 			}, REMOTE_LIVENESS_MS);
@@ -272,6 +309,7 @@ export class BotRemoteView {
 		this.recheck = undefined;
 		this.remote.clear();
 		this.saved.clear();
+		this.holds.clear();
 		this.transcriptCache = undefined;
 	}
 }
