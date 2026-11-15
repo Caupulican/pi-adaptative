@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
 import { type OrchestrationHome, typeSafeEvidenceDir } from "../agent-paths.ts";
 import { legacyBotSystemOneEvidenceDir } from "../bots/bot-home.ts";
 import { type ArtifactStore, createFileArtifactStore, isMissingArtifactMarker } from "../context/context-artifacts.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
+import { sessionStorageRootsOfDir } from "../orchestration-homes.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 
 export interface TypeSafeEvidenceRef {
@@ -58,16 +60,27 @@ export class TypeSafeEvidenceStore {
 
 	/**
 	 * A session's store: its bundle in its orchestration home, with its lineage's; a bot's session also reads, after them,
-	 * the evidence an earlier build kept in the bot's home directory (`legacyBotSystemOneEvidenceDir`), which it never
-	 * writes again.
+	 * the evidence an earlier build kept in the home directory of the bot whose session file it is
+	 * (`legacyBotSystemOneEvidenceDir`, wherever its bundle lives now), which it never writes again.
 	 */
 	static forSession(
 		home: OrchestrationHome,
-		session: { getSessionId(): string; getSessionLineageIds(): readonly string[] },
+		session: {
+			getSessionId(): string;
+			getSessionLineageIds(): readonly string[];
+			getSessionFile(): string | undefined;
+		},
 		agentDir: string,
 	): TypeSafeEvidenceStore {
 		const bundle = TypeSafeEvidenceStore.file(home, session.getSessionId(), session.getSessionLineageIds());
-		const legacyDir = legacyBotSystemOneEvidenceDir(agentDir, home);
+		const sessionFile = session.getSessionFile();
+		const legacyDir =
+			sessionFile === undefined
+				? undefined
+				: legacyBotSystemOneEvidenceDir(
+						agentDir,
+						sessionStorageRootsOfDir(agentDir, dirname(sessionFile)).orchestrationHome,
+					);
 		if (legacyDir === undefined) return bundle;
 		return new TypeSafeEvidenceStore(bundle.artifacts, bundle.admit, [
 			...bundle.inherited,
