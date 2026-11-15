@@ -893,7 +893,7 @@ retention (`RetentionPrunedPayload` `v: 2`, keeping `v: 1` replay compatibility)
 retired agent bindings and released approval and unbound delivered notifications after the replay
 floor while checking worker transcript files so `worker-N` ids never collide after pruning. Entry
 durability checks match the session's storage mode (`isEntryDurableForSession`), so ephemeral
-`--no-session` (`SessionManager.inMemory()`) runs deliver parent inputs and record harness notices
+`--no-session` (`SessionManager.inMemory(roots)`) runs deliver parent inputs and record harness notices
 without requiring an on-disk session file.
 Enforced by: packages/coding-agent/src/core/delegation/bot-lifecycle-controller.ts (serializes child bot starts); packages/coding-agent/src/core/delegation/leader-controller.ts (serializes per-leader dispatches); packages/coding-agent/src/core/delegation/worker-fleet-limits.ts (excludes retired bindings from live caps); packages/coding-agent/src/core/orchestration/notification-eviction.ts (evicts oldest unbound delivered notifications); packages/coding-agent/src/core/orchestration/retention-eligibility.ts (v: 2 retired-agent and notification pruning); packages/coding-agent/src/kernel/session/session-manager.ts (isEntryDurableForSession admits in-memory parent input); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-8-orchestration-retention.ts; packages/coding-agent/test/fixtures/harness/journeys/journey-5-plan-in-memory.ts
 

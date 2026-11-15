@@ -738,6 +738,7 @@ A session's orchestration state lives in the home its `SessionManager`'s storage
 Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.
 
 ```typescript
+import { join } from "node:path";
 import {
   type CreateAgentSessionRuntimeFactory,
   createAgentSession,
@@ -774,8 +775,8 @@ const { session: opened } = await createAgentSession({
 });
 
 // List sessions
-const currentProjectSessions = await SessionManager.list(process.cwd());
-const allSessions = await SessionManager.listAll(process.cwd());
+const currentProjectSessions = await SessionManager.list(process.cwd(), getAgentDir());
+const allSessions = await SessionManager.listAll(join(getAgentDir(), "sessions"));
 
 // Session replacement API for /new, /resume, /fork, /clone, and import flows.
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionStartEvent }) => {
@@ -818,11 +819,13 @@ await runtime.fork("entry-id", { position: "at" });
 **SessionManager tree API:**
 
 ```typescript
+import { join } from "node:path";
+
 const sm = SessionManager.open("/path/to/session.jsonl", ownerSessionStorageRoots(getAgentDir()));
 
 // Session listing
-const currentProjectSessions = await SessionManager.list(process.cwd());
-const allSessions = await SessionManager.listAll(process.cwd());
+const currentProjectSessions = await SessionManager.list(process.cwd(), getAgentDir());
+const allSessions = await SessionManager.listAll(join(getAgentDir(), "sessions"));
 
 // Tree traversal
 const entries = sm.getEntries();        // All entries (excludes header)

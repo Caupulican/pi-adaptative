@@ -420,8 +420,8 @@ Key methods for working with sessions programmatically.
 `roots` (`SessionStorageRoots`) name the agent directory and the orchestration home the session's state lives in; `ownerSessionStorageRoots(agentDir)` names the owner's.
 
 ### Static Listing Methods
-- `SessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory
-- `SessionManager.listAll(onProgress?)` - List all sessions across all projects
+- `SessionManager.list(cwd, agentDir, sessionDir?, onProgress?)` - List sessions for a directory
+- `SessionManager.listAll(sessionsDir, customSessionDir?, onProgress?)` - List all sessions across all projects (`sessionsDir` is `<agentDir>/sessions`)
 
 ### Instance Methods - Session Management
 - `newSession(options?)` - Start a new session (options: `{ parentSession?: string }`)
