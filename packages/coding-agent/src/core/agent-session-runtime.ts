@@ -22,7 +22,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
-import { managerSessionHomeNow, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
+import { managerSessionHomeNow, newSessionStorageRoots, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import {
@@ -1041,7 +1041,8 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 
 		const previousSessionFile = this.session.sessionFile;
 		const sessionDir = this.sessionManager.getSessionDir();
-		const sessionManager = SessionManager.create(this.cwd, this.sessionManager.getStorageRoots(), sessionDir);
+		const roots = newSessionStorageRoots(this.sessionManager.getStorageRoots(), sessionDir);
+		const sessionManager = SessionManager.create(this.cwd, roots, sessionDir);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
@@ -1119,8 +1120,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			}
 			const sessionDir = this.sessionManager.getSessionDir();
 			const roots = this.sessionManager.getStorageRoots();
+			const forkRoots = newSessionStorageRoots(roots, sessionDir);
 			if (!targetLeafId) {
-				const sessionManager = SessionManager.create(this.cwd, roots, sessionDir);
+				const sessionManager = SessionManager.create(this.cwd, forkRoots, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
 				await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, undefined);
 				return { cancelled: false, ...selected };
@@ -1132,7 +1134,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			}
 
 			const sourceSessionManager = SessionManager.open(currentSessionFile, roots, sessionDir);
-			const sessionManager = sourceSessionManager.createBranchedSessionManager(targetLeafId);
+			const sessionManager = sourceSessionManager.createBranchedSessionManager(targetLeafId, forkRoots);
 			const forkedSessionPath = sessionManager.getSessionFile();
 			if (!forkedSessionPath) {
 				throw new Error("Failed to create forked session");
@@ -1152,7 +1154,10 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			sessionManager = SessionManager.inMemory(this.sessionManager.getStorageRoots(), this.cwd);
 			sessionManager.newSession({ parentSession: this.session.sessionFile });
 		} else {
-			sessionManager = this.sessionManager.createBranchedSessionManager(targetLeafId);
+			sessionManager = this.sessionManager.createBranchedSessionManager(
+				targetLeafId,
+				this.sessionManager.getStorageRoots(),
+			);
 			copyBaseline = copyBaselineOf(sessionManager.getSessionFile());
 		}
 		await this.replaceWithFork(sessionManager, previousSessionFile, options?.withSession, copyBaseline);
@@ -1195,7 +1200,8 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		let copyBaseline: CopyBaseline | undefined;
 		let sessionManager: SessionManager;
 		try {
-			sessionManager = SessionManager.open(destinationPath, roots, sessionDir, cwdOverride);
+			const copyRoots = sessionStorageRootsOfFile(this.services.agentDir, destinationPath);
+			sessionManager = SessionManager.open(destinationPath, copyRoots, sessionDir, cwdOverride);
 			assertSessionCwdExists(sessionManager, this.cwd);
 		} catch (error) {
 			if (copied) this.removeCreatedSessionFile(destinationPath);

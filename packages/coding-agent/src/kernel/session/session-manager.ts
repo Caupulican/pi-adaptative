@@ -3085,9 +3085,10 @@ export class SessionManager {
 	/**
 	 * Create an independent session manager containing only the path from root to the specified
 	 * leaf. The source manager is not mutated, so callers can prepare a replacement runtime before
-	 * retiring the current one.
+	 * retiring the current one. `roots` are the new session's: those of a new session in this manager's directory, which
+	 * the caller derives (a bot's `sessions/` gives its bot's, whatever home the source was opened in).
 	 */
-	createBranchedSessionManager(leafId: string): SessionManager {
+	createBranchedSessionManager(leafId: string, roots: SessionStorageRoots): SessionManager {
 		this._assertWritable();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
@@ -3137,7 +3138,7 @@ export class SessionManager {
 			parentId = labelEntry.id;
 		}
 
-		const branched = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist, this.roots);
+		const branched = new SessionManager(this.cwd, this.sessionDir, undefined, this.persist, roots);
 		branched.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 		branched.sessionId = newSessionId;
 		branched.inheritedSessionIds = new Set(this.getSessionLineageIds());
@@ -3170,7 +3171,8 @@ export class SessionManager {
 	 */
 	createBranchedSession(leafId: string): string | undefined {
 		this._assertWritable();
-		const branched = this.createBranchedSessionManager(leafId);
+		// Made current on this manager, whose roots are fixed: the branch stays in them.
+		const branched = this.createBranchedSessionManager(leafId, this.roots);
 		this.navigationRevision++;
 		this._invalidateSessionContextCache();
 		this.sessionId = branched.sessionId;

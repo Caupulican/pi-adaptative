@@ -7357,7 +7357,10 @@ export function branchForClosingReflection(manager: SessionManager | undefined):
 	if (manager === undefined) throw new Error("the closing reflection has no owner session to branch");
 	const leafId = manager.getLeafId();
 	if (leafId === null) throw new Error("the closing reflection owner has no leaf to branch from");
-	return { held: manager.createBranchedSessionManager(leafId), control: manager.createBranchedSessionManager(leafId) };
+	return {
+		held: manager.createBranchedSessionManager(leafId, manager.getStorageRoots()),
+		control: manager.createBranchedSessionManager(leafId, manager.getStorageRoots()),
+	};
 }
 
 /** The reflection's cue state as the reflection gate reads it on a branch. */

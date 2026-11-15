@@ -111,6 +111,16 @@ export function sessionHomeNow(roots: SessionStorageRoots, sessionFile: string, 
 	return botSessionStorageRoots(roots.agentDir, byDir.orchestrationHome, sessionId).orchestrationHome;
 }
 
+/**
+ * The storage roots of a new session written to `sessionDir` by a session opened in `roots` (its /new, fork or clone):
+ * a bot's `sessions/` gives its bot's, as {@link sessionHomeNow} derives for a session no home holds yet; any other
+ * directory keeps `roots`.
+ */
+export function newSessionStorageRoots(roots: SessionStorageRoots, sessionDir: string): SessionStorageRoots {
+	const byDir = sessionStorageRootsOfDir(roots.agentDir, sessionDir);
+	return sameOrchestrationHome(byDir.orchestrationHome, ownerOrchestrationHome(roots.agentDir)) ? roots : byDir;
+}
+
 /** {@link sessionHomeNow} of a persisted session's manager, for its lease (`acquireSessionBundleLease`'s `homeNow`). */
 export function managerSessionHomeNow(
 	manager: Pick<SessionManager, "getStorageRoots" | "getSessionFile" | "getSessionId">,
