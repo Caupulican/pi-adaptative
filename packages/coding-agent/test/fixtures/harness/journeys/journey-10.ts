@@ -17,6 +17,7 @@ import {
 	outDir,
 	type PlacerJobRecord,
 } from "../../../../src/core/remote/job-store.ts";
+import { JobTransport } from "../../../../src/core/remote/job-transport.ts";
 import { LinkClient, type LinkState } from "../../../../src/core/remote/link-client.ts";
 import { hubMachinesFor } from "../../../../src/core/remote/link-context.ts";
 import { REFUSAL_TEXT } from "../../../../src/core/remote/protocol.ts";
@@ -143,9 +144,10 @@ async function runTimedOfflineHoldWitness(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
 	const agentDirTimed = `${world.agentDir}-timed`;
 	renameIdentity(agentDirTimed, "timed-hub");
+	const timedManager = world.createSessionManager(agentDirTimed);
 	const timedCreated = await world.createRootSession("root", {
 		agentDir: agentDirTimed,
-		sessionManager: world.createSessionManager(agentDirTimed),
+		sessionManager: timedManager,
 	});
 	const sessionTimed = timedCreated.session;
 	const timerPort = world.timers.port("orchestration");
@@ -225,6 +227,50 @@ async function runTimedOfflineHoldWitness(world: HarnessWorld): Promise<void> {
 				ending: "machine_offline",
 				applied: true,
 			});
+
+			// The machine comes back and delivers the outcome of the job it ran meanwhile: the lane already ended at the hold, yet
+			// the usage the executor reports is what the job spent, so the placer charges it once and says its usage grew.
+			const lateUsage = { costUsd: 0.0042, totalTokens: 210 };
+			const usageUpdated = createBarrier();
+			let usageUpdates = 0;
+			const unsubscribeUsage = sessionTimed.subscribe((event) => {
+				if (event.type !== "usage_updated") return;
+				usageUpdates += 1;
+				usageUpdated.release();
+			});
+			const transport = new JobTransport({ agentDir: agentDirTimed, selfId: loadIdentity(agentDirTimed).machineId });
+			try {
+				transport.up({
+					machineId: peerId,
+					name: "offline-box",
+					role: "joiner",
+					features: [JOBS_FEATURE],
+					send: () => true,
+				});
+				transport.receive(peerId, {
+					t: "job.outcome",
+					jobId: placed.handle.jobId,
+					seq: 1,
+					outcome: { status: "succeeded", summary: "Status check answered.", usage: lateUsage },
+				});
+				await withDeadline(trace, "J10 timed late outcome charged", usageUpdated.promise);
+				await withDeadline(
+					trace,
+					"J10 timed session idle after late outcome",
+					sessionTimed.waitForForegroundIdle(),
+				);
+			} finally {
+				transport.dispose();
+				unsubscribeUsage();
+			}
+			const timedReceipts = timedManager.getEntries().flatMap((entry) => {
+				const receipt = usageReceiptOf(entry);
+				return receipt ? [receipt] : [];
+			});
+			expect(
+				{ receipts: timedReceipts, usageUpdates },
+				"an outcome delivered after the lane ended is charged once, as the lane's receipt",
+			).toEqual({ receipts: [expect.objectContaining({ label: "managed-worker", ...lateUsage })], usageUpdates: 1 });
 		} finally {
 			unsubscribe();
 		}

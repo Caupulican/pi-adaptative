@@ -332,6 +332,8 @@ export class RemoteJobClient {
 	private readonly listeners = new Map<string, Set<(event: RemoteJobEvent) => void>>();
 	private readonly emittedSeq = new Map<string, number>();
 	private readonly applying = new Set<string>();
+	/** Applied jobs whose reported usage this process has sent to their lane (`chargeLateUsage`). */
+	private readonly usageSent = new Set<string>();
 	/** The retry alarm of a lane end that could not be recorded, and how many times it has failed so far, by job. */
 	private readonly applyRetries = new Map<string, WallAlarm>();
 	private readonly applyAttempts = new Map<string, number>();
@@ -374,6 +376,7 @@ export class RemoteJobClient {
 		for (const alarm of this.applyRetries.values()) alarm.stop();
 		this.applyRetries.clear();
 		this.applyAttempts.clear();
+		this.usageSent.clear();
 		this.listeners.clear();
 	}
 
@@ -944,8 +947,11 @@ export class RemoteJobClient {
 		const holdMs = loadLinkSettings(this.agentDir).offlineHoldMs;
 		for (const mark of this.store.placedCancelMarks()) this.honorCancelMark(mark);
 		for (const record of [...this.store.placedScan().valid.values()]) {
-			if (record.appliedAt !== undefined) continue;
 			const owned = record.ownerSession === sessionId;
+			if (record.appliedAt !== undefined) {
+				if (owned) this.chargeLateUsage(record);
+				continue;
+			}
 			if (owned && record.progress && record.progress.seq > (this.emittedSeq.get(record.jobId) ?? 0)) {
 				this.emittedSeq.set(record.jobId, record.progress.seq);
 				this.emit(record.jobId, {
@@ -1002,15 +1008,10 @@ export class RemoteJobClient {
 		);
 	}
 
-	/** Records the end on the job's managed lane once; a lane that is gone or already ended takes nothing more. */
-	private apply(record: PlacerJobRecord): void {
-		const terminal = placedJobTerminal(record);
-		if (!terminal || this.applying.has(record.jobId)) return;
-		this.applying.add(record.jobId);
-		this.disarm(record.jobId);
-		let failed = false;
+	/** Reports `terminal` on the job's managed lane, with what the executor reported it spent, whichever way the job ended. */
+	private recordEnd(record: PlacerJobRecord, terminal: NonNullable<ReturnType<typeof placedJobTerminal>>) {
 		const dispatchSequence = this.session.managedLaneBindings().get(record.laneId)?.dispatchSequence;
-		void runtimeRetry(() =>
+		return runtimeRetry(() =>
 			this.session.recordManagedLane(
 				{
 					laneId: record.laneId,
@@ -1020,10 +1021,38 @@ export class RemoteJobClient {
 					summary: terminal.summary,
 					...(terminal.reasonCode ? { reasonCode: terminal.reasonCode } : {}),
 				},
-				// What the executor reported it spent, whichever way the job ended: an outcome on record was paid for.
+				// An outcome on record was paid for.
 				record.outcome?.usage ? { receipt: record.outcome.usage } : NO_MANAGED_LANE_HOST_FACTS,
 			),
-		)
+		);
+	}
+
+	/**
+	 * Sends the usage of an applied job's outcome to its lane: an outcome the executor delivered after the lane ended (at the
+	 * deadline, the offline hold or a lost lease) was still run and paid for. The ended lane takes the receipt alone and charges its
+	 * report id once, so the outcome applied with the end, or this job sent again after a restart, records nothing more. Once per
+	 * job in this process; a failure is logged and the next process sends it again.
+	 */
+	private chargeLateUsage(record: PlacerJobRecord): void {
+		const terminal = placedJobTerminal(record);
+		if (!record.outcome?.usage || !terminal || this.usageSent.has(record.jobId)) return;
+		this.usageSent.add(record.jobId);
+		void this.recordEnd(record, terminal).catch((error: unknown) => {
+			harnessLog.warn("placement", "a placed job's reported usage could not be charged on its ended lane", {
+				jobId: record.jobId,
+				reason: error instanceof Error ? error.name : "unknown",
+			});
+		});
+	}
+
+	/** Records the end on the job's managed lane once; a lane that is gone or already ended takes nothing more. */
+	private apply(record: PlacerJobRecord): void {
+		const terminal = placedJobTerminal(record);
+		if (!terminal || this.applying.has(record.jobId)) return;
+		this.applying.add(record.jobId);
+		this.disarm(record.jobId);
+		let failed = false;
+		void this.recordEnd(record, terminal)
 			// Nothing returned means the lane had already ended (this terminal replayed after a crash, or its lease ran out):
 			// the lane is closed either way, so the end counts as applied. An unknown lane throws and is retried.
 			.catch((error: unknown) => {

@@ -40,7 +40,7 @@ import {
 	reviewManagedLaneChangedFiles,
 } from "./worker-claim.ts";
 import { compileManagedProcessExecutionGrant } from "./worker-execution-policy.ts";
-import { isWorkerTimeoutReasonCode } from "./worker-lane-projection.ts";
+import { isWorkerTimeoutReasonCode, NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
 import { ManagedLaneLifetimeInputError, type WorkerLifecycle } from "./worker-lifecycle.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 
@@ -378,6 +378,13 @@ export class ManagedLaneController {
 		if (!attempt) throw new Error(`Unknown managed worker '${event.laneId}'.`);
 		if (event.dispatchSequence !== undefined && event.dispatchSequence !== attempt.dispatch.dispatchSequence)
 			throw new Error(`Managed worker '${event.laneId}' terminal sequence does not match its current dispatch.`);
+		// An ended attempt takes no second terminal, yet a receipt that reaches it after its end (a placed job's outcome the
+		// executor delivered after the placer ended the lane at its deadline or offline hold, or after its lease ran out) is still
+		// what the job spent: it is charged once, under the report id the lane's own terminal would have used.
+		if (!NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
+			if (host.receipt) this.chargeReceipt(`managed-worker:${attempt.attemptId}`, validUsageReceipt(host.receipt));
+			return undefined;
+		}
 		if (!handle && attemptAwaitingLease(attempt) && resolveManagedLaneTerminalStatus(event.status) === "canceled")
 			return this.endUnleased(event, attempt);
 		if (!handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);
