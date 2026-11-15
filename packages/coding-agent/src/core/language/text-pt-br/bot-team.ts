@@ -117,9 +117,7 @@ export const BOT_TEAM = {
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: há um aviso no chat dele, mas a lista não pôde marcá-lo como não lido (${reason}).`,
 	botSpendLedgerHeld: (agentId: string, reason: string, setAsideError: string | undefined) =>
-		setAsideError === undefined
-			? `Bot ${agentId}: o registro de gasto dele não pôde ser lido (${reason}); ele fica como está e é lido de novo no próximo gasto. Até ser lido, o gasto dos pedidos conta a partir de agora e o gasto é cobrado à sessão principal quando for lido.`
-			: `Bot ${agentId}: o registro de gasto dele não é legível (${reason}) e não pôde ser separado (${setAsideError}); ele fica como está e é tentado de novo no próximo gasto. Até lá, o gasto dos pedidos conta a partir de agora e o gasto é cobrado à sessão principal quando ele for separado.`,
+		`Bot ${agentId}: o registro de gasto dele ${setAsideError === undefined ? `não pôde ser lido (${reason})` : `não é legível (${reason}) e não pôde ser separado (${setAsideError})`}; ele fica como está e é tentado de novo no próximo gasto. Até lá, o gasto dos pedidos conta a partir de agora e o gasto é cobrado à sessão principal quando ele ${setAsideError === undefined ? "for lido" : "for separado"}.`,
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: o registro de gasto dele não foi lido por inteiro (${reason}) e foi separado como ${file}; os pedidos cujo gasto não foi lido contam a partir de agora, e as cobranças à sessão principal continuam ${chargesKept ? "do registro dele" : "do que a sessão principal registrou delas"}.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

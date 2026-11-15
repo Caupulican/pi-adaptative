@@ -387,10 +387,10 @@ export class BotSpendWindows {
 	 * a window being counted or bounded is never dropped and opened again at nothing, whatever the others hold.
 	 */
 	private flush(snapshot: TaskRuntimeProjection | undefined): void {
+		const held = this.heldWindows(snapshot);
 		const excess = this.windows.size - MAX_WINDOWS_KEPT;
 		if (excess > 0) {
 			const now = this.ports.now();
-			const held = this.heldWindows(snapshot);
 			const done = [...this.windows.values()]
 				.filter((window) => !held.has(window.id) && !this.mayStillServe(window, snapshot, now))
 				.sort((a, b) => a.updatedAt - b.updatedAt)

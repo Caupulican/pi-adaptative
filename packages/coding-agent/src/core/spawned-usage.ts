@@ -2,21 +2,22 @@ import { createHash } from "node:crypto";
 import type { Usage } from "@caupulican/pi-ai";
 import type { UsageComponent } from "../kernel/usage-components.ts";
 
+/** How a spawned-usage report is recorded (`SpawnedUsageReport`): its label, source session, report id, model, goal and components. */
+export interface SpawnedUsageOptions {
+	label?: string;
+	sourceSessionId?: string;
+	reportId?: string;
+	/** Originating worker binding; cumulative usage may also include other models. */
+	provider?: string;
+	model?: string;
+	goalId?: string;
+	usageComponents?: readonly UsageComponent[];
+	/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
+	through?: Usage;
+}
+
 export interface SpawnedUsageReporter {
-	addSpawnedUsage(
-		usage: Usage,
-		options: {
-			label?: string;
-			sourceSessionId?: string;
-			reportId: string;
-			provider?: string;
-			model?: string;
-			goalId?: string;
-			usageComponents?: readonly UsageComponent[];
-			/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
-			through?: Usage;
-		},
-	): string | undefined;
+	addSpawnedUsage(usage: Usage, options: SpawnedUsageOptions & { reportId: string }): string | undefined;
 }
 
 export type SpawnedUsageIdentity = string | readonly string[];

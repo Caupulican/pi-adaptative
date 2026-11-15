@@ -131,9 +131,7 @@ export const BOT_TEAM = {
 	 * read, or it does not parse and could not be set aside (`setAsideError`).
 	 */
 	botSpendLedgerHeld: (agentId: string, reason: string, setAsideError: string | undefined) =>
-		setAsideError === undefined
-			? `Bot ${agentId}: its spend record could not be read (${reason}); it is left as it is and read again with its next spend. Until it reads, its requests' spend is counted from now and its spend is charged to the main session once it does.`
-			: `Bot ${agentId}: its spend record does not read (${reason}) and could not be set aside (${setAsideError}); it is left as it is and tried again with its next spend. Until then, its requests' spend is counted from now and its spend is charged to the main session once it is set aside.`,
+		`Bot ${agentId}: its spend record ${setAsideError === undefined ? `could not be read (${reason})` : `does not read (${reason}) and could not be set aside (${setAsideError})`}; it is left as it is and tried again with its next spend. Until then, its requests' spend is counted from now and its spend is charged to the main session once it ${setAsideError === undefined ? "reads" : "is set aside"}.`,
 	/** The ledger did not parse in full and was set aside; its charge watermark was kept (`chargesKept`) or is recovered from the main session. */
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from ${chargesKept ? "its record" : "what the main session has recorded of them"}.`,

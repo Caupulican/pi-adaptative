@@ -4,26 +4,16 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import type { UsageComponent } from "../../kernel/usage-components.ts";
 import { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
-import type { SpawnedUsageReporter } from "../spawned-usage.ts";
+import type { SpawnedUsageOptions, SpawnedUsageReporter } from "../spawned-usage.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
 
 export { classifyCustomEntryPersisted } from "../session-entry-persistence.ts";
 
-export interface SpawnedUsageReceiptOptions {
-	usageComponents?: readonly UsageComponent[];
+export interface SpawnedUsageReceiptOptions extends SpawnedUsageOptions {
 	parentSessionId: string;
 	reportId: string;
-	label?: string;
-	sourceSessionId?: string;
-	/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
-	through?: Usage;
-	/** Originating worker binding; cumulative usage may also include other models. */
-	provider?: string;
-	model?: string;
-	goalId?: string;
 }
 
 export type SpawnedUsageReceiptDisposition = "persisted" | "pending" | "foreign_session";

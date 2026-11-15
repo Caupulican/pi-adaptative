@@ -22,7 +22,6 @@ import {
 import { FileSnapshotChangedError } from "../kernel/storage/bounded-file.ts";
 import type { AgentMessage, AgentState } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../kernel/usage.ts";
-import type { UsageComponent } from "../kernel/usage-components.ts";
 import { theme } from "../presentation/theme-model.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { CompactionGateCheckStats, SessionStats } from "./agent-session-contracts.ts";
@@ -69,6 +68,7 @@ import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
 import { resolveSessionEntryIndex } from "./session-entry-index.ts";
 import { writeJsonLinesSync } from "./session-jsonl-writer.ts";
+import type { SpawnedUsageOptions } from "./spawned-usage.ts";
 import { isToolArgumentValidationLogRecord, type ToolArgumentValidationLogRecord } from "./tool-recovery-records.ts";
 import {
 	consumeToolArgumentValidationRecord,
@@ -80,17 +80,7 @@ import {
 } from "./tool-recovery-stats.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
-/** How a spawned-usage report is recorded: its label, source session, report id, model, goal, per-model components and the range end it charges up to. */
-export interface SpawnedUsageOptions {
-	label?: string;
-	sourceSessionId?: string;
-	reportId?: string;
-	provider?: string;
-	model?: string;
-	goalId?: string;
-	usageComponents?: readonly UsageComponent[];
-	through?: Usage;
-}
+export type { SpawnedUsageOptions };
 
 export interface SessionAnalyticsSettingsSource {
 	getTheme(): string | undefined;
