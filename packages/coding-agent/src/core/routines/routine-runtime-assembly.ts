@@ -195,7 +195,7 @@ export class RoutineRuntimeAssembly {
 	}
 
 	/**
-	 * Tells the armer of a watch that its checks keep failing, as one more wake (a session's parent input, a worker's message).
+	 * Tells the armer of a watch that its checks keep failing, or that its firing keeps finding the journal full, as one more wake (a session's parent input, a worker's message).
 	 * The delivery is keyed by the watch's incarnation, its firing count and the words, so a restart that finds the same failure
 	 * tells the armer nothing twice. It is not a routine result, so the day's wake bound does not hold it.
 	 */
@@ -203,18 +203,24 @@ export class RoutineRuntimeAssembly {
 		const routine = store.getRoutine(failing.routineId);
 		const address = routine && routineWakeAddress(routine);
 		if (!routine || !address || routine.incarnationId !== failing.incarnationId) return;
-		const text = watchFailingWakeText(routine, failing.failures, failing.reason);
+		const text = watchFailingWakeText(routine, failing);
 		const fires = routine.cursor.kind === "watch" ? routine.cursor.fires : 0;
 		const deliveryId = `watch-failing:${createHash("sha256")
 			.update(JSON.stringify([routine.incarnationId, fires, text]))
 			.digest("hex")}`;
-		const details = { routineId: routine.routineId, routineRevision: routine.revision, failing: true as const };
+		const details = {
+			routineId: routine.routineId,
+			routineRevision: routine.revision,
+			failing: true as const,
+			// A firing the journal holds is not a failing check: the owner's line says which (older builds read `failing` only).
+			...(failing.cause === "journal-full" ? { held: true as const } : {}),
+		};
 		let content = text;
 		if (address.kind === "worker") {
 			const wake = wakeWorkerRuntime(
 				this.workerWakeHost(),
 				address.runtimeId,
-				watchFailingWakeText(routine, failing.failures, failing.reason, WORKER_WAKE_PLAN_CHARS),
+				watchFailingWakeText(routine, failing, WORKER_WAKE_PLAN_CHARS),
 				deliveryId,
 			);
 			if (wake.kind !== "refused") return;

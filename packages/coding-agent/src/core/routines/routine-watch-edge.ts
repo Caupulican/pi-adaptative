@@ -26,11 +26,13 @@ export interface RoutineWatchObservationInput {
 
 /**
  * How the store answered an observation: `fired` recorded the firing for delivery to whoever armed the watch; `recorded`
- * moved the baseline or re-armed the edge; `unchanged` changed nothing; `held` is an edge the store could not take yet
- * (an earlier firing is not delivered, the journal is full or the routine's share is held), so the monitor offers it again
- * on the next store change; `stale` means the routine is gone, paused, ended or another incarnation.
+ * moved the baseline or re-armed the edge; `unchanged` changed nothing; `stale` means the routine is gone, paused, ended
+ * or another incarnation. An edge the store could not take yet is held, and the monitor offers it again: `held-busy` when
+ * an earlier firing of the watch is not delivered yet (the next one coalesces behind it, which is the intended wait), and
+ * `held-full` when the journal has no room or the routine's share of it is held, which only an outside change frees, so
+ * the monitor counts it as a failing check and the armer is told once the streak is long enough. Never persisted.
  */
-export type RoutineWatchOutcome = "fired" | "recorded" | "unchanged" | "held" | "stale";
+export type RoutineWatchOutcome = "fired" | "recorded" | "unchanged" | "held-busy" | "held-full" | "stale";
 
 /**
  * The edge rule of a watch. A change-style observation (it carries `state`) fires when the state differs from the

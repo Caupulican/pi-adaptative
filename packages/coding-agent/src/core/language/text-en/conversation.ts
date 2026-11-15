@@ -114,6 +114,9 @@ export const CONVERSATION = {
 	/** The note after what a watch saw: the agent that armed the watch was woken with it. */
 	watchWokeArmer: "woke the agent that armed it",
 	watchFailing: (routineId: string) => `Watch ${routineId} keeps failing its checks; the agent that armed it was told`,
+	/** A watch saw its change, but the routine journal has no room for the firing, which stays held until it does. */
+	watchHeld: (routineId: string) =>
+		`Watch ${routineId} saw its change, but the routine journal is full and the firing is held; the agent that armed it was told`,
 	/** The outcome word when the record carries none. */
 	routineEndedOutcome: "ended",
 	routineWaitsForMessage: "waits for your next message",

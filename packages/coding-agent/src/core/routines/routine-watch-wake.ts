@@ -17,6 +17,7 @@ import {
 	type RoutineWatchTrigger,
 } from "./routine-contract.ts";
 import type { WatchLastSeen } from "./routine-watch-edge.ts";
+import type { WatchFailing } from "./routine-watch-monitor.ts";
 import { describeWatchCondition, describeWatchFired, type WatchFiredEvent, watchFiredLine } from "./watch-contract.ts";
 
 /** What a watch firing's own result says: its armer is woken with the event itself, never through a run. */
@@ -145,15 +146,17 @@ export function routineWakeText(
 }
 
 /**
- * The wake of a watch whose checks keep failing (refused by the session's rules or unable to run): the condition cannot be
- * observed, so it can neither fire nor be known false. The armer decides whether to keep waiting; the watch keeps trying until its end time.
+ * The wake of a failing watch. Its checks keep failing (refused by the session's rules or unable to run): the condition
+ * cannot be observed, so it can neither fire nor be known false. Or its firing keeps finding the routine journal full: the
+ * change was seen and is held until the journal has room. The armer decides whether to keep waiting; the watch keeps trying
+ * until its end time.
  */
 export function watchFailingWakeText(
 	definition: Pick<PersistentRoutineDefinition, "prompt" | "armedBy" | "routineId" | "incarnationId" | "schedule">,
-	failures: number,
-	reason: string,
+	failing: Pick<WatchFailing, "cause" | "failures" | "reason">,
 	planChars = MAX_ROUTINE_PROMPT_CHARS,
 ): string {
+	const { failures, reason } = failing;
 	const { schedule } = definition;
 	const watching =
 		schedule.kind === "event" && schedule.source === "watch"
@@ -163,8 +166,12 @@ export function watchFailingWakeText(
 		schedule.kind !== "once" && schedule.expiresAt !== undefined
 			? ` until ${new Date(schedule.expiresAt).toISOString()}`
 			: "";
+	const state =
+		failing.cause === "journal-full"
+			? `Watch ${definition.routineId} is failing: it saw its condition${watching} change, but its last ${failures} attempts to record the firing found no room (${reason}). The firing is held and is delivered once the journal has room; it keeps trying${until}.`
+			: `Watch ${definition.routineId} is failing: its last ${failures} checks of the condition${watching} were refused or could not run (${reason}). It keeps trying${until}, and a condition it cannot check does not fire.`;
 	return [
-		`Watch ${definition.routineId} is failing: its last ${failures} checks of the condition${watching} were refused or could not run (${reason}). It keeps trying${until}, and a condition it cannot check does not fire.`,
+		state,
 		savedPlan(definition, `failing:${definition.incarnationId}`, planChars),
 		"Decide whether to keep waiting, check the state yourself, or change what you wait on; end the turn if nothing waits on it.",
 	].join("\n");

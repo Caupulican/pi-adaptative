@@ -151,11 +151,11 @@ export function observeWatch(
 			occurrence.routineId === routine.routineId &&
 			(occurrence.phase === "pending" || occurrence.phase === "claimed" || occurrence.result?.delivery === "pending")
 		)
-			return "held";
+			return "held-busy";
 	const parentOrigin = routineReceiptOrigin(routine);
 	if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) return "stale";
 	if (!routineJournalHasRoom(state, input.nowMs) || !routineHasJournalShare(state, routine.routineId, input.nowMs))
-		return "held";
+		return "held-full";
 	const sequence = routine.cursor.fires + 1;
 	const trigger = { kind: "watch" as const, triggeredAt: input.nowMs, sequence, event: input.event };
 	const occurrenceId = routineOccurrenceId(routine, trigger);

@@ -395,7 +395,11 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 	if (message.customType !== "routine-completion" || !routineId) return undefined;
 	if (typeof details.expiresAt === "number") return { text: text.routineExpired(routineId), status: "warning" };
 	if (typeof details.conditionMetBy === "string") return { text: text.routineEnded(routineId), status: "success" };
-	if (details.failing === true) return { text: text.watchFailing(routineId), status: "warning" };
+	if (details.failing === true)
+		return {
+			text: details.held === true ? text.watchHeld(routineId) : text.watchFailing(routineId),
+			status: "warning",
+		};
 	// A watch's wake started no run: the row says what the host saw and that the armer was woken with it.
 	const fired = parseWatchFiredLine(details.watch);
 	// A message saved before the firing's line was kept holds its cause as English words.

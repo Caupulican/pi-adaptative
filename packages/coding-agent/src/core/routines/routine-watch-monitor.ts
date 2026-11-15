@@ -6,8 +6,11 @@
  * edge rule (`observeWatch`), which fires a pending occurrence in the same write as the cursor it advances; this monitor
  * decides nothing. Nothing is evaluated while the session is closed.
  *
- * An edge the store cannot take yet (an earlier firing is not claimed, the journal is full) is kept as the routine's
- * latest observation and offered again on the next store change, so a file that does not change twice still fires once.
+ * An edge the store cannot take yet is kept as the routine's latest observation and offered again on the next store
+ * change, so a file that does not change twice still fires once. Behind an earlier firing not yet delivered it simply
+ * waits; when the journal has no room for it, each refused offer counts as a failing check (so the armer is told, as for a
+ * check that cannot run), and a watch with no timer of its own offers it again every {@link WATCH_HELD_RETRY_MS}, since a
+ * full journal may see no store change that would offer it.
  */
 
 import { type FSWatcher, statSync, watch as watchDirectory } from "node:fs";
@@ -43,10 +46,24 @@ export interface RoutineWatchMonitorDeps {
 /** Consecutive checks of a watch the session refused before its armer is told: one refused tick is not a failing watch. */
 const WATCH_FAILING_AFTER = 5;
 
-/** A watch whose last `failures` checks the session refused or could not run, with the reason in plain words (redacted and bounded). */
+/** How long an event-driven watch's firing that found the journal full waits before it is offered to the store again. */
+const WATCH_HELD_RETRY_MS = 60_000;
+
+/** Why a watch is failing: its checks are refused or cannot run, or its firing finds no room in the routine journal. */
+export type WatchFailingCause = "check-failed" | "journal-full";
+
+/** The reason a firing the journal has no room for is held, in the words the armer is told. */
+const JOURNAL_FULL_REASON =
+	"the routine journal has no room for another firing until earlier runs settle or their results are delivered";
+
+/**
+ * A watch whose last `failures` attempts failed for one `cause`: checks the session refused or could not run, or a firing
+ * the journal had no room for; with the reason in plain words (redacted and bounded).
+ */
 export interface WatchFailing {
 	readonly routineId: string;
 	readonly incarnationId: string;
+	readonly cause: WatchFailingCause;
 	readonly failures: number;
 	readonly reason: string;
 }
@@ -67,8 +84,9 @@ interface ArmedWatch {
 	/** An observation is running; a trigger meanwhile asks for one more after it. */
 	running: boolean;
 	again: boolean;
-	/** Checks in a row that could not be made, and whether the armer was told about this streak. */
+	/** Attempts in a row that failed for `failureCause`, and whether the armer was told about this streak. */
 	failures: number;
+	failureCause: WatchFailingCause | undefined;
 	failingReported: boolean;
 }
 
@@ -237,6 +255,7 @@ export class RoutineWatchMonitor {
 			running: false,
 			again: false,
 			failures: 0,
+			failureCause: undefined,
 			failingReported: false,
 		};
 		this.armed.set(routine.routineId, watch);
@@ -340,7 +359,7 @@ export class RoutineWatchMonitor {
 			} catch (error) {
 				if (watch.abort.signal.aborted || !this.active) return;
 				this.refuse(watch, error);
-				this.noteFailure(watch, error instanceof Error ? error.message : String(error));
+				this.noteFailure(watch, "check-failed", error instanceof Error ? error.message : String(error));
 				return;
 			}
 			if (!this.active || watch.abort.signal.aborted) return;
@@ -351,8 +370,7 @@ export class RoutineWatchMonitor {
 					reason: "unknown",
 				});
 			} else {
-				watch.failures = 0;
-				watch.failingReported = false;
+				this.clearFailures(watch, "check-failed");
 				await this.submit(watch, sample);
 			}
 		} finally {
@@ -374,12 +392,15 @@ export class RoutineWatchMonitor {
 	}
 
 	/**
-	 * Counts a check the session refused or could not run: a failure that stays until something is changed. A check with no
-	 * observation (the target is down, a network error, a timeout) is not counted: waiting for a service to come up is what
-	 * a watch is for, and the end time reports what such a watch last saw. The streak's one report tells the armer once
+	 * Counts a check the session refused or could not run, or a firing the journal had no room for: a failure that stays
+	 * until something is changed. A check with no observation (the target is down, a network error, a timeout) is not
+	 * counted: waiting for a service to come up is what a watch is for, and the end time reports what such a watch last saw.
+	 * A streak is one cause in a row; the other cause starts a new one. Its one report tells the armer once
 	 * {@link WATCH_FAILING_AFTER} in a row failed.
 	 */
-	private noteFailure(watch: ArmedWatch, reason: string): void {
+	private noteFailure(watch: ArmedWatch, cause: WatchFailingCause, reason: string): void {
+		if (watch.failureCause !== cause) this.clearFailures(watch, watch.failureCause);
+		watch.failureCause = cause;
 		watch.failures += 1;
 		if (watch.failures < WATCH_FAILING_AFTER || watch.failingReported) return;
 		watch.failingReported = true;
@@ -387,12 +408,25 @@ export class RoutineWatchMonitor {
 			this.deps.onFailing?.({
 				routineId: watch.routineId,
 				incarnationId: watch.incarnationId,
+				cause,
 				failures: watch.failures,
 				reason: boundedRedactedDiagnosticText(reason) ?? "operation unavailable",
 			});
 		} catch (error) {
 			this.warn(error);
 		}
+	}
+
+	/**
+	 * An attempt that worked ends the streak of its own cause only: a check that ran ends a check-failed streak, a firing
+	 * the journal took (or held behind an undelivered one) ends a journal-full streak. A later failure starts counting
+	 * again and is reported again.
+	 */
+	private clearFailures(watch: ArmedWatch, cause: WatchFailingCause | undefined): void {
+		if (watch.failureCause !== cause) return;
+		watch.failures = 0;
+		watch.failureCause = undefined;
+		watch.failingReported = false;
 	}
 
 	/**
@@ -438,7 +472,9 @@ export class RoutineWatchMonitor {
 				observation: sample.observation,
 				event: sample.event,
 			});
-			watch.pending = outcome === "held" ? sample : undefined;
+			watch.pending = outcome === "held-busy" || outcome === "held-full" ? sample : undefined;
+			if (outcome === "held-full") this.holdForRoom(watch);
+			else this.clearFailures(watch, "journal-full");
 			if (outcome === "fired")
 				harnessLog.info("routines", "a watch condition became true", {
 					routineId: watch.routineId,
@@ -450,19 +486,41 @@ export class RoutineWatchMonitor {
 					routineId: watch.routineId,
 					condition: watch.condition.type,
 				});
-			else if (outcome === "held")
-				harnessLog.debug("routines", "a watch firing waits for room", {
+			else if (outcome === "held-busy")
+				harnessLog.debug("routines", "a watch firing waits behind an undelivered one", {
 					routineId: watch.routineId,
-					reason: "held",
 				});
 			this.faults.delete(watch.routineId);
 		} catch (error) {
 			// The write did not happen (another process holds the store lock, or the store is unreadable): the observation is
-			// kept and offered again on the next store change, since an event-driven condition may never report again.
+			// kept and offered again on the next store change, since an event-driven condition may never report again. The
+			// journal gave no answer, so no streak ends or grows.
 			watch.pending = sample;
 			if ((error as NodeJS.ErrnoException | undefined)?.code === "ELOCKED") return;
 			this.reportOnce(watch.routineId, error);
 		}
+	}
+
+	/**
+	 * A firing the journal has no room for: counted as a failing attempt, and offered again after
+	 * {@link WATCH_HELD_RETRY_MS} when the watch has no timer of its own, since a file event or a store change may never
+	 * come. A timer-based watch's next check offers it (with what it then sees) on its own cadence, and a pending file-event
+	 * debounce is kept: it samples the newer change, and that sample is offered instead.
+	 */
+	private holdForRoom(watch: ArmedWatch): void {
+		this.noteFailure(watch, "journal-full", JOURNAL_FULL_REASON);
+		harnessLog.info("routines", "a watch firing is held: the routine journal has no room", {
+			routineId: watch.routineId,
+			condition: watch.condition.type,
+			attempts: watch.failures,
+		});
+		if (watchCadenceMs(watch.condition) !== undefined || this.armed.get(watch.routineId) !== watch) return;
+		if (watch.timer !== undefined) return;
+		watch.timer = this.deps.timers.setTimeout(() => {
+			watch.timer = undefined;
+			if (!this.active || watch.abort.signal.aborted || this.armed.get(watch.routineId) !== watch) return;
+			if (watch.pending) void this.submit(watch, watch.pending);
+		}, WATCH_HELD_RETRY_MS);
 	}
 
 	private disarm(watch: ArmedWatch): void {

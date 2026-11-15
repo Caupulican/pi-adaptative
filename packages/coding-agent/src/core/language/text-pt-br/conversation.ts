@@ -102,6 +102,8 @@ export const CONVERSATION = {
 	watchWokeArmer: "acionou o agente que a criou",
 	watchFailing: (routineId: string) =>
 		`A espera ${routineId} segue falhando nas verificações; o agente que a criou foi avisado`,
+	watchHeld: (routineId: string) =>
+		`A espera ${routineId} viu a mudança, mas o registro de rotinas está cheio e o disparo ficou retido; o agente que a criou foi avisado`,
 	routineEndedOutcome: "terminou",
 	routineWaitsForMessage: "espera sua próxima mensagem",
 	routineEarlierSlots: (count: number) => `cobre ${count} ${count === 1 ? "horário anterior" : "horários anteriores"}`,
