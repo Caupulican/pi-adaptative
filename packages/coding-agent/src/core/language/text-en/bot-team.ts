@@ -26,7 +26,7 @@ export const BOT_TEAM = {
 	/** A rename whose name was too long or too short. */
 	usageLength: (line: string) => `Usage: ${line} (a name of 1 to 60 characters).`,
 	botUsage:
-		"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> (a standing leader; its goals are /lead) | /bot spawner | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
+		"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> (a standing leader; its goals are /lead) | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 	teamUsage:
 		"Usage: /team [list] | /team create <teamId> <bot1,bot2,...> [description...] | /team members <teamId> <bot1,bot2,...> | /team open <teamId> | /team msg <teamId> <text...> | /team inbox [teamId] | /team ack [teamId|all] | /team schedule [list|add|rm] ... | /team delete <teamId>",
 	botMessageUsage: "Usage: /bot msg|send|steer|queue <id> <text...>",
@@ -45,9 +45,6 @@ export const BOT_TEAM = {
 	botNotFound: (agentId: string) => `No bot named ${agentId}. Create it with /bot new ${agentId} <model>.`,
 	botNotFoundSoul: (agentId: string) =>
 		`No bot named ${agentId}. Create it with /bot new ${agentId} <model> [soul...].`,
-	botExists: (agentId: string) => `${agentId} already exists.`,
-	spawnerReady: (agentId: string) =>
-		`${agentId} is ready. The orchestrator can hand it the making of many bots at once; it creates them and briefs each.`,
 	leaderOn: (agentId: string) =>
 		`${agentId} is now a standing leader: it gets bots of its own from the orchestrator, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start. Its goals, handed to it by the orchestrator, are shown and overridden with /lead, not here.`,
 	leaderOff: (agentId: string) =>

@@ -35,7 +35,7 @@ export const BOT_TEAM = {
 	/** Um rename cujo nome ficou longo ou curto demais. */
 	usageLength: (line: string) => `Uso: ${line} (um nome de 1 a 60 caracteres).`,
 	botUsage:
-		"Uso: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> (um líder permanente; os objetivos dele ficam em /lead) | /bot spawner | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
+		"Uso: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> (um líder permanente; os objetivos dele ficam em /lead) | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 	teamUsage:
 		"Uso: /team [list] | /team create <teamId> <bot1,bot2,...> [description...] | /team members <teamId> <bot1,bot2,...> | /team open <teamId> | /team msg <teamId> <text...> | /team inbox [teamId] | /team ack [teamId|all] | /team schedule [list|add|rm] ... | /team delete <teamId>",
 	botMessageUsage: "Uso: /bot msg|send|steer|queue <id> <text...>",
@@ -55,9 +55,6 @@ export const BOT_TEAM = {
 	botNotFound: (agentId: string) => `Nenhum bot chamado ${agentId}. Crie com /bot new ${agentId} <model>.`,
 	botNotFoundSoul: (agentId: string) =>
 		`Nenhum bot chamado ${agentId}. Crie com /bot new ${agentId} <model> [soul...].`,
-	botExists: (agentId: string) => `${agentId} já existe.`,
-	spawnerReady: (agentId: string) =>
-		`${agentId} está pronto. O orquestrador pode entregar a ele a criação de muitos bots de uma vez; ele cria cada um e passa o brief.`,
 	leaderOn: (agentId: string) =>
 		`${agentId} agora é líder permanente: recebe bots próprios do orquestrador, e os outros bots pedem um bot a ele ou ao orquestrador. Vale a partir do próximo início de worker do bot. Os objetivos que o orquestrador entrega a ele aparecem e são alterados em /lead, não aqui.`,
 	leaderOff: (agentId: string) =>

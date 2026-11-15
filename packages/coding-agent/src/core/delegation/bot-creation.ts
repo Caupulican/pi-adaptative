@@ -53,11 +53,6 @@ export interface CreatedBotView {
 	readonly createdBy: string;
 }
 
-/** The standing instructions of the spawner bot: the one bot whose only work is making the bots and workers others need. */
-export const SPAWNER_BOT_ID = "spawner";
-export const SPAWNER_SOUL =
-	"You make bots for the orchestrator and do nothing else. When asked, create each bot with bot_message action create: a short clear agentId, and a soul that states that bot's single purpose and rules, no more than it needs. Then send each new bot its first task with bot_message send, and answer the orchestrator with the ids you created and what each was asked to do. Never do the task yourself and never write files.";
-
 /** One bot as the `bot` tool's list shows it. */
 export type BotToolListEntry = {
 	agentId: string;

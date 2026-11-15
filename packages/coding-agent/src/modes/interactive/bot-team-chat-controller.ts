@@ -1,6 +1,5 @@
 import type { Container, TUI } from "@caupulican/pi-tui";
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
-import { SPAWNER_BOT_ID, SPAWNER_SOUL } from "../../core/delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, describeBotDaemonLaunch } from "../../core/delegation/bot-daemon-launch.ts";
 import { type BotDaemonStopResult, describeBotDaemonStop } from "../../core/delegation/bot-daemon-stop.ts";
 import { displayNameFor } from "../../core/delegation/bot-naming.ts";
@@ -407,9 +406,6 @@ export class BotTeamChatController {
 				case "unlead":
 					this.setBotLeader(rest, sub === "lead", port);
 					return;
-				case "spawner":
-					this.createSpawnerBot(port);
-					return;
 				case "rename":
 					this.renameBot(rest, port);
 					return;
@@ -790,26 +786,6 @@ export class BotTeamChatController {
 		}
 		port.upsertPersistentBot({ agentId: bot.agentId, displayName: name });
 		this.host.showStatus(interfaceText().botTeam.botRenamed(bot.agentId, name));
-	}
-
-	/** `/bot spawner`: the one bot whose only work is making the bots and workers the orchestrator asks for. */
-	private createSpawnerBot(port: BotTeamChatSessionPort): void {
-		if (port.listPersistentBots().some((b) => b.agentId === SPAWNER_BOT_ID && b.persistent)) {
-			this.host.showStatus(interfaceText().botTeam.botExists(SPAWNER_BOT_ID));
-			return;
-		}
-		const spec = port.resolveModelSpec(undefined);
-		port.upsertPersistentBot({
-			agentId: SPAWNER_BOT_ID,
-			displayName: displayNameFor(SPAWNER_BOT_ID),
-			provider: spec.provider,
-			modelId: spec.modelId,
-			thinkingLevel: spec.thinkingLevel,
-			soul: SPAWNER_SOUL,
-			leader: true,
-			createdBy: "owner",
-		});
-		this.host.showStatus(interfaceText().botTeam.spawnerReady(SPAWNER_BOT_ID));
 	}
 
 	/** `/bot lead <id>` and `/bot unlead <id>`: only the owner makes a bot a leader; its bots come from the orchestrator. */
