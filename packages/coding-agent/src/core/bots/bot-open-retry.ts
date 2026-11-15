@@ -18,6 +18,13 @@ import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { isLockBusy } from "./bot-failure-words.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 
+/** What failed, in its own words: each cause of a failure that gathers several. */
+export function errorText(error: unknown): string {
+	if (error instanceof AggregateError)
+		return [error.message, ...error.errors.map(errorText)].filter(Boolean).join("; ");
+	return error instanceof Error ? error.message : String(error);
+}
+
 export const BOT_OPEN_RETRY_FIRST_MS = 2_000;
 export const BOT_OPEN_RETRY_MAX_MS = 5 * 60 * 1000;
 /** How many times in a row a failing disk or a permission is tried again (2 s to 32 s, a minute in all). */

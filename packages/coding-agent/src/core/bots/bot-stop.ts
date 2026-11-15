@@ -43,6 +43,7 @@ import {
 	refuseBotInboxMessage,
 	takeBotInboxStop,
 } from "./bot-inbox.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
 
 /** What applying a stop needs besides the bot's files: the owner's notices, and the provider admission clock's time. */
@@ -90,16 +91,44 @@ export function takeHostedBotStops(
 	return takeStops(
 		agentDir,
 		agentId,
-		(stop) => {
-			// Read before acting: a home that does not list leaves the stop waiting with nothing done.
-			const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "follow").filter(
-				(id) => id !== sessionId,
-			);
-			const outcome = stopHere(stop);
-			endPlacedJobsOfSessions(agentDir, new Set(others), jobCancelReasonOf(stop.reasonCode));
-			return outcome;
-		},
+		(stop) => endWithOtherSessionsJobs(agentDir, agentId, sessionId, stop.reasonCode, () => stopHere(stop)),
 		ports,
+	);
+}
+
+/**
+ * Ends the work of bot `agentId`'s session `sessionId` this process hosts through `endHere`, then the jobs its home's
+ * other sessions placed on other machines, for `reasonCode` (no client of theirs runs: this process holds the bot). The
+ * home is listed before anything ends: one that does not list throws with nothing done. What `endHere` left unended.
+ */
+function endWithOtherSessionsJobs(
+	agentDir: string,
+	agentId: string,
+	sessionId: string,
+	reasonCode: string,
+	endHere: () => WorkerStopOutcome,
+): WorkerStopOutcome {
+	const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "follow").filter(
+		(id) => id !== sessionId,
+	);
+	const outcome = endHere();
+	endPlacedJobsOfSessions(agentDir, new Set(others), jobCancelReasonOf(reasonCode));
+	return outcome;
+}
+
+/**
+ * The work of bot `agentId`'s session this process has loaded, ended for `reasonCode` as the owner's stop of a hosted bot
+ * ends it, for a release of the bot (retired, or off the session path): its whole fleet (`cancelOwnFleet`), then the jobs
+ * its home's other sessions placed. What it left unended.
+ */
+export function endLoadedBotWork(
+	agentDir: string,
+	agentId: string,
+	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
+	reasonCode: string,
+): WorkerStopOutcome {
+	return endWithOtherSessionsJobs(agentDir, agentId, session.sessionId, reasonCode, () =>
+		session.backgroundLanes.cancelOwnFleet(reasonCode),
 	);
 }
 
@@ -247,7 +276,7 @@ export function endClosedBotWork(
 	reasonCode: string,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
-	if (!taken.held) throw new Error(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
+	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
 		const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
 		return cancelOwedWorkerWork(agentDir, bundle, placedBy, reasonCode).outcome;
