@@ -95,8 +95,17 @@ export const BOT_TEAM = {
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
 		`O bot ${agentId} está aberto em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}).`,
-	botSessionOpenInSession: (agentId: string, pids: string) =>
-		`a conversa do bot ${agentId} está aberta em outra sessão (processo ${pids}); o hospedeiro dele a abre quando aquela sessão a fechar`,
+	botSessionOpenElsewhere: (agentId: string, holders: string) =>
+		`a conversa do bot ${agentId} está aberta em ${holders}; o hospedeiro dele a abre quando isso a fechar`,
+	botSessionHolderSession: (pid: number) => `uma sessão sua (processo ${pid})`,
+	botSessionHolderPhone: (pid: number) => `o daemon da sessão do telefone (processo ${pid})`,
+	botSessionHolderBotHost: (pid: number) => `outro hospedeiro de bot (processo ${pid})`,
+	botSessionStoreBusy: (agentId: string) =>
+		`os arquivos da sessão do bot ${agentId} estavam ocupados ou mudando durante a leitura; o hospedeiro dele a abre de novo em instantes`,
+	botSessionStoreFailing: (agentId: string) =>
+		`os arquivos da sessão do bot ${agentId} falharam na leitura (um erro de disco); o hospedeiro dele tenta de novo por um minuto, depois quando uma mensagem ou uma mudança do bot pedir`,
+	botSessionStorePermission: (agentId: string) =>
+		`este processo não tem permissão para ler os arquivos da sessão do bot ${agentId}; o hospedeiro dele tenta de novo por um minuto, depois quando uma mensagem ou uma mudança do bot pedir`,
 	botInboxFull: (agentId: string, max: number) =>
 		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>

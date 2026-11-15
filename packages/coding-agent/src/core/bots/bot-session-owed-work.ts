@@ -17,7 +17,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
-import { BotOpenRetries, botOpenFailureText, opensLater } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure, botOpenFailureText, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -180,7 +180,7 @@ export class BotOwedWork {
 	private readonly failedOpens = new Map<string, { readonly key: string | undefined; readonly inbox: string }>();
 	/** The periodic listing of the bots' inboxes (see {@link sweepInboxes}). */
 	private sweep: RepeatingAlarm | undefined;
-	/** The next open of each bot whose session failed to open for a cause that passes on its own (`opensLater`). */
+	/** The next open of each bot whose session failed to open for a cause that passes on its own (`botOpenFailure`). */
 	private readonly openRetries: BotOpenRetries;
 
 	constructor(ports: BotOwedWorkPorts) {
@@ -192,9 +192,13 @@ export class BotOwedWork {
 		});
 	}
 
-	/** The bot's session failed to open for a cause that passes on its own: it is opened again after a backoff. */
-	openLater(agentId: string): void {
-		this.openRetries.arm(agentId);
+	/**
+	 * The bot's session failed to open with `error`: whether it is opened again after a backoff (a cause that passes on
+	 * its own, `botOpenFailure`, not past its cap).
+	 */
+	openLater(agentId: string, error: unknown): boolean {
+		const failure = botOpenFailure(error);
+		return failure !== undefined && this.openRetries.arm(agentId, failure);
 	}
 
 	/**
@@ -245,7 +249,8 @@ export class BotOwedWork {
 	 * Lists every bot's inbox every `OWED_INBOX_SWEEP_MS` until the host stops, whether the watch over the bot homes runs
 	 * or not (a watch that runs can still miss what another process writes): a message waiting for a bot this host runs is
 	 * taken, and a bot no host runs is opened ({@link openIfOwed}), unless its last open failed on the same definition and
-	 * inbox. Costs one directory listing per bot when nothing waits; no session file is read.
+	 * inbox or its next open is armed already. Costs one directory listing per bot when nothing waits; no session file is
+	 * read.
 	 */
 	sweepInboxes(): void {
 		if (this.sweep !== undefined || this.ports.stopped()) return;
@@ -254,7 +259,7 @@ export class BotOwedWork {
 			for (const { agentId } of this.ports.store().listBots()) {
 				if (!botInboxWaiting(agentDir, agentId)) continue;
 				if (this.ports.hostedHere(agentId)) this.ports.takeInbox(agentId);
-				else this.openIfOwed(agentId, true);
+				else if (!this.openRetries.pending(agentId)) this.openIfOwed(agentId, true);
 			}
 		});
 	}
@@ -316,16 +321,30 @@ export class BotOwedWork {
 	openIfOwed(agentId: string, swept = false): void {
 		const { ports } = this;
 		const agentDir = ports.agentDir();
-		if (ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId)) return;
+		if (ports.stopped()) return;
 		const record = ports.store().getBot(agentId);
-		if (!record || record.retired || !ports.runsAsSession(record)) return;
-		// A cause that passes on its own is asked again after a backoff; any other at the next change.
-		const notResumed = (error: unknown) => {
-			if (opensLater(error)) this.openRetries.arm(agentId);
+		// Nothing of it is this host's to open: no attempt stays armed for it.
+		if (
+			ports.hostedHere(agentId) ||
+			ports.heldElsewhere(agentId) ||
+			!record ||
+			record.retired ||
+			!ports.runsAsSession(record)
+		) {
+			this.openRetries.forget(agentId);
+			return;
+		}
+		// A cause that passes on its own is asked again after a backoff, armed once for this attempt whichever read or open
+		// failed; any other cause at the next change. Whether the session opens later is returned.
+		let retrying = false;
+		const notResumed = (error: unknown): boolean => {
+			const failure = botOpenFailure(error);
+			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, failure);
 			this.tellWaits(
 				agentId,
 				interfaceText().botTeam.botWatchesNotResumed(agentId, botOpenFailureText(agentId, error)),
 			);
+			return failure !== undefined && retrying;
 		};
 		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox. A
 		// home that does not read is asked again at the next change.
@@ -333,20 +352,26 @@ export class BotOwedWork {
 		try {
 			saved = ports.savedSessionOf(agentId);
 		} catch (error) {
-			notResumed(error);
+			notResumed(storeFailure(agentId, error, undefined));
 			return;
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
 		let unrun = "";
+		let unread = false;
 		try {
 			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
 			if (worked && !watching) unrun = this.wakes.read(agentId, worked.file, agentDir);
 		} catch (error) {
-			notResumed(error);
+			unread = true;
+			notResumed(storeFailure(agentId, error, undefined));
 		}
 		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? ports.waiting(agentId) : [];
-		if (!watching && !unrun && waiting.length === 0) return;
+		if (!watching && !unrun && waiting.length === 0) {
+			// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this read is.
+			if (!unread) this.openRetries.forget(agentId);
+			return;
+		}
 		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
 		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
 		// a profile's where its profile compiles to for that root.
@@ -383,9 +408,8 @@ export class BotOwedWork {
 			if (error instanceof BotModelRefusedError) this.record(agentId, "open", key, error);
 			else this.forgetRefusal(agentId);
 			if (ports.heldElsewhere(agentId)) return;
-			if (!(error instanceof BotModelRefusedError) && !opensLater(error))
-				this.failedOpens.set(agentId, { key, inbox });
-			notResumed(error);
+			const later = notResumed(error);
+			if (!(error instanceof BotModelRefusedError) && !later) this.failedOpens.set(agentId, { key, inbox });
 		});
 	}
 

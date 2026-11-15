@@ -74,7 +74,7 @@ import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { opensLater } from "./bot-open-retry.ts";
+import { botOpenFailure, storeFailure } from "./bot-open-retry.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
@@ -423,10 +423,9 @@ export class BotSessionHost {
 		try {
 			entry = await this.open(agentId, sender);
 		} catch (error) {
-			// Another host runs it, or it opens later (a session of the owner holds it, a passing read failure): the words wait
-			// in its inbox, taken by that host or by this one's next open (`BotOwedWork.openLater`).
-			if (!(error instanceof BotSessionHeldError) && !opensLater(error)) throw error;
-			if (opensLater(error)) this.owed.openLater(agentId);
+			// Another host runs it, or it may open later (a holder keeps its host out, a passing read failure): the words wait
+			// in its inbox, taken by that host or by this one's next open, which the send arms (`BotOwedWork.openLater`).
+			if (!(error instanceof BotSessionHeldError) && botOpenFailure(error) === undefined) throw error;
 			return sendToBotHost(
 				{
 					agentDir: this.ports.agentDir(),
@@ -434,6 +433,7 @@ export class BotSessionHost {
 					store: () => this.ports.store(),
 					changed: (changedId) => this.changed(changedId),
 					open: (openedId) => this.open(openedId, sender),
+					openLater: (openedId, openError) => this.owed.openLater(openedId, openError),
 				},
 				agentId,
 				message,
@@ -684,6 +684,9 @@ export class BotSessionHost {
 		let session: AgentSession | undefined;
 		let settings: ReturnType<BotSender["settings"]> | undefined;
 		let built: BotSessionEntry | undefined;
+		// Until its file is open, a failure is a read of the bot's session store; after, only one in its orchestration home
+		// (its lease) is (`storeFailure`).
+		let storeWithin: string | undefined;
 		try {
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
@@ -702,6 +705,7 @@ export class BotSessionHost {
 					);
 				},
 			});
+			storeWithin = sessionManager.getStorageRoots().orchestrationHome.root;
 			const cancelled = cancelOtherSessionsWatches(
 				this.ports.store(),
 				home.sessionsDir,
@@ -834,7 +838,7 @@ export class BotSessionHost {
 				words.botSessionNotClosed,
 				{ error },
 			);
-			throw error;
+			throw storeFailure(agentId, error, storeWithin);
 		}
 	}
 

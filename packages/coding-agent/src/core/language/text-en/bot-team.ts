@@ -93,8 +93,19 @@ export const BOT_TEAM = {
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
 		`Bot ${agentId} is open in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}).`,
 	/** A session of the owner (`pids`) holds the bot's conversation open: the bot's host opens it once that one closes it. */
-	botSessionOpenInSession: (agentId: string, pids: string) =>
-		`bot ${agentId}'s conversation is open in another session (process ${pids}); its host opens it once that session closes it`,
+	/** A bot's session did not open: `holders` (each one of the holder words below) keep its host out. */
+	botSessionOpenElsewhere: (agentId: string, holders: string) =>
+		`bot ${agentId}'s conversation is open in ${holders}; its host opens it once that closes it`,
+	botSessionHolderSession: (pid: number) => `a session of yours (process ${pid})`,
+	botSessionHolderPhone: (pid: number) => `the phone session's daemon (process ${pid})`,
+	botSessionHolderBotHost: (pid: number) => `another bot host (process ${pid})`,
+	/** A read of the bot's session files failed for a cause that passes on its own. */
+	botSessionStoreBusy: (agentId: string) =>
+		`bot ${agentId}'s session files were busy or changing while they were read; its host opens it again shortly`,
+	botSessionStoreFailing: (agentId: string) =>
+		`bot ${agentId}'s session files failed to read (a disk error); its host tries again for a minute, then when a message or a change of the bot asks`,
+	botSessionStorePermission: (agentId: string) =>
+		`this process may not read bot ${agentId}'s session files (permission denied); its host tries again for a minute, then when a message or a change of the bot asks`,
 	/** The bot's inbox holds as many messages as it takes: its host is not taking them. */
 	botInboxFull: (agentId: string, max: number) =>
 		`Bot ${agentId}: ${max} messages already wait for the session hosting it; send again once it has taken them.`,

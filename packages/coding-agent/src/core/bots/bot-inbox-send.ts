@@ -2,8 +2,8 @@
  * A message to a bot whose session another process hosts: it goes to the bot's inbox (`bot-inbox.ts`), which that host
  * takes and answers in the bot's chat. A host that let the bot go between the refused lock and the write would leave it
  * to no one, so the bot is then opened here, which takes the inbox first (this message included); a refusal of that open
- * takes the message back and is the send's own, unless the session opens later (`opensLater`): the message then waits,
- * and the owner is told why (`waitsFor`).
+ * takes the message back and is the send's own, unless the host opens the session again later (`openLater`: a cause that
+ * passes on its own, not past its cap): the message then waits, and the owner is told why (`waitsFor`).
  */
 
 import type {
@@ -13,7 +13,7 @@ import type {
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { readRemoteBotHost } from "./bot-host-state.ts";
 import { enqueueBotInbox, takeBotInboxMessage } from "./bot-inbox.ts";
-import { botOpenFailureText, opensLater } from "./bot-open-retry.ts";
+import { botOpenFailureText } from "./bot-open-retry.ts";
 
 /** Another host holds the bot's lock: a message goes to the bot's inbox for it instead (`sendToBotHost`). */
 export class BotSessionHeldError extends Error {
@@ -28,11 +28,10 @@ export interface BotInboxSendPorts {
 	store(): PersistentBotTeamStore;
 	/** The bot's state changed (its inbox): the roster and an open chat follow it. */
 	changed(agentId: string): void;
-	/**
-	 * Opens the bot's session here; throws `BotSessionHeldError` while another host holds it, and an error `opensLater`
-	 * names while it opens later (the words then wait, and the host opens it again after a backoff).
-	 */
+	/** Opens the bot's session here; throws `BotSessionHeldError` while another host holds it. */
 	open(agentId: string): Promise<unknown>;
+	/** The open failed with `error`: whether the host opens it again after a backoff (`BotOwedWork.openLater`). */
+	openLater(agentId: string, error: unknown): boolean;
 }
 
 /** Sends the owner's words to the bot's inbox for the host that runs its session (see the module comment). */
@@ -62,7 +61,7 @@ export async function sendToBotHost(
 			return { agentId, mode: "queued", messageId: item.message.id, modelRef };
 		} catch (error) {
 			// A session that opens later keeps the words waiting, and the owner is told why; any other failure takes them back.
-			if (opensLater(error)) waitsFor = botOpenFailureText(agentId, error);
+			if (ports.openLater(agentId, error)) waitsFor = botOpenFailureText(agentId, error);
 			else if (!(error instanceof BotSessionHeldError)) {
 				takeBotInboxMessage(item);
 				ports.changed(agentId);

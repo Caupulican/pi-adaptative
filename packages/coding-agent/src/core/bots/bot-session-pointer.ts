@@ -87,7 +87,7 @@ function linkedPath(path: string): string | undefined {
  * Why the file a pointer names does not hold its session, or undefined when it does, is missing or is empty (the
  * session is started there). Only its content decides, a symlink followed to the file it names (a directory, a FIFO or
  * a device holds no session); a failure to read it is thrown, so the load is asked again (after a backoff when it
- * passes on its own: `opensLater`).
+ * passes on its own: `storeFailure`).
  */
 function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerSetAsideReason | undefined {
 	const header = readLinkedSessionHeaderResult(path);
