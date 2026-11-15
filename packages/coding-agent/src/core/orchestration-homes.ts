@@ -27,48 +27,80 @@ import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { sessionHomeChangeOf } from "./session-switch-failures.ts";
 
 /**
- * The owner's home, then the home of every bot directory that has an orchestration directory (with or without a
- * profile: a home whose profile is gone still holds its sessions' state). The bot homes are read once; a missing
- * `bots/` holds none, and any other failure to read it is thrown to the reader, which cannot know what it holds.
+ * The homes a batch of by-id lookups asks, read once: the owner's, and the home of every bot directory that has an
+ * orchestration directory (with or without a profile: a home whose profile is gone still holds its sessions' state). A
+ * missing `bots/` holds none; one that could not be listed is kept as `unreadable`, so the owner's home still answers
+ * for a session it holds ({@link sessionHomeHolding}).
  */
-export function orchestrationHomes(agentDir: string): OrchestrationHome[] {
-	const homes = [ownerOrchestrationHome(agentDir)];
+export interface SessionHomes {
+	readonly owner: OrchestrationHome;
+	readonly bots: { readonly homes: readonly OrchestrationHome[] } | { readonly unreadable: unknown };
+}
+
+/** {@link SessionHomes} of `agentDir` as one listing of `bots/` finds them now. */
+export function sessionHomes(agentDir: string): SessionHomes {
+	const owner = ownerOrchestrationHome(agentDir);
 	const bots = botsDir(agentDir);
 	let entries: Dirent[];
 	try {
 		entries = readdirSync(bots, { withFileTypes: true });
 	} catch (error) {
-		if (isMissingFileError(error)) return homes;
-		throw error;
+		return { owner, bots: isMissingFileError(error) ? { homes: [] } : { unreadable: error } };
 	}
-	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		if (!entry.isDirectory()) continue;
-		const home = botHomeOrchestrationHome(join(bots, entry.name));
-		if (existsSync(home.root)) homes.push(home);
-	}
-	return homes;
+	const homes = entries
+		.filter((entry) => entry.isDirectory())
+		.sort((a, b) => a.name.localeCompare(b.name))
+		.map((entry) => botHomeOrchestrationHome(join(bots, entry.name)))
+		.filter((home) => existsSync(home.root));
+	return { owner, bots: { homes } };
 }
 
 /** A path's real spelling, case-folded where the file system ignores case: two spellings of one directory compare equal. */
 export function canonicalPath(path: string): string {
-	const real = safeRealpathSync(path, { native: true });
-	return process.platform === "win32" ? real.toLowerCase() : real;
+	return foldCase(safeRealpathSync(path, { native: true }));
+}
+
+function foldCase(path: string): string {
+	return process.platform === "win32" ? path.toLowerCase() : path;
 }
 
 /**
  * The bot home whose `sessions/` directory is `dir`, or whose `orchestration/` holds it (a bundle and its workers'
- * transcripts), judged by real path and spelled from `agentDir`; undefined for any other directory.
+ * transcripts), spelled from `agentDir`; undefined for any other directory. Judged by the paths as written first (a
+ * bot directory, or its `sessions/` or `orchestration/`, may be a symlink to a place outside `bots/`), then by real
+ * path (a symlinked or differently spelled agent directory), each resolved once.
  */
 function botHomeOfDir(agentDir: string, dir: string): OrchestrationHome | undefined {
 	const bots = botsDir(agentDir);
+	const written = resolve(dir);
+	const byText = botHomeAt(bots, resolve(bots), written, written);
+	if (byText) return byText;
 	const real = safeRealpathSync(dir, { native: true });
-	const offset = relative(canonicalPath(bots), canonicalPath(dir));
+	return botHomeAt(bots, safeRealpathSync(bots, { native: true }), real, real);
+}
+
+/** {@link botHomeOfDir} for one spelling of `bots/` and `dir`; the name keeps `spelled`'s case, the match ignores it. */
+function botHomeAt(bots: string, botsPath: string, dirPath: string, spelled: string): OrchestrationHome | undefined {
+	const offset = relative(foldCase(botsPath), foldCase(dirPath));
 	if (offset === "" || offset.startsWith("..") || isAbsolute(offset)) return undefined;
 	const depth = offset.split(sep).length;
-	// The real path's own segments keep the bot directory's spelling; the folded ones only locate it.
-	const [name, area] = real.split(sep).slice(-depth);
+	const [name, area] = spelled.split(sep).slice(-depth);
 	if (name === undefined || !((area === "sessions" && depth === 2) || area === "orchestration")) return undefined;
 	return botHomeOrchestrationHome(join(bots, name));
+}
+
+/**
+ * The home among `homes` that holds anything of session `sessionId`: a bot's first, then the owner's; undefined when
+ * none does. While `bots/` cannot be listed, the owner's answers for a session it holds and any other lookup throws what
+ * the listing threw: the reader cannot know whether a bot's home holds it.
+ */
+export function sessionHomeHolding(homes: SessionHomes, sessionId: string): OrchestrationHome | undefined {
+	if ("unreadable" in homes.bots) {
+		if (orchestrationHomeHoldsSession(homes.owner, sessionId)) return homes.owner;
+		throw homes.bots.unreadable;
+	}
+	const bot = homes.bots.homes.find((home) => orchestrationHomeHoldsSession(home, sessionId));
+	return bot ?? (orchestrationHomeHoldsSession(homes.owner, sessionId) ? homes.owner : undefined);
 }
 
 /**
@@ -83,14 +115,9 @@ export function resolveSessionHome(
 	place: OrchestrationHome | undefined,
 ): OrchestrationHome {
 	const owner = ownerOrchestrationHome(agentDir);
-	const bot =
-		place ??
-		orchestrationHomes(agentDir)
-			.slice(1)
-			.find((home) => orchestrationHomeHoldsSession(home, sessionId));
-	if (bot && orchestrationHomeHoldsSession(bot, sessionId)) return bot;
-	if (orchestrationHomeHoldsSession(owner, sessionId)) return owner;
-	return bot ?? owner;
+	if (place === undefined) return sessionHomeHolding(sessionHomes(agentDir), sessionId) ?? owner;
+	if (orchestrationHomeHoldsSession(place, sessionId)) return place;
+	return orchestrationHomeHoldsSession(owner, sessionId) ? owner : place;
 }
 
 /** The home that holds the session, by its id alone ({@link resolveSessionHome}). */
@@ -99,17 +126,18 @@ export function orchestrationHomeOfSession(agentDir: string, sessionId: string):
 }
 
 /**
- * `own` when the session is `own`'s by {@link resolveSessionHome}, else undefined: a reference into another home is not
- * followed, so a session's workers stay inside its own ceiling and spend window. A session no home holds any more is
- * still `own`'s: a reference to it was written in `own`, by a session of that home.
+ * `own` when the session is `own`'s, else undefined: a reference into another home is not followed, so a session's
+ * workers stay inside its own ceiling and spend window. The session is looked up by its id among `homes` (read once for
+ * a batch of lookups, {@link sessionHomeHolding}), whatever home `own` is: one another bot's home holds is that bot's.
+ * A session no home holds any more is still `own`'s: a reference to it was written in `own`, by a session of that home.
  */
 export function followedOrchestrationHome(
-	agentDir: string,
+	homes: SessionHomes,
 	own: OrchestrationHome,
 	sessionId: string,
 ): OrchestrationHome | undefined {
-	const place = sameOrchestrationHome(own, ownerOrchestrationHome(agentDir)) ? undefined : own;
-	return sameOrchestrationHome(resolveSessionHome(agentDir, sessionId, place), own) ? own : undefined;
+	const holder = sessionHomeHolding(homes, sessionId);
+	return holder === undefined || sameOrchestrationHome(holder, own) ? own : undefined;
 }
 
 /**

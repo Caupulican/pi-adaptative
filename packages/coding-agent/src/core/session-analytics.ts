@@ -202,7 +202,6 @@ export class SessionAnalytics {
 		this.deps = deps;
 		this.accountingHistory = new SessionAccountingHistory({
 			getSession: () => deps.getSessionManager(),
-			getAgentDir: () => deps.getAgentDir(),
 			isDisposed: () => deps.isDisposed?.() ?? false,
 			onUpdated: () => {
 				this._currentSessionCostCache = undefined;

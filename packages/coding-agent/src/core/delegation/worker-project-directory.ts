@@ -12,7 +12,7 @@ import type {
 	SpecialistContextOwner,
 	SpecialistContextOwnership,
 } from "../orchestration/specialist-context-ownership.ts";
-import { followedOrchestrationHome } from "../orchestration-homes.ts";
+import { followedOrchestrationHome, type SessionHomes, sessionHomes } from "../orchestration-homes.ts";
 import {
 	currentSynchronousFileLockScope,
 	type SynchronousFileLockScope,
@@ -67,16 +67,16 @@ export class WorkerProjectDirectory {
 		this.conversations = conversations;
 	}
 
-	/** Whether the session is held by this directory's home; one another home holds is never followed. */
-	private follows(sessionId: string): boolean {
-		return followedOrchestrationHome(this.agentDir, this.orchestrationHome, sessionId) !== undefined;
+	/** Whether the session is held by this directory's home among `homes`; one another home holds is never followed. */
+	private follows(homes: SessionHomes, sessionId: string): boolean {
+		return followedOrchestrationHome(homes, this.orchestrationHome, sessionId) !== undefined;
 	}
 
 	/** Whether every session the entry names (its allocating owner, its birth parent) is held by this home. */
-	private followsEntry(entry: DirectoryEntry): boolean {
+	private followsEntry(homes: SessionHomes, entry: DirectoryEntry): boolean {
 		return (
-			this.follows(entry.allocatedBy.parentSessionId) &&
-			(!entry.reference || this.follows(entry.reference.parentSessionId))
+			this.follows(homes, entry.allocatedBy.parentSessionId) &&
+			(!entry.reference || this.follows(homes, entry.reference.parentSessionId))
 		);
 	}
 
@@ -90,9 +90,11 @@ export class WorkerProjectDirectory {
 		return withFileLockSync(file, () => {
 			const entries = this.read(file);
 			if (!input.independent) {
+				// The homes are listed once for every entry this admission judges.
+				const homes = sessionHomes(this.agentDir);
 				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.orchestrationHome, this.conversations);
 				for (const entry of [...entries]) {
-					if (!this.followsEntry(entry)) continue;
+					if (!this.followsEntry(homes, entry)) continue;
 					try {
 						const allocation = {
 							specializationKey: input.specializationKey,
@@ -116,7 +118,7 @@ export class WorkerProjectDirectory {
 				const idle: WorkerProjectContextReference[] = [];
 				let busy = false;
 				for (const entry of entries) {
-					if (!this.followsEntry(entry)) continue;
+					if (!this.followsEntry(homes, entry)) continue;
 					if (entry.phase === "allocating") {
 						busy = true;
 						continue;
@@ -133,7 +135,7 @@ export class WorkerProjectDirectory {
 						);
 						if (
 							ownership.state === "retired" ||
-							!this.follows(ownership.claim.parentSessionId) ||
+							!this.follows(homes, ownership.claim.parentSessionId) ||
 							!input.isCompatible(reference, ownership)
 						)
 							continue;

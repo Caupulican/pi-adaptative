@@ -55,7 +55,7 @@ import { isLocalOrManagedRouterModel } from "../model-router/tool-escalation.ts"
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
-import { followedOrchestrationHome, sessionHomeNow } from "../orchestration-homes.ts";
+import { followedOrchestrationHome, sessionHomeNow, sessionHomes } from "../orchestration-homes.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
@@ -151,7 +151,11 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 	const { agentDir, parentSessionId, sessionFile } = input;
 	// The away host opens one of the owner's closed sessions: its bundle lives in the owner's orchestration home, and a
 	// session another home holds is not followed.
-	const orchestrationHome = followedOrchestrationHome(agentDir, ownerOrchestrationHome(agentDir), parentSessionId);
+	const orchestrationHome = followedOrchestrationHome(
+		sessionHomes(agentDir),
+		ownerOrchestrationHome(agentDir),
+		parentSessionId,
+	);
 	if (!orchestrationHome) throw new AwayParentUnavailable("it is held by another orchestration home.");
 	// The parent's file is read, and the run's model-call vehicle kept, in the parent's own roots.
 	const roots = { agentDir, orchestrationHome };

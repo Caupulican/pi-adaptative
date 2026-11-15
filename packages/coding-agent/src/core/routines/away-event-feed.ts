@@ -26,7 +26,7 @@ import { DeliveryLane, HostEventSessionController } from "../events/host-event-s
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
-import { followedOrchestrationHome } from "../orchestration-homes.ts";
+import { followedOrchestrationHome, sessionHomes } from "../orchestration-homes.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { routineHostEventFeed } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -158,7 +158,11 @@ export class AwayEventFeed {
 		const { agentDir, parentSessionId, sessionFile } = input;
 		// The away feed follows one of the owner's closed sessions: its ledger lives in the owner's home, and a session
 		// another home holds is not followed.
-		const orchestrationHome = followedOrchestrationHome(agentDir, ownerOrchestrationHome(agentDir), parentSessionId);
+		const orchestrationHome = followedOrchestrationHome(
+			sessionHomes(agentDir),
+			ownerOrchestrationHome(agentDir),
+			parentSessionId,
+		);
 		if (!orchestrationHome) throw new AwayEventFeedUnavailable("it is held by another orchestration home.");
 		let reader: ReadonlySessionManager;
 		try {

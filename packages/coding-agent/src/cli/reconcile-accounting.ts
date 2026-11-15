@@ -5,6 +5,7 @@ import { reconcileAccountingFragment } from "../core/cost/accounting-fragments.t
 import { readAccountedSession, reconcileSessionAccounting } from "../core/cost/accounting-history.ts";
 import { aggregateCurrentSessionCostsFromEntries } from "../core/cost/cost-summary.ts";
 import { computeSessionTaskAndModelMetrics } from "../core/cost/task-cost-metrics.ts";
+import { sessionStorageRootsOfFile } from "../core/orchestration-homes.ts";
 import { getDefaultSessionDirCandidates, readSessionHeaderResult } from "../kernel/session/session-manager.ts";
 import { ACCOUNTING_RECONCILE_HELP, answeringRefusals, CommandRefusal } from "./maintenance-command.ts";
 
@@ -79,7 +80,7 @@ async function reconcileAccounting(args: string[]): Promise<void> {
 				continue;
 			}
 			if (!header.ok) throw header.reason === "unreadable" ? header.cause : new Error("Invalid session identity.");
-			await reconcileSessionAccounting(agentDir, path);
+			await reconcileSessionAccounting(sessionStorageRootsOfFile(agentDir, path).orchestrationHome, path);
 			const accounted = await readAccountedSession(path);
 			if (!accounted) throw new Error("Accounting evidence changed after reconciliation; retry required.");
 			const { projection, entries: recovered } = accounted;

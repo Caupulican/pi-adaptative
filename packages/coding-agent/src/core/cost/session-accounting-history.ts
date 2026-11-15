@@ -30,7 +30,6 @@ export class SessionAccountingHistory {
 	private readonly loads = new Set<Promise<void>>();
 	private readonly deps: {
 		getSession(): SessionManager;
-		getAgentDir(): string;
 		isDisposed(): boolean;
 		onUpdated(): void;
 		onError(error: unknown): void;
@@ -164,7 +163,7 @@ export class SessionAccountingHistory {
 		const load = (async () => {
 			const projection =
 				(!state.loaded ? await readAccountingProjection(file) : undefined) ??
-				(await reconcileSessionAccounting(this.deps.getAgentDir(), file));
+				(await reconcileSessionAccounting(state.session.getStorageRoots().orchestrationHome, file));
 			if (projection.sessionId !== state.sessionId)
 				throw new Error("Accounting projection session identity changed.");
 			if (!this.isCurrent(state)) return;
