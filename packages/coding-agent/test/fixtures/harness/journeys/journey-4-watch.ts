@@ -612,6 +612,9 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			},
 		);
 		const commandWorkersBefore = workerRequests();
+		/** The routine clock's alarms armed with the watch's one-second cadence. */
+		const cadenceAlarms = () => world.timers.armedDelays("routines").filter((delayMs) => delayMs === 1_000).length;
+		const cadenceAlarmsBefore = cadenceAlarms();
 		await withDeadline(
 			trace,
 			"the owner's build worker turn",
@@ -619,6 +622,14 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		);
 		await withDeadline(trace, "the worker armed its command watch and is running", commandRunning.promise);
 		await withDeadline(trace, "the command watch took its starting state", baselineSampled.promise);
+		// The barrier opens when the check's command starts; the next check is armed only once that whole observation ends.
+		await withDeadline(
+			trace,
+			"the command watch armed its next check",
+			(async () => {
+				while (cadenceAlarms() <= cadenceAlarmsBefore) await world.timers.nextArmed("routines");
+			})(),
+		);
 		expect(
 			{ firings: runsOf("build-wait"), scope: storedScope() },
 			"the watch stores the worker's read-only, offline scope, and the starting state fires nothing",
