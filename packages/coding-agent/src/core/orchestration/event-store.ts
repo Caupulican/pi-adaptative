@@ -364,8 +364,6 @@ export class OrchestrationEventStore {
 	readonly snapshotsDir: string;
 	readonly carriedDir: string;
 	readonly baselinePath: string;
-	/** Where the bundle's records name its worker storage: what they read is translated through it, never rewritten. */
-	readonly storage: WorkerStorageIdentity;
 	private readonly now: () => string;
 	private readonly createEventId: () => string;
 	private readonly maxTailEvents: number;
@@ -380,6 +378,7 @@ export class OrchestrationEventStore {
 	private cursorRead: SignedRead<EventCursor | undefined> | undefined;
 	private baselineRead: SignedRead<SnapshotBaseline> | undefined;
 	private transactionActive = false;
+	private storageIdentity: WorkerStorageIdentity | undefined;
 
 	constructor(options: OrchestrationEventStoreOptions) {
 		this.orchestrationHome = options.orchestrationHome;
@@ -391,7 +390,6 @@ export class OrchestrationEventStore {
 		this.snapshotsDir = join(this.rootDir, "snapshots");
 		this.carriedDir = join(this.rootDir, "carried");
 		this.baselinePath = join(this.rootDir, "projection-baseline.json");
-		this.storage = sessionWorkerStorage(options.orchestrationHome, options.sessionId);
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
 		this.fs = options.fs ?? nodeFs;
@@ -414,6 +412,15 @@ export class OrchestrationEventStore {
 			MAX_CONFIGURED_IDEMPOTENCY_EVENTS,
 			"maxIdempotencyEvents",
 		);
+	}
+
+	/**
+	 * Where the bundle's records name its worker storage: what they read is translated through it, never rewritten. Read
+	 * on the store's first read of its records, so a bundle's invalid former roots fail that read, not the store's creation.
+	 */
+	get storage(): WorkerStorageIdentity {
+		this.storageIdentity ??= sessionWorkerStorage(this.orchestrationHome, this.sessionId);
+		return this.storageIdentity;
 	}
 
 	append(input: AppendOrchestrationEventInput, options: AppendOrchestrationEventOptions = {}): OrchestrationEvent {

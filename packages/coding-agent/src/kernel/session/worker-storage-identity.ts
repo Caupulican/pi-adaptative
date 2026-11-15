@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { writeFileAtomicSync } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
@@ -144,11 +145,18 @@ export function recordBundleFormerRoot(bundleDir: string, formerRoot: string): v
 	});
 }
 
-/** The path `recorded` names now: under the bundle's directory when it was recorded under a former one, else itself. */
+/**
+ * The path `recorded` names now: under the bundle's directory when it was recorded under a former one, else itself. A
+ * file URL (a worker's terminal output artifact is recorded as one) is read the same way, by its URL prefix.
+ */
 export function currentStoragePath(storage: WorkerStorageIdentity, recorded: string): string {
+	const url = recorded.startsWith("file:");
 	for (const former of storage.formerBundleDirs) {
-		if (recorded === former) return storage.bundleDir;
-		if (recorded.startsWith(former + sep)) return storage.bundleDir + recorded.slice(former.length);
+		const [from, to, separator] = url
+			? [pathToFileURL(former).href, pathToFileURL(storage.bundleDir).href, "/"]
+			: [former, storage.bundleDir, sep];
+		if (recorded === from) return to;
+		if (recorded.startsWith(from + separator)) return to + recorded.slice(from.length);
 	}
 	return recorded;
 }
