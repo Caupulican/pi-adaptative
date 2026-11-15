@@ -54,7 +54,11 @@ export interface SessionCapabilities {
 	readonly answersForCheckout: boolean;
 	/** Manages bots: the `bot` tool, leaders and their terminal route, the retire-leader refusal. */
 	readonly managesBots: boolean;
-	/** Directs workers: the delegation gate, director prompt, delegation and plan rules, plan tool and executor, retention. */
+	/**
+	 * Directs workers: the delegation gate, director prompt, delegation and plan rules, plan tool and executor, retention.
+	 * A bot directs its own workers with the tools its session holds (`delegate`, `assign`; no `plan`), so its plan
+	 * surfaces stay off, and is never hosted in a worker process (`resolveSessionStanding`).
+	 */
 	readonly directsWorkers: boolean;
 	/** Runs the proactive lanes: proactive review and the research lane. */
 	readonly runsProactiveLanes: boolean;
@@ -102,7 +106,7 @@ const FLAGS: Readonly<Record<FlagCapability, Row>> = {
 	writesOwnerSettings: [true, false, false, false],
 	answersForCheckout: [true, false, false, false],
 	managesBots: [true, false, false, false],
-	directsWorkers: [true, false, false, false],
+	directsWorkers: [true, false, true, false],
 	runsProactiveLanes: [true, false, false, false],
 	ownsWorkLifecycle: [true, false, false, false],
 	compactsOwnContext: [true, false, true, false],

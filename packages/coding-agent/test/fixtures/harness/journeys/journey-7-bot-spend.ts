@@ -1,5 +1,4 @@
 import "../builtin-install.ts";
-import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { createEmptyUsage, type Usage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
@@ -7,11 +6,7 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { BOT_CHARGE_MARK_CUSTOM_TYPE } from "../../../../src/core/bots/bot-charge-mark.ts";
 import { readBotNotices } from "../../../../src/core/bots/bot-notices.ts";
 import { aggregateDailyUsageAsync } from "../../../../src/core/cost/daily-usage.ts";
-import {
-	BOT_SESSION_USAGE_LABEL,
-	SPAWNED_USAGE_CUSTOM_TYPE,
-	type SpawnedUsageReport,
-} from "../../../../src/core/cost/usage-records.ts";
+import { BOT_SESSION_USAGE_LABEL } from "../../../../src/core/cost/usage-records.ts";
 import { rollingDayWindow } from "../../../../src/core/proactivity/proactivity-controller.ts";
 import { usageScope } from "../../../../src/core/session-analytics.ts";
 import { spawnedUsageReportIdPrefix } from "../../../../src/core/spawned-usage.ts";
@@ -19,12 +14,16 @@ import type { SessionManager } from "../../../../src/kernel/session/session-mana
 import { HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
+	botCharges,
 	botRecord,
 	botRosterState,
 	botSessionFilesText,
+	botSessionIds,
 	carries,
+	createChargedRoot,
 	createOwnerBot,
 	enqueueBot,
+	fileLines,
 	MODEL_ID,
 	reached,
 	TRACK,
@@ -62,35 +61,6 @@ const OVER_USAGE = priced(6000, 600, 1.5);
 const CEILING_USD = 1;
 /** The stop the product tells the owner in the bot's chat (text-en/bot-team.ts `botTurnOverBudget`), whole. */
 const OVER_BOUND = `Bot ${SPENDER}: its turn was stopped at the spend bound ($${OVER_USAGE.cost.total.toFixed(2)} spent on this request, its workers included; workerDelegation.maxUsd is $${CEILING_USD.toFixed(2)}).`;
-
-interface FileLine {
-	type?: string;
-	id?: string;
-	customType?: string;
-	data?: unknown;
-}
-
-function fileLines(text: string): FileLine[] {
-	return text
-		.split("\n")
-		.filter((line) => line.trim().length > 0)
-		.map((line) => JSON.parse(line) as FileLine);
-}
-
-/** The bot's charges the root's session file holds: the custom spawned-usage entries labelled as a bot session's, of its session. */
-function botCharges(rootFile: string, botSessionId: string): SpawnedUsageReport[] {
-	return fileLines(readFileSync(rootFile, "utf8"))
-		.filter((line) => line.type === "custom" && line.customType === SPAWNED_USAGE_CUSTOM_TYPE)
-		.map((line) => line.data as SpawnedUsageReport)
-		.filter((report) => report.label === BOT_SESSION_USAGE_LABEL && report.sourceSessionId === botSessionId);
-}
-
-/** The ids of the session headers in the bot's own session files: one per session file it ever opened. */
-function botSessionIds(world: HarnessWorld): string[] {
-	return fileLines(botSessionFilesText(world, SPENDER))
-		.filter((line) => line.type === "session")
-		.map((line) => line.id ?? "");
-}
 
 /** The `through` of every charge mark in the bot's own transcript, oldest first. */
 function chargeMarks(world: HarnessWorld): unknown[] {
@@ -139,24 +109,8 @@ function spenderRequests(world: HarnessWorld): number {
  */
 export async function runJourney7BotSpendPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
-	// A main session buffers its entries until one needs its file; a bot's charge is settled only once that file holds it,
-	// so the main session starts with one recorded reply, as a session the owner already spoke in does.
-	const manager = world.createSessionManager();
-	const rootModel = world.provider.model(MODEL_ID.root);
-	manager.appendMessage({
-		role: "assistant",
-		api: rootModel.api,
-		provider: rootModel.provider,
-		model: rootModel.id,
-		content: [{ type: "text", text: "The connection pool is configured." }],
-		usage: createEmptyUsage(),
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
-	if (!manager.hasDurableSessionFile()) throw new Error("the bot-spend root's seeded reply did not reach its file");
-	const { session } = await world.createRootSession(MODEL_ID.root, {
-		sessionManager: manager,
-		settings: { workerDelegation: { maxUsd: CEILING_USD } },
+	const { session, manager } = await createChargedRoot(world, "bot-spend", {
+		workerDelegation: { maxUsd: CEILING_USD },
 	});
 	try {
 		await runLeg(world, session, manager);
@@ -240,7 +194,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 
 	// Step 1: the first answer's spend lands one charge in the main session's file, from zero through what it spent.
 	const firstMode = await ask(FIRST_QUESTION, "j7-spender-first", "J7 bot spend: the bot answered the first question");
-	const idsAfterFirst = botSessionIds(world);
+	const idsAfterFirst = botSessionIds(world, SPENDER);
 	expect(idsAfterFirst, "the bot's first message opened one session file").toHaveLength(1);
 	botSessionIdValue = idsAfterFirst[0];
 	await recordsReach(1, "J7 bot spend: the first charge reached the main session's file");
@@ -299,7 +253,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 			reportIdNamespaced: second.reportId?.startsWith(reportPrefix()) === true,
 			throughCost: second.through.cost.total,
 			usageCost: second.usage.cost.total,
-			sessionIds: botSessionIds(world),
+			sessionIds: botSessionIds(world, SPENDER),
 			costView: session.getCostSummary().subagentCost,
 			daily: (await dailySpawnedUsd(manager)) - baselineDailyUsd,
 		},
@@ -331,7 +285,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 			mode: thirdMode,
 			carried: seen.reopened,
 			reportIds: afterReopen.map((report) => report.reportId),
-			sessionIds: botSessionIds(world),
+			sessionIds: botSessionIds(world, SPENDER),
 			costView: session.getCostSummary().subagentCost,
 			daily: await dailySpawnedUsd(manager),
 			lastMark: chargeMarks(world).at(-1),

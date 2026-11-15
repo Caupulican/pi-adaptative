@@ -2,11 +2,11 @@
  * What a bot's session is built from (`BotSessionDefinition`).
  *
  * A bot of its own runs on its record (`ownBotSession`): its model and thinking, the read tools with the file and process
- * tools when it may write, a worker's private-path scope in the owner's project directory, and its soul.
+ * tools when it may write, the director tools it hands work to its workers with, a worker's private-path scope in the owner's project directory, and its soul.
  *
  * A bot made from a worker profile runs on the contract its profile compiled to (`profileBotSession`, from
  * `BotSessionCompilation`): the resolved model and thinking, the plan's tools a session holds plus the watch it arms for
- * its own waits, the plan's working directory, its read roots (when the plan confines reads), write roots, private paths
+ * its own waits and the director tools the profile names, the plan's working directory, its read roots (when the plan confines reads), write roots, private paths
  * and read-only grant as the session's private path scope, a capability ceiling of the plan's capabilities and cost bound
  * held by the session's tool gate, the soul a worker of it would carry and its resources as a system prompt. A profile
  * that needs what only a worker's run has, an independent verifier of each claim, a tool a session does not hold or a
@@ -39,6 +39,7 @@ import { workerPromptSoul } from "../orchestration/worker-execution-contract.ts"
 import { TASK_WATCH_TOOL_NAME } from "../routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { requiredEnvelopeCapabilities, toolSurvivesReadOnly } from "../tool-capability-policy.ts";
+import { BOT_DIRECTOR_TOOL_NAMES } from "../tools/delegate-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { allToolNames } from "../tools/tool-definition-factory.ts";
 import { botProfileOf } from "./bot-home.ts";
@@ -70,15 +71,16 @@ export interface BotSessionDefinition {
 
 /**
  * The tools of a bot of its own: the read tools, System One's tool (as a worker holds it; it is registered only while
- * System One is on), `task_watch` for its own waits and `self_compact` for its own context always, the file and process
- * tools only when the bot may write.
+ * System One is on), `task_watch` for its own waits, `self_compact` for its own context and the director tools
+ * (`delegate`, `assign`) for its own workers always, the file and process tools only when the bot may write.
  */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
 	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`),
 	// and so is a watched command, at arming and at every check (`WatchAdmission`), so `task_watch` widens nothing;
-	// `self_compact` touches only the session's own context.
-	const own = [TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME];
+	// `self_compact` touches only the session's own context. A read-only bot's workers are read-only too: their parent
+	// ceiling is the bot's own write reach (`worker-parent-ceiling.ts`), so directing them widens nothing.
+	const own = [TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, ...BOT_DIRECTOR_TOOL_NAMES];
 	return canWrite
 		? [...reads, ...own, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
 		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), ...own];
@@ -141,6 +143,7 @@ const SESSION_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 	SYSTEM_ONE_TOOL_NAME,
 	TASK_WATCH_TOOL_NAME,
 	SELF_COMPACT_TOOL_NAME,
+	...BOT_DIRECTOR_TOOL_NAMES,
 ]);
 
 function sessionHolds(toolName: string): boolean {
@@ -174,8 +177,11 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	// session bounds its turns by cost alone.
 	const workerLimits = WORKER_COUNTED_LIMITS.filter((field) => profile.budget[field] !== undefined);
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
-	// It arms its own waits as a worker's host does, and compacts its own context, outside the granted surface.
-	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME];
+	// It arms its own waits as a worker's host does, and compacts its own context, outside the granted surface. The worker
+	// ceiling the plan was compiled under forbids the director tools, so they come from the profile itself: a profile that
+	// names them directs its own workers, held to its own ceiling.
+	const director = BOT_DIRECTOR_TOOL_NAMES.filter((name) => mapToolNamesForPlatform(profile.toolNames).includes(name));
+	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, ...director];
 	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
 	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
 	// when its spend is metered, `maxCostUsd` alone on a subscription. The profile's own ceilings are kept whole: each spend

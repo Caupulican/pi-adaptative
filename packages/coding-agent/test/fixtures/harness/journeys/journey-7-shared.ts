@@ -1,9 +1,15 @@
 import "../builtin-install.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { botSessionsDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import {
+	BOT_SESSION_USAGE_LABEL,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	type SpawnedUsageReport,
+} from "../../../../src/core/cost/usage-records.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
 import type { DelegationRecord } from "../../../../src/core/delegation/leader-delegation-ledger.ts";
 import type {
@@ -11,6 +17,8 @@ import type {
 	PersistentTeamMessage,
 } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "../../../../src/core/delegation/worker-agent-control.ts";
+import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { HARNESS_PROVIDER, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { fencedToolOutput, ICM_INTAKE_JUDGMENTS, latestBatchResults, refusalDiagnostic } from "./shared.ts";
@@ -34,6 +42,16 @@ const { optional_tool_0: _optionalTool, ...ownerPolicy } = intake;
  */
 export const BOT_SESSION_JUDGMENTS = ownerPolicy;
 
+/**
+ * The judgments the owner's words ask in a bot's own session whose turn directs a worker: the owner-policy questions, as
+ * for any owner request that calls a tool there. `delegate` and `assign` are not optional tools (only `secret_store` and
+ * extension tools are), so they add no optional-tool question; the delegation gate is off by default, so neither of its
+ * questions is asked; and every scripted bot and worker answer states a fact that names no claim kind, so no claim reading
+ * is asked. Its own constant, so a question a bot's delegation comes to ask is declared here by id and the legs that call
+ * no director tool keep asking exactly theirs.
+ */
+export const BOT_DELEGATION_JUDGMENTS = BOT_SESSION_JUDGMENTS;
+
 /** The scripted model id of each actor: the bot's model is chosen when it is created, and the track carries it. */
 export const MODEL_ID = {
 	root: "root",
@@ -54,6 +72,12 @@ export const MODEL_ID = {
 	homeBot: "worker-c",
 	/** An appointed goal leader runs on the session's own model, so it shares the root's model and is told apart by its soul. */
 	goalLeader: "root",
+	/** The owner's bot that writes and directs workers of its own; its soul tells it apart on the shared model. */
+	delegator: "worker-b",
+	/** The owner's read-only bot that directs workers of its own; its soul tells it apart on the shared model. */
+	readOnlyDelegator: "worker-a",
+	/** The workers the delegating bots start, each told apart by the marker its task carries. */
+	delegateWorker: "worker-c",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -91,6 +115,11 @@ export const TRACK = {
 	goalLeader: "j7-goal-leader",
 	spender: "j7-spender",
 	homeBot: "j7-home-bot",
+	delegator: "j7-delegator",
+	readOnlyDelegator: "j7-read-only-delegator",
+	delegateWorker: "j7-delegate-worker",
+	heldDelegateWorker: "j7-held-delegate-worker",
+	readOnlyDelegateWorker: "j7-read-only-delegate-worker",
 } as const;
 
 /**
@@ -363,4 +392,67 @@ export function botSessionFilesText(world: HarnessWorld, agentId: string): strin
 /** Fails with `what` unless the value the phase read is the one the product promises. */
 export function assertSeen(actual: unknown, what: string, expected: unknown): void {
 	expect(actual, what).toEqual(expected);
+}
+
+/** One line of a JSONL session file, as the bot-charge readers need it. */
+interface FileLine {
+	type?: string;
+	id?: string;
+	customType?: string;
+	data?: unknown;
+}
+
+/** The lines of a JSONL session file's text, blank lines skipped. */
+export function fileLines(text: string): FileLine[] {
+	return text
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as FileLine);
+}
+
+/** The bot's charges the root's session file holds: the custom spawned-usage entries labelled as a bot session's, of its session. */
+export function botCharges(rootFile: string, botSessionId: string): SpawnedUsageReport[] {
+	return fileLines(readFileSync(rootFile, "utf8"))
+		.filter((line) => line.type === "custom" && line.customType === SPAWNED_USAGE_CUSTOM_TYPE)
+		.map((line) => line.data as SpawnedUsageReport)
+		.filter((report) => report.label === BOT_SESSION_USAGE_LABEL && report.sourceSessionId === botSessionId);
+}
+
+/** The ids of the session headers in the bot's own session files: one per session file it ever opened. */
+export function botSessionIds(world: HarnessWorld, agentId: string): string[] {
+	return fileLines(botSessionFilesText(world, agentId))
+		.filter((line) => line.type === "session")
+		.map((line) => line.id ?? "");
+}
+
+/**
+ * A root session whose file already exists, so a bot's charge can be settled in it: a main session buffers its entries
+ * until one needs its file, and a bot's charge is settled only once that file holds it, so the root starts with one
+ * recorded reply, as a session the owner already spoke in does.
+ */
+export async function createChargedRoot(
+	world: HarnessWorld,
+	label: string,
+	settings?: Partial<Settings>,
+): Promise<{ readonly session: AgentSession; readonly manager: SessionManager; readonly rootFile: string }> {
+	const manager = world.createSessionManager();
+	const rootModel = world.provider.model(MODEL_ID.root);
+	manager.appendMessage({
+		role: "assistant",
+		api: rootModel.api,
+		provider: rootModel.provider,
+		model: rootModel.id,
+		content: [{ type: "text", text: "The connection pool is configured." }],
+		usage: createEmptyUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+	const rootFile = manager.getSessionFile();
+	if (!manager.hasDurableSessionFile() || rootFile === undefined)
+		throw new Error(`the ${label} root's seeded reply did not reach its file`);
+	const { session } = await world.createRootSession(MODEL_ID.root, {
+		sessionManager: manager,
+		...(settings ? { settings } : {}),
+	});
+	return { session, manager, rootFile };
 }
