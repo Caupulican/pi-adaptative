@@ -1,7 +1,8 @@
 /**
  * The one-file-per-record directories of a bot's home (`inbox/`, `notices/`): listing a kind of record by its name,
- * reading each, setting aside one that does not read, and keeping only the newest of a kind. Every record is written by an
- * atomic replace, so a reader never sees a partial one; the names sort oldest first.
+ * reading each, setting aside one that does not read (and telling the owner whether its rename took), and keeping only
+ * the newest of a kind. Every record is written by an atomic replace, so a reader never sees a partial one; the names
+ * sort oldest first.
  */
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
