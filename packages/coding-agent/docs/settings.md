@@ -344,11 +344,11 @@ A waiting worker starts when the resource it waits on changes (a worker ends, an
 
 ### Orchestrator
 
-The root orchestrates and its workers carry out the work. While the `delegate` tool is active, the delegation gate checks each root call before it runs: a `write` or `edit` outside the orchestration directories (the agent directory and the project's `.pi`), and a `bash`, `run_process`, `powershell` or `python` call System One establishes as task work (changing project files, or running a build, test, install or program) are refused, and the refusal says how to delegate. Reading, searching, planning, reviewing, and writing agent definitions and instruction files for workers always pass. A System One doubt or outage lets the call run; without a System One engine only the typed-write rule applies. The gate never applies to a worker, and YOLO does not skip it.
+A session that directs workers (the root, and a bot's own session) orchestrates and its workers carry out the work. While the `delegate` tool is active, the delegation gate checks each of that session's calls before it runs: a `write` or `edit` outside the orchestration directories (the session's home, which is the agent directory for the root and `bots/<id>` for a bot, and the project's `.pi`), and a `bash`, `run_process`, `powershell` or `python` call System One establishes as task work (changing project files, or running a build, test, install or program) are refused, and the refusal says how to delegate. Reading, searching, planning, reviewing, and writing agent definitions and instruction files for workers always pass. A System One doubt or outage lets the call run; without a System One engine only the typed-write rule applies. The gate never applies to a worker, and YOLO does not skip it.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `orchestrator.delegationGate` | `false` | Opt-in strict split: refuse root calls that are task work and send them to a worker. Off by default: the root edits and runs commands itself and delegates by choice. |
+| `orchestrator.delegationGate` | `false` | Opt-in strict split: refuse the calls of a session that directs workers (the root, a bot's own session) that are task work, and send them to a worker. Off by default: such a session edits and runs commands itself and delegates by choice. |
 
 ### Orchestration retention
 

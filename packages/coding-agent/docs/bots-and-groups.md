@@ -119,6 +119,20 @@ while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
 orchestrator as a worker's terminal does.
 
+A bot directs workers of its own with `delegate` and its one-call form `assign`, the tools the main session directs its
+workers with; it holds no `plan`. Its system prompt carries the director role in a bot's words (its own work is
+integration, verification, security and every answer in its conversation; it writes instruction files only inside its
+write scope), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
+since a bot lends its workers no memory. Its workers are held to the bot's own reach: they write, read, run commands and
+reach the network no wider than the bot (a read-only bot's workers are read-only). Their conversations lie in the bot's
+home (`orchestration/`), their spend counts in the bot's spend window and reaches the main session with the bot's, and a
+worker's end opens the bot's next turn, as a worker's handoff opens the main session's. They answer only the bot:
+`bot_message` lists no bot or group for them. `/bot stop` stops the bot's turn and every worker it started, and says the
+bot was stopped whenever a turn, input or a worker was in flight; a worker the owner stopped opens no turn of the bot. A
+profile bot holds `delegate` when its profile's tools name it. The delegation gate (`orchestrator.delegationGate`)
+applies to a bot's session as to the main session, with the bot's home in place of the agent directory. A bot is never
+hosted in a worker process.
+
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
 whatever armed them (the bot can change or delete none). A command or page is first admitted as the call its own shell or
@@ -429,7 +443,8 @@ Native workers use `bot_message` through the existing durable mailbox:
 An idle peer wakes through the existing worker scheduler. Messages to a running peer arrive at a
 request boundary. The worker's group is bound by the host; supplying another `teamId` cannot enter
 another group's mailbox. Messages are coordination input and do not grant file, process, spawning
-or advisor authority.
+or advisor authority. A worker of a session that manages no bots (a bot's own session, an away channel's) lists no bot or
+group and replies only to its session root.
 
 Default native worker grants include this broker. An explicit profile or tool list must include
 `bot_message` and `workflow.message`; an already admitted worker does not gain tools retroactively.
