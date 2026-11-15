@@ -3,7 +3,7 @@
  * into the bot's (`bots/<id>/orchestration`), the first time the bot's host loads it after the change: its bundle
  * directory, its lifetime leases and its fleet queue files (the session's and its away runs', the latter from the name
  * an earlier build gave it when the current one is absent and it is theirs, `earlierAwayFleetQueueMetadataFile`, which moves
- * under that name for the away controller in the bot's home to settle), each by one
+ * under that name, never adopted on the way), each by one
  * rename, never a copy. One rename of one directory cannot carry them: the homes keep a session's pieces in separate trees (the
  * bundle under `sessions/`, the tombstone and leases under `deletions/`, the fleet queue files under the state
  * directory's `fleet/queue/`), and moving those trees would move the owner's own paths.
@@ -118,9 +118,10 @@ export function sessionStatePieces(home: OrchestrationHome, sessionId: string): 
  * {@link sessionStatePieces} of the owner's home, where the move starts (`from`), and of the bot's, where it ends (`to`),
  * with the away runs' fleet queue file an earlier build named in the owner's home when it is theirs
  * (`earlierAwayFleetQueueMetadataFile`): while their file is absent under its name, the earlier one stands in its place
- * and moves under the same earlier name into the bot's home, where the away controller settles it as it would have in the
- * owner's (`settleEarlierAwayFleetQueue`: adopted only on its ledger's claim, else set aside), and a put-back gives it
- * back that name; while it is present, the earlier one is `superseded`: the away runs load the current one, and the
+ * and moves under the same earlier name into the bot's home, so only an away controller's ledger claim adopts it
+ * (`settleEarlierAwayFleetQueue`). No away controller runs in a bot's home (an away parent opens only in the home that
+ * holds its session and is refused for a bot's: `followedOrchestrationHome`), so there it is read by nothing and goes
+ * when retention removes the session's bundle; a put-back gives it back that name; while it is present, the earlier one is `superseded`: the away runs load the current one, and the
  * earlier goes once the move may run.
  */
 function statePieces(

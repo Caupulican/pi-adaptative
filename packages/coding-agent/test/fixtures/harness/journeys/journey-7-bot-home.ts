@@ -290,7 +290,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	mkdirSync(dirname(ownerPieces[fleet] as string), { recursive: true });
 	writeFileSync(ownerPieces[fleet] as string, `${JSON.stringify(PLANTED_FLEET)}\n`);
 	// The away runs' queue file under the name an earlier build gave it, standing where their own file is absent: whose it
-	// is only their ledger can prove, so the move carries it under that name for their controller to settle, never adopting it.
+	// is only their ledger can prove, so the move carries it under that name and never adopts it.
 	const awayFleet = 3;
 	const earlierAwayInOwner = earlierAwayFleetQueueMetadataPath(owner, sessionId());
 	const earlierAwayInBot = earlierAwayFleetQueueMetadataPath(home.orchestrationHome, sessionId());
