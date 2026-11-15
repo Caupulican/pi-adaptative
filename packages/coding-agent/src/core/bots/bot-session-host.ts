@@ -40,8 +40,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { namedAgentIdentity } from "../agent-identity.ts";
-import { botHostLockFile, botSpendWindowsFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
+import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type {
@@ -50,14 +49,10 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { contextFilesWithinReadScope } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
-import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -69,16 +64,16 @@ import {
 	type BotInboxItem,
 	type BotInboxRefusal,
 	botInboxWaiting,
-	enqueueBotInbox,
 	readBotInbox,
 	readBotInboxRefusals,
 	refuseBotInboxMessage,
-	takeBotInboxMessage,
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
+import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
+import { createBotAgentSession } from "./bot-session-build.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
 	type BotSessionDefinition,
@@ -87,9 +82,9 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
-import { type BotTurnSpendBound, botSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
-import { BotSpendWindows } from "./bot-spend-window.ts";
-import { BotTurnAccounting, type BotTurnUsageReport } from "./bot-turn-report.ts";
+import { BotSessionSpend, botSpendBoundOn } from "./bot-session-spend.ts";
+import { type BotTurnSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
+import type { BotTurnAccounting, BotTurnUsageReport } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -180,11 +175,6 @@ interface BotSessionEntry {
 	/** Its turns' spend and outcome, each reported once per turn. */
 	readonly turns: BotTurnAccounting;
 	idleTimer: unknown;
-}
-
-/** Another host holds the bot's lock: a message goes to the bot's inbox for it instead (`sendToHost`). */
-class BotSessionHeldError extends Error {
-	override readonly name = "BotSessionHeldError";
 }
 
 /** What failed, in its own words: each cause of a failure that gathers several. */
@@ -410,58 +400,22 @@ export class BotSessionHost {
 			entry = await this.open(agentId, sender);
 		} catch (error) {
 			if (!(error instanceof BotSessionHeldError)) throw error;
-			return this.sendToHost(agentId, message, mode, sender);
+			return sendToBotHost(
+				{
+					agentDir: this.ports.agentDir(),
+					holder: this.holder,
+					store: () => this.ports.store(),
+					changed: (changedId) => this.changed(changedId),
+					open: (openedId) => this.open(openedId, sender),
+				},
+				agentId,
+				message,
+				mode,
+				{ sessionId: sender.hostSessionId(), cwd: sender.cwd() },
+			);
 		}
 		entry.sender = sender;
 		return this.give(entry, message, mode);
-	}
-
-	/**
-	 * Another host runs the bot's session: the words go to the bot's inbox, which that host takes and answers in the bot's
-	 * chat. A host that let the bot go between the refused lock and the write would leave them to no one, so the bot is then
-	 * opened here, which takes the inbox first (this message included); a refusal of that open takes the message back and is
-	 * the send's own.
-	 */
-	private async sendToHost(
-		agentId: string,
-		message: string,
-		mode: BotOperatorMessageOptions["mode"],
-		sender: BotSender,
-	): Promise<BotOperatorMessageDispatchResult> {
-		const agentDir = this.ports.agentDir();
-		const record = this.ports.store().getBot(agentId);
-		const modelRef = record ? `${record.provider}/${record.modelId}` : "";
-		const item = enqueueBotInbox(agentDir, {
-			agentId,
-			text: message,
-			...(mode !== undefined ? { mode } : {}),
-			from: { pid: process.pid, sessionId: sender.hostSessionId(), cwd: sender.cwd() },
-			at: Date.now(),
-		});
-		this.changed(agentId);
-		let host = readRemoteBotHost(agentDir, agentId, this.holder);
-		if (!host) {
-			try {
-				await this.open(agentId, sender);
-				return { agentId, mode: "queued", messageId: item.message.id, modelRef };
-			} catch (error) {
-				if (!(error instanceof BotSessionHeldError)) {
-					takeBotInboxMessage(item);
-					this.changed(agentId);
-					throw error;
-				}
-				host = readRemoteBotHost(agentDir, agentId, this.holder);
-			}
-		}
-		return {
-			agentId,
-			mode: "queued",
-			messageId: item.message.id,
-			modelRef,
-			...(host
-				? { deliveredTo: { pid: host.pid, ...(host.hostSessionId ? { sessionId: host.hostSessionId } : {}) } }
-				: {}),
-		};
 	}
 
 	/**
@@ -582,23 +536,14 @@ export class BotSessionHost {
 			const refused = this.ports.modelRefusal(record, model);
 			if (refused) return refused;
 		}
-		const unpriced = this.spendBound(model, spendBudget) === undefined ? undefined : unpricedModelRefusal(model);
-		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
-	}
-
-	/**
-	 * The bound on spend made on `model`: the owner's and the main session's, and the bot's own ceilings on that spend. A
-	 * model the registry does not know (undefined) is held as metered spend, which is never laxer.
-	 */
-	private spendBound(
-		model: Model<Api> | undefined,
-		spendBudget: BotSessionDefinition["spendBudget"],
-	): BotTurnSpendBound | undefined {
-		return botSpendBound(
-			this.ports.turnSpendBound(model),
+		const bound = botSpendBoundOn(
+			(on) => this.ports.turnSpendBound(on),
+			model,
 			spendBudget,
-			isMeteredSpend(model, this.ports.modelRegistry()),
+			this.ports.modelRegistry(),
 		);
+		const unpriced = bound === undefined ? undefined : unpricedModelRefusal(model);
+		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
 	/**
@@ -726,73 +671,30 @@ export class BotSessionHost {
 			if (cancelled > 0) this.ports.warn(interfaceText().botTeam.botWatchesCancelled(agentId, cancelled));
 			settings = sender.settings();
 			const settingsManager = settings.settings;
-			const ports = this.ports;
-			// System One as the main session runs it now, read at each use: on or off, provider, transport.
-			const systemOneHost: SystemOneHostSource = {
-				get enabled() {
-					return ports.systemOne().enabled;
-				},
-				get provider() {
-					return ports.systemOne().provider;
-				},
-				get fetch() {
-					return ports.systemOne().fetch;
-				},
-			};
 			const registry = this.ports.modelRegistry();
 			// The bot's spend per request it serves: its turns and the runs of the workers they start share one bound.
-			const windows = new BotSpendWindows(botSpendWindowsFile(agentDir, agentId), sessionManager, {
+			const spend = new BotSessionSpend(agentId, agentDir, sessionManager, definition, registry, {
+				rootBound: (on) => this.ports.turnSpendBound(on),
 				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
 				now: () => this.idleTimers().now(),
-				notRead: (reason) => this.ports.warn(interfaceText().botTeam.botSpendWindowsNotRead(agentId, reason)),
-				notWritten: (reason) => this.ports.warn(interfaceText().botTeam.botSpendWindowsNotWritten(agentId, reason)),
+				warn: (message) => this.ports.warn(message),
 			});
-			const resourceLoader = new DefaultResourceLoader({
-				cwd,
+			session = await createBotAgentSession({
+				agentId,
 				agentDir,
+				definition,
+				displayName: profile.displayName,
+				memoryBlock: this.ports.store().composeBotUnifiedMemoryContext(agentId, undefined, undefined, "session")
+					.promptBlock,
+				sessionManager,
 				settingsManager,
-				noExtensions: true,
-				installMissingPackages: false,
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				// The prompt a worker of the bot carries: the project context files its read scope reaches, a profile's resources
-				// before them, and none of the owner's own system prompt files (SYSTEM.md, APPEND_SYSTEM.md).
-				agentsFilesOverride: (base) => ({
-					agentsFiles: definition.contextFileScope
-						? contextFilesWithinReadScope(base.agentsFiles, definition.contextFileScope)
-						: base.agentsFiles,
-				}),
-				systemPromptOverride: () => undefined,
-				appendSystemPromptOverride: () =>
-					definition.resourceSystemPrompt ? [definition.resourceSystemPrompt] : [],
-			});
-			await resourceLoader.reload();
-			session = (
-				await createAgentSession({
-					cwd,
-					agentDir,
-					pinnedModel: true,
-					authStorage: registry.authStorage,
-					modelRegistry: registry,
-					settingsManager,
-					resourceLoader,
-					sessionManager,
-					model,
-					...(definition.thinkingLevel ? { thinkingLevel: definition.thinkingLevel } : {}),
-					// A bot's own session: it runs the watches it arms and takes their wakes as parent inputs (idle starts a
-					// turn, running steers).
-					standing: { kind: "bot", agentId },
-					// A worker's run is held to the bound on its own model's spend, less what the bot's turns spent on the
-					// request it serves; the request's workers share it. No bound on that model, none: its usage windows hold it.
-					workerRunCostBound: (attempt, snapshot) => {
-						const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
-						const attemptModel = binding && registry.find(binding.provider, binding.modelId);
-						const bound = this.spendBound(attemptModel, definition.spendBudget);
-						return windows.runCostBound(attempt, snapshot, bound?.usd);
-					},
+				registry,
+				systemOne: () => this.ports.systemOne(),
+				timers: this.ports.timers(),
+				host: {
+					workerRunCostBound: spend.workerRunCostBound,
 					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
-					ownerNoticeLine: botNoticeLine(this.ports.agentDir(), agentId, {
+					ownerNoticeLine: botNoticeLine(agentDir, agentId, {
 						keep: (text, deliveryId) => this.notify(agentId, text, true, deliveryId),
 						warn: (line) => this.ports.warn(line),
 					}),
@@ -807,28 +709,12 @@ export class BotSessionHost {
 						}
 						this.owed.admitted(agentId);
 					},
-					// System One as the main session runs it; its evidence stays in the bot's home.
-					systemOneHost,
-					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
-					// Its own name, soul and memory block (its blackboard, which the store appends to after each turn) replace
-					// the main agent's in the prompt, as a worker-path start opens on the same block.
-					agentIdentity: namedAgentIdentity(
-						profile.displayName,
-						definition.soul,
-						agentId,
-						this.ports.store().composeBotUnifiedMemoryContext(agentId, undefined, undefined, "session")
-							.promptBlock,
-					),
-					tools: [...definition.tools],
-					privatePathScope: definition.privatePathScope,
-					...(definition.capabilityEnvelope ? { capabilityEnvelope: definition.capabilityEnvelope } : {}),
-					timers: this.ports.timers(),
 					onClosingWarnings: (warnings) => {
 						for (const warning of warnings)
 							this.notify(agentId, interfaceText().botTeam.botWarning(agentId, warning));
 					},
-				})
-			).session;
+				},
+			});
 			const entry: BotSessionEntry = {
 				agentId,
 				session,
@@ -849,7 +735,7 @@ export class BotSessionHost {
 				unsubscribe: () => {},
 				inFlight: 0,
 				recheckWhenIdle: false,
-				turns: new BotTurnAccounting(agentId, session, sessionManager, {
+				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
@@ -863,8 +749,7 @@ export class BotSessionHost {
 				role: definition.role,
 				cwd,
 				timers: this.idleTimers(),
-				spendBound: () => this.spendBound(definition.model, definition.spendBudget),
-				spent: (turnUsd, addedUsd) => windows.count(turnUsd, addedUsd),
+				...spend.turnBound(),
 				maxWallClockMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
 				notify: (text, mark) => this.notify(agentId, text, mark),
 				settle: () => this.settle(entry),
