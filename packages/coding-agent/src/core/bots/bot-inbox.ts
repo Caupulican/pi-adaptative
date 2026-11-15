@@ -153,7 +153,7 @@ export function botInboxWaiting(agentDir: string, agentId: string): boolean {
 export function readBotInboxStops(
 	agentDir: string,
 	agentId: string,
-	unreadable: (file: string, reason: string) => void,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotHomeRecord<BotInboxStop>[] {
 	return readHomeRecords(botInboxDir(agentDir, agentId), STOP, (value) => parseStop(value, agentId), unreadable);
 }
@@ -170,12 +170,13 @@ export function botInboxStopNames(agentDir: string, agentId: string): readonly s
 
 /**
  * Writes the owner's stop of the bot's work for the process that hosts its session (one that holds `host.lock` while the
- * sender does not), and drops the older stops: the newest says all of them.
+ * sender does not), and drops the older stops: the newest says all of them. Once written the stop is recorded, whatever
+ * becomes of the older ones: a drop that failed is handed back (`olderLeft`), the older stops then taken with it.
  */
 export function requestBotStop(
 	agentDir: string,
 	input: { agentId: string; reasonCode: string; from: BotInboxSender; at: number },
-): BotHomeRecord<BotInboxStop> {
+): { readonly record: BotHomeRecord<BotInboxStop>; readonly olderLeft?: unknown } {
 	const dir = botInboxDir(agentDir, input.agentId);
 	const stop: BotInboxStop = {
 		version: 1,
@@ -187,8 +188,13 @@ export function requestBotStop(
 	};
 	const file = join(dir, `${String(input.at).padStart(15, "0")}-${stop.id}.stop.json`);
 	writeFileAtomicSync(file, `${JSON.stringify(stop)}\n`, { mode: 0o600 });
-	keepNewestHomeRecords(dir, STOP, 1);
-	return { file, message: stop };
+	const record = { file, message: stop };
+	try {
+		keepNewestHomeRecords(dir, STOP, 1);
+	} catch (error) {
+		return { record, olderLeft: error };
+	}
+	return { record };
 }
 
 /** The host stopped the bot's work for the stop: it leaves the inbox. */

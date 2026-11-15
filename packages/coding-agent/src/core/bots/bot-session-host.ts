@@ -1058,7 +1058,7 @@ export class BotSessionHost {
 			return elsewhere ? { stopped: false, elsewhere } : { stopped: false };
 		}
 		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() };
-		const unwritten = writeOwnerStop(this.ports.agentDir(), stop);
+		const unwritten = writeOwnerStop(this.ports.agentDir(), stop, (message) => this.ports.warn(message));
 		const state = entry.session.getSessionWorkState();
 		// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).
 		const turn = entry.inFlight > 0 || entry.session.deliverablePendingMessageCount > 0 || state.busyBesideWorkers;

@@ -49,13 +49,14 @@ export function homeRecordNames(dir: string, pattern: RegExp): string[] {
 
 /**
  * Reads the files `pattern` names in `dir`, oldest first. A file that does not read as a record is set aside (renamed
- * `.unreadable`) and reported through `unreadable`: it would otherwise hold a queue, or be counted, forever.
+ * `.unreadable`) and reported through `unreadable`: it would otherwise hold a queue, or be counted, forever. `setAside` says
+ * whether the rename took: one that failed leaves the file where `pattern` still names it.
  */
 export function readHomeRecords<T>(
 	dir: string,
 	pattern: RegExp,
 	parse: (value: unknown) => T | undefined,
-	unreadable: (file: string, reason: string) => void,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotHomeRecord<T>[] {
 	const records: BotHomeRecord<T>[] = [];
 	for (const name of homeRecordNames(dir, pattern)) {
@@ -73,12 +74,14 @@ export function readHomeRecords<T>(
 			records.push({ file, message });
 			continue;
 		}
+		let setAside = true;
 		try {
 			renameSync(file, `${file}.unreadable`);
 		} catch {
 			if (!existsSync(file)) continue;
+			setAside = false;
 		}
-		unreadable(file, reason);
+		unreadable(file, reason, setAside);
 	}
 	return records;
 }

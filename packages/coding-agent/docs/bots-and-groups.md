@@ -136,24 +136,24 @@ taken still ends the turn and the workers of the bot this process hosts, and one
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
 stop that could not be recorded for a bot no process hosts is held in memory by the process that made it, across the
 root sessions it runs in turn (a new, resumed or forked session keeps it; quitting the process drops it), until a take
-there applies it whole under the
-bot's host lock (a retry, or that process's open of the bot, a stop made during the open included), the messages sent
-before it refused. No other process learns of it, so it ends only the work there was when it was made: where the bot's
-work stands is read as the stop is dated, and each take reads the bot's saved session from its home on disk under the
-lock, for that comparison and for the stop it applies. The stop is dropped once a process ran the bot since (the bot's
-saved session, or that session's worker records, moved), and it is not held when where the bot's work stands cannot be
-read as the stop is made or after a take of it failed; either way you are told once that it was dropped, and why, to
-send it again. A read that fails inside a take keeps the stop held and fails that take, for the next. For a bot this
-process hosts, a stop that could not be recorded is applied at once, whole, to the bot's work here, and you are told
-so. A worker the owner stopped opens no turn of the bot. A
-profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
-`delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
-plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
-writer), so each step is planned as the read-only work its worker does.
-The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session. The orchestration
-directories it counts as a bot's own are its home `bots/<id>`, which its path scope keeps private (it writes nothing
-there), and the place its director role names for its instruction files: the project's `.pi` in its working directory
-when its write roots hold it, else its write roots, so the role never names a place the gate refuses. A bot is never hosted in a worker process.
+there applies it whole under the bot's host lock (a retry, or that process's open of the bot, a stop made during the
+open included), the messages sent before it refused. No other process learns of it, so it ends only the work there was
+when it was made: where the bot's work stands is read as the stop is dated, and each take reads the bot's saved session
+from its home on disk under the lock, for that comparison and for the stop it applies. The stop is dropped once a
+process ran the bot since (the bot's saved session, or that session's worker records, moved), and it is not held when
+where the bot's work stands cannot be read as the stop is made or after a take of it failed (an older stop already held
+stays held then); either way you are told once that it was dropped, and why, to send it again. A read that fails inside
+a take keeps the stop held and fails that take, for the next. For a bot this process hosts, a stop that could not be
+recorded applies only to the bot's work in this process, and you are told so. A worker the owner stopped opens no turn
+of the bot. A profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since
+`assign` runs `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A
+read-only bot's plans name no files: a step that names files is refused (its worker would run read-only under a plan
+that treats it as a writer), so each step is planned as the read-only work its worker does. The delegation gate
+(`orchestrator.delegationGate`) applies to a bot's session as to the main session. The orchestration directories it
+counts as a bot's own are its home `bots/<id>`, which its path scope keeps private (it writes nothing there), and the
+place its director role names for its instruction files: the project's `.pi` in its working directory when its write
+roots hold it, else its write roots, so the role never names a place the gate refuses. A bot is never hosted in a worker
+process.
 
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
@@ -206,10 +206,11 @@ stop waits unapplied they wait in the bot's inbox behind it, and you are told so
 wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which, or that it could not be read),
 or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end
 with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
-they end when they fire, at their end time or when the bot is retired. A stop
-that cannot be written to the bot's home is not recorded: you are told it is held only by this running process (quitting
-it drops the stop), reaches no other process and is applied here only while the bot's work is unchanged (for a bot this process hosts, that it was applied at once to its work here), and
-to send it again once it is dropped. A session started after every other one closed lists each bot with its whole conversation.
+they end when they fire, at their end time or when the bot is retired. A stop that cannot be written to the bot's home
+is not recorded: you are told it is held only by this running process (quitting it drops the stop), reaches no other
+process and is applied here only while the bot's work is unchanged (for a bot this process hosts, that it applies only
+to the bot's work in this process), and to send it again once it is dropped. A session started after every other one
+closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime

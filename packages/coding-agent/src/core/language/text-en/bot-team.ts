@@ -137,9 +137,18 @@ export const BOT_TEAM = {
 	 */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); only this running process holds it, so it reaches no other process, is dropped if this process quits, and is applied here only while the bot's work is unchanged since the stop.`,
-	/** The owner's stop of a bot this process runs could not be written to its home: it was applied here, whole, at once. */
+	/** The owner's stop of a bot this process runs could not be written to its home: it applies to this process's work only. */
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
-		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process, so it was applied at once to the bot's work in this process.`,
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and applies only to the bot's work in this process.`,
+	/** An owner's stop in the bot's inbox did not read: it was set aside and stops nothing. */
+	botInboxStopUnreadable: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: an owner's stop in its inbox could not be read (${reason}) and was set aside as ${file}.unreadable; it stops nothing, so send the stop again if it is still wanted.`,
+	/** An owner's stop in the bot's inbox did not read and could not be set aside: it stays, holding back the work it stops. */
+	botInboxStopNotSetAside: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: an owner's stop in its inbox could not be read (${reason}) nor set aside (${file}); it still waits, holding back the work it stops.`,
+	/** The owner's stop was written, but the older stops it replaces were not removed: they are taken with it. */
+	botStopOlderLeft: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop was recorded, but the older stops it replaces could not be removed (${reason}); they are taken with it.`,
 	/** The periodic listing of the bots failed on this one; the others were listed. */
 	botSweepFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its inbox and owed work could not be checked (${reason}); they are checked again every minute.`,

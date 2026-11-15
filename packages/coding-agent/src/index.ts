@@ -339,6 +339,7 @@ export {
 export * from "./core/orchestration/capability-gateway.ts";
 export * from "./core/orchestration/contracts.ts";
 export * from "./core/orchestration/event-store.ts";
+export * from "./core/orchestration/event-store-errors.ts";
 export * from "./core/orchestration/model-binding.ts";
 export * from "./core/orchestration/policy-compiler.ts";
 export * from "./core/orchestration/profile-registry.ts";
