@@ -3,6 +3,7 @@ import lockfile from "proper-lockfile";
 import { expect } from "vitest";
 import { botTeamStoreFile, configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { usageReceiptOf } from "../../../../src/core/cost/usage-receipt.ts";
 import type { PlanNodeSpec } from "../../../../src/core/plan/plan-graph.ts";
 import { placementFor } from "../../../../src/core/plan/plan-placement.ts";
 import { recordPeerDown, recordPeerFacts, recordPeerUp } from "../../../../src/core/remote/fleet-machines.ts";
@@ -450,6 +451,12 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 
 		const checkoutCwd = await hub.jobs!.projectOn(joinerMachine.machineId);
 		expect(checkoutCwd).toBe(HARNESS_PROJECT_CWD);
+		const usageReceiptsOnHub = () =>
+			hubManager.getEntries().flatMap((entry) => {
+				const receipt = usageReceiptOf(entry);
+				return receipt ? [receipt] : [];
+			});
+		const hubReceiptsBeforeJob = usageReceiptsOnHub().length;
 		const placedDirect = await hub.jobs!.place(
 			joinerMachine.machineId,
 			{
@@ -487,6 +494,12 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		expect(observedPhases.length, "progress frames streamed over jobs/1").toBeGreaterThanOrEqual(1);
 		expect(directPlacerRecord?.state).toBe("terminal");
 		expect(directPlacerRecord?.outcome).toMatchObject({ status: "succeeded", summary: directSummary });
+		const directUsage = directPlacerRecord?.outcome?.usage;
+		expect(directUsage?.totalTokens, "the executor reports the placed job's usage").toBeGreaterThan(0);
+		expect(
+			usageReceiptsOnHub().slice(hubReceiptsBeforeJob),
+			"the placing session charges the placed job's reported usage once",
+		).toEqual([expect.objectContaining({ label: "managed-worker", ...directUsage })]);
 		expect(sessionJoiner.isStreaming, "Joiner foreground never streams on placed job").toBe(false);
 		expect(
 			sessionJoiner.messages.length,

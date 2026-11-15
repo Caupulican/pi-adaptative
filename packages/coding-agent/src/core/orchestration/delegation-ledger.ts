@@ -132,6 +132,8 @@ export interface PrepareManagedDelegationInput {
 	worktreeLanePath?: string;
 	/** The placed job's placement key, when a placer placed this lane's job. */
 	placement?: ManagedLanePlacement;
+	/** The input the placed job's work serves, when its placer's dispatch names one. */
+	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
 	/** Exact granted knowledge versions of this turn's task; never their values. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** A third party's words the run that dispatched this turn carried; an earlier tainted turn of the lane taints it too. */
@@ -340,7 +342,11 @@ export class DelegationOrchestrationLedger {
 				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
 				...(input.worktreeLanePath ? { worktreeLanePath: input.worktreeLanePath } : {}),
 				...(input.placement ? { placement: input.placement } : {}),
-				...dispatchEvidence({ knowledgeReferences: input.knowledgeReferences, turnOrigin }),
+				...dispatchEvidence({
+					knowledgeReferences: input.knowledgeReferences,
+					turnOrigin,
+					receiptOrigin: input.receiptOrigin,
+				}),
 			},
 		});
 	}

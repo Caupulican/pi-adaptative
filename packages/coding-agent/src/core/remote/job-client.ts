@@ -13,8 +13,9 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
 import { ManagedLaneRuntimeAdmissionError, NO_MANAGED_LANE_HOST_FACTS } from "../extensions/managed-lane-records.ts";
-import type { FleetDispatch } from "../fleet/fleet-types.ts";
+import { dispatchReceiptOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
 import type { RemoteRefusalCode } from "../fleet/remote-admit.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedLine } from "../util/bounded-line.ts";
@@ -101,6 +102,8 @@ export type PreparedOffer =
 			readonly deadlineMs: number;
 			readonly goalId?: string;
 			readonly placement: PlacementKey;
+			/** The input the job's work serves, when its dispatch names one (`dispatchReceiptOrigin`). */
+			readonly receiptOrigin?: WorkerReceiptOrigin;
 	  };
 
 /** A committed offer: the job's record, the attempt and task its managed lane runs under, or why it is not placed here. */
@@ -121,6 +124,8 @@ interface OfferWrite {
 	readonly goalId?: string;
 	/** A placement's key; absent for a conversation turn, which no placement names. */
 	readonly placement?: PlacementKey;
+	/** The input the job's work serves: its lane's attempt serves it, so a bot's spend window holds the job's cost. */
+	readonly receiptOrigin?: WorkerReceiptOrigin;
 }
 
 /** What writing a job's lane and record came to: the record with its attempt, or the refusal that wrote no record and sent nothing. */
@@ -239,6 +244,7 @@ function offerWrite(prepared: Extract<PreparedOffer, { readonly kind: "offer" }>
 		deadlineMs: prepared.deadlineMs,
 		placement: prepared.placement,
 		...(prepared.goalId ? { goalId: prepared.goalId } : {}),
+		...(prepared.receiptOrigin ? { receiptOrigin: prepared.receiptOrigin } : {}),
 	};
 }
 
@@ -414,7 +420,10 @@ export class RemoteJobClient {
 	 * refusal is a code fact and nothing is written here.
 	 */
 	async prepareOffer(
-		dispatch: Pick<FleetDispatch, "idempotencyKey" | "instructions" | "writeScope" | "plan">,
+		dispatch: Pick<
+			FleetDispatch,
+			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "escalation"
+		>,
 		placement: Extract<Placement, { kind: "remote_machine" }>,
 		options: PlaceOptions = {},
 	): Promise<PreparedOffer | { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly reason: string }> {
@@ -470,6 +479,7 @@ export class RemoteJobClient {
 			deadlineMs,
 			hops: [selfId],
 		};
+		const receiptOrigin = dispatchReceiptOrigin(dispatch);
 		return {
 			kind: "offer",
 			machine,
@@ -479,6 +489,7 @@ export class RemoteJobClient {
 			deadlineMs,
 			placement: placementKeyOf(dispatch),
 			...(options.goalId ? { goalId: options.goalId } : {}),
+			...(receiptOrigin ? { receiptOrigin } : {}),
 		};
 	}
 
@@ -525,7 +536,10 @@ export class RemoteJobClient {
 	}
 
 	async place(
-		dispatch: Pick<FleetDispatch, "idempotencyKey" | "instructions" | "writeScope" | "plan">,
+		dispatch: Pick<
+			FleetDispatch,
+			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "escalation"
+		>,
 		placement: Extract<Placement, { kind: "remote_machine" }>,
 		options: PlaceOptions = {},
 	): Promise<PlaceResult> {
@@ -680,8 +694,11 @@ export class RemoteJobClient {
 					leaseTtlMs: deadlineMs + PLACER_GRACE_MS + holdMs + PLACER_GRACE_MS,
 				},
 			},
-			// The key the record is written under: a plan's stop finds this job through its lane when the record cannot be read.
-			input.placement ? { placement: input.placement } : NO_MANAGED_LANE_HOST_FACTS,
+			{
+				// The key the record is written under: a plan's stop finds this job through its lane when the record cannot be read.
+				...(input.placement ? { placement: input.placement } : {}),
+				...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+			},
 		);
 		const written = this.session.managedLaneBindings().get(laneId);
 		if (!written) throw new Error("remote_job_lane_unrecorded");
@@ -994,7 +1011,8 @@ export class RemoteJobClient {
 					summary: terminal.summary,
 					...(terminal.reasonCode ? { reasonCode: terminal.reasonCode } : {}),
 				},
-				NO_MANAGED_LANE_HOST_FACTS,
+				// What the executor reported it spent, whichever way the job ended: an outcome on record was paid for.
+				record.outcome?.usage ? { receipt: record.outcome.usage } : NO_MANAGED_LANE_HOST_FACTS,
 			),
 		)
 			// Nothing returned means the lane had already ended (this terminal replayed after a crash, or its lease ran out):

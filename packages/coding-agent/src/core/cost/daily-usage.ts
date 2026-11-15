@@ -23,6 +23,7 @@ import {
 } from "./accounting-history.ts";
 import { type ChargedRange, sweepChargedRanges } from "./charged-ranges.ts";
 import { chargedRangeOf } from "./session-usage.ts";
+import { USAGE_RECEIPT_CUSTOM_TYPE, usageOfReceipt, usageReceiptOf } from "./usage-receipt.ts";
 import {
 	getSpawnedUsageComponents,
 	hasUnknownUsageModel,
@@ -384,6 +385,19 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 		const report = entry.data as SemanticAccountingReport | undefined;
 		return report?.usage && report.reportId ? [semanticUsageRecord(report, entry.timestamp)] : [];
 	}
+	const receipt = usageReceiptOf(entry);
+	// A usage receipt names no model: its cost counts as recorded, on the day it was recorded.
+	if (receipt)
+		return [
+			{
+				timestamp: entry.timestamp,
+				usage: usageOfReceipt(receipt),
+				kind: "spawned",
+				reportId: receipt.reportId,
+				historySummary: false,
+				proactivity: false,
+			},
+		];
 	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) return [];
 	const data = entry.data as SpawnedUsageReport | undefined;
 	if (!data?.usage) return [];
@@ -483,8 +497,10 @@ async function readSessionDirectory(directory: string) {
 	}
 }
 
-/** Wake and acting-ahead lines carry no usage, so the usage prefilter also admits them. */
-const PARENT_WAKE_LINES = [...PARENT_WAKE_KINDS.keys(), ACT_AHEAD_CUSTOM_TYPE].map((customType) => `"${customType}"`);
+/** Wake, acting-ahead and usage-receipt lines carry no `usage` field, so the usage prefilter also admits them. */
+const LINES_WITHOUT_USAGE = [...PARENT_WAKE_KINDS.keys(), ACT_AHEAD_CUSTOM_TYPE, USAGE_RECEIPT_CUSTOM_TYPE].map(
+	(customType) => `"${customType}"`,
+);
 
 /**
  * Entire scan is asynchronous; retained cache entries contain usage only, never conversation payloads. The live session
@@ -545,7 +561,7 @@ export async function aggregateDailyUsageAsync(
 					} else
 						await visitSessionEntriesAsync(
 							filePath,
-							(line) => line.includes('"usage"') || PARENT_WAKE_LINES.some((wake) => line.includes(wake)),
+							(line) => line.includes('"usage"') || LINES_WITHOUT_USAGE.some((type) => line.includes(type)),
 							(entry) => {
 								records.push(...usageRecords(entry));
 							},

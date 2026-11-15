@@ -248,7 +248,9 @@ export class BotSpendWindows {
 		let meteredUsd = 0;
 		for (const attempt of Object.values(snapshot?.attempts ?? {})) {
 			if (!snapshot || this.windowOfAttempt(attempt, snapshot) !== windowId) continue;
-			const costUsd = projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? 0;
+			// A managed lane runs out of process and is metered by no generation: its cost is the one its terminal result reports.
+			const costUsd =
+				projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? attempt.result?.usage.costUsd ?? 0;
 			usd += costUsd;
 			if (this.ports.attemptMetered(attempt)) meteredUsd += costUsd;
 		}

@@ -410,7 +410,8 @@ never offered a job. Job frames never become a turn on either side: they move wo
   different offer under the same id is refused. The outcome waits in the executor's outbox until the placer persists it
   and acknowledges it, so a link that drops mid-job resumes on reconnect (`job.resume`) and the outcome arrives once.
   The placer records the job as a managed worker lane at once, so it shows in Orchestration as `<task> · on <machine>`,
-  and reports its end to the session that placed it, once.
+  and reports its end to the session that placed it, once. The cost and tokens the other machine reports for the job
+  count in that session's cost and, for a bot's job, in the bot's spend window.
 - **Ends the placer decides.** A job past its deadline is stopped there and ends as a timeout; a machine that stays
   offline past the offline hold (`offlineHoldMs`, ten minutes by default) has its jobs end as blocked; `/remote revoke`
   ends that machine's jobs at once; a refusal ends the lane as blocked with the reason in plain words. Only one session

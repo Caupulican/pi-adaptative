@@ -4,6 +4,7 @@ import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { ChargedRanges } from "./charged-ranges.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 import { chargedRangeOf } from "./session-usage.ts";
+import { usageReceiptOf } from "./usage-receipt.ts";
 import {
 	hasUnknownUsageModel,
 	resolveEffectiveEntryCost,
@@ -135,6 +136,18 @@ export function accumulateCurrentSessionCostsFromEntries(
 			}
 			if (resolved.estimated) accumulator.costEstimate = "base-rates";
 			recordUnknownModel(accumulator, report.usage, report.provider, report.model);
+			continue;
+		}
+
+		const receipt = usageReceiptOf(entry);
+		if (receipt) {
+			// A usage receipt is background spend charged as received: its cost, no price made from tokens.
+			if (accumulator.seenSubagentReportIds.has(receipt.reportId)) continue;
+			accumulator.seenSubagentReportIds.add(receipt.reportId);
+			const cost = receipt.costUsd ?? 0;
+			accumulator.subagentCost += cost;
+			accumulator.reportedSubagentCost = (accumulator.reportedSubagentCost ?? 0) + cost;
+			accumulator.subagentReports += 1;
 			continue;
 		}
 

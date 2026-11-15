@@ -13,6 +13,7 @@ import type { AccountingOrigin } from "./accounting-evidence.ts";
 import { ChargedRanges } from "./charged-ranges.ts";
 import { chargedRangeOf } from "./session-usage.ts";
 import { measureTaskExecutionTiming } from "./task-execution-timing.ts";
+import { usageReceiptOf } from "./usage-receipt.ts";
 import {
 	hasUnknownUsageModel,
 	isMaintenanceUsageRoute,
@@ -416,6 +417,22 @@ export function computeSessionTaskAndModelMetrics(options: {
 				currentWindow.lastActivityMs = entryMs;
 				if (entryMs > currentWindow.endMs) currentWindow.endMs = entryMs;
 			}
+			continue;
+		}
+
+		const receipt = usageReceiptOf(entry);
+		if (receipt) {
+			// A usage receipt names no model and no origin: its cost and tokens go to the window of when it was recorded.
+			if (seenSpawned.has(receipt.reportId)) continue;
+			seenSpawned.add(receipt.reportId);
+			const owner = receiptOwner(undefined, undefined, Date.parse(entry.timestamp));
+			const tokens = receipt.totalTokens ?? 0;
+			const cost = receipt.costUsd ?? 0;
+			if (owner) {
+				owner.tokens += tokens;
+				owner.subagentCostUsd += cost;
+			} else unassignedCostUsd += cost;
+			recordModelUsage(receipt.label, "subagent", tokens, cost);
 			continue;
 		}
 

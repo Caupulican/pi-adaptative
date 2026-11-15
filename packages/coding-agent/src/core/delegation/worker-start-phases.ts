@@ -20,7 +20,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { FleetDispatch } from "../fleet/fleet-types.ts";
+import { dispatchReceiptOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
 import {
 	ESCALATION_AUTHORITY_MISMATCH,
 	type FleetLocalStart,
@@ -197,7 +197,7 @@ export function workerRequestForDispatch(
 			: {}),
 	};
 	// A rerun answers the original's parent; a plan step serves the input its version was stated for.
-	const receiptOrigin = pinned?.receiptOrigin ?? dispatch.receiptOrigin;
+	const receiptOrigin = dispatchReceiptOrigin(dispatch);
 	return {
 		instructions: dispatch.instructions,
 		...(dispatch.brief ? { brief: dispatch.brief } : {}),

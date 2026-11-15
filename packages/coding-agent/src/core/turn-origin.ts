@@ -53,6 +53,7 @@ import {
 import { COMPACTION_PREPARED_CUSTOM_TYPE } from "./compaction-controller.ts";
 import { CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE } from "./context/context-prompt-enforcement.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
+import { USAGE_RECEIPT_CUSTOM_TYPE } from "./cost/usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE } from "./delegation/bot-runtime-bindings.ts";
 import { LEADER_OUTCOME_CUSTOM_TYPE, LEADER_QUESTION_CUSTOM_TYPE } from "./delegation/leader-controller.ts";
@@ -344,6 +345,7 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		PIPELINE_RUN_CUSTOM_TYPE,
 		SPAWNED_USAGE_CUSTOM_TYPE,
 		SEMANTIC_USAGE_CUSTOM_TYPE,
+		USAGE_RECEIPT_CUSTOM_TYPE,
 		COMPACTION_PREPARED_CUSTOM_TYPE,
 		RETENTION_AUDIT_CUSTOM_TYPE,
 		SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE,

@@ -11,6 +11,7 @@ import {
 	protectedPathHostOptions,
 } from "../autonomy/protected-path-watch.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
+import { recordUsageReceipt, type UsageReceipt, validUsageReceipt } from "../cost/usage-receipt.ts";
 import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
 	type ManagedLaneDispatch,
@@ -279,6 +280,7 @@ export class ManagedLaneController {
 						...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 						...(runOrigin?.thirdParty ? { turnOrigin: runOrigin } : {}),
 						...(host.placement ? { placement: host.placement } : {}),
+						...(host.receiptOrigin ? { receiptOrigin: host.receiptOrigin } : {}),
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
@@ -374,12 +376,18 @@ export class ManagedLaneController {
 		if (!handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);
 		if (attempt.status !== "leased" && attempt.status !== "running") return undefined;
 		let usage: Usage | undefined;
+		let receipt: UsageReceipt | undefined;
 		const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
 		let usageReportId: string | undefined;
 		let claim: WorkerClaim;
 		try {
 			usage = event.usage ? validateProviderUsage(event.usage, "managed lane usage") : undefined;
-			usageReportId = usage && this.deps.addSpawnedUsage ? `managed-worker:${handle.attemptId}` : undefined;
+			// A lane's own usage claim and its placer's receipt are two accounts of one spend: both at once is a broken report.
+			if (usage && host.receipt)
+				throw new Error("A managed lane's terminal carries both its own usage and a placer's receipt.");
+			receipt = host.receipt ? validUsageReceipt(host.receipt) : undefined;
+			usageReportId =
+				(usage && this.deps.addSpawnedUsage) || receipt ? `managed-worker:${handle.attemptId}` : undefined;
 			const descriptor = Object.getOwnPropertyDescriptor(event, "summary");
 			if (descriptor && !("value" in descriptor))
 				throw new Error("Managed terminal summary must not be an accessor.");
@@ -442,20 +450,28 @@ export class ManagedLaneController {
 			if (usage && usageReportId) {
 				this.deps.addSpawnedUsage?.(usage, { label: "managed-worker", reportId: usageReportId });
 			}
+			if (receipt && usageReportId) {
+				recordUsageReceipt(this.deps.getSessionManager(), {
+					reportId: usageReportId,
+					label: "managed-worker",
+					...receipt,
+				});
+			}
 			if (!this.hasPersistedClaimForAttempt(claim)) this.deps.saveWorkerClaimSnapshot(claim);
 			const terminal = finalizeWorkerClaim(this.lifecycle, {
 				handle,
 				claim,
 				accepted: resolvedStatus === "succeeded" && claim.parentReviewRequired !== true,
-				costUsd: usage?.cost.total,
 				cwd: this.deps.getCwd(),
+				// The receipt's fields are charged as received: an unknown one stays unknown.
 				...(usage
 					? {
+							costUsd: usage.cost.total,
 							inputTokens: usage.input,
 							outputTokens: usage.output,
 							totalTokens: usage.totalTokens,
 						}
-					: {}),
+					: { ...receipt }),
 				wallClockMs: Math.max(0, Date.now() - Date.parse(attempt.createdAt)),
 				toolCalls: 0,
 				reasonCode: managedTerminalReasonCode({

@@ -279,6 +279,16 @@ export interface FleetScheduler {
 	registerCapacitySource(source: PlacementCapacitySource): () => void;
 }
 
+/**
+ * The input a dispatch's work serves: an escalation rerun's original's (so the rerun answers the same parent), else the
+ * dispatch's own (a plan step's stated origin). One reading for a local start and a placement on another machine.
+ */
+export function dispatchReceiptOrigin(
+	dispatch: Pick<FleetDispatch, "receiptOrigin" | "escalation">,
+): WorkerReceiptOrigin | undefined {
+	return dispatch.escalation?.pinned.receiptOrigin ?? dispatch.receiptOrigin;
+}
+
 /** DRR cost of one dispatch of a class: a heavy node spends eight probes' worth of its flow's quantum. */
 /**
  * The fleet subtree a worker lane is charged to: its parent agent's id, or the session root subtree "" when it has no

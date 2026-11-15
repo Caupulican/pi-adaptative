@@ -4,6 +4,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import { USAGE_RECEIPT_CUSTOM_TYPE } from "./cost/usage-receipt.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
 
 /**
@@ -22,7 +23,11 @@ export interface CreatedSession {
  */
 export type CopyBaseline = { readonly bytes: number } | { readonly unreadable: unknown };
 
-const PAID_ROW_TYPES: ReadonlySet<string> = new Set([SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE]);
+const PAID_ROW_TYPES: ReadonlySet<string> = new Set([
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	USAGE_RECEIPT_CUSTOM_TYPE,
+]);
 
 /**
  * The copy baseline of a replacement's file as it stands once its copied rows are written. A file not yet written holds no copied

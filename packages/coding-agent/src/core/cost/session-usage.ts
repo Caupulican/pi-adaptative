@@ -6,6 +6,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import { type ChargedRange, ChargedRanges, chargedRangeSource, legacyChargedRangeSource } from "./charged-ranges.ts";
+import { usageOfReceipt, usageReceiptOf } from "./usage-receipt.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -83,7 +84,8 @@ export function readAutoLearnSessionIdFromFile(filePath: string): string | undef
 /**
  * Whole-session spend, including direct entry charges and already-rolled-up descendants. `pending` are held semantic
  * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row. Spawned reports
- * that charge a range count as the union of their ranges (`ChargedRanges`), any other once by report id.
+ * that charge a range count as the union of their ranges (`ChargedRanges`), any other once by report id; a usage receipt
+ * (`usage-receipt.ts`) counts once by its report id, its cost and token total only.
  */
 export function aggregateCumulativeUsageFromSessionEntries(
 	entries: readonly SessionEntry[],
@@ -96,6 +98,7 @@ export function aggregateCumulativeUsageFromSessionEntries(
 	const ranges = new ChargedRanges();
 	for (const entry of entries) {
 		const usage = getSessionEntryUsage(entry);
+		const receipt = usageReceiptOf(entry);
 		if (usage && isUsage(usage)) {
 			addUsage(total, usage);
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
@@ -112,6 +115,10 @@ export function aggregateCumulativeUsageFromSessionEntries(
 				seenSpawnedReportIds.add(data.reportId);
 			}
 			addUsage(total, data.usage);
+		} else if (receipt) {
+			if (seenSpawnedReportIds.has(receipt.reportId)) continue;
+			seenSpawnedReportIds.add(receipt.reportId);
+			addUsage(total, usageOfReceipt(receipt));
 		} else if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SemanticAccountingReport | undefined;
 			if (!data?.usage || !isUsage(data.usage) || !data.reportId || seenSemanticReportIds.has(data.reportId))

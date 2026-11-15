@@ -1,6 +1,8 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { UsageReceipt } from "../cost/usage-receipt.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { ManagedLanePlacement } from "../orchestration/contracts.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 
 /** A report needs new host preparation after replacement settles; its producer must retain the report. */
 export class ManagedLaneRuntimeAdmissionError extends Error {
@@ -68,6 +70,16 @@ export interface ManagedLaneHostFacts {
 	 * other lane. It names the plan a stop of that job belongs to.
 	 */
 	readonly placement?: ManagedLanePlacement;
+	/**
+	 * On a dispatch, the input the placed job's work serves (a plan step's stated origin, or the original's of a rerun); absent
+	 * when its dispatch names none. The lane's attempt serves it, as a local start of the same dispatch would.
+	 */
+	readonly receiptOrigin?: WorkerReceiptOrigin;
+	/**
+	 * On a terminal, what the placed job's executor reported it spent. It is charged as received: a field the executor did not
+	 * know stays unknown, and no token split or price is made up.
+	 */
+	readonly receipt?: UsageReceipt;
 }
 
 /** The host facts of a report the host's placer did not make: an extension's, or an end the host records itself. */

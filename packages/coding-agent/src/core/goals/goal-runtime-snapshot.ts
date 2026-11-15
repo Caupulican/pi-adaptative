@@ -191,11 +191,9 @@ export function buildGoalRuntimeSnapshot(args: {
 		// Live-derived, not durably persisted: the goal-state event log has no reducer branch that
 		// writes `continuationWorkerSpendUsd` (see its doc comment on `GoalState`), so every read
 		// re-sums THIS goal's own lane records instead of trusting a stale/zero persisted value.
-		// `costUsd` is set today for in-process worker/research lane completions (LaneTracker.complete);
-		// it is NOT yet set for managed-worker completions (`ManagedLaneEvent` carries no cost claim), so
-		// this sum is accurate for in-process lanes and a documented undercount for herdr workers until
-		// `reportSpawnedUsage` threads a goalId/lane correlation through. Forward-compatible: the moment
-		// managed-worker costUsd is populated, this same sum picks it up with no further change here.
+		// `costUsd` is set for in-process worker/research lane completions (LaneTracker.complete) and for
+		// managed-worker completions from the cost their terminal reports (a lane's own usage claim, or a
+		// placed job's usage receipt); a managed lane whose terminal reports no cost adds nothing.
 		let workerSpendUsd = 0;
 		for (const record of args.laneRecords) {
 			if (record.goalId !== goalId) continue;
