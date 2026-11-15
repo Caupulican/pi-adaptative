@@ -213,7 +213,7 @@ export const NOTICES = {
 	},
 	/** System One is configured but has no engine (`session-edge-intent-controller.ts`); its English cause is the domain's own. */
 	systemOneNoEngine: (cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
-		`${cause}, so tool calls run under the deterministic gates only, without System One's review of their effects.`,
+		`${cause}, so tool calls run under the deterministic gates only, without System One's review of their effects. Messages are not read for a lasting goal either; to set one, say it explicitly, for example: set a goal: <goal>.`,
 	/**
 	 * The delegation gate's notices (`system-one/delegation-gate.ts`): a call of a session that directs workers was refused
 	 * as task work (`subject` is the refused operation), or System One could not judge one (`cause` is the error's own words).
