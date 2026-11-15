@@ -252,7 +252,15 @@ export class WorkerEscalation {
 
 	follow(outcome: Outcome): void {
 		if (this.deps.signal.aborted) return;
-		if (outcome.nextAction.kind === "host_check") void this.runChecks(outcome, outcome.nextAction.requirementIds);
+		if (outcome.nextAction.kind === "host_check")
+			// A check never rejects; reading the goal or recording what ran can, and this run is not awaited, so its failure
+			// is logged as a rung placement's is.
+			void this.runChecks(outcome, outcome.nextAction.requirementIds).catch((error: unknown) =>
+				harnessLog.warn("escalation", "running host requirement checks after a worker attempt failed", {
+					outcomeId: outcome.outcomeId,
+					error: error instanceof Error ? error.message : String(error),
+				}),
+			);
 		else if (outcome.nextAction.kind === "rerun_uncovered") void this.placeRung(outcome, outcome.nextAction);
 	}
 
