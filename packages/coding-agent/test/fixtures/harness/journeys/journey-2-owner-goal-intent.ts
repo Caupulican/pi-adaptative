@@ -2,6 +2,7 @@ import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { projectActivityLane } from "../../../../src/modes/interactive/components/activity-lane.ts";
 import { buildOperatorPovSegments } from "../../../../src/modes/interactive/components/operator-pov-bar.ts";
+import { initTheme } from "../../../../src/presentation/theme/theme.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
@@ -21,6 +22,8 @@ const OWNER_MESSAGE =
  * interactive layout's source reads the session) and the activity lane's goal items.
  */
 function goalMarks(session: AgentSession) {
+	// The bar styles System One's and CI's segments with the theme the interactive mode loads before it draws.
+	initTheme("dark");
 	const goalState = session.getGoalStateSnapshot();
 	const segment = buildOperatorPovSegments({
 		getProjection: () => session.operatorProjection.getProjection(),
