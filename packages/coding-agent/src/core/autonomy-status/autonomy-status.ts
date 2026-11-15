@@ -64,6 +64,8 @@ import type { SessionSemanticPlaneController } from "../session-semantic-plane-c
 import type { SettingsManager } from "../settings-manager.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { TurnAuthority, TurnOriginKind } from "../turn-origin.ts";
+import type { SessionWatchStatus } from "../watches/session-watch-ledger.ts";
+import type { SessionWatchView } from "../watches/session-watch-service.ts";
 import type { RunToolManifest } from "./tool-manifest.ts";
 
 /** Items each list keeps; the rest are counted in its `omitted`. */
@@ -133,8 +135,22 @@ export interface RoutineStatusItem {
 	readonly progressLine?: RoutineProgressLine;
 }
 
+/** A watch the session or one of its workers armed for its own wait (`core/watches/`), as the report names it. */
+export interface SessionWatchStatusItem {
+	readonly watchId: string;
+	readonly status: SessionWatchStatus;
+	readonly condition: WatchCondition;
+	readonly expiresAt: number;
+	/** The worker runtime that armed it; absent when the session did. */
+	readonly runtimeId?: string;
+	/** Wakes its armer is still owed. */
+	readonly pendingWakes: number;
+}
+
 export interface RoutinesStatus {
 	readonly routines: BoundedList<RoutineStatusItem>;
+	/** The session's own watches, in its watch ledger beside the routines. */
+	readonly watches: BoundedList<SessionWatchStatusItem>;
 	/** Routine results delivered as a parent turn, against `routines.maxResultWakesPerDay`. */
 	readonly resultWakes: DayCount;
 	readonly intake?: RoutineIntakeStatus;
@@ -411,7 +427,14 @@ export interface AutonomyStatusSources {
 	readonly routineStore:
 		| Pick<PersistentBotTeamStore, "listRoutines" | "listRoutineOccurrences" | "getDaemonStatus">
 		| undefined;
-	readonly routineIntake: RoutineIntakeStatus | undefined;
+	/**
+	 * The session's routines as loaded, never built for the report: its intake while its runtime is built, and its own
+	 * watches (`core/watches/`), none until then.
+	 */
+	readonly routines: {
+		readonly current: { readonly intake?: { status(): RoutineIntakeStatus } } | undefined;
+		readonly ownWatches: { list(): readonly SessionWatchView[] };
+	};
 	/** The worker ledger's projection (host events and plans); undefined while the ledger is not loaded. */
 	readonly hostEventLedger: TaskRuntimeProjection | undefined;
 	/** The running host event sources' connections (`HostEventSessionController.connections`). */
@@ -575,14 +598,25 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 					sources.holdsRoutines ? NO_STORE : "this session holds no routines",
 				);
 			const wakes = (await day()).routineResultTurnWakes;
+			const intake = sources.routines.current?.intake?.status();
 			return available({
 				routines: bounded(
 					sessionRoutines().map((routine) =>
 						routineItem(routine, nowMs, store.listRoutineOccurrences({ routineId: routine.routineId })),
 					),
 				),
+				watches: bounded(
+					sources.routines.ownWatches.list().map((watch) => ({
+						watchId: watch.watchId,
+						status: watch.status,
+						condition: watch.condition,
+						expiresAt: Date.parse(watch.expiresAt),
+						...(watch.armedBy.kind === "worker" ? { runtimeId: watch.armedBy.runtimeId } : {}),
+						pendingWakes: watch.pendingWakes,
+					})),
+				),
 				resultWakes: { used: wakes, max: settings.getRoutinesSettings().maxResultWakesPerDay },
-				...(sources.routineIntake ? { intake: sources.routineIntake } : {}),
+				...(intake ? { intake } : {}),
 			});
 		}),
 		section<AwayDaemonStatusView>(async () => {

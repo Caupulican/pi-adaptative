@@ -77,6 +77,7 @@ export const SELECTORS = {
 		deleted: "Sessão excluída",
 		remainder: (parts: string[]) => parts.join(" e "),
 		remainderJournals: "diários de uso",
+		remainderWatches: "registro de monitoramentos",
 		remainderWorkerArtifacts: "artefatos de worker",
 		removedWithRemainder: (detail: string) => `Sessão removida; restam ${detail}.`,
 		deleteFailed: "Falha ao excluir a sessão. Os detalhes estão no log.",

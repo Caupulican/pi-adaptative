@@ -12,7 +12,7 @@ import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
-import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
+import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME, WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
@@ -50,6 +50,8 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	SELF_COMPACT_TOOL_NAME,
 	PROACTIVITY_TOOL_NAME,
 	ROUTINE_TOOL_NAME,
+	// A worker waits through its own `task_watch`, armed under its runtime's identity and scope, never the session's tool.
+	WATCH_TOOL_NAME,
 	// Bots are created by the orchestrator alone (its bot tool, a leader's bots included), never by a worker's own tool.
 	BOT_TOOL_NAME,
 	// Workers never launch workers: `assign` starts one, as `delegate` does, and `plan` starts many.

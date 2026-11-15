@@ -1,6 +1,13 @@
 import "../builtin-install.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect } from "vitest";
 import { UNTRUSTED_BOUNDARY_TAG } from "../../../../src/core/provider-prompt-contracts.ts";
+import {
+	parseSessionWatchRecord,
+	SESSION_WATCH_LEDGER_SUFFIX,
+	type SessionWatchRecord,
+} from "../../../../src/core/watches/session-watch-ledger.ts";
 import { createBarrier, type ScriptedRequest, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
@@ -124,4 +131,30 @@ export async function settleWatchWake(
 	await withDeadline(world.trace, `${label} wake turn answered`, answered);
 	await withDeadline(world.trace, `agent idle after ${label} wake turn`, session.agent.waitForIdle());
 	await withDeadline(world.trace, `foreground idle after ${label} wake turn`, session.waitForForegroundIdle());
+}
+
+/**
+ * The watches a session armed for its own waits, as the ledgers beside its transcripts in `directory` record them
+ * (`core/watches/`), read through the product's own codec; none before the first arming.
+ */
+export function sessionLedgerWatches(directory: string): SessionWatchRecord[] {
+	if (!existsSync(directory)) return [];
+	return readdirSync(directory)
+		.filter((name) => name.endsWith(SESSION_WATCH_LEDGER_SUFFIX))
+		.flatMap((name) => {
+			const ledger = JSON.parse(readFileSync(join(directory, name), "utf8")) as { readonly watches: unknown[] };
+			return ledger.watches.map(parseSessionWatchRecord);
+		});
+}
+
+/** How a session's own watch went: its firings, and each wake it owed its armer with whether that wake was delivered. */
+export function sessionWatchOutcome(
+	directory: string,
+	watchId: string,
+): { readonly fires: number; readonly wakes: readonly (readonly [string, boolean])[] } {
+	const record = sessionLedgerWatches(directory).find((watch) => watch.watchId === watchId);
+	return {
+		fires: record?.cursor.fires ?? 0,
+		wakes: record?.wakes.map((wake) => [wake.kind, wake.delivered] as const) ?? [],
+	};
 }

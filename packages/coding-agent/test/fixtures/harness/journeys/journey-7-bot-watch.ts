@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { botSessionsDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { createBarrier } from "../scripted-provider.ts";
@@ -17,7 +18,12 @@ import {
 	TRACK,
 	waitForBotRosterState,
 } from "./journey-7-shared.ts";
-import { assertWatchWake, latestWatchWakeText } from "./journey-watch-wake.ts";
+import {
+	assertWatchWake,
+	latestWatchWakeText,
+	sessionLedgerWatches,
+	sessionWatchOutcome,
+} from "./journey-watch-wake.ts";
 import { fencedToolOutput, latestBatchResults, refusalDiagnostic } from "./shared.ts";
 
 const WATCHER = "flag-watcher";
@@ -86,34 +92,32 @@ async function untilRosterWatches(
 	}
 }
 
-/** Whether the store holds the watch `routineId`, read again from its file. */
-function storeHolds(session: AgentSession, routineId: string): boolean {
-	const store = session.getBotTeamStore();
-	store.reload(true);
-	return store.getRoutine(routineId) !== undefined;
+/** Whether bot `agentId`'s own session holds the live watch `watchId`, read again from its watch ledger. */
+function ledgerHolds(world: HarnessWorld, agentId: string, watchId: string): boolean {
+	return sessionLedgerWatches(botSessionsDir(world.agentDir, agentId)).some(
+		(watch) => watch.watchId === watchId && watch.status === "live",
+	);
 }
 
 /**
  * Leg: the owner's stop ends the watches a bot armed before it, and a bot cancels a watch it armed. The bot arms a watch on
- * a file that never appears; the owner stops it, and the stop deletes that watch, the owner told how many it ended. Then the
+ * a file that never appears; the owner stops it, and the stop ends that watch, the owner told how many it ended. Then the
  * owner's next words have the bot arm another watch, which the stop made before it leaves, and cancel it with
  * `task_watch`'s `cancel` action; the roster's count follows each. The stop ends the bot's work, not its conversation:
- * those next words start a turn on the conversation it kept ("followed_up"). The store's routine revision counter moves
- * on every save of any routine and on nothing else (the stop's delete and the cancel included), so the watch armed after
- * the stop is the store's second save, revision 2.
+ * those next words start a turn on the conversation it kept ("followed_up").
  */
 async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const { trace } = world;
 	createOwnerBot(session, STOPPER, MODEL_ID.watcher, STOPPER_SOUL);
 	const flag = projectPath("release.flag");
 	const expiresAt = world.timers.port("routines").now() + 3_600_000;
-	const armWatch = (id: string, routineId: string) => ({
+	const armWatch = (id: string, watchId: string) => ({
 		type: "toolCall" as const,
 		id,
 		name: "task_watch",
 		arguments: {
 			action: "arm",
-			routineId,
+			watchId,
 			prompt: "Tell the owner the release file is up.",
 			condition: { type: "file", path: flag, on: "created" },
 			expiresAt,
@@ -148,7 +152,7 @@ async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): P
 			name: "j7-stopper-cancel",
 			check: (request) => {
 				seen.rearmed = results(request);
-				seen.laterHeld = storeHolds(session, LATER_WATCH_ID);
+				seen.laterHeld = ledgerHolds(world, STOPPER, LATER_WATCH_ID);
 			},
 			reply: {
 				content: [
@@ -156,7 +160,7 @@ async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): P
 						type: "toolCall",
 						id: "j7-stopper-drop",
 						name: "task_watch",
-						arguments: { action: "cancel", routineId: LATER_WATCH_ID },
+						arguments: { action: "cancel", watchId: LATER_WATCH_ID },
 					},
 				],
 				stopReason: "toolUse",
@@ -192,12 +196,17 @@ async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): P
 			sent: first.mode,
 			armed: seen.armed,
 			warnings: stopWarnings,
-			held: storeHolds(session, STOPPED_WATCH_ID),
+			held: ledgerHolds(world, STOPPER, STOPPED_WATCH_ID),
 		},
 		"the owner's stop ends the watch the bot armed before it, and the owner is told how many it ended",
 	).toEqual({
 		sent: "started",
-		armed: [[false, JSON.stringify({ routineId: STOPPED_WATCH_ID, revision: 1, armed: true })]],
+		armed: [
+			[
+				false,
+				JSON.stringify({ watchId: STOPPED_WATCH_ID, expiresAt: new Date(expiresAt).toISOString(), armed: true }),
+			],
+		],
 		warnings: [interfaceText().botTeam.botStopWatchesEnded(STOPPER, 1, 0)],
 		held: false,
 	});
@@ -215,14 +224,17 @@ async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): P
 			sent: second.mode,
 			results: seen.rearmed,
 			laterHeld: seen.laterHeld,
-			held: storeHolds(session, LATER_WATCH_ID),
+			held: ledgerHolds(world, STOPPER, LATER_WATCH_ID),
 		},
 		"a watch armed after the owner's stop stays until the bot cancels it with task_watch's cancel action",
 	).toEqual({
 		sent: "followed_up",
 		results: [
-			[false, JSON.stringify({ routineId: LATER_WATCH_ID, revision: 2, armed: true })],
-			[false, JSON.stringify({ routineId: LATER_WATCH_ID, cancelled: true })],
+			[
+				false,
+				JSON.stringify({ watchId: LATER_WATCH_ID, expiresAt: new Date(expiresAt).toISOString(), armed: true }),
+			],
+			[false, JSON.stringify({ watchId: LATER_WATCH_ID, cancelled: true })],
 		],
 		laterHeld: true,
 		held: false,
@@ -240,11 +252,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	const flag = projectPath("deploy.flag");
 	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length;
 	const rootBefore = rootRequests();
-	const occurrences = () => {
-		const store = session.getBotTeamStore();
-		store.reload(true);
-		return store.listRoutineOccurrences({ routineId: WATCH_ID });
-	};
+	// The bot's watch is one of its own session's waits (`core/watches/`): the ledger beside its transcript records it.
+	const outcome = () => sessionWatchOutcome(botSessionsDir(world.agentDir, WATCHER), WATCH_ID);
 	const expiresAt = world.timers.port("routines").now() + 3_600_000;
 	const armed = createBarrier();
 	const seen = {
@@ -344,20 +353,19 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		holdsRoutine: false,
 		holdsSelfCompact: true,
 		refused: [true, true],
-		// The store's revision counter moved at the stop leg's two watches and the refused watch saves nothing: the third save.
-		accepted: [false, { routineId: WATCH_ID, revision: 3, armed: true }],
+		accepted: [false, { watchId: WATCH_ID, expiresAt: new Date(expiresAt).toISOString(), armed: true }],
 		watches: 1,
 	});
 
 	// The file's absence when the watch was armed is its starting state: nothing fires for it.
 	const untilFired = async (): Promise<void> => {
-		for (let step = 0; step < 8 && occurrences().length === 0; step++) {
+		for (let step = 0; step < 8 && outcome().fires === 0; step++) {
 			world.timers.advance("routines", 500);
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	};
 	await untilFired();
-	expect(occurrences(), "an absent file fires nothing while it stays absent").toHaveLength(0);
+	expect(outcome().fires, "an absent file fires nothing while it stays absent").toBe(0);
 
 	world.io.writeFileSync(flag, "ready\n");
 	await untilFired();
@@ -370,7 +378,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	await untilRosterWatches(world, session, WATCHER, 0, "J7 bot watch: the spent watch left the roster");
 	expect(
 		{
-			runs: occurrences().map((run) => [run.phase, run.result?.outcome, run.result?.delivery]),
+			watch: outcome(),
 			rootTurns: rootRequests() - rootBefore,
 			workers: agentsOn(session, MODEL_ID.watcher).length,
 			chat: chatText(session, WATCHER).includes(WATCHER_WOKEN),
@@ -378,7 +386,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		},
 		"the firing is one delivered wake of the bot's own session, which answered in a turn of its own: no root turn, no worker",
 	).toEqual({
-		runs: [["terminal", "succeeded", "acknowledged"]],
+		watch: { fires: 1, wakes: [["fired", true]] },
 		rootTurns: 0,
 		workers: 0,
 		chat: true,

@@ -1,10 +1,10 @@
 /**
- * The bounds on a watch the model arms for its own work, and the count of a session's live watches. A run the owner did
- * not speak in may arm only a finite watch: one-shot, with an end time at most a day ahead, while the session holds fewer
- * than {@link MAX_AGENT_ARMED_WATCHES} such watches. A worker runtime arms under the same bounds, within the session's
- * count and at most {@link MAX_WORKER_ARMED_WATCHES} of its own; what its condition may run or read is its own scope's
- * (`worker-watch-scope.ts`). These are code facts the routine controller checks; the same predicate counts what the
- * operator bar shows.
+ * The bounds on a watch the model arms for its own work, and the count of a session's live watches. Such a watch is
+ * one-shot, with an end time at most a day ahead, while the session holds fewer than {@link MAX_AGENT_ARMED_WATCHES} of
+ * them; a worker runtime arms within the session's count and at most {@link MAX_WORKER_ARMED_WATCHES} of its own, and what
+ * its condition may run or read is its own scope's (`worker-watch-scope.ts`). The session's watch service holds these
+ * numbers (`core/watches/`); routine watches an earlier build armed without the owner's words still count in them, by the
+ * counts below, which the operator bar reads too.
  */
 
 import {
@@ -29,20 +29,6 @@ export function isWatchSchedule(schedule: RoutineScheduleInput): schedule is Wat
 export function isWatchSchedule(schedule: RoutineSchedule): boolean;
 export function isWatchSchedule(schedule: RoutineSchedule | RoutineScheduleInput): boolean {
 	return schedule.kind === "event" && schedule.source === "watch";
-}
-
-/**
- * Why a watch may not be armed without the owner's words, in the fields to send; undefined when it is one-shot and ends
- * within {@link MAX_AGENT_WATCH_HORIZON_MS}.
- */
-export function agentWatchBoundsRefusal(schedule: WatchScheduleInput, nowMs: number): string | undefined {
-	if (schedule.stopAfterFirstRun !== true)
-		return "An agent-armed watch must be one-shot: send stopAfterFirstRun: true in the schedule.";
-	const hours = MAX_AGENT_WATCH_HORIZON_MS / 3_600_000;
-	const { expiresAt } = schedule;
-	if (expiresAt === undefined || expiresAt <= nowMs || expiresAt > nowMs + MAX_AGENT_WATCH_HORIZON_MS)
-		return `An agent-armed watch needs an end time: send expiresAt (UTC epoch ms) after now and at most ${hours} hours ahead.`;
-	return undefined;
 }
 
 /** Whether `routine` is a watch of this session that has not ended: it holds one of the session's watch slots. */
@@ -82,20 +68,6 @@ export function liveWatchCount(
 	return liveWatches(routines, parentSessionId, nowMs).length;
 }
 
-/**
- * Why one more agent-armed watch may not be armed: the session already holds the most. A paused watch still holds its slot,
- * so pausing cannot free room for another; a spent watch (its one run taken) does not, so its own wake may arm the next.
- */
-export function agentWatchSlotsRefusal(
-	routines: readonly RoutineDefinitionView[],
-	parentSessionId: string,
-	nowMs: number,
-): string | undefined {
-	return agentArmedWatchCount(routines, parentSessionId, nowMs) >= MAX_AGENT_ARMED_WATCHES
-		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches armed without the owner's words, the most it may; delete one or wait for one to fire or end.`
-		: undefined;
-}
-
 /** How many watch slots of the session the watches a run armed without the owner's words hold. */
 export function agentArmedWatchCount(
 	routines: readonly RoutineDefinitionView[],
@@ -123,32 +95,6 @@ export function workerArmedWatchCount(
 			routine.wake.runtimeId === runtimeId &&
 			holdsWatchSlot(routine, parentSessionId, nowMs),
 	).length;
-}
-
-/**
- * Why one more watch may not be armed by a session that arms watches only for its own wait (a bot's own session): it
- * already holds the most, whatever armed them, since it can change or delete none of them.
- */
-export function ownWatchSlotsRefusal(
-	routines: readonly RoutineDefinitionView[],
-	parentSessionId: string,
-	nowMs: number,
-): string | undefined {
-	return heldWatchCount(routines, parentSessionId, nowMs) >= MAX_AGENT_ARMED_WATCHES
-		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches, the most it may; wait for one to fire or end.`
-		: undefined;
-}
-
-/** Why one more watch may not be armed for this worker runtime: it already holds its share of the session's slots. */
-export function workerWatchSlotsRefusal(
-	routines: readonly RoutineDefinitionView[],
-	parentSessionId: string,
-	runtimeId: string,
-	nowMs: number,
-): string | undefined {
-	return workerArmedWatchCount(routines, parentSessionId, runtimeId, nowMs) >= MAX_WORKER_ARMED_WATCHES
-		? `This worker already holds ${MAX_WORKER_ARMED_WATCHES} watches, the most one may; wait for one to fire or end.`
-		: undefined;
 }
 
 /**

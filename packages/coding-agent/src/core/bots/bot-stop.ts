@@ -11,7 +11,7 @@
  * the stop was made (`holdPersistedGoalForOwnerStop`; the owner resumes it), and the usage-limit wait of every usage stop
  * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop), and what the bot's session armed or was
  * fired for before the stop is ended: its watches armed until then are deleted and the results it has not taken, fired for
- * it until then or by those watches since, are settled without a turn (`endWatchesBeforeStop`). The stop is then taken, and every job a
+ * it until then or by those watches since, are settled without a turn, in the store and in its session's watch ledger alike (`endWatchesBeforeStop`). The stop is then taken, and every job a
  * session of the bot's home placed on another machine is ended, so nothing goes on spending; a failure there is told to the
  * owner and does not keep the stop. A managed lane is left to the extension that runs it, and the owner is told.
  *
@@ -53,6 +53,7 @@ import { MAX_ROUTINE_OCCURRENCES, type PersistentRoutineDefinition } from "../ro
 import { routineResultInputIds } from "../routines/routine-parent-input.ts";
 import { isWatchSchedule } from "../routines/routine-watch-arming.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
+import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeOwnSessionIds } from "./bot-home.ts";
@@ -118,12 +119,15 @@ export const BOT_STOP_UNNOTED_MARKER_PREFIX = "bot-stop-unnoted:";
  * delivery appended while the stop waited is delivered, not settled: it is marked by that input, as the delivery would
  * mark it, so it is never both. A watch armed after the stop, and what it fires, are the bot's later work and stay. What
  * it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and is tried again,
- * which finds them ended, has told them once. A failure throws.
+ * which finds them ended, has told them once. The watches the session armed into its own `ledger` (`core/watches/`) end by
+ * the same rule: armed by the stop, a live one is cancelled and every wake it is owed settled, one the transcript already
+ * carries marked by that input; one armed after it stays. A failure throws.
  */
 function endWatchesBeforeStop(
 	agentId: string,
 	sessionId: string,
 	transcript: StopNoteTranscript | undefined,
+	ledger: StopWatchLedger | undefined,
 	stop: OwnerStop,
 	ports: Pick<BotStopPorts, "warn" | "now" | "watches">,
 ): void {
@@ -133,6 +137,16 @@ function endWatchesBeforeStop(
 		isWatchSchedule(routine.schedule) && Date.parse(routine.createdAt) <= stop.at;
 	let [ended, settled] = [0, 0];
 	try {
+		// The session's watch ledger first: what it armed by the stop ends, and the wakes owed it are settled, a wake its
+		// transcript already carries (to the session, or to it for a worker that could not take it) marked by that input.
+		if (ledger) {
+			const carried = (deliveryId: string) =>
+				transcript?.getParentInput(deliveryId) !== undefined ||
+				transcript?.getParentInput(`${deliveryId}:session`) !== undefined;
+			const own = ledger.endArmedByStop(stop.at, carried);
+			ended += own.ended;
+			settled += own.settled;
+		}
 		store.reload(true);
 		for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
 			if (armedBefore(watch) && store.deleteRoutine(watch.routineId, watch.revision, now)) ended++;
@@ -177,6 +191,16 @@ function endWatchesBeforeStop(
 	} finally {
 		if (ended + settled > 0) ports.warn(interfaceText().botTeam.botStopWatchesEnded(agentId, ended, settled));
 	}
+}
+
+/** A bot session's watch ledger as the owner's stop ends what it armed (`SessionWatchLedger.endArmedByStop`). */
+export interface StopWatchLedger {
+	endArmedByStop(stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number };
+}
+
+/** The live session's own watches, as the stop ends them. */
+function loadedWatches(loaded: LoadedBotSession): StopWatchLedger {
+	return loaded.session.backgroundLanes.ownWatches();
 }
 
 /** What ending the jobs a bot's home placed tells the owner through: its notices, and what they were told of its links. */
@@ -360,7 +384,14 @@ export function endUnrecordedStopWork(
 			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
 		}
 		try {
-			endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, stop, ports);
+			endWatchesBeforeStop(
+				agentId,
+				loaded.session.sessionId,
+				loaded.sessionManager,
+				loadedWatches(loaded),
+				stop,
+				ports,
+			);
 		} catch (error) {
 			ports.warn(interfaceText().botTeam.botStopWatchesNotEnded(agentId, botFailureText(agentId, error)));
 		}
@@ -525,7 +556,14 @@ export function stopLoadedBot(
 			(taken) => {
 				stopTurn(taken);
 				outcome = applyOwnerStopToSession(live, taken, ports.now());
-				endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, taken, ports);
+				endWatchesBeforeStop(
+					agentId,
+					loaded.session.sessionId,
+					loaded.sessionManager,
+					loadedWatches(loaded),
+					taken,
+					ports,
+				);
 				return outcome;
 			},
 			ports,
@@ -730,7 +768,17 @@ function stopClosedSession(
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
 		declineUsageWaitForOwner(transcript, stop.at, now);
 	}
-	if (saved) endWatchesBeforeStop(agentId, saved.id, transcript, stop, { ...ports, warn: tell });
+	// The ledger beside the transcript is read only when the file is the bot's session: one beside another session's file is that session's.
+	const ledger =
+		saved && transcript
+			? new SessionWatchLedger({
+					sessionId: saved.id,
+					path: () => sessionWatchLedgerPath(saved.file),
+					now: () => ports.now(),
+					warn: tell,
+				})
+			: undefined;
+	if (saved) endWatchesBeforeStop(agentId, saved.id, transcript, ledger, stop, { ...ports, warn: tell });
 	return outcome;
 }
 

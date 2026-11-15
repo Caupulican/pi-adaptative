@@ -19,6 +19,19 @@ import type { RoutineDefinitionView } from "../../routines/routine-contract.ts";
 import type { RoutineIntakeInactiveReason, RoutineIntakeStatus } from "../../routines/routine-intake.ts";
 import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
 import type { TurnAuthority, TurnOriginKind } from "../../turn-origin.ts";
+import type { SessionWatchStatus } from "../../watches/session-watch-ledger.ts";
+
+/** The facts the line of a watch the session armed for its own wait carries; formatted fragments arrive as strings. */
+export interface AutonomyWatchLine {
+	readonly watchId: string;
+	readonly state: string;
+	readonly condition: string;
+	readonly ends: string;
+	/** The worker runtime that armed it; absent when the session did. */
+	readonly worker?: string;
+	/** Wakes its armer is still owed. */
+	readonly owed: number;
+}
 
 /** The facts a routine's line in the report carries; already-formatted fragments arrive as strings. */
 export interface AutonomyRoutineLine {
@@ -227,6 +240,16 @@ export const AUTONOMY_STATUS = {
 			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.originLoss ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
 			`; paused after ${after} failed runs${reason === undefined ? "" : `: ${reason}`}`,
+		/** A watch's state, keyed by the identifier its ledger record holds. */
+		watchState: {
+			live: "watching",
+			fired: "fired",
+			"timed-out": "timed out",
+			cancelled: "cancelled",
+		} satisfies Readonly<Record<SessionWatchStatus, string>>,
+		/** One watch the session or one of its workers armed for its own wait (`core/watches/`). */
+		watchLine: (line: AutonomyWatchLine) =>
+			`watch ${line.watchId}: ${line.state}, ${line.condition}, until ${line.ends}${line.worker === undefined ? "" : `, armed by worker ${line.worker}`}${line.owed === 0 ? "" : `, ${line.owed} ${line.owed === 1 ? "wake" : "wakes"} owed`}`,
 		/**
 		 * The latest run settled because its origin is lost: its result not delivered, or the run cancelled before it started;
 		 * when, and why (`notices.routineOriginLoss`).

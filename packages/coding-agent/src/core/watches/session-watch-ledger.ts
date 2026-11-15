@@ -12,7 +12,8 @@
  * days after the session last closed, and at most {@link MAX_ENDED_SESSION_WATCHES} of them; one whose wake is not
  * delivered yet is always kept. A session with no transcript file keeps its ledger in memory.
  */
-import { readFileSync, renameSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	isRoutineId,
 	MAX_ROUTINE_PROMPT_CHARS,
@@ -30,7 +31,7 @@ import {
 } from "../routines/watch-contract.ts";
 import { parseWorkerWatchScope, type WorkerWatchScope } from "../routines/worker-watch-scope.ts";
 import type { TurnAuthority } from "../turn-origin.ts";
-import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { atomicTemporaryTarget, isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
 export const SESSION_WATCH_LEDGER_VERSION = 1;
@@ -68,6 +69,11 @@ export interface SessionWatchWake {
 	readonly deliveryId: string;
 	readonly at: number;
 	readonly delivered: boolean;
+	/**
+	 * When the owner's stop made at this time settled the wake without a turn (`delivered` is then true and nothing carried
+	 * it): the bot's session armed the watch by the stop, so its wake is work the stop ended.
+	 */
+	readonly stopSettledAt?: number;
 	/** A failing streak's words, as the monitor reported them. */
 	readonly failing?: Pick<WatchFailing, "cause" | "failures" | "reason">;
 }
@@ -142,8 +148,9 @@ function parseCursor(value: unknown): SessionWatchCursor {
 function parseWake(value: unknown): SessionWatchWake {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["kind", "deliveryId", "at", "delivered", "failing"]) ||
-		typeof value.delivered !== "boolean"
+		!hasOnlyKeys(value, ["kind", "deliveryId", "at", "delivered", "stopSettledAt", "failing"]) ||
+		typeof value.delivered !== "boolean" ||
+		(value.stopSettledAt !== undefined && value.delivered !== true)
 	)
 		throw new TypeError("Watch wake is invalid.");
 	const kind = oneOf(value.kind, SESSION_WATCH_WAKE_KINDS, "wake");
@@ -170,6 +177,7 @@ function parseWake(value: unknown): SessionWatchWake {
 		deliveryId: boundedRoutineText(value.deliveryId, MAX_ID_CHARS, "delivery"),
 		at: instant(value.at),
 		delivered: value.delivered,
+		...(value.stopSettledAt === undefined ? {} : { stopSettledAt: instant(value.stopSettledAt) }),
 		...(failing ? { failing } : {}),
 	};
 }
@@ -302,6 +310,68 @@ export function readSessionWatchWork(sessionFile: string, nowMs: number): Sessio
 		: { live: live.length, owed, firstExpiresAt: Math.min(...live.map((record) => record.expiresAt)) };
 }
 
+/** What an owner's stop ended of a session's watches: the watches it cancelled and the wakes it settled without a turn. */
+export interface WatchesEndedByStop {
+	readonly records: readonly SessionWatchRecord[];
+	readonly ended: number;
+	readonly settled: number;
+}
+
+/**
+ * The owner's stop made at `stopAt` over a session's watch records, at `nowMs`: every watch armed at or before then is
+ * ended (a live one cancelled, waking nobody) and every wake it is still owed is settled: marked delivered, by the input
+ * that carried it when `carried` says the session's transcript holds one (the delivery appended it while the stop
+ * waited), otherwise as settled by the stop (`stopSettledAt`). A watch armed after the stop is the session's later work
+ * and is kept as it is.
+ */
+export function endWatchesArmedByStop(
+	records: readonly SessionWatchRecord[],
+	stopAt: number,
+	nowMs: number,
+	carried: (deliveryId: string) => boolean,
+): WatchesEndedByStop {
+	let [ended, settled] = [0, 0];
+	const next = records.map((record): SessionWatchRecord => {
+		if (record.armedAt > stopAt) return record;
+		const live = record.status === "live";
+		const owed = record.wakes.some((wake) => !wake.delivered);
+		if (!live && !owed) return record;
+		if (live) ended++;
+		return {
+			...record,
+			...(live ? { status: "cancelled" as const, endedAt: nowMs } : {}),
+			wakes: record.wakes.map((wake): SessionWatchWake => {
+				if (wake.delivered) return wake;
+				if (carried(wake.deliveryId)) return { ...wake, delivered: true };
+				settled++;
+				return { ...wake, delivered: true, stopSettledAt: stopAt };
+			}),
+		};
+	});
+	return { records: next, ended, settled };
+}
+
+/**
+ * The ledger files beside a session's transcript: the ledger, the unreadable ones set aside under its name and the
+ * temporaries of its crashed atomic writes. They hold only the session's own watches, so they go with its transcript.
+ */
+export function sessionWatchLedgerFiles(sessionFile: string): string[] {
+	const ledger = sessionWatchLedgerPath(sessionFile);
+	const [directory, name] = [dirname(ledger), basename(ledger)];
+	let names: string[];
+	try {
+		names = readdirSync(directory);
+	} catch (error) {
+		if (isMissingFileError(error)) return [];
+		throw error;
+	}
+	return names
+		.filter(
+			(entry) => entry === name || entry.startsWith(`${name}.unreadable-`) || atomicTemporaryTarget(entry) === name,
+		)
+		.map((entry) => join(directory, entry));
+}
+
 export interface SessionWatchLedgerDeps {
 	readonly sessionId: string;
 	/** The ledger's file, from the session's transcript; undefined while the session has none (kept in memory). */
@@ -411,6 +481,13 @@ export class SessionWatchLedger {
 	 */
 	commit(next: readonly SessionWatchRecord[]): void {
 		this.write(retained(next, this.closedAt, this.deps.now()), this.closedAt);
+	}
+
+	/** Applies the owner's stop made at `stopAt` ({@link endWatchesArmedByStop}); writes only when it ended or settled anything. */
+	endArmedByStop(stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } {
+		const { records, ended, settled } = endWatchesArmedByStop(this.records, stopAt, this.deps.now(), carried);
+		if (ended + settled > 0 || records.some((record, index) => record !== this.records[index])) this.commit(records);
+		return { ended, settled };
 	}
 
 	/** Records that the session closed now: ended watches are kept for {@link ENDED_SESSION_WATCH_RETENTION_MS} after it. */

@@ -8,6 +8,7 @@ import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { canDeleteReservedWorkerBundle } from "./delegation/worker-bundle-deletion.ts";
 import { reserveSessionBundleDeletion, settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
+import { sessionWatchLedgerFiles } from "./watches/session-watch-ledger.ts";
 
 export type SessionArtifactDeletionMethod = "trash" | "unlink" | "preserved";
 
@@ -26,6 +27,8 @@ export interface ForegroundSessionBundleDeletion {
 	foreground: SessionArtifactPathDeletion;
 	/** The session's usage-journal sidecars: they record spend into this file and cannot outlive it. */
 	journal: SessionArtifactBundlePart;
+	/** The session's watch ledger (`watches/session-watch-ledger.ts`): its own watches, which end with it. */
+	watches: SessionArtifactBundlePart;
 	workerArtifacts: SessionArtifactBundlePart;
 	complete: boolean;
 }
@@ -79,6 +82,34 @@ export async function removePathWithTrashFallback(path: string): Promise<Session
 	}
 }
 
+/** Removes each path under the same policy, stopping at the first failure; absent when there is none. */
+async function removeEach(
+	paths: readonly string[],
+	removePath: (path: string) => Promise<SessionArtifactPathDeletion>,
+): Promise<SessionArtifactBundlePart> {
+	if (paths.length === 0) return { ok: true, method: "absent" };
+	let last: SessionArtifactPathDeletion = { ok: true, method: "trash" };
+	for (const path of paths) {
+		last = await removePath(path);
+		if (!last.ok) return last;
+	}
+	return last;
+}
+
+/** The session's watch ledger files, removed under the same policy; preserved when they cannot be listed. */
+async function removeWatchLedger(
+	sessionPath: string,
+	removePath: (path: string) => Promise<SessionArtifactPathDeletion>,
+): Promise<SessionArtifactBundlePart> {
+	let paths: string[];
+	try {
+		paths = sessionWatchLedgerFiles(sessionPath);
+	} catch {
+		return { ok: false, method: "preserved" };
+	}
+	return removeEach(paths, removePath);
+}
+
 /** Every usage-journal sidecar of the session file, removed one by one under the same policy; preserved when they cannot be listed. */
 async function removeJournalSidecars(
 	sessionPath: string,
@@ -101,16 +132,10 @@ async function removeJournalSidecars(
 	} catch {
 		return { ok: false, method: "preserved" };
 	}
-	if (paths.length === 0) return { ok: true, method: "absent" };
-	let last: SessionArtifactPathDeletion = { ok: true, method: "trash" };
-	for (const path of paths) {
-		last = await removePath(path);
-		if (!last.ok) return last;
-	}
-	return last;
+	return removeEach(paths, removePath);
 }
 
-/** One deletion reservation spans foreground, journal and optional worker-artifact removal. */
+/** One deletion reservation spans foreground, journal, watch-ledger and optional worker-artifact removal. */
 export async function deleteForegroundSessionBundle(
 	options: DeleteForegroundSessionBundleOptions,
 ): Promise<ForegroundSessionBundleDeletion> {
@@ -138,6 +163,7 @@ export async function deleteForegroundSessionBundle(
 		return {
 			foreground: { ok: false, method: "preserved", error: "Session is active or another deletion owns it." },
 			journal: { ok: false, method: "preserved" },
+			watches: { ok: false, method: "preserved" },
 			workerArtifacts: { ok: false, method: "preserved" },
 			complete: false,
 		};
@@ -154,12 +180,21 @@ export async function deleteForegroundSessionBundle(
 				return {
 					foreground,
 					journal: { ok: false, method: "preserved" },
+					watches: { ok: false, method: "preserved" },
 					workerArtifacts: { ok: false, method: "preserved" },
 					complete: false,
 				};
 			const journal = await removeJournalSidecars(options.sessionPath, removePath);
+			const watches = await removeWatchLedger(options.sessionPath, removePath);
+			const sidecars = journal.ok && watches.ok;
 			if (!canDeleteReservedWorkerBundle(options.agentDir, options.orchestrationHome, reservation))
-				return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
+				return {
+					foreground,
+					journal,
+					watches,
+					workerArtifacts: { ok: false, method: "preserved" },
+					complete: false,
+				};
 			const exists = await lstat(workerArtifactsPath).then(
 				() => true,
 				(error: unknown) => {
@@ -169,11 +204,17 @@ export async function deleteForegroundSessionBundle(
 			);
 			if (!exists) {
 				outcome = "removed";
-				return { foreground, journal, workerArtifacts: { ok: true, method: "absent" }, complete: journal.ok };
+				return {
+					foreground,
+					journal,
+					watches,
+					workerArtifacts: { ok: true, method: "absent" },
+					complete: sidecars,
+				};
 			}
 			const workerArtifacts = await removePath(workerArtifactsPath);
 			if (workerArtifacts.ok) outcome = "removed";
-			return { foreground, journal, workerArtifacts, complete: journal.ok && workerArtifacts.ok };
+			return { foreground, journal, watches, workerArtifacts, complete: sidecars && workerArtifacts.ok };
 		})();
 	} catch (error) {
 		failures.push(error);

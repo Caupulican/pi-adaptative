@@ -835,6 +835,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 						// The identifiers name what stayed behind in the log; the labels are what the owner reads.
 						const parts = [
 							{ id: "journal", label: text.remainderJournals, part: result.journal },
+							{ id: "watches", label: text.remainderWatches, part: result.watches },
 							{ id: "workerArtifacts", label: text.remainderWorkerArtifacts, part: result.workerArtifacts },
 						];
 						const remaining = parts.filter((entry) => !entry.part.ok);

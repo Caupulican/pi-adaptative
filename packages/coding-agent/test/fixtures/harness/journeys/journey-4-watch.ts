@@ -1,4 +1,5 @@
 import "../builtin-install.ts";
+import { dirname } from "node:path";
 import { expect } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
@@ -12,6 +13,8 @@ import {
 	assertWatchWake,
 	latestWatchWakeText,
 	scriptWatchWake,
+	sessionLedgerWatches,
+	sessionWatchOutcome,
 	settleWatchWake,
 	type WatchWakeExpectation,
 } from "./journey-watch-wake.ts";
@@ -382,6 +385,22 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	// A worker that arms a watch for its own wait is the one woken: running, it is steered with the event; the root hears
 	// only what the worker reports.
 	const workerFlag = projectPath("worker.flag");
+	// A worker's watch is one of the session's own waits (`core/watches/`): its firings and wakes are in the session's ledger.
+	const ledgerDirectory = () => dirname(manager.getSessionFile() ?? "");
+	const firesOf = (watchId: string) => sessionWatchOutcome(ledgerDirectory(), watchId).fires;
+	const untilFires = async (watchId: string, count: number): Promise<void> => {
+		for (let step = 0; step < 8 && firesOf(watchId) < count; step++) {
+			world.timers.advance("routines", 500);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	};
+	/** No firing of a worker's watch starts a routine worker; its one firing is one wake of the worker, delivered. */
+	const expectWorkerWoken = (watchId: string): void => {
+		expect(
+			sessionWatchOutcome(ledgerDirectory(), watchId).wakes,
+			`${watchId}: its firing is one delivered wake`,
+		).toEqual([["fired", true]]);
+	};
 	const workerPlan = "Report the size of worker.flag when it appears.";
 	const workerRunning = createBarrier();
 	const holdWorker = createBarrier();
@@ -485,27 +504,30 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		session.prompt("Have a worker wait for worker.flag and report its size."),
 	);
 	await withDeadline(trace, "the worker armed its watch and is running", workerRunning.promise);
-	await untilRuns("worker-wait", 1);
-	expect(runsOf("worker-wait"), "the worker's watch fires nothing for the file as it was").toBe(0);
+	await untilFires("worker-wait", 1);
+	expect(firesOf("worker-wait"), "the worker's watch fires nothing for the file as it was").toBe(0);
 	world.io.writeFileSync(workerFlag, "ready\n");
-	await untilRuns("worker-wait", 1);
+	await untilFires("worker-wait", 1);
 	holdWorker.release();
 	await withDeadline(trace, "the running worker is steered with the event", workerWoken.promise);
 	await withDeadline(trace, "the root hears the worker's report", rootHeardWorker.promise);
 	await withDeadline(trace, "agent idle after the worker's report", session.agent.waitForIdle());
 	await withDeadline(trace, "the session is at rest after the worker's report", session.waitForForegroundIdle());
 	expect(
-		{ workerSteps: workerRequests() - workersBefore, firings: runsOf("worker-wait") },
+		{ workerSteps: workerRequests() - workersBefore, firings: firesOf("worker-wait") },
 		"the worker took three model steps (arm, read, report) and its watch fired once",
 	).toEqual({ workerSteps: 3, firings: 1 });
-	expectDelivered("worker-wait", 1);
+	expectWorkerWoken("worker-wait");
 
 	// A read-only worker with a shell arms a command watch: its own gate admits the command, every check runs in the
 	// worker's directory with its offline, read-only environment, and the worker is woken with the output fenced as data.
 	const commandPlan = "Report the build status once it reads done.";
 	const statusCommand = "cat build-status.txt";
 	/** The scope the worker armed its watch under, as stored with it. */
-	const storedScope = () => store().getRoutine("build-wait")?.workerScope;
+	const storedScope = () => {
+		const armer = sessionLedgerWatches(ledgerDirectory()).find((watch) => watch.watchId === "build-wait")?.armedBy;
+		return armer?.kind === "worker" ? armer.scope : undefined;
+	};
 	/** Each check runs in the stored worker directory, with the worker's offline and read-only command environment. */
 	const checkWorkerShell = (request: ShellRequest): void => {
 		expect(request.cwd, "the watched command runs in the worker's directory").toBe(storedScope()?.cwd);
@@ -649,7 +671,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			})(),
 		);
 		expect(
-			{ firings: runsOf("build-wait"), scope: storedScope() },
+			{ firings: firesOf("build-wait"), scope: storedScope() },
 			"the watch stores the worker's read-only, offline scope, and the starting state fires nothing",
 		).toEqual({
 			firings: 0,
@@ -666,7 +688,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		});
 		world.timers.advance("routines", 1_000);
 		await withDeadline(trace, "the command watch checked again", doneSampled.promise);
-		await untilRuns("build-wait", 1);
+		await untilFires("build-wait", 1);
 		holdCommandWorker.release();
 		await withDeadline(trace, "the running worker is steered with the command's output", commandWoken.promise);
 		await withDeadline(trace, "the root hears the build worker's report", rootHeardCommandWorker.promise);
@@ -677,10 +699,10 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			session.waitForForegroundIdle(),
 		);
 		expect(
-			{ workerSteps: workerRequests() - commandWorkersBefore, firings: runsOf("build-wait") },
+			{ workerSteps: workerRequests() - commandWorkersBefore, firings: firesOf("build-wait") },
 			"the worker took three model steps (arm, read, report) and its command watch fired once",
 		).toEqual({ workerSteps: 3, firings: 1 });
-		expectDelivered("build-wait", 1);
+		expectWorkerWoken("build-wait");
 	} finally {
 		scriptedCheck.restore();
 	}

@@ -1662,7 +1662,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			usageWindow: () =>
 				this.deps.aggregateUsageWindow(rollingDayWindow(this.deps.getTimers().port("proactivity").now())),
 			routineStore: this._botTeamStore,
-			routineIntake: this._routines.current?.intake?.status(),
+			routines: this._routines,
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
 			hostEventConnections: () => this.readHostEventConnections(),
 			goalContinuation: () =>

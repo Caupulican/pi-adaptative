@@ -10,6 +10,7 @@ import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-regist
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { expandPath } from "../tools/path-utils.ts";
 import type { ShellCommandDialect } from "../tools/shell-command-parser.ts";
+import { DELEGATION_ACTIONS, OWN_WAIT_ACTIONS, THIRD_PARTY_READ_ONLY_ACTIONS } from "./harness-action-tables.ts";
 
 /**
  * The edge: the operations that can need the operator, and whether they still do.
@@ -435,66 +436,6 @@ const GH_READ_ONLY: ReadonlyMap<string, ReadonlySet<string> | "every"> = new Map
 	],
 );
 const GH_API_WRITE_OPTIONS = new Set(["-f", "-F", "--field", "--raw-field", "--input"]);
-/** Tool actions that hand the run's work to another agent: its authority would leave with it. */
-const DELEGATION_ACTIONS: Readonly<Record<string, ReadonlySet<string | undefined>>> = {
-	delegate: new Set([undefined, "start", "send", "broadcast", "follow_up", "resume"]),
-	pi_collaboration: new Set(["fire_task", "send_followup", "launch_workspace", "answer_question"]),
-	goal: new Set(["dispatch_worker"]),
-};
-/**
- * The closed table of actions a run carrying a third party's words may take on the harness's own action tools: the
- * ones that only read. Every other action of these tools, and any action of a tool not listed here, is the owner's
- * (`ownerOnlyToolCallReason`), except the delegation launches above, which are prepared like outward actions.
- */
-const THIRD_PARTY_READ_ONLY_ACTIONS: ReadonlyMap<string, ReadonlySet<string | undefined>> = new Map([
-	[
-		"delegate",
-		new Set([
-			"tasks",
-			"list",
-			"transcript",
-			"wait",
-			"wait_many",
-			"inbox",
-			"inbox_wait",
-			"status",
-			"review",
-			"profile_inspect",
-			"events",
-		]),
-	],
-	[
-		"pi_collaboration",
-		new Set([
-			"status",
-			"setup_help",
-			"workspace_plan",
-			"job_status",
-			"list_jobs",
-			"list_variables",
-			"list_templates",
-			"show_template",
-		]),
-	],
-	["goal", new Set(["get"])],
-	["routine", new Set(["list", "get"])],
-	["proactivity", new Set(["view"])],
-	["repo_read", new Set(["status", "log", "diff", "show", "blame", "ls-files", "rev-parse"])],
-	["decision_ledger_read", new Set(["sessions", "stages", "evaluations", "failures", "replay"])],
-	["secret_store", new Set(["status", "list"])],
-	["task_automation", new Set(["status", "spec", "validate"])],
-	["worktree_sync", new Set(["status", "git_status", "git_diff"])],
-	["pipeline", new Set(["list", "status"])],
-	["task_directory", new Set(["status"])],
-	["task_steps", new Set(["list"])],
-	["task_events", new Set(["events"])],
-	["bot_message", new Set(["list"])],
-	["runtime_update", new Set(["status"])],
-	["improvement_loop", new Set(["status"])],
-	["skill", new Set(["search", "read"])],
-	// Advisory judgments and reads; `resolve_uncertainty` records a disposition, so it stays the owner's.
-	["systemone", new Set(["status", "evaluate", "review", "vision", "evidence", "uncertainties", "locate"])],
-]);
 
 /** The operands of an invocation: words that are not options or the values `values` options take. */
 function operands(argv: readonly string[], values: ReadonlySet<string>): string[] {
@@ -688,7 +629,8 @@ export function classifyOutwardEdgeOperations(input: ClassifyEdgeInput): EdgeOpe
  * Why a tool call is the owner's own decision, which a run carrying a third party's words never makes: any action of
  * `knowledge`, `memory` (the owner's private records) and `channel_reply` (the owner's channel replies); an action
  * outside `THIRD_PARTY_READ_ONLY_ACTIONS` (a tool not listed there may take no action at all), other than a delegation
- * launch, which is prepared instead; and a knowledge grant to another agent.
+ * launch, which is prepared instead, and the run's own bounded wait (`OWN_WAIT_ACTIONS`); and a knowledge grant to
+ * another agent.
  */
 export function ownerOnlyToolCallReason(toolName: string, args: unknown): string | undefined {
 	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
@@ -700,7 +642,7 @@ export function ownerOnlyToolCallReason(toolName: string, args: unknown): string
 		return `${toolName} reads and changes the owner's private records`;
 	if (toolName === "channel_reply") return "channel_reply releases or discards the owner's channel replies";
 	const action = typeof record.action === "string" ? record.action : undefined;
-	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
+	if (DELEGATION_ACTIONS[toolName]?.has(action) || OWN_WAIT_ACTIONS.get(toolName)?.has(action)) return undefined;
 	const readOnly = THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName);
 	if (readOnly ? readOnly.has(action) : action === undefined) return undefined;
 	return `${toolName} ${action ?? "without an action"} changes state beyond reading`;
@@ -760,6 +702,7 @@ function isKnownActionTool(toolName: string): boolean {
 	return (
 		THIRD_PARTY_READ_ONLY_ACTIONS.has(toolName) ||
 		DELEGATION_ACTIONS[toolName] !== undefined ||
+		OWN_WAIT_ACTIONS.has(toolName) ||
 		REMOTE_OWNER_TYPED_ONLY.has(toolName) ||
 		REMOTE_OWNER_RECORD_TOOLS.has(toolName) ||
 		REMOTE_OWNER_OTHER_ACTION_TOOLS.has(toolName)
@@ -792,8 +735,8 @@ export function remoteOwnerTypedOnlyOperation(operations: readonly EdgeOperation
 
 /**
  * An action of a harness action tool that a run opened from an owner channel holds for the owner's approval: every
- * action outside the read-only table, the owner's private records and the delegation launches (which the outward
- * classifier holds as `agent.delegate`). Such an action changes state the edge does not classify (a measured command,
+ * action outside the read-only table, the owner's private records, the run's own bounded wait and the delegation launches
+ * (which the outward classifier holds as `agent.delegate`). Such an action changes state the edge does not classify (a measured command,
  * a step or event write), so the phone owner approves the exact call. A call of such a tool without a string `action`
  * is held too, as a run carrying a third party's words is refused it.
  */
@@ -801,7 +744,8 @@ export function remoteOwnerUnclassifiedAction(toolName: string, args: unknown): 
 	const action = toolAction(args);
 	if (REMOTE_OWNER_RECORD_TOOLS.has(toolName) || !isKnownActionTool(toolName)) return undefined;
 	if (DELEGATION_ACTIONS[toolName]?.has(action)) return undefined;
-	if (THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName)?.has(action)) return undefined;
+	if (THIRD_PARTY_READ_ONLY_ACTIONS.get(toolName)?.has(action) || OWN_WAIT_ACTIONS.get(toolName)?.has(action))
+		return undefined;
 	return {
 		class: "operation.irreversible",
 		operation: `${toolName} ${action ?? "without an action"}`,

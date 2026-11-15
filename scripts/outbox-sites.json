@@ -106,6 +106,13 @@
 			"reason": "port adapters of routine intake, whose announce claims the notice (claimThenEffect) before it calls deliver and whose isDelivered reads the same delivery id, and of routine results, which deliverWhilePending appends only while the result is pending in the store, read again under the transcript lock; the delivery id is the parent ledger's idempotency key"
 		},
 		{
+			"file": "packages/coding-agent/src/core/routines/routine-runtime-assembly.ts",
+			"transport": "this.deps.deliverParentInput(",
+			"enclosing": ["sessionWatches"],
+			"count": 1,
+			"reason": "port adapter of the session's own watch wakes: the wake is recorded owed in the session's watch ledger before the delivery, deliverWhileOwed appends only while that record still owes it, read under the transcript lock, and the ledger marks it delivered after; the delivery id is the parent ledger's idempotency key"
+		},
+		{
 			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
 			"transport": "this.deps.deliverParentInput(",
 			"enclosing": ["_getLeaders"],

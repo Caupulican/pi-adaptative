@@ -29,6 +29,7 @@ import type {
 	AutonomyRoutineLine,
 	AutonomyRunLine,
 	AutonomyStatusBlockKey,
+	AutonomyWatchLine,
 } from "../text-en/autonomy-status.ts";
 import { SESSIONS } from "./sessions.ts";
 
@@ -300,6 +301,14 @@ export const AUTONOMY_STATUS = {
 			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, próxima ${line.next}${line.startsFrom === undefined ? "" : ` (a partir de ${line.startsFrom})`}, última ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, ausência recusada: ${line.awayRefusal}`}${line.pause ?? ""}${line.originLoss ?? ""}${line.progress === undefined ? "" : `; onde parou: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
 			`; pausada após ${after} ${after === 1 ? "falha" : "falhas"}${reason === undefined ? "" : `: ${reason}`}`,
+		watchState: {
+			live: "monitorando",
+			fired: "disparou",
+			"timed-out": "prazo esgotado",
+			cancelled: "cancelado",
+		},
+		watchLine: (line: AutonomyWatchLine) =>
+			`monitoramento ${line.watchId}: ${line.state}, ${line.condition}, até ${line.ends}${line.worker === undefined ? "" : `, armado pelo worker ${line.worker}`}${line.owed === 0 ? "" : `, ${line.owed === 1 ? "1 despertar devido" : `${line.owed} despertares devidos`}`}`,
 		originLoss: (run: "undelivered" | "unstarted", at: string, why: string): string =>
 			run === "undelivered"
 				? `; um resultado não pôde ser entregue (${at}): ${why}`

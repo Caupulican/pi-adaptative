@@ -161,7 +161,7 @@ process.
 
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
-whatever armed them (the bot changes none, and cancels one its own session armed with `task_watch`'s `cancel` action once it
+whatever armed them (the bot changes none, and cancels one its own session armed with `task_watch`'s `cancel` action, naming its `watchId`, once it
 no longer waits on it, which frees that slot). A command or page is first admitted as the call its own shell or
 fetch tool would make, by its own gate (System One's operation judgment included), so a bot without that tool arms
 nothing, and a read-only bot's command is held to its read-only shell at arming and at every check. The bot's own session
@@ -170,7 +170,8 @@ samples or delivers them. While it holds a live watch, or a fired watch's wake i
 is no longer live), its session stays loaded past the idle close, a process that starts
 or sees its host let it go or die opens it again (only where it works in the directory that session worked in; the phone session
 never does), and retiring the bot drops its watches. The roster shows each bot's live watch count in the operator bar's
-words (`watching n`; the ring `◌n` only where the row has no room), read from the store in every session.
+words (`watching n`; the ring `◌n` only where the row has no room), read from the store and the watch ledgers beside its
+session files in every session.
 
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is

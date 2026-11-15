@@ -147,6 +147,16 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 					progress: progressWords(routine.progressLine),
 				}),
 			),
+			...list(value.watches, (watch) =>
+				words.routines.watchLine({
+					watchId: watch.watchId,
+					state: words.routines.watchState[watch.status],
+					condition: describeWatchCondition(watch.condition, interfaceText().chat.watch),
+					ends: at(watch.expiresAt),
+					worker: watch.runtimeId,
+					owed: watch.pendingWakes,
+				}),
+			),
 		]),
 		...block("awayDaemon", status.awayDaemon, (value) => [
 			words.awayDaemon.state({

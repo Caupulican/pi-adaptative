@@ -65,6 +65,7 @@ export const SELECTORS = {
 		deleted: "Session deleted",
 		remainder: (parts: string[]) => parts.join(" and "),
 		remainderJournals: "usage journals",
+		remainderWatches: "watch ledger",
 		remainderWorkerArtifacts: "worker artifacts",
 		removedWithRemainder: (detail: string) => `Session removed; ${detail} remain.`,
 		deleteFailed: "Failed to delete the session. Details are in the log.",

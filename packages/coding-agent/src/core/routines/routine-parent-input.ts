@@ -186,42 +186,59 @@ export function routineResultInputIds(delivery: RoutineDelivery): readonly [own:
 /** A delivered result's parent input receipt, or `"settled"`: it was settled elsewhere first and nothing was appended. */
 export type RoutineDeliveryReceipt = { readonly entryId: string } | "settled";
 
-/** Thrown under the transcript lock by {@link deliverWhilePending}'s append: the result is no longer pending. */
-class RoutineResultSettled extends Error {}
+/** Thrown under the transcript lock by {@link deliverWhileOwed}'s append: the delivery is no longer owed. */
+class DeliverySettled extends Error {}
 
 /**
- * Delivers `input`, a parent input of `delivery`, through `deliver` only while its result is still pending in `store`: the
- * store is read again under the transcript lock, right before the append, so a result settled while the delivery waited
- * for the session (an owner's stop marks the results it ends by its note) is never delivered too, and resolves
- * `"settled"`. While `stopWaiting` (an owner's stop of the bot whose session this is waits to be taken) nothing is
- * appended either: the delivery fails, to be tried again once the stop, taken, has settled what it covers, so no wake
- * starts a turn across a stop. A replay of an input already saved appends nothing and resolves its receipt.
+ * Delivers `input` through `deliver` only while `owed` holds, read under the transcript lock right before the append,
+ * so a delivery settled while it waited for the session (an owner's stop settles the ones it ends) is never delivered
+ * too, and resolves `"settled"`. While `stopWaiting` (an owner's stop of the bot whose session this is waits to be
+ * taken) nothing is appended either: the delivery fails, to be tried again once the stop, taken, has settled what it
+ * covers, so no wake starts a turn across a stop. A replay of an input already saved appends nothing and resolves its
+ * receipt.
  */
-export async function deliverWhilePending(
+export async function deliverWhileOwed(
+	input: ParentInputDelivery,
+	deliver: (input: ParentInputDelivery, options: ParentInputDeliveryOptions) => Promise<ParentInputReceipt>,
+	owed: () => boolean,
+	stopWaiting: () => boolean,
+): Promise<RoutineDeliveryReceipt> {
+	const withAppend: ParentInputDeliveryOptions["withAppend"] = (append) => {
+		if (!owed()) throw new DeliverySettled(`Delivery ${input.deliveryId} was settled before its append.`);
+		if (stopWaiting())
+			throw new Error(`Delivery ${input.deliveryId} waits for the owner's stop of the bot to be taken.`);
+		return append();
+	};
+	try {
+		return await deliver(input, { withAppend });
+	} catch (error) {
+		if (error instanceof DeliverySettled) return "settled";
+		throw error;
+	}
+}
+
+/**
+ * Delivers `input`, a parent input of `delivery`, only while its result is still pending in `store`
+ * ({@link deliverWhileOwed}): the store is read again under the transcript lock, so a result an owner's stop marked by
+ * its note is never delivered too.
+ */
+export function deliverWhilePending(
 	store: Pick<RoutineStorePort, "reload" | "listPendingRoutineDeliveries">,
 	{ occurrence, result }: RoutineDelivery,
 	input: ParentInputDelivery,
 	deliver: (input: ParentInputDelivery, options: ParentInputDeliveryOptions) => Promise<ParentInputReceipt>,
 	stopWaiting: () => boolean,
 ): Promise<RoutineDeliveryReceipt> {
-	const withAppend: ParentInputDeliveryOptions["withAppend"] = (append) => {
+	const pending = (): boolean => {
 		store.reload();
-		const pending = store
+		return store
 			.listPendingRoutineDeliveries(result.recipient, 2 * MAX_ROUTINE_OCCURRENCES)
 			.some(
 				(entry) =>
 					entry.occurrence.occurrenceId === occurrence.occurrenceId && entry.result.digest === result.digest,
 			);
-		if (!pending) throw new RoutineResultSettled("The routine result was settled before its delivery.");
-		if (stopWaiting()) throw new Error("The routine result waits for the owner's stop of the bot to be taken.");
-		return append();
 	};
-	try {
-		return await deliver(input, { withAppend });
-	} catch (error) {
-		if (error instanceof RoutineResultSettled) return "settled";
-		throw error;
-	}
+	return deliverWhileOwed(input, deliver, pending, stopWaiting);
 }
 
 /** One stored result's parent input: its identity is the occurrence and result digest, so a redelivery is the same. */

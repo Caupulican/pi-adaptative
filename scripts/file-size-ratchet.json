@@ -77,7 +77,7 @@
 		"packages/coding-agent/src/core/improvement-loop.ts": 1306,
 		"packages/ai/src/providers/openai-completions.ts": 1299,
 		"packages/coding-agent/src/core/automation/task-automation-controller.ts": 1276,
-		"packages/coding-agent/src/core/autonomy/edge-policy.ts": 1265,
+		"packages/coding-agent/src/core/autonomy/edge-policy.ts": 1209,
 		"packages/coding-agent/src/core/memory/transcript-summary-catalog.ts": 1225,
 		"packages/tui/src/utils.ts": 1218
 	}

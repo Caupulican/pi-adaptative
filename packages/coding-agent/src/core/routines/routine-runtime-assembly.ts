@@ -30,13 +30,16 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
+import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
 import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
+import type { SessionWatchPort } from "../watches/watch-tool.ts";
 import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import { routineOriginReach } from "./routine-origin-reach.ts";
 import {
+	deliverWhileOwed,
 	deliverWhilePending,
 	isCarriedRoutineCompletion,
 	ROUTINE_COMPLETION_TYPE,
@@ -46,7 +49,6 @@ import {
 	routineResultInputIds,
 	routineResultIsQuiet,
 } from "./routine-parent-input.ts";
-import { routineRunOpener } from "./routine-run-opener.ts";
 import type { RoutineHostEventPort } from "./routine-scheduler-controller.ts";
 import {
 	RoutineSchedulerController,
@@ -56,6 +58,7 @@ import {
 } from "./routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routine-session-controller.ts";
 import type { RoutineMessageResult } from "./routine-store-port.ts";
+import { TASK_WATCH_TOOL_NAME } from "./routine-tool-names.ts";
 import { routineWakeAddress } from "./routine-wake-address.ts";
 import { agentArmedWatchCount, heldWatchCount, workerArmedWatchCount } from "./routine-watch-arming.ts";
 import {
@@ -97,6 +100,8 @@ export interface RoutineRuntime {
 	/** The session's own watches (`core/watches/`), and the monitor that samples them with the same samplers. */
 	readonly sessionWatches: SessionWatchService;
 	readonly sessionWatchMonitor: RoutineWatchMonitor;
+	/** The session's own watches as its `watch` tool (and a bot's own `task_watch`) reach them. */
+	readonly watchPort: SessionWatchPort;
 	stop(): Promise<void>;
 }
 
@@ -211,19 +216,29 @@ export class RoutineRuntimeAssembly {
 		return carried ? { entryId: carried.entryId } : undefined;
 	}
 
-	/** The watch a worker runtime arms through: this session's routine runtime, which holds the worker's bounds and its wake address. */
+	/** The watch a worker runtime arms through: this session's watch service, which holds the worker's bounds and wakes it. */
 	taskWatches(runtime: () => RoutineRuntime | undefined): TaskWatchPort {
 		return {
 			available: () => runtime() !== undefined,
-			arm: async (worker, input, signal) => {
+			arm: async (worker, watch, signal) => {
 				const routines = runtime();
-				if (!routines) throw new Error("Routines are unavailable in this session.");
-				return routines.session.armForWorker(worker, input, signal);
+				if (!routines) throw new Error("Watches are unavailable in this session.");
+				return routines.sessionWatches.arm(
+					{
+						...watch,
+						armedBy: { kind: "worker", runtimeId: worker.runtimeId, scope: worker.scope },
+						parentToolName: TASK_WATCH_TOOL_NAME,
+					},
+					signal,
+				);
 			},
-			cancel: async (worker, routineId, signal) => {
+			cancel: async (worker, watchId, signal) => {
 				const routines = runtime();
-				if (!routines) throw new Error("Routines are unavailable in this session.");
-				await routines.session.cancelForWorker(worker, routineId, signal);
+				if (!routines) throw new Error("Watches are unavailable in this session.");
+				// The ledger holds the worker's watches; a routine watch of that id is one an earlier build armed for it.
+				if (routines.sessionWatches.holds(watchId))
+					routines.sessionWatches.cancel(watchId, { kind: "worker", runtimeId: worker.runtimeId }, signal);
+				else await routines.session.cancelForWorker(worker, watchId, signal);
 			},
 		};
 	}
@@ -365,8 +380,20 @@ export class RoutineRuntimeAssembly {
 				),
 			legacyWorkerWatches: (runtimeId) =>
 				workerArmedWatchCount(store.listRoutines(), sessionId, runtimeId, timers.now()),
-			deliverToSession: (deliveryId, content, details) =>
-				this.deps.deliverParentInput(this.sessionWake(deliveryId, content, details)),
+			workerRuntimeLive: (runtimeId) =>
+				workerRuntimeLive(this.host.workerLifecycle().getTaskRuntimeSnapshot(), runtimeId),
+			subscribeWorkers: (listener) => this.host.subscribeOrchestrationStore(listener),
+			deliverToSession: async (deliveryId, content, details, owed) => {
+				// Appended only while the wake is still owed and no owner's stop of the bot waits, as a routine result is.
+				const bot = this.deps.botAgentId;
+				const receipt = await deliverWhileOwed(
+					this.sessionWake(deliveryId, content, details),
+					(next, options) => this.deps.deliverParentInput(next, options),
+					owed,
+					() => bot !== undefined && botInboxStopWaiting(this.deps.getAgentDir(), bot),
+				);
+				return receipt === "settled" ? "settled" : "delivered";
+			},
 			wakeWorker: (runtimeId, text, key) => wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key),
 			warnOwner: warn,
 			isDisposed: () => this.deps.isDisposed(),
@@ -544,7 +571,6 @@ export class RoutineRuntimeAssembly {
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this.host.workerLifecycle().getTaskRuntimeSnapshot()),
 			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
-			runOpener: () => routineRunOpener(this.deps.getSessionManager().getBranch(), this.deps.getGoalStateSnapshot()),
 			warnOwner: (message) => this.host.warn(message),
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
@@ -634,6 +660,23 @@ export class RoutineRuntimeAssembly {
 			});
 			return shutdown;
 		};
-		return { scheduler, session, intake, watches, sessionWatches, sessionWatchMonitor, stop };
+		// The authority of the turn a call runs in: the latest decisive origin of the branch it extends.
+		const authority = () => turnAuthorityOf(latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin);
+		const turn = () => ({ kind: "turn" as const, authority: authority() });
+		const watchPort: SessionWatchPort = {
+			arm: (watch, toolCallId, signal) =>
+				sessionWatches.arm({ ...watch, armedBy: { kind: "session", authority: authority() }, toolCallId }, signal),
+			list: () => sessionWatches.listFor(turn()),
+			get: (watchId) => sessionWatches.get(watchId, turn()),
+			cancel: (watchId, signal) => sessionWatches.cancel(watchId, turn(), signal),
+			// A bot's own session's: its ledger's watch, else a routine watch an earlier build armed under that id.
+			cancelOwn: async (watchId, signal) => {
+				const caller = { ...turn(), sessionOnly: true };
+				if (sessionWatches.holds(watchId)) sessionWatches.cancel(watchId, caller, signal);
+				else await session.cancelForSession(watchId, caller.authority, signal);
+			},
+			now: () => routineTimers.now(),
+		};
+		return { scheduler, session, intake, watches, sessionWatches, sessionWatchMonitor, watchPort, stop };
 	}
 }

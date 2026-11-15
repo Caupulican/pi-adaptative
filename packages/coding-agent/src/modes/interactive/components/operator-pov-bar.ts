@@ -47,7 +47,10 @@ export interface OperatorPovSource {
 	getCiStatus?(): CiStatusView | undefined;
 	/** The session's goal state; an unfinished goal is marked on the bar with its requirement count. */
 	getGoalState?(): GoalState | undefined;
-	/** The session's live watch routines (armed conditions waiting on a file, process, port, command or page); a cached read. */
+	/**
+	 * The session's live watches, its ledger's and the routine watches an earlier build armed (armed conditions waiting on
+	 * a file, process, port, command or page); a cached read.
+	 */
 	getWatchCount?(): number;
 	/** Mandatory peer findings, separate from advisory System One doubts. */
 	getPeerFindingCount?(): number;

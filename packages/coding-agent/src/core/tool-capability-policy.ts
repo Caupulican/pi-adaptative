@@ -15,7 +15,7 @@ import {
 } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
-import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
+import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME, WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
@@ -115,6 +115,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["self_compact", policy([["workflow.plan"]], "control-plane")],
 	[PROACTIVITY_TOOL_NAME, policy([["settings.read", "settings.write"]], "control-plane")],
 	[ROUTINE_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
+	// The session's own wait: one-shot, bounded, on a condition its tools could check; it reads and changes no routine.
+	[WATCH_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	[BOT_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[ASSIGN_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[PLAN_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],

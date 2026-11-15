@@ -4,6 +4,7 @@
  * is observed under (`worker-watch-scope.ts`). This module owns the stored shape of the arming authority, its parse, the one
  * place the store stamps all four onto a new routine, and the check that the wake address and scope fit the routine.
  */
+import type { TurnAuthority } from "../turn-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type { PersistentRoutineDefinition, RoutineIntakeOrigin, RoutineOrigin } from "./routine-contract.ts";
 import { boundedRoutineText } from "./routine-field-guards.ts";
@@ -15,7 +16,9 @@ export const MAX_ARM_OWNER_SOURCES = 16;
 const MAX_ARM_TEXT_CHARS = 512;
 
 /**
- * The authority a routine was armed under, never more than the run that armed it held:
+ * The authority a routine was armed under, never more than the run that armed it held. A routine tool save now stamps
+ * `owner` alone (the model's own waits are the session's watches, `core/watches/`); `goal`, `wake` and `worker` are what
+ * earlier builds stamped on the watches they armed as routines, read until those end:
  * - `owner`: the owner spoke in the run; these are the owner sources its context held.
  * - `goal`: a goal continuation opened the run and this goal was active; `ownerSourceId` is the owner source the goal was
  *   started from, when the goal records one (a goal the owner's own message started), and the run claims no other. The run
@@ -31,8 +34,14 @@ export type RoutineArmAuthority =
 	| { readonly kind: "wake"; readonly ref: string }
 	| { readonly kind: "worker"; readonly runtimeId: string };
 
-/** What opened a run the owner did not speak in: the arming authority the run can offer a routine it arms. */
-export type RoutineRunOpener = Extract<RoutineArmAuthority, { readonly kind: "goal" | "wake" }>;
+/**
+ * The turn authority a routine watch was armed at, for a turn that would read or end it (`turnAuthorityCovers`): one saved
+ * under the owner's words, or before arming was stamped, is an owner's turn's; one a goal continuation or a delivered wake
+ * opened was armed without the owner's words, and its plan already reads back as data, so any turn of its session reaches it.
+ */
+export function routineWatchAuthority(armedBy: RoutineArmAuthority | undefined): TurnAuthority {
+	return armedBy === undefined || armedBy.kind === "owner" ? "owner" : "third-party";
+}
 
 /** The stored arming authority; a malformed one makes the whole routine unreadable. */
 export function parseRoutineArmAuthority(value: unknown): RoutineArmAuthority {

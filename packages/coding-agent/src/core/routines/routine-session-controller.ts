@@ -9,6 +9,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import type { RoutineCallFacts } from "../tool-capability-policy.ts";
 import type { NestedCallAdmission, NestedCallAdmitter } from "../tools/nested-tool-call.ts";
+import { type TurnAuthority, turnAuthorityCovers } from "../turn-origin.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
@@ -26,7 +27,7 @@ import {
 } from "./routine-contract.ts";
 import { latestOriginSettlements } from "./routine-origin-reach.ts";
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
-import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, type RoutineRunOpener } from "./routine-provenance.ts";
+import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, routineWatchAuthority } from "./routine-provenance.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
 import { routineRunsWorkers } from "./routine-save-origin.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
@@ -40,16 +41,8 @@ import {
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
-import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routine-tool-names.ts";
-import type { RoutineWakeAddress } from "./routine-wake-address.ts";
-import {
-	agentWatchBoundsRefusal,
-	agentWatchSlotsRefusal,
-	isWatchSchedule,
-	ownWatchSlotsRefusal,
-	type WatchScheduleInput,
-	workerWatchSlotsRefusal,
-} from "./routine-watch-arming.ts";
+import { ROUTINE_TOOL_NAME } from "./routine-tool-names.ts";
+import { isWatchSchedule, type WatchScheduleInput } from "./routine-watch-arming.ts";
 import { admitWatchCheck } from "./watch-check-admission.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
 import { routineWorkerAuthority, type WorkerWatchAuthority, watchCheckRefusal } from "./worker-watch-scope.ts";
@@ -80,8 +73,6 @@ interface RoutineSessionDeps {
 	 * or no run is active.
 	 */
 	ownerTurnSources(): readonly string[];
-	/** What opened the current run when the owner did not speak in it: a goal continuation or a delivered host input. */
-	runOpener(): RoutineRunOpener | undefined;
 	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
 	warnOwner(message: string): void;
 	now(): number;
@@ -93,12 +84,6 @@ interface RoutineSessionDeps {
  * carries the position); a watch, the position alone (`routine-save-origin.ts`).
  */
 type RoutineSave = { readonly intent: WorkerSavedIntent } | { readonly watchOrigin: WorkerReceiptOrigin };
-
-/**
- * The model call a tool save comes from: the `routine` tool, or the `task_watch` tool of a session that arms watches only
- * for its own wait (a bot's own session), whose every watch takes a slot of the session's count.
- */
-type RoutineSaveCall = typeof ROUTINE_TOOL_NAME | typeof TASK_WATCH_TOOL_NAME;
 
 /** A host intake creation: the routine, or why the routine owner refused it. Other failures are thrown. */
 export type RoutineIntakeCreation =
@@ -264,70 +249,16 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	/**
-	 * Arms a watch for the session's own wait with its `task_watch` tool (a bot's own session, which holds no `routine`
-	 * tool): the routine tool's arming of a watch, its check admitted by the session's gate as a sub-call of `toolCallId`,
-	 * under the bounds of a watch armed without the owner's words whoever opened the run (one-shot, an end time within a
-	 * day), and in a slot of the session's count whatever armed the others, since nothing in the session changes a watch
-	 * once armed; it only cancels one it armed itself (`cancelForSession`), which frees that slot.
+	 * Cancels a routine watch an earlier build armed for the session's own wait with its `task_watch` tool (a bot's own
+	 * session): one of its own session's watches that no worker armed, armed at the cancelling turn's `authority` or below
+	 * (`routineWatchAuthority`). A worker's watch is the worker's own (`cancelForWorker`).
 	 */
-	async armForSession(input: RoutineToolInput, toolCallId: string, signal?: AbortSignal): Promise<RoutineToolView> {
-		this.check(signal);
-		const watch = input.schedule;
-		if (!isWatchSchedule(watch)) throw new Error("Only a watch is armed for the session's own wait.");
-		const refusal = agentWatchBoundsRefusal(watch, this.deps.now());
-		if (refusal !== undefined) {
-			harnessLog.warn("routines", "a session's own watch was refused: it is not bounded");
-			throw new Error(refusal);
-		}
-		return this.save(input, undefined, toolCallId, signal, TASK_WATCH_TOOL_NAME);
-	}
-
-	/**
-	 * Arms a watch for a worker runtime's own wait, on the admitted identity and scope its executor holds: under the same
-	 * bounds as an agent-armed watch (one-shot, an end time within a day, a slot in the session's count), admitted and
-	 * observed under the worker's scope and the session's authority together, and woken at the runtime itself (`wake`),
-	 * never at the session. Neither the runtime id nor the scope is ever an argument.
-	 */
-	async armForWorker(
-		worker: WorkerWatchAuthority,
-		input: RoutineToolInput,
-		signal?: AbortSignal,
-	): Promise<RoutineToolView> {
-		this.check(signal);
-		const watch = input.schedule;
-		if (!isWatchSchedule(watch)) throw new Error("A worker can only arm a watch.");
-		const { runtimeId } = worker;
-		const refusal =
-			agentWatchBoundsRefusal(watch, this.deps.now()) ??
-			workerWatchSlotsRefusal(
-				this.deps.store.listRoutines(),
-				this.deps.parentSessionId,
-				runtimeId,
-				this.deps.now(),
-			) ??
-			agentWatchSlotsRefusal(this.deps.store.listRoutines(), this.deps.parentSessionId, this.deps.now());
-		if (refusal !== undefined) {
-			harnessLog.warn("routines", "a worker's watch was refused");
-			throw new Error(refusal);
-		}
-		return this.persist(
-			input,
-			{ watchOrigin: this.deps.captureOrigin() },
-			{
-				enabled: true,
-				armedBy: { kind: "worker", runtimeId },
-				wake: { kind: "worker", parentSessionId: this.deps.parentSessionId, runtimeId },
-				worker,
-			},
+	async cancelForSession(routineId: string, authority: TurnAuthority, signal?: AbortSignal): Promise<void> {
+		this.cancelWatch(
+			routineId,
+			(armedBy) => armedBy?.kind !== "worker" && turnAuthorityCovers(authority, routineWatchAuthority(armedBy)),
+			signal,
 		);
-	}
-
-	/**
-	 * Cancels a watch the session armed for its own wait with its `task_watch` tool (a bot's own session): one of its own
-	 * session's watches that no worker armed. A worker's watch is the worker's own (`cancelForWorker`).
-	 */
-	async cancelForSession(routineId: string, signal?: AbortSignal): Promise<void> {
-		this.cancelWatch(routineId, (armedBy) => armedBy?.kind !== "worker", signal);
 	}
 
 	/** Cancels a watch worker runtime `worker` armed for its own wait; one any other runtime or the session armed is absent to it. */
@@ -498,13 +429,12 @@ export class RoutineSessionController implements RoutineToolPort {
 		}
 	}
 
-	/** `toolCallId` names the `call` tool call that saves; the host's own save has none. */
+	/** `toolCallId` names the routine tool call that saves; the host's own save has none. */
 	private async save(
 		input: RoutineToolInput,
 		expectedRevision: number | undefined,
 		toolCallId: string | undefined,
 		signal?: AbortSignal,
-		call: RoutineSaveCall = ROUTINE_TOOL_NAME,
 	): Promise<RoutineToolView> {
 		this.check(signal);
 		// Read before admission waits: the sources in this call's context, never words the owner sends meanwhile.
@@ -512,15 +442,10 @@ export class RoutineSessionController implements RoutineToolPort {
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
 		// An update of a worker's watch is admitted under the scope the worker armed it with, which the store keeps.
 		const worker = prior && routineWorkerAuthority(prior);
-		const ownWatch = call === TASK_WATCH_TOOL_NAME;
-		const slotted = ownWatch || (authority?.armedBy !== undefined && authority.armedBy.kind !== "owner");
 		let check: NestedCallAdmission | undefined;
 		if (toolCallId !== undefined && isWatchSchedule(input.schedule)) {
-			// A watch with no slot left is refused before the gate is asked about its check.
-			if (slotted) this.requireWatchSlot(ownWatch);
 			check = await this.admitWatchedCall(
 				toolCallId,
-				call,
 				input.routineId,
 				input.schedule.condition,
 				prior,
@@ -536,8 +461,6 @@ export class RoutineSessionController implements RoutineToolPort {
 				? { watchOrigin: this.deps.captureOrigin() }
 				: { intent: await this.captureIntent(input, prior, signal) };
 			this.check(signal);
-			// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
-			if (slotted) this.requireWatchSlot(ownWatch);
 			// What an armed watch's save replaces, read after the awaits (the check above reloaded), so an undo restores it.
 			if (check && expectedRevision !== undefined) replaced = this.require(input.routineId, expectedRevision);
 			persisted = this.persist(input, saved, {
@@ -605,12 +528,10 @@ export class RoutineSessionController implements RoutineToolPort {
 
 	/**
 	 * A watched command or page is first the call its check would make, admitted by this session's gate as a sub-call of
-	 * the routine or `task_watch` call that arms it (`watch-check-admission.ts`). An update that keeps the armed check is
-	 * not asked again.
+	 * the routine call that arms it (`watch-check-admission.ts`). An update that keeps the armed check is not asked again.
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
-		parentToolName: RoutineSaveCall,
 		watchId: string,
 		condition: WatchScheduleInput["condition"],
 		prior: RoutineDefinitionView | undefined,
@@ -622,7 +543,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			this.deps,
 			{
 				toolCallId,
-				parentToolName,
+				parentToolName: ROUTINE_TOOL_NAME,
 				watchId,
 				condition: parseWatchCondition(condition),
 				...(worker ? { worker } : {}),
@@ -676,7 +597,6 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly timeZone?: string;
 			readonly toolAnsweredSources?: readonly string[];
 			readonly armedBy?: RoutineArmAuthority;
-			readonly wake?: RoutineWakeAddress;
 			/** A worker's watch: admitted under its scope too, which a creation stores (`worker-watch-scope.ts`). */
 			readonly worker?: WorkerWatchAuthority;
 			readonly intakeOrigin?: RoutineIntakeOrigin;
@@ -724,9 +644,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			...(extras.armedBy === undefined ? {} : { armedBy: extras.armedBy }),
 			...(extras.worker === undefined ? {} : { workerScope: extras.worker.scope }),
 			// A watch wakes the session that saved it, stamped once at creation from this controller, never from the call's arguments.
-			...(watching
-				? { wake: extras.wake ?? { kind: "session" as const, sessionId: this.deps.parentSessionId } }
-				: {}),
+			...(watching ? { wake: { kind: "session" as const, sessionId: this.deps.parentSessionId } } : {}),
 			...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 			...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 		});
@@ -744,50 +662,19 @@ export class RoutineSessionController implements RoutineToolPort {
 	/**
 	 * What a tool save may do in the current run. Standing work is created, changed, restarted or run only on the owner's
 	 * own words: a run a routine result, CI event or other host input opened cannot extend or re-trigger the automation
-	 * that woke it. The one exception is a watch the run arms for its own work: a condition edge that is one-shot and ends
-	 * within a day ({@link agentWatchBoundsRefusal}), while the session holds fewer than the most such watches
-	 * ({@link agentWatchSlotsRefusal}), stamped with what opened the run so it never claims owner words it does not have.
-	 * That watch fires once and cannot re-arm itself: its wake is a run like this one and passes the same bounds, so a chain
-	 * of waits is bounded by the slot count and each deadline, and nothing recurring or untimed starts without the owner.
+	 * that woke it. A wait the model arms for its own work is not a routine: the `watch` tool arms it in any turn
+	 * (`core/watches/`). A watch saved here is the owner's, stamped with the owner sources it answers.
 	 */
 	private authorizeToolSave(
 		input: RoutineToolInput,
 		expectedRevision: number | undefined,
 	): { readonly answeredSources?: readonly string[]; readonly armedBy?: RoutineArmAuthority } {
-		const schedule = input.schedule;
-		const watch = expectedRevision === undefined && isWatchSchedule(schedule) ? schedule : undefined;
-		if (watch && this.deps.ownerTurnSources().length === 0) {
-			const opener = this.deps.runOpener();
-			if (!opener) {
-				harnessLog.warn("routines", "a watch was refused: nothing the harness delivered opened this run");
-				throw new Error(
-					"The owner has not spoken in this turn and no delivered result, event or goal continuation opened it, so no watch can be armed in it. Tell the owner what is waiting.",
-				);
-			}
-			const refusal = agentWatchBoundsRefusal(watch, this.deps.now());
-			if (refusal !== undefined) {
-				harnessLog.warn("routines", "a watch was refused: it is not bounded", { opener: opener.kind });
-				throw new Error(refusal);
-			}
-			return { armedBy: opener };
-		}
+		const watch = expectedRevision === undefined && isWatchSchedule(input.schedule);
 		const sources = this.requireOwnerTurn();
 		return {
 			answeredSources: sources,
 			...(watch ? { armedBy: { kind: "owner" as const, sourceIds: sources.slice(-MAX_ARM_OWNER_SOURCES) } } : {}),
 		};
-	}
-
-	/** Refuses a watch with no slot left: of the agent-armed watches, or of all the session holds for its own waits (`own`). */
-	private requireWatchSlot(own: boolean): void {
-		const refusal = (own ? ownWatchSlotsRefusal : agentWatchSlotsRefusal)(
-			this.deps.store.listRoutines(),
-			this.deps.parentSessionId,
-			this.deps.now(),
-		);
-		if (refusal === undefined) return;
-		harnessLog.warn("routines", "a watch was refused: the session holds the most it may");
-		throw new Error(refusal);
 	}
 
 	/** The owner sources the current run answers; the owner's own words are what standing work waits for. */
@@ -796,7 +683,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		if (sources.length === 0) {
 			harnessLog.warn("routines", "a routine change was refused: the owner has not spoken in this turn");
 			throw new Error(
-				"The owner has not spoken in this turn (a result or event started it): create, update, resume, run, note and reset_progress need the owner's request. To wait on your own work, arm a watch with stopAfterFirstRun and expiresAt within 24 hours.",
+				"The owner has not spoken in this turn (a result or event started it): create, update, resume, run, note and reset_progress need the owner's request. To wait on your own work, arm a watch with the watch tool, which works in any turn.",
 			);
 		}
 		return sources;

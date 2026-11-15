@@ -49,9 +49,11 @@ import { admitWatchCheck, type WatchCheckAdmitter } from "../routines/watch-chec
 import { type WatchCondition, watchFiredLine } from "../routines/watch-contract.ts";
 import { watchCheckRefusal } from "../routines/worker-watch-scope.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { type TurnAuthority, turnAuthorityCovers } from "../turn-origin.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import {
 	isLiveSessionWatch,
+	parseSessionWatchRecord,
 	type SessionWatchArmer,
 	type SessionWatchLedger,
 	type SessionWatchRecord,
@@ -63,6 +65,28 @@ import {
 
 /** How long a wake that could not be delivered waits before it is tried again. */
 const WATCH_WAKE_RETRY_DELAY_MS = 5_000;
+
+/** Who reads or ends a session's watches: a turn of the session, under its authority, or one of its worker runtimes. */
+export type SessionWatchCaller =
+	| {
+			readonly kind: "turn";
+			readonly authority: TurnAuthority;
+			/** Only the watches the session itself armed (a bot's own session's `task_watch`), never a worker's. */
+			readonly sessionOnly?: boolean;
+	  }
+	| { readonly kind: "worker"; readonly runtimeId: string };
+
+/**
+ * Whether `caller` holds watch `record`, to read or end it: a worker runtime its own; a turn a watch the session armed at
+ * the turn's authority or below, and a worker's only from an owner's turn. So a third party's run, or one opened from an
+ * owner channel, never reads or ends a watch an owner's turn armed, nor its plan.
+ */
+export function callerHoldsWatch(record: SessionWatchRecord, caller: SessionWatchCaller): boolean {
+	if (caller.kind === "worker")
+		return record.armedBy.kind === "worker" && record.armedBy.runtimeId === caller.runtimeId;
+	if (record.armedBy.kind === "worker") return caller.authority === "owner" && caller.sessionOnly !== true;
+	return turnAuthorityCovers(caller.authority, record.armedBy.authority);
+}
 
 /** One arming: what to wait on, the plan, the end time and who arms it. */
 export interface SessionWatchArmRequest {
@@ -104,8 +128,21 @@ export interface SessionWatchServiceDeps {
 	legacyAgentWatches(): number;
 	/** Live routine watches an earlier build armed for this worker runtime. */
 	legacyWorkerWatches(runtimeId: string): number;
-	/** Wakes the session with one parent input (steer mode); resolves once it is durable. */
-	deliverToSession(deliveryId: string, content: string, details: Readonly<Record<string, unknown>>): Promise<unknown>;
+	/** Whether a worker runtime can still be woken (`worker-watch-liveness.ts`): retiring or cancelling it ends its watches. */
+	workerRuntimeLive(runtimeId: string): boolean;
+	/** Tells the listener of every change of the session's worker runtimes. */
+	subscribeWorkers(listener: () => void): () => void;
+	/**
+	 * Wakes the session with one parent input (steer mode); resolves once it is durable. `owed` is read under the
+	 * transcript's lock right before the append: a wake no longer owed (the owner's stop settled it meanwhile) appends
+	 * nothing and resolves `"settled"`.
+	 */
+	deliverToSession(
+		deliveryId: string,
+		content: string,
+		details: Readonly<Record<string, unknown>>,
+		owed: () => boolean,
+	): Promise<"delivered" | "settled">;
 	wakeWorker(runtimeId: string, text: string, key: string): WorkerWake;
 	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
 	warnOwner(message: string): void;
@@ -200,6 +237,7 @@ export class SessionWatchService implements WatchObservationStore {
 	private retryTimer: unknown;
 	private draining: Promise<void> | undefined;
 	private drainAgain = false;
+	private unsubscribeWorkers: (() => void) | undefined;
 	/** The reason last warned for a wake that could not be delivered, so one failing delivery warns once. */
 	private lastDeliveryFault: string | undefined;
 
@@ -211,6 +249,8 @@ export class SessionWatchService implements WatchObservationStore {
 	start(): void {
 		if (this.started || this.stopped) return;
 		this.started = true;
+		this.unsubscribeWorkers = this.deps.subscribeWorkers(() => this.endWatchesOfEndedWorkers());
+		this.endWatchesOfEndedWorkers();
 		this.expireDue();
 		this.drain();
 	}
@@ -219,6 +259,8 @@ export class SessionWatchService implements WatchObservationStore {
 	async stop(): Promise<void> {
 		if (this.stopped) return;
 		this.stopped = true;
+		this.unsubscribeWorkers?.();
+		this.unsubscribeWorkers = undefined;
 		this.clearTimer("expiryTimer");
 		this.clearTimer("retryTimer");
 		await this.draining;
@@ -234,13 +276,39 @@ export class SessionWatchService implements WatchObservationStore {
 		return this.deps.ledger.list().filter((record) => isLiveSessionWatch(record, nowMs)).length;
 	}
 
+	/** Every watch of the session, for its own readers (the operator's status); a caller reads only its own ({@link listFor}). */
 	list(): SessionWatchView[] {
 		return this.deps.ledger.list().map(view);
 	}
 
-	get(watchId: string): SessionWatchView | undefined {
+	/** The watches `caller` holds ({@link callerHoldsWatch}). */
+	listFor(caller: SessionWatchCaller): SessionWatchView[] {
+		return this.deps.ledger
+			.list()
+			.filter((record) => callerHoldsWatch(record, caller))
+			.map(view);
+	}
+
+	/** Whether the ledger holds watch `watchId` at all, whoever armed it. */
+	holds(watchId: string): boolean {
+		return this.deps.ledger.get(watchId) !== undefined;
+	}
+
+	/**
+	 * The owner's stop made at `stopAt` (a bot's): the watches the session armed by then end and the wakes they are owed
+	 * are settled without a turn, a wake its transcript already carries (`carried`) marked by that input
+	 * ({@link endWatchesArmedByStop}). A failure throws, with the ledger as it was.
+	 */
+	endArmedByStop(stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } {
+		const outcome = this.deps.ledger.endArmedByStop(stopAt, carried);
+		this.followEndTimes();
+		return outcome;
+	}
+
+	/** Watch `watchId` when `caller` holds it; absent to it otherwise, as a watch never armed is. */
+	get(watchId: string, caller: SessionWatchCaller): SessionWatchView | undefined {
 		const record = this.deps.ledger.get(watchId);
-		return record && view(record);
+		return record && callerHoldsWatch(record, caller) ? view(record) : undefined;
 	}
 
 	/**
@@ -269,20 +337,22 @@ export class SessionWatchService implements WatchObservationStore {
 						},
 						signal,
 					);
-		const record: SessionWatchRecord = {
-			watchId: request.watchId,
-			incarnationId: randomUUID(),
-			...(request.purpose === undefined ? {} : { purpose: request.purpose }),
-			onFire: request.onFire,
-			condition: admitted.condition,
-			armedAt: this.deps.timers.now(),
-			expiresAt: request.expiresAt,
-			armedBy: request.armedBy,
-			cursor: { kind: "watch", truth: null, fires: 0 },
-			status: "live",
-			wakes: [],
-		};
+		let record: SessionWatchRecord;
 		try {
+			// Built through the ledger's own codec, so no arming writes a record a reload would set aside.
+			record = parseSessionWatchRecord({
+				watchId: request.watchId,
+				incarnationId: randomUUID(),
+				...(request.purpose === undefined ? {} : { purpose: request.purpose }),
+				onFire: request.onFire,
+				condition: admitted.condition,
+				armedAt: this.deps.timers.now(),
+				expiresAt: request.expiresAt,
+				armedBy: request.armedBy,
+				cursor: { kind: "watch", truth: null, fires: 0 },
+				status: "live",
+				wakes: [],
+			} satisfies SessionWatchRecord);
 			this.check(signal);
 			this.requireRoom(request);
 			this.deps.ledger.commit([
@@ -351,12 +421,13 @@ export class SessionWatchService implements WatchObservationStore {
 			);
 	}
 
-	/** Stops a live watch; it wakes nobody. */
-	cancel(watchId: string, signal?: AbortSignal): SessionWatchView {
+	/** Stops a live watch `caller` holds; it wakes nobody. One it does not hold is absent to it. */
+	cancel(watchId: string, caller: SessionWatchCaller, signal?: AbortSignal): SessionWatchView {
 		this.check(signal);
 		const nowMs = this.deps.timers.now();
 		const record = this.deps.ledger.get(watchId);
-		if (!record || !isLiveSessionWatch(record, nowMs)) throw new Error(`No live watch ${watchId} in this session.`);
+		if (!record || !callerHoldsWatch(record, caller) || !isLiveSessionWatch(record, nowMs))
+			throw new Error(`No live watch ${watchId} you armed in this session.`);
 		const cancelled: SessionWatchRecord = { ...record, status: "cancelled", endedAt: nowMs };
 		this.replace(cancelled);
 		this.followEndTimes();
@@ -443,6 +514,40 @@ export class SessionWatchService implements WatchObservationStore {
 		);
 	}
 
+	/**
+	 * Ends the live watches of worker runtimes that can no longer be woken (retired, cancelled, gone): what they waited for
+	 * ended with the worker, so they free their slots and wake nobody. Read from the durable task state, so it holds across
+	 * a restart.
+	 */
+	private endWatchesOfEndedWorkers(): void {
+		if (!this.active) return;
+		const nowMs = this.deps.timers.now();
+		const ended = this.deps.ledger
+			.list()
+			.filter(
+				(record) =>
+					record.status === "live" &&
+					record.armedBy.kind === "worker" &&
+					!this.deps.workerRuntimeLive(record.armedBy.runtimeId),
+			);
+		if (ended.length === 0) return;
+		const ids = new Set(ended.map((record) => record.watchId));
+		try {
+			this.deps.ledger.commit(
+				this.deps.ledger
+					.list()
+					.map((record) =>
+						ids.has(record.watchId) ? { ...record, status: "cancelled" as const, endedAt: nowMs } : record,
+					),
+			);
+		} catch (error) {
+			// The ledger could not be written: the next change of the session's workers tries again.
+			this.warn(error);
+			return;
+		}
+		this.followEndTimes();
+	}
+
 	/** Ends every live watch whose end time passed, with what it last saw and the wake it owes. */
 	private expireDue(): void {
 		const nowMs = this.deps.timers.now();
@@ -526,11 +631,12 @@ export class SessionWatchService implements WatchObservationStore {
 			for (const wake of record.wakes) {
 				if (wake.delivered || !this.active) continue;
 				try {
-					if (!(await this.deliver(record, wake))) {
+					const outcome = await this.deliver(record, wake);
+					if (outcome === "later") {
 						retry = true;
 						continue;
 					}
-					this.markDelivered(record.watchId, wake.deliveryId);
+					if (outcome === "delivered") this.markDelivered(record.watchId, wake.deliveryId);
 					this.lastDeliveryFault = undefined;
 				} catch (error) {
 					retry = true;
@@ -542,14 +648,21 @@ export class SessionWatchService implements WatchObservationStore {
 		if (retry) this.retryLater();
 	}
 
-	/** Delivers one wake; false when its worker did not take it now and the retry window is still open. */
-	private async deliver(record: SessionWatchRecord, wake: SessionWatchWake): Promise<boolean> {
+	/**
+	 * Delivers one wake: `"later"` when its worker did not take it now and the retry window is still open, `"settled"` when
+	 * it was no longer owed at the append (the owner's stop settled it).
+	 */
+	private async deliver(
+		record: SessionWatchRecord,
+		wake: SessionWatchWake,
+	): Promise<"delivered" | "settled" | "later"> {
 		const details = sessionWatchWakeDetails(record, wake);
 		const text = sessionWatchWakeText(record, wake);
-		if (record.armedBy.kind === "session") {
-			await this.deps.deliverToSession(wake.deliveryId, text, details);
-			return true;
-		}
+		const owed = () =>
+			this.deps.ledger
+				.get(record.watchId)
+				?.wakes.some((entry) => entry.deliveryId === wake.deliveryId && !entry.delivered) === true;
+		if (record.armedBy.kind === "session") return this.deps.deliverToSession(wake.deliveryId, text, details, owed);
 		const { runtimeId } = record.armedBy;
 		const woken = this.deps.wakeWorker(
 			runtimeId,
@@ -557,14 +670,14 @@ export class SessionWatchService implements WatchObservationStore {
 			wake.deliveryId,
 		);
 		// A runtime that is gone settles the wake unwoken, as a routine watch's does.
-		if (woken.kind !== "refused") return true;
-		if (this.deps.timers.now() - wake.at < WORKER_WAKE_RETRY_MS) return false;
-		await this.deps.deliverToSession(
+		if (woken.kind !== "refused") return "delivered";
+		if (this.deps.timers.now() - wake.at < WORKER_WAKE_RETRY_MS) return "later";
+		return this.deps.deliverToSession(
 			`${wake.deliveryId}:session`,
 			`${workerUnreachableLine(runtimeId, woken.reason)}\n${text}`,
 			details,
+			owed,
 		);
-		return true;
 	}
 
 	private markDelivered(watchId: string, wakeId: string): void {

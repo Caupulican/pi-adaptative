@@ -9,6 +9,8 @@ import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-s
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolCallFacts } from "../tool-capability-policy.ts";
+import type { SessionWatchView } from "../watches/session-watch-service.ts";
+import { createWatchTool } from "../watches/watch-tool.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routine-intake.ts";
 import type { RoutineRuntime } from "./routine-runtime-assembly.ts";
@@ -29,8 +31,12 @@ export class SessionRoutines {
 	private readonly ports: SessionRoutinesPorts;
 	private runtime: RoutineRuntime | undefined;
 	private started = false;
-	/** A bot's own session's `task_watch`: it reads the runtime at each call, since the runtime is built with the store. */
-	private readonly ownWatchTool = createSessionTaskWatchTool(() => this.loaded()?.session);
+	/**
+	 * The session's own waits: a root session's `watch`, a bot's own session's `task_watch`. Each reads the runtime at the
+	 * call, since the runtime is built with the store.
+	 */
+	private readonly watchTool = createWatchTool(() => this.loaded()?.watchPort);
+	private readonly ownWatchTool = createSessionTaskWatchTool(() => this.loaded()?.watchPort);
 	private readonly watchListeners = new Set<() => void>();
 	/**
 	 * The session's own watches as the operator bar counts them (`core/watches/`): none until the runtime is built, then
@@ -38,6 +44,14 @@ export class SessionRoutines {
 	 */
 	readonly ownWatches = {
 		liveCount: (nowMs: number): number => this.runtime?.sessionWatches.liveCount(nowMs) ?? 0,
+		/** Every watch in the ledger, for the session's own status; none until the runtime is built. */
+		list: (): SessionWatchView[] => this.runtime?.sessionWatches.list() ?? [],
+		/**
+		 * The owner's stop of a bot made at `stopAt`, over its own session's watches (`SessionWatchService.endArmedByStop`):
+		 * the runtime is built for it, since the ledger holds the session's watches whether or not it ran yet.
+		 */
+		endArmedByStop: (stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } =>
+			this.loaded()?.sessionWatches.endArmedByStop(stopAt, carried) ?? { ended: 0, settled: 0 },
 		subscribe: (listener: () => void): (() => void) => {
 			this.watchListeners.add(listener);
 			return () => this.watchListeners.delete(listener);
@@ -118,12 +132,12 @@ export class SessionRoutines {
 		return this.runtime?.intake?.settled() ?? Promise.resolve();
 	}
 
-	/** The session's routine tools: a root session's `routine`; a bot's own session's `task_watch`, for its own waits. */
+	/** The session's routine tools: a root session's `routine` and `watch`; a bot's own session's `task_watch`, for its own waits. */
 	tools(): ToolDefinition[] {
 		const scope = this.scope();
 		if (scope === "session") {
 			const tool = this.loaded()?.session.tool;
-			return tool ? [tool] : [];
+			return tool ? [tool, this.watchTool] : [];
 		}
 		return scope === "own-watches" ? [this.ownWatchTool] : [];
 	}

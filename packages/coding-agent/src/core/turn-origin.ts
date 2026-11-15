@@ -468,6 +468,22 @@ export function isRemoteOwnerOrigin(origin: TurnOriginRecord | undefined): boole
 	return origin?.k === "owner-channel";
 }
 
+/** The authority a decisive origin gives a run (`RunTurnOrigin`); no decisive origin is the owner's. */
+export function turnAuthorityOf(origin: TurnOriginRecord | undefined): TurnAuthority {
+	if (isThirdPartyOrigin(origin)) return "third-party";
+	return isRemoteOwnerOrigin(origin) ? "remote-owner" : "owner";
+}
+
+const TURN_AUTHORITY_RANK: Readonly<Record<TurnAuthority, number>> = { "third-party": 0, "remote-owner": 1, owner: 2 };
+
+/**
+ * Whether a turn of authority `caller` reaches what a turn of authority `armed` made: its own standing or below. An owner's
+ * turn reaches everything; one an owner channel opened reaches its own and a third party's; a third party's only its own.
+ */
+export function turnAuthorityCovers(caller: TurnAuthority, armed: TurnAuthority): boolean {
+	return TURN_AUTHORITY_RANK[armed] <= TURN_AUTHORITY_RANK[caller];
+}
+
 /**
  * The owner's typed words, the owner's words from a verified owner channel, and a third party's words decide a run's
  * authority; the owner's automation does not.
@@ -575,7 +591,6 @@ export class RunTurnOrigin {
 	}
 
 	authority(): TurnAuthority {
-		if (isThirdPartyOrigin(this.latest)) return "third-party";
-		return isRemoteOwnerOrigin(this.latest) ? "remote-owner" : "owner";
+		return turnAuthorityOf(this.latest);
 	}
 }
