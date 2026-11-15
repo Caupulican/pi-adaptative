@@ -70,6 +70,10 @@ export async function runJourney8(): Promise<void> {
 		{
 			name: "journey-8-command-code-allowance",
 			journey: 8,
+			warningAllowances: [
+				// The running worker's leg waits for its subscription's usage reset and asserts this warning once.
+				/^Worker \S+: its subscription's usage is used up; it resumes on its own when the usage resets \(.+\)\.$/,
+			],
 			settings: {
 				fleet: { ceiling: { running: 4 } },
 				workerDelegation: {

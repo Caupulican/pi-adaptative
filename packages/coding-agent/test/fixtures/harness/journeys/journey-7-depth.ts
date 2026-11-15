@@ -250,7 +250,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			firstClosedAfterPart:
 				first.closedAt !== undefined && part.closedAt !== undefined && first.closedAt >= part.closedAt,
 			handedOnLine: seen.handedOnLine,
-			toldOnce: seen.wakeLines.filter((line) => /^Leader \S+ finished /.test(line)).length,
+			// A goal leader is named by its goal's first line, so its name may hold spaces.
+			toldOnce: seen.wakeLines.filter((line) => /^Leader .+ finished the goal "/.test(line)).length,
 			goalInOutcome: outcomeLine?.includes(`the goal "${GOAL}"`),
 			reportsTop: seen.wakeLines.join("\n").includes(TOP_REPORT),
 		},
