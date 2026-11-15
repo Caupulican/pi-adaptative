@@ -395,14 +395,16 @@ const PACKAGE_SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const RELEASE_SCRIPT_RE = /^release(?:[:._-](?:patch|minor|major|repair|adopt|promote|publish))?$/u;
 
 /**
- * A command whose run is a wait on state outside the session, which the bash tool runs as a background task so the wait
- * never holds the turn: `gh run watch`, `gh pr checks --watch`, a release script (`npm`, `pnpm`, `yarn` or `bun`
+ * A command whose run ends in a wait on state outside the session, which the bash tool runs as a background task so the
+ * wait never holds the turn: `gh run watch`, `gh pr checks --watch`, a release script (`npm`, `pnpm`, `yarn` or `bun`
  * `run release`, `run release:patch` and the like), or a `while` or `until` loop whose body runs `sleep` (a polling loop,
- * `until test -f done; do sleep 5; done`). It is read from the command's parsed structure, so such a command anywhere
- * in the line counts (`cd x && gh run watch 12 | tail -5`, inside an `if`, a group or `bash -c '…'`), while the same
- * words as an argument (`echo "gh run watch"`, a commit message, `grep "npm run release"`) do not. A bare `sleep N`, a loop that never sleeps, a `for` loop (a bounded list), a
- * `while read` loop (it paces its own input, not a check), and a line the structure reader cannot read (a here-document,
- * a function definition, an unterminated quote) are not waits.
+ * `until test -f done; do sleep 5; done`). It is read from the command's parsed structure and counts only as the line's
+ * last work: the last pipeline (`cd x && gh run watch 12 | tail -5`), and inside it the last work of a group, a branch
+ * of an `if` or `case`, a loop's body or `bash -c '…'`. A line that runs more after the wait (`gh run watch 12 && npm
+ * run migrate`) is not one, nor is the same words as an argument (`echo "gh run watch"`, a commit message, `grep "npm
+ * run release"`). A bare `sleep N`, a loop that never sleeps, a `for` loop (a bounded list), a `while read` loop (it
+ * paces its own input, not a check), and a line the structure reader cannot read (a here-document, a function
+ * definition, an unterminated quote) are not waits.
  */
 export function isExternalWaitCommand(command: string): boolean {
 	return isExternalWaitAtDepth(command, 0);
@@ -412,7 +414,14 @@ function isExternalWaitAtDepth(command: string, depth: number): boolean {
 	const tokens = tokenizeShellCommand(command, "posix", { compound: true });
 	if (!tokens) return false;
 	const nodes = parseShellCompound(tokens);
-	return typeof nodes !== "string" && nodes.some((node) => nodeWaits(node, depth));
+	return typeof nodes !== "string" && listWaits(nodes, depth);
+}
+
+/** A list ends in a wait when a command of its last pipeline waits: nothing the list runs after the wait is held by it. */
+function listWaits(nodes: readonly ShellCompoundNode[], depth: number): boolean {
+	let start = nodes.length - 1;
+	while (start > 0 && nodes[start]?.piped === true) start--;
+	return nodes.slice(Math.max(0, start)).some((node) => nodeWaits(node, depth));
 }
 
 /** The commands a compound command runs directly: a group's body, every list of an `if` or `case`, a loop's condition and body. */
@@ -430,14 +439,26 @@ function childCommands(node: ShellCompoundNode): ShellCompoundNode[] {
 	}
 }
 
+/** A command ends in a wait: a waiting invocation, a polling loop, or a compound command whose last work waits. */
 function nodeWaits(node: ShellCompoundNode, depth: number): boolean {
-	if (node.kind === "simple")
-		return invocationWaits(
-			node.words.map((word) => word.value),
-			depth,
-		);
-	if (isPollingLoop(node)) return true;
-	return childCommands(node).some((child) => nodeWaits(child, depth));
+	switch (node.kind) {
+		case "simple":
+			return invocationWaits(
+				node.words.map((word) => word.value),
+				depth,
+			);
+		case "group":
+			return listWaits(node.body, depth);
+		case "if":
+			// Conditions and branches alternate, an `else` last: a branch is what runs after its condition.
+			return node.lists.some(
+				(list, index) => (index % 2 === 1 || index === node.lists.length - 1) && listWaits(list, depth),
+			);
+		case "case":
+			return node.lists.some((list) => listWaits(list, depth));
+		case "loop":
+			return isPollingLoop(node) || listWaits(node.body, depth);
+	}
 }
 
 /** A `while` or `until` loop (no loop variable) that sleeps in its body and whose condition is not a `read` of input. */

@@ -200,16 +200,16 @@ function createLocalShellOperations(
 		return {
 			exec: async (command, cwd, execOptions) => {
 				const { onData, signal, timeout, env, forceCwd, detached } = execOptions;
-				// Checked before a lane is touched at all: a detached command must never take a lane,
-				// not even to be skipped.
-				if (detached === true) return execOnce(command, cwd, execOptions);
+				const lanes = acquireShellSessionLanes(sessionKey);
+				// Checked before a lane is taken: a detached command never takes one, not even to be skipped, and
+				// runs with the session's exports, as the foreground call would have.
+				if (detached === true) return execOnce(lanes.withExports(command), cwd, execOptions);
 				try {
 					await fsAccess(cwd, constants.F_OK);
 				} catch {
 					throw new Error(missingWorkingDirectoryMessage(cwd, shellName));
 				}
 				if (signal?.aborted) throw new Error("aborted");
-				const lanes = acquireShellSessionLanes(sessionKey);
 				// Every lane starts each command where the pool is standing. A lane whose last request
 				// was somewhere else re-enters that directory, exactly as the single session did when a
 				// host-pinned directory differed from its last request.

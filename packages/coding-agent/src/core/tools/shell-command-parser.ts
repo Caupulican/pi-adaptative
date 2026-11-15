@@ -568,7 +568,7 @@ export interface ShellRedirection {
  * `{ ...; }` or a `( ... )` subshell. `if`: every condition and branch list in order. `loop`: `for NAME [in WORDS]`,
  * `while` or `until` (its condition list) and its body. `case`: the word, every pattern and every item's list.
  */
-export type ShellCompoundNode =
+export type ShellCompoundNode = (
 	| { readonly kind: "simple"; readonly words: ShellToken[]; readonly redirections: ShellRedirection[] }
 	| {
 			readonly kind: "group";
@@ -593,7 +593,11 @@ export type ShellCompoundNode =
 			readonly patterns: ShellToken[];
 			readonly lists: ShellCompoundNode[][];
 			readonly redirections: ShellRedirection[];
-	  };
+	  }
+) & {
+	/** Set on a command that reads the previous command's output (it follows `|` or `|&`): the two are one pipeline. */
+	readonly piped?: true;
+};
 
 /** How deep compound commands may nest before a reader of the structure stops. */
 export const MAX_COMPOUND_DEPTH = 16;
@@ -605,7 +609,7 @@ const LIST_SEPARATORS = new Set([";", "&", "&&", "||", "\n", "\r", "|", "|&"]);
 /**
  * Reads a POSIX command line tokenized with `compound` into its commands: brace groups, subshells, `if`, `for`,
  * `while`, `until` and `case`. Reserved words count only unquoted and where a command starts, so `echo done` and `'fi'`
- * stay words. A string is why the line cannot be read: a function definition (it stays defined in the shell and runs
+ * stay words; a command that follows `|` or `|&` is marked `piped`. A string is why the line cannot be read: a function definition (it stays defined in the shell and runs
  * in place of the program a later command names), an arithmetic command or `for ((...))`, `select`, a here-document
  * (its text is not part of the structure), a construct left open, or nesting deeper than `MAX_COMPOUND_DEPTH`.
  */
@@ -679,10 +683,12 @@ export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompound
 		if (depth > MAX_COMPOUND_DEPTH)
 			return `it nests compound commands deeper than the gate judges (${MAX_COMPOUND_DEPTH} levels)`;
 		const nodes: ShellCompoundNode[] = [];
+		let piped = false;
 		while (index < tokens.length) {
 			const token = tokens[index]!;
 			if (token.kind === "operator" || token.kind === "pipe") {
 				if (LIST_SEPARATORS.has(token.value)) {
+					piped = token.value === "|" || token.value === "|&";
 					index++;
 					continue;
 				}
@@ -692,7 +698,9 @@ export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompound
 			if (word !== undefined && closers.has(word)) return nodes;
 			const node = command(depth);
 			if (typeof node === "string") return node;
-			if (node) nodes.push(node);
+			if (!node) continue;
+			nodes.push(piped ? { ...node, piped: true } : node);
+			piped = false;
 		}
 		return closers.size === 0 ? nodes : `it leaves a compound command open (no ${[...closers].join(" or ")})`;
 	};

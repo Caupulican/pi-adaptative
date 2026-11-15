@@ -20,7 +20,7 @@ import {
 	retainedVerificationDetails,
 	type VerificationRecord,
 } from "../kernel/verification-obligations.ts";
-import { handoffHeadline } from "./background-tool-handoff-text.ts";
+import { handoffStubText } from "./background-tool-handoff-text.ts";
 import {
 	type BackgroundToolImageCapture,
 	type BackgroundToolImageManifest,
@@ -931,10 +931,7 @@ export class BackgroundToolTaskController {
 				content: [
 					{
 						type: "text",
-						text: [
-							handoffHeadline(context, taskId),
-							"Continue independent work; the completion wake-up carries its result. Call tool_task action=wait with taskId only when you have nothing else to do until it ends, or when the wake-up marks its output omitted; never poll.",
-						].join("\n"),
+						text: handoffStubText(context, taskId, remainingRuntimeMs),
 					},
 				],
 				details: { sessionId, taskId, status: "running" as const },

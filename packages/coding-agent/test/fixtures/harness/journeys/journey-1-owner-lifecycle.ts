@@ -3021,7 +3021,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		const waitSession = (
 			await world.createRootSession("root", { agentDir: `${world.agentDir}-external-wait`, systemOneEnabled: false })
 		).session;
-		const command = "until test -f ci.done; do sleep 5; done; echo ci-done";
+		const command = "until test -f ci.done; do sleep 5; done";
 		const gate = createBarrier();
 		const handed = createBarrier();
 		let taskId: string | undefined;
@@ -3029,7 +3029,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			name: "external-wait",
 			command,
 			cwd: HARNESS_PROJECT_CWD,
-			output: "ci-done\n",
+			output: "",
 			exitCode: 0,
 			gate: gate.promise,
 		});
@@ -3044,6 +3044,12 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 					const stub = request.context.messages.findLast((message) => message.role === "toolResult");
 					expect(JSON.stringify(stub?.content), "the handoff says why the call was moved").toContain(
 						"moved to the background because it waits on outside state",
+					);
+					expect(
+						JSON.stringify(stub?.content),
+						"the handoff states the task's bound and how to stop it",
+					).toContain(
+						`The task is stopped if it still runs after 1 hour; stop it sooner with tool_task action=cancel taskId=${taskId}.`,
 					);
 				},
 				reply: { content: [{ type: "text", text: "The wait runs in the background." }] },
@@ -3073,6 +3079,8 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		expect(
 			[
 				forms("gh run watch 4242 --exit-status"),
+				forms("cd ci && gh run watch 4242 | tail -5"),
+				forms("gh run watch 4242 && npm run migrate"),
 				forms("gh run watch 4242", false),
 				forms('echo "gh run watch 4242"'),
 				forms("sleep 5"),
@@ -3080,13 +3088,19 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				forms("for i in 1 2 3; do curl -s localhost; sleep 1; done"),
 				forms("while read line; do echo line; sleep 1; done"),
 			],
-			"a CI watch is moved; an explicit foreground call, the words as an argument, a bare sleep, a quick release read, a bounded for loop and a while-read loop are not",
+			"a CI watch that is the line's last work is moved; a line with work after the wait, an explicit foreground call, the words as an argument, a bare sleep, a quick release read, a bounded for loop and a while-read loop are not",
 		).toEqual([
 			{
 				background: { command: "gh run watch 4242 --exit-status", background: true },
 				foreground: { command: "gh run watch 4242 --exit-status" },
 				reason: "it waits on outside state",
 			},
+			{
+				background: { command: "cd ci && gh run watch 4242 | tail -5", background: true },
+				foreground: { command: "cd ci && gh run watch 4242 | tail -5" },
+				reason: "it waits on outside state",
+			},
+			undefined,
 			undefined,
 			undefined,
 			undefined,

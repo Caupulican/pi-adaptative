@@ -283,6 +283,15 @@ export class ShellSessionLanes {
 			disposeLane: (laneKey) => disposePersistentShellSession(laneKey),
 		});
 	}
+
+	/**
+	 * `command` as a detached child shell of this session runs it: what the session's lanes exported (and unset) is applied
+	 * first, onto the spawn environment the lanes started from, so the child has the session shell's environment.
+	 */
+	withExports(command: string): string {
+		const prelude = this.exports.preludeFor(undefined);
+		return prelude === undefined ? command : `${prelude}\n${command}`;
+	}
 }
 
 const shellSessionLanes = new Map<string, ShellSessionLanes>();

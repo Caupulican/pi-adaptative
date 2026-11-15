@@ -1,12 +1,28 @@
 /**
- * The first line of a background tool task's handoff stub, the result the model reads in place of the call's output: it
- * says what moved the call (the model's request, the tool because the call waits on outside state, the operator, or the
- * latency clock), so a task the model or the tool started never reads as a timeout.
+ * A background tool task's handoff stub, the result the model reads in place of the call's output. Its first line says
+ * what moved the call (the model's request, the tool because the call waits on outside state, the operator, or the
+ * latency clock), so a task the model or the tool started never reads as a timeout; the next says how long the task may
+ * run and how to stop it sooner, and the last how its result arrives.
  */
 
 import type { BackgroundToolCallContext } from "../kernel/index.ts";
 
-export function handoffHeadline(context: BackgroundToolCallContext, taskId: string): string {
+export function handoffStubText(context: BackgroundToolCallContext, taskId: string, runtimeBoundMs: number): string {
+	return [
+		handoffHeadline(context, taskId),
+		`The task is stopped if it still runs after ${runtimeBound(runtimeBoundMs)}; stop it sooner with tool_task action=cancel taskId=${taskId}.`,
+		"Continue independent work; the completion wake-up carries its result. Call tool_task action=wait with taskId only when you have nothing else to do until it ends, or when the wake-up marks its output omitted; never poll.",
+	].join("\n");
+}
+
+/** The task's remaining lifetime in whole minutes, or hours when it is a whole number of them. */
+function runtimeBound(ms: number): string {
+	const minutes = Math.max(1, Math.round(ms / 60_000));
+	if (minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`;
+	return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
+function handoffHeadline(context: BackgroundToolCallContext, taskId: string): string {
 	const elapsedMs = Number.isFinite(context.elapsedMs) ? Math.max(0, context.elapsedMs) : 0;
 	const seconds = Math.max(1, Math.round(elapsedMs / 1000));
 	switch (context.trigger) {
