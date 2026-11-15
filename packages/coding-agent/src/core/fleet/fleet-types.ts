@@ -314,6 +314,10 @@ export function laneSubtreeId(parentAgentId: string | undefined): string {
 	return parentAgentId ?? "";
 }
 
+/**
+ * The service one dispatch of a class charges its flow in the fleet queue (`fleet-queue.ts`, divided by the flow's weight): a
+ * heavy node is charged eight probes' worth.
+ */
 export const WEIGHT_CLASS_COST: Readonly<Record<WeightClass, number>> = { probe: 1, read: 2, write: 4, heavy: 8 };
 
 /** One term of the room formula: how many more nodes it admits, the wait key that wakes it, and when it reopens. */
