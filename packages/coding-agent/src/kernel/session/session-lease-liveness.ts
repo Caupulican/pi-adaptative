@@ -2,8 +2,8 @@
  * The liveness proof of a process that holds session lifetime leases in an orchestration home:
  * `<home>/lease-holders/<processInstanceId>.beat`, written when the process takes its first lease there, written again
  * every `LEASE_RENEW_MS` while it holds any, and removed with its last. It names its process as `ownProcessOwner`
- * describes it at each write, so a proof whose process crashed is removed by the first lease another process of a host
- * that proves it dead takes in that home ({@link holdLeaseLiveness}). A lease registry records each holder by the
+ * describes it at each write, so a proof whose process crashed is removed by the next lease a process of a host that
+ * proves it dead takes in that home ({@link holdLeaseLiveness}). A lease registry records each holder by the
  * process facts `judgeOwner` reads, which prove a holder dead only on its own host: a holder recorded on another host,
  * or on one this process cannot place, is never proven dead here. Such a holder is judged by its proof instead: it is
  * stale once this process has seen it unchanged for `LEASE_LIVENESS_WINDOW_MS` on its own monotonic clock, so no
@@ -103,16 +103,16 @@ function sweepDeadProofs(home: OrchestrationHome, processInstanceId: string): vo
 
 /**
  * This process (`processInstanceId`) takes a lease in `home`: its proof there is written now, before the lease is
- * recorded, and renewed while it holds any lease there. A failure to write it is thrown, and nothing is counted. Its
- * first lease there also removes the proofs of processes this host proves dead ({@link sweepDeadProofs}).
+ * recorded, and renewed while it holds any lease there. A failure to write it is thrown, and nothing is counted. Each
+ * lease it takes there first removes the proofs of processes this host proves dead ({@link sweepDeadProofs}).
  */
 export function holdLeaseLiveness(home: OrchestrationHome, processInstanceId: string): void {
+	sweepDeadProofs(home, processInstanceId);
 	const entry = held.get(home.root);
 	if (entry) {
 		entry.count++;
 		return;
 	}
-	sweepDeadProofs(home, processInstanceId);
 	writeProof(home, processInstanceId);
 	held.set(home.root, { home, count: 1 });
 	// A renewal that fails is written again at the next: the window spans six, so one missed write ages nothing. A home

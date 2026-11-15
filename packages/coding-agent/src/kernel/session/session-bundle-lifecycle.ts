@@ -13,6 +13,7 @@ import {
 	writeFileAtomicSync,
 } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
+import { type RepeatingAlarm, repeatEvery, SYSTEM_TIMER_PORT } from "../timer-port.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import {
 	type OrchestrationHome,
@@ -24,6 +25,7 @@ import {
 import {
 	forgetLeaseLiveness,
 	holdLeaseLiveness,
+	LEASE_RENEW_MS,
 	leaseLivenessExpired,
 	releaseLeaseLiveness,
 } from "./session-lease-liveness.ts";
@@ -464,13 +466,21 @@ export function holdersAwaitHostIdentity(
  */
 const unplacedHolds = new Set<BundleLeaseState>();
 
-/** Records every hold in {@link unplacedHolds} again with this process's machine id, now that it is read. */
+/** Retries {@link placeOwnHolds} while a rewrite failed: the record keeps naming this process by hostname until it is done. */
+let placing: RepeatingAlarm | undefined;
+
+/**
+ * Records every hold in {@link unplacedHolds} again with this process's machine id, now that it is read. A hold leaves
+ * the set once rewritten or no longer held; one whose rewrite failed is tried again every `LEASE_RENEW_MS`.
+ */
 function placeOwnHolds(): void {
 	const owner = ownProcessOwner();
 	for (const state of [...unplacedHolds]) {
-		unplacedHolds.delete(state);
 		// A host that exposes no machine id is named by hostname in every record it writes; nothing changes.
-		if (owner.machineId === undefined) continue;
+		if (owner.machineId === undefined || state.status !== "held") {
+			unplacedHolds.delete(state);
+			continue;
+		}
 		const tombstone = orchestrationSessionDeletionFile(state.home, state.parentSessionId);
 		const file = `${tombstone}.leases.json`;
 		try {
@@ -483,14 +493,18 @@ function placeOwnHolds(): void {
 				holders[index] = { ...recorded, owner };
 				writeHolders(file, state.parentSessionId, holders);
 			});
+			unplacedHolds.delete(state);
 		} catch (error) {
-			// Nothing waits on this step: the record keeps naming this process by hostname, as one written before machine ids.
-			harnessLog.warn("session", "a session lease could not record this process's machine id", () => ({
+			harnessLog.warn("session", "a session lease could not record this process's machine id yet", () => ({
 				parentSessionId: state.parentSessionId,
 				error: error instanceof Error ? error.message : String(error),
 			}));
 		}
 	}
+	if (unplacedHolds.size === 0) {
+		placing?.stop();
+		placing = undefined;
+	} else placing ??= repeatEvery(SYSTEM_TIMER_PORT, LEASE_RENEW_MS, placeOwnHolds);
 }
 
 /**
