@@ -99,7 +99,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * gates its bundle already passed and finishes, also when the bundle itself is already gone. A tombstone an earlier
  * build wrote, or one whose remover settled what the bundle owed, does not record how far its removal went
  * (`unrecorded`): it is resumed through the gates; refused by one only the open session settles (receipts awaiting
- * delivery, a younger or project-bound obligation) it is released, and it stays only while its bundle does not read.
+ * delivery, a younger or project-bound obligation), or held by a process or a bot's history, it is released, and it
+ * stays only while its bundle does not read.
  *
 * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
  * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
@@ -688,11 +689,13 @@ async function sweepBundle(
 	const label = labelOf(name);
 	try {
 		const parentSessionId = recoverParentSessionId(home, name);
-		if (!parentSessionId || processHeld.has(parentSessionId)) return;
+		if (!parentSessionId) return;
 		const pending = resume ?? pendingSessionBundleRetention(home, parentSessionId);
 		const resumingDeletion = pending !== undefined;
-		// A removal that began passed every gate before it began: a bot history naming its session is not read for it.
-		if (pending !== "removing" && historyHeld.has(parentSessionId)) return;
+		// Held by a process, or by a bot history (which a removal that began, having passed every gate, no longer reads):
+		// never removed. An `unrecorded` tombstone of such a session is still taken below, to be released.
+		const held = processHeld.has(parentSessionId) || (pending !== "removing" && historyHeld.has(parentSessionId));
+		if (held && pending !== "unrecorded") return;
 		if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) return;
 		// Its session's files may be in a home whose files were not listed, which would hold it.
 		if (!resumingDeletion && unfiledHeld && !transcripts.has(parentSessionId)) return;
@@ -721,28 +724,33 @@ async function sweepBundle(
 		try {
 			if (!existsSync(bundleDir)) {
 				// Gone before this reservation: a removal that may have begun finishes with the side files; a bundle gone
-				// any other way (moved to another home, or deleted) is released and nothing else is touched.
-				if (reservation.phase !== "reserved") {
+				// any other way (moved to another home, or deleted), or a held session's, is released and nothing else is
+				// touched.
+				if (held && reservation.phase !== "removing") outcome = "released";
+				else if (reservation.phase !== "reserved") {
 					removeSessionSideFiles(home, parentSessionId);
 					outcome = "removed";
 				}
+				return;
+			}
+			if (held) {
+				// The session is the open one's: its tombstone goes, unless its removal began meanwhile or its bundle does
+				// not read (evidence that does not read throws: a deferral, which keeps an `unrecorded` tombstone).
+				if (reservation.phase === "removing") return;
+				receiptsAwaitDelivery(home, parentSessionId, reservation);
+				if (
+					bundleOwesMailboxWork(home, parentSessionId, bundleDir) &&
+					openObligationsVerdict(agentDir, home, parentSessionId, bundleDir, now) === "unreadable"
+				)
+					return;
+				outcome = "released";
 				return;
 			}
 			// A removal this build marked begun passed every gate before it began, and what is left of its bundle proves
 			// nothing; a tombstone an earlier build left (`unrecorded`) goes through the gates again.
 			if (reservation.phase !== "removing") {
 				// Evidence that does not read throws: a deferral.
-				const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
-					const state = readTaskRuntimeProjection(
-						new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
-					);
-					return Object.values(state.attempts).some(
-						(attempt) =>
-							Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
-							workerReceiptPublicationPending(state, attempt),
-					);
-				});
-				if (pendingReceipts) {
+				if (receiptsAwaitDelivery(home, parentSessionId, reservation)) {
 					// Only the open session delivers them: the tombstone goes, whatever its phase, so the session opens.
 					outcome = "released";
 					report(`session bundle ${label} retained: worker receipts await parent delivery`);
@@ -796,6 +804,26 @@ async function sweepBundle(
 	}
 }
 
+/**
+ * Whether worker usage or accepted-worker receipts of the session wait for parent delivery, read under its retention
+ * reservation; a projection that does not read throws.
+ */
+function receiptsAwaitDelivery(
+	home: OrchestrationHome,
+	parentSessionId: string,
+	reservation: SessionBundleDeletionReservation,
+): boolean {
+	return withSessionBundleRetention(home, parentSessionId, reservation, () => {
+		const state = readTaskRuntimeProjection(
+			new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
+		);
+		return Object.values(state.attempts).some(
+			(attempt) =>
+				Object.keys(attempt.usageReceipts ?? {}).length > 0 || workerReceiptPublicationPending(state, attempt),
+		);
+	});
+}
+
 /** The bundle directory names of a home's `sessions/`, sorted; none when it has no `sessions/`. */
 async function bundleNames(home: OrchestrationHome): Promise<string[]> {
 	const root = orchestrationSessionsDir(home);
@@ -813,7 +841,7 @@ async function homeSweep(
 ): Promise<HomeSweep | undefined> {
 	try {
 		const names = await bundleNames(base.home);
-		const inFlight = sessionBundleRetentionsInFlight(base.home);
+		const inFlight = await sessionBundleRetentionsInFlight(base.home);
 		return { ...base, names, inFlight: inFlight.sessionIds, unreadable: inFlight.unreadable };
 	} catch (error) {
 		harnessLog.warn("sessions", "a home's session bundles or deletion records do not list", {

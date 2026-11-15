@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { harnessLog } from "../harness-log.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -736,23 +737,23 @@ export function inspectSessionBundleRetention(
 /**
  * The sessions whose retention tombstones `home`'s in-flight index names (`session-retention-index.ts`), each to be
  * confirmed with {@link inspectSessionBundleRetention}, and how many tombstones or entries could not be read. The first
- * call in a home indexes the retention tombstones written before the index existed, once; no other tombstone is read.
+ * call in a home with tombstones indexes the retention tombstones written before the index existed, once (a tombstone
+ * that cannot be read or indexed is counted and left; admission still reads it); no other tombstone is read. A home
+ * without tombstones is not written to.
  */
-export function sessionBundleRetentionsInFlight(home: OrchestrationHome): { sessionIds: string[]; unreadable: number } {
+export async function sessionBundleRetentionsInFlight(
+	home: OrchestrationHome,
+): Promise<{ sessionIds: string[]; unreadable: number }> {
+	const dir = orchestrationSessionDeletionsDir(home);
+	if (!existsSync(dir)) return { sessionIds: [], unreadable: 0 };
 	let unindexed = 0;
 	if (!retentionIndexComplete(home)) {
-		const dir = orchestrationSessionDeletionsDir(home);
-		const names = existsSync(dir) ? readdirSync(dir) : [];
-		for (const name of names) {
-			const key = sessionKeyOfDeletionFile(name);
-			if (key === undefined) continue;
-			const recorded = recordedTombstone(join(dir, name));
-			if (recorded === null) continue;
-			// An entry whose tombstone settles meanwhile is stale and pruned under the lock; one whose policy does not read
-			// is indexed, so it is reported where it is read. One that names no session of its file is reported here, once.
-			if (recorded !== undefined && orchestrationSessionDeletionFile(home, recorded) === join(dir, name))
-				recordRetentionInFlight(home, recorded);
-			else unindexed++;
+		let read = 0;
+		for (const name of readdirSync(dir)) {
+			if (sessionKeyOfDeletionFile(name) === undefined) continue;
+			// Every tombstone is read once, the permanent ones too: yield now and then.
+			if (++read % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+			if (!indexTombstone(home, join(dir, name))) unindexed++;
 		}
 		markRetentionIndexComplete(home);
 	}
@@ -761,19 +762,37 @@ export function sessionBundleRetentionsInFlight(home: OrchestrationHome): { sess
 }
 
 /**
- * The session a tombstone file names for the index (its policy is confirmed under the lock): null for a permanent
- * tombstone or one gone since it was listed, undefined when its content names none. A file that cannot be read throws.
+ * Indexes the tombstone `file` when it may be a retention (its policy is confirmed under the lock where the entry is
+ * read: an entry whose tombstone settled meanwhile is stale and pruned there; one whose policy does not read is indexed,
+ * so it is counted where it is read). Whether it was indexed or needs none; false when it names no session of its file,
+ * or could not be read or indexed.
+ */
+function indexTombstone(home: OrchestrationHome, file: string): boolean {
+	let parentSessionId: string | null | undefined;
+	try {
+		parentSessionId = recordedTombstone(file);
+		if (parentSessionId === null) return true;
+		if (parentSessionId === undefined || orchestrationSessionDeletionFile(home, parentSessionId) !== file)
+			return false;
+		recordRetentionInFlight(home, parentSessionId);
+		return true;
+	} catch (error) {
+		harnessLog.warn("sessions", "a session bundle tombstone was not indexed", {
+			file,
+			detail: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	}
+}
+
+/**
+ * The session a tombstone file names for the index: null for a permanent tombstone or one gone since it was listed,
+ * undefined when its content names none.
  */
 function recordedTombstone(file: string): string | null | undefined {
 	const text = readOptionalBoundedTextFileSync(file, MAX_MARKER_BYTES, "Session bundle deletion marker");
 	if (text === undefined) return null;
-	let value: unknown;
-	try {
-		value = JSON.parse(text);
-	} catch (error) {
-		if (error instanceof SyntaxError) return undefined;
-		throw error;
-	}
+	const value: unknown = JSON.parse(text);
 	if (!isPlainRecord(value) || typeof value.parentSessionId !== "string") return undefined;
 	return value.policy === "permanent" ? null : value.parentSessionId;
 }

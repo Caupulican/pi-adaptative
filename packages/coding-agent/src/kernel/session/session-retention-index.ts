@@ -7,8 +7,10 @@
  *   before such a marker is written and removed after the tombstone goes, under the same lock. A startup lists the
  *   retentions it resumes from it without reading every tombstone (the permanent ones accumulate). An entry whose
  *   tombstone is gone, or is no longer a retention, is stale and is pruned by whoever reads it under the lock.
- * - `pending.indexed`: the index also holds every retention tombstone written before it existed (one scan per home).
- * Only the lifecycle writes them, under the tombstone's lock.
+ * - `pending.indexed`: the index also holds every retention tombstone written before it existed (one scan per home,
+ *   which writes its entries without the tombstones' locks: an entry it writes for a tombstone settled meanwhile is
+ *   stale, and pruned as above).
+ * Only the lifecycle writes them.
  */
 import { lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
