@@ -5,8 +5,8 @@
  * the coordinator's ports; the coordinator's private members are reached through arrow functions in its own method, never
  * through a cast. `createBotMessageBroker` turns the directory into the broker the bot_message tool calls.
  *
- * A session that manages no bots (a bot's own session, the away vehicle) gets `createSessionScopedBotMessageDirectory`:
- * its workers stay inside it, so they reach no bot and no group, and answer only their session root.
+ * A session that directs workers and manages no bots (a bot's own) gets `createSessionScopedBotMessageDirectory`: its
+ * workers stay inside it, so they reach no bot and no group, and answer only their session root.
  */
 
 import type { SessionManager } from "../../kernel/node.ts";
@@ -65,7 +65,7 @@ function senderFence(
 }
 
 /**
- * The directory of a worker of a session that manages no bots: it lists nothing, resolves no bot, and authorizes a reply
+ * The directory of a worker of a bot's own session: it lists nothing, resolves no bot, and authorizes a reply
  * only to its own session root. No leader move is offered.
  */
 export function createSessionScopedBotMessageDirectory(

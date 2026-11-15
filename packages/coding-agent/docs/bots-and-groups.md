@@ -451,8 +451,7 @@ Native workers use `bot_message` through the existing durable mailbox:
 An idle peer wakes through the existing worker scheduler. Messages to a running peer arrive at a
 request boundary. The worker's group is bound by the host; supplying another `teamId` cannot enter
 another group's mailbox. Messages are coordination input and do not grant file, process, spawning
-or advisor authority. A worker of a session that manages no bots (a bot's own session, an away channel's) lists no bot or
-group and replies only to its session root.
+or advisor authority. A worker of a bot's own session lists no bot or group and replies only to its session root.
 
 Default native worker grants include this broker. An explicit profile or tool list must include
 `bot_message` and `workflow.message`; an already admitted worker does not gain tools retroactively.

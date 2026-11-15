@@ -201,11 +201,12 @@ export class BotLifecycleController {
 	}
 
 	/**
-	 * The directory a worker of this session messages through: the owner's bots and groups where the session manages
-	 * them (the root), and only its session root anywhere else, so a bot's workers stay inside their bot.
+	 * The directory a worker of this session messages through: only its session root where the session directs workers
+	 * and manages no bots (a bot's own), so a bot's workers stay inside their bot; the owner's bots and groups anywhere
+	 * else (the root, and a vehicle, which keeps what it had).
 	 */
 	createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
-		if (!this.deps.standing.managesBots)
+		if (this.deps.standing.directsWorkers && !this.deps.standing.managesBots)
 			return createSessionScopedBotMessageDirectory(
 				{
 					getSessionManager: () => this.deps.getSessionManager(),
