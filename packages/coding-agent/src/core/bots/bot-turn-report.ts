@@ -13,7 +13,7 @@ import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-recei
 import { usageReach, usageSince } from "../cost/usage-delta.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
 import { BotChargeMark } from "./bot-charge-mark.ts";
-import { BotChargeFileUnreadable, type BotChargesHeld } from "./bot-charges-held.ts";
+import type { BotChargesHeld, BotChargeUnread } from "./bot-charges-held.ts";
 import type { BotCharge, BotChargeReport, BotChargeState, BotSpendLedger } from "./bot-spend-ledger.ts";
 
 /** How long after a failed read-back of a watermark the next one may start. */
@@ -97,8 +97,8 @@ export interface BotTurnAccountingPorts {
 	charge(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 	/**
 	 * How far the roots of the process hold the charges of bot session `sessionId` in the files written since `since` (ms
-	 * since the epoch), and the charges they hold unwritten (`botChargesHeld`); rejects when no root answers or a record
-	 * does not read (`BotChargeFileUnreadable` naming a file that does not).
+	 * since the epoch), the charges they hold unwritten and the files that could not be read (`botChargesHeld`); rejects
+	 * when no root answers.
 	 */
 	chargesHeld(sessionId: string, since: number): Promise<BotChargesHeld>;
 	/** Calls `listener` with the charges the answering root's file holds as each of its writes lands; returns the unsubscribe. */
@@ -106,10 +106,15 @@ export interface BotTurnAccountingPorts {
 	/** The session of the root the bot answers now. */
 	rootSessionId(): string;
 	/**
-	 * A charge was not recorded: the owner is told why, and the root's file that could not be read when that is why, once
-	 * until a charge reaches the root again (it is delivered again with the next charge).
+	 * A charge was not recorded: the owner is told why, once until a charge reaches the root again (it is delivered again
+	 * with the next charge).
 	 */
-	chargeNotRecorded(reason: string, file: string | undefined): void;
+	chargeNotRecorded(reason: string): void;
+	/**
+	 * A read-back read the roots' files or directories `unread` as holding none of the session's charges (they could not be
+	 * read): the owner is told which, once per session load; the ranges they hold are charged again.
+	 */
+	chargesUnread(unread: readonly BotChargeUnread[]): void;
 	/**
 	 * How far the root holds the session's charges could not be marked in its transcript (`BotChargeMark`): the owner is
 	 * told why, once until a mark is kept again.
@@ -130,7 +135,7 @@ export interface BotTurnAccountingPorts {
  * charge (its usage, the report id its range derives, the range's end and when it was fixed) joins the ledger's pending
  * charges and the watermark moves to the range's end, in one write, before the charge is delivered; it leaves the pending
  * charges once the root's file holds it, either at once or when the root's write lands (a root holds a charge unwritten
- * until it writes its file; a root that keeps no file holds it for its life, at once). Every charge delivers the pending
+ * until it writes its file; a root that keeps no file never does, so the charge waits for one that does). Every charge delivers the pending
  * ones again first, in order, so a range a root lost is appended again before any later one; the root's report-id index
  * keeps one it holds from being appended twice, and its readers take each charge's range (`from` to `through`) once
  * however often and wherever it is recorded (`ChargedRanges`). At each turn's end and at the session's close, how far the
@@ -165,6 +170,8 @@ export class BotTurnAccounting {
 	private unmarked: { readonly sessionId: string; readonly through: Usage } | undefined;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */
 	private notRecordedTold = false;
+	/** The owner was told of root files a read-back could not read. */
+	private unreadTold = false;
 	/** A mark was not kept and the owner was told; told again only after a mark is kept. */
 	private markNotKeptTold = false;
 	private closed = false;
@@ -285,7 +292,12 @@ export class BotTurnAccounting {
 			.then(
 				(held) => {
 					this.recovering = undefined;
-					if (this.closed || this.session.sessionId !== sessionId || !this.ledger.readable()) return;
+					if (this.closed) return;
+					if (held.unread.length > 0 && !this.unreadTold) {
+						this.unreadTold = true;
+						this.ports.chargesUnread(held.unread);
+					}
+					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
 					if (this.adopt(sessionId, held)) this.charge();
 				},
 				(error: unknown) => {
@@ -302,7 +314,7 @@ export class BotTurnAccounting {
 	 * charges kept (those of the session before stay: they are their own ranges, delivered under their own ids). True
 	 * once written.
 	 */
-	private adopt(sessionId: string, held: BotChargesHeld): boolean {
+	private adopt(sessionId: string, held: Pick<BotChargesHeld, "through" | "unwritten">): boolean {
 		const kept = this.ledger.charge;
 		if (kept?.sessionId === sessionId) return false;
 		const keptPending = kept?.pending ?? [];
@@ -404,10 +416,7 @@ export class BotTurnAccounting {
 	private notRecorded(error: unknown): void {
 		if (this.notRecordedTold) return;
 		this.notRecordedTold = true;
-		this.ports.chargeNotRecorded(
-			error instanceof Error ? error.message : String(error),
-			error instanceof BotChargeFileUnreadable ? error.file : undefined,
-		);
+		this.ports.chargeNotRecorded(error instanceof Error ? error.message : String(error));
 	}
 
 	/**

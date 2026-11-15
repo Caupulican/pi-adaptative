@@ -108,8 +108,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a execução não pôde entrar no histórico dele (${reason}).`,
 	botStateNotPublished: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o estado dele não pôde ser publicado para as outras sessões (${reason}).`,
-	botTurnSpendNotRecorded: (agentId: string, reason: string, file: string | undefined) =>
-		`Bot ${agentId}: o gasto do turno não pôde ser registrado (${file === undefined ? reason : `${file} não pôde ser lido: ${reason}`}).`,
+	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o gasto do turno não pôde ser registrado (${reason}).`,
+	botChargeFilesUnread: (agentId: string, unread: readonly { readonly path: string; readonly reason: string }[]) =>
+		`Bot ${agentId}: ${unread.map(({ path, reason }) => `${path} (${reason})`).join("; ")} não ${unread.length === 1 ? "pôde ser lido" : "puderam ser lidos"} para conferir as cobranças de gasto dele, então o que ${unread.length === 1 ? "ele guarda" : "eles guardam"} é cobrado de novo à sessão principal.`,
 	botChargeMarkNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: até onde a sessão principal guarda o gasto dele não pôde ser marcado na transcrição dele (${reason}); se o registro de gasto se perder, isso é relido só dos arquivos da sessão principal.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>

@@ -62,16 +62,22 @@ ledger: each charge's range is written there before it is reported and kept unti
 reopen or a crash loses no range. The watermark only moves forward, field by field, over the usage the bot's session has
 recorded, so a reading short of it (its history still loading, or failed to load) charges nothing twice. Each charge names
 its range (where it starts and ends in the bot session's spend), and the main session's cost, its task costs and the daily
-brake count a bot session's charges as the union of their ranges: a range recorded twice, in two main sessions, again
-after a reopen or overlapping another counts once, on the earliest day a charge covering it was recorded. Every charge
-delivers the ones still held first, in order, so a range a main session lost is recorded again before any later one; a
-main session that keeps no file holds a charge at once. A session with no watermark (a new bot, a new session file, a
+brake count a bot session's charges as the union of their ranges: within one main session's file a range recorded again
+after a reopen or overlapping another counts once. A main session's cost and task costs read only its own file, so a
+range delivered to two main sessions counts in each one's view. The daily brake reads the main sessions' files changed
+within the day and counts a range once across them, on the earliest day a charge covering it among those files was
+recorded; a range fixed again whose earlier charge lies only in a file not changed that day counts again on the later
+charge's day. Every charge delivers the ones still held first, in order, so a range a main session lost is recorded
+again before any later one. A charge counts as held only once a main session's file holds it: one that keeps no file
+never does, so the charge stays in the bot's ledger, delivered again with each later charge (found by its report id,
+not appended again), until a main session with a file takes it. A session with no watermark (a new bot, a new session file, a
 lost record) starts at zero when it recorded no spend, with nothing read, and otherwise at the furthest of how far the
 main sessions of the process hold its charges, the charge mark in its own transcript and the charges the ledger still
 holds for it. Only the main sessions' files changed since the bot's session began, or since its last charge mark, are
 read back for it (a file a writer appends to while it is read is read as it was, one that changes otherwise is read
-again, one that is no session file holds none; one that cannot be read keeps the charge waiting and is named when you
-are told). A live main session's charges count once its file holds them, the ones it holds unwritten being delivered
+again, one that is no session file holds none; one that cannot be read, or a directory that cannot be listed, is read
+as holding none, so the watermark may start lower and what it holds is charged again, counted once by the union within
+the file that receives it; you are told once, naming each one and why). A live main session's charges count once its file holds them, the ones it holds unwritten being delivered
 again. At each turn's end and when the session closes, how far the main sessions' files hold the bot's charges is marked
 in the bot's transcript (`bot-charge-mark-v1`), so a range is not charged again after session retention removed the files
 that held it (a mark that cannot be written is told once). Ranges reach the main session in order. A spend record that cannot be read is left in place and read again,

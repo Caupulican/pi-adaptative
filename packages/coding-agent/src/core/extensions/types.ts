@@ -1452,9 +1452,9 @@ export interface ExtensionAPI {
 	 * Report usage spent by a session this extension spawned (subagent or `pi` subprocess) so the
 	 * parent footer can roll it into the displayed cost (Cost Aggregation).
 	 *
-	 * Single-hop: `usage` MUST already include the spawned session's own usage AND any sub-usage it
-	 * rolled up — report only to the direct parent. Pass a stable `reportId` to make re-reports
-	 * (retries, duplicate completion events) idempotent.
+	 * Single-hop: `usage` MUST already include the spawned session's own usage AND any sub-usage it rolled up — report
+	 * only to the direct parent. Pass a stable `reportId` to make re-reports (retries, duplicate completion events)
+	 * idempotent. Only `label`, `sourceSessionId` and `reportId` are recorded; the label `bot-session` throws (reserved).
 	 */
 	reportSpawnedUsage(usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 

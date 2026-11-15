@@ -18,18 +18,26 @@ export interface SpawnedUsageReceiptOptions extends SpawnedUsageOptions {
 
 export type SpawnedUsageReceiptDisposition = "persisted" | "pending" | "foreign_session";
 
+/**
+ * Whether the recorded report `data` is this receipt. A receipt that charges a range (`from` and `through`) is the same
+ * charge as a report of the same source, range and usage, whatever model or date it was recorded with: a range fixed again
+ * after the source's model changed is still the one charge. Any other matches on every field it records.
+ */
 function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: SpawnedUsageReceiptOptions): boolean {
+	if (!isPlainRecord(data) || data.reportId !== options.reportId || data.sourceSessionId !== options.sourceSessionId)
+		return false;
+	if (
+		!isDeepStrictEqual(data.from, options.from) ||
+		!isDeepStrictEqual(data.through, options.through) ||
+		!isDeepStrictEqual(data.usage, usage)
+	)
+		return false;
+	if (options.from !== undefined && options.through !== undefined) return true;
 	return (
-		isPlainRecord(data) &&
-		data.reportId === options.reportId &&
-		data.sourceSessionId === options.sourceSessionId &&
 		(data.provider === undefined || data.provider === options.provider) &&
 		(data.model === undefined || data.model === options.model) &&
 		(data.goalId === undefined || data.goalId === options.goalId) &&
-		isDeepStrictEqual(data.usageComponents, options.usageComponents) &&
-		isDeepStrictEqual(data.from, options.from) &&
-		isDeepStrictEqual(data.through, options.through) &&
-		isDeepStrictEqual(data.usage, usage)
+		isDeepStrictEqual(data.usageComponents, options.usageComponents)
 	);
 }
 

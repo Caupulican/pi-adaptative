@@ -9,6 +9,11 @@ import type { AccountingOrigin } from "./accounting-evidence.ts";
 
 export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
 export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
+/**
+ * The label of a bot session's charge to the main session (`BotTurnAccounting`): the only reports whose `from` and
+ * `through` are read as a charged range. Reserved: an extension's usage report cannot carry it (`reportSpawnedUsage`).
+ */
+export const BOT_SESSION_USAGE_LABEL = "bot-session";
 
 export function isMaintenanceUsageRoute(route: SystemOneUsageRoute | undefined): route is MaintenanceUsageRoute {
 	return (

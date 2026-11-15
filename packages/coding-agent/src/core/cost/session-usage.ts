@@ -7,6 +7,7 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import { type ChargedRange, ChargedRanges } from "./charged-ranges.ts";
 import {
+	BOT_SESSION_USAGE_LABEL,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
 	type SemanticAccountingReport,
 	type SemanticUsageReport,
@@ -36,7 +37,13 @@ export function isUsage(value: unknown): value is Usage {
 
 /** The range a spawned report charges, when it names one: both ends, its source, and no per-model components (`ChargedRanges`). */
 export function chargedRangeOf(report: SpawnedUsageReport | undefined): ChargedRange | undefined {
-	if (!report || report.usageComponents !== undefined || typeof report.sourceSessionId !== "string") return undefined;
+	if (
+		!report ||
+		report.label !== BOT_SESSION_USAGE_LABEL ||
+		report.usageComponents !== undefined ||
+		typeof report.sourceSessionId !== "string"
+	)
+		return undefined;
 	const { from, through } = report;
 	return isUsage(from) && isUsage(through) ? { source: report.sourceSessionId, from, through } : undefined;
 }

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { ExhaustedProviderRegistry } from "../billing-failover-controller.ts";
 import { classifyCustomEntryPersisted, deliverSpawnedUsageReceipt } from "../cost/spawned-usage-receipt.ts";
-import { SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
+import { BOT_SESSION_USAGE_LABEL, SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
 import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
@@ -131,12 +131,12 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 			return ceilings.filter((ceiling) => ceiling.usd > 0);
 		},
 		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
-		// only once read back from its file. A session that keeps no file holds it for its life at once: no write settles it.
-		reportUsage: (usage, report) => {
-			const session = deps.getSessionManager();
-			const disposition = deliverSpawnedUsageReceipt(session, deps, usage, {
+		// only once read back from its file. A session that keeps no file never holds it so: the charge stays in the bot's
+		// ledger until a session with a file takes it.
+		reportUsage: (usage, report) =>
+			deliverSpawnedUsageReceipt(deps.getSessionManager(), deps, usage, {
 				parentSessionId: deps.getSessionId(),
-				label: "bot-session",
+				label: BOT_SESSION_USAGE_LABEL,
 				sourceSessionId: report.sessionId,
 				reportId: report.reportId,
 				provider: report.provider,
@@ -144,9 +144,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				from: structuredClone(report.from),
 				through: structuredClone(report.through),
 				recordedAt: report.recordedAt,
-			});
-			return disposition === "pending" && !session.isPersisted() ? "persisted" : disposition;
-		},
+			}),
 		// Where its charges are read back: the session files of every project (or the custom session directory) and the live
 		// session's entries, each held once its file holds it exactly.
 		chargeHolder: () => {
@@ -157,17 +155,15 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				live: {
 					file: session.getSessionFile(),
 					entries: session.getEntries(),
-					// The row its file holds is the entry as it was written: the same JSON. A session that keeps no file holds
-					// its entries for its life.
+					// The row its file holds is the entry as it was written: the same JSON.
 					persisted: (entry) =>
-						!session.isPersisted() ||
-						(entry.type === "custom" &&
-							classifyCustomEntryPersisted(
-								session,
-								entry.id,
-								entry.customType,
-								(data) => JSON.stringify(data) === JSON.stringify(entry.data),
-							) === "persisted"),
+						entry.type === "custom" &&
+						classifyCustomEntryPersisted(
+							session,
+							entry.id,
+							entry.customType,
+							(data) => JSON.stringify(data) === JSON.stringify(entry.data),
+						) === "persisted",
 				},
 			};
 		},
@@ -180,7 +176,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 					return entry?.type === "custom" &&
 						entry.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
 						isPlainRecord(entry.data) &&
-						entry.data.label === "bot-session" &&
+						entry.data.label === BOT_SESSION_USAGE_LABEL &&
 						typeof entry.data.reportId === "string"
 						? [entry.data.reportId]
 						: [];

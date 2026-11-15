@@ -28,6 +28,7 @@ import type { CustomMessage } from "../kernel/messages.ts";
 import type { SessionManager } from "../kernel/node.ts";
 import type { ExtensionBindings } from "./agent-session-contracts.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
+import { BOT_SESSION_USAGE_LABEL } from "./cost/usage-records.ts";
 import type {
 	CompactOptions,
 	ContextUsage,
@@ -375,7 +376,14 @@ export class ExtensionBindingController {
 					this.deps.registerContextMemoryProvider(provider, assertResourceMutation);
 				},
 				reportSpawnedUsage: (usage, opts) => {
-					this.deps.addSpawnedUsage(usage, opts);
+					// Only the fields an extension's report is declared to carry: a bot session's charged range (`from`,
+					// `through`, label `bot-session`) is the bot host's alone, so an extension's report cannot mask a bot's charges.
+					const { label, sourceSessionId, reportId } = opts ?? {};
+					if (label === BOT_SESSION_USAGE_LABEL)
+						throw new Error(
+							`reportSpawnedUsage: the label "${BOT_SESSION_USAGE_LABEL}" is reserved for bot session charges.`,
+						);
+					this.deps.addSpawnedUsage(usage, { label, sourceSessionId, reportId });
 				},
 				reportManagedLane: (event) => {
 					this.deps.recordManagedLane(event);

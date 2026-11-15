@@ -14,8 +14,9 @@
  * held unwritten that does not name its whole range is counted neither: its range is charged again, and the readers take
  * an overlapping range once (`ChargedRanges`). A file that only grows while it is read (a writer appending) is read as
  * it was when opened; one that changes otherwise is read again; one that is no session file (no valid header) holds no
- * charge; one removed since it was listed holds none any more; any other that cannot be read fails the read-back naming
- * it (`BotChargeFileUnreadable`). A charge an earlier build reported without a range end counts as its usage, once by
+ * charge; one removed since it was listed holds none any more. A file or directory that cannot be read (or stat'ed, or
+ * listed) is read as holding none and named (`unread`): the watermark starts lower, its ranges are charged again, and
+ * the readers take an overlapping range once. A charge an earlier build reported without a range end counts as its usage, once by
  * report id, all of them together reaching as far as their sum.
  */
 
@@ -28,13 +29,13 @@ import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { combineUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import { isUsage } from "../cost/session-usage.ts";
 import { usageReach } from "../cost/usage-delta.ts";
-import { SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
+import { BOT_SESSION_USAGE_LABEL, SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 /**
- * How many times a session file that changes while it is read is read again before the read-back fails (and is tried
- * again later): skipping it would under-read how far the roots hold the charges, and charge its ranges again.
+ * How many times a session file that changes while it is read is read again before it is read as holding none (and
+ * named): skipping it under-reads how far the roots hold the charges, so its ranges are charged again.
  */
 const MAX_FILE_READS = 3;
 
@@ -72,42 +73,45 @@ export interface UnwrittenBotCharge {
 	readonly recordedAt: string;
 }
 
-/** How far the roots' files hold a bot session's charges, and the charges the live roots hold unwritten, oldest first. */
+/** A root's session file or directory the read-back could not read, and why. */
+export interface BotChargeUnread {
+	readonly path: string;
+	readonly reason: string;
+}
+
+/**
+ * How far the roots' files hold a bot session's charges, the charges the live roots hold unwritten, oldest first, and the
+ * files and directories that could not be read (read as holding none).
+ */
 export interface BotChargesHeld {
 	readonly through: Usage;
 	readonly unwritten: readonly UnwrittenBotCharge[];
+	readonly unread: readonly BotChargeUnread[];
 }
 
-/** A root's session file that could not be read: the read-back fails, naming it. */
-export class BotChargeFileUnreadable extends Error {
-	readonly file: string;
-
-	constructor(file: string, cause: unknown) {
-		super(cause instanceof Error ? cause.message : String(cause));
-		this.name = "BotChargeFileUnreadable";
-		this.file = file;
-	}
+function unreadOf(path: string, error: unknown): BotChargeUnread {
+	return { path, reason: error instanceof Error ? error.message : String(error) };
 }
 
-/** The names in `directory`; none when it does not exist yet. */
-async function namesIn(directory: string, directories: boolean): Promise<string[]> {
+/** The names in `directory`; none when it does not exist yet, or cannot be listed (named in `unread`). */
+async function namesIn(directory: string, directories: boolean, unread: BotChargeUnread[]): Promise<string[]> {
 	try {
 		const found = await readdir(directory, { withFileTypes: true });
 		return found
 			.filter((entry) => (directories ? entry.isDirectory() : entry.name.endsWith(".jsonl")))
 			.map((entry) => entry.name);
 	} catch (error) {
-		if (isMissingFileError(error)) return [];
-		throw error;
+		if (!isMissingFileError(error)) unread.push(unreadOf(directory, error));
+		return [];
 	}
 }
 
 /** The session directories the holders keep their files in, each once. */
-async function directoriesOf(holders: readonly BotChargeHolder[]): Promise<string[]> {
+async function directoriesOf(holders: readonly BotChargeHolder[], unread: BotChargeUnread[]): Promise<string[]> {
 	const directories = new Map<string, string>();
 	for (const holder of holders) {
 		const found = holder.root
-			? (await namesIn(holder.scope, true)).map((name) => join(holder.scope, name))
+			? (await namesIn(holder.scope, true, unread)).map((name) => join(holder.scope, name))
 			: [holder.scope];
 		for (const directory of found) directories.set(resolve(directory), directory);
 	}
@@ -115,10 +119,15 @@ async function directoriesOf(holders: readonly BotChargeHolder[]): Promise<strin
 }
 
 /**
- * Reads one session file's charge lines, as it was when opened; false when it holds none (removed since it was listed, or
- * no session file). Throws `BotChargeFileUnreadable` when it cannot be read.
+ * Reads one session file's charge lines, as it was when opened; false when it holds none (removed since it was listed, no
+ * session file, or one that cannot be read, named in `unread`).
  */
-async function readFileCharges(file: string, sessionId: string, take: (entry: SessionEntry) => void): Promise<boolean> {
+async function readFileCharges(
+	file: string,
+	sessionId: string,
+	take: (entry: SessionEntry) => void,
+	unread: BotChargeUnread[],
+): Promise<boolean> {
 	for (let read = 1; ; read++) {
 		const taken: SessionEntry[] = [];
 		try {
@@ -131,7 +140,8 @@ async function readFileCharges(file: string, sessionId: string, take: (entry: Se
 		} catch (error) {
 			if (isMissingFileError(error) || error instanceof InvalidSessionHeaderError) return false;
 			if (error instanceof FileSnapshotChangedError && read < MAX_FILE_READS) continue;
-			throw new BotChargeFileUnreadable(file, error);
+			unread.push(unreadOf(file, error));
+			return false;
 		}
 		for (const entry of taken) take(entry);
 		return true;
@@ -143,7 +153,7 @@ function chargeOf(entry: SessionEntry, sessionId: string): Record<string, unknow
 	if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE || !isPlainRecord(entry.data))
 		return undefined;
 	const { label, sourceSessionId } = entry.data;
-	return label === "bot-session" && sourceSessionId === sessionId ? entry.data : undefined;
+	return label === BOT_SESSION_USAGE_LABEL && sourceSessionId === sessionId ? entry.data : undefined;
 }
 
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
@@ -170,23 +180,29 @@ export async function botChargesHeld(
 		if (isUsage(data.through)) reach = usageReach(reach, data.through);
 		else if (isUsage(data.usage) && typeof data.reportId === "string") unranged.set(data.reportId, data.usage);
 	};
+	const unread: BotChargeUnread[] = [];
 	const live = new Set(holders.flatMap(({ live: root }) => (root.file === undefined ? [] : [resolve(root.file)])));
-	for (const directory of await directoriesOf(holders))
-		for (const name of await namesIn(directory, false)) {
+	for (const directory of await directoriesOf(holders, unread))
+		for (const name of await namesIn(directory, false, unread)) {
 			const file = join(directory, name);
 			if (live.has(resolve(file))) continue;
 			const changed = await stat(file).then(
 				(found) => found.mtimeMs,
 				(error: unknown) => {
-					if (isMissingFileError(error)) return undefined;
-					throw error;
+					if (!isMissingFileError(error)) unread.push(unreadOf(file, error));
+					return undefined;
 				},
 			);
 			if (changed === undefined || changed < since - MTIME_GRANULARITY_MS) continue;
-			await readFileCharges(file, sessionId, (entry) => {
-				const data = chargeOf(entry, sessionId);
-				if (data) held(data);
-			});
+			await readFileCharges(
+				file,
+				sessionId,
+				(entry) => {
+					const data = chargeOf(entry, sessionId);
+					if (data) held(data);
+				},
+				unread,
+			);
 		}
 	const unwritten = new Map<string, UnwrittenBotCharge>();
 	for (const { live: root } of holders)
@@ -202,5 +218,9 @@ export async function botChargesHeld(
 			const charge = unwrittenOf(data);
 			if (charge && !unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
 		}
-	return { through: usageReach(reach, combineUsage(...unranged.values())), unwritten: [...unwritten.values()] };
+	return {
+		through: usageReach(reach, combineUsage(...unranged.values())),
+		unwritten: [...unwritten.values()],
+		unread,
+	};
 }

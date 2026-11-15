@@ -754,8 +754,10 @@ export class BotSessionHost {
 					chargesHeld: (sessionId, since) => entry.sender.chargesHeld(sessionId, since),
 					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
 					rootSessionId: () => entry.sender.hostSessionId(),
-					chargeNotRecorded: (reason, file) =>
-						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason, file)),
+					chargeNotRecorded: (reason) =>
+						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
+					chargesUnread: (unread) =>
+						entry.sender.warn(interfaceText().botTeam.botChargeFilesUnread(agentId, unread)),
 					markNotKept: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botChargeMarkNotKept(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),
