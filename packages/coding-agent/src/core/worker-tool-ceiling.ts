@@ -8,6 +8,7 @@ import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import { BOT_TOOL_NAME } from "./delegation/bot-creation.ts";
 import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
@@ -69,8 +70,8 @@ export const WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS: ReadonlySet<string> = new Se
 	TASK_EVENTS_TOOL_NAME,
 	TASK_WATCH_TOOL_NAME,
 	...WORKER_MEMORY_BROKER_TOOL_NAMES,
-	"get_goal",
-	"update_goal",
+	// The goal lifecycle (create, get, update) is the root's: a leaf lane neither starts a goal nor moves one.
+	...GOAL_LIFECYCLE_TOOL_NAMES,
 	"task_steps",
 	"pipeline",
 	"tool_task",
