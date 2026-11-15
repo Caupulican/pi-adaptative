@@ -173,99 +173,115 @@ function directToolEvidence(
 	};
 }
 
-/** Recover only exact paid-receipt links. Artifact timestamps and evaluation IDs never imply ownership. */
+/** Whether `directory` holds evidence: false when it is missing; a path that is not a plain directory throws. */
+function evidenceDirectoryPresent(directory: string): boolean {
+	try {
+		const stat = lstatSync(directory);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Semantic evidence path is not a directory.");
+		return true;
+	} catch (error) {
+		if (isMissingFileError(error)) return false;
+		throw error;
+	}
+}
+
+/**
+ * Recover only exact paid-receipt links. Artifact timestamps and evaluation IDs never imply ownership. The session's
+ * evidence is read from its bundle, then from `legacyEvidenceDir` (where an earlier build kept a bot's own sessions'
+ * evidence, `legacyBotSystemOneEvidenceDir`), both within the one total byte limit.
+ */
 export function readSemanticAccountingEvidence(options: {
 	orchestrationHome: OrchestrationHome;
 	sessionId: string;
 	reports: readonly SemanticUsageReport[];
 	entries?: readonly SessionEntry[];
+	legacyEvidenceDir: string | undefined;
 }): AccountingEvidenceGroup[] {
 	const directGroups = recordedDirectToolEvidence(options.entries ?? [], options.sessionId);
-	const directory = typeSafeEvidenceDir(options.orchestrationHome, options.sessionId);
-	try {
-		const stat = lstatSync(directory);
-		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Semantic evidence path is not a directory.");
-	} catch (error) {
-		if (isMissingFileError(error)) return directGroups;
-		throw error;
-	}
+	const directories = [typeSafeEvidenceDir(options.orchestrationHome, options.sessionId), options.legacyEvidenceDir]
+		.filter((directory): directory is string => directory !== undefined)
+		.filter(evidenceDirectoryPresent);
 	const reports = new Map(options.reports.map((report) => [report.reportId, report]));
 	const groups = new Map(directGroups.map((group) => [`direct:${group.directEntries![0]!.entryId}`, group]));
 	let totalBytes = 0;
-	for (const name of readBoundedDirectoryNamesSync(
-		directory,
-		MAX_DIRECTORY_ENTRIES,
-		"Semantic evidence directory",
-	).sort()) {
-		if (!/^[a-f0-9]{24}\.meta\.json$/.test(name)) continue;
-		const id = name.slice(0, -".meta.json".length);
-		const revisions: AccountingSourceRevision[] = [];
-		const read = (path: string): string => {
-			const text = readBoundedTextFileSync(path, MAX_ARTIFACT_BYTES, "Semantic evidence artifact");
-			const size = Buffer.byteLength(text);
-			totalBytes += size;
-			if (totalBytes > MAX_TOTAL_BYTES) throw new Error("Semantic evidence exceeds its total byte limit.");
-			revisions.push({ path, size, sha256: createHash("sha256").update(text).digest("hex") });
-			return text;
-		};
-		const metadata: unknown = JSON.parse(read(join(directory, name)));
-		if (!isPlainRecord(metadata) || !isPlainRecord(metadata.ref) || metadata.ref.id !== id) {
-			throw new Error("Semantic evidence metadata has invalid identity.");
-		}
-		if (typeof metadata.ref.toolName !== "string" || !ARCHIVED_REVIEW_TOOL_NAMES.has(metadata.ref.toolName))
-			throw new Error("Semantic evidence belongs to another tool.");
-		const payload = read(join(directory, `${id}.payload`));
-		if (metadata.ref.command !== revisions[1]!.sha256 || metadata.ref.byteLength !== Buffer.byteLength(payload)) {
-			throw new Error("Semantic evidence payload does not match its recorded digest or size.");
-		}
-		const artifact: unknown = JSON.parse(payload);
-		if (!isPlainRecord(artifact) || artifact.version !== 1 || !isPlainRecord(artifact.record)) {
-			throw new Error("Semantic evidence payload has invalid structure.");
-		}
-		if (typeof artifact.toolCallId !== "string" || artifact.toolCallId.length === 0) {
-			throw new Error("Semantic evidence lacks its outer tool-call identity.");
-		}
-		if (!Array.isArray(artifact.record.receipts)) {
-			const direct = directToolEvidence(
-				{ toolCallId: artifact.toolCallId, record: artifact.record },
-				metadata.ref,
-				options.entries ?? [],
-				options.sessionId,
-				revisions,
-			);
-			if (direct) groups.set(`direct:${direct.directEntries![0]!.entryId}`, direct);
-			continue;
-		}
-		for (const value of artifact.record.receipts) {
-			if (!isPlainRecord(value) || typeof value.reportId !== "string" || !reports.has(value.reportId)) continue;
-			const receipt = parseTypeSafeUsageReceipt(value.payload);
-			if (!receipt || receipt.receiptId !== value.reportId)
-				throw new Error("Semantic evidence receipt identity is invalid.");
-			const current = reports.get(value.reportId)!;
-			// The tool-specific sink stamps this route at admission; the reviewer's retained payload predates that stamp.
-			const recovered = semanticUsageReportOf({ ...receipt, route: "system_one_tool" });
-			const { origin: _oldOrigin, ...oldUsage } = current;
-			const { origin: _newOrigin, ...newUsage } = recovered;
-			if (!isDeepStrictEqual(oldUsage, newUsage))
-				throw new Error("Semantic evidence conflicts with the recorded usage receipt.");
-			const origin: AccountingOrigin = receipt.origin ?? {
-				sessionId: options.sessionId,
-				toolCallId: artifact.toolCallId,
+	for (const directory of directories)
+		for (const name of readBoundedDirectoryNamesSync(
+			directory,
+			MAX_DIRECTORY_ENTRIES,
+			"Semantic evidence directory",
+		).sort()) {
+			if (!/^[a-f0-9]{24}\.meta\.json$/.test(name)) continue;
+			const id = name.slice(0, -".meta.json".length);
+			const revisions: AccountingSourceRevision[] = [];
+			const read = (path: string): string => {
+				const text = readBoundedTextFileSync(path, MAX_ARTIFACT_BYTES, "Semantic evidence artifact");
+				const size = Buffer.byteLength(text);
+				totalBytes += size;
+				if (totalBytes > MAX_TOTAL_BYTES) throw new Error("Semantic evidence exceeds its total byte limit.");
+				revisions.push({ path, size, sha256: createHash("sha256").update(text).digest("hex") });
+				return text;
 			};
-			if (origin.toolCallId !== undefined && origin.toolCallId !== artifact.toolCallId) {
-				throw new Error("Semantic evidence has conflicting tool-call ownership.");
+			const metadata: unknown = JSON.parse(read(join(directory, name)));
+			if (!isPlainRecord(metadata) || !isPlainRecord(metadata.ref) || metadata.ref.id !== id) {
+				throw new Error("Semantic evidence metadata has invalid identity.");
 			}
-			const group: AccountingEvidenceGroup = {
-				reportIds: [value.reportId],
-				origin: { ...origin, toolCallId: artifact.toolCallId },
-				evidence: revisions,
-			};
-			const previous = groups.get(value.reportId);
-			if (previous && !isDeepStrictEqual(previous.origin, group.origin)) {
-				throw new Error("Semantic receipt appears under conflicting retained tool calls.");
+			if (typeof metadata.ref.toolName !== "string" || !ARCHIVED_REVIEW_TOOL_NAMES.has(metadata.ref.toolName))
+				throw new Error("Semantic evidence belongs to another tool.");
+			const payload = read(join(directory, `${id}.payload`));
+			if (metadata.ref.command !== revisions[1]!.sha256 || metadata.ref.byteLength !== Buffer.byteLength(payload)) {
+				throw new Error("Semantic evidence payload does not match its recorded digest or size.");
 			}
-			groups.set(value.reportId, previous ? { ...previous, evidence: [...previous.evidence, ...revisions] } : group);
+			const artifact: unknown = JSON.parse(payload);
+			if (!isPlainRecord(artifact) || artifact.version !== 1 || !isPlainRecord(artifact.record)) {
+				throw new Error("Semantic evidence payload has invalid structure.");
+			}
+			if (typeof artifact.toolCallId !== "string" || artifact.toolCallId.length === 0) {
+				throw new Error("Semantic evidence lacks its outer tool-call identity.");
+			}
+			if (!Array.isArray(artifact.record.receipts)) {
+				const direct = directToolEvidence(
+					{ toolCallId: artifact.toolCallId, record: artifact.record },
+					metadata.ref,
+					options.entries ?? [],
+					options.sessionId,
+					revisions,
+				);
+				if (direct) groups.set(`direct:${direct.directEntries![0]!.entryId}`, direct);
+				continue;
+			}
+			for (const value of artifact.record.receipts) {
+				if (!isPlainRecord(value) || typeof value.reportId !== "string" || !reports.has(value.reportId)) continue;
+				const receipt = parseTypeSafeUsageReceipt(value.payload);
+				if (!receipt || receipt.receiptId !== value.reportId)
+					throw new Error("Semantic evidence receipt identity is invalid.");
+				const current = reports.get(value.reportId)!;
+				// The tool-specific sink stamps this route at admission; the reviewer's retained payload predates that stamp.
+				const recovered = semanticUsageReportOf({ ...receipt, route: "system_one_tool" });
+				const { origin: _oldOrigin, ...oldUsage } = current;
+				const { origin: _newOrigin, ...newUsage } = recovered;
+				if (!isDeepStrictEqual(oldUsage, newUsage))
+					throw new Error("Semantic evidence conflicts with the recorded usage receipt.");
+				const origin: AccountingOrigin = receipt.origin ?? {
+					sessionId: options.sessionId,
+					toolCallId: artifact.toolCallId,
+				};
+				if (origin.toolCallId !== undefined && origin.toolCallId !== artifact.toolCallId) {
+					throw new Error("Semantic evidence has conflicting tool-call ownership.");
+				}
+				const group: AccountingEvidenceGroup = {
+					reportIds: [value.reportId],
+					origin: { ...origin, toolCallId: artifact.toolCallId },
+					evidence: revisions,
+				};
+				const previous = groups.get(value.reportId);
+				if (previous && !isDeepStrictEqual(previous.origin, group.origin)) {
+					throw new Error("Semantic receipt appears under conflicting retained tool calls.");
+				}
+				groups.set(
+					value.reportId,
+					previous ? { ...previous, evidence: [...previous.evidence, ...revisions] } : group,
+				);
+			}
 		}
-	}
 	return [...groups.values()];
 }

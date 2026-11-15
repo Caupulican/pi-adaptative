@@ -1637,7 +1637,7 @@ export class RuntimeBuilder {
 					? TypeSafeEvidenceStore.forSession(
 							this.deps.getOrchestrationHome(),
 							this.deps.getSessionManager(),
-							source?.evidenceDir,
+							this.deps.getAgentDir(),
 						)
 					: undefined;
 			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {

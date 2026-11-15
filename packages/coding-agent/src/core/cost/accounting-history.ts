@@ -6,6 +6,7 @@ import type { SessionStorageRoots } from "../../kernel/session/session-bundle-pa
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
+import { legacyBotSystemOneEvidenceDir } from "../bots/bot-home.ts";
 import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
@@ -279,7 +280,13 @@ export async function reconcileSessionAccounting(
 	let groups: AccountingEvidenceGroup[] = (
 		await Promise.all([
 			collectWorkerAccountingEvidence(homeOf, header.id, entries),
-			readSemanticAccountingEvidence({ orchestrationHome: home, sessionId: header.id, reports, entries }),
+			readSemanticAccountingEvidence({
+				orchestrationHome: home,
+				sessionId: header.id,
+				reports,
+				entries,
+				legacyEvidenceDir: legacyBotSystemOneEvidenceDir(roots.agentDir, home),
+			}),
 		])
 	).flat();
 	const publicationSources = revisions({

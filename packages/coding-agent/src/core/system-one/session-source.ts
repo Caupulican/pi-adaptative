@@ -1,8 +1,8 @@
 /**
  * What a session's System One runs on beyond its settings, and the controller a session builds from it. A session keeps
  * the choices it was built with (on or off as it resolved them, the provider it was told to use, the transport its
- * requests take, where its evidence is kept); a session it hosts (a bot's) follows them as they are at each use, so it runs
- * System One exactly as its host does, with its own evidence home.
+ * requests take); a session it hosts (a bot's) follows them as they are at each use, so it runs System One exactly as
+ * its host does, its evidence in its own bundle as every session's.
  */
 
 import { execFileSync } from "node:child_process";
@@ -21,12 +21,10 @@ export interface SystemOneSessionSource {
 	readonly provider?: SystemOneProviderChoice;
 	/** The transport System One's requests take; unset is the global fetch. */
 	readonly fetch?: typeof fetch;
-	/** Where the session's System One evidence is kept, in place of its orchestration directory (a bot's is in its home). */
-	readonly evidenceDir?: string;
 }
 
-/** What a hosted session (a bot's) follows of its host's System One: everything but the evidence home, which is its own. */
-export type SystemOneHostSource = Omit<SystemOneSessionSource, "evidenceDir">;
+/** What a hosted session (a bot's) follows of its host's System One: all of it. */
+export type SystemOneHostSource = SystemOneSessionSource;
 
 /**
  * The source of a session built with these options: the one resolution of its provider and transport, which its
@@ -39,11 +37,9 @@ export function systemOneSourceOf(
 		systemOneHost?: SystemOneHostSource;
 		systemOneProvider?: SystemOneProviderChoice;
 		systemOneFetch?: typeof fetch;
-		systemOneEvidenceDir?: string;
 	},
 	enabled: () => boolean,
 ): SystemOneSessionSource {
-	const evidence = options.systemOneEvidenceDir ? { evidenceDir: options.systemOneEvidenceDir } : {};
 	const host = options.systemOneHost;
 	if (host)
 		return {
@@ -56,7 +52,6 @@ export function systemOneSourceOf(
 			get fetch() {
 				return host.fetch;
 			},
-			...evidence,
 		};
 	return {
 		get enabled() {
@@ -64,7 +59,6 @@ export function systemOneSourceOf(
 		},
 		...(options.systemOneProvider ? { provider: options.systemOneProvider } : {}),
 		...(options.systemOneFetch ? { fetch: options.systemOneFetch } : {}),
-		...evidence,
 	};
 }
 

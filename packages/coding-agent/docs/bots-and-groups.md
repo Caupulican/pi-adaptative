@@ -104,8 +104,9 @@ continues the stopped work, and a note the bot's session left saved when it clos
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, the claims in its answers (files changed, a commit, a passing check) are checked
 against its own turn's tool results as the main session's are, a contradicted or unbacked claim getting the one correction
-turn (on a message or a watch's wake alike), it holds the `systemone` tool, and its System One evidence is kept in its home
-(`typesafe-reviews/`). As a root session it writes the learning stores a worker only reads (model adaptation, fitness and
+turn (on a message or a watch's wake alike), it holds the `systemone` tool, and its System One evidence is kept in its session's bundle in its home
+(`orchestration/sessions/<session-key>/typesafe-reviews/`), as every session's is; evidence an earlier build kept in
+the home's own `typesafe-reviews/` is still read. As a root session it writes the learning stores a worker only reads (model adaptation, fitness and
 outcomes, observations, the failure corpus, tool performance and recovery logs, steering certificates); every write
 takes the store file's lock and works from what the file holds then, so the bot's session and any other session or process
 sharing the agent directory never drop each other's records. A bot is a session of its own, so its edge grants are its own conversation's plus your settings'; no other session's

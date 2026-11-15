@@ -228,8 +228,6 @@ export interface CreateAgentSessionOptions
 	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	/** HTTP transport for System One's decision endpoint; omitted means the global fetch. */
 	systemOneFetch?: typeof fetch;
-	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
-	systemOneEvidenceDir?: string;
 	/**
 	 * The System One of the session hosting this one (a bot's host), followed in place of the options above: its on/off
 	 * decides the controller (not this session's settings at this moment) and is read with its provider at each use.

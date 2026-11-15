@@ -8,7 +8,6 @@
 
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
-import { botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { contextFilesWithinReadScope } from "../delegation/worker-execution-policy.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -94,9 +93,8 @@ export async function createBotAgentSession(input: BotAgentSessionInput): Promis
 		// running steers).
 		standing: { kind: "bot", agentId },
 		...input.host,
-		// System One as the main session runs it; its evidence stays in the bot's home.
+		// System One as the main session runs it; its evidence goes to the session's bundle in the bot's home.
 		systemOneHost,
-		systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
 		// Its own name, soul and memory block (its blackboard, which the store appends to after each turn) replace the main
 		// agent's in the prompt, as a worker-path start opens on the same block.
 		agentIdentity: namedAgentIdentity(input.displayName, definition.soul, agentId, input.memoryBlock),

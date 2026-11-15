@@ -25,7 +25,7 @@
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
  *   bots/<id>/                         one bot's home: profile.json, sessions/, session.json, -- botHomeDir
- *                                      host.lock, host-state.json, history.json, typesafe-reviews/,
+ *                                      host.lock, host-state.json, history.json, typesafe-reviews/ (read only),
  *                                      orchestration/ (its sessions' orchestration home)
  *   state/orchestration/              the owner's orchestration home                         -- ownerOrchestrationHome
  *     sessions/<session-key>/         one foreground-session-owned control-plane bundle      -- orchestrationSessionDir
@@ -334,9 +334,13 @@ export function botHomeSpendLedgerFile(homeDir: string): string {
 	return join(homeDir, "spend.json");
 }
 
-/** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */
-export function botSystemOneEvidenceDir(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "typesafe-reviews");
+/**
+ * `<home>/typesafe-reviews` -- where an earlier build kept the System One evidence of the bot's own sessions, whose home
+ * is `homeDir`; read only: a bot session's evidence is written to its bundle, as every session's is.
+ * @deprecated Reads evidence an earlier build kept outside the session's bundle; replaced by the bundle's typesafe-reviews. Remove when no bot home holds a typesafe-reviews directory.
+ */
+export function botHomeLegacySystemOneEvidenceDir(homeDir: string): string {
+	return join(homeDir, "typesafe-reviews");
 }
 
 /** `<agentDir>/state/bots/history-scan.json` -- the one scan of the root session files for bot histories has run. */

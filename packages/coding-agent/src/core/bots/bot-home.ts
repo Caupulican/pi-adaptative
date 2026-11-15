@@ -7,10 +7,21 @@
  * store save that touches the record's summary or read marks never rewrites the file.
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { botHomeOrchestrationHome, type OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
+import { dirname, join } from "node:path";
+import {
+	botHomeOrchestrationHome,
+	type OrchestrationHome,
+	ownerOrchestrationHome,
+	sameOrchestrationHome,
+} from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
-import { botHomeDir, botHomeProfileFile, botHomeSessionsDir, botHomeSpendLedgerFile } from "../agent-paths.ts";
+import {
+	botHomeDir,
+	botHomeLegacySystemOneEvidenceDir,
+	botHomeProfileFile,
+	botHomeSessionsDir,
+	botHomeSpendLedgerFile,
+} from "../agent-paths.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { type BotSessionLinks, botFileReadPath } from "./bot-session-pointer.ts";
@@ -111,6 +122,17 @@ function sessionFiles(sessionsDir: string): string[] {
 function sessionIdIn(path: string): string[] {
 	const header = readSessionHeaderResult(path);
 	return header.ok ? [header.header.id] : [];
+}
+
+/**
+ * Where an earlier build kept the System One evidence of a bot's own sessions, for a session whose orchestration home is
+ * `home`: the bot's home directory's `typesafe-reviews` when `home` is a bot's, read after the session's bundle so
+ * evidence the earlier build wrote stays readable; undefined for a session of the owner's home.
+ * @deprecated Reads evidence an earlier build kept outside the session's bundle; replaced by the bundle's typesafe-reviews. Remove with botHomeLegacySystemOneEvidenceDir.
+ */
+export function legacyBotSystemOneEvidenceDir(agentDir: string, home: OrchestrationHome): string | undefined {
+	if (sameOrchestrationHome(home, ownerOrchestrationHome(agentDir))) return undefined;
+	return botHomeLegacySystemOneEvidenceDir(dirname(home.root));
 }
 
 /** `<agentDir>/bots/<id>/orchestration` -- the orchestration home of the bot's sessions. */

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type OrchestrationHome, typeSafeEvidenceDir } from "../agent-paths.ts";
+import { legacyBotSystemOneEvidenceDir } from "../bots/bot-home.ts";
 import { type ArtifactStore, createFileArtifactStore, isMissingArtifactMarker } from "../context/context-artifacts.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
@@ -56,17 +57,22 @@ export class TypeSafeEvidenceStore {
 	}
 
 	/**
-	 * A session's store: in `homeDir` when the session keeps its evidence in a home of its own (a bot's, which no session
-	 * bundle's retention reaches, so no bundle admission applies), else in its orchestration directory with its lineage's.
+	 * A session's store: its bundle in its orchestration home, with its lineage's; a bot's session also reads, after them,
+	 * the evidence an earlier build kept in the bot's home directory (`legacyBotSystemOneEvidenceDir`), which it never
+	 * writes again.
 	 */
 	static forSession(
 		home: OrchestrationHome,
 		session: { getSessionId(): string; getSessionLineageIds(): readonly string[] },
-		homeDir?: string,
+		agentDir: string,
 	): TypeSafeEvidenceStore {
-		return homeDir
-			? new TypeSafeEvidenceStore(createFileArtifactStore({ baseDir: homeDir }))
-			: TypeSafeEvidenceStore.file(home, session.getSessionId(), session.getSessionLineageIds());
+		const bundle = TypeSafeEvidenceStore.file(home, session.getSessionId(), session.getSessionLineageIds());
+		const legacyDir = legacyBotSystemOneEvidenceDir(agentDir, home);
+		if (legacyDir === undefined) return bundle;
+		return new TypeSafeEvidenceStore(bundle.artifacts, bundle.admit, [
+			...bundle.inherited,
+			new TypeSafeEvidenceStore(createFileArtifactStore({ baseDir: legacyDir })),
+		]);
 	}
 
 	save(toolCallId: string, record: Record<string, unknown>): TypeSafeEvidenceRef {
