@@ -7,6 +7,7 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { isInterruptedAssistantStopReason } from "./agent-session-contracts.ts";
+import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { BackgroundLaneController } from "./background-lane-controller.ts";
 import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
@@ -15,9 +16,15 @@ import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { ObjectiveExecutionInterruptedError } from "./objective-execution/current-objective-execution.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { hasRunningBackgroundedToolCall } from "./session-settlement.ts";
-import { deriveSessionWorkState, type SessionWorkState } from "./session-work-state.ts";
+import {
+	deriveSessionWorkState,
+	type SessionWorkerFacts,
+	type SessionWorkerState,
+	type SessionWorkStateInput,
+} from "./session-work-state.ts";
 
 export interface AgentSessionWorkStatePorts {
 	getForegroundActivity(): { sessionId: string; epoch?: number; busy: boolean };
@@ -43,12 +50,14 @@ export class AgentSessionWorkState {
 		this.ports = ports;
 	}
 
-	getSessionWorkState(): SessionWorkState {
+	getSessionWorkState(): SessionWorkerState {
 		const activity = this.ports.getForegroundActivity();
-		const hasRunningWorker = this.ports
+		const lanesInFlight = this.ports
 			.backgroundLanes()
 			.getLaneRecords()
-			.some((lane) => lane.status === "queued" || lane.status === "running");
+			.filter((lane) => lane.status === "queued" || lane.status === "running");
+		// The phase counts every lane in flight, a worker waiting for its retry included.
+		const hasRunningWorker = lanesInFlight.length > 0;
 		const hasRunningTool = hasRunningBackgroundedToolCall(this.ports.backgroundToolTasks().list());
 		const hasPendingContinuation = this.ports.hasPendingIdleContinuation();
 		const goalSnapshot = this.ports.getGoalStateSnapshot();
@@ -72,7 +81,7 @@ export class AgentSessionWorkState {
 
 		const livenessFault = Boolean(isObjectiveActive && !hasActiveExecutionOrOwner);
 
-		return deriveSessionWorkState({
+		const input: SessionWorkStateInput = {
 			isStreaming: this.ports.isStreaming(),
 			isCompacting: this.ports.isCompacting(),
 			isRetrying: this.ports.isRetrying(),
@@ -90,7 +99,11 @@ export class AgentSessionWorkState {
 			epoch: activity.epoch,
 			sessionId: this.ports.sessionManager().getSessionId(),
 			objectiveId: goalSnapshot?.goalId,
-		});
+		};
+		return {
+			...deriveSessionWorkState(input),
+			...workerFacts(lanesInFlight, this.ports.backgroundLanes().getTaskRuntimeSnapshot(), input),
+		};
 	}
 
 	/**
@@ -140,4 +153,37 @@ export class AgentSessionWorkState {
 		if (outcome.kind === "disposed" || this.ports.isDisposed())
 			throw new ObjectiveExecutionInterruptedError("session_disposed");
 	}
+}
+
+/**
+ * The facts of the lanes in flight (`SessionWorkerFacts`), each worker lane read by its attempt in `snapshot`: leased or
+ * running is running; suspended until a retry waits for it; queued, suspended for another reason or awaiting its result's
+ * verification is other work. A lane with no attempt, or whose attempt the projection does not hold, counts as running.
+ */
+function workerFacts(
+	lanes: readonly LaneRecord[],
+	snapshot: TaskRuntimeProjection | undefined,
+	input: SessionWorkStateInput,
+): SessionWorkerFacts {
+	let running = false;
+	let other = false;
+	let until: number | undefined;
+	for (const lane of lanes) {
+		const attempt = lane.attemptId === undefined ? undefined : snapshot?.attempts[lane.attemptId];
+		const retryAt =
+			attempt?.status === "suspended" && attempt.retry ? Date.parse(attempt.retry.notBefore) : Number.NaN;
+		if (!attempt || attempt.status === "leased" || attempt.status === "running") running = true;
+		else if (Number.isFinite(retryAt)) until = Math.min(until ?? retryAt, retryAt);
+		else other = true;
+	}
+	return {
+		hasRunningWorker: running,
+		busyBesideWorkers: deriveSessionWorkState({ ...input, hasRunningWorker: false }).busy,
+		workerLanes:
+			lanes.length === 0
+				? { kind: "none" }
+				: running || other || until === undefined
+					? { kind: "active" }
+					: { kind: "retries", until },
+	};
 }

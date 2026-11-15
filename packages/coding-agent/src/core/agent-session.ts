@@ -310,7 +310,7 @@ import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chai
 import { SessionSystemPromptController } from "./session-system-prompt-controller.ts";
 import { SessionTreeNavigator, type TreeNavigationResult } from "./session-tree-navigator.ts";
 import { SessionUnsettledLadderController } from "./session-unsettled-ladder-controller.ts";
-import type { SessionWorkState } from "./session-work-state.ts";
+import type { SessionWorkerState } from "./session-work-state.ts";
 import type { MemorySystem, ResourceProfileFilterSettings, SettingsScope } from "./settings/settings-schema.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
@@ -3819,7 +3819,7 @@ export class AgentSession {
 		return this._foregroundRecovery.getActivitySnapshot(this.sessionManager.getSessionId());
 	}
 
-	getSessionWorkState(): SessionWorkState {
+	getSessionWorkState(): SessionWorkerState {
 		return this._workState.getSessionWorkState();
 	}
 

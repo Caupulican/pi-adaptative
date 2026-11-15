@@ -117,3 +117,28 @@ export function deriveSessionWorkState(input: SessionWorkStateInput): SessionWor
 		faultReason,
 	};
 }
+
+/**
+ * What the session's worker lanes hold beside its phase, which counts every lane in flight (a worker waiting for its retry
+ * included) and ranks a pending human input or a blocked goal before them: what a host that may close an idle session reads.
+ */
+export interface SessionWorkerFacts {
+	/** A worker attempt holds a lease or runs, or a lane with no attempt of its own (research, review) is queued or running. */
+	readonly hasRunningWorker: boolean;
+	/** Busy as derived with no worker lane in flight: the foreground, a tool, an evaluation or a continuation holds it. */
+	readonly busyBesideWorkers: boolean;
+	/** The lanes in flight: none, only worker attempts suspended until a retry (`until`, the earliest), or any other work. */
+	readonly workerLanes:
+		| { readonly kind: "none" }
+		| { readonly kind: "retries"; readonly until: number }
+		| { readonly kind: "active" };
+}
+
+/** The work state of a session with the facts of its worker lanes. */
+export type SessionWorkerState = SessionWorkState & SessionWorkerFacts;
+
+/** Whether the only lanes in flight are worker retries none of which comes due by `atMs`; true when no lane is in flight. */
+export function onlyWorkerRetriesWaitBeyond(state: Pick<SessionWorkerFacts, "workerLanes">, atMs: number): boolean {
+	const lanes = state.workerLanes;
+	return lanes.kind === "none" || (lanes.kind === "retries" && lanes.until > atMs);
+}
