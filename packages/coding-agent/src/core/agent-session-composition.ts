@@ -42,7 +42,11 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { proveRequirementChecks, recordHostRequirementCheckProof } from "./goals/prove-requirement-checks.ts";
-import { type RequirementCheckResult, runRequirementCheck } from "./goals/requirement-checks.ts";
+import {
+	type HostRequirementChecks,
+	type RequirementCheckSession,
+	runSessionRequirementCheck,
+} from "./goals/session-requirement-check.ts";
 import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import type { AutoLearnApplyPorts } from "./learning/auto-learn-proposals.ts";
@@ -378,7 +382,10 @@ export interface SessionAdaptiveRuntimeAttachDeps {
 	>;
 	objectiveMutationId(): string;
 	readonly repositoryObserver: Pick<RepositoryMutationObserver, "deliveryBlockReason" | "waitForQuiescence">;
-	readonly runtimeBuilder: Pick<RuntimeBuilder, "withTaskDirectoryContext" | "taskCwd">;
+	readonly runtimeBuilder: Pick<
+		RuntimeBuilder,
+		"withTaskDirectoryContext" | "taskCwd" | "sessionConfinement" | "credentialExposureBoundary"
+	>;
 	getGoalStateSnapshot(): GoalState | undefined;
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string | Promise<boolean> | boolean;
 	getLocalCommitBranch(): string | undefined;
@@ -480,10 +487,7 @@ export function attachSessionAdaptiveRuntime(
 					return proveRequirementChecks({
 						state: goal,
 						runCheck: (check, checkSignal) =>
-							runRequirementCheck(check, {
-								cwd: deps.runtimeBuilder.taskCwd,
-								...(checkSignal ? { signal: checkSignal } : {}),
-							}),
+							runSessionRequirementCheck(check, deps.runtimeBuilder, deps.runtimeBuilder.taskCwd, checkSignal),
 						now: () => new Date().toISOString(),
 						save: (state, expected) => deps.saveGoalStateSnapshot(state, expected),
 						requireVerifiedEvidenceForCompletion: true,
@@ -867,10 +871,13 @@ export function createLessonRoutePort(owners: {
 
 /**
  * The writes a session makes into its goal state from its workers' proof: the evidence an accepted claim gives, and the
- * result of the host's own requirement check. A write that fails is reported as a warning, so a saved claim never reports
- * itself unsaved and a passing check never fails the attempt that ran it.
+ * host's own requirement checks, run as the session's own commands are, with the proof a passing one records. A write that
+ * fails is reported as a warning, so a saved claim never reports itself unsaved and a passing check never fails the attempt
+ * that ran it.
  */
 export function createGoalProofWrites(deps: {
+	/** The session the checks run for: its confinement and credential boundary admit them, its commands' environment runs them. */
+	requirementCheckSession(): RequirementCheckSession;
 	getGoalState(): GoalState | undefined;
 	saveGoalState(state: GoalState, expected: GoalStateRevision): string;
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
@@ -879,8 +886,8 @@ export function createGoalProofWrites(deps: {
 }): {
 	/** Makes accepted worker proof citable by the goal's completion account, after every claim save and review acknowledgement. */
 	recordAcceptedWorkerEvidence(): void;
-	/** Records the host's own check as the goal's proof: a check that passed satisfies its requirement. */
-	recordRequirementCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+	/** Runs the host's own checks for a worker attempt and records a passing one as the goal's proof of its requirement. */
+	readonly hostRequirementChecks: HostRequirementChecks;
 } {
 	const guarded = (failure: string, write: () => void): void => {
 		try {
@@ -899,9 +906,12 @@ export function createGoalProofWrites(deps: {
 					getWorkerClaimSnapshots: deps.getWorkerClaimSnapshots,
 				}),
 			),
-		recordRequirementCheckProof: (attemptId, requirementId, result) =>
-			guarded("The host check's proof for a goal requirement was not recorded", () =>
-				recordHostRequirementCheckProof(deps, { attemptId, requirementId, result }),
-			),
+		hostRequirementChecks: {
+			run: (check, cwd, signal) => runSessionRequirementCheck(check, deps.requirementCheckSession(), cwd, signal),
+			recordProof: (attemptId, requirementId, result) =>
+				guarded("The host check's proof for a goal requirement was not recorded", () =>
+					recordHostRequirementCheckProof(deps, { attemptId, requirementId, result }),
+				),
+		},
 	};
 }

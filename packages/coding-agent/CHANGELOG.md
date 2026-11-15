@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- For callers importing module paths directly (the package index does not re-export them): `runRequirementCheck` (`core/goals/requirement-checks.ts`) takes `admit` and `env` as required options, so every caller names the admission and the environment of whoever the check runs for (it ran in the owner's process environment by default), and `ParentExecutionContext.recordRequirementCheckProof` is replaced by the required `requirementChecks` port (`run`, and `recordProof` on the host that owns the goal).
+
+### Fixed
+
+- A goal's requirement check now runs as the session's own shell command runs. It gets the environment the shell's commands get: the project credential environment the credential manager holds for its directory, and never the vault session `BW_SESSION` (it ran in pi's own process environment, `BW_SESSION` included, without the project credentials). A check whose command reaches an owner credential (a `.env` file, a key, a recursive `grep` over dotenv files) runs, and the output it keeps (the goal's check evidence) is masked with the mask the shell's output of that command gets; it was kept unmasked except for generic secret shapes. Only a session whose commands keep owner credentials out refuses such a check, as its shell refuses the command.
+
 ## [0.104.65] - 2026-11-15
 
 ### Breaking Changes

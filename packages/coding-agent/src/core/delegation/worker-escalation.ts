@@ -10,7 +10,7 @@ import {
 	laneSubtreeId,
 } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import { type RequirementCheckResult, runRequirementCheck } from "../goals/requirement-checks.ts";
+import type { HostRequirementChecks } from "../goals/session-requirement-check.ts";
 import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	ORCHESTRATION_THINKING_LEVELS,
@@ -226,8 +226,8 @@ export interface WorkerEscalationDeps {
 	cwd(): string;
 	/** Re-record the attempt's outcome with the host checks just run. */
 	recordChecks(attemptId: string, checks: readonly HostRequirementCheck[]): void;
-	/** Record a passing host check as the goal's own proof of that requirement (`recordHostRequirementCheckProof`). */
-	recordCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+	/** The goal's session runs each host check as its own commands run, and records a passing one as that requirement's proof. */
+	readonly requirementChecks: HostRequirementChecks;
 	/** Record that a rung could not start under the original authority: the ladder then asks the owner. */
 	recordRefusal(attemptId: string, detail: string): void;
 	readonly signal: AbortSignal;
@@ -267,10 +267,10 @@ export class WorkerEscalation {
 		for (const id of requirementIds) {
 			const check = requirements.get(id)?.check;
 			if (!check) continue;
-			const result = await runRequirementCheck(check, { cwd, signal: this.deps.signal });
+			const result = await this.deps.requirementChecks.run(check, cwd, this.deps.signal);
 			if (this.deps.signal.aborted) return;
 			checks.push({ id, passed: result.passed });
-			if (result.passed) this.deps.recordCheckProof(attemptId, id, result);
+			if (result.passed) this.deps.requirementChecks.recordProof?.(attemptId, id, result);
 		}
 		harnessLog.info("escalation", "host requirement checks ran after a worker attempt", {
 			outcomeId: outcome.outcomeId,

@@ -103,6 +103,15 @@ export function createAwayParentWrites(deps: AwayParentWriteDeps): AwayParentWri
 		},
 		// The parent re-derives the lane-record projection from the attempt's pending notification.
 		appendLaneRecordSnapshot: () => {},
+		// It holds no goal, so no host check is asked of it; one asked fails as a check that cannot run, never runs unguarded.
+		requirementChecks: {
+			run: async () => ({
+				passed: false,
+				exitCode: null,
+				output: "",
+				reason: "A parent opened away holds no goal, so it runs no requirement check.",
+			}),
+		},
 		appendSessionTaskProfile: () => {
 			throw new AwayParentWriteRefusal(
 				"A parent opened away creates no session task profile: only the root's delegate tool does.",

@@ -25,6 +25,11 @@ export interface SessionCommandEnvironment {
 	 * own session sees masked values.
 	 */
 	readonly credentialExposure: CredentialExposureMode;
+	/**
+	 * The environment one of the session's own commands runs in, built on the shell's `base` for a command in `cwd`: what
+	 * the spawn hook gives a shell command, and what a requirement check the harness runs for the session gets.
+	 */
+	shellEnvironment(base: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv;
 	readonly spawnHook: BashSpawnHook;
 	readonly python: {
 		readonly environment: (cwd: string) => NodeJS.ProcessEnv;
@@ -75,14 +80,15 @@ export function createSessionCommandEnvironment(
 				)
 			: undefined;
 	const added = (cwd: string): NodeJS.ProcessEnv => (denied ? {} : (credentialEnvironment(cwd) ?? {}));
+	const shellEnvironment = (base: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv => {
+		const env = { ...(run ? run.commandEnvironment(base) : base), ...added(cwd) };
+		delete env[VAULT_SESSION_VARIABLE];
+		return env;
+	};
 	return {
 		credentialExposure,
-		spawnHook: (context) => {
-			const hooked = run ? run.spawnHook(context) : context;
-			const env = { ...hooked.env, ...added(hooked.cwd) };
-			delete env[VAULT_SESSION_VARIABLE];
-			return { ...hooked, env };
-		},
+		shellEnvironment,
+		spawnHook: (context) => ({ ...context, env: shellEnvironment(context.env, context.cwd) }),
 		python: {
 			environment: (cwd) => ({ ...added(cwd), ...run?.attributionEnvironment }),
 			omitEnvironmentVariables: [...new Set([VAULT_SESSION_VARIABLE, ...(run?.omittedEnvironmentVariables ?? [])])],

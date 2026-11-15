@@ -41,7 +41,7 @@ import type {
 } from "../expert-routing/vocabulary.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { RequirementCheckResult } from "../goals/requirement-checks.ts";
+import type { HostRequirementChecks } from "../goals/session-requirement-check.ts";
 import type { KnowledgeGrant, KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { LaneKnowledgeSelection } from "../memory/lane-knowledge-view.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
@@ -450,11 +450,10 @@ export interface ParentWritePort {
 	/** The compatibility lane-record projection of a published terminal. */
 	appendLaneRecordSnapshot(record: LaneRecord): void;
 	/**
-	 * The host's own check of one goal requirement, run for one worker attempt, passed: record it as that requirement's proof
-	 * (`recordHostRequirementCheckProof`), exactly once per attempt and requirement. Present on the host that owns the goal
-	 * state; a host without it records the pass on the outcome alone.
+	 * The host's own checks of its goal's requirements, run for one worker attempt as the goal's session runs its own
+	 * commands (its credential guard, read-only shell line and command environment), and the proof a passing one records.
 	 */
-	recordRequirementCheckProof?(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+	readonly requirementChecks: HostRequirementChecks;
 	/** A session task profile, created only by the root's delegate tool. */
 	appendSessionTaskProfile(record: PersistedSessionTaskProfileRecord): void;
 	/**

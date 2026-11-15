@@ -557,6 +557,7 @@ export class AgentSession {
 	private readonly _goals: GoalSessionController;
 	/** The proof this session records on its goal from its workers: accepted claim evidence and the host's own checks. */
 	private readonly goalProof = createGoalProofWrites({
+		requirementCheckSession: () => this._runtimeBuilder,
 		getGoalState: () => this._goals.getState(),
 		saveGoalState: (state, expected) => this._goals.saveState(state, expected),
 		getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
@@ -1296,8 +1297,7 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
-			recordRequirementCheckProof: (attemptId, requirementId, result) =>
-				this.goalProof.recordRequirementCheckProof(attemptId, requirementId, result),
+			requirementChecks: this.goalProof.hostRequirementChecks,
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),

@@ -6,13 +6,13 @@
  * the repository or a service and never changes them, which is what makes running it from the
  * completion path safe without any further prompt. A run of the project's own tests is admitted
  * too: it is how a check proves code works, and it runs nothing the agent could not already run. Output capture is bounded; a timeout kills the
- * process tree the check started (by handle, never by pid).
+ * process tree the check started (by handle, never by pid). The caller names the admission and the environment of whoever the
+ * check runs for: a session's goal check runs through `session-requirement-check.ts`, as the session's own commands run.
  */
 import type { ChildProcess } from "node:child_process";
 import { type KillTreeOutcome, killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getShellConfig } from "../../utils/shell.ts";
-import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
 import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import type { RequirementCheck } from "./goal-state.ts";
 
@@ -65,20 +65,23 @@ export function runRequirementCheck(
 		timeoutMs?: number;
 		signal?: AbortSignal;
 		terminateTree?: (child: ChildProcess) => Promise<KillTreeOutcome>;
-		/** Replaces the requirement line a command must pass (a stricter caller's own admission), judged before it runs. */
-		admit?: (check: RequirementCheck) => string | undefined;
-		/** The environment the command runs with; the harness's launch variables are removed from the process environment by default. */
-		env?: NodeJS.ProcessEnv;
+		/**
+		 * Why the command may not run, judged before it runs: the admission of whoever the check runs for, at least the
+		 * requirement line (`requirementCheckViolation`) unless the caller admitted the command itself.
+		 */
+		admit: (check: RequirementCheck) => string | undefined;
+		/** The environment the command runs with: that of whoever the check runs for (a session's: its shell commands'). */
+		env: NodeJS.ProcessEnv;
 	},
 ): Promise<RequirementCheckResult> {
-	const violation = (options.admit ?? ((candidate) => requirementCheckViolation(candidate, options.cwd)))(check);
+	const violation = options.admit(check);
 	if (violation) return Promise.resolve({ passed: false, exitCode: null, output: "", reason: violation });
 	let child: ChildProcess;
 	try {
 		const shell = getShellConfig(undefined, "bash");
 		child = spawnProcess(shell.shell, [...shell.args, check.command], {
 			cwd: options.cwd,
-			env: options.env ?? withoutHarnessLaunchEnv({ ...process.env }),
+			env: options.env,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});

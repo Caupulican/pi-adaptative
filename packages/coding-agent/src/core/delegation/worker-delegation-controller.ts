@@ -751,8 +751,7 @@ export class WorkerDelegationController {
 			cwd: () => this.deps.getCwd(),
 			signal: this.workerAbort.signal,
 			laneAt: (directory) => lanePlacementAt(this.laneIsolation, directory),
-			recordCheckProof: (attemptId, requirementId, result) =>
-				this.deps.recordRequirementCheckProof?.(attemptId, requirementId, result),
+			requirementChecks: this.deps.requirementChecks,
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),

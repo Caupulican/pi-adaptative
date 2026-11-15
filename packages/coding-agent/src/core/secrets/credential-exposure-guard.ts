@@ -33,7 +33,7 @@ import {
 	mockedValue,
 } from "./credential-content-mock.ts";
 import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtection } from "./credential-path-policy.ts";
-import { createExposureMock, type ExposureTextKind, errorMaskFor } from "./exposure-mock.ts";
+import { createExposureMock, type ExposureMock, type ExposureTextKind, errorMaskFor } from "./exposure-mock.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
 import { redactedThrownToolError } from "./redacted-tool-error.ts";
@@ -952,8 +952,56 @@ export async function credentialToolBlockReasonAsync(
 		.reason;
 }
 
+/**
+ * How the guard meets one call before it runs, for a wrapped tool and for a command the harness runs on a session's behalf
+ * (a requirement check): in deny mode, the refusal of a call that reaches an owner credential; in any mode, the mock its
+ * output is masked by.
+ */
+export interface CredentialCallExposure {
+	readonly refusal: string | undefined;
+	/** What the call's output reads as (a credential's content, a search, program source, none of them). */
+	readonly kind: ExposureTextKind;
+	readonly mock: ExposureMock;
+}
+
+export async function assessCredentialCall(
+	toolName: string,
+	args: unknown,
+	cwd: string,
+	boundary: CredentialExposureBoundary | undefined,
+	mode: CredentialExposureMode,
+	call: {
+		executionContext?: ExecutionContext | undefined;
+		pathAuthority?: ExecutionPathAuthority | undefined;
+		signal?: AbortSignal | undefined;
+		harnessTool: boolean;
+	},
+): Promise<CredentialCallExposure> {
+	const { executionContext, pathAuthority } = call;
+	const assessment = await assessCredentialExposureAsync(
+		toolName,
+		args,
+		cwd,
+		boundary,
+		executionContext,
+		pathAuthority,
+		call.signal,
+		call.harnessTool,
+	);
+	return {
+		refusal: mode === "deny" ? assessment.reason : undefined,
+		kind: assessment.kind,
+		mock: createExposureMock(
+			assessment.kind,
+			() => credentialPolicyFor(toolName, args, cwd, boundary, executionContext, pathAuthority),
+			assessment.dialect,
+			assessment.numbered === true,
+		),
+	};
+}
+
 /** Known values first (exact), then the shape-preserving mock, which also covers secret-shaped text. */
-function createOutputRedactor(
+export function createOutputRedactor(
 	boundary: CredentialExposureBoundary | undefined,
 	mock: (text: string) => string,
 	additionalValues: readonly string[],
@@ -1083,30 +1131,21 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 			try {
 				signal?.throwIfAborted();
 				sensitiveValues = (await boundary?.getSensitiveValues?.()) ?? [];
-				const assessment = await assessCredentialExposureAsync(
-					tool.name,
-					params,
-					cwd,
-					boundary,
+				const exposure = await assessCredentialCall(tool.name, params, cwd, boundary, mode, {
 					executionContext,
 					pathAuthority,
 					signal,
 					harnessTool,
-				);
-				if (assessment.reason && mode === "deny") {
+				});
+				if (exposure.refusal) {
 					throw new AgentToolExecutionError(
-						`${assessment.reason} ${DENY_MODE_ESCALATION}`,
+						`${exposure.refusal} ${DENY_MODE_ESCALATION}`,
 						"credential_access_blocked",
 						"credential-access-blocked",
 						"tool_failure",
 					);
 				}
-				const exposureMock = createExposureMock(
-					assessment.kind,
-					() => credentialPolicyFor(tool.name, params, cwd, boundary, executionContext, pathAuthority),
-					assessment.dialect,
-					assessment.numbered === true,
-				);
+				const exposureMock = exposure.mock;
 				fragment = exposureMock.fragment;
 				errorMock = errorMaskFor();
 				signal?.throwIfAborted();
@@ -1116,7 +1155,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					boundary?.toolStreamsDirectory,
 				);
 				// Only a final result that holds the call's whole output from its first line may be read as source.
-				const whole = assessment.kind !== "source" || resultHoldsWholeOutput(tool.name, result);
+				const whole = exposure.kind !== "source" || resultHoldsWholeOutput(tool.name, result);
 				return redactResult(
 					result,
 					boundary,

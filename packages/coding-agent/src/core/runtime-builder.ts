@@ -124,8 +124,8 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { GoalStartGrant } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
-import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
+import { runSessionRequirementCheck } from "./goals/session-requirement-check.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
 import type { KnowledgeCollectionStatus } from "./memory/knowledge-collector.ts";
@@ -1883,8 +1883,7 @@ export class RuntimeBuilder {
 							reviewWaiting: proofSheetsAwaitingReview(sessionManager.getBranch()).length + 1,
 						});
 					},
-					runRequirementCheck: (check, signal) =>
-						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),
+					runRequirementCheck: (check, signal) => runSessionRequirementCheck(check, this, this.taskCwd, signal),
 					grantEdge: this.deps.grantEdgeFromInstructions
 						? (grant) => this.deps.grantEdgeFromInstructions?.(grant)
 						: undefined,

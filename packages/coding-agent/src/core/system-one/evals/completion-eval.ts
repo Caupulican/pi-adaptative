@@ -20,7 +20,8 @@ import {
 	type RequirementCheck,
 } from "../../goals/goal-state.ts";
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../../goals/prove-requirement-checks.ts";
-import { runRequirementCheck } from "../../goals/requirement-checks.ts";
+import { requirementCheckViolation, runRequirementCheck } from "../../goals/requirement-checks.ts";
+import { withoutHarnessLaunchEnv } from "../../harness-environment.ts";
 import type { JevAdapter } from "../adapter.ts";
 import { projectCanonicalTruth } from "../canonical-truth.ts";
 import type { CompletionAccount } from "../completion-account.ts";
@@ -669,7 +670,14 @@ export async function evaluateCompletionOnce(
 		// completion before System One is asked.
 		const proof = await proveRequirementChecks({
 			state: buildEvalGoal(testCase, now, machine),
-			runCheck: (check, signal) => runRequirementCheck(check, { cwd, ...(signal ? { signal } : {}) }),
+			// No session runs here: a check is held to the requirement line and runs in this process's environment.
+			runCheck: (check, signal) =>
+				runRequirementCheck(check, {
+					cwd,
+					...(signal ? { signal } : {}),
+					admit: (candidate) => requirementCheckViolation(candidate, cwd),
+					env: withoutHarnessLaunchEnv({ ...process.env }),
+				}),
 			now: () => new Date().toISOString(),
 			save: () => {},
 			requireVerifiedEvidenceForCompletion: true,

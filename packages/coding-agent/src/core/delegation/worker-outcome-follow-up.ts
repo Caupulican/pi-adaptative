@@ -2,7 +2,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { FleetScheduler } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { RequirementCheckResult } from "../goals/requirement-checks.ts";
+import type { HostRequirementChecks } from "../goals/session-requirement-check.ts";
 import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
@@ -27,8 +27,8 @@ export interface WorkerOutcomeFollowUpDeps {
 	readonly signal: AbortSignal;
 	/** Classify the lane and resolve its registered root. */
 	laneAt(directory: string): Promise<{ isLane: boolean; root?: string }>;
-	/** Record a passing host requirement check as the goal's own proof of that requirement. */
-	recordCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+	/** The goal's session's host requirement checks: run as its own commands are, a passing one recorded as proof. */
+	readonly requirementChecks: HostRequirementChecks;
 }
 
 /**
@@ -64,7 +64,7 @@ export class WorkerOutcomeFollowUp {
 			recordRefusal: (attemptId, detail) => {
 				deps.recorder.record(attemptId, undefined, { rungRefusal: detail });
 			},
-			recordCheckProof: deps.recordCheckProof,
+			requirementChecks: deps.requirementChecks,
 			signal: deps.signal,
 		});
 		this.releaseLadder = deps.recorder.useLadderContext({
