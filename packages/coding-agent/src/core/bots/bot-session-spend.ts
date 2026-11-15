@@ -45,9 +45,10 @@ function botSpendCeilings(
 
 /**
  * The ceilings that hold spend made on `model`: every one on all spend, and the metered-only ones when that spend is
- * metered. A model the registry does not know (undefined) is held as metered spend, which is never laxer. A model that
- * declares no price is held by none: its spend cannot be priced, so its usage windows hold it, as they hold the bot's
- * workers on such a model (`RunCostBound.unpriced` "unbounded").
+ * metered. A model the registry does not know (undefined) is held as metered spend, which is never laxer. A subscription
+ * model that declares no price is held by none: its spend cannot be priced, and its usage windows hold it, as they hold
+ * the bot's workers on such a model (`RunCostBound.unpriced` "unbounded"). A metered one keeps every ceiling: real dollars
+ * are spent, so a ceiling that applies refuses it (`BotSessionHost.modelRefusal`), as it refuses the root's workers.
  */
 export function botSpendCeilingsOn(
 	root: readonly BotSpendCeiling[],
@@ -55,8 +56,8 @@ export function botSpendCeilingsOn(
 	model: Model<Api> | undefined,
 	registry: ModelRegistry,
 ): BotSpendCeiling[] {
-	if (model?.costDefaulted) return [];
 	const metered = isMeteredSpend(model, registry);
+	if (model?.costDefaulted && !metered) return [];
 	return botSpendCeilings(root, spendBudget).filter((ceiling) => metered || !ceiling.meteredOnly);
 }
 

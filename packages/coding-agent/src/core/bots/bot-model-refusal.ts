@@ -1,5 +1,6 @@
 /**
- * Why a bot's own model may not run now (the worker admission's rules for it), in the owner's words, with when the refusal ends when that is known: the host refuses a run or an open with it,
+ * Why a bot's own model may not run now (the worker admission's rules for it, or a dollar bound on a metered model with no
+ * price), in the owner's words, with when the refusal ends when that is known: the host refuses a run or an open with it,
  * and the opening of owed sessions keys a refusal by it and takes the work up again once it no longer holds.
  */
 import { interfaceText } from "../language/interface-text.ts";
@@ -7,9 +8,13 @@ import type { OrchestrationModelUnusableCause } from "../orchestration/model-bin
 
 /**
  * Which rule refuses the bot's model: the host reports it unusable (its own cause), the subscription rule holds it to a
- * metered model, or the session's model policy does not allow it.
+ * metered model, the session's model policy does not allow it, or a dollar bound applies to a metered model with no price.
  */
-export type BotModelRefusalCause = OrchestrationModelUnusableCause | "model_metered" | "model_not_allowed";
+export type BotModelRefusalCause =
+	| OrchestrationModelUnusableCause
+	| "model_metered"
+	| "model_not_allowed"
+	| "model_unpriced";
 
 /** Why a bot's model may not run now: the rule as a code, the owner's words for it, and when that ends when it is known. */
 export interface BotModelRefusal {

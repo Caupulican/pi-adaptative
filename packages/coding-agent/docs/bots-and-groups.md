@@ -52,8 +52,10 @@ request; the window's workers share each ceiling less what the bot's turns spent
 spend it counts (a metered worker the metered-only ones too, so a subscription bot's own turns never use up the metered
 ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
 its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the
-reset and continues on its own. A bot or a worker on a model that declares no price gets no dollar bound either, as the
-main session's workers on it run: its spend cannot be priced, so its usage windows hold it. The windows are kept in the bot's spend ledger, `bots/<id>/spend.json`; past 64 windows the oldest are dropped, but never one a worker that may still run serves, nor the one the bot's turn is counting to. A turn is bounded
+reset and continues on its own. A bot or a worker on a subscription model that declares no price gets no dollar bound
+either: its spend cannot be priced, so its usage windows hold it. On a metered (API) model that declares no price, a
+dollar ceiling that applies refuses the bot's turns and its workers' requests, as it refuses the main session's workers:
+real dollars would be spent with nothing to hold them. The windows are kept in the bot's spend ledger, `bots/<id>/spend.json`; past 64 windows the oldest are dropped, but never one a worker that may still run serves, nor the one the bot's turn is counting to. A turn is bounded
 in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is. What the bot's session spends is added
 to the main session's cost at each turn's end and each time a worker's usage reaches it, from a watermark kept in the same
 ledger: each charge's range is written there before it is reported and kept until the main session's file holds it, so a

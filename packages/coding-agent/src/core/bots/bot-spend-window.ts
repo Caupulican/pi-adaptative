@@ -195,7 +195,8 @@ export class BotSpendWindows {
 			...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
 			...(maxMeteredCostUsd !== undefined ? { maxMeteredCostUsd } : {}),
 			includes: (candidate) => this.windowOfAttempt(candidate, snapshot) === window.id,
-			// A model with no published price gets no dollar run bound, as the root's workers on it run under none.
+			// A subscription model with no published price gets no dollar run bound (its usage windows hold it); a metered one
+			// is priced against the bound, which refuses it, as the root's workers under a metered ceiling are.
 			unpriced: "unbounded",
 		};
 	}

@@ -199,8 +199,9 @@ export interface RunCostBound {
 	includes(attempt: AttemptRuntimeState): boolean;
 	/**
 	 * What the run's bounds do with an attempt on a model that declares no price, whose requests cannot be priced against
-	 * them: refuse its requests (`refused`), or hold it to no dollar run bound (`unbounded`, as the root's workers on such
-	 * a model run); its spend, if any, still seeds the run's budgets for the others.
+	 * them: refuse its requests (`refused`), or hold it to no dollar run bound (`unbounded`) when its spend is not metered
+	 * (a subscription's usage windows hold it); a metered attempt with no price is refused either way, as the root's
+	 * workers are under a metered ceiling. Its spend, if any, still seeds the run's budgets for the others.
 	 */
 	readonly unpriced: "refused" | "unbounded";
 }
