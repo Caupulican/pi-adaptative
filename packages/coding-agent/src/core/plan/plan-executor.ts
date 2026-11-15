@@ -86,6 +86,7 @@ import { PlanResultGates } from "./plan-result-gates.ts";
 import { placeHereNodes, resolveSince, verifyWrapNodes, voteCheckNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
 import { activeRootPlan, type PlanView, planNodeBrief, planNodeOutcome, planView } from "./plan-view.ts";
+import type { WorkerWriteReach } from "./plan-write-facts.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
@@ -110,8 +111,8 @@ export interface PlanExecutorDeps {
 	/** Fires after every orchestration store commit. */
 	readonly subscribeStore: (listener: () => void) => () => void;
 	readonly fleet: () => PlanFleet;
-	/** Whether the session lends its workers writes, read at each plan call (`ceilingLendsWrites`). */
-	readonly workersWrite: () => boolean;
+	/** Where the session's workers may write, read at each plan call (F11). */
+	readonly workerWrites: () => WorkerWriteReach;
 	readonly engine: () => OperationEffectEngine | undefined;
 	readonly goal: () => GoalState | undefined;
 	readonly sessionId: () => string;
@@ -359,7 +360,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			goal,
 			...(current ? { current } : {}),
 			headroom: runtime.getProjectionCapacity().headroom,
-			workersWrite: this.deps.workersWrite(),
+			workerWrites: this.deps.workerWrites(),
 			engine: this.deps.engine(),
 			entries: this.deps.rootEntries(),
 			now: nowIso,

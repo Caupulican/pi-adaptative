@@ -137,7 +137,7 @@ import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
-import { ceilingLendsWrites, workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
+import { workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { WorkerTerminalReport } from "./delegation/worker-terminal-report.ts";
@@ -2036,7 +2036,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			runtime: () => lifecycle.ledger.runtime,
 			subscribeStore: (listener) => store.subscribe(listener),
 			fleet: () => this._getWorkerController().getFleet(),
-			workersWrite: () => ceilingLendsWrites(workerCeilingOf(this.deps.standing, this.deps)),
+			workerWrites: () => ({ ceiling: workerCeilingOf(this.deps.standing, this.deps), cwd: this.deps.getCwd() }),
 			engine: () => this.deps.systemOne.semanticDecisionEngine(),
 			goal: () => this.deps.getGoalStateSnapshot(),
 			sessionId: () => this.deps.getSessionId(),

@@ -1,11 +1,14 @@
 /**
  * The write facts of one plan call, F8, F9 and F11. F8: a step that changes files names what proves it (a requirement or a
  * proof). F9: two steps that may change the same files at the same time are ordered, or are members of one merge. F11: a
- * session that lends its workers no writes plans no step that names files.
+ * step names no file outside the roots the session's workers may write in.
  * Pure code over the steps stated at this call's version; a host revision (verify wrap, placement, merge land) never
  * passes through here, so it never trips them. Unverified write steps are a doubt, not a refusal.
  */
 
+import { resolve } from "node:path";
+import { pathWithinRoots } from "../delegation/worker-nested-start.ts";
+import type { WorkerCeiling } from "../delegation/worker-parent-ceiling.ts";
 import { type PlanNodeSpec, planPathExists, writeScopesOverlap } from "./plan-graph.ts";
 
 export interface WriteFactRefusal {
@@ -57,20 +60,37 @@ export function checkWriteFacts(nodes: readonly PlanNodeSpec[], changed: Readonl
 	return refusals;
 }
 
+/** Where a session's workers may write: its ceiling over them (`workerCeilingOf`) and the directory step files are under. */
+export interface WorkerWriteReach {
+	readonly ceiling: WorkerCeiling;
+	readonly cwd: string;
+}
+
 /**
- * F11: the refusal of every step that names files, when the session lends its workers no writes (`ceilingLendsWrites`: a
- * read-only bot). Its ceiling would start such a step's worker read-only, under a plan that orders, isolates, proves and
- * lands the step as a writer; refused, every step is planned as the read-only work its worker does. A merge, whose steps
- * must name their files, cannot be planned there either.
+ * F11: the refusal of each step stated at this version (`changed`) that names a file outside the roots the session's
+ * workers may write in (its ceiling's `writeRoots`, each file resolved against the session's directory); the owner's
+ * reach, or a ceiling that bounds no root, refuses none. The ceiling would start such a step's worker without the write,
+ * under a plan that orders, isolates, proves and lands the step as a writer of that file. A session whose workers write
+ * nowhere (a read-only bot) plans every step as the read-only work its worker does, and no merge, whose steps must name
+ * their files.
  */
-export function unlentWriteRefusals(nodes: readonly PlanNodeSpec[], workersWrite: boolean): WriteFactRefusal[] {
-	if (workersWrite) return [];
-	return nodes
-		.filter((node) => node.writeScope.length > 0)
-		.map((node) => ({
-			fact: "F11",
-			fix: `step "${node.id}" names files, but this session changes no files and neither do its workers; leave out files`,
-		}));
+export function unlentWriteRefusals(
+	nodes: readonly PlanNodeSpec[],
+	reach: WorkerWriteReach,
+	changed: ReadonlySet<string>,
+): WriteFactRefusal[] {
+	const roots = reach.ceiling === "unbounded" ? undefined : reach.ceiling.writeRoots;
+	if (roots === undefined) return [];
+	return nodes.flatMap((node): WriteFactRefusal[] => {
+		if (!changed.has(node.id)) return [];
+		const outside = node.writeScope.filter((path) => !pathWithinRoots(resolve(reach.cwd, path), roots));
+		if (outside.length === 0) return [];
+		const fix =
+			roots.length === 0
+				? `step "${node.id}" names files, but this session changes no files and neither do its workers; leave out files`
+				: `step "${node.id}" names ${outside.join(", ")}, outside where this session's workers may write (${roots.join(", ")}); name files inside it or leave them out`;
+		return [{ fact: "F11", fix }];
+	});
 }
 
 /** Work steps that change files and have no verify step downstream of them: a doubt on each, never a refusal. */

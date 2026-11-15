@@ -2,7 +2,7 @@
  * Acceptance of one `plan` tool call (start or revise), design PG 3.3, as ordered code decisions:
  *
  * 1. code facts F1-F7 (and F10's goal-dependency edges, added first), the step shapes, the ids a merge reserves and F11
- *    (files named in a session that lends its workers no writes) refuse with every fix listed; nothing is recorded;
+ *    (files named outside where the session's workers may write) refuse with every fix listed; nothing is recorded;
  * 2. System One absent or failing -> recorded on code facts alone (`unjudged`);
  * 3. J2 and its paired J3 accepted (>= 0.90) for a pair -> the edge is added; the version is re-checked on code facts
  *    with the edges, and a refusal then names the edges that caused it;
@@ -48,7 +48,12 @@ import {
 	thinSteps,
 	withEdges,
 } from "./plan-revision.ts";
-import { checkWriteFacts, unlentWriteRefusals, unverifiedWriteSteps } from "./plan-write-facts.ts";
+import {
+	checkWriteFacts,
+	unlentWriteRefusals,
+	unverifiedWriteSteps,
+	type WorkerWriteReach,
+} from "./plan-write-facts.ts";
 
 const REQUEST_MAX_BYTES = 4 * 1024;
 /** The planner's recent conversation, baked into a step's note at acceptance; the header lets a later pass see it. */
@@ -63,8 +68,8 @@ export interface PlanAcceptanceContext {
 	/** The plan being revised; absent for a start. */
 	readonly current?: { readonly record: PlanRecord; readonly runtime: PlanRuntimeState };
 	readonly headroom: { readonly tasks: number; readonly attempts: number };
-	/** Whether the session lends its workers writes (`ceilingLendsWrites`); false refuses every step that names files (F11). */
-	readonly workersWrite: boolean;
+	/** Where the session's workers may write: a step naming a file outside it is refused (F11). */
+	readonly workerWrites: WorkerWriteReach;
 	readonly engine: OperationEffectEngine | undefined;
 	/** The root's session branch, root to leaf. */
 	readonly entries: readonly unknown[];
@@ -174,8 +179,6 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 	}
 	const reserved = reservedLandIdProblems(proposed, current, new Set((input.steps ?? []).map((step) => step.id)));
 	if (reserved.length > 0) return { ok: false, problems: reserved };
-	const unlent = unlentWriteRefusals(proposed, context.workersWrite);
-	if (unlent.length > 0) return { ok: false, problems: unlent.map((refusal) => refusal.fix) };
 	const goal = context.goal;
 	const goalEdges = goal ? goalDependencyEdges(proposed, goal.requirements) : [];
 	proposed = withEdges(proposed, goalEdges, "after");
@@ -202,8 +205,11 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 		releasedTasks,
 		maxScopeChars: PLAN_LIMITS.scopeChars,
 	};
+	// F11 reads the steps stated at this version, as F8 does: a step a revise leaves unchanged keeps the files it runs with.
+	const unlent = unlentWriteRefusals(proposed, context.workerWrites, changed).map((refusal) => refusal.fix);
 	const facts = checkPlanFacts(title, proposed, final ?? "", factContext);
-	if (!facts.ok) return { ok: false, problems: problemLines(facts.problems) };
+	if (!facts.ok || unlent.length > 0)
+		return { ok: false, problems: [...(facts.ok ? [] : problemLines(facts.problems)), ...unlent] };
 	const focus = current ? changed : undefined;
 	const review = await reviewPlanGraph(context.engine, {
 		request: requestText(goal, context.entries, title),
