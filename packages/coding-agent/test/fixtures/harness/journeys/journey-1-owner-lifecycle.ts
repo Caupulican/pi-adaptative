@@ -1,10 +1,12 @@
 import "../builtin-install.ts";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
+import { Type } from "typebox";
 import { expect } from "vitest";
 import { SOUL_FILE_NAME } from "../../../../src/core/agent-identity.ts";
 import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { defineTool } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
@@ -45,7 +47,7 @@ import { routeShellContract } from "../../../../src/core/tools/shell-contract-ro
 import { wrapToolDefinition } from "../../../../src/core/tools/tool-definition-wrapper.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { toolCallForm, toolCallHandoff } from "../../../../src/kernel/tool-call-arguments.ts";
+import { requestedBackgroundForms, toolCallForm, toolCallHandoff } from "../../../../src/kernel/tool-call-arguments.ts";
 import type { AgentTool } from "../../../../src/kernel/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import {
@@ -3138,6 +3140,64 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		await withDeadline(trace, "external wait exit woke the root", handed.promise, 60_000);
 		await withDeadline(trace, "external wait handoff settled", waitSession.waitForForegroundIdle(), 60_000);
 		expect(await world.disposeSessionInBody(waitSession), "the external-wait root disposes cleanly").toBeUndefined();
+	}
+
+	// A refused handoff. A call that asks for a background task in a session that can start one holds its body until the
+	// handoff is decided; when the session's task controller declines it (here because its tool marks the call a foreground
+	// wait), the body runs in its foreground form, without `background` and so with the foreground's bound, the call's result
+	// is the tool's own, and no task starts.
+	{
+		const executed: Record<string, unknown>[] = [];
+		const heldTool = defineTool({
+			name: "held_probe",
+			label: "held probe",
+			description: "Probe a target, in the background when asked.",
+			parameters: Type.Object({ target: Type.String(), background: Type.Optional(Type.Boolean()) }),
+			foregroundWait: () => true,
+			backgroundArguments: (input) => requestedBackgroundForms(input),
+			async execute(_toolCallId, input) {
+				executed.push({ ...input });
+				return { content: [{ type: "text", text: `probed ${input.target}` }], details: {} };
+			},
+		});
+		const heldSession = (
+			await world.createRootSession("root", {
+				agentDir: `${world.agentDir}-refused-handoff`,
+				systemOneEnabled: false,
+				customTools: [heldTool],
+			})
+		).session;
+		world.systemOne.enterPhase("refused-handoff", {});
+		world.provider.enqueue(
+			"root",
+			calls("refused-handoff-start", [
+				{ id: "refused-handoff-1", name: "held_probe", arguments: { target: "ci", background: true } },
+			]),
+			{
+				name: "refused-handoff-result",
+				check: (request) => {
+					const result = request.context.messages.findLast((message) => message.role === "toolResult");
+					expect(JSON.stringify(result?.content), "the declined call's result is the tool's own").toContain(
+						"probed ci",
+					);
+				},
+				reply: { content: [{ type: "text", text: "Probed in the foreground." }] },
+			},
+		);
+		expect(heldSession.getActiveToolNames(), "the session can start a task, so the handoff is asked").toContain(
+			"tool_task",
+		);
+		await withDeadline(trace, "refused handoff turn", heldSession.prompt("Probe ci in the background."));
+		await withDeadline(trace, "refused handoff settled", heldSession.waitForForegroundIdle(), 60_000);
+		expect(executed, "the declined call's body ran once, in its foreground form").toEqual([{ target: "ci" }]);
+		expect(
+			heldSession.getResourceSnapshot().backgroundToolTasks.runningTaskIds,
+			"a declined handoff starts no task",
+		).toEqual([]);
+		expect(
+			await world.disposeSessionInBody(heldSession),
+			"the refused-handoff root disposes cleanly",
+		).toBeUndefined();
 	}
 
 	// R48s, a decision ledger whose open meets a busy database inside a live session. Two fresh owners (System One off in their

@@ -837,7 +837,7 @@ refused handoff runs it in its foreground form too. A moved bash call runs in th
 environment. The handoff stub says how long the task may run and how to cancel it, and names what moved the call (`started as session task
 … (background requested)`, `started as session task …: moved to the background because it waits on outside state`,
 `exceeded Ns; running as session task`, `moved to session task … by the operator`).
-Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundArguments and the external-wait handoff); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundArguments, the external-wait handoff and the refused handoff); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)
 
 **The completion wake-up carries the result.** When a background task ends, its wake-up lists each
 finished record's status line followed by its bounded final output verbatim, in emission order,
