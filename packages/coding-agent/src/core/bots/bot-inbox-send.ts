@@ -37,17 +37,19 @@ export interface BotInboxSendPorts {
 }
 
 /**
- * The owner's words to a bot this host runs, while a stop of it waits that could not be taken: no turn starts on them
- * before the stop is applied, so they wait in the bot's inbox, which the host takes only behind its waiting stops (taken
- * again on the stop's retry), and the owner is told why (`waitsFor`).
+ * The owner's words to a bot this host runs, left in its inbox instead of given, which the host takes in order and only
+ * behind the stops waiting for the bot (taken again on a stop's retry): behind a stop that waits and could not be taken
+ * (`behindStop`: no turn starts on them before it is applied, and the owner is told why, `waitsFor`), or behind words
+ * the inbox still holds, which go first.
  */
-export function queueBehindBotStop(
+export function queueInBotInbox(
 	agentDir: string,
 	agentId: string,
 	message: string,
 	mode: BotOperatorMessageOptions["mode"],
 	from: { readonly sessionId: string; readonly cwd: string },
 	modelRef: string,
+	behindStop: boolean,
 ): BotOperatorMessageDispatchResult {
 	const item = enqueueOwnerWords(agentDir, agentId, message, mode, from);
 	return {
@@ -55,7 +57,7 @@ export function queueBehindBotStop(
 		mode: "queued",
 		messageId: item.message.id,
 		modelRef,
-		waitsFor: interfaceText().botTeam.botWordsWaitBehindStop(agentId),
+		...(behindStop ? { waitsFor: interfaceText().botTeam.botWordsWaitBehindStop(agentId) } : {}),
 	};
 }
 

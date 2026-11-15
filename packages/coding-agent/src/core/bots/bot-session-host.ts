@@ -74,7 +74,7 @@ import {
 	requestBotStop,
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
-import { BotSessionHeldError, queueBehindBotStop, sendToBotHost } from "./bot-inbox-send.ts";
+import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
@@ -199,6 +199,8 @@ interface BotSessionEntry {
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
+	/** The end of the turn the owner's stop last aborted: the words given next wait on it, not steering a dying turn. */
+	turnEnding: Promise<void>;
 	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
 	recheckWhenIdle: boolean;
 	/** Its turns' spend and outcome, each reported once per turn. */
@@ -349,7 +351,7 @@ export class BotSessionHost {
 		if (!entry) return false;
 		try {
 			const loaded = { session: entry.session, transcript: entry.sessionManager };
-			stopLoadedBot(this.ports.agentDir(), agentId, loaded, this.isBusy(entry), this.stopPorts());
+			stopLoadedBot(this.ports.agentDir(), agentId, loaded, () => this.stopTurn(entry), this.stopPorts());
 			this.stopRetries.forget(agentId);
 			this.stopTold.delete(agentId);
 			return true;
@@ -360,6 +362,16 @@ export class BotSessionHost {
 			this.stopRetries.arm(agentId, false);
 			return false;
 		}
+	}
+
+	/** Aborts the turn the bot's session works on, for the owner's stop; the words given next wait for its end. */
+	private stopTurn(entry: BotSessionEntry): void {
+		if (!this.isBusy(entry)) return;
+		entry.turnEnding = entry.session
+			.abort(interfaceText().botTeam.botTurnAbortReasons.ownerStopped)
+			.catch((error: unknown) =>
+				this.ports.warn(interfaceText().botTeam.botTurnFailed(entry.agentId, errorText(error))),
+			);
 	}
 
 	/** What applying a stop reads: the owner's warnings, and the provider admission clock a usage wait is dated on. */
@@ -521,13 +533,14 @@ export class BotSessionHost {
 		entry.sender = sender;
 		// The owner's words never start a turn while a stop of the bot waits: it is taken first, or they wait behind it.
 		const agentDir = this.ports.agentDir();
-		if (botInboxStopWaiting(agentDir, agentId) && !this.takeStops(agentId)) {
-			const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
-			const result = queueBehindBotStop(agentDir, agentId, message, mode, from, entry.modelRef);
-			this.changed(agentId);
-			return result;
-		}
-		return this.give(entry, message, mode);
+		const behindStop = botInboxStopWaiting(agentDir, agentId) && !this.takeStops(agentId);
+		// Words its inbox holds (left behind a stop since taken) go first, and these follow them in order.
+		if (!behindStop && botInboxWaiting(agentDir, agentId)) await this.inbox.drain(agentId);
+		if (!behindStop && !botInboxWaiting(agentDir, agentId)) return this.give(entry, message, mode);
+		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
+		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop);
+		this.changed(agentId);
+		return result;
 	}
 
 	/**
@@ -540,6 +553,8 @@ export class BotSessionHost {
 		mode: BotOperatorMessageOptions["mode"],
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId } = entry;
+		// A turn the owner's stop aborted ends first: the words start the next turn, never steer the one dying.
+		await entry.turnEnding;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
 		this.admission.admit(
 			agentId,
@@ -779,6 +794,7 @@ export class BotSessionHost {
 				spendBudget: definition.spendBudget,
 				unsubscribe: () => {},
 				inFlight: 0,
+				turnEnding: Promise.resolve(),
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
@@ -809,7 +825,7 @@ export class BotSessionHost {
 			});
 			session.startBackgroundInputs();
 			// A stop written since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
-			stopLoadedBot(agentDir, agentId, { session, transcript: sessionManager }, false, this.stopPorts());
+			stopLoadedBot(agentDir, agentId, { session, transcript: sessionManager }, () => {}, this.stopPorts());
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
 			session.backgroundLanes.drainQueuedWorkerDelegations();
@@ -1027,12 +1043,7 @@ export class BotSessionHost {
 		if (entry) {
 			const working = this.isBusy(entry);
 			// The turn it runs stops at once, whether or not the stop was written and taken (a stop not taken is tried again).
-			if (!(written && this.takeStops(agentId)) && working)
-				void entry.session
-					.abort(interfaceText().botTeam.botTurnAbortReasons.ownerStopped)
-					.catch((error: unknown) =>
-						this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error))),
-					);
+			if (!(written && this.takeStops(agentId))) this.stopTurn(entry);
 			this.takeInbox(agentId);
 			return { stopped: working };
 		}

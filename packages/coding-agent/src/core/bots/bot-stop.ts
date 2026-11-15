@@ -227,24 +227,23 @@ export function readClosedBotSession(read: () => SavedBotSession | undefined): C
 export interface LoadedBotSession {
 	readonly session: Pick<
 		AgentSession,
-		"sessionId" | "abort" | "getGoalStateSnapshot" | "saveGoalStateSnapshot" | "backgroundLanes"
+		"sessionId" | "getGoalStateSnapshot" | "saveGoalStateSnapshot" | "backgroundLanes"
 	>;
 	readonly transcript: UsageWakeLog & UsageWakeWriter;
 }
 
 /**
- * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it
- * runs, when `turnRuns`, stopped for the owner, then {@link applyOwnerStopToSession}. The stop applied, undefined when
- * none waits; a failure throws with the stops left waiting.
+ * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it runs
+ * stopped for the owner by `stopTurn` (the host's, which the words it gives next wait on until the turn ended), then
+ * {@link applyOwnerStopToSession}. The stop applied, undefined when none waits; a failure throws with the stops left waiting.
  */
 export function stopLoadedBot(
 	agentDir: string,
 	agentId: string,
 	{ session, transcript }: LoadedBotSession,
-	turnRuns: boolean,
+	stopTurn: () => void,
 	ports: BotStopPorts,
 ): BotInboxStop | undefined {
-	const words = interfaceText().botTeam;
 	const live: HostedBotStopSession = {
 		goal: {
 			getGoalStateSnapshot: () => session.getGoalStateSnapshot(),
@@ -258,12 +257,7 @@ export function stopLoadedBot(
 		agentId,
 		session.sessionId,
 		(stop) => {
-			if (turnRuns)
-				void session
-					.abort(words.botTurnAbortReasons.ownerStopped)
-					.catch((error: unknown) =>
-						ports.warn(words.botTurnFailed(agentId, error instanceof Error ? error.message : String(error))),
-					);
+			stopTurn();
 			return applyOwnerStopToSession(live, stop, ports.now());
 		},
 		ports,

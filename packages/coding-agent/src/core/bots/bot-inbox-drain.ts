@@ -46,8 +46,8 @@ export interface BotInboxDrainPorts {
 
 export class BotInboxDrain {
 	private readonly ports: BotInboxDrainPorts;
-	/** The bots whose inbox a pass is taking now, and whether a change asked for another read when it ends. */
-	private readonly passes = new Map<string, boolean>();
+	/** The bots whose inbox a pass is taking now: whether a change asked for another read when it ends, and its end. */
+	private readonly passes = new Map<string, { again: boolean; done?: Promise<void> }>();
 	private poll: unknown;
 	private stopped = false;
 
@@ -55,21 +55,29 @@ export class BotInboxDrain {
 		this.ports = ports;
 	}
 
-	/** Takes the bot's inbox now; a pass already running reads it again when it ends. */
+	/**
+	 * Takes the bot's inbox now, resolving once it was taken; a pass already running reads it again when it ends, and this
+	 * resolves then.
+	 */
 	async drain(agentId: string): Promise<void> {
 		if (this.stopped) return;
-		if (this.passes.has(agentId)) {
-			this.passes.set(agentId, true);
-			return;
+		const running = this.passes.get(agentId);
+		if (running) {
+			running.again = true;
+			return running.done;
 		}
-		try {
-			do {
-				this.passes.set(agentId, false);
-				if (!(await this.pass(agentId))) return;
-			} while (this.passes.get(agentId) === true && !this.stopped);
-		} finally {
-			this.passes.delete(agentId);
-		}
+		const pass: { again: boolean; done?: Promise<void> } = { again: false };
+		this.passes.set(agentId, pass);
+		pass.done = this.passesOf(agentId, pass).finally(() => this.passes.delete(agentId));
+		return pass.done;
+	}
+
+	/** The passes of one drain: again while a change asked for another read during the last. */
+	private async passesOf(agentId: string, pass: { again: boolean }): Promise<void> {
+		do {
+			pass.again = false;
+			if (!(await this.pass(agentId))) return;
+		} while (pass.again && !this.stopped);
 	}
 
 	/** One read of the inbox, every message given in order; false when the bot's session is no longer loaded here. */
