@@ -18,6 +18,16 @@ const EXPLICIT_GOAL_PATTERNS = [
 	/^\s*keep\s+working\s+until\s+this\s+is\s+(?:complete|done)\s*:\s*(.+)$/is,
 	/^\s*instead of .+,\s*i want to (.+)$/is,
 	/^\s*i want to ((?:refactor|rewrite|rebuild|redesign)\b.+)$/is,
+	// The same statements in pt-BR. Where English reads "is to <verb>", the pt-BR form reads "é <infinitive>".
+	/^\s*(?:defina|definir|estabele[çc]a)\s+(?:isso\s+como\s+)?uma\s+meta(?:\s+persistente)?\s*:\s*(.+)$/is,
+	/^\s*meta\s*:\s*(.+)$/is,
+	/^\s*minha\s+meta\s+(?:persistente\s+)?é\s+([a-zà-ú]+(?:ar|er|ir|or)\b.*)$/is,
+	/^\s*(?:a|nossa)\s+meta\s+(?:persistente\s+)?é\s+([a-zà-ú]+(?:ar|er|ir|or)\b.*)$/is,
+	/^\s*trate\s+isso\s+como\s+(?:minha|uma)\s+meta(?:\s+persistente)?\s*:\s*(.+)$/is,
+	/^\s*(?:eu\s+)?quero\s+isso\s+como\s+(?:minha\s+|uma\s+)?meta(?:\s+persistente)?\s*:\s*(.+)$/is,
+	/^\s*continue\s+trabalhando\s+até\s+(?:isso|isto)\s+(?:estar|ficar)\s+(?:completo|conclu[íi]do|pronto)\s*:\s*(.+)$/is,
+	/^\s*em\s+vez\s+de\s+.+,\s*(?:eu\s+)?quero\s+(.+)$/is,
+	/^\s*(?:eu\s+)?quero\s+((?:refatorar|reescrever|reconstruir|redesenhar)\b.+)$/is,
 ] as const;
 
 const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
@@ -27,9 +37,15 @@ const STANDALONE_GOAL_AUTHORITY_PATTERNS = [
 	/^\s*(?:this|the|that)\s+task\s+is\s+(?:now\s+)?a\s+(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
 	/^\s*(?:make|treat)\s+this\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
 	/^\s*(?:make|treat)\s+this\s+task\s+(?:as\s+)?(?:my\s+|a\s+)?(?:persistent\s+)?goal(?=[\s,.:;!?]|$)/is,
+	// pt-BR: "isso é uma meta", "esta tarefa é uma meta", "trate isso como (minha) meta", "transforme isso em uma meta".
+	/^\s*(?:isso|isto)\s+(?:agora\s+)?é\s+(?:agora\s+)?uma\s+meta(?:\s+persistente)?(?=[\s,.:;!?]|$)/is,
+	/^\s*(?:esta|essa|a)\s+tarefa\s+(?:agora\s+)?é\s+(?:agora\s+)?uma\s+meta(?:\s+persistente)?(?=[\s,.:;!?]|$)/is,
+	/^\s*trate\s+(?:isso|esta\s+tarefa)\s+como\s+(?:minha\s+|uma\s+)?meta(?:\s+persistente)?(?=[\s,.:;!?]|$)/is,
+	/^\s*transforme\s+(?:isso|esta\s+tarefa)\s+em\s+(?:minha\s+|uma\s+)?meta(?:\s+persistente)?(?=[\s,.:;!?]|$)/is,
 ] as const;
 
-const STANDALONE_GOAL_FILLER = /^(?:use it|please|now|ok|okay|thanks|go|do it)(?:[.!?])?$/i;
+const STANDALONE_GOAL_FILLER =
+	/^(?:use it|please|now|ok|okay|thanks|go|do it|por favor|agora|obrigad[oa]|vai|pode ir|fa[çc]a isso)(?:[.!?])?$/i;
 
 const STANDALONE_GOAL_PROCESS_PHRASES = [
 	/\bby the way\b/gi,

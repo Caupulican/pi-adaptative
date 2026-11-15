@@ -378,7 +378,10 @@ export const AUTONOMY_STATUS = {
 	},
 
 	systemOne: {
-		state: (state: "on" | "off") => (state === "on" ? "ligado" : "desligado"),
+		state: (state: "on" | "off") =>
+			state === "on"
+				? "ligado"
+				: 'desligado, então metas ditas com suas próprias palavras não são reconhecidas; "defina uma meta: <texto>" ainda define uma',
 		noEngine: (_cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
 			"sem motor: o System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido",
 	},

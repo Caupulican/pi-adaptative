@@ -75,7 +75,10 @@ progress does not grant the model permission to resume a stopped goal.
 An explicit goal stated in normal chat does not require `/goal`. Phrases such as `Set a persistent
 goal: ...`, `The goal is to ...`, `Keep working until this is complete: ...`, `this is a goal.
 <task>`, a follow-up `this is a goal` / `the task is a goal` after a task, `instead of …, I want
-to …`, or `I want to refactor/rewrite/rebuild/redesign …` create the same durable goal record.
+to …`, or `I want to refactor/rewrite/rebuild/redesign …` create the same durable goal record, as do
+their pt-BR forms (`defina uma meta: ...`, `meta: ...`, `minha meta é <verbo> ...`, `trate isso como minha meta: ...`,
+`continue trabalhando até isso estar pronto: ...`, `quero refatorar/reescrever ...`, `isso é uma meta`) in either
+interface language. With System One off, `/status` says that goals in plain words are not recognised.
 Handover wording (`by the way`, `i'm handing over`, sub-agent or role assignment) is classification
 only; the previous user task is the objective. These phrases are the instant path. A message that uses
 none of them still starts a goal when System One reads it as asking for an outcome to be pursued until

@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { formatSessionAutonomyStatus } from "../../../../src/core/autonomy-status/format.ts";
 import { projectActivityLane } from "../../../../src/modes/interactive/components/activity-lane.ts";
 import { buildOperatorPovSegments } from "../../../../src/modes/interactive/components/operator-pov-bar.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
@@ -13,7 +14,8 @@ const OWNER_MESSAGE =
  * An owner message that names no goal phrase starts a goal when System One judges it a standing outcome. The judgment runs
  * after the message is delivered: the owner's turn ends first (the evaluator is held until then), and the goal starts from
  * the judgment alone, with the hidden harness note that asks the agent to record the end state and the steps. With System
- * One off the same message asks nothing and starts no goal. While the goal is unfinished the operator bar marks it and the
+ * One off the same message asks nothing and starts no goal; `/status` says that goals in plain words are not recognised and
+ * names the explicit phrase, and that phrase in pt-BR ("defina uma meta: ...") still starts one, by code. While the goal is unfinished the operator bar marks it and the
  * activity lane names it with the product's words; with no goal neither shows one.
  */
 /**
@@ -96,6 +98,25 @@ export async function verifyOwnerGoalIntent(world: HarnessWorld): Promise<void> 
 				bar: undefined,
 				lane: [],
 			});
+			expect(
+				formatSessionAutonomyStatus(await session.autonomyStatus()),
+				"/status tells the owner that goals said in plain words are not recognised, and the phrase that still sets one",
+			).toContain('off, so goals said in your own words are not recognised; "set a goal: <text>" still sets one');
+			world.provider.enqueue("root", text(`${LABEL}-pt-br-turn`, "Entendido; começando pelos imports."));
+			await withDeadline(
+				world.trace,
+				`${LABEL}: pt-BR explicit goal turn`,
+				session.prompt("defina uma meta: corrigir os imports do módulo limits", { autoContinueGoal: false }),
+			);
+			await withDeadline(world.trace, `${LABEL}: pt-BR goal turn idle`, session.waitForForegroundIdle());
+			expect(
+				session.getGoalStateSnapshot(),
+				"the explicit pt-BR phrase starts the goal with System One off",
+			).toMatchObject({
+				status: "active",
+				userGoal: expect.stringContaining("corrigir os imports do módulo limits"),
+			});
+			expect(world.systemOne.requests.length, "the explicit phrase asks System One nothing").toBe(requestsBefore);
 			expect(extensionErrors, "no extension error").toEqual([]);
 		} else {
 			judged.release();

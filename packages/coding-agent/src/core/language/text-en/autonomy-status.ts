@@ -311,8 +311,15 @@ export const AUTONOMY_STATUS = {
 	},
 
 	systemOne: {
-		/** Whether System One can judge here, keyed by the identifier the snapshot holds. */
-		state: (state: "on" | "off"): string => state,
+		/**
+		 * Whether System One can judge here, keyed by the identifier the snapshot holds. Off also says what the owner loses: their
+		 * goals said in plain words are not judged. Nearly every typed message meets the code facts that would send it to
+		 * judgment (`OwnerGoalIntent.noteDelivered`), so this is told here, on `/status`, not as a notice at a message.
+		 */
+		state: (state: "on" | "off"): string =>
+			state === "on"
+				? state
+				: 'off, so goals said in your own words are not recognised; "set a goal: <text>" still sets one',
 		/** The one cause a session without an engine has; its English sentence is the domain's own. */
 		noEngine: (cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) => `no engine: ${cause}`,
 	},
