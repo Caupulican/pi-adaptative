@@ -345,6 +345,11 @@ export interface BotOwedWorkPorts {
 	usageRules(): SavedUsageResumeRules;
 }
 
+/** One running ask to open a bot, and the asks gathered while it runs (see {@link BotOwedWork.openIfOwed}). */
+interface AskPass {
+	again?: { readonly swept: boolean };
+}
+
 /**
  * Opens the session of a bot owed work that no process hosts (see {@link BotOwedWork.openIfOwed}), and tells the owner,
  * once for each cause, what the work waits on when it cannot be taken up here. A refusal is kept with its cause, and the
@@ -357,8 +362,11 @@ export class BotOwedWork {
 	private readonly told = new Map<string, string>();
 	/** What the owner was last told of a bot the periodic listing failed on: told once per cause, forgotten once it lists clean. */
 	private readonly sweepTold = new Map<string, string>();
-	/** Bots whose ask to open (`openIfOwed`) is reading them now. */
-	private readonly asking = new Set<string>();
+	/**
+	 * Each bot whose ask to open (`openIfOwed`) runs now (its reads, and the open it started until that settles), and
+	 * whether another ask for it came meanwhile (`swept` when every such ask was the periodic listing's).
+	 */
+	private readonly asking = new Map<string, AskPass>();
 	/** The wakes the bots' session files hold unrun. */
 	private readonly wakes = new UnrunWakeLedger();
 	/** Why each bot's session was last refused, while no run of it was admitted since. */
@@ -743,21 +751,43 @@ export class BotOwedWork {
 	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
 	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
 	 * sent from. Another process that opened it first is not a failure. `swept` (the periodic listing asks) skips a bot
-	 * whose last open failed on what defines it now and the inbox files waiting now. An ask for the bot made while this one
-	 * reads it (a host change the home watch reports as it starts, when this ask's read starts it) is this ask's to answer:
-	 * two would share one open and arm its next attempt twice.
+	 * whose last open failed on what defines it now and the inbox files waiting now. Asks for the bot made while one runs
+	 * (a host change the home watch reports as it starts, when this ask's read starts it; any change while the open it
+	 * started is pending) are gathered into one more pass after it settles, which reads the bot again: two passes at once
+	 * would share one open and arm its next attempt twice, and dropping the later ask would miss a change made after the
+	 * running one read the bot.
 	 */
 	openIfOwed(agentId: string, swept = false): void {
-		if (this.asking.has(agentId)) return;
-		this.asking.add(agentId);
-		try {
-			this.askOpen(agentId, swept);
-		} finally {
-			this.asking.delete(agentId);
+		const running = this.asking.get(agentId);
+		if (running) {
+			running.again = { swept: (running.again?.swept ?? true) && swept };
+			return;
 		}
+		const pass: AskPass = {};
+		this.asking.set(agentId, pass);
+		let opened: Promise<unknown> | undefined;
+		try {
+			opened = this.askOpen(agentId, swept);
+		} catch (error) {
+			this.finishAsk(agentId, pass);
+			throw error;
+		}
+		if (opened) void opened.finally(() => this.finishAsk(agentId, pass));
+		else this.finishAsk(agentId, pass);
 	}
 
-	private askOpen(agentId: string, swept: boolean): void {
+	/** The bot's running ask settled: the asks gathered meanwhile run as one more pass. */
+	private finishAsk(agentId: string, pass: AskPass): void {
+		this.asking.delete(agentId);
+		const again = pass.again;
+		if (!again) return;
+		// Only listings asked: answered as the listing answers, not while the bot's next attempt is armed.
+		if (again.swept && this.openRetries.pending(agentId)) return;
+		this.openIfOwed(agentId, again.swept);
+	}
+
+	/** Reads the bot and opens its session when it is owed; the open it started, if any. */
+	private askOpen(agentId: string, swept: boolean): Promise<unknown> | undefined {
 		const { ports } = this;
 		const agentDir = ports.agentDir();
 		if (ports.stopped()) return;
@@ -850,7 +880,7 @@ export class BotOwedWork {
 		const inbox = (watching ? ports.waiting(agentId) : waiting).map((item) => item.file).join("\n");
 		const failed = this.failedOpens.get(agentId);
 		if (swept && failed !== undefined && failed.key === key && failed.inbox === inbox) return;
-		void ports.open(agentId, sender).catch((error: unknown) => {
+		return ports.open(agentId, sender).catch((error: unknown) => {
 			// A model refused before the lock is kept with its cause; a cause that passes on its own is asked again after a
 			// backoff; any other failure at the next change, and by the periodic listing only once what defines the bot or what
 			// waits in its inbox changed.
