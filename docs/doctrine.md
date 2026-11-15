@@ -832,7 +832,8 @@ up front (`backgroundArguments`: the model's `background: true`, or a bash call 
 `background` unset and only waits on outside state, such as `gh run watch`); every other call blocks up to its own timeout
 unless the operator configured a clock (`backgroundTool.callAfterMs`, off by default) or moved the
 call by hand. Where no task can start (no `tool_task`, a worker or lane, a nested call), such a call runs in its
-foreground form, with the foreground's bound. The handoff stub names what moved the call (`started as session task
+foreground form, with the foreground's bound; where one can, its body starts only once the handoff is decided, and a
+refused handoff runs it in its foreground form too. The handoff stub names what moved the call (`started as session task
 … (background requested)`, `started as session task …: moved to the background because it waits on outside state`,
 `exceeded Ns; running as session task`, `moved to session task … by the operator`).
 Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundArguments and the external-wait handoff); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)

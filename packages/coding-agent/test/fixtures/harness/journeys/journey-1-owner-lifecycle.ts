@@ -3111,7 +3111,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		).toEqual([
 			{
 				arguments: { command: "gh run watch 4242", background: true },
-				background: { reason: "it waits on outside state" },
+				background: { reason: "it waits on outside state", foreground: { command: "gh run watch 4242" } },
 			},
 			{ arguments: { command: "gh run watch 4242" }, background: undefined },
 			{ arguments: { command: "gh run watch 4242" }, background: undefined },
