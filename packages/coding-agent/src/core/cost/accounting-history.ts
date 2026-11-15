@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
 import { legacyBotSystemOneEvidenceDir } from "../bots/bot-home.ts";
-import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
+import { orchestrationHomeOfSession, sessionStorageRootsOfDir } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type AccountingEvidenceGroup,
@@ -285,7 +286,12 @@ export async function reconcileSessionAccounting(
 				sessionId: header.id,
 				reports,
 				entries,
-				legacyEvidenceDir: legacyBotSystemOneEvidenceDir(roots.agentDir, home),
+				// Where the session was made, by its file's directory: a bot session's bundle may be gone or still in the
+				// owner's home, while what an earlier build kept is in its bot's home.
+				legacyEvidenceDir: legacyBotSystemOneEvidenceDir(
+					roots.agentDir,
+					sessionStorageRootsOfDir(roots.agentDir, dirname(sessionFile)).orchestrationHome,
+				),
 			}),
 		])
 	).flat();

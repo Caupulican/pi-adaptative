@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
 import { sameOrchestrationHome } from "../kernel/session/session-bundle-paths.ts";
 import {
@@ -734,8 +734,14 @@ export async function sweepSessionBundles(
 		report(`session bundle retention failed: ${describe(error)}`);
 	}
 	if (result.expiredObligations > 0) {
+		const evidence = [...obligationLedgers]
+			.map((ledger) => `<agentDir>/${relative(agentDir, ledger).split(sep).join(posix.sep)}`)
+			.join(", ");
 		result.diagnostics = [
-			`settled ${result.expiredObligations} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: ${[...obligationLedgers].map((ledger) => `<agentDir>/${relative(agentDir, ledger)}`).join(", ")}`,
+			`settled ${result.expiredObligations} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: ${evidence}`.slice(
+				0,
+				MAX_DIAGNOSTIC_CHARS,
+			),
 			...result.diagnostics,
 		].slice(0, MAX_DIAGNOSTICS);
 	}
