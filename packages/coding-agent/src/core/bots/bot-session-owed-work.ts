@@ -1,10 +1,11 @@
 /**
  * What a bot's own session is owed, read from the store, its bundle and its file without loading it: a live watch to
  * sample, a firing whose wake it has not taken, a wake it accepted and never ran (a turn refused at its start), its
- * workers' work (`owesWorkerExecution`, and what they hold to deliver) and the turn a usage limit stopped (`savedUsageResumeAt`); and the opening of the
- * session of a bot owed work that no process hosts (`BotOwedWork`), at once or when the work comes due. The owner's stop of
- * the workers of a session no process hosts (`cancelOwedWorkerWork`). And the one rule that keeps watches with the session
- * that holds them: the watches the home's other sessions armed are cancelled when the bot continues one session.
+ * workers' work (`owesWorkerExecution`, and what they hold to deliver) and the turn a usage limit stopped
+ * (`savedUsageResumeAt`); and the opening of the session of a bot owed work that no process hosts (`BotOwedWork`), at once
+ * or when the work comes due, after the owner's stop waiting for it is applied (`applyUnhostedBotStop`). And the one rule
+ * that keeps watches with the session that holds them: the watches the home's other sessions armed are cancelled when the
+ * bot continues one session.
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -16,7 +17,6 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { stopSessionWorkers } from "../delegation/worker-fleet-stop.ts";
 import {
 	nextWorkerDueAt,
 	owesWorkerExecutionAt,
@@ -26,23 +26,21 @@ import {
 import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "../orchestration/event-store.ts";
-import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
-import { endPlacedJobsOfSession } from "../remote/job-client.ts";
-import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf } from "./bot-home.ts";
-import { type BotInboxItem, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
+import { type BotInboxItem, botInboxStopNames, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 import { refuseLink } from "./bot-session-pointer.ts";
+import { applyUnhostedBotStop } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -85,43 +83,6 @@ export function owesWorkerExecution(home: OrchestrationHome, sessionId: string, 
 	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return false;
 	const store = new OrchestrationEventStore({ orchestrationHome: home, sessionId });
 	return owesWorkerExecutionAt(workerWorkFacts(readTaskRuntimeProjection(store)), nowMs);
-}
-
-/**
- * The owner's stop of the workers of bot session `sessionId` while no process hosts it, written to its bundle in `home`
- * alone (`stopSessionWorkers`): every open plan closed and every unended worker attempt cancelled for `reasonCode`, so
- * nothing opens the session for them. Their ends are recorded delivered by the session's next open, when its outbox is
- * replayed (`owner_stopped` wakes no one). Then every job the session placed on another machine is ended in its record in
- * `agentDir` (`endPlacedJobsOfSession`), so its executor stops and stops spending; the bundle's cancel comes first, so
- * no open dispatches a lane again for a job this ends. The caller holds the bot's host lock, so no process runs what it
- * cancels. Returns how many attempts it cancelled and placed jobs it ended.
- */
-export function cancelOwedWorkerWork(
-	home: OrchestrationHome,
-	agentDir: string,
-	sessionId: string,
-	reasonCode: string,
-): { readonly cancelled: number; readonly placedEnded: number } {
-	const cancelled = cancelBundleWorkers(home, sessionId, reasonCode);
-	return { cancelled, placedEnded: endPlacedJobsOfSession(agentDir, sessionId, jobCancelReasonOf(reasonCode)) };
-}
-
-function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonCode: string): number {
-	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return 0;
-	const runtime = new DurableTaskRuntime({
-		store: new OrchestrationEventStore({ orchestrationHome: home, sessionId }),
-	});
-	let cancelled = 0;
-	stopSessionWorkers(
-		runtime,
-		undefined,
-		(attempt) => {
-			runtime.cancelAttempt(attempt.attemptId, reasonCode);
-			cancelled++;
-		},
-		reasonCode,
-	);
-	return cancelled;
 }
 
 /** What the time a saved transcript continues reads beside the rule of a kept stop: the reset recorded for a model. */
@@ -387,6 +348,8 @@ export class BotOwedWork {
 	 * state holds to deliver, the session's open could not deliver, so it does not open the session again.
 	 */
 	private readonly offered = new Map<string, string>();
+	/** The stops waiting for each bot when applying them last failed here ({@link applyStop}). */
+	private readonly failedStops = new Map<string, string>();
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
@@ -452,6 +415,7 @@ export class BotOwedWork {
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
 	released(agentId: string): void {
 		this.offered.delete(agentId);
+		this.failedStops.delete(agentId);
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
 		this.forgetRefusal(agentId);
@@ -571,11 +535,16 @@ export class BotOwedWork {
 				const waiting = botInboxWaiting(agentDir, agentId);
 				if (this.ports.hostedHere(agentId)) {
 					if (waiting || botInboxStopWaiting(agentDir, agentId)) this.ports.takeInbox(agentId);
-				} else if (
-					!this.openRetries.pending(agentId) &&
-					(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
-				)
-					this.openIfOwed(agentId, true);
+				} else {
+					// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
+					if (!this.ports.heldElsewhere(agentId) && botInboxStopWaiting(agentDir, agentId))
+						this.applyStop(agentId, true);
+					if (
+						!this.openRetries.pending(agentId) &&
+						(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
+					)
+						this.openIfOwed(agentId, true);
+				}
 			}
 		});
 	}
@@ -672,6 +641,7 @@ export class BotOwedWork {
 			notResumed(storeFailure(agentId, error, undefined));
 			return;
 		}
+		this.applyStop(agentId, swept);
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
 		// A stop the owner wrote while another process hosted it (`requestBotStop`) holds back the work it stopped: its
@@ -738,6 +708,29 @@ export class BotOwedWork {
 			const later = notResumed(error);
 			if (!(error instanceof BotModelRefusedError) && !later) this.failedOpens.set(agentId, { key, inbox });
 		});
+	}
+
+	/**
+	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
+	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told;
+	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change.
+	 */
+	private applyStop(agentId: string, swept: boolean): void {
+		const agentDir = this.ports.agentDir();
+		const stops = botInboxStopNames(agentDir, agentId).join("\n");
+		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return;
+		try {
+			const saved = this.ports.savedSessionOf(agentId);
+			const ports = {
+				warn: (message: string) => this.ports.warn(message),
+				now: () => this.ports.admissionTimers().now(),
+			};
+			if (applyUnhostedBotStop(agentDir, agentId, saved, ports) === "applied") this.forgetOwedTimes(agentId);
+			this.failedStops.delete(agentId);
+		} catch (error) {
+			this.failedStops.set(agentId, stops);
+			this.tellWaits(agentId, interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, error)));
+		}
 	}
 
 	/** The owner is told once what the bot's owed work waits on: every attach and every other host's change asks again. */

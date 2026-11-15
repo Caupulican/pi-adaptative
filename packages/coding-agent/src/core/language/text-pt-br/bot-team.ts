@@ -124,6 +124,19 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
+	botStopNotApplied: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
+	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
+		`Bot ${agentId}: a parada do dono não encerrou ${[
+			failed > 0
+				? `${failed} ${failed === 1 ? "lane de worker cujo cancelamento falhou" : "lanes de worker cujo cancelamento falhou"}`
+				: "",
+			managed > 0
+				? `${managed} ${managed === 1 ? "lane gerenciada, que a extensão que a executa encerra" : "lanes gerenciadas, que a extensão que as executa encerra"}`
+				: "",
+		]
+			.filter((part) => part !== "")
+			.join(" e ")}.`,
 	botInboxRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId}: uma mensagem enviada de outra sessão não foi recebida (${reason}).`,
 	botInboxNotTaken: (agentId: string, reason: string) =>

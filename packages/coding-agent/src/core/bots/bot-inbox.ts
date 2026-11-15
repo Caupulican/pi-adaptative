@@ -160,7 +160,12 @@ export function readBotInboxStops(
 
 /** Whether a stop waits for the process that hosts the bot's session; read from the names alone. */
 export function botInboxStopWaiting(agentDir: string, agentId: string): boolean {
-	return homeRecordNames(botInboxDir(agentDir, agentId), STOP).length > 0;
+	return botInboxStopNames(agentDir, agentId).length > 0;
+}
+
+/** The file names of the stops waiting, oldest first: which stops wait, read from the names alone. */
+export function botInboxStopNames(agentDir: string, agentId: string): readonly string[] {
+	return homeRecordNames(botInboxDir(agentDir, agentId), STOP);
 }
 
 /**

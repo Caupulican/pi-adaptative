@@ -132,6 +132,19 @@ export const BOT_TEAM = {
 	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
+	/** The owner's stop of a bot no process hosts could not be applied; it waits, and the work it stops stays held. */
+	botStopNotApplied: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,
+	/** What the owner's stop of a bot did not end. */
+	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
+		`Bot ${agentId}: the owner's stop did not end ${[
+			failed > 0 ? `${failed} worker lane${failed === 1 ? "" : "s"} whose cancel failed` : "",
+			managed > 0
+				? `${managed} managed lane${managed === 1 ? ", which the extension running it ends" : "s, which the extension running them ends"}`
+				: "",
+		]
+			.filter((part) => part !== "")
+			.join(" and ")}.`,
 	/** The bot's session refused a message another session sent; the chat shows it with the reason. */
 	botInboxRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a message sent from another session was not taken (${reason}).`,
