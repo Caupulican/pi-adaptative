@@ -1,14 +1,16 @@
 /**
  * What a session's worker bundle owes the session's next open, read from its durable projection alone, with no process
- * running it: the work its recovery takes up at the open (a queued attempt, one suspended because its owner process is
- * gone, one whose lease holder is proven dead, a result still waiting for its independent verification), the ends it has
- * not told the session of (a terminal notification not delivered, the owner's stops excepted) and the receipts it has not
- * delivered; and the retries it waits on, owed once their time comes. A managed lane's attempt runs in a process the host
- * never starts or resumes, so it owes nothing here; an attempt an owner or root suspended waits for an explicit resume.
+ * running it, in two kinds. Execution: work its recovery runs at the open (a queued attempt, one suspended because its owner
+ * process is gone, an unbound lease whose holder is proven dead or whose term ended, a result still waiting for its
+ * independent verification), a reason to keep the session open as well as to open it; and the retries and lease terms it
+ * waits on, owed once their time comes. Delivery: what the open hands over (a receipt publishable now, a usage receipt, a
+ * parent write, an end not delivered, the owner's stops excepted), which only a try can show deliverable. A managed lane's
+ * attempt runs in a process the host never starts or resumes, so it owes nothing here; an attempt an owner or root
+ * suspended waits for an explicit resume.
  */
 
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { workerReceiptPublicationPending } from "../orchestration/worker-receipt-publication.ts";
+import { deliverableWorkerReceipt } from "../orchestration/worker-receipt-publication.ts";
 import { workerTerminalNotificationId } from "../orchestration/worker-terminal-notification.ts";
 import { isOwnerStoppedEnd } from "./worker-fleet-stop.ts";
 import {
@@ -21,52 +23,71 @@ import {
 import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
 import { ownerLostSuspension } from "./worker-recovery-coordinator.ts";
 
-/** What a bundle owes, as its projection read: `owed` whatever the clock reads, the rest by the clock and the processes. */
+/** A lease on a leased or running attempt: its holder, the end of its term, and whether an agent is bound to the attempt. */
+export interface WorkerLeaseFact {
+	readonly ownerId: string;
+	readonly expiresAt: number;
+	readonly bound: boolean;
+}
+
+/** What a bundle owes, as its projection read: `execution` and `delivery` whatever the clock reads, the rest by the clock. */
 export interface WorkerWorkFacts {
-	readonly owed: boolean;
+	/** Work the open runs now. */
+	readonly execution: boolean;
+	/** What the open delivers, when a try can deliver it. */
+	readonly delivery: boolean;
 	/** The recorded retry time of each attempt suspended until a retry. */
 	readonly retriesAt: readonly number[];
-	/** The lease holders of attempts leased or running: owed once proven dead. */
-	readonly leaseOwners: readonly string[];
+	/** The leases of attempts leased or running. */
+	readonly leases: readonly WorkerLeaseFact[];
 }
 
 /** The facts of {@link WorkerWorkFacts} in `snapshot`. */
 export function workerWorkFacts(snapshot: TaskRuntimeProjection): WorkerWorkFacts {
 	const retriesAt: number[] = [];
-	const leaseOwners: string[] = [];
-	let owed = Object.values(snapshot.attempts).some(
+	const leases: WorkerLeaseFact[] = [];
+	// The same reading the open's receipt deliveries take: a receipt they would skip is not owed.
+	let delivery = Object.values(snapshot.attempts).some(
 		(attempt) =>
 			Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
 			Object.keys(attempt.parentWrites ?? {}).length > 0 ||
-			workerReceiptPublicationPending(snapshot, attempt),
+			deliverableWorkerReceipt(snapshot, attempt) !== undefined,
 	);
 	// A pending end of an attempt its task no longer selects is replayed at the open as well.
-	owed ||= Object.values(snapshot.notifications).some(
+	delivery ||= Object.values(snapshot.notifications).some(
 		(notification) =>
 			notification.status === "pending" &&
 			notification.attemptId !== undefined &&
 			endNotOwnerStopped(snapshot, notification.attemptId),
 	);
+	let execution = false;
 	for (const taskId of Object.keys(snapshot.tasks)) {
 		const attempt = selectedWorkerAttempt(snapshot, taskId);
 		if (!attempt) continue;
 		if (!NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
 			// The open enqueues the end of the selected attempt when no notification holds it yet.
 			if (snapshot.notifications[workerTerminalNotificationId(attempt.attemptId)]?.status !== "delivered")
-				owed ||= endNotOwnerStopped(snapshot, attempt.attemptId);
-			owed ||= attemptAwaitsVerification(snapshot, attempt) && !verifierUnended(snapshot, taskId);
+				delivery ||= endNotOwnerStopped(snapshot, attempt.attemptId);
+			execution ||= attemptAwaitsVerification(snapshot, attempt) && !verifierUnended(snapshot, taskId);
 			continue;
 		}
 		if (isManagedWorkerAttempt(attempt)) continue;
-		if (attempt.status === "queued") owed = true;
+		if (attempt.status === "queued") execution = true;
 		else if (attempt.status === "suspended") {
 			const retryAt = attempt.retry ? Date.parse(attempt.retry.notBefore) : undefined;
 			if (retryAt !== undefined && Number.isFinite(retryAt)) retriesAt.push(retryAt);
-			else owed ||= attempt.retry !== undefined || ownerLostSuspension(attempt);
-		} else if (attempt.lease) leaseOwners.push(attempt.lease.ownerId);
-		else owed = true;
+			else execution ||= attempt.retry !== undefined || ownerLostSuspension(attempt);
+		} else if (attempt.lease) {
+			const expiresAt = Date.parse(attempt.lease.expiresAt);
+			leases.push({
+				ownerId: attempt.lease.ownerId,
+				// A term that does not read has ended: the holder's proof alone keeps it.
+				expiresAt: Number.isFinite(expiresAt) ? expiresAt : Number.NEGATIVE_INFINITY,
+				bound: attempt.agentId !== undefined,
+			});
+		} else execution = true;
 	}
-	return { owed, retriesAt, leaseOwners };
+	return { execution, delivery, retriesAt, leases };
 }
 
 /** Whether the attempt has ended (as its lane reads) other than by the owner's stop. */
@@ -86,21 +107,32 @@ function verifierUnended(snapshot: TaskRuntimeProjection, taskId: string): boole
 	});
 }
 
-/** Whether the bundle owes its session's open at `nowMs`: owed outright, a retry due, or a lease holder proven dead. */
-export function owesWorkerWorkAt(
+/**
+ * Whether the bundle owes its session's open execution at `nowMs`: work to run now, a retry due, or a lease the open's
+ * recovery takes back: its holder proven dead, or, for an attempt no agent is bound to, its term ended (an agent-bound
+ * attempt's lease is taken back only from a holder proven dead).
+ */
+export function owesWorkerExecutionAt(
 	facts: WorkerWorkFacts,
 	nowMs: number,
 	isProcessAlive: (pid: number) => boolean = isLocalProcessAlive,
 ): boolean {
 	return (
-		facts.owed ||
+		facts.execution ||
 		facts.retriesAt.some((at) => at <= nowMs) ||
-		facts.leaseOwners.some((ownerId) => isLocalWorkerProcessOwnerProvenDead(ownerId, isProcessAlive))
+		facts.leases.some(
+			(lease) =>
+				(!lease.bound && lease.expiresAt <= nowMs) ||
+				isLocalWorkerProcessOwnerProvenDead(lease.ownerId, isProcessAlive),
+		)
 	);
 }
 
-/** The earliest retry the bundle waits on after `nowMs`; undefined when none. */
-export function nextWorkerRetryAt(facts: WorkerWorkFacts, nowMs: number): number | undefined {
-	const later = facts.retriesAt.filter((at) => at > nowMs);
+/** The earliest time after `nowMs` execution comes due: a retry, or the end of an unbound lease's term; undefined when none. */
+export function nextWorkerDueAt(facts: WorkerWorkFacts, nowMs: number): number | undefined {
+	const later = [
+		...facts.retriesAt,
+		...facts.leases.filter((lease) => !lease.bound).map((lease) => lease.expiresAt),
+	].filter((at) => at > nowMs);
 	return later.length > 0 ? Math.min(...later) : undefined;
 }

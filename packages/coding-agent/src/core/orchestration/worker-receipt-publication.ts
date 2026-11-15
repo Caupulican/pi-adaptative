@@ -169,6 +169,19 @@ export function workerReceiptPublicationPending(
 	return !verification || verification.verdict === "accepted";
 }
 
+/**
+ * The receipt a delivery publishes for the attempt now: not yet acknowledged, publication allowed, and the candidate the
+ * resolver authorizes ({@link workerReceiptCandidate}); undefined when a delivery skips the attempt. What the receipt
+ * delivery and the reading of a bundle's owed work share.
+ */
+export function deliverableWorkerReceipt(
+	state: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
+	attempt: AttemptRuntimeState,
+): WorkerReceiptCandidate | undefined {
+	if (attempt.receiptAcknowledgement || !workerReceiptPublicationAllowed(state, attempt)) return undefined;
+	return workerReceiptCandidate(state, attempt);
+}
+
 export function workerReceiptPublicationAllowed(
 	state: Pick<TaskRuntimeProjection, "tasks" | "attempts">,
 	attempt: AttemptRuntimeState,

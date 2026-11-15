@@ -1,10 +1,7 @@
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
-import {
-	workerReceiptCandidate,
-	workerReceiptPublicationAllowed,
-} from "../orchestration/worker-receipt-publication.ts";
+import { deliverableWorkerReceipt } from "../orchestration/worker-receipt-publication.ts";
 import { ReceiptDeliveryLoop } from "./receipt-delivery-loop.ts";
 import { WorkerReceiptParentLedger } from "./worker-receipt-parent-ledger.ts";
 
@@ -51,8 +48,7 @@ export class WorkerReceiptDelivery {
 			const snapshot = this.deps.runtime.getSnapshot();
 			const attempt = snapshot.attempts[attemptId];
 			if (!attempt) continue;
-			if (attempt.receiptAcknowledgement || !workerReceiptPublicationAllowed(snapshot, attempt)) continue;
-			const candidate = workerReceiptCandidate(snapshot, attempt);
+			const candidate = deliverableWorkerReceipt(snapshot, attempt);
 			if (!candidate) continue;
 			let changed = false;
 			const unsubscribe = this.deps.subscribe(() => {
