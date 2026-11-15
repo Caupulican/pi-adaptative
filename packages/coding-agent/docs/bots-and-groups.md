@@ -47,7 +47,8 @@ serving it, the handoff turns its workers' results open and those workers' runs 
 `workerDelegation.maxUsd`, the main session's own ceiling and a profile's `maxCostUsd` on all of the window's spend, and
 the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models. A
 turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes a ceiling that
-holds the bot's model; the window's workers share each ceiling less what the bot's turns spent in the window on the
+holds the bot's model, and a turn a worker's handoff opens into a window already past one is stopped before its first
+request; the window's workers share each ceiling less what the bot's turns spent in the window on the
 spend it counts (a metered worker the metered-only ones too, so a subscription bot's own turns never use up the metered
 ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
 its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the

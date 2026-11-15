@@ -12,6 +12,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { botSpendLedgerFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
@@ -54,14 +55,6 @@ export function botSpendCeilingsOn(
 ): BotSpendCeiling[] {
 	const metered = isMeteredSpend(model, registry);
 	return botSpendCeilings(root, spendBudget).filter((ceiling) => metered || !ceiling.meteredOnly);
-}
-
-/** The lowest of `ceilings`; undefined when there is none. */
-function lowest(ceilings: readonly BotSpendCeiling[]): BotSpendCeiling | undefined {
-	return ceilings.reduce<BotSpendCeiling | undefined>(
-		(low, ceiling) => (low === undefined || ceiling.usd < low.usd ? ceiling : low),
-		undefined,
-	);
 }
 
 /** What a bot session's spend reads from its host. */
@@ -128,19 +121,25 @@ export class BotSessionSpend {
 		this.windows.runCostBound(attempt, snapshot, this.ceilings());
 
 	/** The bounds the bot's turns are held to and the spend they count toward them: the request's, its workers' included. */
-	turnBound(): Pick<BotSessionTurnPorts, "spendBound" | "exceeded"> {
+	turnBound(): Pick<BotSessionTurnPorts, "openingExceeded" | "exceeded"> {
 		return {
-			spendBound: () =>
-				lowest(
-					botSpendCeilingsOn(
-						this.ports.rootCeilings(),
-						this.definition.spendBudget,
-						this.definition.model,
-						this.registry,
-					),
-				),
+			openingExceeded: (opening, turnUsd) => this.openingExceeded(opening, turnUsd),
 			exceeded: (turnUsd, addedUsd) => this.exceeded(turnUsd, addedUsd),
 		};
+	}
+
+	/**
+	 * At the start of a turn's first run: the spend of the window its opening input serves (`BotSpendWindows.openingSpend`)
+	 * with the turn's own spend so far, past one of the ceilings on the bot's own spend. A handoff into a window already past
+	 * a ceiling is stopped before its first request; a new outside input holds only the turn's spend.
+	 */
+	private openingExceeded(
+		opening: readonly AgentMessage[],
+		turnUsd: number,
+	): SpendExcess<BotSpendCeiling> | undefined {
+		const metered = isMeteredSpend(this.definition.model, this.registry);
+		const window = this.windows.openingSpend(opening) ?? { usd: 0, meteredUsd: 0 };
+		return this.excessOf({ usd: window.usd + turnUsd, meteredUsd: window.meteredUsd + (metered ? turnUsd : 0) });
 	}
 
 	/**
@@ -149,12 +148,18 @@ export class BotSessionSpend {
 	 * the turn's own spend is the window's.
 	 */
 	private exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotSpendCeiling> | undefined {
+		const metered = isMeteredSpend(this.definition.model, this.registry);
+		return this.excessOf(
+			this.windows.count(addedUsd, metered) ?? {
+				usd: turnUsd,
+				meteredUsd: metered ? turnUsd : 0,
+			},
+		);
+	}
+
+	/** `spend` past the lowest ceiling it passes of those that hold the bot's own spend, each on the spend it counts. */
+	private excessOf(spend: WindowSpend): SpendExcess<BotSpendCeiling> | undefined {
 		const { model, spendBudget } = this.definition;
-		const metered = isMeteredSpend(model, this.registry);
-		const spend: WindowSpend = this.windows.count(addedUsd, metered) ?? {
-			usd: turnUsd,
-			meteredUsd: metered ? turnUsd : 0,
-		};
 		let excess: SpendExcess<BotSpendCeiling> | undefined;
 		for (const ceiling of botSpendCeilingsOn(this.ports.rootCeilings(), spendBudget, model, this.registry)) {
 			const spentUsd = ceiling.meteredOnly ? spend.meteredUsd : spend.usd;

@@ -8,6 +8,7 @@
  * (`settle`). The host composes them once per loaded session and ends them all with the returned unsubscribe.
  */
 
+import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, type SpendExcess } from "../cost/session-turn-spend-bound.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -37,8 +38,12 @@ export interface BotSessionTurnPorts {
 	readonly cwd: string;
 	/** The host's timers: the time bound arms its alarm on them. */
 	readonly timers: TimerPort;
-	/** The lowest bound on the bot's own spend now; undefined when nothing bounds it. */
-	spendBound(): BotSpendCeiling | undefined;
+	/**
+	 * At the start of a turn's first run: the spend of the request its opening input serves (`opening`: the messages the
+	 * run opens with, which the transcript may not hold yet), with the turn's own spend so far, past one of its bounds;
+	 * undefined within them all. Counts nothing.
+	 */
+	openingExceeded(opening: readonly AgentMessage[], turnUsd: number): SpendExcess<BotSpendCeiling> | undefined;
 	/**
 	 * Counts `addedUsd` the turn just spent to the request it serves; returns that request's spend (its workers' included)
 	 * past one of its bounds, with that bound, or undefined within them all.
@@ -61,7 +66,7 @@ export function observeBotSessionTurns(
 	const { agentId } = ports;
 	const words = () => interfaceText().botTeam;
 	const unsubscribeSpend = boundSessionTurnSpend(session, {
-		limit: () => ports.spendBound(),
+		openingExceeded: (opening, turnUsd) => ports.openingExceeded(opening, turnUsd),
 		exceeded: (turnUsd, addedUsd) => ports.exceeded(turnUsd, addedUsd),
 		onExceeded: (spentUsd, limit) => {
 			const reason = words().botTurnOverBudget(

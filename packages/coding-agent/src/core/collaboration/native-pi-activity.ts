@@ -15,7 +15,7 @@ import { createNativePiQuestionReporter, type NativePiQuestionReporter } from ".
 export interface NativePiActivityPort {
 	foreground: Pick<
 		ForegroundRecoveryController,
-		"isBusy" | "waitForIdle" | "subscribeActivity" | "getCurrentSubmissionEpoch"
+		"isBusy" | "waitForIdle" | "subscribeActivity" | "getCurrentSubmissionEpoch" | "turnOrigin"
 	>;
 	/** Delegates to the session settlement owner, including scheduled goal/research continuations. */
 	isSettled(): boolean;

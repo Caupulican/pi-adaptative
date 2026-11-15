@@ -12,13 +12,16 @@
  * what spend its bounds hold (`exceeded`): the turn's own, or a wider spend the turn's adds to (a bot's request with its
  * workers, each of its ceilings on the spend it counts). It is told each addition once, where the transcript already holds
  * the turn's own entries: at a priced message's end, at the start of a run the turn continues with, and at the turn's
- * end. The turn's first run starts before the input that opened it is written, so that start is checked on the turn's
- * own spend against the lowest bound on it (`limit`), which every wider spend includes.
+ * end. The turn's first run starts before the input that opened it is written, so that start is checked on the spend
+ * the host holds for that input (`openingExceeded`, given the messages the run opens with): a new outside input's own
+ * request holds only the turn's spend, a worker's handoff the request it serves, so a handoff into a request already
+ * past its bound is stopped before it spends anything.
  * Past the bound the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run. A bound can only
  * be kept on a model that declares a price.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { observeSessionTurns, stopSessionTurn } from "../session-turn-boundary.ts";
@@ -40,8 +43,14 @@ export interface SpendExcess<Limit extends SpendLimit> {
 }
 
 export interface SessionTurnSpendBound<Limit extends SpendLimit> {
-	/** The lowest bound on the turn's own spend now; undefined when no bound applies. */
-	limit(): Limit | undefined;
+	/**
+	 * At the start of a turn's first run: the spend the host holds past one of its bounds for the input the run opens with,
+	 * given the messages it opens with that the transcript may not hold yet (`opening`: none for a continuation, which
+	 * runs from the transcript's tail) and the turn's own spend so far (`turnUsd`: a compaction its submission ran first,
+	 * not yet told). Nothing is counted here: the turn's spend is told at its first priced message. Undefined within every
+	 * bound.
+	 */
+	openingExceeded(opening: readonly AgentMessage[], turnUsd: number): SpendExcess<Limit> | undefined;
 	/**
 	 * The spend the host holds past one of its bounds, with that bound, given the turn's spend so far (`turnUsd`) and what
 	 * was just added to it (`addedUsd`, told once each, zero when the bounds are only checked again); undefined while it is
@@ -79,7 +88,7 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 	// Spend added to the turn and not yet told to the host.
 	let untoldUsd = 0;
 	let open = false;
-	// The turn has just started: its first run's start is checked on the turn's own spend.
+	// The turn has just started: its first run's start is checked on the spend held for the input it opens with.
 	let opening = false;
 	// The running compaction: the session's recorded compaction spend when it started, and its submission.
 	let compaction: SubmissionSpend | undefined;
@@ -131,7 +140,7 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 			compaction = undefined;
 		} else if (event.type === "agent_start") {
 			// The turn's started() runs first, on the same event (its boundary subscribed first).
-			if (opening) enforce(turnSpendExcess(turnUsd, bound.limit()));
+			if (opening) enforce(bound.openingExceeded(foreground.turnOrigin.opening(), turnUsd));
 			else enforce(tell());
 			opening = false;
 		}

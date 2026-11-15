@@ -20,11 +20,12 @@
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginKind } from "../../kernel/turn-origin-stamp.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { ACTIVE_ATTEMPT_STATUSES } from "../delegation/delegation-spend.ts";
 import type { RunCostBound } from "../delegation/parent-execution-context.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { entryTurnOrigin } from "../turn-origin.ts";
+import { entryTurnOrigin, turnOriginOf } from "../turn-origin.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
@@ -63,14 +64,17 @@ const OPENING_KINDS: ReadonlySet<TurnOriginKind> = new Set<TurnOriginKind>([
 	"proactive-review",
 ]);
 
-/** The attempt ids a worker-result entry delivers (`records[].attemptId` of its details, a parent input's unwrapped). */
-function deliveredAttemptIds(entry: SessionEntry): string[] {
-	const raw =
-		entry.type === "custom_message"
-			? entry.details
-			: entry.type === "message" && entry.message.role === "custom"
-				? entry.message.details
-				: undefined;
+/** The details of a custom message an entry holds; undefined for any other entry. */
+function entryDetails(entry: SessionEntry): unknown {
+	return entry.type === "custom_message"
+		? entry.details
+		: entry.type === "message" && entry.message.role === "custom"
+			? entry.message.details
+			: undefined;
+}
+
+/** The attempt ids a worker result delivers (`records[].attemptId` of its details, a parent input's unwrapped). */
+function deliveredAttemptIds(raw: unknown): string[] {
 	const details = isPlainRecord(raw) && "parentInput" in raw ? raw.originalDetails : raw;
 	if (!isPlainRecord(details) || !Array.isArray(details.records)) return [];
 	return details.records.flatMap((record) =>
@@ -141,7 +145,7 @@ export class BotSpendWindows {
 			window.updatedAt = this.ports.now();
 			this.ledger.touch();
 		}
-		const workers = this.workerSpend(window, snapshot);
+		const workers = this.workerSpend(window.id, snapshot);
 		this.flush(snapshot);
 		return {
 			usd: window.foregroundUsd + workers.usd,
@@ -185,12 +189,40 @@ export class BotSpendWindows {
 		};
 	}
 
-	/** The spend of the workers serving `window`, as the delegation ledger counts each attempt's usage. */
-	private workerSpend(window: SpendWindowRecord, snapshot: TaskRuntimeProjection | undefined): WindowSpend {
+	/**
+	 * The spend of the window a run opening with `opening` serves, read before the transcript holds those messages: the
+	 * newest of them that places one decides (an outside input opens a fresh window, which holds nothing yet; a worker's
+	 * handoff belongs to the window of the attempts it delivers); when none does (a continuation, a host steer, a handoff
+	 * whose attempts serve no window here), the window the transcript is in now. Nothing is counted and no window opened.
+	 * Undefined while nothing places one (an empty transcript).
+	 */
+	openingSpend(opening: readonly AgentMessage[]): WindowSpend | undefined {
+		const snapshot = this.ports.snapshot();
+		let windowId: string | undefined;
+		for (let index = opening.length - 1; index >= 0 && windowId === undefined; index--) {
+			const message = opening[index];
+			const kind = turnOriginOf(message)?.k;
+			if (kind !== undefined && OPENING_KINDS.has(kind)) return { usd: 0, meteredUsd: 0 };
+			if (kind === "worker-result" && message.role === "custom")
+				windowId = this.windowOfDelivered(deliveredAttemptIds(message.details), snapshot, 0)?.windowId;
+		}
+		const leafId = this.transcript.getLeafId();
+		windowId ??= leafId === null ? undefined : this.windowOfEntry(leafId, snapshot)?.windowId;
+		if (windowId === undefined) return undefined;
+		const kept = this.windows.get(windowId);
+		const workers = this.workerSpend(windowId, snapshot);
+		return {
+			usd: (kept?.foregroundUsd ?? 0) + workers.usd,
+			meteredUsd: (kept?.meteredForegroundUsd ?? 0) + workers.meteredUsd,
+		};
+	}
+
+	/** The spend of the workers serving the window `windowId`, as the delegation ledger counts each attempt's usage. */
+	private workerSpend(windowId: string, snapshot: TaskRuntimeProjection | undefined): WindowSpend {
 		let usd = 0;
 		let meteredUsd = 0;
 		for (const attempt of Object.values(snapshot?.attempts ?? {})) {
-			if (!snapshot || this.windowOfAttempt(attempt, snapshot) !== window.id) continue;
+			if (!snapshot || this.windowOfAttempt(attempt, snapshot) !== windowId) continue;
 			const costUsd = projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? 0;
 			usd += costUsd;
 			if (this.ports.attemptMetered(attempt)) meteredUsd += costUsd;
@@ -271,7 +303,7 @@ export class BotSpendWindows {
 			const kind = entryTurnOrigin(entry)?.k;
 			if (kind !== undefined && OPENING_KINDS.has(kind)) windowId = this.windowIdOf(entry.id);
 			else if (kind === "worker-result" && depth < 8) {
-				const attemptIds = deliveredAttemptIds(entry);
+				const attemptIds = deliveredAttemptIds(entryDetails(entry));
 				const delivered = this.windowOfDelivered(attemptIds, snapshot, depth);
 				windowId = delivered?.windowId;
 				if (attemptIds.length > 0 && !delivered?.settled) settled = false;

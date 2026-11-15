@@ -504,6 +504,8 @@ export class RunTurnOrigin {
 	private latest: TurnOriginRecord | undefined;
 	/** Whether `latest` was set by a message this run took in, not read from the branch at `begin`. */
 	private decidedInRun = false;
+	/** The messages the run opened with, until its first message ends (`opening`). */
+	private openedWith: readonly AgentMessage[] = [];
 
 	/**
 	 * A run starts from the session branch it extends (every entry mode alike: a prompt, a committed turn, a
@@ -515,10 +517,15 @@ export class RunTurnOrigin {
 		this.latest = latestDecisiveEntry(branch)?.origin;
 		this.decidedInRun = false;
 		for (const message of opening) this.note(message);
+		this.openedWith = [...opening];
 	}
 
-	/** A message the running agent took into its context (a steer, a follow-up, a delivered next-turn message). */
+	/**
+	 * A message the running agent took into its context (a steer, a follow-up, a delivered next-turn message) or wrote
+	 * (its end): the run's opening messages have all ended once any message of the run has.
+	 */
 	note(message: AgentMessage): void {
+		this.openedWith = [];
 		if (!this.active) return;
 		const origin = turnOriginOf(message);
 		if (origin && isDecisiveOrigin(origin)) {
@@ -531,6 +538,17 @@ export class RunTurnOrigin {
 		this.active = false;
 		this.latest = undefined;
 		this.decidedInRun = false;
+		this.openedWith = [];
+	}
+
+	/**
+	 * The messages the first run of the submission in progress opens with, from its `begin` until the first message of the
+	 * run ends: at that run's start, the input it answers before the transcript holds it (a prompt's messages, or a
+	 * committed input, already the transcript's tail). None for a continuation, which runs from the transcript's tail, and
+	 * none for any later run of the submission.
+	 */
+	opening(): readonly AgentMessage[] {
+		return this.openedWith;
 	}
 
 	/** The run in progress with its decisive origin and whether the run decided it; undefined when there is none. */
