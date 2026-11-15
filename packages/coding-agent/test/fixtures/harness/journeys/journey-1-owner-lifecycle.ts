@@ -3184,9 +3184,10 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				reply: { content: [{ type: "text", text: "Probed in the foreground." }] },
 			},
 		);
-		expect(heldSession.getActiveToolNames(), "the session can start a task, so the handoff is asked").toContain(
-			"tool_task",
-		);
+		expect(
+			["tool_task", "held_probe"].filter((name) => heldSession.getActiveToolNames().includes(name)),
+			"the probe is active and the session can start a task, so the handoff is asked",
+		).toEqual(["tool_task", "held_probe"]);
 		await withDeadline(trace, "refused handoff turn", heldSession.prompt("Probe ci in the background."));
 		await withDeadline(trace, "refused handoff settled", heldSession.waitForForegroundIdle(), 60_000);
 		expect(executed, "the declined call's body ran once, in its foreground form").toEqual([{ target: "ci" }]);
