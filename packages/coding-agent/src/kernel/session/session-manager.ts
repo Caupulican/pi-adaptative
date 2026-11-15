@@ -120,11 +120,12 @@ import {
 	loadEntriesFromFile,
 	loadEntriesFromFileInternal,
 	parseSessionEntryLine,
+	readSessionHeader,
 	retainedStringChars,
 	type SessionEntryFileLocation,
 } from "./session-file-reading.ts";
 import { appendToExistingSessionFile, withSessionFileLock, writeSessionFile } from "./session-file-writing.ts";
-import { readLinkedSessionHeaderResult, type SessionHeader } from "./session-header.ts";
+import { readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
 import { assistantToolIdentityKey, createSessionId, generateId, pendingIdSpace } from "./session-id-generation.ts";
 import { assertValidSessionId } from "./session-identity.ts";
 import {
@@ -3266,8 +3267,7 @@ export class SessionManager {
 		cwd: string,
 	): SessionManager {
 		assertValidSessionId(id);
-		// A symlinked session file is the file it names, as the load below reads it.
-		const read = readLinkedSessionHeaderResult(resolvePath(path));
+		const read = readSessionHeaderResult(resolvePath(path));
 		if (!read.ok && read.reason === "unreadable" && !isMissingFileError(read.cause)) throw read.cause;
 		const empty = !read.ok && read.reason === "not_a_header" && statSync(resolvePath(path)).size === 0;
 		if (read.ok && read.header.id !== id)
@@ -3299,9 +3299,8 @@ export class SessionManager {
 		starting?: NewSessionOptions,
 	): SessionManager {
 		const resolvedPath = resolvePath(path);
-		// Read only the header here, a symlink followed as the constructor's one full session load follows it.
-		const read = readLinkedSessionHeaderResult(resolvedPath);
-		const header = read.ok ? read.header : undefined;
+		// Read only the header here; the constructor performs the one full session load.
+		const header = readSessionHeader(resolvedPath);
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");

@@ -1,5 +1,5 @@
 /** Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. */
-import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, readdirSync, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -17,7 +17,7 @@ import {
 	readSessionHeader,
 	sessionCwdMatches,
 } from "./session-file-reading.ts";
-import { readLinkedSessionHeaderResult, readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
+import { readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
 import { isAutoLearnSessionId } from "./session-id-generation.ts";
 import type { FileEntry, SessionInfo } from "./session-manager-types.ts";
 
@@ -78,10 +78,24 @@ export function findMostRecentSessionInDirs(
 }
 
 /**
+ * A session file that is a symbolic link where a caller that writes its session reads it: a session's write replaces
+ * its file whole (`renameSync`), which would replace the link with a regular file, so such a file is never followed.
+ */
+export class SessionFileLinkError extends Error {
+	readonly path: string;
+	constructor(path: string) {
+		super(`Session file ${path} is a symbolic link; a session's file is never followed through a link.`);
+		this.name = "SessionFileLinkError";
+		this.path = path;
+	}
+}
+
+/**
  * The newest session file in `dir` by modification time, with its header (auto-learn sessions and those `skip` names
  * left out), for a caller that must tell a directory that holds none from one it could not read: a missing directory
  * holds none, and a file removed while it is read, one that is not a regular file and one whose first line is not a
- * session header are passed over, while any other failure to read the directory, a header or a file's time is thrown.
+ * session header are passed over. A symbolic link among them is thrown ({@link SessionFileLinkError}), as is any other
+ * failure to read the directory, a header or a file's time.
  */
 export function newestSessionFileIn(
 	dir: string,
@@ -97,8 +111,8 @@ export function newestSessionFileIn(
 	let newest: { path: string; header: SessionHeader; mtimeMs: number } | undefined;
 	for (const name of names.filter((entry) => entry.endsWith(".jsonl"))) {
 		const path = join(dir, name);
-		// A symlinked session file counts as the file it names; a link to a directory, FIFO or device holds no session.
-		const read = readLinkedSessionHeaderResult(path);
+		if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new SessionFileLinkError(path);
+		const read = readSessionHeaderResult(path);
 		if (!read.ok) {
 			const passed = read.reason !== "unreadable" || isMissingFileError(read.cause);
 			if (passed || (read.cause instanceof BoundedReadError && read.cause.reason === "not_regular")) continue;

@@ -99,6 +99,9 @@ export const BOT_TEAM = {
 	botSessionHolderSession: (pid: number) => `a session of yours (process ${pid})`,
 	botSessionHolderPhone: (pid: number) => `the phone session's daemon (process ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `another bot host (process ${pid})`,
+	/** The bot's session pointer, or the session file it loads, is a symbolic link: the load stops until it is replaced. */
+	botSessionFileLinked: (path: string) =>
+		`the bot session file ${path} is a symbolic link, which bot sessions do not follow (a write would replace the link with a copy); replace the link with the file itself`,
 	/** A read of the bot's session files failed for a cause that passes on its own. */
 	botSessionStoreBusy: (agentId: string) =>
 		`bot ${agentId}'s session files were busy or changing while they were read; its host opens it again shortly`,

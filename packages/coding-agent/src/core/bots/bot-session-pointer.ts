@@ -5,13 +5,14 @@
  * session it creates when the home has none); after that the choice is the pointer's, never a file's modification time.
  * {@link botSessionChoice} is the one reader, for the host's load and for every view of the bot's conversation alike.
  */
-import { existsSync, realpathSync, renameSync, statSync } from "node:fs";
+import { existsSync, lstatSync, renameSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { sessionBundleDeletionPolicy } from "../../kernel/session/session-bundle-lifecycle.ts";
-import { readLinkedSessionHeaderResult } from "../../kernel/session/session-header.ts";
+import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
-import { newestSessionFileIn } from "../../kernel/session/session-listing.ts";
+import { newestSessionFileIn, SessionFileLinkError } from "../../kernel/session/session-listing.ts";
 import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { resolveSessionHome } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { BotHome } from "./bot-home.ts";
@@ -71,26 +72,34 @@ function deleted(agentDir: string, home: BotHome, sessionId: string): boolean {
 }
 
 /**
- * The file `path` names, a symlink followed to it (a home may link its pointer or a session file elsewhere); undefined
- * when it, or the file a link names, is missing. A failure to resolve it is thrown.
+ * The bot's session pointer, or a session file its load reads, is a symbolic link (`path`). A session's write and the
+ * pointer's replace their file whole, which would replace the link with a regular file, so neither is followed through a
+ * link: the load stops with this, in the owner's words, until the link is replaced by the file. Nothing is set aside
+ * and no session is started for it.
  */
-function linkedPath(path: string): string | undefined {
-	try {
-		return realpathSync(path);
-	} catch (error) {
-		if (isMissingFileError(error)) return undefined;
-		throw error;
+export class BotSessionLinkError extends Error {
+	readonly path: string;
+	constructor(path: string, options?: ErrorOptions) {
+		super(interfaceText().botTeam.botSessionFileLinked(path), options);
+		this.name = "BotSessionLinkError";
+		this.path = path;
 	}
+}
+
+/** Throws {@link BotSessionLinkError} when `path` is a symbolic link. */
+function refuseLink(path: string): void {
+	if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new BotSessionLinkError(path);
 }
 
 /**
  * Why the file a pointer names does not hold its session, or undefined when it does, is missing or is empty (the
- * session is started there). Only its content decides, a symlink followed to the file it names (a directory, a FIFO or
- * a device holds no session); a failure to read it is thrown, so the load is asked again (after a backoff when it
- * passes on its own: `storeFailure`).
+ * session is started there). Only its content decides (a directory, a FIFO or a device holds no session); a symbolic
+ * link is thrown ({@link BotSessionLinkError}), as is a failure to read it, so the load is asked again (after a backoff
+ * when it passes on its own: `storeFailure`).
  */
 function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerSetAsideReason | undefined {
-	const header = readLinkedSessionHeaderResult(path);
+	refuseLink(path);
+	const header = readSessionHeaderResult(path);
 	if (header.ok)
 		return header.header.id === pointer.sessionId
 			? undefined
@@ -109,29 +118,31 @@ function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerS
 
 /**
  * The bot's session as its home records it. A pointer counts when it parses, its file holds its session (or is missing
- * or empty) and that session was not deleted; only those contents set it aside. Any other failure to read the pointer,
- * its file, a tombstone or the home's session files is thrown to the reader: the home is not judged on what it could
- * not read.
+ * or empty) and that session was not deleted; only those contents set it aside. A pointer or session file that is a
+ * symbolic link ({@link BotSessionLinkError}), and any other failure to read the pointer, its file, a tombstone or the
+ * home's session files, is thrown to the reader: the home is not judged on what it could not read.
  */
 export function botSessionChoice(agentDir: string, home: BotHome): BotSessionChoice {
 	const chosen = (setAside?: BotPointerSetAsideReason): BotSessionChoice => {
-		const newest = newestSessionFileIn(home.sessionsDir, (id) => deleted(agentDir, home, id));
+		let newest: ReturnType<typeof newestSessionFileIn>;
+		try {
+			newest = newestSessionFileIn(home.sessionsDir, (id) => deleted(agentDir, home, id));
+		} catch (error) {
+			if (error instanceof SessionFileLinkError) throw new BotSessionLinkError(error.path, { cause: error });
+			throw error;
+		}
 		return {
 			kind: "chosen",
 			newest: newest && { path: newest.path, sessionId: newest.header.id },
 			...(setAside === undefined ? {} : { setAside }),
 		};
 	};
+	refuseLink(home.pointerFile);
 	let text: string | undefined;
 	try {
-		// A symlinked pointer is read as the file it names.
-		const pointerFile = linkedPath(home.pointerFile);
-		text =
-			pointerFile === undefined
-				? undefined
-				: readOptionalBoundedTextFileSync(pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
+		text = readOptionalBoundedTextFileSync(home.pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
 	} catch (error) {
-		// A pointer that is not a regular file (a link followed to it), or larger than any pointer, is content that does not count.
+		// A pointer that is not a regular file (a directory, a FIFO), or larger than any pointer, is content that does not count.
 		if (!(error instanceof BoundedReadError) || error.reason === "deadline") throw error;
 		return chosen({ kind: "not-a-pointer" });
 	}
@@ -145,10 +156,10 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 	return { kind: "recorded", pointer, path };
 }
 
-/** Records `pointer` as the bot's session, replacing the file whole: the one a symlinked pointer names, keeping the link. */
+/** Records `pointer` as the bot's session, replacing the file whole. */
 export function writeBotSessionPointer(home: BotHome, pointer: BotSessionPointer): void {
 	const text = `${JSON.stringify({ version: 1, sessionId: pointer.sessionId, file: pointer.file })}\n`;
-	writeFileAtomicSync(linkedPath(home.pointerFile) ?? home.pointerFile, text, { mode: 0o600 });
+	writeFileAtomicSync(home.pointerFile, text, { mode: 0o600 });
 }
 
 /** A name next to the pointer that no earlier set-aside took: `session.json.set-aside-<n>`. */

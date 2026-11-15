@@ -100,6 +100,8 @@ export const BOT_TEAM = {
 	botSessionHolderSession: (pid: number) => `uma sessão sua (processo ${pid})`,
 	botSessionHolderPhone: (pid: number) => `o daemon da sessão do telefone (processo ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `outro hospedeiro de bot (processo ${pid})`,
+	botSessionFileLinked: (path: string) =>
+		`o arquivo de sessão de bot ${path} é um link simbólico, que as sessões de bot não seguem (uma escrita trocaria o link por uma cópia); troque o link pelo próprio arquivo`,
 	botSessionStoreBusy: (agentId: string) =>
 		`os arquivos da sessão do bot ${agentId} estavam ocupados ou mudando durante a leitura; o hospedeiro dele a abre de novo em instantes`,
 	botSessionStoreFailing: (agentId: string) =>

@@ -19,7 +19,7 @@ import {
 	type SessionStorageRoots,
 	sameOrchestrationHome,
 } from "../kernel/session/session-bundle-paths.ts";
-import { readLinkedSessionHeaderResult } from "../kernel/session/session-header.ts";
+import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../kernel/storage/atomic-file.ts";
 import { botsDir } from "./agent-paths.ts";
@@ -156,7 +156,7 @@ export function sessionStorageRootsOfDir(agentDir: string, sessionDir: string): 
 export function sessionStorageRootsOfFile(agentDir: string, file: string): SessionStorageRoots {
 	const place = botHomeOfDir(agentDir, dirname(resolve(file)));
 	if (!place) return ownerSessionStorageRoots(agentDir);
-	const header = readLinkedSessionHeaderResult(resolve(file));
+	const header = readSessionHeaderResult(resolve(file));
 	const home = header.ok ? resolveSessionHome(agentDir, header.header.id, place) : place;
 	return { agentDir, orchestrationHome: home };
 }
