@@ -1,7 +1,8 @@
 /**
  * The record a session keeps of how a usage-limit wait ended, so a stop the wait already answered is not waited out again
  * after a restart or by the host that opens a closed bot's session for it. Each record names the stop it answers by when
- * that stop was made (`stopAt`), and answers it and every stop made before it: `resumed` (the turn or goal continued),
+ * that stop was made (`stopAt`), and answers it and every stop made before it: `resumed` (the turn or goal continued), `lapsed` (nothing waited on it any more: the goal no longer
+ * stopped by the limit and the transcript moved on from the refusal),
  * `declined` (the owner's stop ended the wait; it names the owner's stop's time, so it answers every usage stop made until the owner's) and `failed`
  * (the continuation threw and the transcript still ends on the refusal). A failed one is tried again after a delay that
  * doubles with each failure in a row, up to {@link USAGE_WAKE_RETRY_MAX_MS}, with no limit on the tries: a subscription's
@@ -13,7 +14,7 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 
 export const USAGE_WAKE_CUSTOM_TYPE = "usage_wake";
 
-export type UsageWakeOutcome = "resumed" | "failed" | "declined";
+export type UsageWakeOutcome = "resumed" | "lapsed" | "failed" | "declined";
 
 export interface UsageWakeRecord {
 	readonly version: 1;
@@ -38,7 +39,7 @@ const USAGE_WAKE_RETRY_BASE_MS = 60_000;
 /** The longest delay between tries of a continuation that keeps failing. */
 export const USAGE_WAKE_RETRY_MAX_MS = 30 * 60_000;
 
-const OUTCOMES: ReadonlySet<string> = new Set<UsageWakeOutcome>(["resumed", "failed", "declined"]);
+const OUTCOMES: ReadonlySet<string> = new Set<UsageWakeOutcome>(["resumed", "lapsed", "failed", "declined"]);
 
 /** The latest record on the session's branch; undefined when none, or when it is not one this build writes. */
 export function latestUsageWake(log: UsageWakeLog): UsageWakeRecord | undefined {
@@ -92,7 +93,7 @@ export function usageWakeRetryDelayMs(failures: number): number {
 /**
  * When a stop made at `stopAt`, whose wait ends at `at`, continues after `wake`: `at` for a stop the record does not
  * answer (none, or a stop after it); after the retry delay for one a failed continuation answered; undefined for one
- * resumed or declined.
+ * resumed, lapsed or declined.
  */
 export function usageStopContinuesAt(
 	stopAt: number,

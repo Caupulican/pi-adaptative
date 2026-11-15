@@ -18,8 +18,8 @@
  * that it continues now. Its notices are held until the session has a listener. A Codex usage limit also says whether
  * the account holds a usage reset to redeem (`/usage`); a redeemed reset ends the wait at once.
  *
- * How each wait ended is recorded in the transcript (`usage-wake-record.ts`): resumed, failed, or declined by the owner's
- * stop. A stop a record answers is not waited out again, here or by a host reading the closed session; a continuation that
+ * How each wait ended is recorded in the transcript (`usage-wake-record.ts`): resumed, lapsed (nothing waited on it any
+ * more), failed, or declined by the owner's stop. A stop a record answers is not waited out again, here or by a host reading the closed session; a continuation that
  * threw is tried again after a delay that grows with each failure in a row, up to a bound, never given up.
  */
 
@@ -210,28 +210,31 @@ export class UsageResetResume {
 		const prior = latestUsageWake(transcript);
 		// The owner's stop declined this wait after it was armed (a failed try of the same stop is retried).
 		if (usageStopContinuesAt(pending.stopAt, pending.at, prior) === undefined) return;
-		if (this.deps.resumeUsageLimitedGoal()) {
-			recordUsageWake(transcript, "resumed", pending.stopAt, this.deps.clock.now(), 0);
-			return;
-		}
-		if (!pending.refusal || !isSameRefusal(this.lastMessage(), pending.refusal)) return;
-		let failure: { readonly error: unknown } | undefined;
+		// The goal the limit stopped continues, else the refused turn; neither waiting any more is an answer too, so a restore
+		// does not wake for the stop again. Either continuation that throws is tried again after the backoff.
+		let outcome: "resumed" | "lapsed";
 		try {
-			await this.deps.continueTurn();
+			if (this.deps.resumeUsageLimitedGoal()) outcome = "resumed";
+			else if (pending.refusal && isSameRefusal(this.lastMessage(), pending.refusal)) {
+				await this.deps.continueTurn();
+				outcome = "resumed";
+			} else outcome = "lapsed";
 		} catch (error) {
-			failure = { error };
-		}
-		const now = this.deps.clock.now();
-		if (!failure) {
-			recordUsageWake(transcript, "resumed", pending.stopAt, now, 0);
+			this.retryAfterFailure(pending, prior, error);
 			return;
 		}
+		recordUsageWake(transcript, outcome, pending.stopAt, this.deps.clock.now(), 0);
+	}
+
+	/** A continuation of `pending` threw: it is tried again after the delay its failures in a row earn, and recorded failed. */
+	private retryAfterFailure(pending: PendingResume, prior: UsageWakeRecord | undefined, error: unknown): void {
+		const now = this.deps.clock.now();
 		const failures = prior?.outcome === "failed" && pending.stopAt <= prior.stopAt ? prior.failures + 1 : 1;
 		const retryAt = now + usageWakeRetryDelayMs(failures);
 		this.arm(pending, retryAt);
-		const detail = failure.error instanceof Error ? failure.error.message : String(failure.error);
+		const detail = error instanceof Error ? error.message : String(error);
 		this.deps.warn(interfaceText().notices.usageReset.sessionResumeFailed(detail, new Date(retryAt).toISOString()));
-		recordUsageWake(transcript, "failed", pending.stopAt, now, failures);
+		recordUsageWake(this.deps.transcript.sessionManager, "failed", pending.stopAt, now, failures);
 	}
 
 	/**
