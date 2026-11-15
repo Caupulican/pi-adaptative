@@ -268,18 +268,28 @@ function endPlacedRecord(
 ): boolean {
 	let ended = false;
 	store.updatePlaced(machineId, jobId, (current) => {
-		if (
-			current.appliedAt !== undefined ||
-			current.ending ||
-			current.state === "refused" ||
-			current.state === "terminal"
-		)
-			return undefined;
+		if (!placedRecordEndable(current)) return undefined;
 		ended = true;
 		return { ...current, state: "ended", ending, cancel };
 	});
 	if (ended) journalJob(agentDir, { side: "placer", jobId, peer: machineId, event: "ended", code: ending });
 	return ended;
+}
+
+/** Whether a placed job's record is still the placer's to end: it has not applied, is not ending, and was neither refused nor ended. */
+function placedRecordEndable(record: PlacerJobRecord): boolean {
+	return record.appliedAt === undefined && !record.ending && record.state !== "refused" && record.state !== "terminal";
+}
+
+/**
+ * Whether a job the sessions `sessionIds` placed is still to end ({@link endPlacedJobsOfSessions} would end it): read
+ * only, from the records that read.
+ */
+export function placedJobsOfSessionsLeft(agentDir: string, sessionIds: ReadonlySet<string>): boolean {
+	if (sessionIds.size === 0) return false;
+	for (const record of new JobStore(agentDir).placedScan().valid.values())
+		if (sessionIds.has(record.ownerSession) && placedRecordEndable(record)) return true;
+	return false;
 }
 
 /**

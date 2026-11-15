@@ -73,6 +73,8 @@ const SIXTH_QUESTION = "Which channel announces the release?";
 const SIXTH_ANSWER = "The release is announced in the releases channel.";
 const SEVENTH_QUESTION = "Who keeps the release checklist?";
 const SEVENTH_ANSWER = "The release manager keeps the release checklist.";
+/** Left waiting in the retired bot's inbox, as a process that retired the bot and ended before its release left it. */
+const OWED_QUESTION = "Which team owns the release dashboard?";
 /** The fleet queue file an earlier build left beside the bot session's state in the owner's home: a stopped, empty queue. */
 const PLANTED_FLEET = { v: 1, stopped: true, entries: [] };
 
@@ -119,7 +121,7 @@ function holdersIn(home: BotHome["orchestrationHome"], sessionId: string): Array
  * owner's home is moved into the bot's on open, its fleet queue file included, leaving nothing behind. A pointer that is a
  * symbolic link stops the load with the product's sentence and starts nothing. While a session of the owner holds the
  * bot's session, the host stays out and the message waits, the send saying why; once that session lets it go, the host
- * opens it and answers. Every message reaches a closed session, so no owner words are left to settle and no System One
+ * opens it and answers. A release a process left owed when it ended is taken up by the next host. Every message reaches a closed session, so no owner words are left to settle and no System One
  * question is asked in either mode.
  */
 export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void> {
@@ -131,6 +133,7 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 		expect(await world.disposeSessionInBody(session), "the root session disposes cleanly").toBeUndefined();
 	}
 	await replacedHostTellsNothing(world, ownerBundle);
+	await owedReleaseTakenUp(world);
 	world.trace.mark("root", "j7.bot-home");
 }
 
@@ -168,6 +171,51 @@ async function replacedHostTellsNothing(world: HarnessWorld, ownerBundle: string
 	} finally {
 		rmSync(ownerBundle, { recursive: true, force: true });
 		expect(await world.disposeSessionInBody(session), "the replacing root session disposes cleanly").toBeUndefined();
+	}
+}
+
+/**
+ * Leg: a release a process left owed when it ended is taken up by the next host. The bot is retired and its release
+ * finished (`replacedHostTellsNothing`); a message then waiting in its inbox is what a process that retired the bot and
+ * ended before its release finished leaves (the record retired, the home still holding the message, the release kept
+ * only in that process's memory). The next root session's host takes the release up as it opens the bots: the message
+ * is refused with the release's reason, the bot's lock is given back and the owner is told nothing.
+ */
+async function owedReleaseTakenUp(world: HarnessWorld): Promise<void> {
+	const words = interfaceText().botTeam;
+	const hostLock = resolve(botHostLockFile(world.agentDir, KEEPER));
+	const left = enqueueBotInbox(world.agentDir, {
+		agentId: KEEPER,
+		text: OWED_QUESTION,
+		from: { pid: process.pid, sessionId: createSessionId(), cwd: HARNESS_PROJECT_CWD },
+		at: Date.now(),
+	});
+	expect(botInboxWaiting(world.agentDir, KEEPER), "the retired bot's inbox holds the message left owed").toBe(true);
+	const mark = world.warnings.length;
+	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
+	try {
+		await withDeadline(
+			world.trace,
+			"J7 bot home: the next host took up the release left owed",
+			world.io.waitForMutation(() => !botInboxWaiting(world.agentDir, KEEPER)),
+		);
+		const refusals = readBotInboxRefusals(world.agentDir, KEEPER, (file, reason) => {
+			throw new Error(`the bot's inbox holds an unreadable refusal ${file}: ${reason}`);
+		});
+		expect(
+			{
+				retired: botRecord(session, KEEPER).retired,
+				refused: refusals.filter((item) => item.message.id === left.message.id).map((item) => item.message.reason),
+				lock: processLockHolder(hostLock),
+				warnings: world.warnings.slice(mark),
+			},
+			"the next host released the retired bot whose release a process left owed: the message left waiting refused with the release's reason, the lock given back, the owner told nothing",
+		).toEqual({ retired: true, refused: [words.botInboxReleased(KEEPER)], lock: undefined, warnings: [] });
+	} finally {
+		expect(
+			await world.disposeSessionInBody(session),
+			"the root session that took the release up disposes cleanly",
+		).toBeUndefined();
 	}
 }
 

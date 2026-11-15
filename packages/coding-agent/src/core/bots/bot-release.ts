@@ -4,7 +4,10 @@
  * lock), the watches its session armed dropped, and the messages waiting in its inbox refused; a loaded session is closed
  * once its workers ended. What a release could not finish stays owed and runs whole again after a backoff, the owner told
  * once, until it is done or the bot is back on the session path; what it told of the work left behind a symbolic link is
- * told once for the release however often it runs (`LinkedSessionNotices`).
+ * told once for the release however often it runs (`LinkedSessionNotices`). A release a process left owed when it ended
+ * (it retired the bot, then ended before the release finished, or while a retry waited) is taken up by the next host that
+ * opens the bots ({@link BotRelease.recoverOwed}): the bot's record, retired or off the session path, is the debt's durable
+ * mark, and what its home still holds of what a release ends is the debt itself.
  */
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -18,7 +21,7 @@ import { type LinkedSessionNotices, RELEASE_OPERATION } from "./bot-link-notices
 import { BotOpenRetries } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
-import { endClosedBotWork, endLoadedBotWork, readClosedBotSession } from "./bot-stop.ts";
+import { closedBotWorkLeft, endClosedBotWork, endLoadedBotWork, readClosedBotSession } from "./bot-stop.ts";
 
 /** What a release reads from the host of the bots' sessions. */
 export interface BotReleasePorts {
@@ -51,6 +54,10 @@ export interface BotReleasePorts {
 	waiting(agentId: string): readonly BotInboxItem[];
 	/** Whether the record answers in a session of its own. */
 	runsAsSession(record: PersistentBotRecord): boolean;
+	/** Whether the bot has a home of its own (a session of it ran, or was made, here or in another process). */
+	hasHome(agentId: string): boolean;
+	/** Whether another live process hosts the bot (holds its host lock). */
+	heldElsewhere(agentId: string): boolean;
 	/** The bot was released: what it was owed is not taken up. */
 	released(agentId: string): void;
 	/** The bot's inbox changed. */
@@ -112,6 +119,43 @@ export class BotRelease {
 		} catch (error) {
 			this.owe(agentId, error);
 		}
+	}
+
+	/**
+	 * Takes up the releases another host left owed (see the module comment): each bot of `records` retired or off the
+	 * session path whose home still holds what a release ends ({@link leftBehind}) is released as an owed release is, run
+	 * again after a backoff until it is done. A bot whose release finished holds none of it and is left as it is, and one
+	 * another live process hosts is that process's to release (on the change it reads; a host that ends first leaves it to
+	 * the next). A read that fails leaves the release owed, the owner told once.
+	 */
+	recoverOwed(records: readonly PersistentBotRecord[]): void {
+		for (const record of records) {
+			const { agentId } = record;
+			if ((!record.retired && this.ports.runsAsSession(record)) || !this.ports.hasHome(agentId)) continue;
+			try {
+				if (!this.ports.heldElsewhere(agentId) && this.leftBehind(agentId)) this.releaseOwed(agentId);
+			} catch (error) {
+				this.owe(agentId, error);
+			}
+		}
+	}
+
+	/**
+	 * Whether the home of a bot no session of it holds here still holds what its release ends ({@link finish}): a watch its
+	 * session armed, a message waiting in its inbox, or its closed session's work (`closedBotWorkLeft`). Read as the
+	 * release reads them; a read that fails throws.
+	 */
+	private leftBehind(agentId: string): boolean {
+		const { ports } = this;
+		const sessionId = ports.savedSessionOf(agentId)?.id;
+		if (sessionId !== undefined && ports.store().listRoutines({ sessionId, scope: "own-watches" }).length > 0)
+			return true;
+		if (ports.waiting(agentId).length > 0) return true;
+		return closedBotWorkLeft(
+			ports.agentDir(),
+			agentId,
+			readClosedBotSession(() => ports.closedSessionOf(agentId)),
+		);
 	}
 
 	/** The host stopped: no owed release runs again. */

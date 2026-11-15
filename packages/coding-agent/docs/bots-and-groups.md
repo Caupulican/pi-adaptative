@@ -198,7 +198,11 @@ waits when the host lets the bot go or dies is taken by the process that opens t
 directory the message was sent from: every process lists the inboxes of the bots no process hosts once a minute, so that
 happens without the owner's next message even where the watch over the bot homes does not fire (a bot whose session
 failed to open for another reason than its model, such as an unreadable session file, is tried again by that listing only
-once a new message waits or its record changed; a process start or another host's change tries it at once); a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
+once a new message waits or its record changed; a process start or another host's change tries it at once); a bot retired or moved to a worker refuses what waits, with the reason. That
+release (its waiting messages refused, the watches its session armed dropped, its closed session's workers and the jobs its
+home's sessions placed ended) is taken up by the next process that opens the bots when the process that retired or moved
+the bot ended before it finished: the bot's record is the mark of what is owed, and what its home still holds of that work
+is the work, so a bot whose release finished is left as it is and one another process hosts stays that process's. Delivery is at
 least once: a host killed after its session took a message and before it deleted the file gives it again. An inbox file
 that does not read is set aside as `<name>.unreadable` and you are told; one that can be neither read nor set aside (a file
 the process may not read in a directory it may not write, a Windows sharing lock) stays in place, is told once, is counted

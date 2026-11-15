@@ -27,15 +27,21 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { OWNER_STOPPED_REASON, stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
+import {
+	OWNER_STOPPED_REASON,
+	stopSessionWorkers,
+	unendedWorkerAttempts,
+	type WorkerStopOutcome,
+} from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
+import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
-import { endPlacedJobsOfSessions } from "../remote/job-client.ts";
+import { endPlacedJobsOfSessions, placedJobsOfSessionsLeft } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { MAX_ROUTINE_OCCURRENCES } from "../routines/routine-contract.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
@@ -489,11 +495,7 @@ interface BotWorkMark {
  */
 function workMarkOf(agentDir: string, agentId: string, session: ClosedBotSession): BotWorkMark {
 	if ("linked" in session) return { session: undefined, linked: session.linked, head: 0 };
-	const bundle = closedBundle(agentDir, agentId, session.saved);
-	const store =
-		bundle &&
-		existsSync(orchestrationEventStoreDir(bundle.home, bundle.sessionId)) &&
-		new OrchestrationEventStore({ orchestrationHome: bundle.home, sessionId: bundle.sessionId });
+	const store = closedBundleStore(agentDir, agentId, session.saved);
 	return {
 		session: session.saved?.id,
 		linked: undefined,
@@ -692,8 +694,8 @@ function stopClosedSession(
 ): WorkerStopOutcome {
 	const bundle = closedBundle(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
-	const outcome =
-		bundle === undefined ? NOTHING_LEFT : cancelBundleWorkers(bundle.home, bundle.sessionId, stop.reasonCode);
+	const store = closedBundleStore(agentDir, agentId, saved);
+	const outcome = store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, stop.reasonCode);
 	if (transcript) {
 		const now = ports.now();
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
@@ -719,6 +721,41 @@ function closedBundle(
 			sessionId: saved.id,
 		}
 	);
+}
+
+/** The store of a closed bot's own bundle ({@link closedBundle}); none when the bot has no saved session or its bundle was never written. */
+function closedBundleStore(
+	agentDir: string,
+	agentId: string,
+	saved: SavedBotSession | undefined,
+): OrchestrationEventStore | undefined {
+	const bundle = closedBundle(agentDir, agentId, saved);
+	return bundle && existsSync(orchestrationEventStoreDir(bundle.home, bundle.sessionId))
+		? new OrchestrationEventStore({ orchestrationHome: bundle.home, sessionId: bundle.sessionId })
+		: undefined;
+}
+
+/** The sessions whose placed jobs are a closed bot's: its home's own session files (`ids`) and its saved session. */
+function closedPlacers(ids: readonly string[], saved: SavedBotSession | undefined): readonly string[] {
+	return saved ? [...ids, saved.id] : ids;
+}
+
+/**
+ * Whether bot `agentId`'s closed session `session` left work a release of it ends ({@link endClosedBotWork}): an
+ * unended attempt of its own or an open plan in its bundle, or a job its home's sessions placed that has not ended. What
+ * a release leaves (the work behind a symbolic link, a managed lane) is not counted, so a bot whose release finished
+ * counts none. Read only, without its host lock; a read that fails throws.
+ */
+export function closedBotWorkLeft(agentDir: string, agentId: string, session: ClosedBotSession): boolean {
+	const saved = "saved" in session ? session.saved : undefined;
+	const store = closedBundleStore(agentDir, agentId, saved);
+	if (store) {
+		const snapshot = readTaskRuntimeProjection(store);
+		if (unendedWorkerAttempts(snapshot).length > 0 || Object.values(snapshot.plans).some((plan) => !plan.closed))
+			return true;
+	}
+	const { ids } = botHomeOwnSessionIds(botHomeOf(agentDir, agentId).sessionsDir);
+	return placedJobsOfSessionsLeft(agentDir, new Set(closedPlacers(ids, saved)));
 }
 
 /**
@@ -747,11 +784,9 @@ export function endClosedBotWork(
 			const sentence = interfaceText().botTeam.botReleaseWorkersLeft(agentId, session.linked);
 			ports.links.tell(agentId, RELEASE_OPERATION, "workers", [session.linked], sentence, ports.warn);
 		}
-		const bundle = closedBundle(agentDir, agentId, saved);
-		const outcome =
-			bundle === undefined ? NOTHING_LEFT : cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
-		const placedBy = (ids: readonly string[]) => (saved ? [...ids, saved.id] : ids);
-		endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, RELEASE_OPERATION, ports);
+		const store = closedBundleStore(agentDir, agentId, saved);
+		const outcome = store === undefined ? NOTHING_LEFT : cancelBundleWorkers(store, reasonCode);
+		endHomePlacedJobs(agentDir, agentId, (ids) => closedPlacers(ids, saved), reasonCode, RELEASE_OPERATION, ports);
 		return outcome;
 	} finally {
 		taken.lock.release();
@@ -790,18 +825,15 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
 }
 
 /**
- * The owner's stop of the workers of the closed bot session `sessionId`, whose bundle is in `home`, while no process
- * hosts the bot, written to its bundle alone (`stopSessionWorkers`): every open plan closed and every unended worker
+ * The owner's stop of the workers of a closed bot session, whose bundle `store` holds, while no process hosts the bot,
+ * written to its bundle alone (`stopSessionWorkers`): every open plan closed and every unended worker
  * attempt cancelled for `reasonCode`, so nothing opens the session for them. Their ends are recorded delivered by the
  * session's next open, when its outbox is replayed (`owner_stopped` wakes no one). It runs before the jobs the home's
  * sessions placed are ended, so no open dispatches a lane again for a job that end reaches. The caller holds the bot's host
  * lock, so no process runs what it cancels. What it left unended.
  */
-function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonCode: string): WorkerStopOutcome {
-	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return NOTHING_LEFT;
-	const runtime = new DurableTaskRuntime({
-		store: new OrchestrationEventStore({ orchestrationHome: home, sessionId }),
-	});
+function cancelBundleWorkers(store: OrchestrationEventStore, reasonCode: string): WorkerStopOutcome {
+	const runtime = new DurableTaskRuntime({ store });
 	return stopSessionWorkers(
 		runtime,
 		undefined,

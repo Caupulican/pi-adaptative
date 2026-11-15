@@ -326,6 +326,8 @@ export class BotSessionHost {
 			closedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),
+			hasHome: (agentId) => this.hasHome(agentId),
+			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
 			released: (agentId) => this.owed.released(agentId),
 			changed: (agentId) => this.changed(agentId),
 			close: (agentId) => this.close(agentId),
@@ -816,12 +818,15 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Opens every bot whose own session is owed work that no process takes (see `BotOwedWork.openIfOwed`), and from then on
-	 * lists the bots' inboxes on a slow cadence (`BotOwedWork.sweepInboxes`).
+	 * Takes up the releases a process left owed when it ended (`BotRelease.recoverOwed`), opens every bot whose own session
+	 * is owed work that no process takes (see `BotOwedWork.openIfOwed`), and from then on lists the bots' inboxes on a slow
+	 * cadence (`BotOwedWork.sweepInboxes`).
 	 */
 	openOwed(): void {
 		this.owed.sweepInboxes();
-		const bots = this.ports.store().listBots();
+		const records = this.ports.store().listBots({ includeRetired: true });
+		this.releases.recoverOwed(records);
+		const bots = records.filter((record) => !record.retired);
 		if (bots.length === 0) return;
 		this.view.watch();
 		for (const bot of bots) this.owed.unhosted(bot.agentId);
