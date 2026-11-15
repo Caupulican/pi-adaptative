@@ -115,10 +115,34 @@ export function isExclusiveHostRole(role: SessionLeaseRole): boolean {
 	return role === "channel-host" || role === "bot-host";
 }
 
-/** A holder named in a refusal: its process id and what it serves. */
+/** A holder named in a refusal: its process id, what it serves and, for a holder on another machine, that machine. */
 export interface SessionLeaseHolderRef {
 	readonly pid: number;
 	readonly role: SessionLeaseRole;
+	/**
+	 * Set when the holder runs on another machine (`judgeOwner`: `foreign`): its pid names no process here, and only a
+	 * process on that machine can prove it gone. `hostname` is the name its record carries, absent on a record that names
+	 * only a machine id. Built in memory from the holder's record, never written to it.
+	 */
+	readonly elsewhere: { readonly hostname: string | undefined } | undefined;
+}
+
+/** The refusal's name for a holder judged `standing`. */
+export function sessionLeaseHolderRef(
+	holder: { readonly owner: ProcessOwner; readonly role: SessionLeaseRole },
+	standing: OwnerStanding,
+): SessionLeaseHolderRef {
+	return {
+		pid: holder.owner.pid,
+		role: holder.role,
+		elsewhere: standing === "foreign" ? { hostname: holder.owner.hostname } : undefined,
+	};
+}
+
+/** Where a holder runs, in the kernel's English: "pid N", or "pid N on <machine>" for one on another machine. */
+function holderProcess(holder: SessionLeaseHolderRef): string {
+	if (!holder.elsewhere) return `pid ${holder.pid}`;
+	return `pid ${holder.pid} on ${holder.elsewhere.hostname ?? "another machine"}`;
 }
 
 /** A session's lease registry (`file`) that does not read as one: no lease is taken or released there until it is inspected. */
@@ -138,7 +162,7 @@ export class SessionHeldError extends Error {
 	constructor(parentSessionId: string, holders: readonly SessionLeaseHolderRef[], refused: SessionLeaseRole) {
 		const host = refused === "bot-host" ? "the bot's host runs" : "the daemon hosts";
 		super(
-			`Session ${parentSessionId} is open (pid ${holders.map((holder) => holder.pid).join(", ")}); ${host} it once it is closed.`,
+			`Session ${parentSessionId} is open (${holders.map(holderProcess).join(", ")}); ${host} it once it is closed.`,
 		);
 		this.name = "SessionHeldError";
 		this.holders = holders;
@@ -175,8 +199,10 @@ export class SessionHostedError extends Error {
 	constructor(holder: SessionLeaseHolderRef) {
 		super(
 			holder.role === "bot-host"
-				? `This session is a bot's own conversation; its host (pid ${holder.pid}) runs it.`
-				: `This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
+				? `This session is a bot's own conversation; its host (${holderProcess(holder)}) runs it.`
+				: holder.elsewhere
+					? `This is the phone session; the background daemon (${holderProcess(holder)}) is hosting it. Stop it on that machine to open it here.`
+					: `This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
 		);
 		this.name = "SessionHostedError";
 		this.holder = holder;
@@ -318,14 +344,6 @@ function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 	return live;
 }
 
-const holderRef = (holder: {
-	readonly owner: ProcessOwner;
-	readonly role: SessionLeaseRole;
-}): SessionLeaseHolderRef => ({
-	pid: holder.owner.pid,
-	role: holder.role,
-});
-
 /**
  * The holders among `holders` (none proven dead) a channel or bot host is refused for, as its admission counts them: a
  * session or another channel or bot host, whether alive, on another machine or unjudgeable; an away host never is.
@@ -348,10 +366,15 @@ function admitHolder(
 	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
 	if (isExclusiveHostRole(holder.role)) {
 		const open = botHostBlockers(holders);
-		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef), holder.role);
+		if (open.length > 0)
+			throw new SessionHeldError(
+				parentSessionId,
+				open.map((entry) => sessionLeaseHolderRef(entry, judgeOwner(entry.owner))),
+				holder.role,
+			);
 	}
 	const host = refuseHosted && holder.role === "session" && holders.find((entry) => isExclusiveHostRole(entry.role));
-	if (host) throw new SessionHostedError(holderRef(host));
+	if (host) throw new SessionHostedError(sessionLeaseHolderRef(host, judgeOwner(host.owner)));
 	return [...holders, holder];
 }
 
@@ -413,7 +436,7 @@ export function sessionExclusiveHost(home: OrchestrationHome, parentSessionId: s
  */
 export function refuseHostedSession(home: OrchestrationHome, parentSessionId: string): void {
 	const host = sessionExclusiveHost(home, parentSessionId);
-	if (host) throw new SessionHostedError(holderRef(host));
+	if (host) throw new SessionHostedError(sessionLeaseHolderRef(host, host.standing));
 }
 
 function releaseBundleLease(state: BundleLeaseState): void {

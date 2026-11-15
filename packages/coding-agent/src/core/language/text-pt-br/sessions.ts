@@ -39,6 +39,11 @@ export const SESSIONS = {
 			`Esta é a sessão do telefone; o daemon em segundo plano (pid ${pid}) a hospeda. Pare o daemon para abri-la aqui (\`/bot daemon stop\`).`,
 		bot: (pid: number) =>
 			`Esta sessão é a conversa do próprio bot; o host dele (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo para abrir a sessão aqui.`,
+		phoneOnMachine: (pid: number, machine: string) =>
+			`Esta é a sessão do telefone; o daemon em segundo plano em ${machine} (pid ${pid}) a hospeda. Pare-o naquela máquina para abrir a sessão aqui; um daemon que terminou lá sem liberá-la é liberado quando o pi naquela máquina abrir a sessão.`,
+		botOnMachine: (pid: number, machine: string) =>
+			`Esta sessão é a conversa do próprio bot; o host dele em ${machine} (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo naquela máquina para abrir a sessão aqui; um host que terminou lá sem liberá-la é liberado quando o pi naquela máquina abrir a sessão.`,
+		otherMachine: "outra máquina",
 	},
 	retention: {
 		ownerFilesUnlisted:

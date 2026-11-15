@@ -12,7 +12,9 @@
  * - `dead`: same host, and the owner is PROVEN gone (ESRCH, or the pid now names a process with another start time).
  *   The only outcome that authorizes reclaiming the owner's record.
  * - `foreign`: the record names another host. A pid means nothing here; the record is neither reclaimed nor judged
- *   by this host's pids. Age-based expiry (a heartbeat the owner keeps renewing) is the only way such a record ends.
+ *   by this host's pids. It ends when its owner removes it, or when a process on its own host judges it `dead`; only a
+ *   store whose owner renews a heartbeat may also end it by age. A record with no heartbeat (a session's lifetime lease,
+ *   a tombstone's operation) is never expired by age.
  * - `unknown`: the judgement could not be made. Either the probe proved neither answer (EPERM with an unreadable
  *   procfs entry, an unclassified error), or the record names a machine id and this process cannot read its own yet
  *   (macOS/Windows read it asynchronously), so it cannot tell its own records from a foreign machine's. Never reclaim

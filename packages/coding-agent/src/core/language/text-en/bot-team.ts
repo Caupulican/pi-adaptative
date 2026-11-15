@@ -98,6 +98,9 @@ export const BOT_TEAM = {
 	botSessionHolderSession: (pid: number) => `a session of yours (process ${pid})`,
 	botSessionHolderPhone: (pid: number) => `the phone session's daemon (process ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `another bot host (process ${pid})`,
+	/** A holder (one of the three above) on another machine, which this one cannot see end. */
+	botSessionHolderOnMachine: (holder: string, machine: string) =>
+		`${holder} on ${machine}, released when it closes the conversation or, if it ended without letting go, when pi on that machine opens it`,
 	/** The bot's session pointer, or the session file it loads, is a symbolic link: the load stops until it is replaced. */
 	botSessionFileLinked: (path: string) =>
 		`the bot session file ${path} is a symbolic link, which bot sessions do not follow (a write would replace the link with a copy); replace the link with the file itself`,

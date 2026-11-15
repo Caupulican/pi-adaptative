@@ -42,12 +42,16 @@ function causeChain(error: unknown): string[] {
 }
 
 function holderWords(holder: SessionLeaseHolderRef): string {
-	const words = interfaceText().botTeam;
-	return holder.role === "channel-host"
-		? words.botSessionHolderPhone(holder.pid)
-		: holder.role === "bot-host"
-			? words.botSessionHolderBotHost(holder.pid)
-			: words.botSessionHolderSession(holder.pid);
+	const text = interfaceText();
+	const words = text.botTeam;
+	const process =
+		holder.role === "channel-host"
+			? words.botSessionHolderPhone(holder.pid)
+			: holder.role === "bot-host"
+				? words.botSessionHolderBotHost(holder.pid)
+				: words.botSessionHolderSession(holder.pid);
+	if (!holder.elsewhere) return process;
+	return words.botSessionHolderOnMachine(process, holder.elsewhere.hostname ?? text.sessions.hosted.otherMachine);
 }
 
 /** The owner's words for `error` when this module words it, else undefined (see the module comment). */

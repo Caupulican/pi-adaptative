@@ -83,7 +83,10 @@ export class SessionReplacementCallbackError extends Error {
 /** The owner's words for a session another process hosts: the phone session the daemon hosts, or a bot's own session. */
 export function hostedSessionRefusal(error: SessionHostedError): string {
 	const words = interfaceText().sessions.hosted;
-	return error.holder.role === "bot-host" ? words.bot(error.holder.pid) : words.phone(error.holder.pid);
+	const { pid, role, elsewhere } = error.holder;
+	if (!elsewhere) return role === "bot-host" ? words.bot(pid) : words.phone(pid);
+	const machine = elsewhere.hostname ?? words.otherMachine;
+	return role === "bot-host" ? words.botOnMachine(pid, machine) : words.phoneOnMachine(pid, machine);
 }
 
 /**

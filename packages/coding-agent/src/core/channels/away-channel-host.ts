@@ -45,6 +45,7 @@ import {
 	ownerSessionStorageRoots,
 	readSessionLeaseHolders,
 	SessionHeldError,
+	sessionLeaseHolderRef,
 } from "../orchestration/session-bundle-lifecycle.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
@@ -447,7 +448,7 @@ export class AwayChannelHosts {
 			if (open.length > 0)
 				throw new SessionHeldError(
 					recorded.sessionId,
-					open.map((holder) => ({ pid: holder.owner.pid, role: holder.role })),
+					open.map((holder) => sessionLeaseHolderRef(holder, holder.standing)),
 					"channel-host",
 				);
 			const header = readSessionHeaderResult(recorded.file);

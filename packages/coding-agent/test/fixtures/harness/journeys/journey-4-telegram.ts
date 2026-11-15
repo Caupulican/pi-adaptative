@@ -1,4 +1,4 @@
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { configFile, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
@@ -16,6 +16,8 @@ import {
 	readSessionLeaseHolders,
 	SessionHostedError,
 } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
+import { hostedSessionRefusal } from "../../../../src/core/session-switch-failures.ts";
+import { orchestrationSessionDeletionFile } from "../../../../src/kernel/session/session-bundle-paths.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import {
 	type Barrier,
@@ -1523,7 +1525,8 @@ interface DaemonLegJournal {
  * its answer goes back to the chat by itself; an allowlisted friend's message still runs in the read-only child session,
  * fenced, and its answer waits as a draft, and none of the friend's words reach the phone session's file. A terminal
  * open of that file is refused with the daemon's pid and `/bot daemon stop`, writing nothing to it; once the daemon
- * stops, the same open succeeds.
+ * stops, a channel host recorded on another machine refuses the open naming that machine (its record kept), and with it
+ * gone the same open succeeds.
  */
 export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -1737,6 +1740,47 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		).toEqual([]);
 		expect(api.openPolls, "the daemon's held poll is aborted").toBe(0);
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
+
+		// A channel host recorded on another machine is not judged by this machine's pids: the open is refused naming that
+		// machine, the refusal tells how its hold ends there, and the record stays (only a process there can prove it gone).
+		const leasesFile = `${orchestrationSessionDeletionFile(ownerOrchestrationHome(agentDir), sessionId)}.leases.json`;
+		const foreignLeases = `${JSON.stringify({
+			schemaVersion: 3,
+			parentSessionId: sessionId,
+			holders: [
+				{
+					token: "4f1c2a8e-9b3d-4e5f-8a6b-7c8d9e0f1a2b",
+					owner: { pid: 4242, hostname: "j4-other-machine" },
+					processInstanceId: "5a2b3c4d-6e7f-4a8b-9c0d-1e2f3a4b5c6d",
+					role: "channel-host",
+				},
+			],
+		})}\n`;
+		world.io.mkdirSync(dirname(leasesFile), { recursive: true });
+		world.io.writeFileSync(leasesFile, foreignLeases);
+		const refusedElsewhere = await world
+			.createRootSession("root", {
+				agentDir,
+				sessionManager: world.openSessionManager(file, agentDir),
+				systemOneEnabled: false,
+				settings,
+			})
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+		expect(refusedElsewhere, "a host on another machine refuses the open").toBeInstanceOf(SessionHostedError);
+		expect((refusedElsewhere as Error).message).toBe(
+			"This is the phone session; the background daemon (pid 4242 on j4-other-machine) is hosting it. Stop it on that machine to open it here.",
+		);
+		expect(hostedSessionRefusal(refusedElsewhere as SessionHostedError), "the owner is told the machine").toBe(
+			"This is the phone session; the background daemon on j4-other-machine (pid 4242) is hosting it. Stop it on that machine to open the session here; a daemon that ended there without letting go is released when pi on that machine opens the session.",
+		);
+		expect(String(world.io.readFileSync(leasesFile)), "a holder on another machine is never pruned here").toBe(
+			foreignLeases,
+		);
+		world.io.unlinkSync(leasesFile);
+		trace.mark("root", "telegram-daemon.refused-elsewhere");
 		// This terminal serves no channel, so the open is its only effect.
 		const opened = await world.createRootSession("root", {
 			agentDir,

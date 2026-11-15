@@ -354,8 +354,10 @@ export {
 	SessionHomeChangedError,
 	type SessionHomeNow,
 	SessionHostedError,
+	type SessionLeaseHolderRef,
 	type SessionLeaseRole,
 	type SessionStorageRoots,
+	sessionLeaseHolderRef,
 } from "./core/orchestration/session-bundle-lifecycle.ts";
 export * from "./core/orchestration/task-runtime.ts";
 export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";

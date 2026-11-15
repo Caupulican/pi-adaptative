@@ -13,6 +13,13 @@ export const SESSIONS = {
 			`This is the phone session; the background daemon (pid ${pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
 		bot: (pid: number) =>
 			`This session is a bot's own conversation; its host (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process to open the session here.`,
+		/** The host runs on another machine (`machine`: its name, or `otherMachine`): this one cannot see it end. */
+		phoneOnMachine: (pid: number, machine: string) =>
+			`This is the phone session; the background daemon on ${machine} (pid ${pid}) is hosting it. Stop it on that machine to open the session here; a daemon that ended there without letting go is released when pi on that machine opens the session.`,
+		botOnMachine: (pid: number, machine: string) =>
+			`This session is a bot's own conversation; its host on ${machine} (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process on that machine to open the session here; a host that ended there without letting go is released when pi on that machine opens the session.`,
+		/** A holder's machine whose record names no hostname (only a machine id). */
+		otherMachine: "another machine",
 	},
 	/** The startup sweep of old session bundles (`session-bundle-retention.ts`), for the owner's home and the run. */
 	retention: {
