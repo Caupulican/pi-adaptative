@@ -5,15 +5,21 @@
  * ledger's queued attempts with their aging intact and keeps a stopped fleet stopped. One file per session under its
  * orchestration home's state directory, `<stateDir>/fleet/queue/<sessionId>.json` (the owner's `<agentDir>/state`), and
  * one for its away controller, `<sessionId>@away.json`; bounded, written atomically and at most once per microtask; an
- * empty, running fleet removes it. Entries no recovered attempt claims are dropped by the first write.
+ * empty, running fleet removes it. Entries no recovered attempt claims are dropped by the first write. An earlier build
+ * named the away controller's file `<sessionId>.away.json`, the name a session whose id is `<sessionId>.away` keeps as its
+ * own; its content (the stop and the entries) names neither, so whose it is is told by whether the home holds that
+ * session's orchestration state ({@link earlierAwayFleetQueueMetadataFile}), and the away controller adopts it
+ * ({@link openFleetQueueStore}) when it is the controller's.
  */
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { orchestrationHomeHoldsSession } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { retryTransientWin32Sync } from "../../kernel/storage/win32-transient-fs.ts";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { FleetPriority } from "./fleet-types.ts";
 
 /** Far above any ready window the ceilings allow; a file past it is truncated to the oldest entries. */
@@ -56,6 +62,51 @@ export function awayFleetQueueKey(sessionId: string): string {
 /** Every fleet queue metadata file of session `sessionId` in `home`: its own and its away controller's. */
 export function sessionFleetQueueMetadataPaths(home: OrchestrationHome, sessionId: string): readonly string[] {
 	return [fleetQueueMetadataPath(home, sessionId), fleetQueueMetadataPath(home, awayFleetQueueKey(sessionId))];
+}
+
+/** The name an earlier build gave session `sessionId`'s away controller's metadata in `home`, whoever's it is. */
+export function earlierAwayFleetQueueMetadataPath(home: OrchestrationHome, sessionId: string): string {
+	return join(home.stateDir, "fleet", "queue", `${sessionId}.away.json`);
+}
+
+/**
+ * The file an earlier build kept session `sessionId`'s away controller's metadata in
+ * ({@link earlierAwayFleetQueueMetadataPath}) when it is that controller's: it exists and `home` holds no orchestration
+ * state of the session whose id is `<sessionId>.away`, whose own file the same name is (its bundle directory, tombstone
+ * or lease registry: `orchestrationHomeHoldsSession`); undefined otherwise. A fleet queue file of key
+ * `<sessionId>.away` is written only by that session's fleet scheduler, which runs inside its orchestration bundle in
+ * the same home, so a live or retained session of that id always leaves that state there. The away controller adopts
+ * the file, the retention that removes the session's bundle removes it, and the bot bundle move carries it, each by this
+ * rule.
+ */
+export function earlierAwayFleetQueueMetadataFile(home: OrchestrationHome, sessionId: string): string | undefined {
+	const path = earlierAwayFleetQueueMetadataPath(home, sessionId);
+	if (!existsSync(path)) return undefined;
+	return orchestrationHomeHoldsSession(home, `${sessionId}.away`) ? undefined : path;
+}
+
+/**
+ * The store of fleet queue `key` in `home`. An away controller's store first settles the file an earlier build left
+ * ({@link earlierAwayFleetQueueMetadataFile}) under its own file's lock, the rule checked again inside it: with no file
+ * of its own it adopts that one by one rename (retried while Windows holds the file a moment), so a fleet stopped before
+ * the upgrade stays stopped; with one, which is the file it loads, it removes the earlier one, logged. A rename that
+ * fails is thrown: the stop it carries is not dropped.
+ */
+export function openFleetQueueStore(home: OrchestrationHome, key: string): FleetQueueStore {
+	const path = fleetQueueMetadataPath(home, key);
+	const sessionId = key.endsWith(AWAY_SUFFIX) ? key.slice(0, -AWAY_SUFFIX.length) : undefined;
+	if (sessionId !== undefined && earlierAwayFleetQueueMetadataFile(home, sessionId) !== undefined)
+		withFileLockSync(path, () => {
+			const earlier = earlierAwayFleetQueueMetadataFile(home, sessionId);
+			if (earlier === undefined) return;
+			if (!existsSync(path)) {
+				retryTransientWin32Sync(() => renameSync(earlier, path));
+				return;
+			}
+			rmSync(earlier, { force: true });
+			harnessLog.info("fleet", "the earlier away fleet queue file was removed: the away controller's own is loaded");
+		});
+	return new FleetQueueStore(path);
 }
 
 export class FleetQueueStore {

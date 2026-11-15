@@ -26,7 +26,7 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { reserveWorkerBundleDeletion } from "./delegation/worker-bundle-deletion.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
-import { sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
+import { earlierAwayFleetQueueMetadataFile, sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
@@ -658,12 +658,21 @@ function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
 
 /**
  * The session's files outside its bundle that name only what the bundle held, removed under the bundle's reservation
- * once the bundle is gone: its fleet queue files (they order and stop attempts the bundle's ledger held) and its
- * capability artifacts.
+ * once the bundle is gone: its fleet queue files (they order and stop attempts the bundle's ledger held), the away
+ * controller's an earlier build named `<id>.away.json` among them when it is the session's
+ * (`earlierAwayFleetQueueMetadataFile`), and its capability artifacts.
  */
-function removeSessionSideFiles(home: OrchestrationHome, sessionId: string): void {
-	for (const path of sessionFleetQueueMetadataPaths(home, sessionId)) rmSync(path, { force: true });
-	rmSync(capabilityArtifactsDir(home, sessionId), { recursive: true, force: true });
+function sessionSideFiles(home: OrchestrationHome, sessionId: string): string[] {
+	const earlier = earlierAwayFleetQueueMetadataFile(home, sessionId);
+	return [
+		...sessionFleetQueueMetadataPaths(home, sessionId),
+		...(earlier !== undefined ? [earlier] : []),
+		capabilityArtifactsDir(home, sessionId),
+	];
+}
+
+function removeSessionSideFiles(paths: readonly string[]): void {
+	for (const path of paths) rmSync(path, { recursive: true, force: true });
 }
 
 /** The walk of a bundle already gone: nothing to measure, nothing newer than any age. */
@@ -728,7 +737,7 @@ async function sweepBundle(
 				// touched.
 				if (held && reservation.phase !== "removing") outcome = "released";
 				else if (reservation.phase !== "reserved") {
-					removeSessionSideFiles(home, parentSessionId);
+					removeSessionSideFiles(sessionSideFiles(home, parentSessionId));
 					outcome = "removed";
 				}
 				return;
@@ -785,9 +794,11 @@ async function sweepBundle(
 				}
 			}
 			outcome = "retained";
+			// Decided before the removal is marked begun, removed after it.
+			const sideFiles = sessionSideFiles(home, parentSessionId);
 			markSessionBundleRemoving(home, reservation);
 			// The side files name only what the bundle held: they go first, so a removal left partial strands none.
-			removeSessionSideFiles(home, parentSessionId);
+			removeSessionSideFiles(sideFiles);
 			await rm(bundleDir, { recursive: true, force: true });
 			if (existsSync(bundleDir)) {
 				report(`session bundle ${label} was only partly removed; it stays reserved for the next startup`);

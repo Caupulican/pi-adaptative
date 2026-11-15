@@ -1,8 +1,9 @@
 /**
  * Moves a bot session's orchestration state an earlier build kept in the owner's home (`<agentDir>/state/orchestration`)
  * into the bot's (`bots/<id>/orchestration`), the first time the bot's host loads it after the change: its bundle
- * directory, its lifetime leases and its fleet queue files (the session's and its away runs'), each by one rename,
- * never a copy. One rename of one directory cannot carry them: the homes keep a session's pieces in separate trees (the
+ * directory, its lifetime leases and its fleet queue files (the session's and its away runs', the latter from the name
+ * an earlier build gave it when the current one is absent and it is theirs: `earlierAwayFleetQueueMetadataFile`), each by one
+ * rename, never a copy. One rename of one directory cannot carry them: the homes keep a session's pieces in separate trees (the
  * bundle under `sessions/`, the tombstone and leases under `deletions/`, the fleet queue files under the state
  * directory's `fleet/queue/`), and moving those trees would move the owner's own paths.
  *
@@ -34,6 +35,7 @@
  */
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	botHostBlockers,
 	readSessionLeaseHolders,
@@ -47,7 +49,11 @@ import {
 	ownerOrchestrationHome,
 	workerConversationSessionsDir,
 } from "../../kernel/session/session-bundle-paths.ts";
-import { sessionFleetQueueMetadataPaths } from "../fleet/fleet-queue-store.ts";
+import {
+	earlierAwayFleetQueueMetadataFile,
+	earlierAwayFleetQueueMetadataPath,
+	sessionFleetQueueMetadataPaths,
+} from "../fleet/fleet-queue-store.ts";
 
 /**
  * `none`: the owner's home has nothing of the session. `moved`: the bot's home holds it now. `deleting`: a tombstone
@@ -95,7 +101,8 @@ export class BotBundleSplitError extends AggregateError {
  */
 const BUNDLE = 0;
 const LEASES = 1;
-const FLEET_QUEUES: readonly number[] = [2, 3];
+const AWAY_FLEET_QUEUE = 3;
+const FLEET_QUEUES: readonly number[] = [2, AWAY_FLEET_QUEUE];
 
 /** The pieces of one session's orchestration state in `home` that move, in the order they move. */
 export function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
@@ -104,6 +111,25 @@ export function sessionStatePieces(home: OrchestrationHome, sessionId: string): 
 		`${orchestrationSessionDeletionFile(home, sessionId)}.leases.json`,
 		...sessionFleetQueueMetadataPaths(home, sessionId),
 	];
+}
+
+/**
+ * {@link sessionStatePieces} of the owner's home, where the move starts (`from`), with the away runs' fleet queue file an
+ * earlier build named there when it is theirs (`earlierAwayFleetQueueMetadataFile`): while their file is absent under
+ * its name, the earlier one stands in its place, so the move carries it to the name the bot's home reads, and a put-back
+ * gives it back its own; while it is present, the earlier one is `superseded`: the away runs load the current one, and
+ * the earlier goes once the move may run.
+ */
+function ownerStatePieces(
+	owner: OrchestrationHome,
+	sessionId: string,
+): { from: string[]; superseded: string | undefined } {
+	const from = sessionStatePieces(owner, sessionId);
+	const earlier = earlierAwayFleetQueueMetadataFile(owner, sessionId);
+	if (earlier === undefined) return { from, superseded: undefined };
+	if (existsSync(from[AWAY_FLEET_QUEUE] as string)) return { from, superseded: earlier };
+	from[AWAY_FLEET_QUEUE] = earlier;
+	return { from, superseded: undefined };
 }
 
 function isCrossDevice(error: unknown): boolean {
@@ -137,11 +163,16 @@ function putBack(sessionId: string, failure: unknown, moved: number[], from: str
  */
 export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHome, sessionId: string): BotBundleMove {
 	const owner = ownerOrchestrationHome(agentDir);
-	const from = sessionStatePieces(owner, sessionId);
 	const to = sessionStatePieces(botHome, sessionId);
-	if (!from.some((path) => existsSync(path))) return { kind: "none" };
+	// Whose an earlier-named away file is, is decided under the locks below; any file of that name counts here.
+	const present = [...sessionStatePieces(owner, sessionId), earlierAwayFleetQueueMetadataPath(owner, sessionId)];
+	if (!present.some((path) => existsSync(path))) return { kind: "none" };
 	return withSessionBundleInspection(owner, sessionId, () =>
 		withSessionBundleInspection(botHome, sessionId, (): BotBundleMove => {
+			// Read under the locks, so what moves is what was decided on. No away controller adopts, writes or removes the
+			// earlier-named file meanwhile: its host's lease (`away-host`) in the owner's home is a holder the check below
+			// finds alive, which stops the move, and none is taken before the locks are released.
+			const { from, superseded } = ownerStatePieces(owner, sessionId);
 			const pieces = from.flatMap((source, index) => (existsSync(source) ? [index] : []));
 			if (pieces.length === 0) return { kind: "none" };
 			const deleting = [owner, botHome].some((home) => sessionBundleDeletionPolicy(home, sessionId) !== undefined);
@@ -168,6 +199,10 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 						statSync(to[index] as string).mtimeMs >= statSync(from[index] as string).mtimeMs),
 			);
 			for (const index of dropped) rmSync(from[index] as string);
+			if (superseded !== undefined) {
+				rmSync(superseded, { force: true });
+				harnessLog.info("bots", "the earlier away fleet queue file was removed: the away runs' own is moved");
+			}
 			const moved: number[] = [];
 			try {
 				for (const index of pieces) {

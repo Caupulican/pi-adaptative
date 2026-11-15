@@ -37,7 +37,7 @@ import { bindingTerm, ceilingTerm, decideRoom } from "./capacity/room.ts";
 import { FLEET_STOP_MACHINE } from "./fleet-admission-machine.ts";
 import { FleetLocalClaims, type SpendBrakeState } from "./fleet-local-claims.ts";
 import { FleetQueue } from "./fleet-queue.ts";
-import { type FleetQueueMetadataEntry, FleetQueueStore, fleetQueueMetadataPath } from "./fleet-queue-store.ts";
+import { type FleetQueueMetadataEntry, type FleetQueueStore, openFleetQueueStore } from "./fleet-queue-store.ts";
 import type {
 	AdmitDecision,
 	FleetDispatch,
@@ -184,7 +184,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	constructor(deps: SessionFleetSchedulerDeps) {
 		this.deps = deps;
-		this.store = new FleetQueueStore(fleetQueueMetadataPath(deps.orchestrationHome, deps.sessionId));
+		this.store = openFleetQueueStore(deps.orchestrationHome, deps.sessionId);
 		this.baseline = deps.readMachine ? machineBaseline(deps.readMachine()) : processMachineBaseline();
 		this.unregisterMachine = registerMachine(this.observer, deps.sessionId);
 		this.claims = new FleetLocalClaims({
