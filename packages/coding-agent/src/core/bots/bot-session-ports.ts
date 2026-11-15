@@ -16,7 +16,13 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import type { ModelExhaustion } from "../provider-admission/gate.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
+import {
+	allowanceExhaustion,
+	heldModelExhaustion,
+	type SubscriptionAllowancePort,
+} from "../provider-admission/subscription-allowance.ts";
 import { usageScope } from "../session-analytics.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
@@ -32,12 +38,12 @@ function sharedExhaustions(deps: BackgroundLaneControllerDeps): ExhaustedProvide
 	return new ExhaustedProviderRegistry(join(providerAdmissionDir(deps.getAgentDir()), "exhausted"), () => clock.now());
 }
 
-/** When the recorded quota exhaustion of `model` resets; undefined when none with a reset time is recorded. */
-function exhaustionReset(
+/** The quota exhaustion recorded with a reset time for `model`; undefined when none is. */
+function recordedExhaustion(
 	deps: BackgroundLaneControllerDeps,
 	model: { provider: string; id: string },
-): number | undefined {
-	return sharedExhaustions(deps).exhaustion(`${model.provider}/${model.id}`)?.until;
+): ModelExhaustion | undefined {
+	return sharedExhaustions(deps).exhaustion(`${model.provider}/${model.id}`);
 }
 
 /**
@@ -46,6 +52,7 @@ function exhaustionReset(
  */
 function botModelRefusal(
 	deps: BackgroundLaneControllerDeps,
+	allowance: SubscriptionAllowancePort,
 	record: PersistentBotRecord,
 	model: Parameters<BotSessionRootPorts["modelRefusal"]>[1],
 ): BotModelRefusal | undefined {
@@ -67,10 +74,15 @@ function botModelRefusal(
 			cause: "model_metered",
 			reason: words.botModelMetered(metered.ref, metered.alternatives, metered.provider),
 		};
-	// Out of quota or refused for the account: the bot waits for its own model, never moved to another.
-	const unusable = deps.modelUnusableCause(model);
+	// Out of quota (a recorded refusal, or the used-up usage windows of its subscription) or refused for the account: the
+	// bot waits for its own model, never moved to another, until the exhaustion that holds longer resets.
+	const spent = allowanceExhaustion(allowance, model);
+	const unusable = deps.modelUnusableCause(model) ?? (spent ? "model_quota_exhausted" : undefined);
 	if (unusable) {
-		const clearsAt = unusable === "model_quota_exhausted" ? exhaustionReset(deps, model) : undefined;
+		const clearsAt =
+			unusable === "model_quota_exhausted"
+				? heldModelExhaustion(recordedExhaustion(deps, model), spent)?.until
+				: undefined;
 		return {
 			cause: unusable,
 			reason: words.botModelUnusable(`${model.provider}/${model.id}`, unusable),
@@ -84,6 +96,8 @@ function botModelRefusal(
 
 /** What the lane controller hands over of its own: the bot store, its warnings and its worker profile resolution. */
 interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn"> {
+	/** The lane controller's reading of the usage a model's subscription account reports. */
+	allowance(): SubscriptionAllowancePort;
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
 }
 
@@ -93,7 +107,7 @@ export function attachBotSessions(deps: BackgroundLaneControllerDeps, own: BotSe
 }
 
 function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionRootPorts {
-	const { workerController, ...ownPorts } = own;
+	const { workerController, allowance, ...ownPorts } = own;
 	return {
 		...ownPorts,
 		// A bot made from a profile is compiled by the resolution a worker of it takes, from the same start request.
@@ -116,7 +130,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		timers: () => deps.getTimers(),
 		hostSessionId: () => deps.getSessionId(),
 		hostKeepsFile: () => deps.getSessionManager().isPersisted(),
-		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
+		modelRefusal: (record, model) => botModelRefusal(deps, allowance(), record, model),
 		// A closed bot's saved usage wait is read as its own session's wake reads it, against the exhaustions every process shares.
 		usageRules: () => ({
 			modelRegistry: deps.getModelRegistry(),

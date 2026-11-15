@@ -73,7 +73,6 @@ import { BackgroundLaneController, type SessionChannelsView } from "./background
 import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
-import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
 import { compactionEntryDetails } from "./compaction/compaction-entry-details.ts";
 import { recordedCompactionUsd } from "./compaction/compaction-spend.ts";
@@ -271,6 +270,8 @@ import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-a
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import {
+	hasAllowance,
+	heldExhaustion,
 	openSubscriptionAllowance,
 	type SubscriptionAllowancePort,
 } from "./provider-admission/subscription-allowance.ts";
@@ -925,7 +926,8 @@ export class AgentSession {
 			providerAdmissionLedger: providerAdmission.ledger,
 			providerLimitStore: providerAdmission.limits,
 			// Read lazily per request: the foreground recovery that owns the exhaustions is built after this chain.
-			modelExhaustion: (modelRef) => this._foregroundRecovery.modelExhaustion(modelRef),
+			modelExhaustion: (ref) =>
+				heldExhaustion(ref, this._foregroundRecovery, this._subscriptionAllowance, this._modelRegistry),
 			agentDir,
 			authStorage: config.modelRegistry.authStorage,
 			redactSensitiveText: (text, additionalValues) =>
@@ -1121,9 +1123,7 @@ export class AgentSession {
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),
 			getSpawnedUsageCost: () => this.getSpawnedUsage().cost,
 			// A subscription costs no marginal dollars while the account has allowance (or reports none); past it, extra usage is money.
-			isUnmeteredSubscription: (model) =>
-				this._modelRegistry.isUsingSubscription(model) &&
-				this._subscriptionAllowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind !== "exhausted",
+			isUnmeteredSubscription: (model) => hasAllowance(this._modelRegistry, this._subscriptionAllowance, model),
 		});
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,

@@ -7,9 +7,11 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "../channels/channel-policy.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { resolveProviderAccountKey } from "./account-key.ts";
 import { AccountUsageMonitor } from "./account-usage-monitor.ts";
+import type { ModelExhaustion } from "./gate.ts";
 import {
 	type AccountUsageSnapshot,
 	type AuthenticatedAccount,
@@ -67,6 +69,65 @@ function exhausted(usedPercent: number, reason: string, windows: readonly UsageW
 /** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
 export interface SubscriptionAllowancePort {
 	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance;
+}
+
+/**
+ * Whether a model's turns cost no marginal dollars: a subscription login whose account has allowance at the owner-channel
+ * quota line, or reports none. Past that line, extra usage is money.
+ */
+export function hasAllowance(
+	registry: { isUsingSubscription(model: Model<Api>): boolean },
+	allowance: SubscriptionAllowancePort,
+	model: Model<Api>,
+): boolean {
+	return (
+		registry.isUsingSubscription(model) &&
+		allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind !== "exhausted"
+	);
+}
+
+/**
+ * How long a subscription's used-up usage holds `model`: until the last of its full windows resets, read at the quota
+ * line the fleet's allowance term holds new dispatches at. Undefined while the account has room, when the reading is
+ * missing or stale, when the model is not a subscription login, and when the account reports no reset for a full
+ * window, because no wait could then end.
+ */
+export function allowanceExhaustion(
+	allowance: SubscriptionAllowancePort,
+	model: Model<Api> | undefined,
+): { readonly until: number } | undefined {
+	if (!model) return undefined;
+	const reading = allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model);
+	return reading.kind === "exhausted" && reading.retryAt !== undefined ? { until: reading.retryAt } : undefined;
+}
+
+/**
+ * The quota exhaustion a model's lanes wait out: the one recorded from a provider's refusal or the used-up usage of its
+ * subscription (`allowanceExhaustion`), whichever holds longer. A recorded one with no reset holds open-ended. The
+ * usage is never recorded: it is read again at each ask, so it lifts with the first reading that has room, and the
+ * model stays routable (a used-up window is waited out, never routed around).
+ */
+export function heldModelExhaustion(
+	recorded: ModelExhaustion | undefined,
+	spent: { readonly until: number } | undefined,
+): ModelExhaustion | undefined {
+	if (!recorded || !spent) return recorded ?? spent;
+	return recorded.until === undefined || recorded.until >= spent.until ? recorded : spent;
+}
+
+/**
+ * The quota exhaustion a request on `ref` waits out: the host's recorded one (`recorded`, from a provider's refusal) or
+ * the used-up usage windows of the model's subscription, whichever holds longer (`heldModelExhaustion`).
+ */
+export function heldExhaustion(
+	ref: string,
+	recorded: { modelExhaustion(ref: string): ModelExhaustion | undefined },
+	allowance: SubscriptionAllowancePort,
+	registry: { find(provider: string, modelId: string): Model<Api> | undefined },
+): ModelExhaustion | undefined {
+	const slash = ref.indexOf("/");
+	const model = slash > 0 ? registry.find(ref.slice(0, slash), ref.slice(slash + 1)) : undefined;
+	return heldModelExhaustion(recorded.modelExhaustion(ref), allowanceExhaustion(allowance, model));
 }
 
 export interface SubscriptionAllowanceReaderDeps {
