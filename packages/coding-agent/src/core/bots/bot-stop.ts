@@ -90,7 +90,8 @@ function holdForOwnerStop(session: Omit<HostedBotStopSession, "fleet">, stop: Ow
  * Takes the stops waiting for the bot this process hosts in session `sessionId`: the newest is applied through `stopHere`
  * (the host stops the foreground turn and calls {@link applyOwnerStopToSession}), the jobs the home's other sessions placed
  * are ended (no client of theirs runs: the host holds the bot), the messages it covers are refused, and every stop read is
- * deleted ({@link takeStops}). The stop applied, undefined when none waits.
+ * deleted ({@link takeStops}). A stop held in memory (`memory`) is taken with them. The stop applied, undefined when none
+ * waits.
  */
 export function takeHostedBotStops(
 	agentDir: string,
@@ -98,6 +99,7 @@ export function takeHostedBotStops(
 	sessionId: string,
 	stopHere: (stop: OwnerStop) => WorkerStopOutcome,
 	ports: BotStopPorts,
+	memory?: OwnerStop,
 ): OwnerStop | undefined {
 	return takeStops(
 		agentDir,
@@ -112,6 +114,7 @@ export function takeHostedBotStops(
 				ports.warn,
 			),
 		ports,
+		memory,
 	);
 }
 
@@ -329,7 +332,8 @@ export interface LoadedBotStop {
  * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it runs
  * stopped for the owner by `stopTurn` (the host's, which the words it gives next wait on until the turn ended), then
  * {@link applyOwnerStopToSession}. A failure is handed back with what the stop had already ended, never thrown, so the
- * lanes its cancel ended before the failure are counted with what a fallback ends after it.
+ * lanes its cancel ended before the failure are counted with what a fallback ends after it. A stop held in memory
+ * (`memory`) is taken with the ones waiting.
  */
 export function stopLoadedBot(
 	agentDir: string,
@@ -337,6 +341,7 @@ export function stopLoadedBot(
 	loaded: LoadedBotSession,
 	stopTurn: () => void,
 	ports: BotStopPorts,
+	memory?: OwnerStop,
 ): LoadedBotStop {
 	let outcome: WorkerStopOutcome = NOTHING_LEFT;
 	try {
@@ -351,6 +356,7 @@ export function stopLoadedBot(
 				return outcome;
 			},
 			ports,
+			memory,
 		);
 		return stop ? { stop, outcome } : { outcome };
 	} catch (cause) {
@@ -359,6 +365,60 @@ export function stopLoadedBot(
 }
 
 const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [], stopped: 0 };
+
+/**
+ * The owner's stops this process could not record (`requestBotStop` failed) for bots it does not host, the newest per bot,
+ * held until a take of the bot's stops applies one: the unhosted application (`BotOwedWork.applyOwnerStop`), or this
+ * process's open of the bot's session, under its lock before the session is built ({@link underLock}) and once it is
+ * built ({@link loaded}), so a stop made while the open runs is taken by it. A take that applied it, or a newer stop that
+ * covers it, ends the hold; a failed one keeps it for the next. It is dropped once another process holds the bot
+ * ({@link drop}): that process never learns of it, and the work it runs came after it.
+ */
+export class UnrecordedBotStops {
+	private readonly held = new Map<string, OwnerStop>();
+	private readonly agentDir: () => string;
+
+	constructor(agentDir: () => string) {
+		this.agentDir = agentDir;
+	}
+
+	/** Holds `stop` for the bot unless a newer one is held. */
+	hold(agentId: string, stop: OwnerStop): void {
+		const held = this.held.get(agentId);
+		if (!held || stop.at >= held.at) this.held.set(agentId, stop);
+	}
+
+	/** The stop held for the bot. */
+	of(agentId: string): OwnerStop | undefined {
+		return this.held.get(agentId);
+	}
+
+	/** A take that read `stop` (the one held when it began) applied it or a newer one: it is held no longer. */
+	taken(agentId: string, stop: OwnerStop | undefined): void {
+		if (stop !== undefined && this.held.get(agentId) === stop) this.held.delete(agentId);
+	}
+
+	/** Another process holds the bot: the stop held for it is dropped (see the class). */
+	drop(agentId: string): void {
+		this.held.delete(agentId);
+	}
+
+	/** {@link applyBotStopUnderLock}, the stop held for the bot taken with the ones waiting. */
+	underLock(agentId: string, session: ClosedBotSession, ports: BotStopPorts): OwnerStop | undefined {
+		const memory = this.held.get(agentId);
+		const applied = applyBotStopUnderLock(this.agentDir(), agentId, session, ports, memory);
+		this.taken(agentId, memory);
+		return applied;
+	}
+
+	/** {@link stopLoadedBot} of a session just built, no turn running yet; the held stop is kept when the take failed. */
+	loaded(agentId: string, loaded: LoadedBotSession, ports: BotStopPorts): LoadedBotStop {
+		const memory = this.held.get(agentId);
+		const taken = stopLoadedBot(this.agentDir(), agentId, loaded, () => {}, ports, memory);
+		if (taken.failure === undefined) this.taken(agentId, memory);
+		return taken;
+	}
+}
 
 /**
  * The stop applied to a closed bot's own work, its host lock held: its saved session's transcript read first, then its

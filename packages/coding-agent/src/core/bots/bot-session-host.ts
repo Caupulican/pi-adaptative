@@ -94,7 +94,7 @@ import { type BotSessionDefinition, botMayRunAsSession, profileBotSession } from
 import { BotSessionSpend } from "./bot-session-spend.ts";
 import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
-import { applyBotStopUnderLock, type BotStopPorts, endUnrecordedStopWork, stopLoadedBot } from "./bot-stop.ts";
+import { type BotStopPorts, endUnrecordedStopWork, stopLoadedBot } from "./bot-stop.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -702,7 +702,7 @@ export class BotSessionHost {
 		let storeWithin: string | undefined;
 		try {
 			// The owner's stop waiting for it is applied to its closed session under the lock first: nothing it stopped resumes.
-			applyBotStopUnderLock(agentDir, agentId, { saved: this.view.savedSessionOf(agentId) }, this.stopPorts());
+			this.owed.unrecorded.underLock(agentId, { saved: this.view.savedSessionOf(agentId) }, this.stopPorts());
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
@@ -825,8 +825,8 @@ export class BotSessionHost {
 				settle: () => this.settle(entry),
 			});
 			session.startBackgroundInputs();
-			// A stop written since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
-			const loadStop = stopLoadedBot(agentDir, agentId, { session, sessionManager }, () => {}, this.stopPorts());
+			// A stop made since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
+			const loadStop = this.owed.unrecorded.loaded(agentId, { session, sessionManager }, this.stopPorts());
 			if (loadStop.failure) throw loadStop.failure.cause;
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
@@ -1060,7 +1060,7 @@ export class BotSessionHost {
 			return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
 		}
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it. One not
-		// written is applied here held in memory, the messages it covers refused, while no process hosts the bot.
+		// written is held in memory until a take here applies it (this one, a retry, or this process's open of the bot).
 		if (!written) this.owed.applyOwnerStop(agentId, false, stop);
 		this.owed.openIfOwed(agentId);
 		this.changed(agentId);
