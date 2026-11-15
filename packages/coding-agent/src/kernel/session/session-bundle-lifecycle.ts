@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, unlinkSync } from "node:fs";
-import { harnessLog } from "../harness-log.ts";
-import { isHostIdentityRead, warmHostIdentity } from "../reliability/host-identity.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -13,7 +11,6 @@ import {
 	writeFileAtomicSync,
 } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
-import { type RepeatingAlarm, repeatEvery, SYSTEM_TIMER_PORT } from "../timer-port.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import {
 	type OrchestrationHome,
@@ -22,13 +19,6 @@ import {
 	resolvedOrchestrationHome,
 	sameOrchestrationHome,
 } from "./session-bundle-paths.ts";
-import {
-	forgetLeaseLiveness,
-	holdLeaseLiveness,
-	LEASE_RENEW_MS,
-	leaseLivenessExpired,
-	releaseLeaseLiveness,
-} from "./session-lease-liveness.ts";
 
 /** Every operation here addresses a bundle inside an orchestration home; callers name the home they mean. */
 export {
@@ -276,25 +266,11 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 	writeFileAtomicSync(file, text);
 }
 
-/**
- * Prunes only holders PROVEN gone, with their liveness proofs; an `alive`, `foreign` or `unknown` holder keeps
- * serving the session.
- */
-function liveHolders(home: OrchestrationHome, file: string, parentSessionId: string): BundleHolder[] {
-	return pruneDeadHolders(home, file, parentSessionId, readHolders(file, parentSessionId));
-}
-
-/** {@link liveHolders} of `holders`, the registry `file` as read under the caller's lock. */
-function pruneDeadHolders(
-	home: OrchestrationHome,
-	file: string,
-	parentSessionId: string,
-	holders: BundleHolder[],
-): BundleHolder[] {
+/** Prunes only holders PROVEN gone; an `alive`, `foreign` or `unknown` holder keeps serving the session. */
+function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
+	const holders = readHolders(file, parentSessionId);
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
-	if (live.length === holders.length) return live;
-	writeHolders(file, parentSessionId, live);
-	for (const holder of holders) if (!live.includes(holder)) forgetLeaseLiveness(home, holder.processInstanceId);
+	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
 	return live;
 }
 
@@ -306,39 +282,20 @@ const holderRef = (holder: {
 	role: holder.role,
 });
 
-/** A recorded holder as the admission of a bot's host judges it. */
-type JudgedHolder = Pick<BundleHolder, "owner" | "processInstanceId" | "role">;
-
 /**
- * Whether `holder` of a session in `home` keeps a bot's host out of it: a live holder, and one this process cannot prove
- * dead (on another host, on a host this process cannot place, or one whose pid it cannot probe) until its liveness proof
- * is stale (`session-lease-liveness.ts`): a holder that renews it serves the session, one that stopped is gone, and none
- * latches the bot's session for good. A holder proven dead does not.
+ * The holders among `holders` (none proven dead) a channel or bot host is refused for, as its admission counts them: a
+ * session or another channel or bot host, whether alive, on another machine or unjudgeable; an away host never is.
  */
-function keepsBotHostOut(home: OrchestrationHome, holder: JudgedHolder): boolean {
-	const standing = judgeOwner(holder.owner);
-	if (standing === "alive") return true;
-	return standing !== "dead" && !leaseLivenessExpired(home, holder.processInstanceId);
-}
-
-/**
- * The holders among `holders` (of a session in `home`) a bot's host is refused for, as its admission counts them: a
- * session or another channel or bot host that keeps it out ({@link keepsBotHostOut}); an away host never does.
- */
-export function botHostBlockers<T extends JudgedHolder>(home: OrchestrationHome, holders: readonly T[]): T[] {
-	return holders.filter(
-		(holder) => (holder.role === "session" || isExclusiveHostRole(holder.role)) && keepsBotHostOut(home, holder),
-	);
+export function botHostBlockers<T extends { readonly role: SessionLeaseRole }>(holders: readonly T[]): T[] {
+	return holders.filter((holder) => holder.role === "session" || isExclusiveHostRole(holder.role));
 }
 
 /**
  * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel or bot
- * host is refused while a session or another such host holds the session (for a bot's host, one that keeps it out:
- * {@link botHostBlockers}), a session asking `refuseHosted` while such a host does; every other admission is bounded by
- * capacity alone.
+ * host is refused while a session or another such host holds the session ({@link botHostBlockers}), a session asking
+ * `refuseHosted` while such a host does; every other admission is bounded by capacity alone.
  */
 function admitHolder(
-	home: OrchestrationHome,
 	parentSessionId: string,
 	holders: readonly BundleHolder[],
 	holder: BundleHolder,
@@ -346,10 +303,7 @@ function admitHolder(
 ): BundleHolder[] {
 	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
 	if (isExclusiveHostRole(holder.role)) {
-		const open =
-			holder.role === "bot-host"
-				? botHostBlockers(home, holders)
-				: holders.filter((entry) => entry.role === "session" || isExclusiveHostRole(entry.role));
+		const open = botHostBlockers(holders);
 		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef), holder.role);
 	}
 	const host = refuseHosted && holder.role === "session" && holders.find((entry) => isExclusiveHostRole(entry.role));
@@ -434,7 +388,6 @@ function releaseBundleLease(state: BundleLeaseState): void {
 				holders.filter((entry) => entry.token !== state.holder.token),
 			);
 		state.status = "released";
-		releaseLeaseLiveness(state.home, PROCESS_INSTANCE_ID);
 	});
 }
 
@@ -445,124 +398,35 @@ function releaseBundleLease(state: BundleLeaseState): void {
 export type SessionHomeNow = () => OrchestrationHome;
 
 /**
- * Whether judging `holders` waits for this process's machine id: one of them, not this process, records a machine id
- * and this process has not read its own yet (macOS and Windows read it asynchronously, `warmHostIdentity`), so
- * `judgeOwner` can only call it `unknown`. A holder recorded by hostname alone is judged the same before that read as
- * after it, and a lease no other holder shares judges none: neither waits.
+ * Takes a lifetime lease on a persisted session, in the home `homeNow` still names under the lock (another refuses it:
+ * {@link SessionHomeChangedError}).
  */
-export function holdersAwaitHostIdentity(
-	holders: readonly { readonly owner: ProcessOwner; readonly processInstanceId: string }[],
-): boolean {
-	return (
-		!isHostIdentityRead() &&
-		holders.some((holder) => holder.processInstanceId !== PROCESS_INSTANCE_ID && holder.owner.machineId !== undefined)
-	);
-}
-
-/**
- * The holds this process recorded before it read its own machine id: each record names this process by hostname alone,
- * which another machine with the same hostname (Windows and its WSL, say) would place on itself and could prove dead by
- * pid. Once the read finishes each still held is recorded again with the machine id ({@link placeOwnHolds}).
- */
-const unplacedHolds = new Set<BundleLeaseState>();
-
-/** Retries {@link placeOwnHolds} while a rewrite failed: the record keeps naming this process by hostname until it is done. */
-let placing: RepeatingAlarm | undefined;
-
-/**
- * Records every hold in {@link unplacedHolds} again with this process's machine id, now that it is read. A hold leaves
- * the set once rewritten or no longer held; one whose rewrite failed is tried again every `LEASE_RENEW_MS`.
- */
-function placeOwnHolds(): void {
-	const owner = ownProcessOwner();
-	for (const state of [...unplacedHolds]) {
-		// A host that exposes no machine id is named by hostname in every record it writes; nothing changes.
-		if (owner.machineId === undefined || state.status !== "held") {
-			unplacedHolds.delete(state);
-			continue;
-		}
-		const tombstone = orchestrationSessionDeletionFile(state.home, state.parentSessionId);
-		const file = `${tombstone}.leases.json`;
-		try {
-			withFileLockSync(tombstone, () => {
-				if (state.status !== "held") return;
-				const holders = readHolders(file, state.parentSessionId);
-				const index = holders.findIndex((entry) => entry.token === state.holder.token);
-				const recorded = holders[index];
-				if (!recorded) return;
-				holders[index] = { ...recorded, owner };
-				writeHolders(file, state.parentSessionId, holders);
-			});
-			unplacedHolds.delete(state);
-		} catch (error) {
-			harnessLog.warn("session", "a session lease could not record this process's machine id yet", () => ({
-				parentSessionId: state.parentSessionId,
-				error: error instanceof Error ? error.message : String(error),
-			}));
-		}
-	}
-	if (unplacedHolds.size === 0) {
-		placing?.stop();
-		placing = undefined;
-	} else placing ??= repeatEvery(SYSTEM_TIMER_PORT, LEASE_RENEW_MS, placeOwnHolds);
-}
-
-/**
- * Takes a lifetime lease on a persisted session. A lease that must judge another holder by its machine
- * ({@link holdersAwaitHostIdentity}) first waits for this process's machine id (`warmHostIdentity`, bounded); one that
- * need not is recorded at once, and a record written before that read is recorded again with the machine id once it is
- * read ({@link placeOwnHolds}).
- */
-export async function acquireSessionBundleLease(
+export function acquireSessionBundleLease(
 	home: OrchestrationHome,
 	parentSessionId: string,
 	/**
 	 * `refuseHosted`: a `session` hold is refused while a channel or bot host holds the session (the AgentSession open).
-	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease
-	 * ({@link SessionHomeChangedError}).
+	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease.
 	 */
 	options: { role?: SessionLeaseRole; refuseHosted?: boolean; homeNow: SessionHomeNow },
-): Promise<SessionBundleLease> {
+): SessionBundleLease {
 	const resolvedHome = resolvedOrchestrationHome(home);
 	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
 	const file = `${tombstone}.leases.json`;
-	// One admission under the lock; undefined, having written nothing, when a holder waits for this process's machine id.
-	const admit = (): BundleHolder | undefined =>
-		withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
-			const current = options.homeNow();
-			if (!sameOrchestrationHome(current, resolvedHome))
-				throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
-			const recorded = readHolders(file, parentSessionId);
-			if (holdersAwaitHostIdentity(recorded)) return undefined;
-			const holders = pruneDeadHolders(resolvedHome, file, parentSessionId, recorded);
-			const holder: BundleHolder = {
-				token: randomUUID(),
-				owner: ownProcessOwner(),
-				processInstanceId: PROCESS_INSTANCE_ID,
-				role: options.role ?? "session",
-			};
-			const admitted = admitHolder(resolvedHome, parentSessionId, holders, holder, options.refuseHosted === true);
-			// The holder's liveness proof is there before the registry names it.
-			holdLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
-			try {
-				writeHolders(file, parentSessionId, admitted);
-			} catch (error) {
-				releaseLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
-				throw error;
-			}
-			return holder;
-		});
-	let holder = admit();
-	// Once the read finished no holder waits for it, so the second admission decides.
-	while (holder === undefined) {
-		await warmHostIdentity();
-		holder = admit();
-	}
+	const holder: BundleHolder = {
+		token: randomUUID(),
+		owner: ownProcessOwner(),
+		processInstanceId: PROCESS_INSTANCE_ID,
+		role: options.role ?? "session",
+	};
+	withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
+		const current = options.homeNow();
+		if (!sameOrchestrationHome(current, resolvedHome))
+			throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
+		const holders = liveHolders(file, parentSessionId);
+		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
+	});
 	const state: BundleLeaseState = { home: resolvedHome, parentSessionId, holder, claimed: false, status: "held" };
-	if (holder.owner.machineId === undefined && !isHostIdentityRead()) {
-		unplacedHolds.add(state);
-		void warmHostIdentity().then(placeOwnHolds);
-	}
 	const lease: SessionBundleLease = Object.freeze({
 		release() {
 			if (state.claimed) throw new Error("The session owns this bundle lease; close the session to release it.");
@@ -643,7 +507,7 @@ export async function withSessionBundleLeases<T>(
 			held.set(key, first ? { ...first, refuseHosted: first.refuseHosted || session.refuseHosted } : session);
 		}
 		for (const { home, sessionId, homeNow, refuseHosted } of held.values())
-			leases.push(await acquireSessionBundleLease(home, sessionId, { refuseHosted, homeNow }));
+			leases.push(acquireSessionBundleLease(home, sessionId, { refuseHosted, homeNow }));
 		result = await operation();
 	} catch (error) {
 		operationFailure = { error };
@@ -872,7 +736,7 @@ export function reserveSessionBundleDeletion(
 		const fresh = marker === undefined;
 		if (marker?.policy === "permanent" && policy === "retention") return undefined;
 		if (marker?.operation && !canRecoverOperation(marker.operation)) return undefined;
-		if (liveHolders(home, `${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
+		if (liveHolders(`${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
 		if (!canDelete(marker?.policy)) return undefined;
 		const token = randomUUID();
 		const next: DeletionMarker = {

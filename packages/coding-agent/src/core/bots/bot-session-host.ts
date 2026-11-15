@@ -693,7 +693,7 @@ export class BotSessionHost {
 		let storeWithin: string | undefined;
 		try {
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
-			const { sessionManager, continued } = await openHostedBotSession(agentDir, home, cwd, {
+			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
 				notMoved: (kept) => {
 					if (this.toldNotMoved.has(agentId)) return;

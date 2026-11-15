@@ -10,9 +10,8 @@
  * - macOS: `IOPlatformUUID` from `ioreg` (spawned without a shell, bounded, once per process).
  * - Windows: `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` via `reg.exe` (same bounded pattern).
  * Linux reads a file synchronously. macOS and Windows need a process spawn, which must never block startup: they are
- * read asynchronously by `warmHostIdentity()` (started by the process-matrix runtime, and awaited by a session lifetime
- * lease only when it must judge a holder recorded with a machine id, `holdersAwaitHostIdentity`), and
- * `readHostIdentity()` reports the machine id only once that read has finished (`isHostIdentityRead()`). A record written before then carries only the hostname.
+ * read asynchronously by `warmHostIdentity()` (started once by the process-matrix runtime), and `readHostIdentity()`
+ * reports the machine id only once that read has finished. A record written before then carries only the hostname.
  * When none is readable the process records no machine id, and only the hostname identifies it.
  */
 import { execFile } from "node:child_process";
@@ -52,11 +51,6 @@ let warming: Promise<void> | undefined;
 export function readHostIdentity(): HostIdentity {
 	if (process.platform === "linux") cachedMachineId ??= { value: digest(readLinuxMachineId()) };
 	return { machineId: cachedMachineId?.value, hostname: osHostname() };
-}
-
-/** Whether this process's machine id read has finished (always on Linux, which reads it synchronously). */
-export function isHostIdentityRead(): boolean {
-	return process.platform === "linux" || cachedMachineId !== undefined;
 }
 
 /** Starts (once) the bounded, shell-less machine-id read macOS and Windows need. Never rejects; a no-op elsewhere. */
