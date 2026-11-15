@@ -43,6 +43,7 @@ import { createWorkerEdgePolicy } from "../delegation/worker-edge-policy.ts";
 import { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "../delegation/worker-notification-coordinator.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
+import { awayFleetQueueKey } from "../fleet/fleet-queue-store.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import { resolveModelScopeWithDiagnostics } from "../model-resolver.ts";
 import {
@@ -408,7 +409,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getCapabilityEnvelope: () => undefined,
 				getGoalStateSnapshot: () => undefined,
 				// The parent may open while this host still runs: each keeps its own fleet queue metadata.
-				fleetQueueKey: `${parentSessionId}.away`,
+				fleetQueueKey: awayFleetQueueKey(parentSessionId),
 			},
 			notifications,
 			lifecycle,

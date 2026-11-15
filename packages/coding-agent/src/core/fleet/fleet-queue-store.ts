@@ -37,6 +37,16 @@ export function fleetQueueMetadataPath(home: OrchestrationHome, sessionId: strin
 	return join(home.stateDir, "fleet", "queue", `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 
+/** The fleet queue key of the worker controller a session's parent runs away (`away-parent-context.ts`), beside its own. */
+export function awayFleetQueueKey(sessionId: string): string {
+	return `${sessionId}.away`;
+}
+
+/** Every fleet queue metadata file of session `sessionId` in `home`: its own and its away controller's. */
+export function sessionFleetQueueMetadataPaths(home: OrchestrationHome, sessionId: string): readonly string[] {
+	return [fleetQueueMetadataPath(home, sessionId), fleetQueueMetadataPath(home, awayFleetQueueKey(sessionId))];
+}
+
 export class FleetQueueStore {
 	private readonly path: string;
 	private pending: (() => FleetQueueMetadata) | undefined;

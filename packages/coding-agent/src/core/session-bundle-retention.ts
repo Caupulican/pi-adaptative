@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
@@ -20,6 +20,7 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { reserveWorkerBundleDeletion } from "./delegation/worker-bundle-deletion.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
+import { sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
@@ -618,6 +619,9 @@ async function sweepHomeBundles(run: SweepRun, { home, names, labelOf, resumeOnl
 					report(`session bundle ${label} was only partly removed; it stays reserved for the next startup`);
 					continue;
 				}
+				// The session's fleet queue metadata orders and stops attempts its bundle's ledger held: with the ledger gone
+				// it names nothing, so it goes under the same reservation.
+				for (const path of sessionFleetQueueMetadataPaths(home, parentSessionId)) rmSync(path, { force: true });
 				outcome = "removed";
 			} finally {
 				settleSessionBundleDeletion(home, reservation, outcome);
