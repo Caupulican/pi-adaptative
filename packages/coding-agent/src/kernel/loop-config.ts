@@ -233,14 +233,17 @@ export interface BackgroundToolCallCompletion {
 }
 
 /** Context offered to a host when a prepared tool call crosses its foreground latency budget. */
-export type BackgroundToolCallTrigger = "requested" | "clock" | "manual";
+export type BackgroundToolCallTrigger = "requested" | "tool" | "clock" | "manual";
 
 export interface BackgroundToolCallContext extends BeforeToolCallContext {
 	/**
-	 * What moved the call: the model asked for a background task up front (`requested`), the
-	 * operator's latency clock elapsed (`clock`), or the host asked by hand (`manual`).
+	 * What moved the call: the model asked for a background task up front (`requested`), the tool
+	 * moved a call the model did not ask to background (`tool`, with `reason`), the operator's
+	 * latency clock elapsed (`clock`), or the host asked by hand (`manual`).
 	 */
 	trigger: BackgroundToolCallTrigger;
+	/** Why the tool moved the call, in words for the model; set only for the `tool` trigger. */
+	reason?: string;
 	/** Foreground time spent before the handoff (about zero for a requested one). */
 	elapsedMs: number;
 	/** Event-driven terminal signal for the real, policy-finalized execution. */
@@ -972,11 +975,11 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	subscribeToolCallHandoffRequest?: (toolCallId: string, request: () => void) => () => void;
 
 	/**
-	 * True when the model asked for this call to run as a background task from the start (a tool
-	 * argument such as `background: true`). The call crosses `handoffToolCall` at once instead of
-	 * waiting for a latency budget; the host decides whether a handoff is possible at all.
+	 * Whether `handoffToolCall` can take a call now. Unset or false: no call is handed off, and a call
+	 * with background forms (`AgentTool.backgroundArguments`) runs in its foreground form. True: such a
+	 * call starts in its background form and crosses `handoffToolCall` at once.
 	 */
-	isBackgroundRequested?: (toolName: string, args: unknown) => boolean;
+	canHandOffToolCalls?: () => boolean;
 }
 
 /** Context snapshot passed into the low-level agent loop. */

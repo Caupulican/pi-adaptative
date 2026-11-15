@@ -114,7 +114,7 @@ Admitted dynamic scripts are integrated into the toolkit registry for discovery 
 
 - **Tool Surface Availability**: `task_automation` is exposed on the default root tool surface for interactive and headless sessions.
 - **Worker Exclusion**: Workers and delegated child sessions are forbidden from invoking `task_automation` via `WORKER_FORBIDDEN_TOOLS`.
-- **Native Background Handoff**: `task_automation` exports a `backgroundRequested` hook for `run` and `validate` actions when `background: true` is specified. It delegates to the existing native `tool_task` subsystem for process management, bounded completion handoff, and parent notification.
+- **Native Background Handoff**: `task_automation` gives `run` and `validate` calls that set `background: true` their background forms (`backgroundArguments`): where the session can start a background task the call starts as one, and elsewhere it runs in the foreground without `background`. It delegates to the existing native `tool_task` subsystem for process management, bounded completion handoff, and parent notification.
 
 ---
 

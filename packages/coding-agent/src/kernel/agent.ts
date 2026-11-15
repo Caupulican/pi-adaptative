@@ -163,7 +163,7 @@ export interface AgentOptions {
 	backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
 	handoffToolCall?: AgentLoopConfig["handoffToolCall"];
 	subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
-	isBackgroundRequested?: AgentLoopConfig["isBackgroundRequested"];
+	canHandOffToolCalls?: AgentLoopConfig["canHandOffToolCalls"];
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	toolArgumentTeachEnabled?: boolean;
 	toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
@@ -319,7 +319,7 @@ export class Agent {
 	public backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
 	public handoffToolCall?: AgentLoopConfig["handoffToolCall"];
 	public subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
-	public isBackgroundRequested?: AgentLoopConfig["isBackgroundRequested"];
+	public canHandOffToolCalls?: AgentLoopConfig["canHandOffToolCalls"];
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	public toolArgumentTeachEnabled?: boolean;
 	public toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
@@ -400,7 +400,7 @@ export class Agent {
 		this.backgroundToolCallAfterMs = options.backgroundToolCallAfterMs;
 		this.handoffToolCall = options.handoffToolCall;
 		this.subscribeToolCallHandoffRequest = options.subscribeToolCallHandoffRequest;
-		this.isBackgroundRequested = options.isBackgroundRequested;
+		this.canHandOffToolCalls = options.canHandOffToolCalls;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
 		this.toolArgumentTeachEnabled = options.toolArgumentTeachEnabled;
 		this.toolFailureProtocolProse = options.toolFailureProtocolProse;
@@ -782,7 +782,7 @@ export class Agent {
 			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,
 			handoffToolCall: this.handoffToolCall,
 			subscribeToolCallHandoffRequest: this.subscribeToolCallHandoffRequest,
-			isBackgroundRequested: this.isBackgroundRequested,
+			canHandOffToolCalls: this.canHandOffToolCalls,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			shouldStopAfterTurn: this.shouldStopAfterTurn
 				? async () => (await this.shouldStopAfterTurn?.(this.signal)) ?? false

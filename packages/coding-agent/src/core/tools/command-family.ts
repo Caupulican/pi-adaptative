@@ -2,13 +2,22 @@
  * Command-family classification shared by the output-reduction pipeline (which reducer applies to a
  * tool result) and the reduction census (which families carry the bytes). One parser, one table:
  * the census must classify exactly the way the runtime does or its "missed savings" would lie.
+ * Beside it, the two readings of what a command does that the bash tool acts on: an ad-hoc interpreter
+ * probe (not a workspace mutation) and a wait on state outside the session (run in the background).
  *
  * A command is reduced to its primary stage: leading `cd <path> &&` and environment assignments are
  * folded away, the executable name is normalized (`python3` → `python`, `.exe` stripped), and the
  * stages after the primary one are kept as names so a reducer can decide whether a trailing
  * `| head -N` still leaves it applicable.
  */
-import { isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
+import {
+	isChangeDirectoryInvocation,
+	parseShellCommandSequence,
+	parseShellCompound,
+	type ShellCompoundNode,
+	stripShellInvocationPrefixes,
+	tokenizeShellCommand,
+} from "./shell-command-parser.ts";
 import { isProjectableTestCommand } from "./shell-test-command.ts";
 
 export type CommandFamily =
@@ -299,4 +308,170 @@ function classifyCommandFamilyAtDepth(command: string, depth: number): CommandFa
 export function commandFamilyLabel(classification: CommandFamilyClassification): string {
 	if (!classification.tool) return "(unparsed)";
 	return classification.subcommand ? `${classification.tool} ${classification.subcommand}` : classification.tool;
+}
+
+/** Ad-hoc Python/Node eval or heredoc probes are not workspace mutations. */
+export function isAdHocInterpreterProbe(command: string): boolean {
+	const tokens = tokenizeShellCommand(command);
+	if (!tokens) return false;
+	let args: string[] = [];
+	let hasHeredoc = false;
+	let skipHeredocDelimiter = false;
+	const segmentIsProbe = (): boolean => {
+		let runtimeIndex = 0;
+		while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(args[runtimeIndex] ?? "")) runtimeIndex++;
+		const commandName = args[runtimeIndex]?.split(/[\\/]/).at(-1)?.toLowerCase();
+		if (commandName === "env") {
+			runtimeIndex++;
+			while (runtimeIndex < args.length) {
+				const arg = args[runtimeIndex];
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg) || /^(?:-i|--ignore-environment|--null)$/.test(arg)) {
+					runtimeIndex++;
+					continue;
+				}
+				if (/^(?:-u|--unset|-C|--chdir)$/.test(arg)) {
+					runtimeIndex += 2;
+					continue;
+				}
+				if (/^--(?:unset|chdir)=/.test(arg)) {
+					runtimeIndex++;
+					continue;
+				}
+				if (arg === "--") runtimeIndex++;
+				break;
+			}
+		}
+		const executable = args[runtimeIndex]
+			?.split(/[\\/]/)
+			.at(-1)
+			?.toLowerCase()
+			.replace(/\.exe$/, "");
+		const runtime =
+			executable === "node"
+				? "node"
+				: /^(?:python\d*(?:\.\d+)?|pypy\d*)$/.test(executable ?? "")
+					? "python"
+					: undefined;
+		if (!runtime) return false;
+		for (let index = runtimeIndex + 1; index < args.length; index++) {
+			const arg = args[index];
+			if (runtime === "node" && /^(?:-c|-e|-p|--eval|--print)(?:=.*)?$/.test(arg)) return true;
+			if (runtime === "python" && arg === "-c") return true;
+			if (arg === "-") return hasHeredoc;
+			if (arg === "--") return hasHeredoc && (args[index + 1] === undefined || args[index + 1] === "-");
+			if (!arg.startsWith("-")) return false;
+		}
+		return hasHeredoc;
+	};
+	for (const token of tokens) {
+		if (token.kind === "arg") {
+			if (skipHeredocDelimiter) skipHeredocDelimiter = false;
+			else args.push(token.value);
+			continue;
+		}
+		if (token.kind === "redirect") {
+			if (token.value.includes("<<")) {
+				hasHeredoc = true;
+				skipHeredocDelimiter = true;
+			}
+			continue;
+		}
+		if (segmentIsProbe()) return true;
+		args = [];
+		hasHeredoc = false;
+		skipHeredocDelimiter = false;
+	}
+	return segmentIsProbe();
+}
+
+/** Package managers whose `run` (or `run-script`) starts a script of the project's package file. */
+const PACKAGE_SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+
+/**
+ * A package script that makes or publishes a release, which waits on builds, pushes and the tag's workflow: `release`, or
+ * `release` and a separator before one of the verbs that cut, repair, adopt, promote or publish one (`release:patch`,
+ * `release-promote`). A script that reads (`release:status`) or writes notes (`release:notes`) is quick, so not a wait.
+ */
+const RELEASE_SCRIPT_RE = /^release(?:[:._-](?:patch|minor|major|repair|adopt|promote|publish))?$/u;
+
+/**
+ * A command whose run is a wait on state outside the session, which the bash tool runs as a background task so the wait
+ * never holds the turn: `gh run watch`, `gh pr checks --watch`, a release script (`npm`, `pnpm`, `yarn` or `bun`
+ * `run release`, `run release:patch` and the like), or a `while` or `until` loop whose body runs `sleep` (a polling loop,
+ * `until test -f done; do sleep 5; done`). It is read from the command's parsed structure, so such a command anywhere
+ * in the line counts (`cd x && gh run watch 12 | tail -5`, inside an `if`, a group or `bash -c '…'`), while the same
+ * words as an argument (`echo "gh run watch"`, a commit message, `grep "npm run release"`) do not. A bare `sleep N`, a loop that never sleeps, a `for` loop (a bounded list), a
+ * `while read` loop (it paces its own input, not a check), and a line the structure reader cannot read (a here-document,
+ * a function definition, an unterminated quote) are not waits.
+ */
+export function isExternalWaitCommand(command: string): boolean {
+	return isExternalWaitAtDepth(command, 0);
+}
+
+function isExternalWaitAtDepth(command: string, depth: number): boolean {
+	const tokens = tokenizeShellCommand(command, "posix", { compound: true });
+	if (!tokens) return false;
+	const nodes = parseShellCompound(tokens);
+	return typeof nodes !== "string" && nodes.some((node) => nodeWaits(node, depth));
+}
+
+/** The commands a compound command runs directly: a group's body, every list of an `if` or `case`, a loop's condition and body. */
+function childCommands(node: ShellCompoundNode): ShellCompoundNode[] {
+	switch (node.kind) {
+		case "simple":
+			return [];
+		case "group":
+			return node.body;
+		case "if":
+		case "case":
+			return node.lists.flat();
+		case "loop":
+			return [...node.condition, ...node.body];
+	}
+}
+
+function nodeWaits(node: ShellCompoundNode, depth: number): boolean {
+	if (node.kind === "simple")
+		return invocationWaits(
+			node.words.map((word) => word.value),
+			depth,
+		);
+	if (isPollingLoop(node)) return true;
+	return childCommands(node).some((child) => nodeWaits(child, depth));
+}
+
+/** A `while` or `until` loop (no loop variable) that sleeps in its body and whose condition is not a `read` of input. */
+function isPollingLoop(node: ShellCompoundNode): boolean {
+	if (node.kind !== "loop" || node.variable !== undefined || !node.body.some(runsSleep)) return false;
+	return !node.condition.some((command) => command.kind === "simple" && commandName(command) === "read");
+}
+
+function commandName(node: Extract<ShellCompoundNode, { kind: "simple" }>): string | undefined {
+	const argv = stripShellInvocationPrefixes(node.words.map((word) => word.value));
+	return argv.length > 0 ? normalizeExecutable(argv[0]) : undefined;
+}
+
+/** Whether a command runs `sleep` anywhere inside it: the pause between the checks of a polling loop. */
+function runsSleep(node: ShellCompoundNode): boolean {
+	if (node.kind !== "simple") return childCommands(node).some(runsSleep);
+	return commandName(node) === "sleep";
+}
+
+function invocationWaits(words: string[], depth: number): boolean {
+	const argv = stripShellInvocationPrefixes(words);
+	if (argv.length === 0) return false;
+	const tool = normalizeExecutable(argv[0]);
+	if (SHELLS.has(tool)) {
+		const script = depth < MAX_WRAPPER_DEPTH ? unwrapShellWrapper(tool, argv) : undefined;
+		return script !== undefined && isExternalWaitAtDepth(script, depth + 1);
+	}
+	const operands = argv.slice(1).filter((arg) => !arg.startsWith("-"));
+	if (tool === "gh")
+		return (
+			(operands[0] === "run" && operands[1] === "watch") ||
+			(operands[0] === "pr" && operands[1] === "checks" && argv.includes("--watch"))
+		);
+	if (!PACKAGE_SCRIPT_RUNNERS.has(tool) || (argv[1] !== "run" && argv[1] !== "run-script")) return false;
+	const script = argv.slice(2).find((arg) => !arg.startsWith("-"));
+	return script !== undefined && RELEASE_SCRIPT_RE.test(script);
 }

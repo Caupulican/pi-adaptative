@@ -34,6 +34,7 @@ import {
 	startPlannedAgentProviderRequestWithId,
 } from "./provider-request-planner.ts";
 import { hasRecalledHistoryMarker, RECALLED_HISTORY_DETAIL_KEY } from "./session/message-retention.ts";
+import { canHandOffToolCalls, handoffTrigger, prepareToolCallArguments, toolCallForm } from "./tool-call-arguments.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	assessToolFailure,
@@ -1629,6 +1630,7 @@ type PreparedToolCall = {
 	/** Declared parameters the model left empty and the call runs with, reported in the call's outcome. */
 	hostFilled: readonly HostFilledArgument[];
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
+	background: { readonly reason?: string } | undefined;
 };
 
 type ImmediateToolCallOutcome = {
@@ -1781,13 +1783,6 @@ function finalizeExecutedToolBatch(
 	const terminate = calls.length > 0 && calls.every((call) => call.result.terminate === true);
 	const handoff = terminate && calls.every((call) => call.result.handoff === true);
 	return { messages, terminate, ...(handoff ? { handoff: true } : {}) };
-}
-
-function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
-	if (!tool.prepareArguments) return toolCall;
-	const preparedArguments = tool.prepareArguments(toolCall.arguments);
-	if (preparedArguments === toolCall.arguments) return toolCall;
-	return { ...toolCall, arguments: preparedArguments as Record<string, any> };
 }
 
 function createValidationBounceTelemetry(
@@ -2142,7 +2137,7 @@ async function prepareToolCall(
 	try {
 		const modelArguments = toolCall.arguments;
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
-		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
+		const validated = validateToolArguments(tool, preparedToolCall, {
 			model: config.model.id,
 			provider: config.model.provider,
 			repairEnabled: config.toolArgumentRepairEnabled ?? !isToolArgumentRepairEmergencyDisabled(),
@@ -2150,6 +2145,7 @@ async function prepareToolCall(
 				validationEvent = event;
 			},
 		});
+		const { arguments: validatedArgs, background } = toolCallForm(tool, validated, canHandOffToolCalls(config));
 		if (preparedToolCall.repairNotes) {
 			toolCall.repairNotes = preparedToolCall.repairNotes;
 		}
@@ -2257,6 +2253,7 @@ async function prepareToolCall(
 			toolCall,
 			tool,
 			args: validatedArgs,
+			background,
 			hostFilled,
 			validationEvent,
 		};
@@ -2457,13 +2454,12 @@ async function executeAndFinalizePreparedToolCall(
 	emit: AgentEventSink,
 	onExecutionOwnership: () => void,
 ): Promise<FinalizedToolCallOutcome> {
-	// The model can ask for a background task up front; otherwise only the operator's clock (off by
-	// default) or a manual host request moves a foreground call to the background.
-	const backgroundRequested =
-		config.isBackgroundRequested?.(prepared.toolCall.name, prepared.toolCall.arguments) === true;
-	const backgroundDelay = backgroundRequested ? 0 : getBackgroundToolCallDelay(config);
+	// A call can start as a background task up front (the model asked, or the tool moved it); otherwise only
+	// the operator's clock (off by default) or a manual host request moves a foreground call, while the host can.
+	const backgroundDelay = prepared.background ? 0 : getBackgroundToolCallDelay(config);
 	const canHandoff =
-		config.handoffToolCall && (backgroundDelay !== undefined || config.subscribeToolCallHandoffRequest !== undefined);
+		canHandOffToolCalls(config) &&
+		(backgroundDelay !== undefined || config.subscribeToolCallHandoffRequest !== undefined);
 	const executionAbort = canHandoff ? createLinkedToolAbort(foregroundSignal) : undefined;
 	const executionSignal = executionAbort?.signal ?? foregroundSignal;
 	const startedAt = Date.now();
@@ -2552,7 +2548,7 @@ async function executeAndFinalizePreparedToolCall(
 	// foreground ownership until its actual completion and publish that outcome before ending.
 	if (unsubscribeFailed) return retainToolDeliveryFailure(await completion, "cleanup");
 	if (outcome.kind === "completed") return outcome.value;
-	if (executionAbort.signal.aborted) return completion;
+	if (executionAbort.signal.aborted || !canHandOffToolCalls(config)) return completion;
 
 	let handoffAccepted = false;
 	// A handed-off call leaves the batch, so the batch never applies its effect: the background
@@ -2571,7 +2567,7 @@ async function executeAndFinalizePreparedToolCall(
 			args: prepared.args,
 			context: currentContext,
 			executionContext: prepared.binding?.executionContext,
-			trigger: outcome.kind === "manual" ? "manual" : backgroundRequested ? "requested" : "clock",
+			...handoffTrigger(outcome.kind === "manual", prepared.background),
 			elapsedMs: Math.max(0, Date.now() - startedAt),
 			completion: handedOffCompletion,
 			cancel: executionAbort.cancel,

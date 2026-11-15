@@ -826,14 +826,16 @@ a saved binding. Synthetic foreground and worker response scripts are independen
 order.
 Enforced by: prose only
 
-**A foreground call is handed off only on the model's request or the operator's clock.** A tool
-declares which calls are foreground waits (never handed off) and which ask for a background task
-up front (`backgroundRequested`, handed off at once); every other call blocks up to its own timeout
+**A foreground call is handed off only on the model's request, a call that only waits on outside state, or the operator's clock.** A tool
+declares which calls are foreground waits (never handed off) and which start as a background task
+up front (`backgroundArguments`: the model's `background: true`, or a bash call that leaves
+`background` unset and only waits on outside state, such as `gh run watch`); every other call blocks up to its own timeout
 unless the operator configured a clock (`backgroundTool.callAfterMs`, off by default) or moved the
-call by hand. The handoff stub names which of the three moved the call (`started as session task
-… (background requested)`, `exceeded Ns; running as session task`, `moved to session task … by the
-operator`).
-Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundRequested); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)
+call by hand. Where no task can start (no `tool_task`, a worker or lane, a nested call), such a call runs in its
+foreground form, with the foreground's bound. The handoff stub names what moved the call (`started as session task
+… (background requested)`, `started as session task …: moved to the background because it waits on outside state`,
+`exceeded Ns; running as session task`, `moved to session task … by the operator`).
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundArguments and the external-wait handoff); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)
 
 **The completion wake-up carries the result.** When a background task ends, its wake-up lists each
 finished record's status line followed by its bounded final output verbatim, in emission order,

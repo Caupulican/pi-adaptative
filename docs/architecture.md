@@ -119,6 +119,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/storage/win32-transient-fs.ts` | (no header comment) |
 | `kernel/tagged-view.ts` | Value primitives of the tagged model views the host renders from its records (the tool-failure ledger, the host injections in `core/comms/host-injection-records.ts`). |
 | `kernel/timer-port.ts` | The clock and timers of a recovery, retry or watchdog alarm. |
+| `kernel/tool-call-arguments.ts` | The arguments a tool call runs with. |
 | `kernel/tool-failure-code.ts` | (no header comment) |
 | `kernel/tool-failure-ledger-record.ts` | (no header comment) |
 | `kernel/tool-failure-memory.ts` | (no header comment) |
@@ -152,7 +153,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-118 kernel modules, 59 with a header comment.
+119 kernel modules, 60 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

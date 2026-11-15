@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { delimiter } from "node:path";
 import { Text } from "@caupulican/pi-tui";
+import { requestedBackgroundForms } from "../../kernel/tool-call-arguments.ts";
 import type { AgentToolFailureReceipt } from "../../kernel/tool-failure-receipt.ts";
 import {
 	type AgentTool,
@@ -280,7 +281,7 @@ export function createPythonToolDefinition(
 		promptSnippet: "Run Python code or a script",
 		parameters: pythonSchema,
 		// A script with tools never becomes a session task: execute refuses that combination at once.
-		backgroundRequested: (input) => input.background === true && !input.tools?.length,
+		backgroundArguments: (input) => (input.tools?.length ? undefined : requestedBackgroundForms(input)),
 		failureRecovery: {
 			getTimeoutMs: ({ timeoutSeconds, background }) => resolvePythonTimeoutMs(timeoutSeconds, background === true),
 			actions: recoveryAuthority

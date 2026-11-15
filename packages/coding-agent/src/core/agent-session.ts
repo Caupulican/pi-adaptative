@@ -3378,12 +3378,10 @@ export class AgentSession {
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
 		this.agent.backgroundToolCallAfterMs = this.settingsManager.getBackgroundToolSettings().callAfterMs;
 		this.agent.toolConcurrency = this.settingsManager.getToolExecutionSettings().concurrency;
-		this.agent.handoffToolCall = (context) =>
-			this.getActiveToolNames().includes("tool_task") ? this._backgroundToolTasks.handoff(context) : undefined;
+		this.agent.canHandOffToolCalls = () => this.getActiveToolNames().includes("tool_task");
+		this.agent.handoffToolCall = (context) => this._backgroundToolTasks.handoff(context);
 		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>
 			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
-		this.agent.isBackgroundRequested = (tool, args) =>
-			this.getToolDefinition(tool)?.backgroundRequested?.(args as never) === true;
 		this.agent.onRunawayStop = (info) => handleRunawayStop(this._guardDeps(), info);
 		this.agent.onToolValidationEscalation = (event) => handleToolValidationEscalation(this._guardDeps(), event);
 		this.agent.toolFailureProtocolProse = this.getCapabilityTierPolicy().protocolProse;

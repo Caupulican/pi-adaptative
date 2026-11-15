@@ -28,8 +28,9 @@ import {
 import type { ManagedToolResolver } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { bashBackgroundArguments } from "./bash-background.ts";
 import { createBashRouteServer } from "./bash-route-serve.ts";
-import { classifyCommandFamily } from "./command-family.ts";
+import { classifyCommandFamily, isAdHocInterpreterProbe } from "./command-family.ts";
 import {
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
@@ -63,7 +64,6 @@ import {
 	BROAD_SEARCH_OUTPUT_ROUTE,
 	expectedContentSearchNoMatch,
 } from "./search-command-guard.ts";
-import { tokenizeShellCommand } from "./shell-command-parser.ts";
 import { routeShellContract, type ShellContractRoute } from "./shell-contract-router.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
@@ -599,80 +599,6 @@ function rebuildBashResultRenderComponent(
 	}
 }
 
-/** Ad-hoc Python/Node eval or heredoc probes are not workspace mutations. */
-function isAdHocInterpreterProbe(command: string): boolean {
-	const tokens = tokenizeShellCommand(command);
-	if (!tokens) return false;
-	let args: string[] = [];
-	let hasHeredoc = false;
-	let skipHeredocDelimiter = false;
-	const segmentIsProbe = (): boolean => {
-		let runtimeIndex = 0;
-		while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(args[runtimeIndex] ?? "")) runtimeIndex++;
-		const commandName = args[runtimeIndex]?.split(/[\\/]/).at(-1)?.toLowerCase();
-		if (commandName === "env") {
-			runtimeIndex++;
-			while (runtimeIndex < args.length) {
-				const arg = args[runtimeIndex];
-				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg) || /^(?:-i|--ignore-environment|--null)$/.test(arg)) {
-					runtimeIndex++;
-					continue;
-				}
-				if (/^(?:-u|--unset|-C|--chdir)$/.test(arg)) {
-					runtimeIndex += 2;
-					continue;
-				}
-				if (/^--(?:unset|chdir)=/.test(arg)) {
-					runtimeIndex++;
-					continue;
-				}
-				if (arg === "--") runtimeIndex++;
-				break;
-			}
-		}
-		const executable = args[runtimeIndex]
-			?.split(/[\\/]/)
-			.at(-1)
-			?.toLowerCase()
-			.replace(/\.exe$/, "");
-		const runtime =
-			executable === "node"
-				? "node"
-				: /^(?:python\d*(?:\.\d+)?|pypy\d*)$/.test(executable ?? "")
-					? "python"
-					: undefined;
-		if (!runtime) return false;
-		for (let index = runtimeIndex + 1; index < args.length; index++) {
-			const arg = args[index];
-			if (runtime === "node" && /^(?:-c|-e|-p|--eval|--print)(?:=.*)?$/.test(arg)) return true;
-			if (runtime === "python" && arg === "-c") return true;
-			if (arg === "-") return hasHeredoc;
-			if (arg === "--") return hasHeredoc && (args[index + 1] === undefined || args[index + 1] === "-");
-			if (!arg.startsWith("-")) return false;
-		}
-		return hasHeredoc;
-	};
-	for (const token of tokens) {
-		if (token.kind === "arg") {
-			if (skipHeredocDelimiter) skipHeredocDelimiter = false;
-			else args.push(token.value);
-			continue;
-		}
-		if (token.kind === "redirect") {
-			if (token.value.includes("<<")) {
-				hasHeredoc = true;
-				skipHeredocDelimiter = true;
-			}
-			continue;
-		}
-		if (segmentIsProbe()) return true;
-		args = [];
-		hasHeredoc = false;
-		skipHeredocDelimiter = false;
-	}
-	return segmentIsProbe();
-}
-
 function createShellToolDefinition(
 	cwd: string,
 	backendShell: PlatformShellToolName,
@@ -767,7 +693,7 @@ function createShellToolDefinition(
 		promptSnippet: "Run shell commands",
 		neverDefer: true,
 		parameters: bashSchema,
-		backgroundRequested: (input) => input.background === true,
+		backgroundArguments: bashBackgroundArguments,
 		failureRecovery: {
 			getTimeoutMs: (params) => resolveCommandTimeoutSeconds(params.timeout, params.background === true) * 1000,
 			getFailureTargets: (params, failure) =>

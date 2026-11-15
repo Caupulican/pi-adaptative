@@ -20,6 +20,7 @@ import {
 	retainedVerificationDetails,
 	type VerificationRecord,
 } from "../kernel/verification-obligations.ts";
+import { handoffHeadline } from "./background-tool-handoff-text.ts";
 import {
 	type BackgroundToolImageCapture,
 	type BackgroundToolImageManifest,
@@ -53,19 +54,6 @@ import { type WaitEndReason, type WaitStatusEvent, type WaitSteer, type WakeSour
  */
 export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
 
-/** First line of the handoff stub: says what moved the call, so a requested task never reads as a timeout. */
-function handoffHeadline(context: BackgroundToolCallContext, taskId: string): string {
-	const elapsedMs = Number.isFinite(context.elapsedMs) ? Math.max(0, context.elapsedMs) : 0;
-	const seconds = Math.max(1, Math.round(elapsedMs / 1000));
-	switch (context.trigger) {
-		case "requested":
-			return `Tool ${context.toolCall.name} started as session task ${taskId} (background requested).`;
-		case "manual":
-			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator${elapsedMs >= 1000 ? ` after ${seconds}s` : ""}.`;
-		default:
-			return `Tool ${context.toolCall.name} exceeded ${seconds}s; running as session task ${taskId}.`;
-	}
-}
 /**
  * How long one `tool_task wait` may block by default. A wait is the model's own decision to have
  * nothing else to do until the task ends, so it blocks as long as a delegate wait may (five

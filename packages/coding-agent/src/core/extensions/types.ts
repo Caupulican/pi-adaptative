@@ -43,6 +43,7 @@ import type {
 	CustomMessage,
 	ExecutionContext,
 	ThinkingLevel,
+	ToolCallBackgroundForms,
 	ToolCallRepairInfo,
 	ToolExecutionMode,
 } from "../../kernel/index.ts";
@@ -515,11 +516,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	foregroundWait?(args: Static<TParams>): boolean;
 
 	/**
-	 * True when the caller asked for this call to run as a background session task from the start
-	 * (`background: true` on bash/python). Foreground is otherwise the default up to the call's own
-	 * timeout; the clock-based handoff that used to move every call after 15 s is off by default.
+	 * Where a call can run as a background session task, its two forms (`ToolCallBackgroundForms`): the loop starts it in
+	 * the background form where the session can hand calls off, and runs it in the foreground form everywhere else.
 	 */
-	backgroundRequested?(args: Static<TParams>): boolean;
+	backgroundArguments?(args: Static<TParams>): ToolCallBackgroundForms<Static<TParams>> | undefined;
 
 	/**
 	 * Host-owned repository effect. Absent means the capability catalogue decides, and an

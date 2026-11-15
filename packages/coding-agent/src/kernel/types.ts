@@ -513,6 +513,20 @@ export interface AgentToolInvocation<TParameters extends TSchema = TSchema, TDet
 	release(): void;
 }
 
+/**
+ * The two forms of a tool call that can run as a background session task. The loop runs the call in its background form
+ * only where the host can hand calls off (`AgentLoopConfig.canHandOffToolCalls`), and in its foreground form everywhere
+ * else, so a background run the host cannot start never reaches the tool's body as one.
+ */
+export interface ToolCallBackgroundForms<T> {
+	/** The arguments the call starts with as a background task. */
+	readonly background: T;
+	/** The arguments it runs with in the foreground, with the foreground's own bounds. */
+	readonly foreground: T;
+	/** Set when the caller did not ask for a background run: why the tool moves the call there, in words for the model. */
+	readonly reason?: string;
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
@@ -524,6 +538,11 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * Must return an object that matches `TParameters`.
 	 */
 	prepareArguments?: (args: unknown) => Static<TParameters>;
+	/**
+	 * Where a call can run as a background session task, its two forms (see {@link ToolCallBackgroundForms}); absent, or
+	 * `undefined` for a call, means it runs in the foreground. Read by the loop on the validated arguments.
+	 */
+	backgroundArguments?: (args: Static<TParameters>) => ToolCallBackgroundForms<Static<TParameters>> | undefined;
 	/**
 	 * Parameters the host fills from the session when the model leaves them empty (see
 	 * `ToolDefinition.sessionIdentity`). The loop reports every such fill in the call's result, because the

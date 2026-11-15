@@ -7,6 +7,7 @@ import {
 	readAgentToolExecutionError,
 	readAgentToolPolicyDeniedError,
 } from "../../kernel/index.ts";
+import { prepareToolCallArguments, toolCallForm } from "../../kernel/tool-call-arguments.ts";
 import { type BoundToolInvocation, bindToolInvocation } from "../../kernel/tool-invocation-binding.ts";
 
 /**
@@ -156,13 +157,10 @@ function contentText(content: AgentToolResult<unknown>["content"]): string {
 	return `${text}${text ? "\n" : ""}[${images} image${images === 1 ? "" : "s"} omitted; read the file as its own call to see it]`;
 }
 
+/** A sub-call is never handed off: it runs in its foreground form, the one a call that asked for a background task gets. */
 function validatedArguments(tool: AgentTool, id: string, args: Record<string, unknown>): Record<string, unknown> {
-	const prepared = tool.prepareArguments ? (tool.prepareArguments(args) as Record<string, unknown>) : args;
-	return validateToolArguments(
-		tool,
-		{ type: "toolCall", id, name: tool.name, arguments: prepared },
-		{ repairEnabled: false },
-	);
+	const toolCall = prepareToolCallArguments(tool, { type: "toolCall", id, name: tool.name, arguments: args });
+	return toolCallForm(tool, validateToolArguments(tool, toolCall, { repairEnabled: false }), false).arguments;
 }
 
 /**

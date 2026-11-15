@@ -477,7 +477,9 @@ export function createWorkerSkillVaultToolDefinition(
 	const full = createSkillVaultToolDefinition(vault, options);
 	return {
 		...full,
+		// The worker schema is narrower than the full one, so no hook typed for the full schema carries over.
 		prepareArguments: undefined,
+		backgroundArguments: undefined,
 		description: SKILL_VAULT_DESCRIPTION,
 		parameters: workerSkillSchema,
 		execute: (toolCallId, input, signal, onUpdate, ctx) => full.execute(toolCallId, input, signal, onUpdate, ctx),

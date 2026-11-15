@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { SessionManager } from "../../kernel/node.ts";
+import { requestedBackgroundForms } from "../../kernel/tool-call-arguments.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript, type ScriptExecution, type ScriptExecutor } from "../toolkit/script-runner.ts";
@@ -177,7 +178,7 @@ export class TaskAutomationRuntimeAdapter {
 
 	/**
 	 * Materialize tool definition for task_automation.
-	 * Exposes native background lifecycle policy via backgroundRequested hook for run and validate.
+	 * Exposes native background lifecycle policy via the backgroundArguments forms for run and validate.
 	 * Worker exclusion is governed canonically through WORKER_FORBIDDEN_TOOLS.
 	 */
 	createToolDefinition(): ToolDefinition {
@@ -186,8 +187,8 @@ export class TaskAutomationRuntimeAdapter {
 
 		return {
 			...baseDefinition,
-			backgroundRequested: (input: TaskAutomationInput) =>
-				(input.action === "run" || input.action === "validate") && input.background === true,
+			backgroundArguments: (input: TaskAutomationInput) =>
+				input.action === "run" || input.action === "validate" ? requestedBackgroundForms(input) : undefined,
 			execute: async (toolCallId, input: TaskAutomationInput, signal, onUpdate, context) => {
 				return baseDefinition.execute(toolCallId, input, signal, onUpdate, context);
 			},

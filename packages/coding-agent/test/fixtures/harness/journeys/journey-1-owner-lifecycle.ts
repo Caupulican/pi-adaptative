@@ -42,8 +42,10 @@ import {
 } from "../../../../src/core/tool-applicability-gate.ts";
 import { localFileMutationIntentOperations } from "../../../../src/core/tools/file-mutation-intent.ts";
 import { routeShellContract } from "../../../../src/core/tools/shell-contract-router.ts";
+import { wrapToolDefinition } from "../../../../src/core/tools/tool-definition-wrapper.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
+import { toolCallForm } from "../../../../src/kernel/tool-call-arguments.ts";
 import type { AgentTool } from "../../../../src/kernel/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import {
@@ -2057,13 +2059,16 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				);
 				const bash = session.getToolDefinition("bash");
 				expect(
-					bash?.backgroundRequested?.({ command: "echo background-check", background: true } as never),
-					"an explicit background bash call is requested in its definition",
-				).toBe(true);
+					bash?.backgroundArguments?.({ command: "echo background-check", background: true } as never),
+					"an explicit background bash call starts as written, and runs without background where no task can start",
+				).toEqual({
+					background: { command: "echo background-check", background: true },
+					foreground: { command: "echo background-check" },
+				});
 				expect(
-					bash?.backgroundRequested?.({ command: "echo background-check" } as never),
-					"a foreground bash call is not requested in its definition",
-				).toBe(false);
+					bash?.backgroundArguments?.({ command: "echo background-check" } as never),
+					"a foreground bash call has no background form",
+				).toBeUndefined();
 				backgroundTaskId = backgroundTaskIdOf(request);
 			},
 			reply: { content: [{ type: "text", text: "The check runs in the background." }] },
@@ -3007,6 +3012,115 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		"an execution that honours its cancellation settles inside the shutdown grace",
 	).toEqual({ armedDelay: 5000, fired: 0, failures: [], disposed: true, runningTaskIds: [] });
 	world.faultMatrix.witness("R22", { control: true });
+
+	// A command that only waits on outside state (a polling loop that sleeps between its checks) runs as a background task
+	// though the call asked for none: the turn is not held, the call's result is the task id and says why it was moved, and
+	// the loop's exit comes back through the completion wake. The same words as an argument, and a call that sets background
+	// itself, are left as written.
+	{
+		const waitSession = (
+			await world.createRootSession("root", { agentDir: `${world.agentDir}-external-wait`, systemOneEnabled: false })
+		).session;
+		const command = "until test -f ci.done; do sleep 5; done; echo ci-done";
+		const gate = createBarrier();
+		const handed = createBarrier();
+		let taskId: string | undefined;
+		world.shell.enqueue({
+			name: "external-wait",
+			command,
+			cwd: HARNESS_PROJECT_CWD,
+			output: "ci-done\n",
+			exitCode: 0,
+			gate: gate.promise,
+		});
+		world.systemOne.enterPhase("external-wait", {});
+		world.provider.enqueue(
+			"root",
+			calls("external-wait-start", [{ id: "external-wait-1", name: "bash", arguments: { command } }]),
+			{
+				name: "external-wait-started",
+				check: (request) => {
+					taskId = backgroundTaskIdOf(request);
+					const stub = request.context.messages.findLast((message) => message.role === "toolResult");
+					expect(JSON.stringify(stub?.content), "the handoff says why the call was moved").toContain(
+						"moved to the background because it waits on outside state",
+					);
+				},
+				reply: { content: [{ type: "text", text: "The wait runs in the background." }] },
+			},
+			{
+				name: "external-wait-handoff",
+				check: (request) => {
+					if (taskId === undefined) throw new Error("the wait's result carried no task id");
+					if (!handoffFor(request, taskId)) throw new Error(`the exit of ${taskId} did not wake the root`);
+					handed.release();
+				},
+				reply: { content: [{ type: "text", text: "CI is done." }] },
+			},
+		);
+		await withDeadline(trace, "external wait start turn", waitSession.prompt("Wait until CI writes ci.done."));
+		await withDeadline(trace, "external wait foreground settled", waitSession.waitForForegroundIdle(), 60_000);
+		expect(
+			waitSession.getResourceSnapshot().backgroundToolTasks.runningTaskIds,
+			"the polling loop runs as a background task while the root is idle",
+		).toEqual([taskId]);
+		const bashDefinition = waitSession.getToolDefinition("bash");
+		if (!bashDefinition) throw new Error("the external-wait root has no bash tool");
+		const forms = (command: string, background?: boolean) =>
+			bashDefinition.backgroundArguments?.(
+				(background === undefined ? { command } : { command, background }) as never,
+			);
+		expect(
+			[
+				forms("gh run watch 4242 --exit-status"),
+				forms("gh run watch 4242", false),
+				forms('echo "gh run watch 4242"'),
+				forms("sleep 5"),
+				forms("npm run release:status"),
+				forms("for i in 1 2 3; do curl -s localhost; sleep 1; done"),
+				forms("while read line; do echo line; sleep 1; done"),
+			],
+			"a CI watch is moved; an explicit foreground call, the words as an argument, a bare sleep, a quick release read, a bounded for loop and a while-read loop are not",
+		).toEqual([
+			{
+				background: { command: "gh run watch 4242 --exit-status", background: true },
+				foreground: { command: "gh run watch 4242 --exit-status" },
+				reason: "it waits on outside state",
+			},
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+		]);
+		// Where no task can start (a worker, a lane, a nested call), a wait and an explicit background request both run in the
+		// foreground form, so the body never runs with the background run's bound.
+		const bashTool = wrapToolDefinition(bashDefinition);
+		const prepared = (args: Record<string, unknown>, canHandOff: boolean) => {
+			const form = toolCallForm(bashTool, args, canHandOff);
+			return { arguments: form.arguments, background: form.background };
+		};
+		expect(
+			[
+				prepared({ command: "gh run watch 4242" }, true),
+				prepared({ command: "gh run watch 4242" }, false),
+				prepared({ command: "gh run watch 4242", background: true }, false),
+			],
+			"the loop starts the background form only where a task can start",
+		).toEqual([
+			{
+				arguments: { command: "gh run watch 4242", background: true },
+				background: { reason: "it waits on outside state" },
+			},
+			{ arguments: { command: "gh run watch 4242" }, background: undefined },
+			{ arguments: { command: "gh run watch 4242" }, background: undefined },
+		]);
+		gate.release();
+		await withDeadline(trace, "external wait exit woke the root", handed.promise, 60_000);
+		await withDeadline(trace, "external wait handoff settled", waitSession.waitForForegroundIdle(), 60_000);
+		expect(await world.disposeSessionInBody(waitSession), "the external-wait root disposes cleanly").toBeUndefined();
+	}
 
 	// R48s, a decision ledger whose open meets a busy database inside a live session. Two fresh owners (System One off in their
 	// own binding, so they ask no judgment) are the only live sessions, so only their ledger opens meet the scripted faults armed
