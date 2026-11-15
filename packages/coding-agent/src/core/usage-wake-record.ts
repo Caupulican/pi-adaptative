@@ -2,7 +2,7 @@
  * The record a session keeps of how a usage-limit wait ended, so a stop the wait already answered is not waited out again
  * after a restart or by the host that opens a closed bot's session for it. Each record names the stop it answers by when
  * that stop was made (`stopAt`), and answers it and every stop made before it: `resumed` (the turn or goal continued),
- * `declined` (the owner's stop ended the wait; it names its own time, so it answers every stop made until it) and `failed`
+ * `declined` (the owner's stop ended the wait; it names the owner's stop's time, so it answers every usage stop made until the owner's) and `failed`
  * (the continuation threw and the transcript still ends on the refusal). A failed one is tried again after a delay that
  * doubles with each failure in a row, up to {@link USAGE_WAKE_RETRY_MAX_MS}, with no limit on the tries: a subscription's
  * continuation waits and continues while its usage has room. A stop made after the one a record names (a continued turn
@@ -75,9 +75,12 @@ export function recordUsageWake(
 	writer.appendCustomEntry(USAGE_WAKE_CUSTOM_TYPE, record);
 }
 
-/** The owner's stop at `at`: whatever usage-limit wait the session holds ends, and is not taken up again. */
-export function declineUsageWaitForOwner(writer: UsageWakeWriter, at: number): void {
-	const record: UsageWakeRecord = { version: 1, outcome: "declined", stopAt: at, at, failures: 0, by: "owner" };
+/**
+ * The owner's stop made at `stopAt`, applied at `at`: the usage-limit wait of every usage stop made until the owner's ends,
+ * and is not taken up again; a usage stop made after it (a turn the owner started since) waits on its own.
+ */
+export function declineUsageWaitForOwner(writer: UsageWakeWriter, stopAt: number, at: number): void {
+	const record: UsageWakeRecord = { version: 1, outcome: "declined", stopAt, at, failures: 0, by: "owner" };
 	writer.appendCustomEntry(USAGE_WAKE_CUSTOM_TYPE, record);
 }
 

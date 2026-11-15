@@ -6,12 +6,14 @@
  * defining fields changed. This module is the profile's one writer, and it writes only when the content differs, so a
  * store save that touches the record's summary or read marks never rewrites the file.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { botHomeOrchestrationHome, type OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
+import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { botHomeDir, botHomeProfileFile, botHomeSessionsDir, botHomeSpendLedgerFile } from "../agent-paths.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { type BotSessionLinks, botFileReadPath } from "./bot-session-pointer.ts";
 
 /** What a bot's record defines, as `profile.json` holds it. */
 export interface BotProfile {
@@ -72,6 +74,21 @@ export function botHomeAt(dir: string): BotHome {
 		orchestrationHome: botHomeOrchestrationHome(dir),
 		spendFile: botHomeSpendLedgerFile(dir),
 	};
+}
+
+/**
+ * The ids of the sessions a bot home's `sessions/` directory holds, by their files' headers: a file whose header does not
+ * read names none, and a home whose sessions never ran holds none. A session file that is a symbolic link is refused or
+ * read through, as `links` says (`BotSessionLinks`: a read for the session's writer refuses it).
+ */
+export function botHomeSessionIds(sessionsDir: string, links: BotSessionLinks): string[] {
+	if (!existsSync(sessionsDir)) return [];
+	return readdirSync(sessionsDir)
+		.filter((name) => name.endsWith(".jsonl"))
+		.flatMap((name) => {
+			const header = readSessionHeaderResult(botFileReadPath(join(sessionsDir, name), links));
+			return header.ok ? [header.header.id] : [];
+		});
 }
 
 /** `<agentDir>/bots/<id>/orchestration` -- the orchestration home of the bot's sessions. */

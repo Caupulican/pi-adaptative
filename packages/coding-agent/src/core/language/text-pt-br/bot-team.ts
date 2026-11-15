@@ -126,6 +126,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
+	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
+		`Bot ${agentId}: a parada do dono encerrou os workers dele e os jobs que ele colocou em outras máquinas, mas deixou o objetivo e a espera pelo limite de uso como estavam: ${file} não contém a sessão ${sessionId}.`,
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
 		`Bot ${agentId}: a parada do dono não encerrou ${[
 			failed > 0

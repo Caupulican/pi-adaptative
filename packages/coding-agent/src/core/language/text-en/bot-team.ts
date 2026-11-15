@@ -135,6 +135,9 @@ export const BOT_TEAM = {
 	/** The owner's stop of a bot no process hosts could not be applied; it waits, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,
+	/** The owner's stop of a closed bot found its saved session's file holding another session, and left the file. */
+	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
+		`Bot ${agentId}: the owner's stop ended its workers and the jobs it placed on other machines, but left its goal and its usage-limit wait as they were: ${file} does not hold its session ${sessionId}.`,
 	/** What the owner's stop of a bot did not end. */
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
 		`Bot ${agentId}: the owner's stop did not end ${[

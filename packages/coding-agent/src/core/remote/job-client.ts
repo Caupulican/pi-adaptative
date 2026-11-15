@@ -271,18 +271,23 @@ function endPlacedRecord(
 }
 
 /**
- * Ends every job session `sessionId` placed whose record reads, with no client of that session running (the session is
- * closed): the owner's stop of a closed bot's placed jobs. The session's lanes end from these records when it opens again,
- * and the executor is told by the process that follows the placed jobs. A record this build cannot read names no session
- * and is left. Returns how many jobs it ended.
+ * Ends every job the sessions `sessionIds` placed whose record reads, with no client of those sessions running (they are
+ * closed): the owner's stop of a bot's placed jobs, of every session its home holds. A session's lanes end from these
+ * records when it opens again, and the executor is told by the process that follows the placed jobs. A record this build
+ * cannot read names no session and is left. Returns how many jobs it ended.
  */
-export function endPlacedJobsOfSession(agentDir: string, sessionId: string, cancel: JobCancelReason): number {
+export function endPlacedJobsOfSessions(
+	agentDir: string,
+	sessionIds: ReadonlySet<string>,
+	cancel: JobCancelReason,
+): number {
+	if (sessionIds.size === 0) return 0;
 	const store = new JobStore(agentDir);
 	const placed = store.placedScan();
 	let ended = 0;
 	for (const record of [...placed.valid.values()])
 		if (
-			record.ownerSession === sessionId &&
+			sessionIds.has(record.ownerSession) &&
 			endPlacedRecord(agentDir, store, record.executorId, record.jobId, endingOfCancel(cancel), cancel)
 		)
 			ended += 1;
@@ -292,7 +297,7 @@ export function endPlacedJobsOfSession(agentDir: string, sessionId: string, canc
 			"placement",
 			"placed job records this build cannot read are not ended by a closed session's stop",
 			{
-				sessionId,
+				sessionIds: [...sessionIds],
 				unreadable: placed.unreadable.length,
 			},
 		);

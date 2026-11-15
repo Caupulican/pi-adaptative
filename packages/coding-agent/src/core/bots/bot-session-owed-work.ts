@@ -8,11 +8,9 @@
  * bot continues one session.
  */
 
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
-import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
@@ -33,13 +31,12 @@ import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resum
 import { latestUsageWake } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText } from "./bot-failure-words.ts";
-import { botHomeOf } from "./bot-home.ts";
+import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
 import { type BotInboxItem, botInboxStopNames, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { refuseLink } from "./bot-session-pointer.ts";
 import { applyUnhostedBotStop } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
@@ -242,14 +239,7 @@ export function cancelOtherSessionsWatches(
 	sessionId: string,
 	nowMs: number,
 ): number {
-	const others = readdirSync(sessionsDir)
-		.filter((name) => name.endsWith(".jsonl"))
-		.map((name) => join(sessionsDir, name))
-		.flatMap((path) => {
-			refuseLink(path);
-			return readSessionHeader(path)?.id ?? [];
-		})
-		.filter((id) => id !== sessionId);
+	const others = botHomeSessionIds(sessionsDir, "refuse").filter((id) => id !== sessionId);
 	let cancelled = 0;
 	for (const other of others)
 		for (const routine of store.listRoutines({ sessionId: other, scope: "own-watches" }))
@@ -725,7 +715,13 @@ export class BotOwedWork {
 			this.failedStops.delete(agentId);
 		} catch (error) {
 			this.failedStops.set(agentId, stops);
-			this.tellWaits(agentId, interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, error)));
+			this.tellWaits(
+				agentId,
+				interfaceText().botTeam.botStopNotApplied(
+					agentId,
+					botFailureText(agentId, storeFailure(agentId, error, undefined)),
+				),
+			);
 		}
 	}
 

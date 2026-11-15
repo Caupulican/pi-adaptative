@@ -94,7 +94,7 @@ export class BotSessionLinkError extends BotOwnerError {
 export type BotSessionLinks = "refuse" | "follow";
 
 /** The path a read of `path` reads: `path` itself, or for a symbolic link the path it names (see {@link BotSessionLinks}). */
-function readPath(path: string, links: BotSessionLinks): string {
+export function botFileReadPath(path: string, links: BotSessionLinks): string {
 	if (!lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) return path;
 	if (links === "refuse") throw new BotSessionLinkError(path);
 	return resolve(dirname(path), readlinkSync(path));
@@ -102,7 +102,7 @@ function readPath(path: string, links: BotSessionLinks): string {
 
 /** Throws {@link BotSessionLinkError} when `path` is a symbolic link. */
 export function refuseLink(path: string): void {
-	readPath(path, "refuse");
+	botFileReadPath(path, "refuse");
 }
 
 /**
@@ -116,7 +116,7 @@ function pointedFileFault(
 	pointer: BotSessionPointer,
 	links: BotSessionLinks,
 ): BotPointerSetAsideReason | undefined {
-	const header = readSessionHeaderResult(readPath(path, links));
+	const header = readSessionHeaderResult(botFileReadPath(path, links));
 	if (header.ok)
 		return header.header.id === pointer.sessionId
 			? undefined
@@ -158,7 +158,7 @@ export function botSessionChoice(agentDir: string, home: BotHome, links: BotSess
 	let text: string | undefined;
 	try {
 		text = readOptionalBoundedTextFileSync(
-			readPath(home.pointerFile, links),
+			botFileReadPath(home.pointerFile, links),
 			MAX_POINTER_BYTES,
 			"Bot session pointer",
 		);

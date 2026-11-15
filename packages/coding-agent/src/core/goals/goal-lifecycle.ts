@@ -293,20 +293,38 @@ export function pausePersistedGoal(host: PersistedGoalStateHost, now = new Date(
 }
 
 /**
- * The owner's stop of a bot's work, applied to its goal: a goal running, or stopped by the system (a guard, a provider
- * failure, a usage limit) and so resumed by the system on its own, is paused, and resumes only when the owner resumes it.
- * A goal the owner or its agent already holds, or one that ended, is left as it is; undefined then.
+ * The owner's stop of a bot's work, made at `stopAt` and applied at `now`, applied to its goal: a goal running, or stopped
+ * by the system (a guard, a provider failure, a usage limit) and so resumed by the system on its own, is paused, and
+ * resumes only when the owner resumes it. A goal the owner or its agent already holds, one that ended, or one the owner set
+ * going after the stop was made (`goalSetGoingSince`) is left as it is; undefined then.
  */
 export function holdPersistedGoalForOwnerStop(
 	host: PersistedGoalStateHost,
+	stopAt: number,
 	now = new Date().toISOString(),
 ): GoalActionResult | undefined {
 	const current = host.getGoalStateSnapshot();
 	if (!current) return undefined;
 	const systemResumes =
 		isGoalExecutionActive(current.status) || isSystemStoppedGoal(current) || current.status === "usage_limited";
-	if (!systemResumes) return undefined;
+	if (!systemResumes || goalSetGoingSince(current, stopAt)) return undefined;
 	return persistResult(host, current, { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) });
+}
+
+/**
+ * Whether the owner set the goal going after `at`: it was created then, or the owner resumed or edited it then. A system
+ * resume, or the goal's own progress, after it is not the owner's word and leaves the stop to hold it.
+ */
+function goalSetGoingSince(state: GoalState, at: number): boolean {
+	const after = (iso: string) => Date.parse(iso) > at;
+	return (
+		after(state.createdAt) ||
+		state.events.some(
+			(event) =>
+				(event.type === "edit_goal" || (event.type === "resume_goal" && event.source !== "system")) &&
+				after(event.now),
+		)
+	);
 }
 
 export function resumePersistedGoal(host: PersistedGoalStateHost, now = new Date().toISOString()): GoalActionResult {
