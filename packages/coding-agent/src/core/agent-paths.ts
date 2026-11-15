@@ -293,12 +293,22 @@ export function botHomeSessionsDir(homeDir: string): string {
 
 /** `<agentDir>/bots/<id>/host.lock` -- names the one process that hosts the bot's session. */
 export function botHostLockFile(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "host.lock");
+	return botHomeHostLockFile(botHomeDir(agentDir, botId));
+}
+
+/** `<home>/host.lock` -- the host lock of the bot whose home is `homeDir`. */
+export function botHomeHostLockFile(homeDir: string): string {
+	return join(homeDir, "host.lock");
 }
 
 /** `<agentDir>/bots/<id>/host-state.json` -- what the hosting process says its session for the bot is doing. */
 export function botHostStateFile(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "host-state.json");
+	return botHomeHostStateFile(botHomeDir(agentDir, botId));
+}
+
+/** `<home>/host-state.json` -- the host state of the bot whose home is `homeDir`. */
+export function botHomeHostStateFile(homeDir: string): string {
+	return join(homeDir, "host-state.json");
 }
 
 /** `<agentDir>/bots/<id>/history.json` -- the bot's earlier worker conversations, by reference (never copies). */

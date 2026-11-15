@@ -250,6 +250,9 @@ export const BOT_TEAM = {
 	botHistoryIndexUnreadable: (agentId: string) =>
 		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,
 	botHistoryNotIndexed: (reason: string) => `Bot history could not be indexed (${reason}).`,
+	/** The startup sweep could not tell which session a bot home keeps (or its live host holds), so it leaves the home's bundles alone. */
+	botHomeSessionsUnknown: (agentId: string, reason: string) =>
+		`Bot ${agentId}: which of its sessions it keeps cannot be told (${reason}), so its old session bundles are not cleaned up until it can.`,
 	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
 	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
 	botModelNotAllowed: (modelRef: string) => `your model policy does not allow ${modelRef}`,

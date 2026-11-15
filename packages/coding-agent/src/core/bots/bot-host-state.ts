@@ -9,13 +9,20 @@
  */
 
 import { readFileSync, rmSync } from "node:fs";
+import { basename } from "node:path";
 import {
 	isProcessOwnerRecord,
 	type OwnerStanding,
 	ownProcessOwner,
 	type ProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
-import { botHostLockFile, botHostStateFile } from "../agent-paths.ts";
+import {
+	botHomeDir,
+	botHomeHostLockFile,
+	botHomeHostStateFile,
+	botHomeName,
+	botHostStateFile,
+} from "../agent-paths.ts";
 import { processLockHolder } from "../remote/host-lock.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -88,21 +95,34 @@ function parseState(text: string): BotHostState | undefined {
 	}
 }
 
+type LockHolder = NonNullable<ReturnType<typeof processLockHolder>>;
+
+/**
+ * The state the lock's live `holder` published in the bot home `homeDir`, for a bot `isBot` accepts; undefined while it
+ * has published none. A file another host wrote earlier (it is gone, a new one has not published yet) says nothing of
+ * this host.
+ */
+function publishedState(
+	homeDir: string,
+	holder: LockHolder,
+	isBot: (agentId: string) => boolean,
+): BotHostState | undefined {
+	const text = stateText(botHomeHostStateFile(homeDir));
+	const written = text === undefined ? undefined : parseState(text);
+	return written?.owner.pid === holder.owner.pid && written.holder === holder.holder && isBot(written.agentId)
+		? written
+		: undefined;
+}
+
 /**
  * The host, other than `ownHolder`, hosting the bot's session now: in another process, or another host in this one.
  * Undefined when the lock names no live process or names `ownHolder`: a host answers for its own sessions from memory.
  */
 export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: string): RemoteBotHost | undefined {
-	const holder = processLockHolder(botHostLockFile(agentDir, agentId));
+	const homeDir = botHomeDir(agentDir, agentId);
+	const holder = processLockHolder(botHomeHostLockFile(homeDir));
 	if (!holder || holder.holder === ownHolder) return undefined;
-	const file = botHostStateFile(agentDir, agentId);
-	const text = stateText(file);
-	const written = text === undefined ? undefined : parseState(text);
-	// A file another host wrote earlier (it is gone, a new one has not published yet) says nothing of this host.
-	const own =
-		written?.owner.pid === holder.owner.pid && written.holder === holder.holder && written.agentId === agentId
-			? written
-			: undefined;
+	const own = publishedState(homeDir, holder, (written) => written === agentId);
 	return {
 		pid: holder.owner.pid,
 		owner: holder.owner,
@@ -125,6 +145,20 @@ function stateText(file: string): string | undefined {
 		if (isMissingFileError(error)) return undefined;
 		throw error;
 	}
+}
+
+/**
+ * Whether a live host holds the session of the bot whose home is `homeDir` now, whichever process, and whichever host
+ * in it (this process's included), holds the lock; undefined when the lock names no live process (a holder whose
+ * standing is foreign or unknown is live: nothing proves it gone). `botSessionId` is the session the host published,
+ * undefined while it has published none. Keyed by the home's directory, as the startup retention sweep enumerates the
+ * homes (a home whose profile is gone has no bot id to name).
+ */
+export function readBotHomeHost(homeDir: string): { readonly botSessionId: string | undefined } | undefined {
+	const holder = processLockHolder(botHomeHostLockFile(homeDir));
+	if (!holder) return undefined;
+	const name = basename(homeDir);
+	return { botSessionId: publishedState(homeDir, holder, (agentId) => botHomeName(agentId) === name)?.botSessionId };
 }
 
 /** The one writer of a bot's `host-state.json`: the process holding the bot's lock. */

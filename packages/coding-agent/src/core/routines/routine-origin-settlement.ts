@@ -96,12 +96,15 @@ export interface GoneSessionSettlementInput {
 		| "retireEndedRoutines"
 		| "markRoutineUncertain"
 	>;
-	/** Sessions a process still holds (this one, live or resumable peers, a worker's parent): each settles its own. */
+	/**
+	 * Sessions a process still holds (this one, live or resumable peers, a worker's parent) and the sessions the bot homes
+	 * hold (each bot's current session, the session a live bot host holds): each settles its own, or opens again to.
+	 */
 	readonly protectedSessionIds: ReadonlySet<string>;
 	/**
-	 * Whether processes register in the process matrix here (this process's own session has a live entry), so a session
-	 * absent from `protectedSessionIds` is held by no process and none of its workers runs. Without that proof a dispatched
-	 * run of a deleted session is left as it is.
+	 * Whether processes register in the process matrix here (this process's own session has a live entry) and every live
+	 * bot host's session is known, so a session absent from `protectedSessionIds` is held by no process and none of its
+	 * workers runs. Without that proof a dispatched run of a deleted session is left as it is.
 	 */
 	readonly processTracked: boolean;
 	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
