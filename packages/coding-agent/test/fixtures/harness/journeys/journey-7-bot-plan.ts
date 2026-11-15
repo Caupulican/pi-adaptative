@@ -19,6 +19,7 @@ import {
 	TRACK,
 	waitForBotRosterState,
 } from "./journey-7-shared.ts";
+import { refusalDiagnostic } from "./shared.ts";
 
 const PLANNER = "pool-planner";
 const PLANNER_SOUL =
@@ -139,8 +140,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			...planCall,
 			check: (request) => {
+				// A refused call reaches the model as its `[harness]` failure record, whose diagnostic holds the refusal.
 				const result = lastResult(request, "plan");
-				seen.refusal = result?.isError ? result.text : undefined;
+				seen.refusal = result?.isError ? refusalDiagnostic(result.text) : undefined;
 				planCall.check?.(request);
 			},
 		},
