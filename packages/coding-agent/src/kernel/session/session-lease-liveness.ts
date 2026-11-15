@@ -12,11 +12,11 @@
  * that reads it, so a new key would make an older build refuse every session a newer one holds.
  */
 
-import { rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { writeFileAtomicSync } from "../storage/atomic-file.ts";
-import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
+import { FileSnapshotChangedError, readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { type RepeatingAlarm, repeatEvery, SYSTEM_TIMER_PORT } from "../timer-port.ts";
 import type { OrchestrationHome } from "./session-bundle-paths.ts";
 
@@ -55,9 +55,11 @@ export function holdLeaseLiveness(home: OrchestrationHome, processInstanceId: st
 	}
 	writeProof(home, processInstanceId);
 	held.set(home.root, { home, count: 1 });
-	// A renewal that fails is written again at the next: the window spans six, so one missed write ages nothing.
+	// A renewal that fails is written again at the next: the window spans six, so one missed write ages nothing. A home
+	// whose proof directory is gone (the home was removed under a lease) is not made again.
 	renewal ??= repeatEvery(SYSTEM_TIMER_PORT, LEASE_RENEW_MS, () => {
 		for (const { home: renewed } of held.values()) {
+			if (!existsSync(dirname(proofFile(renewed, processInstanceId)))) continue;
 			try {
 				writeProof(renewed, processInstanceId);
 			} catch {
@@ -92,7 +94,15 @@ export function forgetLeaseLiveness(home: OrchestrationHome, processInstanceId: 
  */
 export function leaseLivenessExpired(home: OrchestrationHome, processInstanceId: string): boolean {
 	const file = proofFile(home, processInstanceId);
-	const proof = readOptionalBoundedTextFileSync(file, MAX_PROOF_BYTES, "Session lease holder liveness proof");
+	let proof: string | undefined;
+	try {
+		proof = readOptionalBoundedTextFileSync(file, MAX_PROOF_BYTES, "Session lease holder liveness proof");
+	} catch (error) {
+		// Replaced while it was read: its holder renewed it just now.
+		if (!(error instanceof FileSnapshotChangedError)) throw error;
+		seen.set(file, { proof: undefined, since: performance.now() });
+		return false;
+	}
 	const now = performance.now();
 	const last = seen.get(file);
 	if (!last || last.proof !== proof) {

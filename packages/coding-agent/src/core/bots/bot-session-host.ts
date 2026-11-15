@@ -74,7 +74,7 @@ import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { BotOpenRetries, botOpenFailure, botOpenFailureText, storeFailure } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
@@ -1127,12 +1127,7 @@ export class BotSessionHost {
 	/** The bot's release failed with `error`: it is run again after a backoff, and the owner is told once. */
 	private oweRelease(agentId: string, error: unknown): void {
 		if (!this.owedReleases.has(agentId))
-			this.ports.warn(
-				interfaceText().botTeam.botReleaseOwed(
-					agentId,
-					botOpenFailureText(agentId, storeFailure(agentId, error, undefined)),
-				),
-			);
+			this.ports.warn(interfaceText().botTeam.botReleaseOwed(agentId, errorText(error)));
 		this.owedReleases.add(agentId);
 		this.releaseRetries.arm(agentId, false);
 	}
