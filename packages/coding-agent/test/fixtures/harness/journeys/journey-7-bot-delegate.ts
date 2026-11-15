@@ -507,14 +507,12 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 				attempts().some((attempt) => attempt.status === "cancelled" && attempt.end === "delivered"),
 			),
 		);
-		// A turn the delivered end woke is queued, running or done once the session is at rest: nothing queued for its
-		// foreground, no lane or turn busy, and its foreground idle; the requests are counted then.
+		// A turn the delivered end woke is queued or ran once the session is at rest: its agent and its foreground idle, the
+		// requests are counted then, with nothing queued for its foreground and no lane or turn busy.
 		await withDeadline(
 			trace,
-			"J7 bot delegate: the root's session is at rest after its worker's end",
-			world.io.waitForMutation(
-				() => !session.getSessionWorkState().busy && session.deliverablePendingMessageCount === 0,
-			),
+			"J7 bot delegate: the root's agent is idle after its worker's end",
+			session.agent.waitForIdle(),
 		);
 		await withDeadline(trace, "J7 bot delegate: the root's foreground is idle", session.waitForForegroundIdle());
 		expect(
@@ -527,6 +525,8 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 				workerEnd,
 				attempts: attempts(),
 				requests: world.provider.requests.length - requestsAtStop,
+				busy: session.getSessionWorkState().busy,
+				queued: session.deliverablePendingMessageCount,
 			},
 			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the session's fleet stop for owner_stopped ends it, its delivered end waking no turn once the session is at rest",
 		).toEqual({
@@ -538,6 +538,8 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 			workerEnd: "aborted",
 			attempts: [{ status: "cancelled", end: "delivered" }],
 			requests: 0,
+			busy: false,
+			queued: 0,
 		});
 	} finally {
 		workerGate.release();
