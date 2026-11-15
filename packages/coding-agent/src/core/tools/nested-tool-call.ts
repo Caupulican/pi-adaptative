@@ -160,7 +160,7 @@ function contentText(content: AgentToolResult<unknown>["content"]): string {
 /** A sub-call is never handed off: it runs in its foreground form, the one a call that asked for a background task gets. */
 function validatedArguments(tool: AgentTool, id: string, args: Record<string, unknown>): Record<string, unknown> {
 	const toolCall = prepareToolCallArguments(tool, { type: "toolCall", id, name: tool.name, arguments: args });
-	return toolCallForm(tool, validateToolArguments(tool, toolCall, { repairEnabled: false }), false).arguments;
+	return toolCallForm(tool, validateToolArguments(tool, toolCall, { repairEnabled: false })).arguments;
 }
 
 /**

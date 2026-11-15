@@ -1630,7 +1630,7 @@ type PreparedToolCall = {
 	/** Declared parameters the model left empty and the call runs with, reported in the call's outcome. */
 	hostFilled: readonly HostFilledArgument[];
 	validationEvent?: ToolArgumentValidationTelemetryEvent;
-	background: { readonly reason?: string; readonly foreground: Record<string, any> } | undefined;
+	form: ReturnType<typeof toolCallForm>;
 };
 
 type ImmediateToolCallOutcome = {
@@ -2145,7 +2145,6 @@ async function prepareToolCall(
 				validationEvent = event;
 			},
 		});
-		const runForm = toolCallForm(tool, validatedArgs, canHandOffToolCalls(config));
 		if (preparedToolCall.repairNotes) {
 			toolCall.repairNotes = preparedToolCall.repairNotes;
 		}
@@ -2252,8 +2251,8 @@ async function prepareToolCall(
 			},
 			toolCall,
 			tool,
-			args: runForm.arguments,
-			background: runForm.background,
+			args: validatedArgs,
+			form: toolCallForm(tool, validatedArgs),
 			hostFilled,
 			validationEvent,
 		};
@@ -2450,7 +2449,7 @@ async function executeAndFinalizePreparedToolCall(
 ): Promise<FinalizedToolCallOutcome> {
 	// A call can start as a background task up front (the model asked, or the tool moved it), its body held until the
 	// handoff is decided; otherwise only the operator's clock or a manual host request moves it, while the host can.
-	const callForm = toolCallHandoff(prepared, config);
+	const callForm = toolCallHandoff(prepared.form, config);
 	const executionAbort = callForm.canHandOff ? createLinkedToolAbort(foregroundSignal) : undefined;
 	const executionSignal = executionAbort?.signal ?? foregroundSignal;
 	const startedAt = Date.now();
@@ -2461,8 +2460,7 @@ async function executeAndFinalizePreparedToolCall(
 			// Until this completion owns cleanup, the batch still owns preparation. A throwing background
 			// selector must not strand a binding or spend a retry for a body that never started.
 			onExecutionOwnership();
-			await callForm.decided;
-			const executed = await executePreparedToolCall(prepared, executionSignal, (event) => {
+			const executed = await executePreparedToolCall(prepared, await callForm.decided, executionSignal, (event) => {
 				if (emitForegroundUpdates) return emit(event);
 			});
 			const value = await finalizeExecutedToolCall(
@@ -2556,7 +2554,7 @@ async function executeAndFinalizePreparedToolCall(
 			requestId,
 			assistantMessage,
 			toolCall: prepared.toolCall,
-			args: prepared.args,
+			args: callForm.handoffArguments,
 			context: currentContext,
 			executionContext: prepared.binding?.executionContext,
 			...callForm.trigger(outcome.kind === "manual"),
@@ -2571,8 +2569,8 @@ async function executeAndFinalizePreparedToolCall(
 	if (!handoff) return callForm.inForeground(completion);
 
 	emitForegroundUpdates = false;
-	executionAbort.detachForeground();
 	callForm.handedOff();
+	executionAbort.detachForeground();
 	return {
 		toolCall: prepared.toolCall,
 		result: {
@@ -2592,10 +2590,11 @@ async function executeAndFinalizePreparedToolCall(
 
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
+	args: unknown,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
-	const timeoutMs = readToolFailureTimeoutMs(prepared.args, prepared.tool);
+	const timeoutMs = readToolFailureTimeoutMs(args, prepared.tool);
 	const progress = new ToolProgressDelivery<AgentToolResult<unknown>>((partialResult) =>
 		emit({
 			type: "tool_execution_update",
@@ -2610,11 +2609,8 @@ async function executePreparedToolCall(
 	try {
 		// The body starts now: past this point the call is never dropped unstarted.
 		prepared.start();
-		const result = await prepared.tool.execute(
-			prepared.toolCall.id,
-			prepared.args as never,
-			signal,
-			(partialResult) => progress.publish(partialResult),
+		const result = await prepared.tool.execute(prepared.toolCall.id, args as never, signal, (partialResult) =>
+			progress.publish(partialResult),
 		);
 		executed = {
 			result,

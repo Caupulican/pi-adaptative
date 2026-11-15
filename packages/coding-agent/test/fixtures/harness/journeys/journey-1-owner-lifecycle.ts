@@ -45,7 +45,7 @@ import { routeShellContract } from "../../../../src/core/tools/shell-contract-ro
 import { wrapToolDefinition } from "../../../../src/core/tools/tool-definition-wrapper.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
-import { toolCallForm } from "../../../../src/kernel/tool-call-arguments.ts";
+import { toolCallForm, toolCallHandoff } from "../../../../src/kernel/tool-call-arguments.ts";
 import type { AgentTool } from "../../../../src/kernel/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import {
@@ -3094,28 +3094,32 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			undefined,
 			undefined,
 		]);
-		// Where no task can start (a worker, a lane, a nested call), a wait and an explicit background request both run in the
-		// foreground form, so the body never runs with the background run's bound.
+		// A wait and an explicit background request carry both forms; where no task can start (a worker, a lane) or the
+		// handoff is refused, the loop starts the body in the foreground form, never the background form in the foreground.
 		const bashTool = wrapToolDefinition(bashDefinition);
-		const prepared = (args: Record<string, unknown>, canHandOff: boolean) => {
-			const form = toolCallForm(bashTool, args, canHandOff);
-			return { arguments: form.arguments, background: form.background };
-		};
+		const waitForm = toolCallForm(bashTool, { command: "gh run watch 4242" });
 		expect(
-			[
-				prepared({ command: "gh run watch 4242" }, true),
-				prepared({ command: "gh run watch 4242" }, false),
-				prepared({ command: "gh run watch 4242", background: true }, false),
-			],
-			"the loop starts the background form only where a task can start",
+			[waitForm, toolCallForm(bashTool, { command: "gh run watch 4242", background: true })],
+			"a moved wait and an explicit request each carry their background and foreground forms",
 		).toEqual([
 			{
-				arguments: { command: "gh run watch 4242", background: true },
-				background: { reason: "it waits on outside state", foreground: { command: "gh run watch 4242" } },
+				arguments: { command: "gh run watch 4242" },
+				background: {
+					arguments: { command: "gh run watch 4242", background: true },
+					reason: "it waits on outside state",
+				},
 			},
-			{ arguments: { command: "gh run watch 4242" }, background: undefined },
-			{ arguments: { command: "gh run watch 4242" }, background: undefined },
+			{
+				arguments: { command: "gh run watch 4242" },
+				background: { arguments: { command: "gh run watch 4242", background: true } },
+			},
 		]);
+		const noTask = toolCallHandoff(waitForm, {} as never);
+		expect(noTask.canHandOff, "a host that hands no call off cannot move the wait").toBe(false);
+		noTask.inForeground(undefined);
+		expect(await noTask.decided, "the wait's body starts in its foreground form").toEqual({
+			command: "gh run watch 4242",
+		});
 		gate.release();
 		await withDeadline(trace, "external wait exit woke the root", handed.promise, 60_000);
 		await withDeadline(trace, "external wait handoff settled", waitSession.waitForForegroundIdle(), 60_000);
