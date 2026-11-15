@@ -13,6 +13,7 @@ import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
 import type { BotOperatorMessageDispatchResult, BotOperatorMessageOptions } from "./bot-operator-message-options.ts";
 import { assertBotId, type BotRuntimeBindings, type BotRuntimeContext } from "./bot-runtime-bindings.ts";
 import { freshBotRuntimeId, keyedBotRuntimeId } from "./bot-runtime-id.ts";
+import { assertBotReachable } from "./bot-unreachable.ts";
 import { botWorkerStart } from "./bot-worker-start.ts";
 import {
 	normalizeBotOrTeamId,
@@ -166,7 +167,12 @@ export class BotOperatorDispatch {
 			if (!team || teamIncarnation(team) !== teamIncarnationId || !team.memberAgentIds.includes(normId))
 				throw new Error("Bot membership or selected group changed before dispatch.");
 		}
-		if (store.getBot(normId)?.remote) {
+		// Only the owner's own word makes a bot it names or brings a retired one back; any other send to an id no bot has, or
+		// to a retired bot, is refused before anything is written or started (`bot-unreachable.ts`).
+		const ownerDirect = isOwnerDirect(context, options);
+		const known = store.getBot(normId);
+		if (known?.remote) {
+			if (!ownerDirect) assertBotReachable(normId, known);
 			// A machine joined over the link answers on its own; nothing here starts a worker for it.
 			const hub = this.host.getRemoteHub();
 			// The orchestrator's turn is a lane, so its end notifies the asker; the owner's own words stay chat.
@@ -174,8 +180,6 @@ export class BotOperatorDispatch {
 				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
 			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
 		}
-		// Only the owner's own word makes a bot it names; any other send to an id no bot has is refused (`bot-unreachable.ts`).
-		const ownerDirect = isOwnerDirect(context, options);
 		if (ownerDirect) {
 			// The owner's word to a bot with a session of its own never needs the worker runtime.
 			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
@@ -240,6 +244,7 @@ export class BotOperatorDispatch {
 			};
 		}
 
+		// Only the owner's own word reaches a retired bot here: the store refused every other send.
 		if (bot.retired) {
 			bot = store.upsertBot({ agentId: normId, retired: false });
 		}

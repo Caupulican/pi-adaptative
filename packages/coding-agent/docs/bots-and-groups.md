@@ -321,6 +321,10 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
   report still reaches the leader, and the leader's next turn ends the goal. To hold a goal instead, pause it
   (`/lead pause <leader>`). A leader leading an open goal cannot be retired until the goal ends; cancel it first to end it sooner.
 - The orchestrator retires a bot with its `bot` tool (`action retire`, `agentId`), as `/bot retire` does, under the same refusals.
+- A retired bot takes only your own message (`/bot msg`, its roster chat, `@bot`), which brings it back. The orchestrator's
+  `bot ask`, a leader's brief, a group's message and a routine's run do not reach it: the ask is refused with that reason,
+  the group's message records that member as not delivered, and the routine's run fails. You are told once per routine, until
+  a run reaches the bot again, and three failed runs in a row pause the routine, as any failing routine is paused.
 - A paused goal holds the messages it filed to its bots, in order, and starts them again when it resumes. The goal closes
   only once none of its messages is still waiting.
 - The goal lives in this session's orchestration store, so a restart resumes every open goal where it stood.

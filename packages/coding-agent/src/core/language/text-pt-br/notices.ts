@@ -159,6 +159,10 @@ export const NOTICES = {
 		},
 		resultUndeliverable: (routineId: string, why: string) =>
 			`Um resultado da rotina ${routineId} nunca poderá chegar a esta sessão, então ele não espera mais pela entrega: ${why}.`,
+		botUnreachable: (routineId: string, agentId: string, state: "missing" | "retired", pauseAfter: number) =>
+			state === "retired"
+				? `A rotina ${routineId} envia ao bot ${agentId}, que foi retirado, então as execuções dela falham, e após ${pauseAfter} seguidas ela é pausada. Uma mensagem sua ao bot o traz de volta; ou aponte a rotina para outro bot.`
+				: `A rotina ${routineId} envia ao bot ${agentId}, que não existe, então as execuções dela falham, e após ${pauseAfter} seguidas ela é pausada. Crie o bot, ou aponte a rotina para outro bot.`,
 		removedOriginLost: (routineId: string) =>
 			`A rotina ${routineId} foi removida: o ponto desta sessão em que ela foi salva nunca mais poderá ser alcançado (o arquivo da sessão não existe mais, ou a entrada dela falta no arquivo da sessão), então nenhuma execução dela poderia informar aqui. Salve-a de novo para que continue rodando.`,
 	},

@@ -88,7 +88,7 @@ import {
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
-import { BotUnreachableError } from "./bot-unreachable.ts";
+import { assertBotReachable } from "./bot-unreachable.ts";
 import {
 	BOT_OR_TEAM_ID_REGEX,
 	parseBotRecord,
@@ -992,7 +992,7 @@ export class PersistentBotTeamStore {
 
 	/**
 	 * Stamps a send on its bot under the lock, after the reload. `create` (the owner's own word; read only then) makes the
-	 * bot a send names; without it, a send to an id no bot has is refused and writes nothing.
+	 * bot a send names; without it, a send to an id no bot has or to a retired bot is refused and writes nothing.
 	 */
 	ensureBotForDispatch(
 		agentId: string,
@@ -1000,10 +1000,10 @@ export class PersistentBotTeamStore {
 	): PersistentBotRecord {
 		return this.mutate(() => {
 			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
-			const defaults = this.bots.has(normalizedId) ? {} : create?.();
-			if (defaults === undefined) throw new BotUnreachableError(normalizedId);
+			const existing = this.bots.get(normalizedId);
+			if (!create) assertBotReachable(normalizedId, existing);
 			return this.writeBot({
-				...defaults,
+				...(existing ? {} : create?.()),
 				agentId: normalizedId,
 				lastMessageAt: Date.now(),
 			});

@@ -164,6 +164,11 @@ export const NOTICES = {
 		/** `why`: the loss, worded by `routineOriginLoss` of the same catalogue. */
 		resultUndeliverable: (routineId: string, why: string) =>
 			`A result of routine ${routineId} can never reach this session, so it no longer waits for delivery: ${why}.`,
+		/** A bot routine's bot is retired or has no record, so its runs fail; `pauseAfter` failed runs in a row pause it. */
+		botUnreachable: (routineId: string, agentId: string, state: "missing" | "retired", pauseAfter: number) =>
+			state === "retired"
+				? `Routine ${routineId} sends to bot ${agentId}, which is retired, so its runs fail, and after ${pauseAfter} in a row it pauses. The owner's own message to the bot brings it back; or point the routine at another bot.`
+				: `Routine ${routineId} sends to bot ${agentId}, which does not exist, so its runs fail, and after ${pauseAfter} in a row it pauses. Create the bot, or point the routine at another bot.`,
 		removedOriginLost: (routineId: string) =>
 			`Routine ${routineId} was removed: the point of this session it was saved at can never be reached again (its session file is gone, or its entry is missing from the session file), so none of its runs could ever report here. Save it again to keep it running.`,
 	},

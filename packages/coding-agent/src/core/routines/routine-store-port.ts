@@ -18,6 +18,16 @@ import type { RoutineRunFacts } from "./routine-progress.ts";
 import type { RetiredRoutineRecord, RoutineRetireInput } from "./routine-retired.ts";
 import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routine-watch-edge.ts";
 
+/**
+ * What sending a bot or group routine's prompt came to, written as its result: `failed` when the prompt reached no one
+ * (a retired or missing bot, a group none of whose members took it), with the code and the sentence saying why.
+ */
+export interface RoutineMessageResult {
+	readonly outcome: "succeeded" | "failed";
+	readonly summary: string;
+	readonly facts: RoutineRunFacts;
+}
+
 /** The existing persistent store implements this boundary; scheduling owns no second registry. */
 export interface RoutineStorePort {
 	reload(): void;

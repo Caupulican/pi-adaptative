@@ -15,6 +15,7 @@ import type {
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
+import { BotUnreachableError } from "../delegation/bot-unreachable.ts";
 import type {
 	PersistentBotTeamStore,
 	TeamOperatorMessageDispatchResult,
@@ -22,13 +23,13 @@ import type {
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
-import { wordedNotice } from "../harness-notice.ts";
+import { type HarnessNotice, wordedNotice } from "../harness-notice.ts";
 import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
-import type { RoutineDelivery } from "./routine-contract.ts";
+import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import { routineOriginReach } from "./routine-origin-reach.ts";
@@ -48,6 +49,7 @@ import {
 	routineWorkerRequest,
 } from "./routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routine-session-controller.ts";
+import type { RoutineMessageResult } from "./routine-store-port.ts";
 import { routineWakeAddress } from "./routine-wake-address.ts";
 import { RoutineWatchMonitor, type WatchFailing } from "./routine-watch-monitor.ts";
 import { isOneShotWatch, routineWakeText, watchFailingWakeText } from "./routine-watch-wake.ts";
@@ -100,6 +102,65 @@ export class RoutineRuntimeAssembly {
 	constructor(deps: BackgroundLaneControllerDeps, host: RoutineAssemblyHost) {
 		this.deps = deps;
 		this.host = host;
+	}
+
+	/**
+	 * Sends a bot or group routine's prompt. A bot that is retired or missing takes no prompt (`bot-unreachable.ts`): the
+	 * run failed, and the owner is told once, until a run reaches the bot again. A group run failed when no member took the
+	 * prompt. Any other error leaves the run uncertain.
+	 */
+	private async dispatchRoutineMessage(occurrence: RoutineOccurrence): Promise<RoutineMessageResult> {
+		const { target, routineId } = occurrence;
+		const prompt = occurrence.definition.prompt;
+		if (target.kind === "bot") {
+			const notice = (state: HarnessNotice | "clear") =>
+				this.deps.observeHarnessNotice?.("routine-bot-unreachable", () => ({ scope: routineId, state }));
+			try {
+				const result = await this.host.sendOperatorMessageToBot(target.agentId, prompt, { fromRoutine: true });
+				notice("clear");
+				return {
+					outcome: "succeeded",
+					summary: `Prompt accepted by bot ${target.agentId} (${result.mode}); worker completion is tracked separately.`,
+					facts: { reasonCode: "delivered" },
+				};
+			} catch (error) {
+				if (!(error instanceof BotUnreachableError)) throw error;
+				const { agentId, state } = error;
+				notice(
+					wordedNotice(`${routineId}:${agentId}:${state}`, (words) =>
+						words.notices.routineStates.botUnreachable(
+							routineId,
+							agentId,
+							state,
+							ROUTINE_FAILURE_PAUSE_THRESHOLD,
+						),
+					),
+				);
+				return {
+					outcome: "failed",
+					summary: error.message,
+					facts: { reasonCode: `bot_${state}`, step: "dispatch" },
+				};
+			}
+		}
+		if (target.kind === "team") {
+			const { deliveries } = await this.host.sendOperatorMessageToTeam(target.teamId, prompt);
+			const failed = deliveries.filter((delivery) => delivery.outcome === "failed");
+			const why = failed.map((delivery) => `${delivery.agentId}: ${delivery.detail ?? "not delivered"}`).join("; ");
+			if (failed.length === deliveries.length)
+				return {
+					outcome: "failed",
+					summary: `No member of group ${target.teamId} took the prompt (${why}).`,
+					facts: { reasonCode: "team_undelivered", step: "dispatch" },
+				};
+			const accepted = deliveries.length - failed.length;
+			return {
+				outcome: "succeeded",
+				summary: `Prompt accepted for ${accepted} of ${deliveries.length} team deliveries${failed.length > 0 ? ` (not delivered: ${why})` : ""}; worker completion is tracked separately.`,
+				facts: { reasonCode: "delivered" },
+			};
+		}
+		throw new Error("Session routines require the native worker executor.");
 	}
 
 	/**
@@ -338,24 +399,7 @@ export class RoutineRuntimeAssembly {
 				noticeRoutineState: (kind, routineId, notice) =>
 					this.deps.observeHarnessNotice?.(kind, () => ({ scope: routineId, state: notice ?? "clear" })),
 			},
-			dispatchMessage: async (occurrence) => {
-				if (occurrence.target.kind === "bot") {
-					const result = await this.host.sendOperatorMessageToBot(
-						occurrence.target.agentId,
-						occurrence.definition.prompt,
-						{ fromRoutine: true },
-					);
-					return `Prompt accepted by bot ${occurrence.target.agentId} (${result.mode}); worker completion is tracked separately.`;
-				}
-				if (occurrence.target.kind === "team") {
-					const result = await this.host.sendOperatorMessageToTeam(
-						occurrence.target.teamId,
-						occurrence.definition.prompt,
-					);
-					return `Prompt accepted for ${result.deliveries.length} team deliveries; worker completion is tracked separately.`;
-				}
-				throw new Error("Session routines require the native worker executor.");
-			},
+			dispatchMessage: (occurrence) => this.dispatchRoutineMessage(occurrence),
 			warn: (message) => this.host.warn(message),
 		});
 		// One admission serves a watch when it is saved and at every evaluation, so a saved watch never runs with more

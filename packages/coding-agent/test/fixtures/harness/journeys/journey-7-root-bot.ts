@@ -22,6 +22,7 @@ import {
 	onlyAgentOn,
 	PHASE_JUDGMENTS,
 	reached,
+	refusalOf,
 	TRACK,
 } from "./journey-7-shared.ts";
 import { fencedToolOutput } from "./shared.ts";
@@ -36,11 +37,15 @@ const ASKED = "How high is the retry limit?";
 /** The bot's whole answer: a plain fact that names no test, check, commit or change, so it claims nothing System One reads. */
 const ANSWER = "The retry limit is three.";
 const HANDOFF_HEADER = "Background worker terminal handoff:";
+/** An id no bot has: the root's ask to it makes no bot. */
+const MISSING = "never-made";
 
 /**
  * Leg 1: the root creates a bot, asks it and retires it. Creation records the bot and starts nothing; the ask starts it
  * with its soul and the question, and the answer comes back to the root as the event that starts the root's next turn;
- * once it answered, the root's bot retire retires it as the owner's /bot retire does.
+ * once it answered, the root's bot retire retires it as the owner's /bot retire does. Only the owner's own message brings
+ * a retired bot back or makes a bot it names, so the root's ask to the retired bot and its ask to an id no bot has are
+ * refused, each naming the root's next step, and neither reaches a model or makes a bot.
  */
 export async function runJourney7RootBotPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -65,6 +70,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		wakeLines: [] as string[],
 		list: {} as Record<string, unknown>,
 		retired: {} as Record<string, unknown>,
+		retiredAsk: { tool: "", sentence: "" },
+		missingAsk: { tool: "", sentence: "" },
+		// The bot's model requests once it was retired, and after the root's asks to it and to the missing id.
+		botRequests: { retired: -1, after: -1 },
 		// The record as creation left it, read before anything else changes it.
 		record: undefined as ReturnType<typeof botRecord> | undefined,
 		// Read in the request that follows the create call, before anything asks the bot to work.
@@ -192,8 +201,49 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			name: "j7-root-retired",
 			check: (request) => {
 				seen.retired = acceptedJson(request, BOT_TOOL_NAME);
+				seen.botRequests.retired = world.provider.requests.filter(
+					(entry) => entry.model.id === MODEL_ID.retry,
+				).length;
 			},
-			reply: { content: [{ type: "text", text: "The bot is retired." }] },
+			// Retired, the bot takes no message from the root: the ask is refused, and the root learns why.
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-root-ask-retired-1",
+						name: BOT_TOOL_NAME,
+						arguments: { action: "ask", agentId: BOT_ID, message: ASKED },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-root-ask-missing",
+			check: (request) => {
+				seen.retiredAsk = refusalOf(request, BOT_TOOL_NAME);
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-root-ask-missing-1",
+						name: BOT_TOOL_NAME,
+						arguments: { action: "ask", agentId: MISSING, message: ASKED },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-root-asked-missing",
+			check: (request) => {
+				seen.missingAsk = refusalOf(request, BOT_TOOL_NAME);
+				seen.botRequests.after = world.provider.requests.filter(
+					(entry) => entry.model.id === MODEL_ID.retry,
+				).length;
+			},
+			reply: { content: [{ type: "text", text: "Neither bot was asked." }] },
 		},
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-root-bot", PHASE_JUDGMENTS);
@@ -206,7 +256,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	await withDeadline(
 		trace,
 		"J7 leg 1: the bot answered the root",
-		world.provider.whenReached(reached(TRACK.root, "j7-root-retired")),
+		world.provider.whenReached(reached(TRACK.root, "j7-root-asked-missing")),
 	);
 	await withDeadline(trace, "J7 leg 1: the root is idle", session.waitForForegroundIdle());
 
@@ -301,10 +351,30 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	});
 	expect(
 		allBots(session).map((bot) => bot.agentId),
-		"the store holds the one bot this leg made",
+		"the store holds the one bot this leg made: the root's ask to an id no bot has made none",
 	).toEqual([BOT_ID]);
 	expect(
 		{ result: seen.retired, retired: botRecord(session, BOT_ID).retired === true },
 		"bot retire retires the bot as the owner's /bot retire does, says so in the model's words, and the record stays, retired",
 	).toEqual({ result: { retired: true, agentId: BOT_ID, detail: `Bot ${BOT_ID} retired.` }, retired: true });
+	expect(
+		{
+			retiredAsk: seen.retiredAsk,
+			missingAsk: seen.missingAsk,
+			stillRetired: botRecord(session, BOT_ID).retired === true,
+			botRequests: seen.botRequests.after - seen.botRequests.retired,
+		},
+		"the root's ask to the retired bot and to an id no bot has are refused with the root's next step: the retired bot stays retired and no model is asked",
+	).toEqual({
+		retiredAsk: {
+			tool: BOT_TOOL_NAME,
+			sentence: `Bot ${BOT_ID} is retired; only the owner's own message to it brings it back. It was not asked; bot list shows the bots you can ask.`,
+		},
+		missingAsk: {
+			tool: BOT_TOOL_NAME,
+			sentence: `There is no bot named ${MISSING}. Create it with bot create, or find the bot you mean with bot list.`,
+		},
+		stillRetired: true,
+		botRequests: 0,
+	});
 }

@@ -34,6 +34,7 @@ export type HarnessNoticeKind =
 	| "routine-unschedulable"
 	| "routine-snag"
 	| "routine-origin-lost"
+	| "routine-bot-unreachable"
 	| "routine-away-service"
 	| "host-event-gap"
 	| "host-event-source"

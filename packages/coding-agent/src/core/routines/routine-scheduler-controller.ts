@@ -43,7 +43,7 @@ import type { RoutineRunFacts } from "./routine-progress.ts";
 import { routineInstructions } from "./routine-run-brief.ts";
 import { routineReceiptOrigin } from "./routine-save-origin.ts";
 import { type RoutineNoticePort, RoutineStateNotices } from "./routine-state-notices.ts";
-import type { RoutineStorePort } from "./routine-store-port.ts";
+import type { RoutineMessageResult, RoutineStorePort } from "./routine-store-port.ts";
 import { WATCH_WAKE_SUMMARY } from "./routine-watch-wake.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
 
@@ -261,7 +261,7 @@ interface RoutineSchedulerDeps {
 		/** Why a saved run cannot run away (its authority needs the open session), or undefined when it can. */
 		refusal(intent: WorkerSavedIntent): string | undefined;
 	};
-	dispatchMessage(occurrence: RoutineOccurrence): Promise<string>;
+	dispatchMessage(occurrence: RoutineOccurrence): Promise<RoutineMessageResult>;
 	warn(message: string): void;
 }
 
@@ -988,17 +988,17 @@ export class RoutineSchedulerController {
 				);
 				this.recordExecution(occurrence, outcome.state);
 			} else {
-				const summary = await this.deps.dispatchMessage(occurrence);
+				const sent = await this.deps.dispatchMessage(occurrence);
 				if (!this.active) return;
 				this.deps.store.finishRoutineOccurrence({
 					occurrenceId: occurrence.occurrenceId,
 					claimToken,
-					outcome: "succeeded",
-					summary,
+					...sent,
 					recipient: this.deps.parentSessionId,
 					nowMs: this.deps.timers.now(),
-					facts: { reasonCode: "delivered" },
 				});
+				// A prompt that reached no one is a failed run, which counts toward the routine's pause.
+				if (sent.outcome === "failed") return void result.failed.push(`${occurrence.routineId}: ${sent.summary}`);
 			}
 			result.dispatched.push(occurrence.routineId);
 		} catch (error) {

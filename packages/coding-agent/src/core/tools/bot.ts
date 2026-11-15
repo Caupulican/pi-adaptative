@@ -124,10 +124,12 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 					chars: input.message.length,
 				});
 				await port.ask(input.agentId, input.message).catch((error: unknown) => {
-					// The orchestrator makes bots, so an ask that reached none names its next step: make the bot, or find it.
+					// An ask that reached no bot names the orchestrator's next step: it makes bots, but a retired one keeps its id.
 					if (error instanceof BotUnreachableError)
 						throw new Error(
-							`${error.message} Create it with bot create, or find the bot you mean with bot list.`,
+							error.state === "missing"
+								? `${error.message} Create it with bot create, or find the bot you mean with bot list.`
+								: `${error.message} It was not asked; bot list shows the bots you can ask.`,
 						);
 					throw error;
 				});
