@@ -993,7 +993,8 @@ export class BotOwedWork {
 				);
 			}
 			this.failedStops.delete(agentId);
-			return { waits: taken === "held" && waits, failed: false, retrying: false };
+			// A take that applied none (another holds the lock, or no stop listed read) leaves the listed ones waiting.
+			return { waits: waits && (taken === "held" || !taken.stop), failed: false, retrying: false };
 		} catch (error) {
 			// The take may have dropped the stop held (its mark moved, or its re-mark after the failure did not read; the owner
 			// was told it was dropped): only the stops that still wait are owed, and with none left nothing waits.

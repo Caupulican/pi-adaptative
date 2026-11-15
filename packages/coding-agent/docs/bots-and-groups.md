@@ -143,8 +143,8 @@ lock, for that comparison and for the stop it applies. The stop is dropped once 
 saved session, or that session's worker records, moved), and it is not held when where the bot's work stands cannot be
 read as the stop is made or after a take of it failed; either way you are told once that it was dropped, and why, to
 send it again. A read that fails inside a take keeps the stop held and fails that take, for the next. For a bot this
-process hosts, a stop that could not be recorded is applied at once, whole, to the bot's work here, and you are told so. A worker the owner stopped opens no
-turn of the bot. A
+process hosts, a stop that could not be recorded is applied at once, whole, to the bot's work here, and you are told
+so. A worker the owner stopped opens no turn of the bot. A
 profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
 plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
