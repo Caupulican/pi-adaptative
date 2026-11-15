@@ -162,9 +162,10 @@ failed to open for another reason than its model, such as an unreadable session 
 once a new message waits or its record changed; a process start or another host's change tries it at once); a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
 least once: a host killed after its session took a message and before it deleted the file gives it again. Like the session
 files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
-the bot homes. `/bot stop` ends the bot's turn in flight, its plans, the attempts and queued work of its worker tasks (a retry of
-a task included) and the jobs its session placed on other machines. Its turn, plans and tasks are ended only when made
-by the time the stop was given: a turn, plan or task started after it (for your next words) runs on. It reaches the bot
+the bot homes. `/bot stop` ends everything of the bot's running when it is taken: its turn in flight, its plans, the attempts and queued
+work of its worker tasks and the jobs its sessions placed on other machines (a session file in its home that is a
+symbolic link is skipped, and you are told). Your words sent after it never start a turn before it is applied: while a
+stop waits unapplied they wait in the bot's inbox behind it, and you are told so. It reaches the bot
 wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which),
 or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end
 with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
