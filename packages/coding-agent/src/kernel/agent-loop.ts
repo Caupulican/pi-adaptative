@@ -2498,16 +2498,8 @@ async function executeAndFinalizePreparedToolCall(
 	})();
 	if (!executionAbort || !config.handoffToolCall) return callForm.inForeground(completion);
 
-	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = [];
-	if (callForm.delayMs !== undefined) {
-		triggers.push(
-			new Promise<{ kind: "deadline" }>((resolve) => {
-				deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), callForm.delayMs);
-				(deadlineTimer as { unref?: () => void }).unref?.();
-			}),
-		);
-	}
+	const clock = callForm.armClock();
+	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = clock ? [clock.reached] : [];
 	let unsubscribeHandoffRequest: (() => void) | undefined;
 	if (config.subscribeToolCallHandoffRequest) {
 		const manual = new Promise<{ kind: "manual" }>((resolve) => {
@@ -2526,7 +2518,7 @@ async function executeAndFinalizePreparedToolCall(
 	try {
 		outcome = await Promise.race([completion.then((value) => ({ kind: "completed" as const, value })), ...triggers]);
 	} finally {
-		if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+		clock?.disarm();
 		try {
 			unsubscribeHandoffRequest?.();
 		} catch {

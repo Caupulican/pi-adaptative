@@ -45,12 +45,16 @@ export function toolCallForm(tool: AgentTool<any>, args: Record<string, any>): T
 export interface ToolCallHandoff {
 	/** Whether the host can hand this call off at all: it can now, and something would move the call. */
 	readonly canHandOff: boolean;
-	/** When the clock moves the call: at once for a call with a background form, else the operator's delay. */
-	readonly delayMs: number | undefined;
 	/** The arguments the call runs with if it is handed off. */
 	readonly handoffArguments: Record<string, any>;
 	/** The arguments the body runs with, once it may start. */
 	readonly decided: Promise<Record<string, any>>;
+	/**
+	 * Arms the clock that moves the call, if any: at once for a call with a background form, whose body is held until its
+	 * handoff is decided, so no timer stands between the call and its start (an unreferenced one would let the process
+	 * exit with the call never started); else the operator's delay, an unreferenced timer beside a body already running.
+	 */
+	armClock(): { readonly reached: Promise<{ kind: "deadline" }>; disarm(): void } | undefined;
 	/** What moves the call if it is handed off now: the host by hand, the model's request, the tool, or the clock. */
 	trigger(manual: boolean): Pick<BackgroundToolCallContext, "trigger" | "reason">;
 	/** The handoff was accepted: the body starts in the background form. */
@@ -61,7 +65,7 @@ export interface ToolCallHandoff {
 
 export function toolCallHandoff(form: ToolCallForm, config: AgentLoopConfig): ToolCallHandoff {
 	const background = form.background;
-	const delayMs = background !== undefined ? 0 : backgroundToolCallDelay(config);
+	const delayMs = background !== undefined ? undefined : backgroundToolCallDelay(config);
 	let start: (args: Record<string, any>) => void = () => {};
 	const decided = new Promise<Record<string, any>>((resolve) => {
 		start = resolve;
@@ -69,10 +73,20 @@ export function toolCallHandoff(form: ToolCallForm, config: AgentLoopConfig): To
 	if (background === undefined) start(form.arguments);
 	return {
 		canHandOff:
-			canHandOffToolCalls(config) && (delayMs !== undefined || config.subscribeToolCallHandoffRequest !== undefined),
-		delayMs,
+			canHandOffToolCalls(config) &&
+			(background !== undefined || delayMs !== undefined || config.subscribeToolCallHandoffRequest !== undefined),
 		handoffArguments: background?.arguments ?? form.arguments,
 		decided,
+		armClock() {
+			if (background !== undefined) return { reached: Promise.resolve({ kind: "deadline" }), disarm() {} };
+			if (delayMs === undefined) return undefined;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const reached = new Promise<{ kind: "deadline" }>((resolve) => {
+				timer = setTimeout(() => resolve({ kind: "deadline" }), delayMs);
+				(timer as { unref?: () => void }).unref?.();
+			});
+			return { reached, disarm: () => clearTimeout(timer) };
+		},
 		trigger(manual) {
 			if (manual) return { trigger: "manual" };
 			if (background === undefined) return { trigger: "clock" };
