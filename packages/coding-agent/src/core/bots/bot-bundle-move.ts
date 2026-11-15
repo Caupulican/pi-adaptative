@@ -20,6 +20,11 @@
  * in the bot's home, when its session is built there. The bundle moves first, so a reader without the locks that finds
  * the bot's home holding the session finds its state there.
  *
+ * A bundle whose session ran workers is not moved at all: their transcripts' birth records, their bindings in the
+ * session's event store and the home's project-specialist entries name the transcripts by absolute path in the owner's
+ * home, which a rename cannot rewrite, so the session keeps its state there (`kept`, `worker-records`) and keeps using
+ * it there, as every opener derives (`resolveSessionHome`: no bot home holds it).
+ *
  * A rename that fails puts back what moved before it. Across devices (`EXDEV`) the state is kept where it was: the
  * session is then opened in the owner's home, which still holds it (`botSessionStorageRoots`), and the host tells the
  * owner once; any other failure is thrown to the load, and a put-back that fails too is thrown with it, naming which
@@ -39,6 +44,7 @@ import {
 	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	ownerOrchestrationHome,
+	workerConversationSessionsDir,
 } from "../../kernel/session/session-bundle-paths.ts";
 import { fleetQueueMetadataPath } from "../fleet/fleet-queue-store.ts";
 
@@ -49,7 +55,8 @@ import { fleetQueueMetadataPath } from "../fleet/fleet-queue-store.ts";
  * home not proven dead serves it; it stays, and the host's own lease there is refused while that holder lives, which
  * is what the owner is told. `kept`: the move was not made (`reason`), and the host tells the owner once: the bot's
  * home already has a bundle of the session (`in-both-homes`, the session uses the bot's, and the owner's stays unused
- * at `ownerBundle`), or the homes lie on different devices (`cross-device`, the session uses the owner's).
+ * at `ownerBundle`), the session's workers recorded their transcripts in the owner's home (`worker-records`), or the
+ * homes lie on different devices (`cross-device`); in those two the session uses the owner's.
  */
 export type BotBundleMove =
 	| { readonly kind: "none" }
@@ -57,7 +64,7 @@ export type BotBundleMove =
 	| { readonly kind: "deleting" }
 	| { readonly kind: "held" }
 	| { readonly kind: "kept"; readonly reason: "in-both-homes"; readonly ownerBundle: string }
-	| { readonly kind: "kept"; readonly reason: "cross-device" };
+	| { readonly kind: "kept"; readonly reason: "worker-records" | "cross-device" };
 
 /**
  * A move that failed and whose put-back failed too: `errors` holds the failure first, then each put-back's.
@@ -137,6 +144,9 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			const inBoth = pieces.filter((index) => existsSync(to[index] as string));
 			if (inBoth.includes(BUNDLE))
 				return { kind: "kept", reason: "in-both-homes", ownerBundle: from[BUNDLE] as string };
+			// The bot's bundle, when there is one, is the one the session uses; else the owner's stays where its workers wrote.
+			if (existsSync(workerConversationSessionsDir(owner, sessionId)))
+				return { kind: "kept", reason: "worker-records" };
 			// What the bot's home already has wins where the owner's records nothing newer: a registry of dead holders only,
 			// or a fleet queue file older than the bot's. A newer owner's fleet queue file replaces the bot's below.
 			const dropped = inBoth.filter(

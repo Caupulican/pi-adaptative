@@ -685,7 +685,9 @@ export class BotSessionHost {
 					this.ports.warn(
 						kept.reason === "in-both-homes"
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
-							: words.botSessionStateNotMoved(agentId),
+							: kept.reason === "worker-records"
+								? words.botSessionStateKeptForWorkers(agentId)
+								: words.botSessionStateNotMoved(agentId),
 					);
 				},
 			});

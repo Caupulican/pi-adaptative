@@ -1099,7 +1099,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				});
 
 				// Synthesized capability artifacts are runtime state of the session that built them, never a project change.
-				const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
+				const capabilityArtifactRoot = capabilityArtifactsDir(orchestrationHome, sessionManager.getSessionId());
 
 				const capabilityBuilder = new RealCapabilityBuilder({
 					taskRuntime: durableTaskRuntime,

@@ -374,9 +374,13 @@ export function lessonCandidatesFile(agentDir: string): string {
 	return stateFile(agentDir, "lesson-candidates.jsonl");
 }
 
-/** `<agentDir>/state/runtime/capabilities/<sessionId>` -- per-session capability artifacts. */
-export function capabilityArtifactsDir(agentDir: string, sessionId: string): string {
-	return stateFile(agentDir, "runtime", "capabilities", sessionId);
+/**
+ * `<home.stateDir>/runtime/capabilities/<sessionId>` -- per-session capability artifacts, in the state directory of the
+ * session's home (`<agentDir>/state` for the owner's, the bot's orchestration directory for a bot's), so a bot's
+ * synthesized capabilities stay inside its home.
+ */
+export function capabilityArtifactsDir(home: OrchestrationHome, sessionId: string): string {
+	return join(home.stateDir, "runtime", "capabilities", sessionId);
 }
 
 export type ManagedMemoryFileName = "MEMORY.md" | "USER.md";

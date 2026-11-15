@@ -145,6 +145,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a sessão salva dele não foi lida (${reason}); as esperas dele não são contadas até ela ser lida.`,
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele está tanto na casa dele quanto na da sessão principal; ele usa o da casa dele, e a cópia da sessão principal fica sem uso em ${ownerBundle}.`,
+	botSessionStateKeptForWorkers: (agentId: string) =>
+		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, onde os workers dele registraram as conversas; ele continua usando-o lá.`,
 	botSessionStateNotMoved: (agentId: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele, que fica em outro dispositivo; ele continua usando-o na casa da sessão principal.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
