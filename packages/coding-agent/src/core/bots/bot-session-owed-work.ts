@@ -1,22 +1,41 @@
 /**
- * What a bot's own session is owed, read from the store and its file without loading it: a live watch to sample, a firing
- * whose wake it has not taken, or a wake it accepted and never ran (a turn refused at its start); and the opening of the
- * session of a bot owed work that no process hosts (`BotOwedWork`). And the one rule that keeps watches with the session
+ * What a bot's own session is owed, read from the store, its bundle and its file without loading it: a live watch to
+ * sample, a firing whose wake it has not taken, a wake it accepted and never ran (a turn refused at its start), its
+ * workers' work (`owesWorkerWork`) and the turn a usage limit stopped (`savedUsageResumeAt`); and the opening of the
+ * session of a bot owed work that no process hosts (`BotOwedWork`), at once or when the work comes due. The owner's stop of
+ * the workers of a session no process hosts (`cancelOwedWorkerWork`). And the one rule that keeps watches with the session
  * that holds them: the watches the home's other sessions armed are cancelled when the bot continues one session.
  */
 
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
+import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { stopSessionWorkers } from "../delegation/worker-fleet-stop.ts";
+import {
+	nextWorkerRetryAt,
+	owesWorkerWorkAt,
+	type WorkerWorkFacts,
+	workerWorkFacts,
+} from "../delegation/worker-owed-work.ts";
+import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "../orchestration/event-store.ts";
+import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
+import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
+import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
+import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText } from "./bot-failure-words.ts";
-import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
+import { botHomeOf } from "./bot-home.ts";
+import { type BotInboxItem, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
@@ -47,6 +66,114 @@ export function unrunWakes(file: string, agentDir: string): readonly string[] {
 		for (const entry of view.getBranch()) index.apply(entry, (id) => view.getEntry(id));
 		return index.pendingInputs("turn").map((input) => input.metadata.deliveryId);
 	});
+}
+
+/** The orchestration home bot `agentId`'s session `sessionId` keeps its workers in (`botSessionStorageRoots`). */
+export function botSessionHome(agentDir: string, agentId: string, sessionId: string): OrchestrationHome {
+	return botSessionStorageRoots(agentDir, botHomeOf(agentDir, agentId).orchestrationHome, sessionId).orchestrationHome;
+}
+
+/**
+ * Whether the workers of session `sessionId`, whose bundle is in `home`, owe the session's open at `nowMs`
+ * (`owesWorkerWorkAt`): queued or resumable work, a retry due, a lease holder proven dead, an end or a receipt not
+ * delivered. A retry waiting past `nowMs` is owed at its time, not now. Replays the bundle's projection; false without one.
+ */
+export function owesWorkerWork(home: OrchestrationHome, sessionId: string, nowMs: number): boolean {
+	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return false;
+	const store = new OrchestrationEventStore({ orchestrationHome: home, sessionId });
+	return owesWorkerWorkAt(workerWorkFacts(readTaskRuntimeProjection(store)), nowMs);
+}
+
+/**
+ * The owner's stop of the workers of bot session `sessionId` while no process hosts it, written to its bundle in `home`
+ * alone (`stopSessionWorkers`): every open plan closed and every unended worker attempt cancelled for `reasonCode`, so
+ * nothing opens the session for them. Their ends are recorded delivered by the session's next open, when its outbox is
+ * replayed (`owner_stopped` wakes no one). The caller holds the bot's host lock, so no process runs what it cancels.
+ * Returns how many attempts it cancelled.
+ */
+export function cancelOwedWorkerWork(home: OrchestrationHome, sessionId: string, reasonCode: string): number {
+	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return 0;
+	const runtime = new DurableTaskRuntime({
+		store: new OrchestrationEventStore({ orchestrationHome: home, sessionId }),
+	});
+	let cancelled = 0;
+	stopSessionWorkers(
+		runtime,
+		undefined,
+		(attempt) => {
+			runtime.cancelAttempt(attempt.attemptId, reasonCode);
+			cancelled++;
+		},
+		reasonCode,
+	);
+	return cancelled;
+}
+
+/** What the time a saved transcript continues reads beside the rule of a kept stop: the reset recorded for a model. */
+export interface SavedUsageResumeRules extends RestoredUsageRules {
+	modelExhaustion(ref: string): { readonly until: number | undefined } | undefined;
+}
+
+/**
+ * When the bot's saved session, `file`, continues the turn or goal a subscription's usage limit stopped (`restoredUsageStop`
+ * on the messages its load seeds its agent with and on its goal), moved later by the exhaustion the provider admission
+ * recorded for the refusing model, as the live session's wake moves it: a closed bot is not opened against a limit that
+ * still holds. Undefined when it waits for none. Reads the whole file.
+ */
+export function savedUsageResumeAt(file: string, agentDir: string, rules: SavedUsageResumeRules): number | undefined {
+	const stop = readSessionSnapshot(file, agentDir, (view) =>
+		restoredUsageStop(view.buildSessionContext().messages.at(-1), getLatestGoalStateSnapshot(view), rules),
+	);
+	if (!stop) return undefined;
+	const until = rules.modelExhaustion(stop.resume.ref)?.until;
+	return until !== undefined && until > stop.at ? until : stop.at;
+}
+
+/**
+ * What the host knows of the worker work each bot's bundle owes (`workerWorkFacts`): the projection is replayed again only
+ * once the store committed since the last read, so the periodic listing costs a stat and an absent next event file per bot
+ * whose store did not change. The facts alone are kept, one record per bot.
+ */
+class WorkerWorkLedger {
+	private readonly reads = new Map<
+		string,
+		{ readonly dir: string; readonly ino: number; readonly lastOrdinal: number; readonly facts: WorkerWorkFacts }
+	>();
+
+	/** What the bundle of the bot's session `sessionId` in `home` owes; undefined when it has none. */
+	read(agentId: string, home: OrchestrationHome, sessionId: string): WorkerWorkFacts | undefined {
+		const store = new OrchestrationEventStore({ orchestrationHome: home, sessionId });
+		let ino: number;
+		try {
+			ino = statSync(store.rootDir).ino;
+		} catch (error) {
+			if (!isMissingFileError(error)) throw error;
+			this.reads.delete(agentId);
+			return undefined;
+		}
+		const known = this.reads.get(agentId);
+		if (known?.dir === store.rootDir && known.ino === ino && committedNothingAfter(store, known.lastOrdinal))
+			return known.facts;
+		const state = readTaskRuntimeProjection(store);
+		const facts = workerWorkFacts(state);
+		this.reads.set(agentId, { dir: store.rootDir, ino, lastOrdinal: state.lastOrdinal, facts });
+		return facts;
+	}
+
+	/** The bot's session loaded, or the bot was released: its bundle is read again when next asked. */
+	forget(agentId: string): void {
+		this.reads.delete(agentId);
+	}
+}
+
+/** Whether the store committed nothing after `ordinal` (a snapshot that moved past it counts as a commit). */
+function committedNothingAfter(store: OrchestrationEventStore, ordinal: number): boolean {
+	try {
+		return store.readAfter(ordinal).length === 0;
+	} catch (error) {
+		if (error instanceof OrchestrationSnapshotRequiredError) return false;
+		throw error;
+	}
 }
 
 /**
@@ -186,6 +313,14 @@ export class BotOwedWork {
 	private sweep: RepeatingAlarm | undefined;
 	/** The next open of each bot whose session failed to open for a cause that passes on its own (`botOpenFailure`). */
 	private readonly openRetries: BotOpenRetries;
+	/** What each bot's worker bundle owes. */
+	private readonly workerWork = new WorkerWorkLedger();
+	/** The alarm at the time a bot's saved session continues what a usage limit stopped (`armOwedAt`). */
+	private readonly usageWaits = new Map<string, WallAlarm>();
+	/** Bots whose usage wait ended while no process hosted them: owed their session's open until it loads. */
+	private readonly usageDue = new Set<string>();
+	/** The alarm at the next retry a bot's workers wait on, with its time. */
+	private readonly retryWaits = new Map<string, { readonly at: number; readonly alarm: WallAlarm }>();
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
@@ -223,12 +358,16 @@ export class BotOwedWork {
 		this.forgetRefusal(agentId);
 	}
 
-	/** The bot's session loaded: what it was owed is its own now, and its file is read again when next asked. */
+	/**
+	 * The bot's session loaded: what it was owed is its own now (its own usage wait and worker retries take their times up),
+	 * and its file and bundle are read again when next asked.
+	 */
 	loaded(agentId: string): void {
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);
+		this.forgetOwedTimes(agentId);
 	}
 
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
@@ -238,6 +377,7 @@ export class BotOwedWork {
 		this.forgetRefusal(agentId);
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);
+		this.forgetOwedTimes(agentId);
 	}
 
 	/** The host stopped: no alarm takes work up after it. */
@@ -245,25 +385,98 @@ export class BotOwedWork {
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
 		this.openRetries.stop();
+		for (const agentId of [...this.usageWaits.keys(), ...this.retryWaits.keys()]) this.forgetOwedTimes(agentId);
 		this.sweep?.stop();
 		this.sweep = undefined;
 	}
 
 	/**
+	 * The bot's session closed, or this process found it hosted by none: `usageResumeAt` is when its saved session continues
+	 * what a usage limit stopped (`savedUsageResumeAt`), undefined when nothing waits. The session is opened at that time,
+	 * on the provider admission clock, and at the next retry its workers wait on (read from its bundle, by
+	 * {@link openIfOwed}, which runs now), on the host's; any earlier usage alarm ends.
+	 */
+	armOwedAt(agentId: string, usageResumeAt: number | undefined): void {
+		this.usageWaits.get(agentId)?.stop();
+		this.usageWaits.delete(agentId);
+		if (usageResumeAt !== undefined && !this.ports.stopped())
+			this.usageWaits.set(
+				agentId,
+				alarmAt(this.ports.admissionTimers(), usageResumeAt, () => {
+					this.usageWaits.delete(agentId);
+					this.usageDue.add(agentId);
+					this.openIfOwed(agentId);
+				}),
+			);
+		this.openIfOwed(agentId);
+	}
+
+	/** Opens the bot's session at `at`, the next retry its workers wait on; any earlier retry alarm ends, the same time keeps it. */
+	private armRetry(agentId: string, at: number | undefined): void {
+		const armed = this.retryWaits.get(agentId);
+		if (armed?.at === at) return;
+		armed?.alarm.stop();
+		this.retryWaits.delete(agentId);
+		if (at === undefined || this.ports.stopped()) return;
+		const alarm = alarmAt(this.ports.timers(), at, () => {
+			this.retryWaits.delete(agentId);
+			this.openIfOwed(agentId);
+		});
+		this.retryWaits.set(agentId, { at, alarm });
+	}
+
+	/** Ends the bot's usage and retry alarms, its usage wait's due mark and its bundle's read. */
+	private forgetOwedTimes(agentId: string): void {
+		this.usageWaits.get(agentId)?.stop();
+		this.usageWaits.delete(agentId);
+		this.usageDue.delete(agentId);
+		this.retryWaits.get(agentId)?.alarm.stop();
+		this.retryWaits.delete(agentId);
+		this.workerWork.forget(agentId);
+	}
+
+	/** What the workers of the bot's saved session `sessionId` owe, read from its bundle; undefined without one. */
+	private workerFacts(agentId: string, sessionId: string): WorkerWorkFacts | undefined {
+		return this.workerWork.read(agentId, botSessionHome(this.ports.agentDir(), agentId, sessionId), sessionId);
+	}
+
+	/**
+	 * Whether a bot no process hosts is owed its session's open beside its inbox, as the periodic listing asks: a usage wait
+	 * that ended, or its workers' work. A bundle that does not read is reported by {@link openIfOwed}, so it asks.
+	 */
+	private owedBeyondInbox(agentId: string): boolean {
+		if (this.usageDue.has(agentId)) return true;
+		const sessionId = this.ports.savedSessionOf(agentId)?.id;
+		if (sessionId === undefined) return false;
+		try {
+			const facts = this.workerFacts(agentId, sessionId);
+			return facts !== undefined && owesWorkerWorkAt(facts, this.ports.timers().now());
+		} catch {
+			return true;
+		}
+	}
+
+	/**
 	 * Lists every bot's inbox every `OWED_INBOX_SWEEP_MS` until the host stops, whether the watch over the bot homes runs
 	 * or not (a watch that runs can still miss what another process writes): a message waiting for a bot this host runs is
-	 * taken, and a bot no host runs is opened ({@link openIfOwed}), unless its last open failed on the same definition and
-	 * inbox or its next open is armed already. Costs one directory listing per bot when nothing waits; no session file is
-	 * read.
+	 * taken, and a bot no host runs is opened ({@link openIfOwed}) when its inbox, its workers or a usage wait that ended
+	 * owe it, unless its last open failed on the same definition and inbox or its next open is armed already. Costs one
+	 * directory listing per bot, and per bot no host runs a stat of its worker bundle (replayed only once it changed); no
+	 * session file is read.
 	 */
 	sweepInboxes(): void {
 		if (this.sweep !== undefined || this.ports.stopped()) return;
 		this.sweep = repeatEvery(this.ports.timers(), OWED_INBOX_SWEEP_MS, () => {
 			const agentDir = this.ports.agentDir();
 			for (const { agentId } of this.ports.store().listBots()) {
-				if (!botInboxWaiting(agentDir, agentId)) continue;
-				if (this.ports.hostedHere(agentId)) this.ports.takeInbox(agentId);
-				else if (!this.openRetries.pending(agentId)) this.openIfOwed(agentId, true);
+				const waiting = botInboxWaiting(agentDir, agentId);
+				if (this.ports.hostedHere(agentId)) {
+					if (waiting || botInboxStopWaiting(agentDir, agentId)) this.ports.takeInbox(agentId);
+				} else if (
+					!this.openRetries.pending(agentId) &&
+					(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
+				)
+					this.openIfOwed(agentId, true);
 			}
 		});
 	}
@@ -313,8 +526,10 @@ export class BotOwedWork {
 
 	/**
 	 * Opens the bot's session when no process hosts it and it is owed: its home's session holds live watches or a fired
-	 * watch's wake not yet taken, its file holds a wake it accepted and never ran (a turn refused at its start: only its own
-	 * recovery runs it), or its inbox holds messages another process sent. A watch is sampled and its wake delivered
+	 * watch's wake not yet taken, its workers owe it work ({@link owesWorkerWork}: only its own recovery takes it up), the
+	 * usage wait {@link armOwedAt} armed has ended, its file holds a wake it accepted and never ran (a turn refused at its
+	 * start: only its own recovery runs it), or its inbox holds messages another process sent. The next retry its workers
+	 * wait on is armed here. A watch is sampled and its wake delivered
 	 * only by its own session, and an inbox is taken only by the host of the session, so a process that starts, sees a host
 	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
 	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
@@ -358,17 +573,29 @@ export class BotOwedWork {
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
+		// Its workers' work, and the next retry they wait on armed; a bundle it cannot read leaves the rest it is owed.
+		let workers = false;
+		try {
+			const facts = worked && this.workerFacts(agentId, worked.id);
+			const now = ports.timers().now();
+			workers = facts !== undefined && owesWorkerWorkAt(facts, now);
+			this.armRetry(agentId, facts && nextWorkerRetryAt(facts, now));
+		} catch (error) {
+			notResumed(error);
+		}
+		// A usage wait that ended continues the saved session's turn: owed only by a session that ran.
+		const usage = worked !== undefined && this.usageDue.has(agentId);
 		let unrun = "";
 		let unread = false;
 		try {
-			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
-			if (worked && !watching) unrun = this.wakes.read(agentId, worked.file, agentDir);
+			// The file, only when nothing else owes; a file it cannot read leaves the rest of what it is owed.
+			if (worked && !watching && !workers && !usage) unrun = this.wakes.read(agentId, worked.file, agentDir);
 		} catch (error) {
 			unread = true;
 			notResumed(storeFailure(agentId, error, undefined));
 		}
 		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? ports.waiting(agentId) : [];
-		if (!watching && !unrun && waiting.length === 0) {
+		if (!watching && !workers && !usage && !unrun && waiting.length === 0) {
 			// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this read is.
 			if (!unread) this.openRetries.forget(agentId);
 			return;
@@ -395,7 +622,7 @@ export class BotOwedWork {
 			return;
 		}
 		// Refused on what defines it now, for a cause that still holds: not opened again until either changes.
-		if (this.stillRefused(agentId, record, sender, !watching && waiting.length === 0)) return;
+		if (this.stillRefused(agentId, record, sender, !watching && !workers && !usage && waiting.length === 0)) return;
 		const key = ports.currentKey(record, sender);
 		// What waits in the inbox, read here too when the bot is owed its watches (the listing above skipped it then).
 		const inbox = (watching ? ports.waiting(agentId) : waiting).map((item) => item.file).join("\n");

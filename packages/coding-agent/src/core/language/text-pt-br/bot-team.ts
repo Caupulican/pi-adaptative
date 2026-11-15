@@ -218,9 +218,9 @@ export const BOT_TEAM = {
 	botReleaseOwed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: as esperas e mensagens aguardando da sessão dele ainda não foram todas descartadas (${reason}); o hospedeiro dele tenta de novo até que sejam.`,
 	botWatchesNotResumed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a sessão dele tem trabalho de esperas ou mensagens aguardando mas não pôde ser aberta, então eles aguardam até que seja (${reason}).`,
+		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou) mas não pôde ser aberta, então o trabalho aguarda até que seja (${reason}).`,
 	botOwedWorkNoRoot: (agentId: string, directories: string) =>
-		`Bot ${agentId}: a sessão dele tem esperas ou mensagens aguardando, mas nenhuma sessão aberta trabalha em ${directories}, onde ele trabalha; elas aguardam até uma sessão abrir ali.`,
+		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou), mas nenhuma sessão aberta trabalha em ${directories}, onde ele trabalha; o trabalho aguarda até uma sessão abrir ali.`,
 	botWatchesCancelled: (agentId: string, count: number) =>
 		`Bot ${agentId}: ${count} ${count === 1 ? "espera armada numa conversa anterior dele foi cancelada" : "esperas armadas numa conversa anterior dele foram canceladas"}; ele continua a conversa mais recente, e uma espera só é verificada pela conversa que a armou.`,
 	botChangeWhileRunning: (agentId: string) =>

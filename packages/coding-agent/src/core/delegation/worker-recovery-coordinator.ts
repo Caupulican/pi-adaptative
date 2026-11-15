@@ -104,7 +104,7 @@ export interface WorkerRecoveryCoordinatorOptions {
  * A suspension recorded because the attempt's owner process is gone (proven dead, or an explicit shutdown). A suspension this
  * process made itself (a retry it scheduled) is never one: that attempt is live and is requeued as before.
  */
-function ownerLostSuspension(attempt: AttemptRuntimeState): boolean {
+export function ownerLostSuspension(attempt: AttemptRuntimeState): boolean {
 	return (
 		attempt.reasonCode === "agent_process_recovered_after_owner_exit" ||
 		attempt.reasonCode === "agent_process_interrupted"
