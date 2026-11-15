@@ -2028,8 +2028,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Composes the plan executor over the worker runtime. Its terminal claim stands before the outbox replays (plan-step
-	 * terminals are the executor's input), and its first drain is the restart recovery of every open plan.
-	 */
+	 * terminals are its input); its start tells the owner of each lost plan, and its first drain recovers every open one. */
 	private _composePlanExecutor(lifecycle: WorkerLifecycle, store: OrchestrationEventStore): void {
 		if (this._planExecutor) return;
 		const executor = new PlanExecutor({
@@ -2059,6 +2058,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				for (const listener of this._planChangeListeners) listener();
 				this._goalAutoContinue.wakePlanWait();
 			},
+			observeNotice: (read) => this.deps.observeHarnessNotice?.("plan-lost", read),
 			timers: () => this.deps.getTimers().port("orchestration"),
 			lanes: () => this._worktreeLaneHostDeps(),
 			landGate: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),

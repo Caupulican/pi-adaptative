@@ -2,7 +2,9 @@
  * The one decoder of durable plan facts, shared by the orchestration reducer (`plan.*` event payloads) and the
  * projection snapshot codec (the `plans` map). A plan record of version 1 is validated field by field; a record from a
  * newer build decodes to its identity only and is marked unsupported, so an older reader replays the journal without
- * refusing it and never executes a shape it does not know.
+ * refusing it and never executes a shape it does not know. That identity is what an older build's snapshot keeps of the
+ * record when it compacts the session: read back here at a version this build decodes, it is a plan lost to that
+ * compaction (`isPlanLostToOlderBuild`), kept by identity like the newer one, never run.
  */
 
 import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
@@ -364,6 +366,8 @@ const RECORD_FIELDS = [
 ] as const;
 const RECORD_FIELDS_V2 = [...RECORD_FIELDS, "fanout"] as const;
 const RECORD_FIELDS_V3 = [...RECORD_FIELDS_V2, "origins"] as const;
+/** The fields of the identity an older build keeps of a record it does not decode (`planIdentity`). */
+const LOST_PLAN_FIELDS = ["v", "planId", "version", "unsupported"] as const;
 
 function versionOriginFromValue(value: unknown, label: string): PlanVersionOrigin {
 	const input = exactRecord(value, label, ["version", "origin"]);
@@ -387,7 +391,8 @@ function fanoutFromValue(value: unknown, label: string): PlanFanout {
 	};
 }
 
-function newerPlan(input: Record<string, unknown>, version: number): PlanFromNewerBuild {
+/** The identity of a record this build keeps but does not decode, as an older build writes it back when it compacts. */
+function planIdentity(input: Record<string, unknown>, version: number): PlanFromNewerBuild {
 	const planId =
 		typeof input.planId === "string" && /^pl-[0-9a-f]{8}$/.test(input.planId) ? input.planId : "pl-unknown";
 	const planVersion =
@@ -403,7 +408,9 @@ export function planRecordFromValue(value: unknown, label: string): StoredPlanRe
 	const input = record(value, label);
 	const v = input.v;
 	if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) return fail(`${label}.v`, "is invalid");
-	if (!(PLAN_DECODABLE_VERSIONS as readonly number[]).includes(v)) return newerPlan(input, v);
+	if (!(PLAN_DECODABLE_VERSIONS as readonly number[]).includes(v)) return planIdentity(input, v);
+	// The identity an older build wrote over a record of this version when it compacted the session: the plan is lost.
+	if (input.unsupported === true) return planIdentity(exactRecord(input, label, LOST_PLAN_FIELDS), v);
 	exactRecord(input, label, v === 1 ? RECORD_FIELDS : v === 2 ? RECORD_FIELDS_V2 : RECORD_FIELDS_V3);
 	const planId = text(input.planId, 11, `${label}.planId`);
 	if (!/^pl-[0-9a-f]{8}$/.test(planId)) fail(`${label}.planId`, "is not a plan id");

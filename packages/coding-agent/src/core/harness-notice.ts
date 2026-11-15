@@ -48,7 +48,8 @@ export type HarnessNoticeKind =
 	| "worker-login"
 	| "fleet-spend-brake"
 	| "review-backlog"
-	| "orchestration-capacity";
+	| "orchestration-capacity"
+	| "plan-lost";
 
 /**
  * One owner-actionable state: `reason` is its stable identity, `text` its one line in English, which the model reads and

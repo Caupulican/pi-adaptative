@@ -22,6 +22,7 @@ import {
 } from "./plan-codec.ts";
 import {
 	isPlanFromNewerBuild,
+	isPlanLostToOlderBuild,
 	PLAN_LIMITS,
 	type PlanNodeRuntime,
 	type PlanRecord,
@@ -82,13 +83,17 @@ function retentionClassOf(record: StoredPlanRecord): RetentionClass {
 	return !isPlanFromNewerBuild(record) && record.fanout !== undefined ? "fanout" : "plan";
 }
 
-/** Closed plans of one class, oldest first. */
+/** Closed plans of one class, oldest first; a plan lost to an older build's compaction is history, first of all. */
 function closedOldestFirst(
 	plans: Record<string, PlanRuntimeState>,
 	retention: RetentionClass,
 ): [string, PlanRuntimeState][] {
 	return Object.entries(plans)
-		.filter(([, plan]) => plan.closed !== undefined && retentionClassOf(plan.record) === retention)
+		.filter(
+			([, plan]) =>
+				(plan.closed !== undefined || isPlanLostToOlderBuild(plan.record)) &&
+				retentionClassOf(plan.record) === retention,
+		)
 		.sort(([, a], [, b]) => (a.closed?.closedAt ?? "").localeCompare(b.closed?.closedAt ?? ""));
 }
 
@@ -130,7 +135,11 @@ function recordPlan(plans: Record<string, PlanRuntimeState>, event: Orchestratio
 	}
 	const expected = previous && !isPlanFromNewerBuild(previous.record) ? previous.record.version + 1 : 1;
 	if (previous && isPlanFromNewerBuild(previous.record))
-		refuse(`Plan '${record.planId}' was written by a newer build.`);
+		refuse(
+			isPlanLostToOlderBuild(previous.record)
+				? `Plan '${record.planId}' was lost when an older build compacted the session.`
+				: `Plan '${record.planId}' was written by a newer build.`,
+		);
 	if (previous?.closed) refuse(`Plan '${record.planId}' is closed and cannot be revised.`);
 	if (record.version !== expected)
 		refuse(`Plan '${record.planId}' version ${record.version} does not follow ${expected - 1}.`);

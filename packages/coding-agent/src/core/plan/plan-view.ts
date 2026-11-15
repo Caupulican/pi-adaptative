@@ -12,6 +12,7 @@ import type { Placement } from "../placement/placement-types.ts";
 import {
 	effectivePlanStatus,
 	isPlanFromNewerBuild,
+	isPlanLostToOlderBuild,
 	type PlanNodeHold,
 	type PlanNodeKind,
 	type PlanNodeSpec,
@@ -73,7 +74,7 @@ export interface PlanView {
 	readonly title: string;
 	readonly goalId?: string;
 	readonly subgraphOf?: PlanSubgraphOf;
-	readonly status: PlanStatus | "unsupported";
+	readonly status: PlanStatus | "unsupported" | "lost";
 	readonly unjudged: boolean;
 	readonly final?: string;
 	readonly rootOwned: readonly string[];
@@ -257,11 +258,12 @@ export function planView(
 	if (!plan) return undefined;
 	const record = plan.record;
 	if (isPlanFromNewerBuild(record)) {
+		const lost = isPlanLostToOlderBuild(record);
 		return {
 			planId,
 			version: record.version,
-			title: "a plan from a newer version of the harness",
-			status: "unsupported",
+			title: lost ? planId : "a plan from a newer version of the harness",
+			status: lost ? "lost" : "unsupported",
 			unjudged: false,
 			rootOwned: [],
 			nodes: [],
@@ -322,7 +324,7 @@ export function planIsMoving(view: PlanView): boolean {
 	return view.status === "active" && view.counts.running > 0;
 }
 
-/** A plan still being carried out: running or paused (a closed or unsupported plan is history). */
+/** A plan still being carried out: running or paused (a closed, unsupported or lost plan is history). */
 export function isOpenPlanView(view: PlanView): view is PlanView & { readonly status: "active" | "paused" } {
 	return view.status === "active" || view.status === "paused";
 }

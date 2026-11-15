@@ -285,7 +285,11 @@ export function planNodeOrigin(
 	return record.origins?.find((entry) => entry.version === node.since)?.origin;
 }
 
-/** A record written by a newer build: kept by identity, never refused, never executed by this build. */
+/**
+ * A record this build keeps by identity only, never refuses and never executes: one a newer build wrote (its version is
+ * not one this build decodes), or the identity an older build wrote in place of a record it could not decode when it
+ * compacted the session ({@link isPlanLostToOlderBuild}).
+ */
 export interface PlanFromNewerBuild {
 	readonly v: number;
 	readonly planId: string;
@@ -297,6 +301,15 @@ export type StoredPlanRecord = PlanRecord | PlanFromNewerBuild;
 
 export function isPlanFromNewerBuild(record: StoredPlanRecord | undefined): record is PlanFromNewerBuild {
 	return record !== undefined && "unsupported" in record;
+}
+
+/**
+ * An identity-only record of a version this build decodes: an older build, which read the plan as one from a newer build,
+ * compacted the session and wrote its identity in place of the record, so what the plan said is gone and no build will
+ * run it. It is history, never an open plan.
+ */
+export function isPlanLostToOlderBuild(record: StoredPlanRecord | undefined): record is PlanFromNewerBuild {
+	return isPlanFromNewerBuild(record) && (PLAN_DECODABLE_VERSIONS as readonly number[]).includes(record.v);
 }
 
 /** The binding of a node's spec version to the orchestration task that runs it. */
@@ -772,7 +785,8 @@ export function concurrentPlanPairs(
 }
 
 /** The plan's effective status: a closure wins over the recorded status. */
-export function effectivePlanStatus(plan: PlanRuntimeState): PlanStatus | "unsupported" {
+export function effectivePlanStatus(plan: PlanRuntimeState): PlanStatus | "unsupported" | "lost" {
+	if (isPlanLostToOlderBuild(plan.record)) return "lost";
 	if (isPlanFromNewerBuild(plan.record)) return "unsupported";
 	return plan.closed?.status ?? plan.record.status;
 }

@@ -277,6 +277,7 @@ export const AUTONOMY_COMMANDS = {
 			settled: "finished",
 			cancelled: "cancelled",
 			unsupported: "kept, not run by this version",
+			lost: "lost to an older build",
 		},
 		steps: (count: number) => `${count} step${count === 1 ? "" : "s"}`,
 		usage: "/plan shows the session's plans",
@@ -296,6 +297,9 @@ export const AUTONOMY_COMMANDS = {
 		heldCount: (count: number) => `${count} held`,
 		heading: (title: string) => `Plan: ${title}`,
 		unsupportedHeading: (title: string) => `Plan: ${title}; kept, not run by this version.`,
+		/** A plan an older build compacted the session over (`isPlanLostToOlderBuild`): the `/plan` line and its notice. */
+		lostHeading: (planId: string) =>
+			`Plan ${planId} was lost when an older pi build compacted this session; it will not run.`,
 		statusLine: (title: string, parts: string) => `Plan "${title}": ${parts}.`,
 		statusLineHeldElsewhere: (count: number) => `${count} held for a new plan or the root`,
 		statusLineWaitingOnOwner: (steps: string) => `waiting on you for ${steps}`,

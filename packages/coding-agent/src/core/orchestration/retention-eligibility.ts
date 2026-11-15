@@ -12,7 +12,7 @@
  * judge a prune before it is appended (`assertRetentionPruneAllowed`). retention.ts states which is which.
  */
 
-import { isPlanFromNewerBuild, type PlanRuntimeState } from "../plan/plan-graph.ts";
+import { isPlanFromNewerBuild, isPlanLostToOlderBuild, type PlanRuntimeState } from "../plan/plan-graph.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder, latestAgentAttemptsByDurableOrder } from "./attempt-ordering.ts";
@@ -138,8 +138,14 @@ function latestIso(values: readonly string[]): string {
 	return latest;
 }
 
+/**
+ * A plan a newer build wrote hides what its records name, so nothing is released beside it. A plan lost to an older
+ * build's compaction hides nothing any build will read: its record is gone, and it is never run.
+ */
 function hasOpaquePlan(state: TaskRuntimeProjection): boolean {
-	return Object.values(state.plans).some((plan) => isPlanFromNewerBuild(plan.record));
+	return Object.values(state.plans).some(
+		(plan) => isPlanFromNewerBuild(plan.record) && !isPlanLostToOlderBuild(plan.record),
+	);
 }
 
 function unitOf(

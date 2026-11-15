@@ -28,6 +28,7 @@ import { PLAN_VERIFIER_UNAVAILABLE } from "../delegation/worker-profile-resolver
 import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
 import { weightOf } from "../fleet/local-admit.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import type { HarnessNoticeObservation } from "../harness-notice.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import type { DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
@@ -70,6 +71,7 @@ import {
 	planNodeOrigin,
 	planVersionOrigins,
 } from "./plan-graph.ts";
+import { lostPlanNotices } from "./plan-lost-notice.ts";
 import {
 	MergeLandings,
 	type MergeStep,
@@ -133,6 +135,8 @@ export interface PlanExecutorDeps {
 	readonly retireWorker: (agentId: string) => void;
 	/** Fires when a plan's visible state changes (a step starts, settles or is held, a plan opens or closes). */
 	readonly planChanged: () => void;
+	/** Tells the owner of a plan an older build lost (`lostPlanNotices`), as a harness notice (`plan-lost`). */
+	readonly observeNotice: (read: () => HarnessNoticeObservation) => void;
 	readonly timers?: () => TimerPort;
 	readonly lanes?: () => WorkerLaneIsolationDeps;
 	readonly landGate?: () => { readonly gate: "on" | "off"; readonly gateCommand?: string };
@@ -279,9 +283,11 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.unregisterMachine = registerMachine(this.nodeMachine, deps.sessionId());
 	}
 
-	/** Subscribes to the store and runs the startup reconcile (restart recovery). */
+	/** Subscribes to the store and runs the startup reconcile (restart recovery), telling the owner of each lost plan. */
 	start(): void {
 		if (this.unsubscribeStore || this.disposed) return;
+		for (const notice of lostPlanNotices(this.deps.runtime().getSnapshot().plans))
+			this.deps.observeNotice(() => notice);
 		this.unsubscribeStore = this.deps.subscribeStore(() => this.requestDrain());
 		this.requestDrain();
 	}

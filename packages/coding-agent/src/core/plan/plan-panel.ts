@@ -136,7 +136,7 @@ export function planCountWords(counts: PlanCounts): string[] {
 export function planSectionHeading(view: PlanView): string {
 	const words = interfaceText().autonomyCommands.plan;
 	const title = clip(view.title, PLAN_PANEL_LIMITS.titleChars);
-	if (view.status === "unsupported") return words.heading(title);
+	if (view.status === "unsupported" || view.status === "lost") return words.heading(title);
 	const tail = view.status === "active" ? planCountWords(view.counts) : [words.status[view.status]];
 	return [words.heading(title), ...tail].join(" · ");
 }
@@ -161,7 +161,7 @@ export function planNodePanelRow(view: PlanView, node: PlanNodeView): Orchestrat
 export function panelPlans(views: readonly PlanView[]): readonly PlanView[] {
 	const open = views.filter(isOpen);
 	if (open.length > 0) return open;
-	const latest = views.find((view) => view.status !== "unsupported");
+	const latest = views.find((view) => view.status !== "unsupported" && view.status !== "lost");
 	return latest ? [latest] : [];
 }
 
@@ -249,6 +249,7 @@ function inspectOpenPlan(view: PlanView, options: PlanInspectionOptions): string
 function inspectClosedPlan(view: PlanView): string {
 	const words = interfaceText().autonomyCommands.plan;
 	if (view.status === "unsupported") return words.unsupportedHeading(view.title);
+	if (view.status === "lost") return words.lostHeading(view.planId);
 	const reason = view.closedReason ? words.closedReason(clip(view.closedReason, PLAN_PANEL_LIMITS.detailChars)) : "";
 	return words.closed(
 		clip(view.title, PLAN_LIMITS.titleChars),
@@ -260,7 +261,7 @@ function inspectClosedPlan(view: PlanView): string {
 	);
 }
 
-/** The `/plan` text: open plans step by step, closed and unsupported plans one line each. */
+/** The `/plan` text: open plans step by step, closed, unsupported and lost plans one line each. */
 export function planInspectionText(views: readonly PlanView[], options: PlanInspectionOptions = {}): string {
 	if (views.length === 0) return interfaceText().autonomyCommands.plan.none;
 	return views

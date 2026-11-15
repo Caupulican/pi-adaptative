@@ -282,6 +282,7 @@ export const AUTONOMY_COMMANDS = {
 			settled: "concluído",
 			cancelled: "cancelado",
 			unsupported: "mantido, não executado por esta versão",
+			lost: "perdido para uma versão anterior",
 		},
 		steps: (count: number) => `${count} ${count === 1 ? "etapa" : "etapas"}`,
 		usage: "/plan mostra os planos da sessão",
@@ -301,6 +302,8 @@ export const AUTONOMY_COMMANDS = {
 		heldCount: (count: number) => `${count} retidas`,
 		heading: (title: string) => `Plano: ${title}`,
 		unsupportedHeading: (title: string) => `Plano: ${title}; mantido, não executado por esta versão.`,
+		lostHeading: (planId: string) =>
+			`O plano ${planId} foi perdido quando uma versão anterior do pi compactou esta sessão; ele não será executado.`,
 		statusLine: (title: string, parts: string) => `Plano "${title}": ${parts}.`,
 		statusLineHeldElsewhere: (count: number) => `${count} retidas para um novo plano ou para a raiz`,
 		statusLineWaitingOnOwner: (steps: string) => `esperando você por ${steps}`,
