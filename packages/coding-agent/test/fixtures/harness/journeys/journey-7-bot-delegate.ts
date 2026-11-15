@@ -4,6 +4,9 @@ import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
+import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
+import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
+import { workerTerminalNotificationId } from "../../../../src/core/orchestration/worker-terminal-notification.ts";
 import {
 	orchestrationSessionDir,
 	ownerOrchestrationHome,
@@ -20,7 +23,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	BOT_DELEGATION_JUDGMENTS,
 	botCharges,
-	botSessionFilesText,
+	botNoticeTexts,
 	botSessionIds,
 	createChargedRoot,
 	createOwnerBot,
@@ -31,26 +34,33 @@ import {
 	reached,
 	TRACK,
 	waitForBotRosterState,
+	waitForBotRosterView,
 } from "./journey-7-shared.ts";
-import { carriesMarker, newestText, settle, startCall, submitReport } from "./journey-8-shared.ts";
+import { carriesMarker, newestText, startCall, submitReport } from "./journey-8-shared.ts";
 
 const DELEGATOR = "pool-director";
 const DELEGATOR_SOUL =
 	"You direct workers that read the connection pool settings and answer the owner in one sentence.";
 const READ_ONLY_DELEGATOR = "pool-reader";
 const READ_ONLY_SOUL = "You direct read-only workers over the connection pool settings and answer in one sentence.";
+const BOUNDED_DELEGATOR = "pool-timer";
+const BOUNDED_SOUL = "You direct workers that read the pool's timeout settings and answer the owner in one sentence.";
 
 /** Every question asks what something is, and every answer states a fact that names no test, check, commit or change. */
 const FIRST_QUESTION = "How many connections does the pool hold? Have a worker read the settings.";
 const SECOND_QUESTION = "How many idle connections does the pool keep? Have another worker count them.";
 const READ_ONLY_QUESTION = "Which connection is closed first? Have a worker read the settings.";
+const BOUNDED_QUESTION = "How long does the pool wait for a connection? Have a worker read the settings.";
 const FIRST_MARKER = "[j7-delegate-first]";
 const HELD_MARKER = "[j7-delegate-held]";
 const READ_ONLY_MARKER = "[j7-delegate-read-only]";
+const BOUNDED_MARKER = "[j7-delegate-bounded]";
 const FIRST_REPORT = "The pool holds eight connections.";
 const FIRST_ANSWER = "The worker read that the pool holds eight connections.";
 const READ_ONLY_REPORT = "The oldest idle connection is closed first.";
 const READ_ONLY_ANSWER = "The worker read that the oldest idle connection is closed first.";
+const BOUNDED_REPORT = "The pool waits five seconds for a connection.";
+const BOUNDED_ANSWER = "The worker read that the pool waits five seconds for a connection.";
 const SECOND_STARTED = "Another worker is counting the idle connections.";
 /** What the product tells the owner of a stop that ended the bot's work (text-en/bot-team.ts `botStopped`), whole. */
 const STOPPED = `Stopped ${DELEGATOR} (halt).`;
@@ -69,6 +79,13 @@ function priced(input: number, output: number, usd: number): Usage {
 }
 
 const WORKER_USAGE = priced(1000, 100, 0.25);
+/** The main session's worker bound, which holds a bot's request with its workers' spend: within it the bound worker's spend. */
+const WORKER_BOUND_USD = 1;
+const BOUNDED_WORKER_USAGE = priced(3000, 300, 0.75);
+/** The bot's priced answer to its worker's handoff: with the worker's spend, it takes the request past the bound. */
+const BOUNDED_ANSWER_USAGE = priced(2000, 200, 0.5);
+/** The stop the product tells the owner in the bot's chat (text-en/bot-team.ts `botTurnOverBudget`), whole. */
+const OVER_BOUND = `Bot ${BOUNDED_DELEGATOR}: its turn was stopped at the spend bound ($${(BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total).toFixed(2)} spent on this request, its workers included; workerDelegation.maxUsd is $${WORKER_BOUND_USD.toFixed(2)}).`;
 
 /** The stable agent id a `delegate start` result names, read out of the result the bot's next request carries. */
 function startedAgentId(request: ScriptedRequest): string {
@@ -89,7 +106,7 @@ function botStart(id: string, instructions: string, independentOf: readonly stri
 }
 
 /** The bot's turn a worker's terminal handoff opens: its input is that handoff, carrying the worker's report. */
-function handoffStep(name: string, report: string, answer: string): ScriptStep {
+function handoffStep(name: string, report: string, answer: string, usage?: Usage): ScriptStep {
 	return {
 		name,
 		check: (request) => {
@@ -97,7 +114,7 @@ function handoffStep(name: string, report: string, answer: string): ScriptStep {
 			if (!input.includes(HANDOFF) || !input.includes(report))
 				throw new Error(`${name}: the turn's input is not the worker's handoff: ${input}`);
 		},
-		reply: { content: [{ type: "text", text: answer }] },
+		reply: { content: [{ type: "text", text: answer }], ...(usage ? { usage } : {}) },
 	};
 }
 
@@ -112,7 +129,9 @@ function requestsOf(world: HarnessWorld, soul: string): number {
  * bot's next turn, in which it answers. The worker's conversation lies in the bot's home, under the bot's session, and
  * nothing of that session is in the owner's orchestration home; the worker's spend reaches the main session as the bot
  * session's charge. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
- * of the bot. A read-only bot's worker is planned read-only: the bot changes no file, so neither does its worker.
+ * of the bot. A read-only bot's worker is planned read-only: the bot changes no file, so neither does its worker. Under
+ * the main session's worker bound (`workerDelegation.maxUsd`), a bot's request is held to it with its worker's spend: the
+ * bot's answer to its worker's handoff that takes the request past it is stopped with the product's sentence.
  */
 export async function runJourney7BotDelegatePhase(world: HarnessWorld): Promise<void> {
 	const { session, rootFile } = await createChargedRoot(world, "bot-delegate");
@@ -120,6 +139,18 @@ export async function runJourney7BotDelegatePhase(world: HarnessWorld): Promise<
 		await runLeg(world, session, rootFile);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the owner's session disposes cleanly").toBeUndefined();
+	}
+	// The bound has its own main session, so it holds none of the workers above.
+	const bounded = await createChargedRoot(world, "bot-delegate-bound", {
+		workerDelegation: { maxUsd: WORKER_BOUND_USD },
+	});
+	try {
+		await runWorkerBoundStep(world, bounded.session, bounded.rootFile);
+	} finally {
+		expect(
+			await world.disposeSessionInBody(bounded.session),
+			"the bounded owner's session disposes cleanly",
+		).toBeUndefined();
 	}
 	world.trace.mark("root", "j7.bot-delegate");
 }
@@ -262,31 +293,57 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			"J7 bot delegate: the second worker is working",
 			world.provider.whenReached(reached(TRACK.heldDelegateWorker, "j7-held-delegate-worker")),
 		);
-		// The stop lands after the bot's turn ended, so what it ends is the worker alone: the turn's last words are durable, then
-		// the turn settles.
-		await withDeadline(
-			trace,
-			"J7 bot delegate: the bot told the owner of its second worker",
-			world.io.waitForMutation(() => botSessionFilesText(world, DELEGATOR).includes(SECOND_STARTED)),
+		// The stop lands after the bot's turn ended, so what it ends is the worker alone: the turn's end records its last words
+		// as the bot's outcome on the roster.
+		await waitForBotRosterView(
+			world,
+			session,
+			DELEGATOR,
+			"ended the turn that told the owner of its second worker",
+			(view) => view?.lastSummary === SECOND_STARTED,
 		);
-		for (let step = 0; step < 8; step++) await settle();
 		const stopped = session.stopPersistentBot(DELEGATOR);
 		const requestsAtStop = requestsOf(world, DELEGATOR_SOUL);
 		await withDeadline(trace, "J7 bot delegate: the stopped worker's request ended", heldWorkerEnded.promise);
+		// An end the owner's stop made is recorded delivered at once and wakes no one: once the cancelled attempt's end is
+		// delivered, a turn it opened would already have been asked for. The first worker's end was recorded delivered when its
+		// handoff reached the bot's session (the notification coordinator's confirmed delivery), before the bot's first answer.
+		const bundle = new OrchestrationEventStore({
+			orchestrationHome: botOrchestrationHome(world.agentDir, DELEGATOR),
+			sessionId: botSessionId,
+		});
+		const attempts = () => {
+			const projection = readTaskRuntimeProjection(bundle);
+			return Object.values(projection.attempts).map((attempt) => ({
+				status: attempt.status,
+				end: projection.notifications[workerTerminalNotificationId(attempt.attemptId)]?.status,
+			}));
+		};
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the cancelled worker's end was delivered",
+			world.io.waitForMutation(() =>
+				attempts().some((attempt) => attempt.status === "cancelled" && attempt.end === "delivered"),
+			),
+		);
 		await waitForBotRosterState(world, session, DELEGATOR, "idle");
-		for (let step = 0; step < 8; step++) await settle();
 		expect(
 			{
 				sent: secondSent.mode,
 				stopped,
 				heldEnd: seen.heldEnd,
+				attempts: attempts().sort((a, b) => a.status.localeCompare(b.status)),
 				botRequests: requestsOf(world, DELEGATOR_SOUL) - requestsAtStop,
 			},
-			"the owner's stop of a bot whose worker runs cancels that worker, says it stopped the bot, and the cancelled worker's end opens no turn of the bot",
+			"the owner's stop of a bot whose worker runs cancels that worker, says it stopped the bot, and the cancelled worker's end, delivered, opens no turn of the bot",
 		).toEqual({
 			sent: "followed_up",
 			stopped: { stopped: true, detail: STOPPED },
 			heldEnd: "aborted",
+			attempts: [
+				{ status: "cancelled", end: "delivered" },
+				{ status: "completed", end: "delivered" },
+			],
 			botRequests: 0,
 		});
 	} finally {
@@ -363,4 +420,76 @@ async function runReadOnlyStep(world: HarnessWorld, session: AgentSession): Prom
 		},
 		"a read-only bot's worker reads and is offered no write or edit tool, as its start result's grant says",
 	).toEqual({ sent: "started", workerReads: true, workerWrites: false, grantReads: true, grantWrites: false });
+}
+
+/**
+ * Step 7: under the main session's worker bound, a bot's worker spends within it, and the bot's priced answer to that
+ * worker's handoff takes the request past it: the bound counts the worker's spend with the bot's, stops the turn and tells
+ * the owner in the bot's chat with the product's sentence, and the whole spend is charged to the main session.
+ */
+async function runWorkerBoundStep(world: HarnessWorld, session: AgentSession, rootFile: string): Promise<void> {
+	const { trace } = world;
+	createOwnerBot(session, BOUNDED_DELEGATOR, MODEL_ID.boundedDelegator, BOUNDED_SOUL);
+	const workerGo = createBarrier();
+	enqueueBot(
+		world,
+		TRACK.boundedDelegator,
+		MODEL_ID.boundedDelegator,
+		BOUNDED_SOUL,
+		{
+			name: "j7-bounded-delegator-start",
+			reply: botStart(
+				"j7-bounded-delegator-start-1",
+				`${BOUNDED_MARKER} Read the pool settings and report how long the pool waits for a connection.`,
+			),
+		},
+		{
+			name: "j7-bounded-delegator-started",
+			check: (request) => {
+				startedAgentId(request);
+				workerGo.release();
+			},
+			reply: { content: [{ type: "text", text: "A worker is reading the pool settings." }] },
+		},
+		handoffStep("j7-bounded-delegator-handoff", BOUNDED_REPORT, BOUNDED_ANSWER, BOUNDED_ANSWER_USAGE),
+	);
+	world.provider.enqueueTrack(TRACK.boundedDelegateWorker, MODEL_ID.delegateWorker, carriesMarker(BOUNDED_MARKER), {
+		name: "j7-bounded-delegate-worker",
+		gate: workerGo.promise,
+		reply: { ...submitReport("j7-bounded-delegate-worker-report-1", BOUNDED_REPORT), usage: BOUNDED_WORKER_USAGE },
+	});
+	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-delegate-bound", BOT_DELEGATION_JUDGMENTS);
+	const sent = await session.sendOperatorMessageToBot(BOUNDED_DELEGATOR, BOUNDED_QUESTION);
+	await withDeadline(
+		trace,
+		"J7 bot delegate: the bounded bot answered its worker's handoff",
+		world.provider.whenReached(reached(TRACK.boundedDelegator, "j7-bounded-delegator-handoff")),
+	);
+	await withDeadline(
+		trace,
+		"J7 bot delegate: the bounded bot's chat holds the spend-bound stop",
+		world.io.waitForMutation(() =>
+			botNoticeTexts(world, BOUNDED_DELEGATOR).some((text) => text.includes(OVER_BOUND)),
+		),
+	);
+	await waitForBotRosterState(world, session, BOUNDED_DELEGATOR, "idle");
+	const [botSessionId] = botSessionIds(world, BOUNDED_DELEGATOR);
+	if (botSessionId === undefined) throw new Error("the bounded bot opened no session file");
+	const spent = BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total;
+	const charged = () =>
+		botCharges(rootFile, botSessionId).reduce((total, report) => total + report.usage.cost.total, 0);
+	await withDeadline(
+		trace,
+		"J7 bot delegate: the bounded request's spend reached the main session as the bot's charge",
+		world.io.waitForMutation(() => charged() >= spent),
+	);
+	expect(
+		{
+			sent: sent.mode,
+			stopped: botNoticeTexts(world, BOUNDED_DELEGATOR).some((text) => text.includes(OVER_BOUND)),
+			botRequests: requestsOf(world, BOUNDED_SOUL),
+			charged: charged(),
+		},
+		"a bot's request is held to the main session's worker bound with its worker's spend: the answer that passes it stops the turn with the product's sentence, the bot asks nothing more, and the whole spend is charged once",
+	).toEqual({ sent: "started", stopped: true, botRequests: 3, charged: expect.closeTo(spent, 10) });
 }

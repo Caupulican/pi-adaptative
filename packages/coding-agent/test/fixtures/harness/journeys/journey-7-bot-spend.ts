@@ -4,7 +4,6 @@ import { createEmptyUsage, type Usage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { BOT_CHARGE_MARK_CUSTOM_TYPE } from "../../../../src/core/bots/bot-charge-mark.ts";
-import { readBotNotices } from "../../../../src/core/bots/bot-notices.ts";
 import { aggregateDailyUsageAsync } from "../../../../src/core/cost/daily-usage.ts";
 import { BOT_SESSION_USAGE_LABEL } from "../../../../src/core/cost/usage-records.ts";
 import { rollingDayWindow } from "../../../../src/core/proactivity/proactivity-controller.ts";
@@ -15,6 +14,7 @@ import { HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts"
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	botCharges,
+	botNoticeTexts,
 	botRecord,
 	botRosterState,
 	botSessionFilesText,
@@ -80,16 +80,6 @@ async function dailySpawnedUsd(manager: SessionManager): Promise<number> {
 		{ filePath, entries: manager.getEntries() },
 	);
 	return totals.spawnedCost;
-}
-
-/** The owner-facing words of every notice the bot's session wrote to its chat. */
-function noticeTexts(world: HarnessWorld): string[] {
-	const unreadable: string[] = [];
-	const texts = readBotNotices(world.agentDir, SPENDER, (file, reason) => unreadable.push(`${file}: ${reason}`)).map(
-		(record) => record.message.text,
-	);
-	if (unreadable.length > 0) throw new Error(`bot notices could not be read: ${unreadable.join("; ")}`);
-	return texts;
 }
 
 function spenderRequests(world: HarnessWorld): number {
@@ -307,7 +297,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 	await withDeadline(
 		trace,
 		"J7 bot spend: the bot's chat holds the spend-bound stop",
-		world.io.waitForMutation(() => noticeTexts(world).some((text) => text.includes(OVER_BOUND))),
+		world.io.waitForMutation(() => botNoticeTexts(world, SPENDER).some((text) => text.includes(OVER_BOUND))),
 	);
 	await recordsReach(3, "J7 bot spend: the over-bound charge reached the main session's file");
 	const afterOver = botCharges(rootFile, botSessionId());
@@ -315,7 +305,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 	if (third === undefined) throw new Error("the over-bound bot charge is missing");
 	const totalAfterOver = totalAfterSecond + OVER_USAGE.cost.total;
 	expect(
-		noticeTexts(world).join("\n"),
+		botNoticeTexts(world, SPENDER).join("\n"),
 		"the bot's chat tells the owner the turn was stopped at the worker bound",
 	).toContain(OVER_BOUND);
 	expect(

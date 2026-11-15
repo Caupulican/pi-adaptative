@@ -5,6 +5,7 @@ import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { botSessionsDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { readBotNotices } from "../../../../src/core/bots/bot-notices.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
 	SPAWNED_USAGE_CUSTOM_TYPE,
@@ -14,6 +15,7 @@ import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
 import type { DelegationRecord } from "../../../../src/core/delegation/leader-delegation-ledger.ts";
 import type {
 	PersistentBotRecord,
+	PersistentBotView,
 	PersistentTeamMessage,
 } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "../../../../src/core/delegation/worker-agent-control.ts";
@@ -76,6 +78,8 @@ export const MODEL_ID = {
 	delegator: "worker-b",
 	/** The owner's read-only bot that directs workers of its own; its soul tells it apart on the shared model. */
 	readOnlyDelegator: "worker-a",
+	/** The owner's bot that directs a worker under the main session's worker bound; its soul tells it apart on the shared model. */
+	boundedDelegator: "worker-b",
 	/** The workers the delegating bots start, each told apart by the marker its task carries. */
 	delegateWorker: "worker-c",
 } as const;
@@ -120,6 +124,8 @@ export const TRACK = {
 	delegateWorker: "j7-delegate-worker",
 	heldDelegateWorker: "j7-held-delegate-worker",
 	readOnlyDelegateWorker: "j7-read-only-delegate-worker",
+	boundedDelegator: "j7-bounded-delegator",
+	boundedDelegateWorker: "j7-bounded-delegate-worker",
 } as const;
 
 /**
@@ -354,28 +360,49 @@ export function botRosterState(session: AgentSession, agentId: string): string |
 }
 
 /**
- * Waits until the roster shows `state` for the bot: its session's turn started, queued or settled. The poll ends with the
- * wait, whether the state came or the deadline passed, so a failed wait leaves nothing spinning behind it.
+ * Waits until the roster's view of the bot holds `what` (`holds`). The poll ends with the wait, whether the view came or
+ * the deadline passed, so a failed wait leaves nothing spinning behind it.
  */
-export async function waitForBotRosterState(
+export async function waitForBotRosterView(
 	world: HarnessWorld,
 	session: AgentSession,
 	agentId: string,
-	state: string,
+	what: string,
+	holds: (view: PersistentBotView | undefined) => boolean,
 ): Promise<void> {
+	const view = () => session.listPersistentBots().find((bot) => bot.agentId === agentId);
 	let ended = false;
 	try {
 		await withDeadline(
 			world.trace,
-			`the roster shows ${agentId} as ${state}`,
+			`the roster shows ${agentId} ${what}`,
 			(async () => {
-				while (!ended && botRosterState(session, agentId) !== state)
-					await new Promise<void>((resolve) => setImmediate(resolve));
+				while (!ended && !holds(view())) await new Promise<void>((resolve) => setImmediate(resolve));
 			})(),
 		);
 	} finally {
 		ended = true;
 	}
+}
+
+/** Waits until the roster shows `state` for the bot: its session's turn started, queued or settled. */
+export function waitForBotRosterState(
+	world: HarnessWorld,
+	session: AgentSession,
+	agentId: string,
+	state: string,
+): Promise<void> {
+	return waitForBotRosterView(world, session, agentId, `as ${state}`, (view) => view?.state === state);
+}
+
+/** The owner-facing words of every notice the bot's session wrote to its chat. */
+export function botNoticeTexts(world: HarnessWorld, agentId: string): string[] {
+	const unreadable: string[] = [];
+	const texts = readBotNotices(world.agentDir, agentId, (file, reason) => unreadable.push(`${file}: ${reason}`)).map(
+		(record) => record.message.text,
+	);
+	if (unreadable.length > 0) throw new Error(`bot notices could not be read: ${unreadable.join("; ")}`);
+	return texts;
 }
 
 /** The text of every file of the bot's own `sessions/` directory: the conversation as the bot's session wrote it. */
