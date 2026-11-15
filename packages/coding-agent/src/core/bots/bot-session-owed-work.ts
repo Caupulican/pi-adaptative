@@ -33,6 +33,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { readSessionWatchWork } from "../watches/session-watch-ledger.ts";
 import { botFailureCause, botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
 import { fileIdentity } from "./bot-home-records.ts";
@@ -55,12 +56,19 @@ import {
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
 /**
- * Whether the bot session `sessionId` has watch work, as the store says now: a live watch to sample, or a firing whose wake
- * it has not yet taken (a one-shot that fired is no longer live, and its wake is delivered only by its own session).
+ * Whether the bot session has watch work, as the store and the session's watch ledger (`core/watches/`) say now: a live
+ * watch to sample, or a firing or end whose wake it has not yet taken (a one-shot that fired is no longer live, and its
+ * wake is delivered only by its own session). A session with no file yet holds no ledger.
  */
-export function owesWatchWork(store: WatchStore, sessionId: string, nowMs: number): boolean {
+export function owesWatchWork(
+	store: WatchStore,
+	session: { readonly id: string; readonly file: string | undefined },
+	nowMs: number,
+): boolean {
 	return (
-		liveOwnWatches(store, sessionId, nowMs).count > 0 || store.listPendingRoutineDeliveries(sessionId, 1).length > 0
+		liveOwnWatches(store, session.id, nowMs).count > 0 ||
+		store.listPendingRoutineDeliveries(session.id, 1).length > 0 ||
+		(session.file !== undefined && readSessionWatchWork(session.file, nowMs).owed)
 	);
 }
 
@@ -903,7 +911,7 @@ export class BotOwedWork {
 			return;
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
-		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
+		const watching = worked !== undefined && owesWatchWork(ports.store(), worked, ports.timers().now());
 		// Stops that did not list may hold back any of its work: it waits, and the owner is told why once (a held stop that
 		// failed to apply told it already).
 		if (stopNames === undefined) {

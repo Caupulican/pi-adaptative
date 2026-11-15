@@ -50,13 +50,9 @@ import {
 	type WatchScheduleInput,
 	workerWatchSlotsRefusal,
 } from "./routine-watch-arming.ts";
+import { admitWatchCheck } from "./watch-check-admission.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
-import {
-	routineWorkerAuthority,
-	type WorkerWatchAuthority,
-	watchCheckCall,
-	watchCheckRefusal,
-} from "./worker-watch-scope.ts";
+import { routineWorkerAuthority, type WorkerWatchAuthority, watchCheckRefusal } from "./worker-watch-scope.ts";
 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
@@ -609,13 +605,8 @@ export class RoutineSessionController implements RoutineToolPort {
 
 	/**
 	 * A watched command or page is first the call its check would make, admitted by this session's gate as a sub-call of
-	 * the routine or `task_watch` call that arms it, the way a worker's own gate admits its watch's (`task-watch-tool.ts`):
-	 * every check a call of that tool faces applies, the System One operation gate included, and a refused call arms
-	 * nothing. The watch's own rules admit the condition first, so the gate is never asked about a check the watch could
-	 * not make. The admitted call never starts, since the monitor makes the checks: the caller consumes it once the watch
-	 * is saved (an owner approval it claimed is spent arming the watch, whose checks then run on its cadence) and abandons
-	 * it when the save fails. A session that does not hold the check's tool arms nothing. An update that keeps the armed
-	 * check is not asked again.
+	 * the routine or `task_watch` call that arms it (`watch-check-admission.ts`). An update that keeps the armed check is
+	 * not asked again.
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
@@ -626,37 +617,20 @@ export class RoutineSessionController implements RoutineToolPort {
 		worker: WorkerWatchAuthority | undefined,
 		signal?: AbortSignal,
 	): Promise<NestedCallAdmission | undefined> {
-		const admitted = this.deps.admitWatch(parseWatchCondition(condition), worker);
-		const call = watchCheckCall(admitted);
-		if (!call) return undefined;
 		const armed = prior?.schedule.kind === "event" && prior.schedule.source === "watch" ? prior.schedule : undefined;
-		if (armed && isDeepStrictEqual(armed.condition, admitted)) return undefined;
-		// Arming never widens what the session can run: a check needs the tool the session itself would call.
-		if (!this.deps.holdsTool(call.toolName)) {
-			harnessLog.warn("routines", "a watch was refused: the session does not hold its check's tool", () => ({
-				tool: call.toolName,
-			}));
-			throw new Error(
-				`This watch's check runs ${call.toolName}, a tool this session does not hold, so it is not armed.`,
-			);
-		}
-		const admission = await this.deps.admitSubCall(
-			toolCallId,
+		const admitted = await admitWatchCheck(
+			this.deps,
 			{
-				id: `${toolCallId}#watch`,
-				toolName: call.toolName,
-				args: { ...call.args },
-				purpose: { kind: "watch_check", watchId, parentToolName },
+				toolCallId,
+				parentToolName,
+				watchId,
+				condition: parseWatchCondition(condition),
+				...(worker ? { worker } : {}),
+				...(armed ? { armed: armed.condition } : {}),
 			},
 			signal,
 		);
-		if (admission.kind === "refused") {
-			harnessLog.warn("routines", "a watch was refused: the session's gate refused its check's call", () => ({
-				tool: call.toolName,
-			}));
-			throw watchCheckRefusal(watchId, admission);
-		}
-		return admission;
+		return admitted.check;
 	}
 
 	/** The worker authority a routine's runs use: the saved one when nothing it was captured from changed, else captured now. */

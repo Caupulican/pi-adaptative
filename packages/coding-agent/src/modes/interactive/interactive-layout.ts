@@ -364,7 +364,15 @@ export class InteractiveLayout {
 		const watchCount = new SessionWatchCount(
 			{
 				routines: () => lanes.getBotTeamStore().listRoutines(),
-				subscribe: (listener) => lanes.subscribeRoutineDefinitions(listener),
+				ownWatches: (nowMs) => lanes.ownWatches().liveCount(nowMs),
+				subscribe: (listener) => {
+					const routines = lanes.subscribeRoutineDefinitions(listener);
+					const own = lanes.ownWatches().subscribe(listener);
+					return () => {
+						routines();
+						own();
+					};
+				},
 				parentSessionId: () => port.getSessionManager().getSessionId(),
 				now: () => Date.now(),
 			},

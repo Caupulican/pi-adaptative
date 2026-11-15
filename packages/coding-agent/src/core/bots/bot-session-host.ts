@@ -55,6 +55,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
+import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureCause, botFailureText, inOwnerWords } from "./bot-failure-words.ts";
@@ -798,8 +799,8 @@ export class BotSessionHost {
 			}
 			if (this.recheckIfIdle(entry)) return this.armIdle(entry);
 			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
-			if (owesWatchWork(this.ports.store(), entry.session.sessionId, this.idleTimers().now()))
-				return this.armIdle(entry);
+			const session = { id: entry.session.sessionId, file: entry.sessionManager.getSessionFile() };
+			if (owesWatchWork(this.ports.store(), session, this.idleTimers().now())) return this.armIdle(entry);
 			// Its workers' owed execution (queued work, a retry due, a lease to take back) runs only while it is loaded.
 			const { orchestrationHome } = entry.sessionManager.getStorageRoots();
 			if (this.owed.owesLoadedExecution(entry.agentId, orchestrationHome, entry.session.sessionId))
@@ -811,13 +812,18 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * The live watches the bot's own session holds, as the store says now: the loaded session's here, else the one its home
+	 * The live watches the bot's own session holds, as the store and the session's watch ledger (`core/watches/`) say now: the loaded session's here, else the one its home
 	 * saved last, which another process may be hosting. The bot is announced again when the first of them expires.
 	 */
 	liveWatches(agentId: string): number {
 		let sessionId: string | undefined;
+		let own: SessionWatchWork | undefined;
 		try {
-			sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
+			const loaded = this.entries.get(agentId);
+			const saved = loaded ? undefined : this.view.savedSessionOf(agentId);
+			sessionId = loaded?.session.sessionId ?? saved?.id;
+			const file = loaded ? loaded.sessionManager.getSessionFile() : saved?.file;
+			own = file === undefined ? undefined : readSessionWatchWork(file, this.idleTimers().now());
 		} catch (error) {
 			// The roster draws what reads: a home whose session does not read now counts no watches, and says why once.
 			if (!this.toldWatchesNotCounted.has(agentId))
@@ -828,8 +834,9 @@ export class BotSessionHost {
 		this.toldWatchesNotCounted.delete(agentId);
 		if (sessionId === undefined) return 0;
 		const live = liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now());
-		if (live.firstExpiresAt !== undefined) this.watchExpiry.note(agentId, live.firstExpiresAt);
-		return live.count;
+		const ends = [live.firstExpiresAt, own?.firstExpiresAt].filter((end): end is number => end !== undefined);
+		if (ends.length > 0) this.watchExpiry.note(agentId, Math.min(...ends));
+		return live.count + (own?.live ?? 0);
 	}
 
 	/**

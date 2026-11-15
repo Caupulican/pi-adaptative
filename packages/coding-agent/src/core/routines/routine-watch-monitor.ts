@@ -1,10 +1,11 @@
 /**
- * Arms the session's watch routines and reports what they observe to the routine store. A watch costs no model call
- * while it waits: a path (a file, a folder or a glob pattern) and a managed process are followed by operating-system
- * events, and a process id, port, command or page by a timer on the owner's cadence that re-arms only after its check
- * finished. Every observation goes through the store's
- * edge rule (`observeWatch`), which fires a pending occurrence in the same write as the cursor it advances; this monitor
- * decides nothing. Nothing is evaluated while the session is closed.
+ * Arms a session's watches and reports what they observe to the store that holds them: the routine store's session watches
+ * (`routineStoreWatches`) or the session's own watch ledger (`core/watches/`), each behind {@link WatchObservationStore}.
+ * A watch costs no model call while it waits: a path (a file, a folder or a glob pattern) and a managed process are
+ * followed by operating-system events, and a process id, port, command or page by a timer on the armer's cadence that
+ * re-arms only after its check finished. Every observation goes through the store's edge rule (`observeWatch`), which
+ * records a firing in the same write as the cursor it advances; this monitor decides nothing. Nothing is evaluated while
+ * the session is closed.
  *
  * An edge the store cannot take yet is kept as the routine's latest observation and offered again on the next store
  * change, so a file that does not change twice still fires once. Behind an earlier firing not yet delivered it simply
@@ -22,6 +23,7 @@ import type { TimerPort } from "../util/timer-port.ts";
 import { type RoutineDefinitionView, type RoutineWatchSchedule, routineEnded } from "./routine-contract.ts";
 import type { RoutineHolder } from "./routine-holder.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
+import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routine-watch-edge.ts";
 import { isWatchGlob, splitWatchPattern, type WatchCondition, watchCadenceMs } from "./watch-contract.ts";
 import type { WatchSample, WatchSampler } from "./watch-evaluators.ts";
 import { routineWorkerAuthority, type WorkerWatchAuthority } from "./worker-watch-scope.ts";
@@ -29,11 +31,60 @@ import { routineWorkerAuthority, type WorkerWatchAuthority } from "./worker-watc
 /** Wait after the last file-system event before a file or process is observed, so a burst of writes is one observation. */
 const WATCH_DEBOUNCE_MS = 300;
 
+/** One watch a monitor samples, as its store lists it: its id (a routine's or a session watch's), incarnation and condition. */
+export interface ObservedWatch {
+	readonly routineId: string;
+	readonly incarnationId: string;
+	readonly condition: WatchCondition;
+	/** The worker a worker's watch is observed under besides the session (`worker-watch-scope.ts`), fixed with its incarnation. */
+	readonly worker: WorkerWatchAuthority | undefined;
+}
+
+/**
+ * The store a monitor reads its watches from and reports its observations to: the watches to sample now (enabled and not
+ * ended), a change signal, and the edge rule that records an observation (`routine-watch-edge.ts`).
+ */
+export interface WatchObservationStore {
+	subscribe(listener: () => void): () => void;
+	observedWatches(nowMs: number): readonly ObservedWatch[];
+	observeWatch(input: RoutineWatchObservationInput): RoutineWatchOutcome;
+}
+
+/**
+ * The routine store's watches a session's runtime holds (`routine-holder.ts`), as a monitor samples them: enabled, unended
+ * watch routines that wake a session. A bot or team routine is never sampled here.
+ */
+export function routineStoreWatches(
+	store: Pick<RoutineStorePort, "subscribe" | "listRoutines" | "observeWatch">,
+	holder: RoutineHolder,
+): WatchObservationStore {
+	return {
+		subscribe: (listener) => store.subscribe(listener),
+		observedWatches: (nowMs) =>
+			store
+				.listRoutines(holder)
+				.filter(
+					(routine): routine is RoutineDefinitionView & { schedule: RoutineWatchSchedule } =>
+						watchesOf(routine) &&
+						routine.target.kind === "session" &&
+						routine.enabled &&
+						routineEnded(routine, nowMs) === undefined,
+				)
+				.map((routine) => ({
+					routineId: routine.routineId,
+					incarnationId: routine.incarnationId,
+					condition: routine.schedule.condition,
+					worker: routineWorkerAuthority(routine),
+				})),
+		observeWatch: (input) => store.observeWatch(input),
+	};
+}
+
 export interface RoutineWatchMonitorDeps {
-	readonly store: Pick<RoutineStorePort, "reload" | "subscribe" | "listRoutines" | "observeWatch">;
+	readonly watches: WatchObservationStore;
 	readonly sampler: Pick<WatchSampler, "sample">;
-	/** Whose watches this monitor samples: only the ones its session's runtime holds (`routine-holder.ts`). */
-	readonly holder: RoutineHolder;
+	/** The session whose watches this monitor samples; every observation is reported for it. */
+	readonly sessionId: string;
 	/** Tells whoever armed a watch that its checks keep failing; absent where nobody can be told. Called once per failing streak. */
 	onFailing?(failing: WatchFailing): void;
 	readonly timers: TimerPort;
@@ -166,7 +217,7 @@ export class RoutineWatchMonitor {
 
 	start(): void {
 		if (this.disposed || this.unsubscribe) return;
-		this.unsubscribe = this.deps.store.subscribe(() => this.onStoreChange());
+		this.unsubscribe = this.deps.watches.subscribe(() => this.onStoreChange());
 		this.sync();
 	}
 
@@ -215,16 +266,10 @@ export class RoutineWatchMonitor {
 		}
 	}
 
-	/** Arms what the session's enabled, unended watch routines ask for and disarms what no longer applies. */
+	/** Arms what the store's enabled, unended watches ask for and disarms what no longer applies. */
 	private sync(): void {
-		const nowMs = this.deps.timers.now();
-		const wanted = new Map<string, RoutineDefinitionView & { schedule: RoutineWatchSchedule }>();
-		for (const routine of this.deps.store.listRoutines(this.deps.holder)) {
-			// A watch samples for the session it wakes; a bot or team routine is never sampled here.
-			if (!watchesOf(routine) || routine.target.kind !== "session" || !routine.enabled) continue;
-			if (routineEnded(routine, nowMs) !== undefined) continue;
-			wanted.set(routine.routineId, routine);
-		}
+		const wanted = new Map<string, ObservedWatch>();
+		for (const watch of this.deps.watches.observedWatches(this.deps.timers.now())) wanted.set(watch.routineId, watch);
 		for (const watch of [...this.armed.values()]) {
 			const routine = wanted.get(watch.routineId);
 			if (!routine || watchKey(routine) !== watch.key) {
@@ -239,15 +284,15 @@ export class RoutineWatchMonitor {
 			if (!this.armed.has(routineId) && this.skipped.get(routineId) !== watchKey(routine)) this.arm(routine);
 	}
 
-	private arm(routine: RoutineDefinitionView & { schedule: RoutineWatchSchedule }): void {
-		const condition = routine.schedule.condition;
+	private arm(routine: ObservedWatch): void {
+		const { condition } = routine;
 		const key = watchKey(routine);
 		const watch: ArmedWatch = {
 			routineId: routine.routineId,
 			incarnationId: routine.incarnationId,
 			key,
 			condition,
-			worker: routineWorkerAuthority(routine),
+			worker: routine.worker,
 			abort: new AbortController(),
 			timer: undefined,
 			watchers: new Map(),
@@ -464,10 +509,10 @@ export class RoutineWatchMonitor {
 	private async submit(watch: ArmedWatch, sample: WatchSample): Promise<void> {
 		if (!this.active || watch.abort.signal.aborted) return;
 		try {
-			const outcome = this.deps.store.observeWatch({
+			const outcome = this.deps.watches.observeWatch({
 				routineId: watch.routineId,
 				incarnationId: watch.incarnationId,
-				parentSessionId: this.deps.holder.sessionId,
+				parentSessionId: this.deps.sessionId,
 				nowMs: this.deps.timers.now(),
 				observation: sample.observation,
 				event: sample.event,
@@ -575,7 +620,7 @@ export class RoutineWatchMonitor {
 	}
 }
 
-/** Identity of what a watch observes: the routine's incarnation and condition. A prompt-only edit keeps it. */
-function watchKey(routine: RoutineDefinitionView & { schedule: RoutineWatchSchedule }): string {
-	return `${routine.incarnationId}:${JSON.stringify(routine.schedule.condition)}`;
+/** Identity of what a watch observes: its incarnation and condition. A prompt-only edit keeps it. */
+function watchKey(watch: ObservedWatch): string {
+	return `${watch.incarnationId}:${JSON.stringify(watch.condition)}`;
 }

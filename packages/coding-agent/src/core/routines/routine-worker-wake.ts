@@ -28,6 +28,11 @@ export interface WorkerWakeHost {
 	followUp(runtimeId: string, text: string, idempotencyKey: string): { messageId: string; skipReason?: string };
 }
 
+/** The line a session reads before a watch event its worker armed but could not take: the event is the session's to act on or pass on. */
+export function workerUnreachableLine(runtimeId: string, reason: string): string {
+	return `Worker ${runtimeId} armed this watch but could not be woken by it (${reason}), so it reaches you instead: act on it, or pass it to the worker yourself.`;
+}
+
 /** Sends one wake; `key` makes a redelivery the same message. */
 export function wakeWorkerRuntime(
 	host: WorkerWakeHost,

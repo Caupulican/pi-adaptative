@@ -30,6 +30,8 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
+import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
+import { SessionWatchService } from "../watches/session-watch-service.ts";
 import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
@@ -55,19 +57,35 @@ import {
 import { RoutineSessionController } from "./routine-session-controller.ts";
 import type { RoutineMessageResult } from "./routine-store-port.ts";
 import { routineWakeAddress } from "./routine-wake-address.ts";
-import { RoutineWatchMonitor, type WatchFailing } from "./routine-watch-monitor.ts";
-import { isOneShotWatch, routineWakeText, watchFailingWakeText } from "./routine-watch-wake.ts";
+import { agentArmedWatchCount, heldWatchCount, workerArmedWatchCount } from "./routine-watch-arming.ts";
+import {
+	RoutineWatchMonitor,
+	routineStoreWatches,
+	type WatchFailing,
+	type WatchObservationStore,
+} from "./routine-watch-monitor.ts";
+import {
+	isOneShotWatch,
+	routineWakeText,
+	routineWatchCondition,
+	routineWatchPlan,
+	watchFailingWakeText,
+} from "./routine-watch-wake.ts";
 import { RoutineWorkerExecutor } from "./routine-worker-executor.ts";
 import {
 	WORKER_WAKE_PLAN_CHARS,
 	WORKER_WAKE_RETRY_MS,
 	type WorkerWakeHost,
 	wakeWorkerRuntime,
+	workerUnreachableLine,
 } from "./routine-worker-wake.ts";
 import type { TaskWatchPort } from "./task-watch-tool.ts";
 import { WatchAdmission } from "./watch-admission.ts";
+import type { WatchCheckAdmitter } from "./watch-check-admission.ts";
+import type { WatchCondition } from "./watch-contract.ts";
 import { WatchSampler } from "./watch-evaluators.ts";
 import { workerRuntimeCarriesThirdPartyWords, workerRuntimeLive } from "./worker-watch-liveness.ts";
+import type { WorkerWatchAuthority } from "./worker-watch-scope.ts";
 
 /** The routine runtime one session holds: built once, started with the session's inputs, closed when the session disposes. */
 export interface RoutineRuntime {
@@ -76,6 +94,9 @@ export interface RoutineRuntime {
 	/** Absent in a bot's own session: it holds only the watches it arms, so no owner words become routines there. */
 	readonly intake?: RoutineIntake;
 	readonly watches: RoutineWatchMonitor;
+	/** The session's own watches (`core/watches/`), and the monitor that samples them with the same samplers. */
+	readonly sessionWatches: SessionWatchService;
+	readonly sessionWatchMonitor: RoutineWatchMonitor;
 	stop(): Promise<void>;
 }
 
@@ -234,10 +255,6 @@ export class RoutineRuntimeAssembly {
 		};
 	}
 
-	private workerUnreachable(runtimeId: string, reason: string): string {
-		return `Worker ${runtimeId} armed this watch but could not be woken by it (${reason}), so it reaches you instead: act on it, or pass it to the worker yourself.`;
-	}
-
 	/**
 	 * Delivers a watch event to the worker runtime that armed it. A runtime that is gone settles without a wake. One that
 	 * does not take it now is retried for {@link WORKER_WAKE_RETRY_MS}, then the session is woken with the event instead, so
@@ -262,7 +279,7 @@ export class RoutineRuntimeAssembly {
 		return send(
 			this.sessionWake(
 				routineResultInputIds(delivery)[1],
-				`${this.workerUnreachable(runtimeId, wake.reason)}\n${routineWakeText(delivery)}`,
+				`${workerUnreachableLine(runtimeId, wake.reason)}\n${routineWakeText(delivery)}`,
 				input.message.details,
 			),
 		);
@@ -277,7 +294,10 @@ export class RoutineRuntimeAssembly {
 		const routine = store.getRoutine(failing.routineId);
 		const address = routine && routineWakeAddress(routine);
 		if (!routine || !address || routine.incarnationId !== failing.incarnationId) return;
-		const text = watchFailingWakeText(routine, failing);
+		const plan = routineWatchPlan(routine);
+		const condition = routineWatchCondition(routine.schedule);
+		const expiresAt = routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;
+		const text = watchFailingWakeText(plan, routine.incarnationId, condition, expiresAt, failing);
 		const fires = routine.cursor.kind === "watch" ? routine.cursor.fires : 0;
 		const deliveryId = `watch-failing:${createHash("sha256")
 			.update(JSON.stringify([routine.incarnationId, fires, text]))
@@ -294,11 +314,11 @@ export class RoutineRuntimeAssembly {
 			const wake = wakeWorkerRuntime(
 				this.workerWakeHost(),
 				address.runtimeId,
-				watchFailingWakeText(routine, failing, WORKER_WAKE_PLAN_CHARS),
+				watchFailingWakeText(plan, routine.incarnationId, condition, expiresAt, failing, WORKER_WAKE_PLAN_CHARS),
 				deliveryId,
 			);
 			if (wake.kind !== "refused") return;
-			content = `${this.workerUnreachable(address.runtimeId, wake.reason)}\n${text}`;
+			content = `${workerUnreachableLine(address.runtimeId, wake.reason)}\n${text}`;
 		}
 		this.deps
 			.deliverParentInput(this.sessionWake(deliveryId, content, details))
@@ -307,6 +327,51 @@ export class RoutineRuntimeAssembly {
 					`Watch ${routine.routineId} is failing and its armer could not be told: ${error instanceof Error ? error.message : String(error)}`,
 				),
 			);
+	}
+
+	/**
+	 * The session's own watches over its ledger beside the session's transcript (in memory while it has none). Routine
+	 * watches an earlier build armed without the owner's words hold slots of the same bound; a bot's own session counts every
+	 * routine watch it holds, since all of them are its own waits.
+	 */
+	private sessionWatches(
+		store: PersistentBotTeamStore,
+		scope: RoutineScope,
+		checks: WatchCheckAdmitter,
+	): SessionWatchService {
+		const sessionId = this.deps.getSessionId();
+		const manager = this.deps.getSessionManager();
+		const timers = this.deps.getTimers().port("routines");
+		const warn = (message: string) => this.host.warn(message);
+		const ledger = new SessionWatchLedger({
+			sessionId,
+			path: () => {
+				const file = manager.isPersisted() ? manager.getSessionFile() : undefined;
+				return file === undefined ? undefined : sessionWatchLedgerPath(file);
+			},
+			now: () => timers.now(),
+			warn,
+		});
+		return new SessionWatchService({
+			ledger,
+			sessionId,
+			timers,
+			checks,
+			legacyAgentWatches: () =>
+				(scope === "own-watches" ? heldWatchCount : agentArmedWatchCount)(
+					store.listRoutines(),
+					sessionId,
+					timers.now(),
+				),
+			legacyWorkerWatches: (runtimeId) =>
+				workerArmedWatchCount(store.listRoutines(), sessionId, runtimeId, timers.now()),
+			deliverToSession: (deliveryId, content, details) =>
+				this.deps.deliverParentInput(this.sessionWake(deliveryId, content, details)),
+			wakeWorker: (runtimeId, text, key) => wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key),
+			warnOwner: warn,
+			isDisposed: () => this.deps.isDisposed(),
+			warn,
+		});
 	}
 
 	/**
@@ -442,27 +507,38 @@ export class RoutineRuntimeAssembly {
 				thirdPartyProtectedWritePaths(cwd, this.deps.getAgentDir(), this.deps.getSessionManager()),
 		});
 		const routineTimers = this.deps.getTimers().port("routines");
-		const watches = new RoutineWatchMonitor({
-			store,
-			sampler: new WatchSampler({
-				admission: watchAdmission,
-				agentDir: () => this.deps.getAgentDir(),
-				now: () => routineTimers.now(),
-			}),
-			holder: { sessionId: parentSessionId, scope },
-			onFailing: (failing) => this.reportWatchFailing(store, failing),
-			timers: routineTimers,
+		const sampler = new WatchSampler({
+			admission: watchAdmission,
 			agentDir: () => this.deps.getAgentDir(),
-			isDisposed: () => this.deps.isDisposed(),
-			warn: (message) => this.host.warn(message),
+			now: () => routineTimers.now(),
 		});
+		const monitorOver = (observed: WatchObservationStore, onFailing: (failing: WatchFailing) => void) =>
+			new RoutineWatchMonitor({
+				watches: observed,
+				sessionId: parentSessionId,
+				sampler,
+				onFailing,
+				timers: routineTimers,
+				agentDir: () => this.deps.getAgentDir(),
+				isDisposed: () => this.deps.isDisposed(),
+				warn: (message) => this.host.warn(message),
+			});
+		const watches = monitorOver(routineStoreWatches(store, { sessionId: parentSessionId, scope }), (failing) =>
+			this.reportWatchFailing(store, failing),
+		);
+		const checks = {
+			admitWatch: (condition: WatchCondition, worker?: WorkerWatchAuthority) =>
+				watchAdmission.admit(condition, worker),
+			admitSubCall: this.deps.admitNestedToolCall.bind(this.deps),
+			holdsTool: (toolName: string) => this.deps.getForegroundToolNames().includes(toolName),
+		} satisfies WatchCheckAdmitter;
+		const sessionWatches = this.sessionWatches(store, scope, checks);
+		const sessionWatchMonitor = monitorOver(sessionWatches, (failing) => sessionWatches.noteFailing(failing));
 		const session = new RoutineSessionController({
 			store,
 			scheduler,
 			parentSessionId,
-			admitWatch: (condition, worker) => watchAdmission.admit(condition, worker),
-			admitSubCall: (parentId, call, signal) => this.deps.admitNestedToolCall(parentId, call, signal),
-			holdsTool: (toolName) => this.deps.getForegroundToolNames().includes(toolName),
+			...checks,
 			capture: (request, signal) => this.host.workerController().captureSavedIntent(request, signal),
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
@@ -544,6 +620,10 @@ export class RoutineRuntimeAssembly {
 			};
 			const completions = [
 				start("stop routine watches", () => watches.dispose()),
+				start("stop session watches", async () => {
+					await sessionWatchMonitor.dispose();
+					await sessionWatches.stop();
+				}),
 				start("stop routine scheduler", () => scheduler.close()),
 				start("stop routine intake", () => intake?.stop()),
 			];
@@ -554,6 +634,6 @@ export class RoutineRuntimeAssembly {
 			});
 			return shutdown;
 		};
-		return { scheduler, session, intake, watches, stop };
+		return { scheduler, session, intake, watches, sessionWatches, sessionWatchMonitor, stop };
 	}
 }

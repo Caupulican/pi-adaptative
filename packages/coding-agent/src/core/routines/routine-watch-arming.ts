@@ -55,6 +55,15 @@ function holdsWatchSlot(routine: RoutineDefinitionView, parentSessionId: string,
 	);
 }
 
+/** How many watch slots of the session its watches hold, whatever armed them. */
+export function heldWatchCount(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): number {
+	return routines.filter((routine) => holdsWatchSlot(routine, parentSessionId, nowMs)).length;
+}
+
 /** The live watches of the session as the operator bar counts them: held and enabled, so a paused watch is not watching. */
 export function liveWatches(
 	routines: readonly RoutineDefinitionView[],
@@ -82,15 +91,38 @@ export function agentWatchSlotsRefusal(
 	parentSessionId: string,
 	nowMs: number,
 ): string | undefined {
-	const held = routines.filter(
+	return agentArmedWatchCount(routines, parentSessionId, nowMs) >= MAX_AGENT_ARMED_WATCHES
+		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches armed without the owner's words, the most it may; delete one or wait for one to fire or end.`
+		: undefined;
+}
+
+/** How many watch slots of the session the watches a run armed without the owner's words hold. */
+export function agentArmedWatchCount(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): number {
+	return routines.filter(
 		(routine) =>
 			routine.armedBy !== undefined &&
 			routine.armedBy.kind !== "owner" &&
 			holdsWatchSlot(routine, parentSessionId, nowMs),
 	).length;
-	return held >= MAX_AGENT_ARMED_WATCHES
-		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches armed without the owner's words, the most it may; delete one or wait for one to fire or end.`
-		: undefined;
+}
+
+/** How many watch slots of the session one worker runtime's watches hold. */
+export function workerArmedWatchCount(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	runtimeId: string,
+	nowMs: number,
+): number {
+	return routines.filter(
+		(routine) =>
+			routine.wake?.kind === "worker" &&
+			routine.wake.runtimeId === runtimeId &&
+			holdsWatchSlot(routine, parentSessionId, nowMs),
+	).length;
 }
 
 /**
@@ -102,8 +134,7 @@ export function ownWatchSlotsRefusal(
 	parentSessionId: string,
 	nowMs: number,
 ): string | undefined {
-	const held = routines.filter((routine) => holdsWatchSlot(routine, parentSessionId, nowMs)).length;
-	return held >= MAX_AGENT_ARMED_WATCHES
+	return heldWatchCount(routines, parentSessionId, nowMs) >= MAX_AGENT_ARMED_WATCHES
 		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches, the most it may; wait for one to fire or end.`
 		: undefined;
 }
@@ -115,20 +146,18 @@ export function workerWatchSlotsRefusal(
 	runtimeId: string,
 	nowMs: number,
 ): string | undefined {
-	const held = routines.filter(
-		(routine) =>
-			routine.wake?.kind === "worker" &&
-			routine.wake.runtimeId === runtimeId &&
-			holdsWatchSlot(routine, parentSessionId, nowMs),
-	).length;
-	return held >= MAX_WORKER_ARMED_WATCHES
+	return workerArmedWatchCount(routines, parentSessionId, runtimeId, nowMs) >= MAX_WORKER_ARMED_WATCHES
 		? `This worker already holds ${MAX_WORKER_ARMED_WATCHES} watches, the most one may; wait for one to fire or end.`
 		: undefined;
 }
 
-/** What {@link SessionWatchCount} reads: the saved routines, their change signal, the session and the clock. */
+/**
+ * What {@link SessionWatchCount} reads: the saved routines, the session's own watches (`core/watches/`), their change
+ * signal, the session and the clock.
+ */
 export interface SessionWatchCountSource {
 	routines(): readonly RoutineDefinitionView[];
+	ownWatches(nowMs: number): number;
 	subscribe(listener: () => void): () => void;
 	parentSessionId(): string;
 	now(): number;
@@ -153,7 +182,9 @@ export class SessionWatchCount {
 	}
 
 	read(): number {
-		this.counted ??= liveWatchCount(this.source.routines(), this.source.parentSessionId(), this.source.now());
+		const nowMs = this.source.now();
+		this.counted ??=
+			liveWatchCount(this.source.routines(), this.source.parentSessionId(), nowMs) + this.source.ownWatches(nowMs);
 		return this.counted;
 	}
 

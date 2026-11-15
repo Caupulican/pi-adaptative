@@ -20,7 +20,14 @@ import {
 	routineTriggerEvents,
 } from "./routine-contract.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
-import { isOneShotWatch, watchCauseText, watchFiredWakeText, watchTimedOutWakeText } from "./routine-watch-wake.ts";
+import {
+	isOneShotWatch,
+	routineWatchCondition,
+	routineWatchPlan,
+	watchCauseText,
+	watchFiredWakeText,
+	watchTimedOutWakeText,
+} from "./routine-watch-wake.ts";
 import { watchFiredLine } from "./watch-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
@@ -244,7 +251,7 @@ function routineWatchWake(delivery: RoutineDelivery, trigger: RoutineWatchTrigge
 	const message = {
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
-		content: watchFiredWakeText(occurrence, trigger, held),
+		content: watchFiredWakeText(routineWatchPlan(occurrence.definition), occurrence.occurrenceId, trigger, held),
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
@@ -279,7 +286,14 @@ function routineExpiryNotice(
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
 		content: wakesArmer
-			? watchTimedOutWakeText(occurrence, trigger.expiresAt, trigger.lastSeen, held)
+			? watchTimedOutWakeText(
+					routineWatchPlan(occurrence.definition),
+					occurrence.occurrenceId,
+					routineWatchCondition(occurrence.definition.schedule),
+					trigger.expiresAt,
+					trigger.lastSeen,
+					held,
+				)
 			: `Routine ${occurrence.routineId} reached the end time it was saved with and was removed; it stopped watching and will not run again. Tell the owner once, briefly, when it bears on what they ask next; they can ask for it again or for a later end.`,
 		details: {
 			occurrenceId: occurrence.occurrenceId,

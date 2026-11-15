@@ -31,6 +31,18 @@ export class SessionRoutines {
 	private started = false;
 	/** A bot's own session's `task_watch`: it reads the runtime at each call, since the runtime is built with the store. */
 	private readonly ownWatchTool = createSessionTaskWatchTool(() => this.loaded()?.session);
+	private readonly watchListeners = new Set<() => void>();
+	/**
+	 * The session's own watches as the operator bar counts them (`core/watches/`): none until the runtime is built, then
+	 * its ledger's live watches; a listener hears every change of them and the runtime's building.
+	 */
+	readonly ownWatches = {
+		liveCount: (nowMs: number): number => this.runtime?.sessionWatches.liveCount(nowMs) ?? 0,
+		subscribe: (listener: () => void): (() => void) => {
+			this.watchListeners.add(listener);
+			return () => this.watchListeners.delete(listener);
+		},
+	};
 
 	constructor(ports: SessionRoutinesPorts) {
 		this.ports = ports;
@@ -56,6 +68,11 @@ export class SessionRoutines {
 		const scope = this.scope();
 		if (this.runtime || this.ports.isDisposed() || !scope) return;
 		this.runtime = this.ports.assemble(store, scope);
+		const tell = () => {
+			for (const listener of [...this.watchListeners]) listener();
+		};
+		this.runtime.sessionWatches.subscribe(tell);
+		tell();
 		if (this.started) this.startRuntime(this.runtime);
 	}
 
@@ -73,6 +90,8 @@ export class SessionRoutines {
 		runtime.scheduler.start();
 		runtime.intake?.start();
 		runtime.watches.start();
+		runtime.sessionWatches.start();
+		runtime.sessionWatchMonitor.start();
 	}
 
 	/** The runtime over the session's store, loading the store (which builds the runtime) first. */
@@ -99,11 +118,14 @@ export class SessionRoutines {
 		return this.runtime?.intake?.settled() ?? Promise.resolve();
 	}
 
-	/** The session's routine tool: a root session's `routine`; a bot's own session's `task_watch`, for its own waits. */
-	tool(): ToolDefinition | undefined {
+	/** The session's routine tools: a root session's `routine`; a bot's own session's `task_watch`, for its own waits. */
+	tools(): ToolDefinition[] {
 		const scope = this.scope();
-		if (scope === "session") return this.loaded()?.session.tool;
-		return scope === "own-watches" ? this.ownWatchTool : undefined;
+		if (scope === "session") {
+			const tool = this.loaded()?.session.tool;
+			return tool ? [tool] : [];
+		}
+		return scope === "own-watches" ? [this.ownWatchTool] : [];
 	}
 
 	/** What the gate reads about a call's target when the call is the routine tool's (`ToolCallFacts`); else undefined. */

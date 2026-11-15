@@ -836,6 +836,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return routineGithubInterests(this.getBotTeamStore().listRoutines(), this.deps.getSessionId(), nowMs);
 	}
 
+	/** The session's own watches (`core/watches/`) the operator bar counts beside its routine watches. */
+	readonly ownWatches = () => this._routines.ownWatches;
+
 	subscribeRoutineDefinitions(listener: () => void): () => void {
 		return this.getBotTeamStore().subscribe(listener);
 	}
@@ -1617,10 +1620,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._routines.intakeSettled();
 	}
 
-	private createRoutineToolDefinition(): ToolDefinition | undefined {
-		return this._routines.tool();
-	}
-
 	/** What a root-only lane tool's owner reads about a call's target before the gate (`ToolCallFacts`), by tool name. */
 	readonly toolCallFacts = (toolName: string, args: unknown) => this._routines.callFacts(toolName, args);
 
@@ -1890,10 +1889,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * policy) is left out.
 	 */
 	createBackgroundLaneTools(): ToolDefinition[] {
-		const routine = this.createRoutineToolDefinition();
 		const { managesBots, directsWorkers } = this.deps.standing;
 		return [
-			routine,
+			...this._routines.tools(),
 			managesBots ? this.createBotToolDefinition() : undefined,
 			this.createChannelReplyToolDefinition(),
 			directsWorkers ? createPlanToolDefinition(() => this._getPlanExecutor()) : undefined,
