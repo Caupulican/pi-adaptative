@@ -38,7 +38,6 @@ import { existsSync } from "node:fs";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
@@ -672,8 +671,6 @@ export class BotSessionHost {
 	}
 
 	private async load(record: PersistentBotRecord, sender: BotSender): Promise<BotSessionEntry> {
-		// The move below judges the holders of the owner's home by their machine: this process's own is read first.
-		await warmHostIdentity();
 		const agentDir = this.ports.agentDir();
 		const { agentId } = record;
 		const words = interfaceText().botTeam;
@@ -696,7 +693,7 @@ export class BotSessionHost {
 		let storeWithin: string | undefined;
 		try {
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
-			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
+			const { sessionManager, continued } = await openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
 				notMoved: (kept) => {
 					if (this.toldNotMoved.has(agentId)) return;

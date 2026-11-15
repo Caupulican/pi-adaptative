@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
 	botHostBlockers,
+	holdersAwaitHostIdentity,
 	readSessionLeaseHolders,
 	sessionBundleDeletionPolicy,
 	withSessionBundleInspection,
@@ -60,10 +61,12 @@ import { fleetQueueMetadataPath } from "../fleet/fleet-queue-store.ts";
  * recorded their transcripts in the owner's home (`worker-records`), the homes lie on different devices
  * (`cross-device`), or processes `pids` not proven dead still hold it in the owner's home, none of which keeps the
  * bot's host out (an away run's host, or a holder whose liveness proof is stale: `still-held`); in those three the
- * session uses the owner's.
+ * session uses the owner's. `placing`: a holder of the owner's home records a machine id and this process has not read its
+ * own yet (`holdersAwaitHostIdentity`); nothing moved, and the opener moves again once that read finished.
  */
 export type BotBundleMove =
 	| { readonly kind: "none" }
+	| { readonly kind: "placing" }
 	| { readonly kind: "moved" }
 	| { readonly kind: "deleting" }
 	| { readonly kind: "held" }
@@ -150,7 +153,9 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			const deleting = [owner, botHome].some((home) => sessionBundleDeletionPolicy(home, sessionId) !== undefined);
 			if (deleting) return { kind: "deleting" };
 			// Any holder not proven dead stops the renames; whether the bot's host is refused beside it is its admission's rule.
-			const holding = readSessionLeaseHolders(owner, sessionId).filter((holder) => holder.standing !== "dead");
+			const recorded = readSessionLeaseHolders(owner, sessionId);
+			if (holdersAwaitHostIdentity(recorded)) return { kind: "placing" };
+			const holding = recorded.filter((holder) => holder.standing !== "dead");
 			if (holding.length > 0)
 				return botHostBlockers(owner, holding).length > 0
 					? { kind: "held" }

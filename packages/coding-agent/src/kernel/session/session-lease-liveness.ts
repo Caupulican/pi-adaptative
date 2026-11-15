@@ -1,7 +1,9 @@
 /**
  * The liveness proof of a process that holds session lifetime leases in an orchestration home:
  * `<home>/lease-holders/<processInstanceId>.beat`, written when the process takes its first lease there, written again
- * every `LEASE_RENEW_MS` while it holds any, and removed with its last. A lease registry records each holder by the
+ * every `LEASE_RENEW_MS` while it holds any, and removed with its last. It names its process as `ownProcessOwner`
+ * describes it at each write, so a proof whose process crashed is removed by the first lease another process of a host
+ * that proves it dead takes in that home ({@link holdLeaseLiveness}). A lease registry records each holder by the
  * process facts `judgeOwner` reads, which prove a holder dead only on its own host: a holder recorded on another host,
  * or on one this process cannot place, is never proven dead here. Such a holder is judged by its proof instead: it is
  * stale once this process has seen it unchanged for `LEASE_LIVENESS_WINDOW_MS` on its own monotonic clock, so no
@@ -12,10 +14,11 @@
  * that reads it, so a new key would make an older build refuse every session a newer one holds.
  */
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { writeFileAtomicSync } from "../storage/atomic-file.ts";
+import { isProcessOwnerRecord, judgeOwner, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
+import { isMissingFileError, writeFileAtomicSync } from "../storage/atomic-file.ts";
 import { FileSnapshotChangedError, readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { type RepeatingAlarm, repeatEvery, SYSTEM_TIMER_PORT } from "../timer-port.ts";
 import type { OrchestrationHome } from "./session-bundle-paths.ts";
@@ -25,7 +28,8 @@ export const LEASE_RENEW_MS = 30_000;
 /** How long a proof must stay unchanged, as this process sees it, before its holder counts as gone: six renewals. */
 export const LEASE_LIVENESS_WINDOW_MS = 6 * LEASE_RENEW_MS;
 
-const MAX_PROOF_BYTES = 256;
+const MAX_PROOF_BYTES = 2048;
+const PROOF_SUFFIX = ".beat";
 
 /** The homes this process holds leases in, with how many it holds in each. */
 const held = new Map<string, { readonly home: OrchestrationHome; count: number }>();
@@ -35,17 +39,72 @@ let renewals = 0;
 /** What this process saw of each other holder's proof, and since when (`performance.now()`) it has not changed. */
 const seen = new Map<string, { readonly proof: string | undefined; readonly since: number }>();
 
+function proofDir(home: OrchestrationHome): string {
+	return join(home.root, "lease-holders");
+}
+
 function proofFile(home: OrchestrationHome, processInstanceId: string): string {
-	return join(home.root, "lease-holders", `${processInstanceId}.beat`);
+	return join(proofDir(home), `${processInstanceId}${PROOF_SUFFIX}`);
 }
 
 function writeProof(home: OrchestrationHome, processInstanceId: string): void {
-	writeFileAtomicSync(proofFile(home, processInstanceId), `${processInstanceId} ${++renewals}\n`);
+	const proof = { processInstanceId, owner: ownProcessOwner(), beat: ++renewals };
+	writeFileAtomicSync(proofFile(home, processInstanceId), `${JSON.stringify(proof)}\n`);
+}
+
+/**
+ * The process a proof in `home` names, or undefined when it names none this process can judge: a proof that is gone,
+ * being replaced, unreadable or not one this build writes proves nothing, and is left to its holder.
+ */
+function proofOwner(home: OrchestrationHome, processInstanceId: string): ProcessOwner | undefined {
+	let text: string | undefined;
+	try {
+		text = readOptionalBoundedTextFileSync(
+			proofFile(home, processInstanceId),
+			MAX_PROOF_BYTES,
+			"Session lease holder liveness proof",
+		);
+	} catch {
+		return undefined;
+	}
+	if (text === undefined) return undefined;
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const { processInstanceId: named, owner } = value as Record<string, unknown>;
+	return named === processInstanceId && isProcessOwnerRecord(owner) ? owner : undefined;
+}
+
+/**
+ * Removes the proofs in `home` whose process this host proves dead (`judgeOwner`): a process that crashed while it
+ * held a lease there leaves its proof behind. Only `dead` removes one; a proof of another host's process, or one
+ * this process cannot judge, stays until a process of its own host proves it dead.
+ */
+function sweepDeadProofs(home: OrchestrationHome, processInstanceId: string): void {
+	let names: string[];
+	try {
+		names = readdirSync(proofDir(home));
+	} catch (error) {
+		if (isMissingFileError(error)) return;
+		throw error;
+	}
+	for (const name of names) {
+		if (!name.endsWith(PROOF_SUFFIX)) continue;
+		const holder = name.slice(0, -PROOF_SUFFIX.length);
+		if (holder === processInstanceId) continue;
+		const owner = proofOwner(home, holder);
+		if (owner !== undefined && judgeOwner(owner) === "dead") forgetLeaseLiveness(home, holder);
+	}
 }
 
 /**
  * This process (`processInstanceId`) takes a lease in `home`: its proof there is written now, before the lease is
- * recorded, and renewed while it holds any lease there. A failure to write it is thrown, and nothing is counted.
+ * recorded, and renewed while it holds any lease there. A failure to write it is thrown, and nothing is counted. Its
+ * first lease there also removes the proofs of processes this host proves dead ({@link sweepDeadProofs}).
  */
 export function holdLeaseLiveness(home: OrchestrationHome, processInstanceId: string): void {
 	const entry = held.get(home.root);
@@ -53,6 +112,7 @@ export function holdLeaseLiveness(home: OrchestrationHome, processInstanceId: st
 		entry.count++;
 		return;
 	}
+	sweepDeadProofs(home, processInstanceId);
 	writeProof(home, processInstanceId);
 	held.set(home.root, { home, count: 1 });
 	// A renewal that fails is written again at the next: the window spans six, so one missed write ages nothing. A home

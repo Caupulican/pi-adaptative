@@ -7,6 +7,7 @@
  * same session and moves and records nothing ({@link continueBotSession}).
  */
 import { basename, join } from "node:path";
+import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botSessionStorageRoots, sessionStorageRootsOfFile } from "../orchestration-homes.ts";
 import { type BotBundleMove, moveBotSessionBundle } from "./bot-bundle-move.ts";
@@ -47,14 +48,15 @@ function createInHome(agentDir: string, home: BotHome, cwd: string): SessionMana
 /**
  * The host's open of its bot's session, under the bot's `host.lock`: the pointer is settled (recorded before anything
  * is built), the session's state is moved into the bot's home, and the session is opened; `continued` is whether the
- * home already had it.
+ * home already had it. A move that must judge a holder by its machine (`placing`) waits for this process's machine id
+ * and moves again.
  */
-export function openHostedBotSession(
+export async function openHostedBotSession(
 	agentDir: string,
 	home: BotHome,
 	cwd: string,
 	notices: BotSessionOpenNotices,
-): { sessionManager: SessionManager; continued: boolean } {
+): Promise<{ sessionManager: SessionManager; continued: boolean }> {
 	const pointer = settleBotSessionPointer(agentDir, home, (file, reason) => notices.pointerSetAside(file, reason));
 	if (!pointer) {
 		const sessionManager = createInHome(agentDir, home, cwd);
@@ -63,7 +65,12 @@ export function openHostedBotSession(
 		writeBotSessionPointer(home, { sessionId: sessionManager.getSessionId(), file: basename(file) });
 		return { sessionManager, continued: false };
 	}
-	const move = moveBotSessionBundle(agentDir, home.orchestrationHome, pointer.sessionId);
+	let move = moveBotSessionBundle(agentDir, home.orchestrationHome, pointer.sessionId);
+	// Once the read finished no holder waits for it, so the second move decides.
+	while (move.kind === "placing") {
+		await warmHostIdentity();
+		move = moveBotSessionBundle(agentDir, home.orchestrationHome, pointer.sessionId);
+	}
 	if (move.kind === "kept") notices.notMoved(move);
 	const sessionManager = openRecorded(agentDir, home, pointer, join(home.sessionsDir, pointer.file), cwd);
 	return { sessionManager, continued: true };

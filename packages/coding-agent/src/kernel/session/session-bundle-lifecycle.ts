@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, unlinkSync } from "node:fs";
-import { warmHostIdentity } from "../reliability/host-identity.ts";
+import { harnessLog } from "../harness-log.ts";
+import { isHostIdentityRead, warmHostIdentity } from "../reliability/host-identity.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -278,7 +279,16 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
  * serving the session.
  */
 function liveHolders(home: OrchestrationHome, file: string, parentSessionId: string): BundleHolder[] {
-	const holders = readHolders(file, parentSessionId);
+	return pruneDeadHolders(home, file, parentSessionId, readHolders(file, parentSessionId));
+}
+
+/** {@link liveHolders} of `holders`, the registry `file` as read under the caller's lock. */
+function pruneDeadHolders(
+	home: OrchestrationHome,
+	file: string,
+	parentSessionId: string,
+	holders: BundleHolder[],
+): BundleHolder[] {
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
 	if (live.length === holders.length) return live;
 	writeHolders(file, parentSessionId, live);
@@ -433,9 +443,61 @@ function releaseBundleLease(state: BundleLeaseState): void {
 export type SessionHomeNow = () => OrchestrationHome;
 
 /**
- * Takes a lifetime lease on a persisted session. This process's host identity is read first (`warmHostIdentity`: the
- * machine id macOS and Windows read asynchronously), so the holder it records, and every holder its admission judges, is
- * placed by its machine.
+ * Whether judging `holders` waits for this process's machine id: one of them, not this process, records a machine id
+ * and this process has not read its own yet (macOS and Windows read it asynchronously, `warmHostIdentity`), so
+ * `judgeOwner` can only call it `unknown`. A holder recorded by hostname alone is judged the same before that read as
+ * after it, and a lease no other holder shares judges none: neither waits.
+ */
+export function holdersAwaitHostIdentity(
+	holders: readonly { readonly owner: ProcessOwner; readonly processInstanceId: string }[],
+): boolean {
+	return (
+		!isHostIdentityRead() &&
+		holders.some((holder) => holder.processInstanceId !== PROCESS_INSTANCE_ID && holder.owner.machineId !== undefined)
+	);
+}
+
+/**
+ * The holds this process recorded before it read its own machine id: each record names this process by hostname alone,
+ * which another machine with the same hostname (Windows and its WSL, say) would place on itself and could prove dead by
+ * pid. Once the read finishes each still held is recorded again with the machine id ({@link placeOwnHolds}).
+ */
+const unplacedHolds = new Set<BundleLeaseState>();
+
+/** Records every hold in {@link unplacedHolds} again with this process's machine id, now that it is read. */
+function placeOwnHolds(): void {
+	const owner = ownProcessOwner();
+	for (const state of [...unplacedHolds]) {
+		unplacedHolds.delete(state);
+		// A host that exposes no machine id is named by hostname in every record it writes; nothing changes.
+		if (owner.machineId === undefined) continue;
+		const tombstone = orchestrationSessionDeletionFile(state.home, state.parentSessionId);
+		const file = `${tombstone}.leases.json`;
+		try {
+			withFileLockSync(tombstone, () => {
+				if (state.status !== "held") return;
+				const holders = readHolders(file, state.parentSessionId);
+				const index = holders.findIndex((entry) => entry.token === state.holder.token);
+				const recorded = holders[index];
+				if (!recorded) return;
+				holders[index] = { ...recorded, owner };
+				writeHolders(file, state.parentSessionId, holders);
+			});
+		} catch (error) {
+			// Nothing waits on this step: the record keeps naming this process by hostname, as one written before machine ids.
+			harnessLog.warn("session", "a session lease could not record this process's machine id", () => ({
+				parentSessionId: state.parentSessionId,
+				error: error instanceof Error ? error.message : String(error),
+			}));
+		}
+	}
+}
+
+/**
+ * Takes a lifetime lease on a persisted session. A lease that must judge another holder by its machine
+ * ({@link holdersAwaitHostIdentity}) first waits for this process's machine id (`warmHostIdentity`, bounded); one that
+ * need not is recorded at once, and a record written before that read is recorded again with the machine id once it is
+ * read ({@link placeOwnHolds}).
  */
 export async function acquireSessionBundleLease(
 	home: OrchestrationHome,
@@ -447,32 +509,46 @@ export async function acquireSessionBundleLease(
 	 */
 	options: { role?: SessionLeaseRole; refuseHosted?: boolean; homeNow: SessionHomeNow },
 ): Promise<SessionBundleLease> {
-	await warmHostIdentity();
 	const resolvedHome = resolvedOrchestrationHome(home);
 	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
 	const file = `${tombstone}.leases.json`;
-	const holder: BundleHolder = {
-		token: randomUUID(),
-		owner: ownProcessOwner(),
-		processInstanceId: PROCESS_INSTANCE_ID,
-		role: options.role ?? "session",
-	};
-	withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
-		const current = options.homeNow();
-		if (!sameOrchestrationHome(current, resolvedHome))
-			throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
-		const holders = liveHolders(resolvedHome, file, parentSessionId);
-		const admitted = admitHolder(resolvedHome, parentSessionId, holders, holder, options.refuseHosted === true);
-		// The holder's liveness proof is there before the registry names it.
-		holdLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
-		try {
-			writeHolders(file, parentSessionId, admitted);
-		} catch (error) {
-			releaseLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
-			throw error;
-		}
-	});
+	// One admission under the lock; undefined, having written nothing, when a holder waits for this process's machine id.
+	const admit = (): BundleHolder | undefined =>
+		withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
+			const current = options.homeNow();
+			if (!sameOrchestrationHome(current, resolvedHome))
+				throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
+			const recorded = readHolders(file, parentSessionId);
+			if (holdersAwaitHostIdentity(recorded)) return undefined;
+			const holders = pruneDeadHolders(resolvedHome, file, parentSessionId, recorded);
+			const holder: BundleHolder = {
+				token: randomUUID(),
+				owner: ownProcessOwner(),
+				processInstanceId: PROCESS_INSTANCE_ID,
+				role: options.role ?? "session",
+			};
+			const admitted = admitHolder(resolvedHome, parentSessionId, holders, holder, options.refuseHosted === true);
+			// The holder's liveness proof is there before the registry names it.
+			holdLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
+			try {
+				writeHolders(file, parentSessionId, admitted);
+			} catch (error) {
+				releaseLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
+				throw error;
+			}
+			return holder;
+		});
+	let holder = admit();
+	// Once the read finished no holder waits for it, so the second admission decides.
+	while (holder === undefined) {
+		await warmHostIdentity();
+		holder = admit();
+	}
 	const state: BundleLeaseState = { home: resolvedHome, parentSessionId, holder, claimed: false, status: "held" };
+	if (holder.owner.machineId === undefined && !isHostIdentityRead()) {
+		unplacedHolds.add(state);
+		void warmHostIdentity().then(placeOwnHolds);
+	}
 	const lease: SessionBundleLease = Object.freeze({
 		release() {
 			if (state.claimed) throw new Error("The session owns this bundle lease; close the session to release it.");
