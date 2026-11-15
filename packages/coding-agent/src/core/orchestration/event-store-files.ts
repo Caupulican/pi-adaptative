@@ -4,7 +4,7 @@
  * beside a snapshot (`snapshot-carry-file.ts`).
  */
 
-import { lstatSync, type Stats } from "node:fs";
+import { lstatSync, opendirSync, type Stats } from "node:fs";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { OrchestrationEventStoreError } from "./event-store-errors.ts";
 
@@ -129,4 +129,23 @@ export function serializeCompactBounded(value: unknown, maxBytes: number, label:
 export function hasExactFields(record: Record<string, unknown>, fields: readonly string[]): boolean {
 	const actualFields = Object.keys(record);
 	return actualFields.length === fields.length && fields.every((field) => Object.hasOwn(record, field));
+}
+
+/**
+ * Visits each entry name of `dir`, read one entry at a time with no entry bound, so a cleanup reaches what is past a
+ * reader's bound; `visit` may remove the entry it is given. A missing directory has no entries.
+ */
+export function forEachDirectoryEntrySync(dir: string, visit: (name: string) => void): void {
+	let directory: ReturnType<typeof opendirSync>;
+	try {
+		directory = opendirSync(dir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	try {
+		for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) visit(entry.name);
+	} finally {
+		directory.closeSync();
+	}
 }

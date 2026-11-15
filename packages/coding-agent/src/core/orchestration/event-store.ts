@@ -7,6 +7,7 @@ import { type OrchestrationHome, orchestrationEventStoreDir } from "../agent-pat
 import type { JsonObject } from "../autonomy/contracts.ts";
 import {
 	type AtomicFileLockOptions,
+	atomicTemporaryTarget,
 	isMissingFileError,
 	withFileLockSync,
 	writeFileAtomicSync,
@@ -31,6 +32,7 @@ import {
 } from "./event-store-errors.ts";
 import {
 	type EventCursor,
+	forEachDirectoryEntrySync,
 	hasExactFields,
 	MAX_CONFIGURED_TAIL_BYTES,
 	MAX_CURSOR_BYTES,
@@ -62,7 +64,6 @@ const MAX_CONFIGURED_TAIL_EVENTS = 1_024;
 const MAX_CONFIGURED_IDEMPOTENCY_EVENTS = 1_024;
 const MAX_EVENT_DIRECTORY_ENTRIES = 2_048;
 const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
-const MAX_SNAPSHOT_DIRECTORY_ENTRIES = 8;
 const MAX_BASELINE_BYTES = 64 * 1024;
 const ORCHESTRATION_ACTORS = ["human", "kernel", "runtime", "policy", "router", "worker"] as const;
 const APPEND_INPUT_FIELDS = [
@@ -315,6 +316,11 @@ function assertExactIdempotentReplay(existing: OrchestrationEvent, input: Append
 			`Orchestration idempotency key '${input.idempotencyKey}' was reused with conflicting event content.`,
 		);
 	}
+}
+
+/** A file the store keeps in its snapshots directory: a snapshot or a carried manifest. */
+function isSnapshotDirectoryFile(name: string): boolean {
+	return SNAPSHOT_FILE_PATTERN.test(name) || isCarriedFileName(name);
 }
 
 function eventFileName(ordinal: number): string {
@@ -755,10 +761,13 @@ export class OrchestrationEventStore {
 							const ordinal = Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0);
 							if (ordinal <= throughOrdinal) this.unlinkManagedFile(join(this.eventsDir, name));
 						}
-						for (const name of this.snapshotFileNamesUnlocked()) {
-							if (name !== snapshotFile && name !== carried?.file)
+						// Read past the directory's entry bound: whatever crashed compactions left is removed here.
+						forEachDirectoryEntrySync(this.snapshotsDir, (name) => {
+							const staged = atomicTemporaryTarget(name);
+							const kept = staged === undefined && (name === snapshotFile || name === carried?.file);
+							if (!kept && isSnapshotDirectoryFile(staged ?? name))
 								this.unlinkManagedFile(join(this.snapshotsDir, name));
-						}
+						});
 						pruneCarried(this.carriedDir, carried?.manifest, this.fs);
 						writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
 						this.cursorRead = undefined;
@@ -837,21 +846,6 @@ export class OrchestrationEventStore {
 				MAX_IDEMPOTENCY_DIRECTORY_ENTRIES,
 				"Orchestration idempotency directory",
 			).filter((candidate) => candidate.endsWith(".json"));
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-			throw error;
-		}
-	}
-
-	private snapshotFileNamesUnlocked(): string[] {
-		try {
-			return readBoundedDirectoryNamesSync(
-				this.snapshotsDir,
-				MAX_SNAPSHOT_DIRECTORY_ENTRIES,
-				"Orchestration snapshots directory",
-			)
-				.filter((candidate) => SNAPSHOT_FILE_PATTERN.test(candidate) || isCarriedFileName(candidate))
-				.sort();
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 			throw error;

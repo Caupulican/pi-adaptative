@@ -16,10 +16,10 @@
  */
 
 import { createHash } from "node:crypto";
-import { opendirSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { JsonObject } from "../autonomy/contracts.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { atomicTemporaryTarget, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import type { FaultableFs } from "../util/faultable-fs.ts";
 import {
@@ -29,10 +29,17 @@ import {
 	toJsonObject,
 } from "./contracts.ts";
 import { OrchestrationEventStoreError } from "./event-store-errors.ts";
-import { hasExactFields, MAX_CONFIGURED_TAIL_BYTES, serializeCompactBounded } from "./event-store-files.ts";
+import {
+	forEachDirectoryEntrySync,
+	hasExactFields,
+	MAX_CONFIGURED_TAIL_BYTES,
+	serializeCompactBounded,
+} from "./event-store-files.ts";
 
 const MANIFEST_FILE_PATTERN = /^\d{16}\.carried\.json$/;
 const CHAIN_NAME_PATTERN = /^\d{16}-[0-9a-f]{24}$/;
+const CHUNK_FILE_PATTERN = /^(\d{16})\.json$/;
+const BASE_FILE = "base.json";
 const MANIFEST_FIELDS = ["version", "throughOrdinal", "snapshotDigest", "chains", "digest"] as const;
 const CHAIN_FIELDS = ["chain", "base", "chunks", "head"] as const;
 const BASE_FIELDS = ["version", "base", "digest"] as const;
@@ -193,7 +200,7 @@ function carriedEntry(dir: string, chain: CarriedChain): CarriedEntry {
 function readBase(dir: string, expected: string): JsonObject {
 	const label = "Orchestration carried base";
 	const file = readCarriedJson(
-		join(dir, "base.json"),
+		join(dir, BASE_FILE),
 		MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES + FILE_OVERHEAD_BYTES,
 		label,
 	);
@@ -269,7 +276,7 @@ export function writeCarried(
 				MAX_ORCHESTRATION_PROJECTION_SNAPSHOT_BYTES + FILE_OVERHEAD_BYTES,
 				"Orchestration carried base",
 			);
-			writeFileAtomicSync(join(dir, "base.json"), serialized, { fs });
+			writeFileAtomicSync(join(dir, BASE_FILE), serialized, { fs });
 		}
 		let chunks = kept?.chunks ?? 0;
 		let head = kept?.head ?? null;
@@ -300,35 +307,31 @@ export function writeCarried(
 }
 
 /**
- * After a baseline is published: removes every chain `manifest` does not name and each named chain's chunks past its
- * count. The directory is read one entry at a time; a name that is not a chain's is left alone.
+ * After a baseline is published: removes every chain `manifest` does not name and, in each named chain, chunks past its
+ * count and temporaries of crashed writes (left by a compaction that crashed before its baseline; compactions hold the
+ * store lock, so none is in flight). Directories are read one entry at a time; a name that is not the store's is left alone.
  */
 export function pruneCarried(carriedDir: string, manifest: CarriedManifest | undefined, fs: FaultableFs): void {
 	const named = new Map(Object.values(manifest?.chains ?? {}).map((chain) => [chain.chain, chain]));
-	let dir: ReturnType<typeof opendirSync>;
-	try {
-		dir = opendirSync(carriedDir);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw error;
-	}
-	const dropped: string[] = [];
-	try {
-		for (let entry = dir.readSync(); entry !== null; entry = dir.readSync()) {
-			if (CHAIN_NAME_PATTERN.test(entry.name) && !named.has(entry.name)) dropped.push(entry.name);
-		}
-	} finally {
-		dir.closeSync();
-	}
-	for (const name of dropped) rmSync(join(carriedDir, name), { recursive: true, force: true });
+	forEachDirectoryEntrySync(carriedDir, (name) => {
+		if (CHAIN_NAME_PATTERN.test(name) && !named.has(name))
+			rmSync(join(carriedDir, name), { recursive: true, force: true });
+	});
 	for (const chain of named.values()) {
-		for (let sequence = chain.chunks + 1; ; sequence++) {
+		const dir = join(carriedDir, chain.chain);
+		forEachDirectoryEntrySync(dir, (name) => {
+			const staged = atomicTemporaryTarget(name);
+			const sequence = CHUNK_FILE_PATTERN.exec(name)?.[1];
+			const stale =
+				staged !== undefined
+					? staged === BASE_FILE || CHUNK_FILE_PATTERN.test(staged)
+					: sequence !== undefined && Number(sequence) > chain.chunks;
+			if (!stale) return;
 			try {
-				fs.unlinkSync(join(carriedDir, chain.chain, chunkFileName(sequence)));
+				fs.unlinkSync(join(dir, name));
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
-				throw error;
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			}
-		}
+		});
 	}
 }

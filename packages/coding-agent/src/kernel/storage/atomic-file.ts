@@ -577,6 +577,16 @@ function temporaryPath(filePath: string): string {
 	return `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 }
 
+const TEMPORARY_NAME_PATTERN = /^(.+)\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+
+/**
+ * The name of the file a temporary of {@link writeFileAtomicSync} or {@link writeFileAtomic} was staged for, undefined for
+ * any other name: a writer that crashed before its rename leaves the temporary behind, and the directory's owner removes it.
+ */
+export function atomicTemporaryTarget(name: string): string | undefined {
+	return TEMPORARY_NAME_PATTERN.exec(name)?.[1];
+}
+
 /**
  * Async standalone overwrites can legitimately target the same file at once. Unique temporary
  * names prevent writers from corrupting each other's staging files, but Windows still serializes
