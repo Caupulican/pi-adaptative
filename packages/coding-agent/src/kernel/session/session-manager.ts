@@ -42,6 +42,7 @@ import {
 	validateSessionLifecycleEntry,
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
+import { ParentInputConsumptionSources } from "./parent-input-consumption-source.ts";
 import {
 	assertParentInputVisible,
 	isParentNoteOwnerId,
@@ -108,7 +109,6 @@ import type {
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
 } from "./session-entries.ts";
-import { SessionEntryEvidenceIndex } from "./session-entry-evidence-index.ts";
 import { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
 import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
 import {
@@ -358,9 +358,12 @@ export class SessionManager {
 	private plannedParentNotes: ParentNoteSelection | undefined;
 	/** The session the constructor's file starts when it is missing or empty (`openOrStart`); none once constructed. */
 	private startingSession: NewSessionOptions | undefined;
-	private parentEvidenceCache:
-		| { byId: Map<string, SessionEntry>; count: number; index: SessionEntryEvidenceIndex }
-		| undefined;
+	private readonly parentEvidence = new ParentInputConsumptionSources({
+		byId: () => this.byId,
+		entries: () => this.entries,
+		sessionId: () => this.sessionId,
+		isEntryDurable: (id) => this.isEntryDurableForSession(id),
+	});
 
 	private constructor(
 		cwd: string,
@@ -2124,43 +2127,7 @@ export class SessionManager {
 
 	/** Indexed canonical source for both live ingestion and the same proof used by historical imports. */
 	getParentInputConsumptionSource(): ParentInputConsumptionSource {
-		let cache = this.parentEvidenceCache;
-		if (!cache || cache.byId !== this.byId || cache.count > this.entries.length) {
-			cache = { byId: this.byId, count: 0, index: new SessionEntryEvidenceIndex() };
-			this.parentEvidenceCache = cache;
-		}
-		for (; cache.count < this.entries.length; cache.count++) cache.index.add(this.entries[cache.count]!);
-		const byId = this.byId;
-		const sessionId = this.sessionId;
-		const index = cache.index;
-		const assertCurrent = (signal?: AbortSignal): void => {
-			signal?.throwIfAborted();
-			if (this.byId !== byId || this.sessionId !== sessionId)
-				throw new Error("Parent input source changed during ingestion.");
-		};
-		return {
-			sessionId,
-			readEntries: async (ids, signal) => {
-				assertCurrent(signal);
-				if (ids.length > 64) throw new Error("Parent input lookup exceeds its entry bound.");
-				return new Map(
-					ids.map((id) => {
-						const entry = byId.get(id);
-						if (!entry || entry.id !== id || !this.isEntryDurableForSession(id))
-							throw new Error("Parent input source entry is not durable.");
-						return [id, entry] as const;
-					}),
-				);
-			},
-			isAncestor: async (ancestor, descendant, signal) => {
-				assertCurrent(signal);
-				return index.isAncestor(ancestor, descendant);
-			},
-			findAncestors: async (descendant, query, signal) => {
-				assertCurrent(signal);
-				return index.findAncestors(descendant, query);
-			},
-		};
+		return this.parentEvidence.current();
 	}
 
 	private _pendingParentBatch(mode: ParentInputMode): readonly PersistedParentInput[] {

@@ -5,7 +5,7 @@
 		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6457,
 		"packages/coding-agent/src/core/agent-session.ts": 5225,
 		"packages/coding-agent/src/core/memory/transcript-memory.ts": 3535,
-		"packages/coding-agent/src/kernel/session/session-manager.ts": 3438,
+		"packages/coding-agent/src/kernel/session/session-manager.ts": 3405,
 		"packages/coding-agent/src/modes/interactive/interactive-mode.ts": 3058,
 		"packages/coding-agent/src/core/settings-manager.ts": 3244,
 		"packages/coding-agent/src/core/delegation/persistent-bot-team-store.ts": 2362,

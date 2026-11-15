@@ -82,6 +82,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/continuous-chat-view-limits.ts` | Shared ICM view budgets used by projection and worker birth snapshots. |
 | `kernel/session/lifecycle-ledger.ts` | (no header comment) |
 | `kernel/session/message-retention.ts` | Retention budget for tool result details kept in long-lived process memory. |
+| `kernel/session/parent-input-consumption-source.ts` | The indexed source a session's parent-input consumption reads, live and for historical imports alike (`ParentInputConsumptionSource`): its entries by id, durable for the session, and the ancestry of its entry tree. |
 | `kernel/session/parent-input-consumption.ts` | (no header comment) |
 | `kernel/session/parent-input-ledger.ts` | (no header comment) |
 | `kernel/session/session-append-receipt.ts` | (no header comment) |
@@ -154,7 +155,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-120 kernel modules, 61 with a header comment.
+121 kernel modules, 62 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 
