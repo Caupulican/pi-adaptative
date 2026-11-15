@@ -231,7 +231,7 @@ export interface CreateAgentSessionOptions
 	systemOneFetch?: typeof fetch;
 	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
 	systemOneEvidenceDir?: string;
-	/** Where the session's bundle, lease and workers' state live; default: the owner's. A bot's is `botOrchestrationHome`. */
+	/** Where the session's bundle, lease and workers' state live (default: the owner's); its SessionManager's home too. */
 	orchestrationHome?: OrchestrationHome;
 	/**
 	 * The System One of the session hosting this one (a bot's host), followed in place of the options above: its on/off
