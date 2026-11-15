@@ -128,7 +128,7 @@ export const BOT_TEAM = {
 		named: readonly { readonly path: string; readonly reason: string }[],
 		more: number,
 	) =>
-		`Bot ${agentId}: ${named.map(({ path, reason }) => `${path} (${reason})`).join("; ")}${more > 0 ? ` and ${more} more` : ""} could not be read back for its spend charges, so what ${named.length + more === 1 ? "it holds is" : "they hold is"} charged to the main session again.`,
+		`Bot ${agentId}: ${named.map(({ path, reason }) => `${path} (${reason})`).join("; ")}${more > 0 ? ` and ${more} more` : ""} could not be read back for its spend charges, so what ${named.length + more === 1 ? "it holds" : "they hold"} may be charged to the main session again.`,
 	botChargeMarkNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: how far the main session holds its spend could not be marked in its transcript (${reason}); if its spend record is lost, that is read back from the main session's files alone.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>

@@ -114,6 +114,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		},
 		timers: () => deps.getTimers(),
 		hostSessionId: () => deps.getSessionId(),
+		hostKeepsFile: () => deps.getSessionManager().isPersisted(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
 		// A worker's budget is the owner's worker bound, intersected with the main session's own ceilings: on all spend, and
 		// on metered spend (a subscription's limit is its usage windows). None set, none applies.
@@ -132,7 +133,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		},
 		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
 		// only once read back from its file. A session that keeps no file never holds it so: the charge stays in the bot's
-		// ledger until a session with a file takes it.
+		// ledger, held by that session alone (`BotCharge.heldBy`), until a session with a file takes it.
 		reportUsage: (usage, report) =>
 			deliverSpawnedUsageReceipt(deps.getSessionManager(), deps, usage, {
 				parentSessionId: deps.getSessionId(),
@@ -154,6 +155,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				root: session.usesDefaultSessionDir(),
 				live: {
 					file: session.getSessionFile(),
+					heldBy: session.isPersisted() ? undefined : session.getSessionId(),
 					entries: session.getEntries(),
 					// The row its file holds is the entry as it was written: the same JSON.
 					persisted: (entry) =>

@@ -55,6 +55,7 @@ import type {
 	ResourceProfileSettings,
 } from "./settings/settings-schema.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
+import { spawnedUsageReportIdPrefix } from "./spawned-usage.ts";
 import { assertExtensionCustomType } from "./turn-origin.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -150,14 +151,23 @@ const EXTENSION_USAGE_REPORT_FIELDS: ReadonlySet<string> = new Set(["label", "so
 
 /**
  * An extension's usage report as recorded: exactly its declared fields. Any other field (a charged range's `from` or
- * `through`, its instance or date, a model or components) and the label `bot-session` are refused, naming them: a bot
+ * `through`, its instance or date, a model or components), a field that is not a primitive string, the label
+ * `bot-session` and a report id in the bot charges' namespace are refused, naming them: a bot
  * session's charged ranges are the bot host's alone, so an extension's report cannot mask or reshape a bot's charges.
  */
 function extensionUsageReport(opts: ExtensionUsageReport | undefined): ExtensionUsageReport {
-	for (const [field, value] of Object.entries(opts ?? {}))
-		if (value !== undefined && !EXTENSION_USAGE_REPORT_FIELDS.has(field))
+	for (const [field, value] of Object.entries(opts ?? {})) {
+		if (value === undefined) continue;
+		if (!EXTENSION_USAGE_REPORT_FIELDS.has(field))
 			throw new Error(`reportSpawnedUsage: an extension's report cannot carry "${field}".`);
+		// A String object passes `===` against a string: only a primitive string is taken.
+		if (typeof value !== "string") throw new Error(`reportSpawnedUsage: "${field}" must be a string.`);
+	}
 	const { label, sourceSessionId, reportId } = opts ?? {};
+	if (reportId?.startsWith(spawnedUsageReportIdPrefix(BOT_SESSION_USAGE_LABEL)))
+		throw new Error(
+			`reportSpawnedUsage: report ids starting "${spawnedUsageReportIdPrefix(BOT_SESSION_USAGE_LABEL)}" are reserved for bot session charges.`,
+		);
 	if (label === BOT_SESSION_USAGE_LABEL)
 		throw new Error(
 			`reportSpawnedUsage: the label "${BOT_SESSION_USAGE_LABEL}" is reserved for bot session charges.`,

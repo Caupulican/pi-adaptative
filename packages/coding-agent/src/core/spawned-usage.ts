@@ -34,6 +34,11 @@ export interface SpawnedUsageIdentityOptions {
 	identity: SpawnedUsageIdentity;
 }
 
+/** What every report id of `kind` starts with (`deriveSpawnedUsageReportId`): the namespace of that kind's ids. */
+export function spawnedUsageReportIdPrefix(kind: string): string {
+	return `${kind}:`;
+}
+
 /** Stable retry identity; chunk arrays hash as their space-joined form without materializing that string. */
 export function deriveSpawnedUsageReportId(kind: string, sessionId: string, identity: SpawnedUsageIdentity): string {
 	const hash = createHash("sha256");
@@ -45,7 +50,7 @@ export function deriveSpawnedUsageReportId(kind: string, sessionId: string, iden
 			hash.update(identity[index]);
 		}
 	}
-	return `${kind}:${sessionId}:${hash.digest("hex").slice(0, 16)}`;
+	return `${spawnedUsageReportIdPrefix(kind)}${sessionId}:${hash.digest("hex").slice(0, 16)}`;
 }
 
 export function hasReportableUsage(usage: Usage): boolean {

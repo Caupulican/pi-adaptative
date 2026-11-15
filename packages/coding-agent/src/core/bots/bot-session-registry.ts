@@ -98,6 +98,7 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 			};
 		},
 		hostSessionId: () => current().hostSessionId(),
+		hostKeepsFile: () => current().hostKeepsFile(),
 		warn: (message) => current().warn(message),
 		reportUsage: (usage, report) => current().reportUsage(usage, report),
 		chargesPersisted: (listener) => current().chargesPersisted(listener),

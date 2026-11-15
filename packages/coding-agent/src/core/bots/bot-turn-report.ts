@@ -11,6 +11,7 @@ import { createEmptyUsage } from "../../kernel/usage.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import { usageReach, usageSince } from "../cost/usage-delta.ts";
+import { BOT_SESSION_USAGE_LABEL } from "../cost/usage-records.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
 import { BotChargeMark } from "./bot-charge-mark.ts";
 import type { BotChargesHeld, BotChargeUnread } from "./bot-charges-held.ts";
@@ -62,7 +63,10 @@ export function botTurnCharge(
 		usage,
 		report: {
 			agentId,
-			reportId: deriveSpawnedUsageReportId("bot-session", sessionId, [...readingKey(from), ...readingKey(through)]),
+			reportId: deriveSpawnedUsageReportId(BOT_SESSION_USAGE_LABEL, sessionId, [
+				...readingKey(from),
+				...readingKey(through),
+			]),
 			sessionId,
 			provider: model.provider,
 			model: model.id,
@@ -109,14 +113,19 @@ export interface BotTurnAccountingPorts {
 	/** The session of the root the bot answers now. */
 	rootSessionId(): string;
 	/**
+	 * Whether the root the bot answers now keeps a session file: one that keeps none (`--no-session`, an in-memory SDK
+	 * session) holds a charge only while it lives (`BotCharge.heldBy`).
+	 */
+	rootKeepsFile(): boolean;
+	/**
 	 * A charge was not recorded: the owner is told why, once until a charge reaches the root again (it is delivered again
 	 * with the next charge).
 	 */
 	chargeNotRecorded(reason: string): void;
 	/**
 	 * A read-back read roots' files or directories as holding none of the session's charges (they could not be read): the
-	 * owner is told of each once per session load, the first ones by name (`named`) and the rest counted (`more`); the
-	 * ranges they hold are charged again.
+	 * owner is told of each once per session load, once the watermark read back is adopted, the first ones by name
+	 * (`named`) and the rest counted (`more`); the ranges they hold may be charged again.
 	 */
 	chargesUnread(named: readonly BotChargeUnread[], more: number): void;
 	/**
@@ -139,7 +148,8 @@ export interface BotTurnAccountingPorts {
  * charge (its usage, the report id its range derives, the range's end and when it was fixed) joins the ledger's pending
  * charges and the watermark moves to the range's end, in one write, before the charge is delivered; it leaves the pending
  * charges once the root's file holds it, either at once or when the root's write lands (a root holds a charge unwritten
- * until it writes its file; a root that keeps no file never does, so the charge waits for one that does). Every charge delivers the pending
+ * until it writes its file; a root that keeps no file never does: the charge records it as holding it, `heldBy`, and
+ * waits for a root with a file, never taken by another root without one). Every charge delivers the pending
  * ones again first, in order, so a range a root lost is appended again before any later one; the root's report-id index
  * keeps one it holds from being appended twice, and its readers take each charge's range (`from` to `through`) once
  * however often and wherever it is recorded (`ChargedRanges`). At each turn's end and at the session's close, how far the
@@ -240,7 +250,8 @@ export class BotTurnAccounting {
 	 */
 	charge(): void {
 		if (this.closed || !this.ledger.readable()) return;
-		const delivered = this.deliverPending();
+		const keepsFile = this.ports.rootKeepsFile();
+		const delivered = this.deliverPending(keepsFile);
 		const state = this.watermark();
 		if (!state) return;
 		const { through, pending } = state;
@@ -259,7 +270,7 @@ export class BotTurnAccounting {
 			state.through = through;
 			return;
 		}
-		if (delivered && this.deliver(charge)) this.settle([charge]);
+		if (delivered && this.deliver(charge, keepsFile)) this.settle([charge]);
 	}
 
 	/**
@@ -297,12 +308,14 @@ export class BotTurnAccounting {
 				(held) => {
 					this.recovering = undefined;
 					if (this.closed) return;
+					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
+					if (!this.adopt(sessionId, held)) return;
+					// Told only once the watermark it lowered is adopted: a read-back dropped changes nothing.
 					const newly = held.unread.filter(({ path }) => !this.unreadTold.has(path));
 					for (const { path } of newly) this.unreadTold.add(path);
 					if (newly.length > 0)
 						this.ports.chargesUnread(newly.slice(0, UNREAD_NAMED), Math.max(0, newly.length - UNREAD_NAMED));
-					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
-					if (this.adopt(sessionId, held)) this.charge();
+					this.charge();
 				},
 				(error: unknown) => {
 					this.recovering = undefined;
@@ -322,17 +335,22 @@ export class BotTurnAccounting {
 		const kept = this.ledger.charge;
 		if (kept?.sessionId === sessionId) return false;
 		const keptPending = kept?.pending ?? [];
-		const keptIds = new Set(keptPending.map((charge) => charge.report.reportId));
+		const keptById = new Map(keptPending.map((charge) => [charge.report.reportId, charge]));
 		let through = usageReach(held.through, this.mark.reach() ?? held.through);
 		for (const charge of keptPending)
 			if (charge.report.sessionId === sessionId) through = usageReach(through, charge.report.through);
 		const taken: BotCharge[] = [];
-		for (const { usage, reportId, provider, model, from, through: end, recordedAt } of held.unwritten) {
+		for (const { usage, reportId, provider, model, from, through: end, recordedAt, heldBy } of held.unwritten) {
 			through = usageReach(through, end);
-			if (keptIds.has(reportId)) continue;
+			const kept = keptById.get(reportId);
+			if (kept) {
+				kept.heldBy ??= heldBy;
+				continue;
+			}
 			taken.push({
 				usage,
 				report: { agentId: this.agentId, reportId, sessionId, provider, model, from, through: end, recordedAt },
+				...(heldBy !== undefined ? { heldBy } : {}),
 			});
 		}
 		this.ledger.charge = { sessionId, through: structuredClone(through), pending: [...taken, ...keptPending] };
@@ -344,14 +362,16 @@ export class BotTurnAccounting {
 	/**
 	 * Delivers each pending charge again, oldest first, and drops the ones the root's file holds now: one the answering root
 	 * holds is found through its report-id index and not appended again, and one a root lost (a reopen of its file drops
-	 * what it never wrote) is appended again before any later one. False when one failed to be delivered: the ones after it
-	 * wait.
+	 * what it never wrote) is appended again before any later one. One a root that keeps no file took (`heldBy`) is
+	 * delivered again only to a root with a file: never looked up in the root that took it, nor appended into another root
+	 * without one. False when one failed to be delivered: the ones after it wait.
 	 */
-	private deliverPending(): boolean {
+	private deliverPending(keepsFile: boolean): boolean {
 		const held: BotCharge[] = [];
 		let delivered = true;
 		for (const charge of this.ledger.charge?.pending ?? []) {
-			const persisted = this.deliver(charge);
+			if (!keepsFile && charge.heldBy !== undefined) continue;
+			const persisted = this.deliver(charge, keepsFile);
 			if (persisted === undefined) {
 				delivered = false;
 				break;
@@ -364,10 +384,11 @@ export class BotTurnAccounting {
 
 	/**
 	 * Delivers one charge: true once the root's file holds it, false while the root holds it unwritten (its write is
-	 * awaited), undefined when it did not reach the root (a failure, or a root on another session file than the one the
-	 * charge was sent to).
+	 * awaited, or, for a root that keeps no file, never comes: the charge records that root as holding it, `heldBy`),
+	 * undefined when it did not reach the root (a failure, or a root on another session file than the one the charge was
+	 * sent to).
 	 */
-	private deliver(charge: BotCharge): boolean | undefined {
+	private deliver(charge: BotCharge, keepsFile: boolean): boolean | undefined {
 		let disposition: SpawnedUsageReceiptDisposition;
 		try {
 			disposition = this.ports.charge(charge.usage, charge.report);
@@ -378,6 +399,11 @@ export class BotTurnAccounting {
 		if (disposition === "foreign_session") return undefined;
 		this.notRecordedTold = false;
 		if (disposition === "persisted") return true;
+		if (!keepsFile) {
+			charge.heldBy = this.ports.rootSessionId();
+			this.ledger.write();
+			return false;
+		}
 		this.awaitWrite(charge.report.reportId);
 		return false;
 	}

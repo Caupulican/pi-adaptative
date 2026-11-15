@@ -137,6 +137,8 @@ export interface BotSender {
 	settings(): { readonly settings: SettingsManager; release(): void };
 	/** The pi session that hosts the bot, named to the owner of a message another process sends it. */
 	hostSessionId(): string;
+	/** Whether that session keeps a session file (none with `--no-session` or an in-memory SDK session). */
+	hostKeepsFile(): boolean;
 	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
 	warn(message: string): void;
 	/**
@@ -754,6 +756,7 @@ export class BotSessionHost {
 					chargesHeld: (sessionId, since) => entry.sender.chargesHeld(sessionId, since),
 					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
 					rootSessionId: () => entry.sender.hostSessionId(),
+					rootKeepsFile: () => entry.sender.hostKeepsFile(),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
 					chargesUnread: (named, more) =>

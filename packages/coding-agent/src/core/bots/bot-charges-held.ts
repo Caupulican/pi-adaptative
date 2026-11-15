@@ -49,6 +49,8 @@ const MTIME_GRANULARITY_MS = 2_000;
 export interface BotChargeLiveRoot {
 	/** Its file, which its entries stand for; undefined when it has none. */
 	readonly file: string | undefined;
+	/** Its session when it keeps no file: the charges it holds unwritten are held by it alone (`BotCharge.heldBy`). */
+	readonly heldBy: string | undefined;
 	readonly entries: readonly SessionEntry[];
 	/** Whether the root's file holds `entry` exactly as it is (`classifyCustomEntryPersisted`). */
 	persisted(entry: SessionEntry): boolean;
@@ -71,6 +73,8 @@ export interface UnwrittenBotCharge {
 	readonly from: Usage;
 	readonly through: Usage;
 	readonly recordedAt: string;
+	/** The root that keeps no file holding it, when one does (`BotCharge.heldBy`). */
+	readonly heldBy: string | undefined;
 }
 
 /** A root's session file or directory the read-back could not read, and why. */
@@ -157,12 +161,12 @@ function chargeOf(entry: SessionEntry, sessionId: string): Record<string, unknow
 }
 
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
-function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
+function unwrittenOf(data: Record<string, unknown>, heldBy: string | undefined): UnwrittenBotCharge | undefined {
 	const { usage, reportId, provider, model, from, through, recordedAt } = data;
 	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;
 	if (typeof recordedAt !== "string") return undefined;
-	return { usage, reportId, provider, model, from, through, recordedAt };
+	return { usage, reportId, provider, model, from, through, recordedAt, heldBy };
 }
 
 /**
@@ -215,12 +219,13 @@ export async function botChargesHeld(
 			}
 			// A live root holds unwritten only charges this process delivered, each naming its range: one that does not is
 			// counted neither (see the module comment).
-			const charge = unwrittenOf(data);
+			const charge = unwrittenOf(data, root.heldBy);
 			if (charge && !unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
 		}
 	return {
 		through: usageReach(reach, combineUsage(...unranged.values())),
 		unwritten: [...unwritten.values()],
-		unread,
+		// A path met twice (a directory two roots keep, a file listed twice) is named once.
+		unread: [...new Map(unread.map((entry) => [resolve(entry.path), entry])).values()],
 	};
 }

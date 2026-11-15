@@ -1454,7 +1454,7 @@ export interface ExtensionAPI {
 	 *
 	 * Single-hop: `usage` MUST already include the spawned session's own usage AND any sub-usage it rolled up — report
 	 * only to the direct parent. Pass a stable `reportId` to make re-reports (retries, duplicate completion events)
-	 * idempotent. Any other field (`from`, `through`, ...) or the label `bot-session` (reserved) is refused: it throws.
+	 * idempotent. Each must be a string; any other field, the label `bot-session` or an id starting `bot-session:` throws.
 	 */
 	reportSpawnedUsage(usage: Usage, opts?: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 

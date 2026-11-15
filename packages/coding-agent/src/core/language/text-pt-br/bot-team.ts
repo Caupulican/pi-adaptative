@@ -115,7 +115,7 @@ export const BOT_TEAM = {
 		named: readonly { readonly path: string; readonly reason: string }[],
 		more: number,
 	) =>
-		`Bot ${agentId}: ${named.map(({ path, reason }) => `${path} (${reason})`).join("; ")}${more > 0 ? ` e mais ${more}` : ""} não ${named.length + more === 1 ? "pôde ser lido" : "puderam ser lidos"} para conferir as cobranças de gasto dele, então o que ${named.length + more === 1 ? "ele guarda" : "eles guardam"} é cobrado de novo à sessão principal.`,
+		`Bot ${agentId}: ${named.map(({ path, reason }) => `${path} (${reason})`).join("; ")}${more > 0 ? ` e mais ${more}` : ""} não ${named.length + more === 1 ? "pôde ser lido" : "puderam ser lidos"} para conferir as cobranças de gasto dele, então o que ${named.length + more === 1 ? "ele guarda" : "eles guardam"} pode ser cobrado de novo à sessão principal.`,
 	botChargeMarkNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: até onde a sessão principal guarda o gasto dele não pôde ser marcado na transcrição dele (${reason}); se o registro de gasto se perder, isso é relido só dos arquivos da sessão principal.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
