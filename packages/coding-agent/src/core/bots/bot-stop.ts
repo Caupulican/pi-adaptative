@@ -99,7 +99,8 @@ export function takeHostedBotStops(
 /**
  * Ends the work of bot `agentId`'s session `sessionId` this process hosts through `endHere`, then the jobs its home's
  * other sessions placed on other machines, for `reasonCode` (no client of theirs runs: this process holds the bot). The
- * home is listed before anything ends: one that does not list throws with nothing done. What `endHere` left unended.
+ * home is listed before anything ends: one that does not list, or holds a session file that is a symbolic link (the jobs
+ * of whatever session it names are not the bot's to end), throws with nothing done. What `endHere` left unended.
  */
 function endWithOtherSessionsJobs(
 	agentDir: string,
@@ -108,7 +109,7 @@ function endWithOtherSessionsJobs(
 	reasonCode: string,
 	endHere: () => WorkerStopOutcome,
 ): WorkerStopOutcome {
-	const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "follow").filter(
+	const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "refuse").filter(
 		(id) => id !== sessionId,
 	);
 	const outcome = endHere();
@@ -244,7 +245,8 @@ function stopClosedSession(
 
 /**
  * Where a closed bot's work is: its saved session's bundle, in the home its id resolves to now (the bot's, or the owner's
- * it was left in), and every session its home holds, whose placed jobs are the bot's.
+ * it was left in), and every session its home holds, whose placed jobs are the bot's. A session file that is a symbolic
+ * link throws (`BotSessionLinkError`): what it names is not the bot's work to end.
  */
 function closedSessionWork(
 	agentDir: string,
@@ -258,7 +260,7 @@ function closedSessionWork(
 	};
 	return {
 		bundle,
-		placedBy: new Set([...botHomeSessionIds(home.sessionsDir, "follow"), ...(saved ? [saved.id] : [])]),
+		placedBy: new Set([...botHomeSessionIds(home.sessionsDir, "refuse"), ...(saved ? [saved.id] : [])]),
 	};
 }
 

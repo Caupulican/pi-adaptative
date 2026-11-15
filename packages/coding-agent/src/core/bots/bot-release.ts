@@ -16,6 +16,7 @@ import { type BotInboxItem, refuseBotInboxMessage } from "./bot-inbox.ts";
 import { BotOpenRetries } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
+import { BotSessionLinkError } from "./bot-session-pointer.ts";
 import { endClosedBotWork, endLoadedBotWork } from "./bot-stop.ts";
 
 /** What a release reads from the host of the bots' sessions. */
@@ -35,6 +36,11 @@ export interface BotReleasePorts {
 	settling(agentId: string): Promise<unknown> | undefined;
 	/** The bot's own session as its home saved it, read through a linked pointer or session file; throws when its home does not read. */
 	savedSessionOf(agentId: string): SavedBotSession | undefined;
+	/**
+	 * The bot's own session as the work of its closed session is ended from it: a linked pointer or session file is refused
+	 * (`BotSessionLinkError`), since the end is written to the bundle of the session the file names.
+	 */
+	closedSessionOf(agentId: string): SavedBotSession | undefined;
 	/** The messages waiting in the bot's inbox, oldest first. */
 	waiting(agentId: string): readonly BotInboxItem[];
 	/** Whether the record answers in a session of its own. */
@@ -133,7 +139,8 @@ export class BotRelease {
 		try {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
 			const session = loaded ? ports.loaded(agentId)?.session : undefined;
-			if (session) warnLeft(endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON));
+			if (session)
+				warnLeft(this.endWork(agentId, () => endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON)));
 			fleetEnded = true;
 			const store = ports.store();
 			const nowMs = ports.timers().now();
@@ -144,7 +151,11 @@ export class BotRelease {
 				refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
 			if (waiting.length > 0) ports.changed(agentId);
 			if (!loaded)
-				warnLeft(endClosedBotWork(agentDir, agentId, ports.savedSessionOf(agentId), OWNER_STOPPED_REASON));
+				warnLeft(
+					this.endWork(agentId, () =>
+						endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), OWNER_STOPPED_REASON),
+					),
+				);
 			this.owed.delete(agentId);
 			this.retries.forget(agentId);
 		} catch (error) {
@@ -156,6 +167,21 @@ export class BotRelease {
 			.catch((error: unknown) =>
 				ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
 			);
+	}
+
+	/**
+	 * The bot's workers ended by `end`, what it left unended; undefined when a session file of its home is a symbolic link,
+	 * which no end of work follows (it would end the work of whatever session the link names): the owner is told the
+	 * workers were left, and the release goes on without them. Any other failure throws (the release stays owed).
+	 */
+	private endWork(agentId: string, end: () => WorkerStopOutcome): WorkerStopOutcome | undefined {
+		try {
+			return end();
+		} catch (error) {
+			if (!(error instanceof BotSessionLinkError)) throw error;
+			this.ports.warn(interfaceText().botTeam.botReleaseWorkersLeft(agentId, error.path));
+			return undefined;
+		}
 	}
 
 	/** The bot's release failed with `error`: it is run again after a backoff, and the owner is told once. */

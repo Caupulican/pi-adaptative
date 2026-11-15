@@ -329,6 +329,7 @@ export class BotSessionHost {
 			settling: (agentId) => this.loading.get(agentId) ?? this.closing.get(agentId),
 			// Read through a link: a release only reads, so a linked pointer or session file never keeps the bot.
 			savedSessionOf: (agentId) => savedSessionFile(ports.agentDir(), agentId, "follow"),
+			closedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),
 			released: (agentId) => this.owed.released(agentId),

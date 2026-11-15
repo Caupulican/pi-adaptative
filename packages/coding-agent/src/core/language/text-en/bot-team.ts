@@ -269,6 +269,9 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a change of its definition was not applied to its session yet (${reason}); it applies at its next change or message.`,
 	/** Why a closed bot's work is not ended yet: process `pid` holds its host lock (it hosts the bot, or opens or closes it). */
 	botReleaseHeldBy: (pid: number) => `process ${pid} holds its session`,
+	/** A released bot's workers were not ended: a session file of its home is a symbolic link, which no end of work follows. */
+	botReleaseWorkersLeft: (agentId: string, path: string) =>
+		`Bot ${agentId} was released, but its session's workers and the jobs it placed on other machines were not ended: ${path} is a symbolic link, and work is never ended through one.`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",
