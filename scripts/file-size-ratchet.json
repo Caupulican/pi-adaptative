@@ -33,7 +33,7 @@
 		"packages/coding-agent/src/core/orchestration/task-runtime-codecs.ts": 2138,
 		"packages/coding-agent/src/core/memory/transcript-summary-scheduler.ts": 2045,
 		"packages/coding-agent/src/kernel/tool-failure-memory.ts": 2024,
-		"packages/coding-agent/src/core/orchestration/task-runtime-reducer.ts": 2025,
+		"packages/coding-agent/src/core/orchestration/task-runtime-reducer.ts": 2020,
 		"packages/coding-agent/src/core/extensions/types.ts": 2015,
 		"packages/coding-agent/src/core/resource-loader.ts": 1993,
 		"packages/coding-agent/src/kernel/compaction/compaction.ts": 1991,

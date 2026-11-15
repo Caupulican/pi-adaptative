@@ -308,7 +308,7 @@ export function terminalAttemptStatus(status: AttemptStatus): boolean {
  */
 export function attemptAwaitsDispatch<T extends Pick<AttemptRuntimeState, "status">>(
 	attempt: T | undefined,
-): attempt is T {
+): attempt is T & { readonly status: "queued" | "suspended" } {
 	return attempt?.status === "queued" || attempt?.status === "suspended";
 }
 

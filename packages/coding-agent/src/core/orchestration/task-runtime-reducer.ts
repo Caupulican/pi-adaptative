@@ -97,6 +97,7 @@ import {
 	type AttemptDispatchReadiness,
 	type AttemptParentWrite,
 	type AttemptRuntimeState,
+	attemptAwaitsDispatch,
 	DurableTaskRuntimeError,
 	MAX_TASK_ESCALATIONS,
 	missingTrustedCriteria,
@@ -404,7 +405,7 @@ export function attemptDispatchReadiness(
 	attempt: AttemptRuntimeState,
 	checkVerification = true,
 ): AttemptDispatchReadiness {
-	if (attempt.status !== "queued" && attempt.status !== "suspended") {
+	if (!attemptAwaitsDispatch(attempt)) {
 		throw new DurableTaskRuntimeError(`Attempt '${attempt.attemptId}' is neither queued nor suspended.`);
 	}
 	const task = state.tasks[attempt.taskId];
@@ -1269,9 +1270,7 @@ export function reduceOrchestrationEvent(
 		}
 		case "task.attempt_prepared": {
 			const task = taskFromPayload(event.payload);
-			if (event.aggregateId !== task.taskId) {
-				throw new DurableTaskRuntimeError(`Prepared task '${task.taskId}' does not match its aggregate.`);
-			}
+			assertEventAggregateId(event, task.taskId, "Prepared task");
 			applyTaskCreated(state, task, event);
 			applyAttemptQueued(state, event.payload, event.occurredAt);
 			break;
@@ -1445,9 +1444,7 @@ export function reduceOrchestrationEvent(
 		}
 		case "agent.retired": {
 			const agentId = string(event.payload.agentId, "agent.retired.agentId");
-			if (event.aggregateId !== agentId) {
-				throw new DurableTaskRuntimeError(`Retired agent '${agentId}' does not match its aggregate.`);
-			}
+			assertEventAggregateId(event, agentId, "Retired agent");
 			const agent = assertAgentRetirementEligible(state, agentId);
 			if (agent.status === "retired") break;
 			agents[agentId] = { ...agent, status: "retired", updatedAt: event.occurredAt };
@@ -1466,9 +1463,7 @@ export function reduceOrchestrationEvent(
 		case "agent.resume_requested": {
 			const agentId = string(event.payload.agentId, "agent.resume_requested.agentId");
 			const attemptId = string(event.payload.attemptId, "agent.resume_requested.attemptId");
-			if (event.aggregateId !== agentId) {
-				throw new DurableTaskRuntimeError(`Resuming agent '${agentId}' does not match its aggregate.`);
-			}
+			assertEventAggregateId(event, agentId, "Resuming agent");
 			const agent = agents[agentId];
 			if (!agent) throw new DurableTaskRuntimeError(`Unknown agent '${agentId}'.`);
 			assertAgentNotRetired(agent, "request resume");
