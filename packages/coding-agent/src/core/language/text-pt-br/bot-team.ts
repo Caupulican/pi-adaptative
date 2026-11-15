@@ -125,7 +125,7 @@ export const BOT_TEAM = {
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
+		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); só este processo em execução a mantém, então ela não chega a nenhum outro processo, é descartada se este processo for encerrado e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo, então foi aplicada na hora ao trabalho do bot neste processo.`,
 	botSweepFailed: (agentId: string, reason: string) =>

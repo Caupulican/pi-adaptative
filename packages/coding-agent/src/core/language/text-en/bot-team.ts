@@ -132,11 +132,11 @@ export const BOT_TEAM = {
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
 	/**
-	 * The owner's stop could not be written to the bot's home: only this process holds it, and applies it only while the
-	 * bot's work stands where it was when the stop was made.
+	 * The owner's stop could not be written to the bot's home: only this running process holds it (quitting it drops the
+	 * stop), and applies it only while the bot's work stands where it was when the stop was made.
 	 */
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is applied here only while the bot's work is unchanged since the stop.`,
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); only this running process holds it, so it reaches no other process, is dropped if this process quits, and is applied here only while the bot's work is unchanged since the stop.`,
 	/** The owner's stop of a bot this process runs could not be written to its home: it was applied here, whole, at once. */
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process, so it was applied at once to the bot's work in this process.`,

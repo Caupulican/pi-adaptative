@@ -379,8 +379,11 @@ interface OwnerStopOutcome {
  */
 export class BotOwedWork {
 	private readonly ports: BotOwedWorkPorts;
-	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
-	private readonly told = new Map<string, string>();
+	/**
+	 * Bots whose owed work waits on something (no root works where it does, its session did not open), with every sentence
+	 * the owner was told of it: each is told once, until the bot's session loads or the bot is released.
+	 */
+	private readonly told = new Map<string, Set<string>>();
 	/** What the owner was last told of a bot the periodic listing failed on: told once per cause, forgotten once it lists clean. */
 	private readonly sweepTold = new Map<string, string>();
 	/**
@@ -454,7 +457,7 @@ export class BotOwedWork {
 	sentWaits(agentId: string, error: unknown, shown: boolean): string {
 		const reason = botFailureText(agentId, error);
 		const text = this.waitsText(agentId, reason);
-		if (shown) this.told.set(agentId, text);
+		if (shown) this.toldOf(agentId).add(text);
 		else this.tellWaits(agentId, text);
 		return reason;
 	}
@@ -713,16 +716,27 @@ export class BotOwedWork {
 
 	/** One bot of the periodic listing ({@link sweepInboxes}). */
 	private sweepBot(agentDir: string, agentId: string): void {
-		const waiting = botInboxWaiting(agentDir, agentId);
 		if (this.ports.hostedHere(agentId)) {
-			if (waiting || botInboxStopNames(agentDir, agentId).length > 0) this.ports.takeInbox(agentId);
+			if (botInboxWaiting(agentDir, agentId) || botInboxStopNames(agentDir, agentId).length > 0)
+				this.ports.takeInbox(agentId);
 			return;
 		}
-		// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
+		// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff. A stop held
+		// here is applied even when the inbox does not list, as an ask applies it; the listing's failure is then the sweep's,
+		// told once per cause.
 		if (!this.ports.heldElsewhere(agentId)) {
-			const stops = botInboxStopNames(agentDir, agentId);
-			if (this.unrecorded.of(agentId) || stops.length > 0) this.applyOwnerStop(agentId, true, stops);
+			let stops: readonly string[] | undefined;
+			let unlisted: unknown;
+			try {
+				stops = botInboxStopNames(agentDir, agentId);
+			} catch (error) {
+				unlisted = error;
+			}
+			if (this.unrecorded.of(agentId) || (stops !== undefined && stops.length > 0))
+				this.applyOwnerStop(agentId, true, stops);
+			if (stops === undefined) throw unlisted;
 		}
+		const waiting = botInboxWaiting(agentDir, agentId);
 		if (
 			!this.openRetries.pending(agentId) &&
 			(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
@@ -1050,9 +1064,24 @@ export class BotOwedWork {
 		return interfaceText().botTeam.botWatchesNotResumed(agentId, reason);
 	}
 
-	/** The owner is told once what the bot's owed work waits on: every attach and every other host's change asks again. */
+	/** What the owner was told the bot's owed work waits on ({@link told}). */
+	private toldOf(agentId: string): Set<string> {
+		let told = this.told.get(agentId);
+		if (!told) {
+			told = new Set();
+			this.told.set(agentId, told);
+		}
+		return told;
+	}
+
+	/**
+	 * The owner is told once each thing the bot's owed work waits on, however the asks that meet it interleave: every attach
+	 * and every other host's change asks again.
+	 */
 	private tellWaits(agentId: string, message: string): void {
-		if (this.told.get(agentId) !== message) this.ports.warn(message);
-		this.told.set(agentId, message);
+		const told = this.toldOf(agentId);
+		if (told.has(message)) return;
+		this.ports.warn(message);
+		told.add(message);
 	}
 }

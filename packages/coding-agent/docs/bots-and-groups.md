@@ -135,7 +135,8 @@ bot was stopped when it ended a turn or input in flight, or the workers in fligh
 taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also pauses its
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
 stop that could not be recorded for a bot no process hosts is held in memory by the process that made it, across the
-root sessions it runs in turn (a new, resumed or forked session keeps it), until a take there applies it whole under the
+root sessions it runs in turn (a new, resumed or forked session keeps it; quitting the process drops it), until a take
+there applies it whole under the
 bot's host lock (a retry, or that process's open of the bot, a stop made during the open included), the messages sent
 before it refused. No other process learns of it, so it ends only the work there was when it was made: where the bot's
 work stands is read as the stop is dated, and each take reads the bot's saved session from its home on disk under the
@@ -206,8 +207,8 @@ wherever it is: the stop is written to the bot's home and taken by the process t
 or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end
 with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
 they end when they fire, at their end time or when the bot is retired. A stop
-that cannot be written to the bot's home is not recorded: you are told it reaches no other process and is applied here
-only while the bot's work is unchanged (for a bot this process hosts, that it was applied at once to its work here), and
+that cannot be written to the bot's home is not recorded: you are told it is held only by this running process (quitting
+it drops the stop), reaches no other process and is applied here only while the bot's work is unchanged (for a bot this process hosts, that it was applied at once to its work here), and
 to send it again once it is dropped. A session started after every other one closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
