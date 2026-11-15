@@ -13,12 +13,14 @@
  */
 
 import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
 import type { SessionConfinement } from "./autonomy/session-confinement.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
-import { sessionChangesFiles } from "./delegation/worker-parent-ceiling.ts";
+import { sessionChangesFiles, sessionWritesAt } from "./delegation/worker-parent-ceiling.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { icmGuidance } from "./memory/providers/icm.ts";
@@ -424,6 +426,10 @@ export class SystemPromptBuilder {
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
 		this._promptDate ??= promptDate(this._promptNow());
+		const writeSource = {
+			getSessionConfinement: () => this.deps.getSessionConfinement(),
+			getForegroundToolNames: () => validToolNames,
+		};
 		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),
@@ -441,7 +447,8 @@ export class SystemPromptBuilder {
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 			// The root carries the owner's reach (agent definitions, approvals); a bot directs inside its own scope. Whether it
-			// writes is read from the tools this prompt lists, by the rule its workers' ceiling reads.
+			// writes, and whether its writes reach the project's config directory, is read from the tools this prompt lists and
+			// its write roots, by the rule its workers' ceiling reads.
 			...(modelCapability.class === "full" &&
 			this.deps.standing.directsWorkers &&
 			validToolNames.includes("delegate") &&
@@ -449,10 +456,8 @@ export class SystemPromptBuilder {
 				? {
 						directorRole: {
 							root: this.deps.standing.lendsOwnerReach,
-							writes: sessionChangesFiles({
-								getSessionConfinement: () => this.deps.getSessionConfinement(),
-								getForegroundToolNames: () => validToolNames,
-							}),
+							writes: sessionChangesFiles(writeSource),
+							writesConfigDir: sessionWritesAt(writeSource, join(this.deps.getCwd(), CONFIG_DIR_NAME)),
 						},
 					}
 				: {}),

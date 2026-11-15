@@ -1906,11 +1906,11 @@ export interface BuildSystemPromptOptions {
 	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
 	steStrictness?: number;
 	/**
-	 * Render the director role after the identity: the root's (`root: true`) or a bot's, a writer's or a read-only one's
-	 * (`writes`). Set by the session's prompt builder only for the full class of a session that directs workers whose
-	 * `delegate` tool is active with worker delegation enabled; a session that works alone has no team to direct.
+	 * The director role after the identity: the root's (`root`) or a bot's, a writer's (`writes`; `writesConfigDir`: its
+	 * writes reach the project's config directory) or a read-only one's. Set by the prompt builder only for the full class
+	 * of a directing session with `delegate` active and worker delegation on; a session that works alone directs no team.
 	 */
-	directorRole?: { readonly root: boolean; readonly writes: boolean };
+	directorRole?: { readonly root: boolean; readonly writes: boolean; readonly writesConfigDir: boolean };
 	/** The agent's name, read from the agent directory's soul.md; the full prompt opens by stating it. */
 	agentName?: string;
 	/** Extra principle bullets the session adds to PRINCIPLES (for example self-modification when it applies). */

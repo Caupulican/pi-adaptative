@@ -69,12 +69,16 @@ footprint must omit that extension at the resource layer, not merely block one o
 ## Child work contracts
 
 A session that directs workers (the root, and a bot's own session) is their director. Its system prompt carries a
-director role section (`directorRolePrompt({plan, root})` in `src/core/provider-prompt-contracts.ts`): the root's
-`ROLE: root, the director of a team of workers`, or a bot's `ROLE: director of a team of workers`, whose own writes
-are instruction files inside its write scope and whose ownership is every answer in its conversation. It is rendered
+director role section (`directorRolePrompt({plan, root, writes, writesConfigDir})` in
+`src/core/provider-prompt-contracts.ts`): the root's `ROLE: root, the director of a team of workers`, or a bot's
+`ROLE: director of a team of workers`, whose own writes are instruction files in the project's `.pi` when its write
+roots hold it (else where it may write) and whose ownership is every answer in its conversation; a session that changes
+no files is told it and its workers change none, unless it lends them the owner's reach. It is rendered
 after the identity for the full class of a session whose standing `directsWorkers` and whose `delegate` tool is active
-with worker delegation enabled (`SystemPromptBuilder` sets `directorRole: { root: lendsOwnerReach }`; a session that
-works alone, and every worker, gets none); its plan lines follow the `plan` tool, which a bot does not hold. Delegation
+with worker delegation enabled (`SystemPromptBuilder` sets `directorRole: { root: lendsOwnerReach, writes,
+writesConfigDir }`, the last two read from the tools the prompt lists and the session's write roots by the rule its
+workers' ceiling reads; a session that works alone, and every worker, gets none); its plan lines follow the `plan` tool,
+which a bot holds too. Delegation
 applies at every reasoning level and across providers whenever it is enabled and the tool is active; it is not an
 Ultra-only switch. User restrictions remain binding. The rule hook `delegation`
 (`src/core/rule-hooks/rule-hook-rules.ts`) owns the playbook for how to delegate (when, split by write ownership,

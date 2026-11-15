@@ -120,8 +120,11 @@ function commsGlossaryPrompt(plan: boolean): string {
 /** The words of the director role that differ between the root and a bot (`directorRolePrompt`). */
 interface DirectorWords {
 	readonly role: string;
-	/** What the director writes itself, when it writes, after reading, searching, planning and reviewing. */
-	readonly writes: (configDir: string) => string;
+	/**
+	 * What the director writes itself, when it writes, after reading, searching, planning and reviewing; `configDir` is
+	 * undefined when its writes do not reach the project's config directory.
+	 */
+	readonly writes: (configDir: string | undefined) => string;
 	/** What the director owns at the end. */
 	readonly owns: string;
 }
@@ -130,7 +133,7 @@ interface DirectorWords {
  * The root writes agent definitions and instruction files and answers to the owner, approvals included. A bot's writes
  * are confined to its working directory and away from the harness's private roots (its own home among them), so its
  * instruction files go in the project's config directory (`configDir`, `.pi`), the one orchestration directory the
- * delegation gate lets it write; it holds no approval (it never asks the owner live), so it owns the answers of its own
+ * delegation gate lets it write, when its write roots hold it, and else where it may write; it holds no approval (it never asks the owner live), so it owns the answers of its own
  * conversation.
  */
 const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
@@ -142,7 +145,9 @@ const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
 	bot: {
 		role: "ROLE: director of a team of workers",
 		writes: (configDir) =>
-			`writing instruction files in the ${configDir} directory of your working directory are yours`,
+			configDir === undefined
+				? "writing instruction files where you may write are yours"
+				: `writing instruction files in the ${configDir} directory of your working directory are yours`,
 		owns: "integration, verification, security and every answer in this conversation",
 	},
 };
@@ -159,13 +164,15 @@ export function directorRolePrompt(options: {
 	readonly plan: boolean;
 	readonly root: boolean;
 	readonly writes: boolean;
-	/** The project config directory's name (`CONFIG_DIR_NAME`), where a bot's instruction files go. */
+	/** Whether the session's writes reach the project's config directory, where a bot's instruction files then go. */
+	readonly writesConfigDir: boolean;
+	/** The project config directory's name (`CONFIG_DIR_NAME`). */
 	readonly configDir: string;
 }): string {
 	const words = DIRECTOR_WORDS[options.root ? "root" : "bot"];
 	const workersWrite = options.root || options.writes;
 	const yours = options.writes
-		? `Reading, searching, planning, reviewing, and ${words.writes(options.configDir)}`
+		? `Reading, searching, planning, reviewing, and ${words.writes(options.writesConfigDir ? options.configDir : undefined)}`
 		: "Reading, searching, planning and reviewing are yours, and you change no files";
 	const theirs = workersWrite
 		? "Building, testing, changing project files and running programs are the workers'"

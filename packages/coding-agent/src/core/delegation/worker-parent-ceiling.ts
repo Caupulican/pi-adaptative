@@ -15,6 +15,7 @@
 
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
+import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import type { SessionConfinement } from "../autonomy/session-confinement.ts";
 import type { HarnessCapability } from "../orchestration/contracts.ts";
 import type { SessionCapabilities } from "../session-standing.ts";
@@ -143,6 +144,15 @@ export function sessionChangesFiles(
 	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
 ): boolean {
 	return sessionWriteRoots(source)?.length !== 0;
+}
+
+/** Whether the session's writes reach `path`: it changes files, and its write roots (unset: host-wide) hold the path. */
+export function sessionWritesAt(
+	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
+	path: string,
+): boolean {
+	const roots = sessionWriteRoots(source);
+	return roots === undefined || roots.some((root) => isPathWithinScope(path, root));
 }
 
 /** The ceiling of a session that holds its workers to its own reach, from its confinement, held tools and envelope. */

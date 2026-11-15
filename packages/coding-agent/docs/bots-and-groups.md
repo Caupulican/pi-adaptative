@@ -122,8 +122,8 @@ orchestrator as a worker's terminal does.
 A bot directs workers of its own with `delegate`, its one-call form `assign` and `plan`, the tools the main session directs
 its workers with; its plans run through the same fleet as its other workers ([Plans](plans.md)), and the plan rule and the
 director role's plan line reach it with the tool. Its system prompt carries the director role in a bot's words (its own work is
-integration, verification, security and every answer in its conversation; a writing bot writes instruction files only in
-the project's `.pi`, and a read-only bot's words say it and its workers change no files), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
+integration, verification, security and every answer in its conversation; a writing bot writes instruction files in
+the project's `.pi` when its write roots hold it, and else where it may write, and a read-only bot's words say it and its workers change no files), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
 since a bot lends its workers no memory. Its workers are held to the bot's own reach: they write, read, run commands and
 reach the network no wider than the bot (a read-only bot's workers are read-only). Their conversations lie in the bot's
 home (`orchestration/`), their spend counts in the bot's spend window and reaches the main session with the bot's, and a
