@@ -17,6 +17,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
+import { BotOpenRetries, botOpenFailureText, opensLater } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -152,10 +153,6 @@ export interface BotOwedWorkPorts {
 	open(agentId: string, sender: BotSender): Promise<unknown>;
 }
 
-function errorText(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 /**
  * Opens the session of a bot owed work that no process hosts (see {@link BotOwedWork.openIfOwed}), and tells the owner,
  * once for each cause, what the work waits on when it cannot be taken up here. A refusal is kept with its cause, and the
@@ -180,9 +177,21 @@ export class BotOwedWork {
 	private readonly failedOpens = new Map<string, { readonly key: string | undefined; readonly inbox: string }>();
 	/** The periodic listing of the bots' inboxes (see {@link sweepInboxes}). */
 	private sweep: RepeatingAlarm | undefined;
+	/** The next open of each bot whose session failed to open for a cause that passes on its own (`opensLater`). */
+	private readonly openRetries: BotOpenRetries;
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
+		this.openRetries = new BotOpenRetries({
+			timers: () => ports.admissionTimers(),
+			stopped: () => ports.stopped(),
+			retry: (agentId) => this.openIfOwed(agentId),
+		});
+	}
+
+	/** The bot's session failed to open for a cause that passes on its own: it is opened again after a backoff. */
+	openLater(agentId: string): void {
+		this.openRetries.arm(agentId);
 	}
 
 	/**
@@ -208,6 +217,7 @@ export class BotOwedWork {
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
 		this.failedOpens.delete(agentId);
+		this.openRetries.forget(agentId);
 	}
 
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
@@ -216,12 +226,14 @@ export class BotOwedWork {
 		this.wakes.forget(agentId);
 		this.forgetRefusal(agentId);
 		this.failedOpens.delete(agentId);
+		this.openRetries.forget(agentId);
 	}
 
 	/** The host stopped: no alarm takes work up after it. */
 	stop(): void {
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
+		this.openRetries.stop();
 		this.sweep?.stop();
 		this.sweep = undefined;
 	}
@@ -304,8 +316,14 @@ export class BotOwedWork {
 		if (ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId)) return;
 		const record = ports.store().getBot(agentId);
 		if (!record || record.retired || !ports.runsAsSession(record)) return;
-		const notResumed = (error: unknown) =>
-			this.tellWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
+		// A cause that passes on its own is asked again after a backoff; any other at the next change.
+		const notResumed = (error: unknown) => {
+			if (opensLater(error)) this.openRetries.arm(agentId);
+			this.tellWaits(
+				agentId,
+				interfaceText().botTeam.botWatchesNotResumed(agentId, botOpenFailureText(agentId, error)),
+			);
+		};
 		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox. A
 		// home that does not read is asked again at the next change.
 		let saved: SavedBotSession | undefined;
@@ -355,13 +373,15 @@ export class BotOwedWork {
 		const failed = this.failedOpens.get(agentId);
 		if (swept && failed !== undefined && failed.key === key && failed.inbox === inbox) return;
 		void ports.open(agentId, sender).catch((error: unknown) => {
-			// A model refused before the lock is kept with its cause; any other failure is asked again at the next change, and
-			// by the periodic listing only once what defines the bot or what waits in its inbox changed.
+			// A model refused before the lock is kept with its cause; a cause that passes on its own is asked again after a
+			// backoff; any other failure at the next change, and by the periodic listing only once what defines the bot or what
+			// waits in its inbox changed.
 			this.failedOpens.delete(agentId);
 			if (error instanceof BotModelRefusedError) this.record(agentId, "open", key, error);
 			else this.forgetRefusal(agentId);
 			if (ports.heldElsewhere(agentId)) return;
-			if (!(error instanceof BotModelRefusedError)) this.failedOpens.set(agentId, { key, inbox });
+			if (!(error instanceof BotModelRefusedError) && !opensLater(error))
+				this.failedOpens.set(agentId, { key, inbox });
 			notResumed(error);
 		});
 	}

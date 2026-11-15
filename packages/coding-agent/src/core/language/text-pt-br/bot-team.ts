@@ -95,6 +95,8 @@ export const BOT_TEAM = {
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
 		`O bot ${agentId} está aberto em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}).`,
+	botSessionOpenInSession: (agentId: string, pids: string) =>
+		`a conversa do bot ${agentId} está aberta em outra sessão (processo ${pids}); o hospedeiro dele a abre quando aquela sessão a fechar`,
 	botInboxFull: (agentId: string, max: number) =>
 		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>

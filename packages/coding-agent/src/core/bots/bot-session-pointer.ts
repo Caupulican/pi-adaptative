@@ -5,15 +5,19 @@
  * session it creates when the home has none); after that the choice is the pointer's, never a file's modification time.
  * {@link botSessionChoice} is the one reader, for the host's load and for every view of the bot's conversation alike.
  */
-import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, renameSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { sessionBundleDeletionPolicy } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { newestSessionFileIn } from "../../kernel/session/session-listing.ts";
+import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
 import { resolveSessionHome } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { BotHome } from "./bot-home.ts";
+
+/** The most a pointer file holds: a version, a session id and a file name, with room to spare. */
+const MAX_POINTER_BYTES = 4096;
 
 /** The bot's session: its id and the name of its file in the home's `sessions/`. */
 export interface BotSessionPointer {
@@ -68,7 +72,8 @@ function deleted(agentDir: string, home: BotHome, sessionId: string): boolean {
 
 /**
  * Why the file a pointer names does not hold its session, or undefined when it does, is missing or is empty (the
- * session is started there). Only its content decides; a failure to read it is thrown, so the load is asked again.
+ * session is started there). Only its content decides (a directory, a FIFO or a device holds no session); a failure to
+ * read it is thrown, so the load is asked again (after a backoff when it passes on its own: `opensLater`).
  */
 function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerSetAsideReason | undefined {
 	const header = readSessionHeaderResult(path);
@@ -78,6 +83,9 @@ function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerS
 			: { kind: "other-session", file: pointer.file, holds: header.header.id, sessionId: pointer.sessionId };
 	if (header.reason === "unreadable") {
 		if (isMissingFileError(header.cause)) return undefined;
+		// A directory, a FIFO or a device where the session's file belongs holds no session: content, set aside.
+		if (header.cause instanceof BoundedReadError && header.cause.reason === "not_regular")
+			return { kind: "not-a-session", file: pointer.file };
 		throw header.cause;
 	}
 	return header.reason === "not_a_header" && statSync(path).size === 0
@@ -100,13 +108,15 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 			...(setAside === undefined ? {} : { setAside }),
 		};
 	};
-	let text: string;
+	let text: string | undefined;
 	try {
-		text = readFileSync(home.pointerFile, "utf8");
+		text = readOptionalBoundedTextFileSync(home.pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
 	} catch (error) {
-		if (isMissingFileError(error)) return chosen();
-		throw error;
+		// A pointer that is not a regular file, or larger than any pointer, is content that does not count.
+		if (!(error instanceof BoundedReadError) || error.reason === "deadline") throw error;
+		return chosen({ kind: "not-a-pointer" });
 	}
+	if (text === undefined) return chosen();
 	const pointer = parsePointer(text);
 	if (!pointer) return chosen({ kind: "not-a-pointer" });
 	const path = join(home.sessionsDir, pointer.file);

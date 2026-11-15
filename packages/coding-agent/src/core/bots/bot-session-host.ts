@@ -73,6 +73,7 @@ import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
+import { opensLater } from "./bot-open-retry.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
@@ -421,7 +422,10 @@ export class BotSessionHost {
 		try {
 			entry = await this.open(agentId, sender);
 		} catch (error) {
-			if (!(error instanceof BotSessionHeldError)) throw error;
+			// Another host runs it, or it opens later (a session of the owner holds it, a passing read failure): the words wait
+			// in its inbox, taken by that host or by this one's next open (`BotOwedWork.openLater`).
+			if (!(error instanceof BotSessionHeldError) && !opensLater(error)) throw error;
+			if (opensLater(error)) this.owed.openLater(agentId);
 			return sendToBotHost(
 				{
 					agentDir: this.ports.agentDir(),
@@ -1040,25 +1044,34 @@ export class BotSessionHost {
 	 * inbox are refused with the reason, which its chat shows: no session of it takes them now. Refuses while it works.
 	 */
 	release(agentId: string): void {
+		this.prepareRelease(agentId)();
+	}
+
+	/**
+	 * {@link release} in two steps: what it changes is read now (the bot's session, its watches, its inbox), and a refusal or
+	 * a failed read throws here, before anything changed; the returned step changes it, once the caller's own change (a
+	 * retirement) is made.
+	 */
+	prepareRelease(agentId: string): () => void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
-		this.owed.released(agentId);
 		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
-		if (sessionId !== undefined) {
-			const store = this.ports.store();
-			const nowMs = this.idleTimers().now();
-			for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
-				store.deleteRoutine(watch.routineId, watch.revision, nowMs);
-		}
-		const agentDir = this.ports.agentDir();
+		const store = this.ports.store();
+		const watches = sessionId === undefined ? [] : store.listRoutines({ sessionId, scope: "own-watches" });
 		const waiting = this.readInbox(agentId).waiting;
-		for (const item of waiting)
-			refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
-		if (waiting.length > 0) this.changed(agentId);
-		if (!entry) return;
-		void this.close(agentId).catch((error: unknown) =>
-			this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
-		);
+		return () => {
+			this.owed.released(agentId);
+			const nowMs = this.idleTimers().now();
+			for (const watch of watches) store.deleteRoutine(watch.routineId, watch.revision, nowMs);
+			const agentDir = this.ports.agentDir();
+			for (const item of waiting)
+				refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
+			if (waiting.length > 0) this.changed(agentId);
+			if (!entry) return;
+			void this.close(agentId).catch((error: unknown) =>
+				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
+			);
+		};
 	}
 
 	/**

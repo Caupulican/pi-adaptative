@@ -49,7 +49,7 @@ export interface BotLifecycleHost {
 	/** The bots that run as sessions of their own: a stop reaches their running turn, a retirement or a change their session. */
 	readonly botSessions: Pick<
 		BotSessionHost,
-		"interrupt" | "isActive" | "noteHistoryRun" | "release" | "recordChanged"
+		"interrupt" | "isActive" | "noteHistoryRun" | "prepareRelease" | "recordChanged"
 	>;
 	getBotTeamStore(): PersistentBotTeamStore;
 	/** Drops the cached bot roster: a bot changed under it. */
@@ -373,9 +373,11 @@ export class BotLifecycleController {
 				workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle")
 			)
 				throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
+			// Its session's release reads what it changes first: a read that fails retires nothing.
+			const release = this.host.botSessions.prepareRelease(agentId);
 			for (const worker of workers) this.host.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
 			const bot = this.host.getBotTeamStore().retireBot(agentId);
-			this.host.botSessions.release(agentId);
+			release();
 			return {
 				retired: bot !== undefined,
 				detail: bot ? interfaceText().botTeam.botRetired(agentId) : interfaceText().botTeam.botMissing(agentId),

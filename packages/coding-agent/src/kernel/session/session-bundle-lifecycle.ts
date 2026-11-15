@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, unlinkSync } from "node:fs";
+import { isRecordedOnHost, readHostIdentity } from "../reliability/host-identity.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -283,9 +284,21 @@ const holderRef = (holder: {
 });
 
 /**
+ * Whether `holder` keeps a bot's host out of the bot's session: a live holder, or one on this host whose liveness cannot
+ * be judged. A holder recorded on another host, or on a host this process cannot place, can never be proven dead here, so
+ * it would latch the bot's session for good: it does not keep the bot's host out (it still holds the session, as every
+ * holder not proven dead does).
+ */
+function keepsBotHostOut(holder: BundleHolder): boolean {
+	const standing = judgeOwner(holder.owner);
+	return standing === "alive" || (standing === "unknown" && isRecordedOnHost(holder.owner, readHostIdentity()));
+}
+
+/**
  * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel or bot
- * host is refused while a session or another such host holds the session, a session asking `refuseHosted` while such
- * a host does; every other admission is bounded by capacity alone.
+ * host is refused while a session or another such host holds the session (for a bot's host, one that keeps it out:
+ * {@link keepsBotHostOut}), a session asking `refuseHosted` while such a host does; every other admission is bounded by
+ * capacity alone.
  */
 function admitHolder(
 	parentSessionId: string,
@@ -295,7 +308,11 @@ function admitHolder(
 ): BundleHolder[] {
 	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
 	if (isExclusiveHostRole(holder.role)) {
-		const open = holders.filter((entry) => entry.role === "session" || isExclusiveHostRole(entry.role));
+		const open = holders.filter(
+			(entry) =>
+				(entry.role === "session" || isExclusiveHostRole(entry.role)) &&
+				(holder.role !== "bot-host" || keepsBotHostOut(entry)),
+		);
 		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef), holder.role);
 	}
 	const host = refuseHosted && holder.role === "session" && holders.find((entry) => isExclusiveHostRole(entry.role));
