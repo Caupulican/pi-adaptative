@@ -354,8 +354,9 @@ export class WorkerLaneIsolation {
 	 * The mover of the session's paths into the lane `directory` lies in, which places a worker's parent ceiling
 	 * (`relocatedInto`, a path keeps its place relative to the checkout's top); none to make for a session working in that
 	 * lane itself. Synchronous, no git. The checkout is the one `placementAt` resolved when this process placed the worker,
-	 * else the lane's registration read now (`readLaneSource`): a worker resumed after a restart, whose plan is built before
-	 * anything in this process placed its lane, is held by the same placement. Undefined when `directory` is in no lane;
+	 * else the lane's registration read now (`readLaneSource`, with the same fallback to the session's own checkout) and kept
+	 * as the lane's source: a worker resumed after a restart, whose plan is built before anything in this process placed its
+	 * lane, is held by the same placement. Undefined when `directory` is in no lane;
 	 * `unplaced` with the cause when no checkout is known.
 	 */
 	laneOf(
@@ -367,7 +368,10 @@ export class WorkerLaneIsolation {
 		if (!engine || !laneRoot) return undefined;
 		if (placedWithin(laneRoot, sessionCwd)) return (entry) => entry;
 		const key = this.sourceKey(engine, directory);
-		const source = (key ? this.laneSources.get(key) : undefined) ?? readLaneSource(laneRoot);
+		const cached = key ? this.laneSources.get(key) : undefined;
+		const source = cached ?? readLaneSource(laneRoot, sessionCwd);
+		// The registration read stands for the lane as a placement's would, until the lane's next placement, failure or release.
+		if (!cached && key && !("unplaced" in source)) this.laneSources.set(key, source);
 		return "unplaced" in source ? source : (entry) => relocatedInto(source.checkout, source.laneRoot, entry);
 	}
 

@@ -199,9 +199,25 @@ export async function findLaneCheckout(
 	const found = await resolveLaneAt(deps, directory, true);
 	if (!found || found.lane.sourceCheckout) return found && { lane: found.lane, checkout: found.lane.sourceCheckout };
 	const session = await resolveRepoContext({ ...deps, cwd: sessionCwd });
-	const sameRepository =
-		!("code" in session) && canonical(session.gitCommonDir) === canonical(found.context.gitCommonDir);
-	return { lane: found.lane, checkout: sameRepository ? session.topLevel : found.context.hubPath };
+	const checkout = unrecordedSourceCheckout(
+		found.context.gitCommonDir,
+		"code" in session ? undefined : session,
+		found.context.hubPath,
+	);
+	return { lane: found.lane, checkout };
+}
+
+/**
+ * The checkout a session moves its paths into a lane from when the lane's registration names none: the session's own
+ * checkout (`session.topLevel`) when it belongs to the lane's repository (`laneCommonDir`, the same git common dir), since
+ * the paths moved are the session's; else `hub`, the repository's main checkout now (undefined when not known).
+ */
+function unrecordedSourceCheckout(
+	laneCommonDir: string,
+	session: { readonly gitCommonDir: string; readonly topLevel: string } | undefined,
+	hub: string | undefined,
+): string | undefined {
+	return session && canonical(session.gitCommonDir) === canonical(laneCommonDir) ? session.topLevel : hub;
 }
 
 /** The lane a session's paths move into and the checkout they move from, or why that is not known (`unplaced`). */
@@ -211,10 +227,13 @@ export type LaneSourceRead = { readonly laneRoot: string; readonly checkout: str
  * The checkout the lane at `laneRoot` (a lane worktree's root, `laneWorktreeOf`) was made from, read synchronously from its
  * registration (`sourceCheckout`), with the registration's own worktree path: what `findLaneCheckout` reads, without git.
  * The registration is found through the worktree's `.git` pointer to the repository's common dir and the lane key the
- * layout names it by. `unplaced` says, in English, why no checkout is known: the git layout or the registration does not
- * read, the registration is not the active lane at `laneRoot`, or it was written before the checkout was recorded.
+ * layout names it by. A registration written before the checkout was recorded falls back as `findLaneCheckout` does
+ * (`unrecordedSourceCheckout`): the checkout of a session at `sessionCwd` in the lane's repository; the hub, which only
+ * git names, is not read here. `unplaced` says, in English, why no checkout is known: the git layout or the registration
+ * does not read, the registration is not the active lane at `laneRoot`, or it names no checkout and the session works in
+ * another repository.
  */
-export function readLaneSource(laneRoot: string): LaneSourceRead {
+export function readLaneSource(laneRoot: string, sessionCwd: string): LaneSourceRead {
 	const commonDir = findRepositoryGitPaths(laneRoot)?.commonDir;
 	if (!commonDir) return { unplaced: "the lane's git directory does not read" };
 	const lane = readLaneSync(syncStorePaths(commonDir), basename(laneRoot));
@@ -222,9 +241,19 @@ export function readLaneSource(laneRoot: string): LaneSourceRead {
 	if (lane.status !== "active") return { unplaced: `the lane's registration is ${lane.status}` };
 	if (canonical(lane.worktreePath) !== canonical(laneRoot))
 		return { unplaced: "the lane's registration names another worktree" };
-	if (!lane.sourceCheckout)
-		return { unplaced: "the lane's registration was written before the checkout it was made from was recorded" };
-	return { laneRoot: lane.worktreePath, checkout: lane.sourceCheckout };
+	if (lane.sourceCheckout) return { laneRoot: lane.worktreePath, checkout: lane.sourceCheckout };
+	const session = findRepositoryGitPaths(sessionCwd);
+	const checkout = unrecordedSourceCheckout(
+		commonDir,
+		session?.commonDir === undefined ? undefined : { gitCommonDir: session.commonDir, topLevel: session.root },
+		undefined,
+	);
+	return checkout
+		? { laneRoot: lane.worktreePath, checkout }
+		: {
+				unplaced:
+					"the lane's registration was written before the checkout it was made from was recorded, and the session works outside the lane's repository (its main checkout is read only through git)",
+			};
 }
 
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */
