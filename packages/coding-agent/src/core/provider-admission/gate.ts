@@ -8,6 +8,7 @@ import { PROVIDER_ADMISSION_STALE_MS, type ProviderAdmissionHold, ProviderAdmiss
 import {
 	observeProviderResult,
 	ProviderLimitedError,
+	type ProviderLimitRecord,
 	ProviderLimitStore,
 	providerLimitFromFailure,
 } from "./limit-state.ts";
@@ -42,6 +43,13 @@ export type ProviderAdmissionWaitReason = "capacity" | "provider_limit" | "emerg
 /** A model whose quota is exhausted for this host: its recorded reset, or `undefined` when none was recorded. */
 export interface ModelExhaustion {
 	readonly until: number | undefined;
+	/**
+	 * Set when the hold is the used-up usage windows of the model's subscription account, read from the account's usage
+	 * report and never recorded (`heldExhaustion`, subscription-allowance.ts). Past the lane's wait it is refused as that
+	 * account's usage-window limit, never as the model's quota, so a worker's ladder waits for the reset on the same model
+	 * instead of marking the model exhausted and moving off it.
+	 */
+	readonly usageWindow?: true;
 }
 
 export interface ProviderAdmissionWaitRecord {
@@ -411,6 +419,17 @@ export async function admitProviderRequest(
 			const startedAt = now();
 			const waitedMs = startedAt - quotaWaitStartedAt;
 			if (exhaustion.until === undefined || exhaustion.until - startedAt > policy.maxWaitMs - waitedMs) {
+				if (exhaustion.usageWindow && exhaustion.until !== undefined) {
+					const record: ProviderLimitRecord = {
+						provider: key,
+						limitedUntil: exhaustion.until,
+						reason: "usage_window",
+						recordedAt: startedAt,
+						pid: process.pid,
+						detail: "read from the account's usage report",
+					};
+					throw new ProviderLimitedError(record, startedAt, refuse("provider_limit", waitedMs, exhaustion.until));
+				}
 				throw new ModelQuotaExhaustedError(
 					modelRef,
 					exhaustion.until,

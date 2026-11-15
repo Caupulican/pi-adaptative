@@ -86,6 +86,12 @@ export function hasAllowance(
 	);
 }
 
+/** A subscription's used-up usage windows, held as a model exhaustion until the last of them resets. */
+export interface UsageWindowExhaustion extends ModelExhaustion {
+	readonly until: number;
+	readonly usageWindow: true;
+}
+
 /**
  * How long a subscription's used-up usage holds `model`: until the last of its full windows resets, read at the quota
  * line the fleet's allowance term holds new dispatches at. Undefined while the account has room, when the reading is
@@ -95,21 +101,24 @@ export function hasAllowance(
 export function allowanceExhaustion(
 	allowance: SubscriptionAllowancePort,
 	model: Model<Api> | undefined,
-): { readonly until: number } | undefined {
+): UsageWindowExhaustion | undefined {
 	if (!model) return undefined;
 	const reading = allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model);
-	return reading.kind === "exhausted" && reading.retryAt !== undefined ? { until: reading.retryAt } : undefined;
+	return reading.kind === "exhausted" && reading.retryAt !== undefined
+		? { until: reading.retryAt, usageWindow: true }
+		: undefined;
 }
 
 /**
  * The quota exhaustion a model's lanes wait out: the one recorded from a provider's refusal or the used-up usage of its
  * subscription (`allowanceExhaustion`), whichever holds longer. A recorded one with no reset holds open-ended. The
- * usage is never recorded: it is read again at each ask, so it lifts with the first reading that has room, and the
- * model stays routable (a used-up window is waited out, never routed around).
+ * usage is never recorded: it is read again at each ask, so it lifts with the first reading that has room. A request held
+ * by it past its lane's wait is refused as the account's usage-window limit (`ModelExhaustion.usageWindow`), which a
+ * worker's ladder waits out as a usage reset on the same model, so the model is neither marked exhausted nor routed around.
  */
 export function heldModelExhaustion(
 	recorded: ModelExhaustion | undefined,
-	spent: { readonly until: number } | undefined,
+	spent: UsageWindowExhaustion | undefined,
 ): ModelExhaustion | undefined {
 	if (!recorded || !spent) return recorded ?? spent;
 	return recorded.until === undefined || recorded.until >= spent.until ? recorded : spent;
