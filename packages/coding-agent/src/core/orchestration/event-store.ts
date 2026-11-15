@@ -3,6 +3,11 @@ import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import {
+	currentStorageRecord,
+	sessionWorkerStorage,
+	type WorkerStorageIdentity,
+} from "../../kernel/session/worker-storage-identity.ts";
 import { type OrchestrationHome, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import {
@@ -359,6 +364,8 @@ export class OrchestrationEventStore {
 	readonly snapshotsDir: string;
 	readonly carriedDir: string;
 	readonly baselinePath: string;
+	/** Where the bundle's records name its worker storage: what they read is translated through it, never rewritten. */
+	readonly storage: WorkerStorageIdentity;
 	private readonly now: () => string;
 	private readonly createEventId: () => string;
 	private readonly maxTailEvents: number;
@@ -384,6 +391,7 @@ export class OrchestrationEventStore {
 		this.snapshotsDir = join(this.rootDir, "snapshots");
 		this.carriedDir = join(this.rootDir, "carried");
 		this.baselinePath = join(this.rootDir, "projection-baseline.json");
+		this.storage = sessionWorkerStorage(options.orchestrationHome, options.sessionId);
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
 		this.fs = options.fs ?? nodeFs;
@@ -632,7 +640,28 @@ export class OrchestrationEventStore {
 		if (!snapshot) return undefined;
 		const manifest = readCarriedManifest(this.snapshotsDir, snapshot.throughOrdinal, snapshot.digest);
 		const carried = manifest && carriedEntries(this.carriedDir, manifest);
-		return { throughOrdinal: snapshot.throughOrdinal, projection: structuredClone(snapshot.projection), carried };
+		return {
+			throughOrdinal: snapshot.throughOrdinal,
+			projection: structuredClone(snapshot.projection),
+			carried: carried && this.currentCarried(carried),
+		};
+	}
+
+	/** The carried entries, read with the paths the bundle holds now, as the store reads its own events and snapshot. */
+	private currentCarried(carried: ReadonlyMap<string, CarriedEntry>): ReadonlyMap<string, CarriedEntry> {
+		const storage = this.storage;
+		if (storage.formerBundleDirs.length === 0) return carried;
+		return new Map(
+			[...carried].map(([key, entry]) => [
+				key,
+				{
+					base: () => currentStorageRecord(storage, entry.base()),
+					*events() {
+						for (const event of entry.events()) yield currentStorageRecord(storage, event);
+					},
+				},
+			]),
+		);
 	}
 
 	/**
@@ -985,7 +1014,8 @@ export class OrchestrationEventStore {
 		if (snapshotDigest(content) !== baseline.digest) {
 			throw new OrchestrationEventStoreError("Orchestration projection snapshot digest mismatch.");
 		}
-		return { ...content, digest: baseline.digest };
+		// Verified as written; read with the paths the bundle holds now.
+		return { ...currentStorageRecord(this.storage, content), digest: baseline.digest };
 	}
 
 	/**
@@ -1073,7 +1103,7 @@ export class OrchestrationEventStore {
 		if (!isCanonicalOrchestrationEvent(parsed)) {
 			throw new OrchestrationEventStoreError(`Invalid orchestration event record: ${name}`);
 		}
-		return parsed;
+		return currentStorageRecord(this.storage, parsed);
 	}
 
 	/**

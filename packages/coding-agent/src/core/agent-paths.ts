@@ -516,7 +516,12 @@ export function decisionLedgerFile(agentDir: string): string {
  */
 export function workerProjectSpecializationFile(home: OrchestrationHome, specializationKey: string): string {
 	if (!/^[a-f0-9]{64}$/.test(specializationKey)) throw new TypeError("Invalid worker specialization digest.");
-	return join(home.root, "project-specialists", `${specializationKey}.json`);
+	return join(workerProjectSpecializationsDir(home), `${specializationKey}.json`);
+}
+
+/** `<home>/project-specialists` -- the home's specialist directories, one file per specialization. */
+export function workerProjectSpecializationsDir(home: OrchestrationHome): string {
+	return join(home.root, "project-specialists");
 }
 
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */

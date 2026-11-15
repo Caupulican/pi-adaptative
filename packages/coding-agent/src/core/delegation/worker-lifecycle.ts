@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
+	currentStorageRecord,
+	sessionWorkerStorage,
 	workerConversationMetadataFile,
 	workerTranscriptLocation,
 } from "../../kernel/session/worker-storage-identity.ts";
@@ -284,9 +286,11 @@ export class WorkerLifecycle {
 			retentionArchiveDir(orchestrationEventStoreDir(this.orchestrationHome, this.sessionId)),
 		);
 		const archived: AgentBindingContract["status"][] = [];
+		// Read with the paths the bundle holds now, as the store reads its own records.
+		const storage = sessionWorkerStorage(this.orchestrationHome, this.sessionId);
 		for (const archive of archiveRead.archives) {
 			if (archive.sessionId !== this.sessionId || !archiveIsCommitted(archive, committed)) continue;
-			for (const entry of Object.values(archive.records.agents ?? {})) {
+			for (const entry of Object.values(currentStorageRecord(storage, archive.records.agents) ?? {})) {
 				if (!isPlainRecord(entry) || !isPlainRecord(entry.resumeContext) || typeof entry.status !== "string") {
 					throw new Error("Archived agent binding is malformed.");
 				}

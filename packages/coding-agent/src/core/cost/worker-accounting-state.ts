@@ -1,3 +1,4 @@
+import { currentStorageRecord } from "../../kernel/session/worker-storage-identity.ts";
 import {
 	attemptUsageIncrease,
 	EMPTY_ATTEMPT_USAGE,
@@ -178,7 +179,8 @@ export function readHistoricalWorkerAccountingState(store: OrchestrationEventSto
 		const committed = new Set(retentionArchiveIdsField(raw).retentionArchiveIds ?? []);
 		for (const archive of readRetentionArchives(retentionArchiveDir(store.rootDir)).archives) {
 			if (archive.sessionId !== store.sessionId || !archiveIsCommitted(archive, committed)) continue;
-			const archiveRecords = record(archive.records, "archive records");
+			// Verified as written; read with the paths the bundle holds now, as the store reads its own records.
+			const archiveRecords = record(currentStorageRecord(store.storage, archive.records), "archive records");
 			readRecordSet(
 				state,
 				{

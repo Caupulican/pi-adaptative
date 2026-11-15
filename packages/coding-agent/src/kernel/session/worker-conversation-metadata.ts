@@ -12,6 +12,7 @@ import {
 	normalizeWorkerContextForkReference,
 	type WorkerContextForkReference,
 } from "./worker-context-fork-reference.ts";
+import { currentStorageRecord, workerFileStorage } from "./worker-storage-identity.ts";
 
 export const MAX_WORKER_CONVERSATION_METADATA_BYTES = 256 * 1024;
 
@@ -104,7 +105,11 @@ export function readWorkerConversationMetadata(metadataFile: string): WorkerConv
 		metadata: {
 			logicalAgentId,
 			...(typeof parentSessionId === "string" ? { parentSessionId } : {}),
-			resumeContext: cloneResumeContext(resumeContext as AgentResumeContext),
+			// Its transcript's path as the bundle holds it now, which a move into another home changed (`former-roots.json`).
+			resumeContext: currentStorageRecord(
+				workerFileStorage(metadataFile),
+				cloneResumeContext(resumeContext as AgentResumeContext),
+			),
 			...(normalizedBirthContextForkReference
 				? { birthContextForkReference: normalizedBirthContextForkReference }
 				: {}),

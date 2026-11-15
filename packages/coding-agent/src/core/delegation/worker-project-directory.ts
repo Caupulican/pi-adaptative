@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import {
 	type OrchestrationHome,
 	orchestrationSessionDeletionFile,
 	workerProjectSpecializationFile,
+	workerProjectSpecializationsDir,
 } from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type {
@@ -19,7 +21,7 @@ import {
 	withFileLockSync,
 	writeFileAtomicSync,
 } from "../util/atomic-file.ts";
-import { readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
@@ -32,6 +34,7 @@ import type { WorkerProjectAllocation, WorkerProjectPreparation } from "./worker
 
 const MAX_DIRECTORY_BYTES = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 128;
+const MAX_SPECIALIZATION_FILES = 4096;
 
 interface DirectoryEntry {
 	allocationId: string;
@@ -88,7 +91,7 @@ export class WorkerProjectDirectory {
 	}): WorkerProjectAdmission {
 		const file = workerProjectSpecializationFile(this.orchestrationHome, input.specializationKey);
 		return withFileLockSync(file, () => {
-			const entries = this.read(file);
+			const entries = readDirectoryEntries(file);
 			if (!input.independent) {
 				// The homes are listed once for every entry this admission judges.
 				const homes = sessionHomes(this.agentDir);
@@ -166,7 +169,7 @@ export class WorkerProjectDirectory {
 			}
 			if (entries.length >= MAX_DIRECTORY_ENTRIES)
 				return { kind: "unavailable", reason: "worker_project_directory_full" };
-			const owner = this.normalizeOwner(input.owner);
+			const owner = normalizeOwner(input.owner);
 			const allocationId = randomUUID();
 			this.write(file, [...entries, { allocationId, allocatedBy: owner, phase: "allocating", preparation: null }]);
 			return { kind: "allocated", allocation: { specializationKey: input.specializationKey, allocationId, owner } };
@@ -193,7 +196,7 @@ export class WorkerProjectDirectory {
 
 	/** Journal exact command identity BEFORE durable task preparation can leave executable work. */
 	notePreparation(allocation: WorkerProjectAllocation, preparation: WorkerProjectPreparation): void {
-		const normalized = this.normalizePreparation(preparation);
+		const normalized = normalizePreparation(preparation);
 		const scope = this.preparationScope;
 		if (scope && !isDeepStrictEqual(scope.allocation, allocation))
 			throw new Error("Worker preparation scope belongs to another allocation.");
@@ -219,7 +222,7 @@ export class WorkerProjectDirectory {
 				throw new Error("Worker allocation preparation and transcript disagree.");
 			if (entry.reference && !isDeepStrictEqual(entry.reference, reference))
 				throw new Error("Worker allocation identity changed.");
-			return { ...entry, reference: this.normalizeReference(reference) };
+			return { ...entry, reference: normalizeReference(reference) };
 		});
 	}
 
@@ -309,7 +312,7 @@ export class WorkerProjectDirectory {
 		return withFileLockSync(
 			file,
 			() => {
-				const entries = this.read(file);
+				const entries = readDirectoryEntries(file);
 				const index = entries.findIndex((entry) => entry.allocationId === allocation.allocationId);
 				const entry = entries[index];
 				if (!entry || !isDeepStrictEqual(entry.allocatedBy, allocation.owner))
@@ -324,84 +327,98 @@ export class WorkerProjectDirectory {
 		);
 	}
 
-	private normalizeOwner(value: unknown): SpecialistContextOwner {
-		if (!isPlainRecord(value) || typeof value.parentSessionId !== "string" || typeof value.incarnation !== "string")
-			throw new Error("Worker allocation owner is invalid.");
-		return {
-			parentSessionId: requireBoundedTrimmedText(value.parentSessionId, 512, "Worker parent"),
-			incarnation: requireBoundedTrimmedText(value.incarnation, 512, "Worker incarnation"),
-		};
-	}
-
-	private normalizePreparation(value: unknown): WorkerProjectPreparation {
-		if (
-			!isPlainRecord(value) ||
-			typeof value.logicalAgentId !== "string" ||
-			typeof value.controlMessageId !== "string"
-		)
-			throw new Error("Worker preparation is invalid.");
-		return {
-			logicalAgentId: requireBoundedTrimmedText(value.logicalAgentId, 512, "Worker preparation agent"),
-			controlMessageId: requireBoundedTrimmedText(value.controlMessageId, 512, "Worker preparation command"),
-		};
-	}
-
-	private normalizeReference(value: unknown): WorkerProjectContextReference {
-		if (
-			!isPlainRecord(value) ||
-			typeof value.parentSessionId !== "string" ||
-			typeof value.logicalAgentId !== "string" ||
-			!isAgentIdentity({ agentId: value.logicalAgentId, resumeContext: value.resumeContext })
-		)
-			throw new Error("Worker project reference is invalid.");
-		return {
-			parentSessionId: requireBoundedTrimmedText(value.parentSessionId, 512, "Worker birth parent"),
-			logicalAgentId: requireBoundedTrimmedText(value.logicalAgentId, 512, "Worker birth agent"),
-			resumeContext: structuredClone(value.resumeContext) as WorkerProjectContextReference["resumeContext"],
-		};
-	}
-
-	private read(file: string): DirectoryEntry[] {
-		if (!existsSync(file)) return [];
-		const value: unknown = JSON.parse(readBoundedTextFileSync(file, MAX_DIRECTORY_BYTES, "Worker project directory"));
-		if (
-			!isPlainRecord(value) ||
-			value.schemaVersion !== 1 ||
-			!Array.isArray(value.entries) ||
-			value.entries.length > MAX_DIRECTORY_ENTRIES
-		)
-			throw new Error("Worker project directory is invalid.");
-		const ids = new Set<string>();
-		return value.entries.map((item: unknown) => {
-			if (
-				!isPlainRecord(item) ||
-				typeof item.allocationId !== "string" ||
-				(item.phase !== "allocating" && item.phase !== "published")
-			)
-				throw new Error("Worker allocation is invalid.");
-			const allocationId = requireBoundedTrimmedText(item.allocationId, 128, "Worker allocation");
-			if (ids.has(allocationId)) throw new Error("Worker allocation is duplicated.");
-			ids.add(allocationId);
-			const reference = item.reference === undefined ? undefined : this.normalizeReference(item.reference);
-			if (item.phase === "published" && !reference) throw new Error("Published worker has no reference.");
-			return {
-				allocationId,
-				allocatedBy: this.normalizeOwner(item.allocatedBy),
-				phase: item.phase,
-				...(item.preparation === undefined
-					? {}
-					: {
-							preparation: item.preparation === null ? null : this.normalizePreparation(item.preparation),
-						}),
-				...(reference ? { reference } : {}),
-			};
-		});
-	}
-
 	private write(file: string, entries: readonly DirectoryEntry[]): void {
 		const content = JSON.stringify({ schemaVersion: 1, entries });
 		if (Buffer.byteLength(content) > MAX_DIRECTORY_BYTES)
 			throw new Error("Worker project directory exceeds its byte limit.");
 		writeFileAtomicSync(file, content, { mode: 0o600 });
 	}
+}
+
+function normalizeOwner(value: unknown): SpecialistContextOwner {
+	if (!isPlainRecord(value) || typeof value.parentSessionId !== "string" || typeof value.incarnation !== "string")
+		throw new Error("Worker allocation owner is invalid.");
+	return {
+		parentSessionId: requireBoundedTrimmedText(value.parentSessionId, 512, "Worker parent"),
+		incarnation: requireBoundedTrimmedText(value.incarnation, 512, "Worker incarnation"),
+	};
+}
+
+function normalizePreparation(value: unknown): WorkerProjectPreparation {
+	if (!isPlainRecord(value) || typeof value.logicalAgentId !== "string" || typeof value.controlMessageId !== "string")
+		throw new Error("Worker preparation is invalid.");
+	return {
+		logicalAgentId: requireBoundedTrimmedText(value.logicalAgentId, 512, "Worker preparation agent"),
+		controlMessageId: requireBoundedTrimmedText(value.controlMessageId, 512, "Worker preparation command"),
+	};
+}
+
+function normalizeReference(value: unknown): WorkerProjectContextReference {
+	if (
+		!isPlainRecord(value) ||
+		typeof value.parentSessionId !== "string" ||
+		typeof value.logicalAgentId !== "string" ||
+		!isAgentIdentity({ agentId: value.logicalAgentId, resumeContext: value.resumeContext })
+	)
+		throw new Error("Worker project reference is invalid.");
+	return {
+		parentSessionId: requireBoundedTrimmedText(value.parentSessionId, 512, "Worker birth parent"),
+		logicalAgentId: requireBoundedTrimmedText(value.logicalAgentId, 512, "Worker birth agent"),
+		resumeContext: structuredClone(value.resumeContext) as WorkerProjectContextReference["resumeContext"],
+	};
+}
+
+function readDirectoryEntries(file: string): DirectoryEntry[] {
+	if (!existsSync(file)) return [];
+	const value: unknown = JSON.parse(readBoundedTextFileSync(file, MAX_DIRECTORY_BYTES, "Worker project directory"));
+	if (
+		!isPlainRecord(value) ||
+		value.schemaVersion !== 1 ||
+		!Array.isArray(value.entries) ||
+		value.entries.length > MAX_DIRECTORY_ENTRIES
+	)
+		throw new Error("Worker project directory is invalid.");
+	const ids = new Set<string>();
+	return value.entries.map((item: unknown) => {
+		if (
+			!isPlainRecord(item) ||
+			typeof item.allocationId !== "string" ||
+			(item.phase !== "allocating" && item.phase !== "published")
+		)
+			throw new Error("Worker allocation is invalid.");
+		const allocationId = requireBoundedTrimmedText(item.allocationId, 128, "Worker allocation");
+		if (ids.has(allocationId)) throw new Error("Worker allocation is duplicated.");
+		ids.add(allocationId);
+		const reference = item.reference === undefined ? undefined : normalizeReference(item.reference);
+		if (item.phase === "published" && !reference) throw new Error("Published worker has no reference.");
+		return {
+			allocationId,
+			allocatedBy: normalizeOwner(item.allocatedBy),
+			phase: item.phase,
+			...(item.preparation === undefined
+				? {}
+				: {
+						preparation: item.preparation === null ? null : normalizePreparation(item.preparation),
+					}),
+			...(reference ? { reference } : {}),
+		};
+	});
+}
+
+/**
+ * Whether a specialist directory of `home` names session `sessionId`, as the session that allocated a specialist or the
+ * one its transcript was born in: that specialist is claimable by every session of the home, whose claims name its
+ * transcript where the session's bundle holds it.
+ */
+export function projectSpecialistsNameSession(home: OrchestrationHome, sessionId: string): boolean {
+	const dir = workerProjectSpecializationsDir(home);
+	if (!existsSync(dir)) return false;
+	return readBoundedDirectoryNamesSync(dir, MAX_SPECIALIZATION_FILES, "Worker project specializations").some(
+		(name) =>
+			/^[a-f0-9]{64}\.json$/.test(name) &&
+			readDirectoryEntries(join(dir, name)).some(
+				(entry) =>
+					entry.allocatedBy.parentSessionId === sessionId || entry.reference?.parentSessionId === sessionId,
+			),
+	);
 }

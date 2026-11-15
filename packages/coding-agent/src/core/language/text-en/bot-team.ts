@@ -301,7 +301,7 @@ export const BOT_TEAM = {
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>
-		`Bot ${agentId}: its session's orchestration state stays in the main session's home, where its workers recorded their conversations; it keeps using it there.`,
+		`Bot ${agentId}: its session's orchestration state stays in the main session's home, whose other sessions share its workers' conversations; it keeps using it there.`,
 	botSessionStateStillHeld: (agentId: string, pids: string) =>
 		`Bot ${agentId}: its session's orchestration state stays in the main session's home, which process ${pids} still holds without keeping the bot out (an away run's host); the bot runs its session there.`,
 	botSessionStateNotMoved: (agentId: string) =>

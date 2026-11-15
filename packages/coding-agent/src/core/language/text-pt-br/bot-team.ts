@@ -244,7 +244,7 @@ export const BOT_TEAM = {
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele está tanto na casa dele quanto na da sessão principal; ele usa o da casa dele, e a cópia da sessão principal fica sem uso em ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>
-		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, onde os workers dele registraram as conversas; ele continua usando-o lá.`,
+		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, cujas outras sessões compartilham as conversas dos workers dele; ele continua usando-o lá.`,
 	botSessionStateStillHeld: (agentId: string, pids: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, que o processo ${pids} ainda mantém sem impedir o bot (o hospedeiro de uma execução ausente); o bot roda a sessão dele lá.`,
 	botSessionStateNotMoved: (agentId: string) =>
