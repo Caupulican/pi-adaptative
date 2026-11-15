@@ -515,7 +515,7 @@ export interface AgentToolInvocation<TParameters extends TSchema = TSchema, TDet
 
 /**
  * The two forms of a tool call that can run as a background session task. The loop runs the call in its background form
- * only where the host can hand calls off (`AgentLoopConfig.canHandOffToolCalls`), and in its foreground form everywhere
+ * only where the host can hand calls off (`AgentLoopConfig.backgroundHandoff`), and in its foreground form everywhere
  * else, so a background run the host cannot start never reaches the tool's body as one.
  */
 export interface ToolCallBackgroundForms<T> {

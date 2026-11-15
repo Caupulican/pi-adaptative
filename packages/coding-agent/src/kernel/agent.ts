@@ -161,9 +161,8 @@ export interface AgentOptions {
 	onToolCallStart?: ToolCallStartHook;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
-	handoffToolCall?: AgentLoopConfig["handoffToolCall"];
+	backgroundHandoff?: AgentLoopConfig["backgroundHandoff"];
 	subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
-	canHandOffToolCalls?: AgentLoopConfig["canHandOffToolCalls"];
 	onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	toolArgumentTeachEnabled?: boolean;
 	toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
@@ -317,9 +316,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public backgroundToolCallAfterMs?: AgentLoopConfig["backgroundToolCallAfterMs"];
-	public handoffToolCall?: AgentLoopConfig["handoffToolCall"];
+	public backgroundHandoff?: AgentLoopConfig["backgroundHandoff"];
 	public subscribeToolCallHandoffRequest?: AgentLoopConfig["subscribeToolCallHandoffRequest"];
-	public canHandOffToolCalls?: AgentLoopConfig["canHandOffToolCalls"];
 	public onToolArgumentValidation?: (event: ToolArgumentValidationTelemetryEvent) => void;
 	public toolArgumentTeachEnabled?: boolean;
 	public toolFailureProtocolProse?: AgentLoopConfig["toolFailureProtocolProse"];
@@ -398,9 +396,8 @@ export class Agent {
 		this.onToolCallStart = options.onToolCallStart;
 		this.afterToolCall = options.afterToolCall;
 		this.backgroundToolCallAfterMs = options.backgroundToolCallAfterMs;
-		this.handoffToolCall = options.handoffToolCall;
+		this.backgroundHandoff = options.backgroundHandoff;
 		this.subscribeToolCallHandoffRequest = options.subscribeToolCallHandoffRequest;
-		this.canHandOffToolCalls = options.canHandOffToolCalls;
 		this.onToolArgumentValidation = options.onToolArgumentValidation;
 		this.toolArgumentTeachEnabled = options.toolArgumentTeachEnabled;
 		this.toolFailureProtocolProse = options.toolFailureProtocolProse;
@@ -780,9 +777,8 @@ export class Agent {
 			onToolCallStart: this.onToolCallStart,
 			afterToolCall: this.afterToolCall,
 			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,
-			handoffToolCall: this.handoffToolCall,
+			backgroundHandoff: this.backgroundHandoff,
 			subscribeToolCallHandoffRequest: this.subscribeToolCallHandoffRequest,
-			canHandOffToolCalls: this.canHandOffToolCalls,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			shouldStopAfterTurn: this.shouldStopAfterTurn
 				? async () => (await this.shouldStopAfterTurn?.(this.signal)) ?? false

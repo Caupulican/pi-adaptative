@@ -6,6 +6,7 @@
  */
 
 import type { Usage } from "@caupulican/pi-ai";
+import type { BackgroundToolCallHost } from "../kernel/loop-config.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentSessionEvent } from "./agent-session-contracts.ts";
 import {
@@ -43,6 +44,17 @@ export interface SessionBackgroundToolTaskDeps {
 	/** The set of running backgrounded tool tasks changed; a system switch waiting on it may now be admissible. */
 	onRunningTasksChanged(): void;
 	addSpawnedUsage(usage: Usage, options: { label?: string; sourceSessionId?: string; reportId?: string }): void;
+}
+
+/** The agent loop's handoff host: the session's task controller, which can take a call while `tool_task` is active. */
+export function taskHandoffHost(
+	tasks: BackgroundToolTaskController,
+	getActiveToolNames: () => readonly string[],
+): BackgroundToolCallHost {
+	return {
+		canHandOff: () => getActiveToolNames().includes("tool_task"),
+		handoff: (context) => tasks.handoff(context),
+	};
 }
 
 export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTaskDeps): BackgroundToolTaskController {

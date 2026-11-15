@@ -2496,7 +2496,7 @@ async function executeAndFinalizePreparedToolCall(
 		}
 		return cleanupErrors.length > 0 ? retainToolDeliveryFailure(settled.value, "cleanup") : settled.value;
 	})();
-	if (!executionAbort || !config.handoffToolCall) return callForm.inForeground(completion);
+	if (!executionAbort || !config.backgroundHandoff) return callForm.inForeground(completion);
 
 	const clock = callForm.armClock();
 	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = clock ? [clock.reached] : [];
@@ -2539,9 +2539,9 @@ async function executeAndFinalizePreparedToolCall(
 		return finalized;
 	});
 	void handedOffCompletion.catch(() => undefined);
-	let handoff: ReturnType<NonNullable<AgentLoopConfig["handoffToolCall"]>>;
+	let handoff: ReturnType<NonNullable<AgentLoopConfig["backgroundHandoff"]>["handoff"]>;
 	try {
-		handoff = config.handoffToolCall({
+		handoff = config.backgroundHandoff.handoff({
 			requestId,
 			assistantMessage,
 			toolCall: prepared.toolCall,

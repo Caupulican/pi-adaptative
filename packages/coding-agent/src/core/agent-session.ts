@@ -27,7 +27,7 @@ import {
 	installSessionRequestHooks,
 	installSessionToolArgumentHook,
 } from "./agent-session-agent-hooks.ts";
-import { createSessionBackgroundToolTasks } from "./agent-session-background-tasks.ts";
+import { createSessionBackgroundToolTasks, taskHandoffHost } from "./agent-session-background-tasks.ts";
 import {
 	attachSessionAdaptiveRuntime,
 	buildSessionContextCompositionReport,
@@ -3378,8 +3378,7 @@ export class AgentSession {
 		this.agent.afterToolCall = this._toolGate.afterToolCall;
 		this.agent.backgroundToolCallAfterMs = this.settingsManager.getBackgroundToolSettings().callAfterMs;
 		this.agent.toolConcurrency = this.settingsManager.getToolExecutionSettings().concurrency;
-		this.agent.canHandOffToolCalls = () => this.getActiveToolNames().includes("tool_task");
-		this.agent.handoffToolCall = (context) => this._backgroundToolTasks.handoff(context);
+		this.agent.backgroundHandoff = taskHandoffHost(this._backgroundToolTasks, () => this.getActiveToolNames());
 		this.agent.subscribeToolCallHandoffRequest = (toolCallId, request) =>
 			this._backgroundToolTasks.subscribeHandoffRequest(toolCallId, request);
 		this.agent.onRunawayStop = (info) => handleRunawayStop(this._guardDeps(), info);
@@ -3607,7 +3606,7 @@ export class AgentSession {
 		safely(() => this._providerRequestRuntime.dispose());
 		safely(() => {
 			this.agent.afterToolCall = undefined;
-			this.agent.handoffToolCall = undefined;
+			this.agent.backgroundHandoff = undefined;
 			this.agent.subscribeToolCallHandoffRequest = undefined;
 		});
 		safely(() => this._extensionRunner.invalidate());

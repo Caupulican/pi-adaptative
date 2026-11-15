@@ -260,6 +260,21 @@ export interface BackgroundToolCallHandoff {
 	isError?: boolean;
 }
 
+/** The host side of a background handoff, one shape so that a host cannot wire one half of it. */
+export interface BackgroundToolCallHost {
+	/**
+	 * Whether `handoff` can take a call now. False: no call is handed off, and a call with background forms
+	 * (`AgentTool.backgroundArguments`) runs in its foreground form. True: such a call starts in its background form
+	 * and crosses `handoff` at once.
+	 */
+	canHandOff(): boolean;
+	/**
+	 * Synchronously accept ownership of a call. Returning a handoff lets the provider loop continue with its bounded
+	 * placeholder while `completion` still crosses `afterToolCall` once. Returning `undefined` keeps it in the foreground.
+	 */
+	handoff(context: BackgroundToolCallContext): BackgroundToolCallHandoff | undefined;
+}
+
 /** Context passed to the durable tool-start reservation boundary. */
 export interface ToolCallStartContext extends BeforeToolCallContext {
 	/** Accepted provider request identity is mandatory at the durable reservation boundary. */
@@ -956,30 +971,19 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 
 	/**
-	 * Foreground latency budget for prepared tool calls. When it elapses, `handoffToolCall` may
+	 * Foreground latency budget for prepared tool calls. When it elapses, `backgroundHandoff` may
 	 * transfer the still-running execution to a host-owned task. Disabled unless both fields exist.
 	 */
 	backgroundToolCallAfterMs?: number;
 
-	/**
-	 * Synchronously accept ownership of a slow call. Returning a handoff lets the provider loop
-	 * continue with its bounded placeholder while `completion` still crosses `afterToolCall` once.
-	 * Returning `undefined` keeps waiting in the foreground.
-	 */
-	handoffToolCall?: (context: BackgroundToolCallContext) => BackgroundToolCallHandoff | undefined;
+	/** The host that takes calls into background tasks. Unset: no call is handed off. */
+	backgroundHandoff?: BackgroundToolCallHost;
 
 	/**
 	 * Register a one-shot host request that asks an in-flight foreground call to cross the same
-	 * `handoffToolCall` boundary before its automatic latency budget elapses.
+	 * `backgroundHandoff` boundary before its automatic latency budget elapses.
 	 */
 	subscribeToolCallHandoffRequest?: (toolCallId: string, request: () => void) => () => void;
-
-	/**
-	 * Whether `handoffToolCall` can take a call now. Unset or false: no call is handed off, and a call
-	 * with background forms (`AgentTool.backgroundArguments`) runs in its foreground form. True: such a
-	 * call starts in its background form and crosses `handoffToolCall` at once.
-	 */
-	canHandOffToolCalls?: () => boolean;
 }
 
 /** Context snapshot passed into the low-level agent loop. */

@@ -19,7 +19,7 @@ export interface ToolCallForm {
 
 /** Whether the host can hand a call off to a background task now: it hands calls off and says it can. */
 export function canHandOffToolCalls(config: AgentLoopConfig): boolean {
-	return config.handoffToolCall !== undefined && config.canHandOffToolCalls?.() === true;
+	return config.backgroundHandoff?.canHandOff() === true;
 }
 
 /** The tool's compatibility shim on the raw arguments, before schema validation. */
