@@ -2019,6 +2019,8 @@ pi.registerTool({
 });
 ```
 
+**Background forms:** `backgroundArguments(args)` is optional. A tool whose calls can run as a background session task returns a call's two forms, `{ background, foreground, reason? }` (`ToolCallBackgroundForms`), or `undefined` for a call that only runs in the foreground. Where the session can start a task (`tool_task` is active), the agent loop holds the call's body until its handoff is decided: handed off, the body runs with `background` as a session task and the model reads the task id at once, with how long the task may run and how to cancel it; refused, or where no task can start (a worker or lane session, a call made from inside another tool), the body runs with `foreground` and the foreground's own bounds, so a background form never runs in the foreground. A retry after a timeout is compared by the foreground form's bound. Set `reason` only for a call the model did not ask to background, in words for the model: the handoff says the call was moved to the background because of it. For a tool with a `background: true` parameter, the forms are the call as it is and the call without `background`. Its sibling `foregroundWait(args)` marks a call that is itself a wait (it blocks until something else finishes), which is never handed off.
+
 ### Overriding Built-in Tools
 
 Extensions can override built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) by registering a tool with the same name. Interactive mode displays a warning when this happens.

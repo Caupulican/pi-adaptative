@@ -111,7 +111,8 @@ export class BotTeamSelectorComponent extends Container {
 				const glyph = botStateMark(bot.state).glyph;
 				const unread = (bot.unreadCount ?? 0) > 0 ? text.unread(bot.unreadCount ?? 0) : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
-				const watches = (bot.watchCount ?? 0) > 0 ? ` · ◌${bot.watchCount}` : "";
+				const watches =
+					(bot.watchCount ?? 0) > 0 ? ` · ${interfaceText().common.watching(bot.watchCount ?? 0)}` : "";
 				const summaryOrDesc = bot.currentSummary
 					? text.descriptionSuffix(bot.currentSummary)
 					: bot.description

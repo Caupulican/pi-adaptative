@@ -4,6 +4,7 @@
  * so hit-testing the pane finds the same rows.
  */
 
+import { visibleWidth } from "@caupulican/pi-tui";
 import type { ManagedLaneView } from "../../../core/delegation/managed-lane-views.ts";
 import type {
 	ActiveChatTarget,
@@ -111,11 +112,14 @@ export function drawChatRosterPane(input: ChatRosterPaneInput): ChatRosterPaneDr
 		const glyph = botStateGlyph(bot.state);
 		const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 		const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
-		// Watches are passive state, drawn quiet with the operator bar's dotted ring.
-		const watchBadge = (bot.watchCount ?? 0) > 0 ? ` ${theme.fg("muted", `◌${bot.watchCount}`)}` : "";
 		const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", text.panes.roster.leader)}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} ${text.panes.roster.remote}`)}` : ""}`;
+		const row = (watchBadge: string) =>
+			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}`;
+		// Watches are passive state, drawn quiet: "watching n" where the row has room, a bare ring only where it has not.
+		const watches = bot.watchCount ?? 0;
+		const labelled = row(watches > 0 ? ` ${theme.fg("muted", text.common.watching(watches))}` : "");
 		add(
-			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}`,
+			watches === 0 || visibleWidth(labelled) <= width - 2 ? labelled : row(` ${theme.fg("muted", `◌${watches}`)}`),
 			target,
 		);
 		// The row is the bot's name. Its model is a hint on the line below, shown only for the selected bot; the idle state is
