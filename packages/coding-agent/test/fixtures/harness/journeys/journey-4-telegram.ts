@@ -1763,7 +1763,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 				agentDir,
 				sessionManager: world.openSessionManager(file, agentDir),
 				systemOneEnabled: false,
-				settings,
+				settings: ownerBaseline,
 			})
 			.then(
 				() => undefined,
