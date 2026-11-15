@@ -693,7 +693,9 @@ export class BotSessionHost {
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
 							: kept.reason === "worker-records"
 								? words.botSessionStateKeptForWorkers(agentId)
-								: words.botSessionStateNotMoved(agentId),
+								: kept.reason === "held-elsewhere"
+									? words.botSessionStateHeldElsewhere(agentId)
+									: words.botSessionStateNotMoved(agentId),
 					);
 				},
 			});

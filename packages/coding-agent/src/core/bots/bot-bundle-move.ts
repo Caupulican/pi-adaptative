@@ -35,6 +35,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+	keepsBotHostOut,
 	readSessionLeaseHolders,
 	sessionBundleDeletionPolicy,
 	withSessionBundleInspection,
@@ -52,11 +53,14 @@ import { fleetQueueMetadataPath } from "../fleet/fleet-queue-store.ts";
  * `none`: the owner's home has nothing of the session. `moved`: the bot's home holds it now. `deleting`: a tombstone
  * stands for it in either home; nothing moves while its deletion protocol owns it (a permanent deletion has set the
  * pointer aside already; an expiry's settles, and a later load moves what is left). `held`: a holder of the owner's
- * home not proven dead serves it; it stays, and the host's own lease there is refused while that holder lives, which
- * is what the owner is told. `kept`: the move was not made (`reason`), and the host tells the owner once: the bot's
- * home already has a bundle of the session (`in-both-homes`, the session uses the bot's, and the owner's stays unused
- * at `ownerBundle`), the session's workers recorded their transcripts in the owner's home (`worker-records`), or the
- * homes lie on different devices (`cross-device`); in those two the session uses the owner's.
+ * home that keeps the bot's host out (`keepsBotHostOut`: alive, or on this host and not judged) serves it; it stays,
+ * and the host's own lease there is refused while that holder lives, which is what the owner is told. `kept`: the move
+ * was not made (`reason`), and the host tells the owner once: the bot's home already has a bundle of the session
+ * (`in-both-homes`, the session uses the bot's, and the owner's stays unused at `ownerBundle`), the session's workers
+ * recorded their transcripts in the owner's home (`worker-records`), the homes lie on different devices
+ * (`cross-device`), or a holder that can never be proven dead here (on another or an unplaceable host) is recorded in
+ * the owner's home, which the bot's host is admitted past (`held-elsewhere`); in those three the session uses the
+ * owner's.
  */
 export type BotBundleMove =
 	| { readonly kind: "none" }
@@ -64,7 +68,7 @@ export type BotBundleMove =
 	| { readonly kind: "deleting" }
 	| { readonly kind: "held" }
 	| { readonly kind: "kept"; readonly reason: "in-both-homes"; readonly ownerBundle: string }
-	| { readonly kind: "kept"; readonly reason: "worker-records" | "cross-device" };
+	| { readonly kind: "kept"; readonly reason: "worker-records" | "cross-device" | "held-elsewhere" };
 
 /**
  * A move that failed and whose put-back failed too: `errors` holds the failure first, then each put-back's.
@@ -144,8 +148,10 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			if (pieces.length === 0) return { kind: "none" };
 			const deleting = [owner, botHome].some((home) => sessionBundleDeletionPolicy(home, sessionId) !== undefined);
 			if (deleting) return { kind: "deleting" };
-			const leases = readSessionLeaseHolders(owner, sessionId);
-			if (leases.some((holder) => holder.standing !== "dead")) return { kind: "held" };
+			const holding = readSessionLeaseHolders(owner, sessionId).filter((holder) => holder.standing !== "dead");
+			// A holder on another or an unplaceable host is never proven dead, and it does not keep the bot's host out.
+			if (holding.length > 0)
+				return holding.some(keepsBotHostOut) ? { kind: "held" } : { kind: "kept", reason: "held-elsewhere" };
 			const inBoth = pieces.filter((index) => existsSync(to[index] as string));
 			if (inBoth.includes(BUNDLE))
 				return { kind: "kept", reason: "in-both-homes", ownerBundle: from[BUNDLE] as string };

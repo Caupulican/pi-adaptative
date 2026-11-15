@@ -169,6 +169,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>
 		`Bot ${agentId}: its session's orchestration state stays in the main session's home, where its workers recorded their conversations; it keeps using it there.`,
+	botSessionStateHeldElsewhere: (agentId: string) =>
+		`Bot ${agentId}: its session's orchestration state stays in the main session's home, where a process this machine cannot check (on another machine) still holds it; it keeps using it there.`,
 	botSessionStateNotMoved: (agentId: string) =>
 		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own, which lies on another device; it keeps using it in the main session's home.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

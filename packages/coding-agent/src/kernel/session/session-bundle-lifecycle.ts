@@ -289,7 +289,7 @@ const holderRef = (holder: {
  * it would latch the bot's session for good: it does not keep the bot's host out (it still holds the session, as every
  * holder not proven dead does).
  */
-function keepsBotHostOut(holder: BundleHolder): boolean {
+export function keepsBotHostOut(holder: { readonly owner: ProcessOwner }): boolean {
 	const standing = judgeOwner(holder.owner);
 	return standing === "alive" || (standing === "unknown" && isRecordedOnHost(holder.owner, readHostIdentity()));
 }
