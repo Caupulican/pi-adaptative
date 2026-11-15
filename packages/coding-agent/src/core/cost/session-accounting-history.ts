@@ -163,7 +163,7 @@ export class SessionAccountingHistory {
 		const load = (async () => {
 			const projection =
 				(!state.loaded ? await readAccountingProjection(file) : undefined) ??
-				(await reconcileSessionAccounting(state.session.getStorageRoots().orchestrationHome, file));
+				(await reconcileSessionAccounting(state.session.getStorageRoots(), file));
 			if (projection.sessionId !== state.sessionId)
 				throw new Error("Accounting projection session identity changed.");
 			if (!this.isCurrent(state)) return;

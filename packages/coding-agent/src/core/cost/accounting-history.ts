@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
-import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
+import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
+import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type AccountingEvidenceGroup,
@@ -252,8 +253,8 @@ export function readProjectedSessionEntriesSync(sessionFile: string): readonly S
 
 /** Reconcile existing evidence only. No transcript writes, runtime creation or execution recovery. */
 export async function reconcileSessionAccounting(
-	/** The home of the session the file holds, as its opener derived it (its manager's storage roots). */
-	home: OrchestrationHome,
+	/** The storage roots of the session the file holds, as its opener derived them (its manager's). */
+	roots: SessionStorageRoots,
 	sessionFile: string,
 ): Promise<HistoricalAccountingProjection> {
 	const previous = await readAccountingProjection(sessionFile);
@@ -265,6 +266,11 @@ export async function reconcileSessionAccounting(
 	if (previous && (previous.sessionId !== header.id || !matchesBytes(previous.source, raw, true)))
 		throw new FileSnapshotChangedError("Parent accounting source changed before reconciliation.");
 	const entries = loaded.filter((entry): entry is SessionEntry => entry.type !== "session");
+	// Historical accounting reads the session's evidence in its own home, and the evidence its entries inherited from
+	// another session (a fork's source) in the home that holds that session.
+	const home = roots.orchestrationHome;
+	const homeOf = (sessionId: string) =>
+		sessionId === header.id ? home : orchestrationHomeOfSession(roots.agentDir, sessionId);
 	const reports = entries.flatMap((entry) =>
 		entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE
 			? [entry.data as SemanticUsageReport]
@@ -272,7 +278,7 @@ export async function reconcileSessionAccounting(
 	);
 	let groups: AccountingEvidenceGroup[] = (
 		await Promise.all([
-			collectWorkerAccountingEvidence(home, header.id, entries),
+			collectWorkerAccountingEvidence(homeOf, header.id, entries),
 			readSemanticAccountingEvidence({ orchestrationHome: home, sessionId: header.id, reports, entries }),
 		])
 	).flat();

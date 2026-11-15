@@ -214,9 +214,11 @@ async function readTranscript(
  * Recover worker accounting through exact durable attempt identities. Transcript components replace
  * parent rollups only after conservation of every token category and the originally reported dollars.
  * Reading the existing store never creates a runtime, publishes receipts or compacts its history.
+ * `homeOf` names the orchestration home that holds a session's store: the session's own, and that of each session whose
+ * worker usage its entries inherited (a fork copies its source's entries, and its source may be another home's session).
  */
 export async function collectWorkerAccountingEvidence(
-	home: OrchestrationHome,
+	homeOf: (sessionId: string) => OrchestrationHome,
 	sessionId: string,
 	entries: readonly SessionEntry[],
 ): Promise<AccountingEvidenceGroup[]> {
@@ -232,9 +234,10 @@ export async function collectWorkerAccountingEvidence(
 		owned.push(entry);
 		byOrigin.set(parent, owned);
 	}
-	const groups = await collectSessionWorkerEvidence(home, sessionId, byOrigin.get(sessionId) ?? [], true);
+	const groups = await collectSessionWorkerEvidence(homeOf(sessionId), sessionId, byOrigin.get(sessionId) ?? [], true);
 	for (const [parent, inherited] of byOrigin) {
-		if (parent !== sessionId) groups.push(...(await collectSessionWorkerEvidence(home, parent, inherited, false)));
+		if (parent !== sessionId)
+			groups.push(...(await collectSessionWorkerEvidence(homeOf(parent), parent, inherited, false)));
 	}
 	const grouped = new Set(groups.flatMap((group) => group.reportIds));
 	for (const entry of entries) {

@@ -80,7 +80,7 @@ async function reconcileAccounting(args: string[]): Promise<void> {
 				continue;
 			}
 			if (!header.ok) throw header.reason === "unreadable" ? header.cause : new Error("Invalid session identity.");
-			await reconcileSessionAccounting(sessionStorageRootsOfFile(agentDir, path).orchestrationHome, path);
+			await reconcileSessionAccounting(sessionStorageRootsOfFile(agentDir, path), path);
 			const accounted = await readAccountedSession(path);
 			if (!accounted) throw new Error("Accounting evidence changed after reconciliation; retry required.");
 			const { projection, entries: recovered } = accounted;
