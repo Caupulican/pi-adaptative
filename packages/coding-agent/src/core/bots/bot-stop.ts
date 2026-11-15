@@ -167,8 +167,8 @@ export function endLoadedBotWork(
 /**
  * The owner's stop of bot `agentId`, whose session this process hosts, when it was not taken from its record: its
  * foreground turn (`stopTurn`) and its own work ({@link endLoadedBotWork}) end all the same. A stop held in memory
- * (`stop`: one that could not be recorded, or whose record no longer reads) also holds the bot's goal and declines its
- * usage wait as of when it was made, as a stop taken from its record does; a stop recorded and not taken (`stop` absent)
+ * (`stop`: one that could not be recorded, or whose record no longer reads) also holds the bot's goal, declines its
+ * usage wait as of when it was made and refuses the messages sent before it, as a stop taken from its record does; a stop recorded and not taken (`stop` absent)
  * leaves those to its record, which is tried again. What it left unended; undefined when its workers could not be ended.
  * Each failure is told to the owner with its cause.
  */
@@ -195,8 +195,31 @@ export function endUnrecordedStopWork(
 		} catch (error) {
 			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
 		}
+		try {
+			refuseMessagesBeforeStop(agentDir, agentId, stop.at, ports, (file, reason) =>
+				ports.warn(interfaceText().botTeam.botInboxUnreadable(agentId, file, reason)),
+			);
+		} catch (error) {
+			ports.warn(interfaceText().botTeam.botStopMessagesNotRefused(agentId, botFailureText(agentId, error)));
+		}
 	}
 	return outcome;
+}
+
+/**
+ * Refuses the messages waiting for bot `agentId` that were sent at or before the owner's stop made at `at`: the stop
+ * covers them, whether it is taken from its record or held in memory. A failure throws, with the rest left waiting.
+ */
+function refuseMessagesBeforeStop(
+	agentDir: string,
+	agentId: string,
+	at: number,
+	ports: BotStopPorts,
+	unreadable: (file: string, reason: string) => void,
+): void {
+	const reason = interfaceText().botTeam.botTurnAbortReasons.ownerStopped;
+	for (const item of readBotInbox(agentDir, agentId, unreadable))
+		if (item.message.at <= at) refuseBotInboxMessage(agentDir, item, reason, ports.now());
 }
 
 /**
@@ -468,9 +491,7 @@ function takeStops(
 	if (!newest) return undefined;
 	const told: string[] = [];
 	const outcome = ownWork(newest, (message) => told.push(message));
-	const reason = interfaceText().botTeam.botTurnAbortReasons.ownerStopped;
-	for (const item of readBotInbox(agentDir, agentId, unreadable))
-		if (item.message.at <= newest.at) refuseBotInboxMessage(agentDir, item, reason, ports.now());
+	refuseMessagesBeforeStop(agentDir, agentId, newest.at, ports, unreadable);
 	for (const stop of stops) takeBotInboxStop(stop);
 	for (const message of told) ports.warn(message);
 	if (outcome.failed.length > 0 || outcome.managed.length > 0)

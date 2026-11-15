@@ -1029,7 +1029,7 @@ export class BotSessionHost {
 	 * turn or input in flight, or at least one worker lane in flight), else by this process while no process hosts it, else by the
 	 * process hosting it, which `elsewhere` names for the owner. A bot that runs as no session of its own is not written to.
 	 * A stop that could not be written is told to the owner; one not written or not taken still ends the turn and the bot's
-	 * own work this host runs (`endUnrecordedStopWork`), and one not written holds its goal and usage wait from memory.
+	 * own work this host runs (`endUnrecordedStopWork`), and one not written applies whole, held in memory.
 	 */
 	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);

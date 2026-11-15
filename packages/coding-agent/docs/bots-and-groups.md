@@ -132,7 +132,7 @@ bot's own workers hold no `bot_message` (the bot holds no messaging to lend), an
 are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every worker it started, and says the
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
 taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also pauses its
-goal and declines its usage-limit wait, as a recorded stop does. A worker the owner stopped opens no turn of the bot. A
+goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A worker the owner stopped opens no turn of the bot. A
 profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
 plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
