@@ -12,6 +12,7 @@ import { existsSync, statSync } from "node:fs";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import {
@@ -20,14 +21,15 @@ import {
 	type WorkerWorkFacts,
 	workerWorkFacts,
 } from "../delegation/worker-owed-work.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "../orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
-import { latestUsageWake } from "../usage-wake-record.ts";
+import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
+import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
@@ -75,23 +77,85 @@ export interface SavedUsageResumeRules extends RestoredUsageRules {
 }
 
 /**
- * When the bot's saved session, `file`, continues the turn or goal a subscription's usage limit stopped (`restoredUsageStop`
- * on the messages its load seeds its agent with and on its goal), moved later by the exhaustion the provider admission
- * recorded for the refusing model, as the live session's wake moves it: a closed bot is not opened against a limit that
- * still holds. Undefined when it waits for none. Reads the whole file.
+ * What of a bot's saved session file the time it continues reads (`restoredUsageStop` on the messages its load seeds its
+ * agent with and on its goal): the refusal its messages end on and its goal when a usage or rate limit stopped it, each
+ * only when it holds one, with its latest wake; undefined when neither does. Reads the whole file.
  */
-export function savedUsageResumeAt(file: string, agentDir: string, rules: SavedUsageResumeRules): number | undefined {
-	const stop = readSessionSnapshot(file, agentDir, (view) =>
-		restoredUsageStop(
-			view.buildSessionContext().messages.at(-1),
-			getLatestGoalStateSnapshot(view),
-			latestUsageWake(view),
-			rules,
-		),
-	);
-	if (!stop) return undefined;
-	const until = rules.modelExhaustion(stop.resume.ref)?.until;
-	return until !== undefined && until > stop.at ? until : stop.at;
+interface SavedUsageStop {
+	readonly lastMessage: AgentMessage | undefined;
+	readonly goal: GoalState | undefined;
+	readonly wake: UsageWakeRecord | undefined;
+}
+
+function readSavedUsageStop(file: string, agentDir: string): SavedUsageStop | undefined {
+	return readSessionSnapshot(file, agentDir, (view) => {
+		const last = view.buildSessionContext().messages.at(-1);
+		const lastMessage = last?.role === "assistant" && last.stopReason === "error" ? last : undefined;
+		const latestGoal = getLatestGoalStateSnapshot(view);
+		const goal = latestGoal && goalUsageStop(latestGoal) ? latestGoal : undefined;
+		return lastMessage || goal ? { lastMessage, goal, wake: latestUsageWake(view) } : undefined;
+	});
+}
+
+/**
+ * When the bot's saved session continues the turn or goal a subscription's usage limit stopped (`stop`, read by
+ * {@link SavedUsageStopLedger}), moved later by the exhaustion the provider admission recorded for the refusing model, as
+ * the live session's wake moves it: a closed bot is not opened against a limit that still holds. The rules are read at
+ * each ask. Undefined when it waits for none.
+ */
+function savedUsageResumeAt(stop: SavedUsageStop | undefined, rules: SavedUsageResumeRules): number | undefined {
+	const restored = stop && restoredUsageStop(stop.lastMessage, stop.goal, stop.wake, rules);
+	if (!restored) return undefined;
+	const until = rules.modelExhaustion(restored.resume.ref)?.until;
+	return until !== undefined && until > restored.at ? until : restored.at;
+}
+
+/** A saved session file as the host read it for its usage wait; `fresh` the first time it did not read with that identity. */
+type SavedUsageRead =
+	| { readonly kind: "read"; readonly stop: SavedUsageStop | undefined }
+	| { readonly kind: "unreadable"; readonly error: unknown; readonly fresh: boolean };
+
+/**
+ * What the host knows of each closed bot's saved session file for its usage wait (`readSavedUsageStop`): read again only
+ * once the file's identity (device, inode, size, modification time, taken before the read) changed, so an unchanged
+ * transcript is not parsed at every attach and host change. A file that did not read is kept with the identity it failed
+ * on, reported once. What the stop holds alone is kept, one record per bot, none when it holds no stop.
+ */
+class SavedUsageStopLedger {
+	private readonly reads = new Map<
+		string,
+		{ readonly file: string; readonly identity: string; readonly read: SavedUsageRead }
+	>();
+
+	read(agentId: string, file: string, agentDir: string): SavedUsageRead {
+		const identity = savedFileIdentity(file);
+		const known = this.reads.get(agentId);
+		if (known?.file === file && known.identity === identity)
+			return known.read.kind === "unreadable" ? { ...known.read, fresh: false } : known.read;
+		let read: SavedUsageRead;
+		try {
+			read = { kind: "read", stop: readSavedUsageStop(file, agentDir) };
+		} catch (error) {
+			read = { kind: "unreadable", error, fresh: true };
+		}
+		this.reads.set(agentId, { file, identity, read });
+		return read;
+	}
+
+	/** The bot's session loaded, or the bot was released: its file is read again when next asked. */
+	forget(agentId: string): void {
+		this.reads.delete(agentId);
+	}
+}
+
+/** A file's device, inode, size and modification time; a stat that fails names its error code. */
+function savedFileIdentity(file: string): string {
+	try {
+		const { dev, ino, size, mtimeMs } = statSync(file);
+		return `${dev}:${ino}:${size}:${mtimeMs}`;
+	} catch (error) {
+		return `!${(error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.message : String(error))}`;
+	}
 }
 
 /** A bundle as the host read it: none; its facts; or the error it did not read with, `fresh` the first time its files read so. */
@@ -309,6 +373,8 @@ export class BotOwedWork {
 	private readonly openRetries: BotOpenRetries;
 	/** What each bot's worker bundle owes. */
 	private readonly workerWork = new WorkerWorkLedger();
+	/** What each closed bot's saved session file holds of a usage stop, read once per file identity. */
+	private readonly usageStops = new SavedUsageStopLedger();
 	/** The alarm at the time a bot's saved session continues what a usage limit stopped (`armOwedAt`). */
 	private readonly usageWaits = new Map<string, WallAlarm>();
 	/** Bots whose usage wait ended while no process hosted them: owed their session's open until it loads. */
@@ -366,6 +432,7 @@ export class BotOwedWork {
 	loaded(agentId: string): void {
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
+		this.usageStops.forget(agentId);
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);
 		this.forgetOwedTimes(agentId);
@@ -425,12 +492,9 @@ export class BotOwedWork {
 		const { ports } = this;
 		if (saved?.cwd === undefined || ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId))
 			return undefined;
-		try {
-			return savedUsageResumeAt(saved.file, ports.agentDir(), ports.usageRules());
-		} catch (error) {
-			this.notReadable(agentId, error);
-			return undefined;
-		}
+		const read = this.usageStops.read(agentId, saved.file, ports.agentDir());
+		if (read.kind === "unreadable" && read.fresh) this.notReadable(agentId, read.error);
+		return read.kind === "read" ? savedUsageResumeAt(read.stop, ports.usageRules()) : undefined;
 	}
 
 	/** The owner is told what of the bot's session store did not read (`storeFailure`). */
@@ -450,6 +514,7 @@ export class BotOwedWork {
 		this.failedStops.delete(agentId);
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
+		this.usageStops.forget(agentId);
 		this.forgetRefusal(agentId);
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);

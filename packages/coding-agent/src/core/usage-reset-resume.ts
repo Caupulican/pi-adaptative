@@ -373,7 +373,7 @@ function isSameRefusal(last: AgentMessage | undefined, refusal: AssistantMessage
  * model that refused (the latest system stop in its event history; a stop recorded before the model was kept names none);
  * undefined when another stop holds it or the stop is no longer in its history.
  */
-function goalUsageStop(
+export function goalUsageStop(
 	goal: GoalState,
 ): { readonly refusal: string; readonly at: number; readonly refusedBy?: GoalStopModel } | undefined {
 	const prefix =
