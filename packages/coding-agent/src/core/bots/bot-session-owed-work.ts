@@ -384,8 +384,8 @@ export class BotOwedWork {
 	 * the owner was told of it: each is told once, until the bot's session loads or the bot is released.
 	 */
 	private readonly told = new Map<string, Set<string>>();
-	/** What the owner was last told of a bot the periodic listing failed on: told once per cause, forgotten once it lists clean. */
-	private readonly sweepTold = new Map<string, string>();
+	/** What the owner was told of a bot the periodic listing failed on: each cause told once, forgotten once it lists clean. */
+	private readonly sweepTold = new Map<string, Set<string>>();
 	/**
 	 * Each bot whose ask to open (`openIfOwed`) runs now (its reads, and the open it started until that settles), and
 	 * whether another ask for it came meanwhile (`swept` when every such ask was the periodic listing's).
@@ -708,8 +708,11 @@ export class BotOwedWork {
 					this.sweepTold.delete(agentId);
 				} catch (error) {
 					const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
-					if (this.sweepTold.get(agentId) !== message) this.ports.warn(message);
-					this.sweepTold.set(agentId, message);
+					const told = this.sweepTold.get(agentId) ?? new Set<string>();
+					this.sweepTold.set(agentId, told);
+					if (told.has(message)) continue;
+					this.ports.warn(message);
+					told.add(message);
 				}
 		});
 	}
