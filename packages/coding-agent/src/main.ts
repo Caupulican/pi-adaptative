@@ -1161,7 +1161,7 @@ export async function main(args: string[], options?: MainOptions) {
 		// Once per main-session process, after this session's process-matrix entry is registered, so
 		// its own and every live peer's bundle is already protected. Bounded; never fails startup.
 		if (getSessionRole() === "main") {
-			// Interactive startup never waits for the sweep (up to 1,024 bundles); its diagnostics reach the session
+			// Interactive startup never waits for the sweep (up to 1,024 bundles across every home); its diagnostics reach the session
 			// as warnings, since stderr output would corrupt the running UI. Every other mode awaits it, so an exit
 			// cannot cut a removal short.
 			const interactiveStart = appMode === "interactive";

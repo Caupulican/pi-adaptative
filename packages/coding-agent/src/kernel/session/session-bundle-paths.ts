@@ -93,7 +93,18 @@ export function orchestrationSessionDir(home: OrchestrationHome, parentSessionId
  * recreating deleted worker contexts.
  */
 export function orchestrationSessionDeletionFile(home: OrchestrationHome, parentSessionId: string): string {
-	return join(home.root, "deletions", `${orchestrationSessionKey(parentSessionId)}.json`);
+	return join(orchestrationSessionDeletionsDir(home), `${orchestrationSessionKey(parentSessionId)}.json`);
+}
+
+/** `<home>/deletions` -- the home's session tombstones (`<session-key>.json`) and their lease registries. */
+export function orchestrationSessionDeletionsDir(home: OrchestrationHome): string {
+	return join(home.root, "deletions");
+}
+
+/** The session key whose tombstone file is named `name` in {@link orchestrationSessionDeletionsDir}; undefined for any other file. */
+export function sessionKeyOfDeletionFile(name: string): string | undefined {
+	if (!name.endsWith(".json") || name.endsWith(".leases.json")) return undefined;
+	return name.slice(0, -".json".length);
 }
 
 /**

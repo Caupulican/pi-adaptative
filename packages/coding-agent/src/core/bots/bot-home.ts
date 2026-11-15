@@ -8,6 +8,7 @@
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	botHomeOrchestrationHome,
 	type OrchestrationHome,
@@ -23,7 +24,7 @@ import {
 	botHomeSpendLedgerFile,
 } from "../agent-paths.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { type BotSessionLinks, botFileReadPath } from "./bot-session-pointer.ts";
 
 /** What a bot's record defines, as `profile.json` holds it. */
@@ -138,6 +139,23 @@ export function legacyBotSystemOneEvidenceDir(agentDir: string, home: Orchestrat
 /** `<agentDir>/bots/<id>/orchestration` -- the orchestration home of the bot's sessions. */
 export function botOrchestrationHome(agentDir: string, botId: string): OrchestrationHome {
 	return botHomeOf(agentDir, botId).orchestrationHome;
+}
+
+/**
+ * The display name the home's profile gives the bot; undefined when the home has no profile, or one that does not read
+ * as a profile (the home is then named by its directory). Only names the bot to the owner; nothing is decided by it.
+ */
+export function readBotProfileDisplayName(home: BotHome): string | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(readFileSync(home.profileFile, "utf8"));
+	} catch (error) {
+		if (!isMissingFileError(error)) harnessLog.warn("bots", "a bot's profile does not read", { home: home.dir });
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null) return undefined;
+	const { version, displayName } = value as Record<string, unknown>;
+	return version === 1 && typeof displayName === "string" && displayName.trim() !== "" ? displayName : undefined;
 }
 
 /** The text the profile file holds: the same profile always gives the same text, so a rewrite is detectable by comparison. */

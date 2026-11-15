@@ -7,10 +7,11 @@
  *
  * A session that was deleted never opens again to settle its own: the main session's startup sweep
  * (`session-bundle-retention.ts`) settles, store-wide, the pending results and retires the routines of each session no
- * process holds whose session file is gone and of which no other session file remains (`settleGoneSessionRoutines`).
+ * process holds whose session file is gone and of which no other session file remains, outside the session directories
+ * held whole (`settleGoneSessionRoutines`).
  */
 import { readdirSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { MAX_ROUTINE_OCCURRENCES, type RoutineDefinitionView, type RoutineOccurrence } from "./routine-contract.ts";
@@ -102,11 +103,17 @@ export interface GoneSessionSettlementInput {
 	 */
 	readonly protectedSessionIds: ReadonlySet<string>;
 	/**
-	 * Whether processes register in the process matrix here (this process's own session has a live entry) and every live
-	 * bot host's session is known, so a session absent from `protectedSessionIds` is held by no process and none of its
-	 * workers runs. Without that proof a dispatched run of a deleted session is left as it is.
+	 * Whether processes register in the process matrix here (this process's own session has a live entry), so a session
+	 * absent from `protectedSessionIds` and from `heldSessionDirs` is held by no process and none of its workers runs.
+	 * Without that proof a dispatched run of a deleted session is left as it is.
 	 */
 	readonly processTracked: boolean;
+	/**
+	 * The session directories (resolved) whose sessions are held whatever their files say: a bot home's `sessions/` when a
+	 * live host there may hold a session no id names, or when its files could not be listed. Work whose origin session
+	 * file lies in one is never settled here.
+	 */
+	readonly heldSessionDirs: ReadonlySet<string>;
 	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
 	sessionFiles(sessionId: string): readonly string[];
 	readonly nowMs: number;
@@ -154,7 +161,9 @@ export function settleGoneSessionRoutines(input: GoneSessionSettlementInput): Go
 		const key = `${sessionId}\0${sessionFile}`;
 		let known = gone.get(key);
 		if (known === undefined) {
-			known = sessionGone(sessionId, sessionFile, input.sessionFiles(sessionId));
+			known =
+				!input.heldSessionDirs.has(resolve(dirname(sessionFile))) &&
+				sessionGone(sessionId, sessionFile, input.sessionFiles(sessionId));
 			gone.set(key, known);
 		}
 		return known;

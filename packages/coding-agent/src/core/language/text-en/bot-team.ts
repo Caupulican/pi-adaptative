@@ -251,15 +251,16 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,
 	botHistoryNotIndexed: (reason: string) => `Bot history could not be indexed (${reason}).`,
 	/** The startup sweep cannot tell which session a bot home keeps or its live host holds: it only resumes what it already reserved there. */
-	botHomeHostStateUnreadable: (agentId: string, detail: string) =>
-		`Bot ${agentId}: the state of the process hosting it cannot be read (${detail}), so its old session bundles are not cleaned up until it can.`,
-	botHomeNewestSessionUnreadable: (agentId: string, file: string, detail: string) =>
-		`Bot ${agentId}: it records no session and its newest session file ${file} does not read as a session (${detail}), so its old session bundles are not cleaned up until it does.`,
-	botHomeHostSessionUnnamed: (agentId: string) =>
-		`Bot ${agentId}: the process hosting it has not yet named the session it holds, so its old session bundles are not cleaned up until it does.`,
-	/** The startup sweep could not read a bot home's session bundles. */
-	botHomeRetentionFailed: (agentId: string, detail: string) =>
-		`Bot ${agentId}: its old session bundles could not be read for cleanup (${detail}).`,
+	botHomeHostStateUnreadable: (botName: string) =>
+		`Bot ${botName}: the state of the process hosting it cannot be read, so its old session bundles are not cleaned up until it can.`,
+	/** Which session the bot keeps cannot be told: its session pointer does not read, or its newest file changed meanwhile. */
+	botHomeCurrentSessionUnknown: (botName: string) =>
+		`Bot ${botName}: which session it keeps cannot be told now, so its old session bundles are not cleaned up until it can.`,
+	botHomeHostSessionUnnamed: (botName: string) =>
+		`Bot ${botName}: the process hosting it has not yet named the session it holds, so its old session bundles are not cleaned up until it does.`,
+	/** The startup sweep could not list a bot home's session files or session bundles. */
+	botHomeRetentionFailed: (botName: string) =>
+		`Bot ${botName}: its session files or old session bundles could not be read, so its old session bundles are not cleaned up until they can.`,
 	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
 	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
 	botModelNotAllowed: (modelRef: string) => `your model policy does not allow ${modelRef}`,
