@@ -135,6 +135,9 @@ export const BOT_TEAM = {
 	/** The owner's stop could not be written to the bot's home: no process takes it, and it is not tried again. */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
+	/** A stop or a release ended the bot's own work, and the jobs its home's sessions placed could not be ended. */
+	botPlacedJobsNotEnded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its own work was ended, but the jobs its home's sessions placed on other machines could not be ended (${reason}).`,
 	/** A stop or a release of a bot left the jobs that its home's session files which are symbolic links placed. */
 	botLinkedSessionsJobsLeft: (agentId: string, paths: readonly string[]) =>
 		`Bot ${agentId}: the jobs placed on other machines by ${paths.join(", ")} were not ended: ${paths.length === 1 ? "it is a symbolic link" : "they are symbolic links"}, and work is never ended through one.`,

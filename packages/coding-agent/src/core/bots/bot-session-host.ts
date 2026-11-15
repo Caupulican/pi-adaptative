@@ -229,6 +229,8 @@ export class BotSessionHost {
 		stopped: () => this.stopped,
 		retry: (agentId) => this.takeInbox(agentId),
 	});
+	/** What the owner was last told of a bot's stop that its loaded session could not take: told once per cause. */
+	private readonly stopTold = new Map<string, string>();
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -349,9 +351,12 @@ export class BotSessionHost {
 			const loaded = { session: entry.session, transcript: entry.sessionManager };
 			stopLoadedBot(this.ports.agentDir(), agentId, loaded, this.isBusy(entry), this.stopPorts());
 			this.stopRetries.forget(agentId);
+			this.stopTold.delete(agentId);
 			return true;
 		} catch (error) {
-			this.ports.warn(interfaceText().botTeam.botStopNotApplied(agentId, errorText(error)));
+			const message = interfaceText().botTeam.botStopNotApplied(agentId, errorText(error));
+			if (this.stopTold.get(agentId) !== message) this.ports.warn(message);
+			this.stopTold.set(agentId, message);
 			this.stopRetries.arm(agentId, false);
 			return false;
 		}

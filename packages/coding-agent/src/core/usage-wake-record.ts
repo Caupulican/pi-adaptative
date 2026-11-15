@@ -78,11 +78,14 @@ export function recordUsageWake(
 
 /**
  * The owner's stop made at `stopAt`, applied at `at`: the usage-limit wait of every usage stop made until the owner's ends,
- * and is not taken up again; a usage stop made after it (a turn the owner started since) waits on its own.
+ * and is not taken up again; a usage stop made after it (a turn the owner started since) waits on its own. Written once
+ * per owner's stop: a stop applied again (its first apply failed after this) finds its record and writes none.
  */
-export function declineUsageWaitForOwner(writer: UsageWakeWriter, stopAt: number, at: number): void {
+export function declineUsageWaitForOwner(transcript: UsageWakeLog & UsageWakeWriter, stopAt: number, at: number): void {
+	const latest = latestUsageWake(transcript);
+	if (latest?.outcome === "declined" && latest.by === "owner" && latest.stopAt === stopAt) return;
 	const record: UsageWakeRecord = { version: 1, outcome: "declined", stopAt, at, failures: 0, by: "owner" };
-	writer.appendCustomEntry(USAGE_WAKE_CUSTOM_TYPE, record);
+	transcript.appendCustomEntry(USAGE_WAKE_CUSTOM_TYPE, record);
 }
 
 /** The delay before the next try after `failures` failed continuations in a row. */
