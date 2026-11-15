@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- The generated text and image model catalogs follow the providers' current listings: models they added since the last release (among them Kimi K3.1 Pro, Gemini 4 Hydrogen, Recraft v4.1 Flash, HeyGen Decision 1 and Motif 3) are listed with their prices and limits, and models they no longer list are removed.
+
 ## [0.104.64] - 2026-11-13
 
 ### Changed
