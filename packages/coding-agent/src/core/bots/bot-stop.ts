@@ -117,7 +117,7 @@ export function takeHostedBotStops(
 			),
 		ports,
 		memory,
-	).stop;
+	);
 }
 
 /**
@@ -250,8 +250,8 @@ export function applyUnhostedBotStop(
 /**
  * The stop waiting for bot `agentId` applied to its closed session `saved` while the caller holds the bot's host lock and
  * no session of it is open: by {@link applyUnhostedBotStop}, and by a host that took the lock to open the bot's session,
- * before the session is built, so nothing the session's recovery would resume runs. What the take applied and left
- * ({@link BotStopTake}); a failure throws with the stop left waiting. A stop held in memory (`memory`) is taken as one
+ * before the session is built, so nothing the session's recovery would resume runs. The stop the take applied, if any; a
+ * failure throws with the stop left waiting. A stop held in memory (`memory`) is taken as one
  * waiting.
  */
 function applyBotStopUnderLock(
@@ -260,7 +260,7 @@ function applyBotStopUnderLock(
 	session: ClosedBotSession,
 	ports: BotStopPorts,
 	memory?: OwnerStop,
-): BotStopTake {
+): OwnerStop | undefined {
 	const saved = "saved" in session ? session.saved : undefined;
 	return takeStops(
 		agentDir,
@@ -454,17 +454,9 @@ interface HeldOwnerStop {
 	readonly mark: BotWorkMark;
 }
 
-/**
- * What a take of the stops waiting for a bot did: the stop it applied, and how many of the stops it listed are still in
- * the inbox (ones it could neither read nor set aside), which still hold back the work they stop.
- */
-export interface BotStopTake {
+/** A take of the stops waiting for a closed bot under its host lock: the stop it applied, if any, and its session as it read it. */
+export interface LockedBotStop {
 	readonly stop?: OwnerStop;
-	readonly left: number;
-}
-
-/** A take of the stops waiting for a closed bot under its host lock ({@link BotStopTake}), with its session as it read it. */
-export interface LockedBotStop extends BotStopTake {
 	readonly session: ClosedBotSession;
 }
 
@@ -535,9 +527,9 @@ export class UnrecordedBotStops {
 		}
 		const memory = this.held.get(agentId);
 		try {
-			const take = applyBotStopUnderLock(this.agentDir, agentId, session, ports, memory?.stop);
+			const stop = applyBotStopUnderLock(this.agentDir, agentId, session, ports, memory?.stop);
 			this.taken(agentId, memory);
-			return { ...take, session };
+			return { stop, session };
 		} catch (error) {
 			// What the take ended before it failed is this process's own move of the bot's work.
 			if (memory) {
@@ -715,8 +707,8 @@ function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonC
  * stop is taken (the messages it covers refused, every stop read deleted) and what `ownWork` told is told; then the jobs
  * the home's sessions placed are ended by `placedJobs`, which never keeps the stop. A stop that could not be recorded
  * (`memory`) is taken with them, applied when it is the newest; it covers the messages sent before it all the same. A
- * stop that does not read is set aside and told as a stop; one that could not be set aside stays, counted in `left`. What
- * the take applied and left ({@link BotStopTake}).
+ * stop that does not read has no date to order it by and stops nothing: it is set aside and told as a stop, or, when it
+ * could not be set aside, told as one left in place, read and told again at every take. The stop applied, if any.
  */
 function takeStops(
 	agentDir: string,
@@ -725,20 +717,18 @@ function takeStops(
 	placedJobs: (stop: OwnerStop) => void,
 	ports: BotStopPorts,
 	memory?: OwnerStop,
-): BotStopTake {
+): OwnerStop | undefined {
 	const words = interfaceText().botTeam;
-	let left = 0;
-	const stops = readBotInboxStops(agentDir, agentId, (file, reason, setAside) => {
-		if (!setAside) left++;
+	const stops = readBotInboxStops(agentDir, agentId, (file, reason, setAside) =>
 		ports.warn(
 			setAside
 				? words.botInboxStopUnreadable(agentId, file, reason)
 				: words.botInboxStopNotSetAside(agentId, file, reason),
-		);
-	});
+		),
+	);
 	const recorded = stops.at(-1)?.message;
 	const newest = memory && (!recorded || memory.at > recorded.at) ? memory : recorded;
-	if (!newest) return { left };
+	if (!newest) return undefined;
 	const told: string[] = [];
 	const outcome = ownWork(newest, (message) => told.push(message));
 	refuseMessagesBeforeStop(agentDir, agentId, newest.at, ports);
@@ -747,5 +737,5 @@ function takeStops(
 	if (outcome.failed.length > 0 || outcome.managed.length > 0)
 		ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
 	placedJobs(newest);
-	return { stop: newest, left };
+	return newest;
 }

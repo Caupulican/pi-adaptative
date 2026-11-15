@@ -423,8 +423,11 @@ export class BotOwedWork {
 	 * deliver them, so they do not open the session again.
 	 */
 	private readonly offered = new Map<string, ReadonlySet<string>>();
-	/** The stops waiting for each bot when applying them last failed here ({@link applyOwnerStop}). */
-	private readonly failedStops = new Map<string, string>();
+	/**
+	 * The stops waiting for each bot when applying them last failed here, and what the owner was told of it
+	 * ({@link applyOwnerStop}).
+	 */
+	private readonly failedStops = new Map<string, { readonly key: string; readonly sentence: string }>();
 	/**
 	 * The owner's stops this process could not record, held until a take applies them; its opens of a bot take them too.
 	 * They are its process's and agent directory's, kept across its hosts (`bot-session-registry.ts`).
@@ -706,8 +709,7 @@ export class BotOwedWork {
 			// bots after it are listed.
 			for (const { agentId } of bots)
 				try {
-					this.sweepBot(agentDir, agentId);
-					this.sweepTold.delete(agentId);
+					if (this.sweepBot(agentDir, agentId)) this.sweepTold.delete(agentId);
 				} catch (error) {
 					const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
 					const told = this.sweepTold.get(agentId) ?? new Set<string>();
@@ -719,12 +721,15 @@ export class BotOwedWork {
 		});
 	}
 
-	/** One bot of the periodic listing ({@link sweepInboxes}). */
-	private sweepBot(agentDir: string, agentId: string): void {
+	/**
+	 * One bot of the periodic listing ({@link sweepInboxes}); whether its inbox listed clean (false when it did not list and a
+	 * held stop's failed take told why).
+	 */
+	private sweepBot(agentDir: string, agentId: string): boolean {
 		if (this.ports.hostedHere(agentId)) {
 			if (botInboxWaiting(agentDir, agentId) || botInboxStopNames(agentDir, agentId).length > 0)
 				this.ports.takeInbox(agentId);
-			return;
+			return true;
 		}
 		// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff. A stop held
 		// here is tried even when the inbox does not list, as an ask tries it; its take reads the inbox under the lock, so a
@@ -742,7 +747,7 @@ export class BotOwedWork {
 					? this.applyOwnerStop(agentId, true, stops)
 					: undefined;
 			if (stops === undefined) {
-				if (stop?.failed) return;
+				if (stop?.failed) return false;
 				throw unlisted;
 			}
 		}
@@ -752,6 +757,7 @@ export class BotOwedWork {
 			(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
 		)
 			this.openIfOwed(agentId, true);
+		return true;
 	}
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
@@ -980,7 +986,8 @@ export class BotOwedWork {
 	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
 	 * alarms end with it. `inbox` names the stops waiting in its inbox, as the caller listed them (undefined when they did
 	 * not list: only a stop held here is applied then). A stop it could not apply keeps waiting, holding back the work it
-	 * stops, and the owner is told (not of a held stop the failed take dropped, which no longer waits);
+	 * stops, and the owner is told once per stops waiting and cause (not of a held stop the failed take dropped, which no
+	 * longer waits); a stop that does not read stops nothing and holds nothing back;
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open (`retrying`). The owner's
 	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and asks the bot open ({@link ownerStopped}),
@@ -992,20 +999,23 @@ export class BotOwedWork {
 		const none: OwnerStopOutcome = { waits: false, failed: false, retrying: false };
 		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return none;
 		const agentDir = this.ports.agentDir();
-		// The stop held counts among the ones waiting: a failed application is tried again by the listing once either changes.
+		// Nothing waits when no stop is held here and the inbox listed none, or did not list (only a held stop is applied then).
+		const nothingWaits = () =>
+			this.unrecorded.of(agentId) === undefined && (inbox === undefined || inbox.length === 0);
+		// The stops waiting as a failed application is keyed: the listed ones, or an inbox that did not list, and the one held;
+		// the listing tries a failed application again once it changes.
 		const waiting = () => {
 			const held = this.unrecorded.of(agentId);
-			return [...(inbox ?? []), ...(held ? [`held ${held.at}`] : [])].join("\n");
+			return [...(inbox === undefined ? ["unlisted"] : inbox), ...(held ? [`held ${held.at}`] : [])].join("\n");
 		};
 		// What waits in the inbox until a take: all the listed stops while none ran here, or another process holds the lock.
 		const waits = inbox !== undefined && inbox.length > 0;
-		const stops = waiting();
-		if (stops === "") {
+		if (nothingWaits()) {
 			// Known to hold none only once the inbox listed.
 			if (inbox !== undefined) this.failedStops.delete(agentId);
 			return none;
 		}
-		if (swept && this.failedStops.get(agentId) === stops) return { waits, failed: true, retrying: false };
+		if (swept && this.failedStops.get(agentId)?.key === waiting()) return { waits, failed: true, retrying: false };
 		try {
 			const ports = {
 				warn: (message: string) => this.ports.warn(message),
@@ -1022,25 +1032,27 @@ export class BotOwedWork {
 				);
 			}
 			this.failedStops.delete(agentId);
-			// A take sets aside the stops it could not read: only those it could not set aside stay, still waiting.
-			return { waits: taken === "held" ? waits : taken.left > 0, failed: false, retrying: false };
+			// A take applied the newest stop that reads; one that does not read has no date to order it by and stops nothing,
+			// left in place or not, so nothing waits after it.
+			return { waits: taken === "held" ? waits : false, failed: false, retrying: false };
 		} catch (error) {
 			// The take may have dropped the stop held (its mark moved, or its re-mark after the failure did not read; the owner
 			// was told it was dropped): only the stops that still wait are owed, and with none left nothing waits.
-			const after = waiting();
-			if (after === "") {
+			if (nothingWaits()) {
 				this.failedStops.delete(agentId);
 				return none;
 			}
-			// Told once for the stops that wait, and again once they change (a new stop, or one taken or dropped).
-			const known = this.failedStops.get(agentId) === after;
-			if (swept && known) return { waits, failed: true, retrying: false };
-			this.failedStops.set(agentId, after);
+			// Told once for the stops that wait and the cause, and again once either changes (a new stop, one taken or dropped,
+			// an inbox that stopped listing, another cause); the listing asks again only once the stops change.
+			const key = waiting();
+			const known = this.failedStops.get(agentId);
+			if (swept && known?.key === key) return { waits, failed: true, retrying: false };
 			const failure = storeFailure(agentId, error, undefined);
+			const sentence = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure));
+			this.failedStops.set(agentId, { key, sentence });
 			const passing = botOpenFailure(failure);
 			const retrying = passing !== undefined && this.openRetries.arm(agentId, cappedFailure(passing));
-			if (!known)
-				this.ports.warn(interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure)));
+			if (known?.key !== key || known.sentence !== sentence) this.ports.warn(sentence);
 			return { waits, failed: true, retrying };
 		}
 	}

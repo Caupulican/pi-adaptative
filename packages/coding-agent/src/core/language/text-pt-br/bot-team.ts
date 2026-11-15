@@ -137,9 +137,9 @@ export const BOT_TEAM = {
 	botInboxStopUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) e foi separada como ${file}.unreadable; ela não para nada, então envie a parada de novo se ainda a quiser.`,
 	botInboxStopNotSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) nem separada (${file}); ela continua esperando e segura o trabalho que ela para.`,
+		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) nem separada (${file}); ela não para nada, continua no lugar e é lida e avisada de novo a cada leitura.`,
 	botStopOlderLeft: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a parada do dono foi registrada, mas as paradas anteriores que ela substitui não puderam ser removidas (${reason}); elas são tomadas junto com ela.`,
+		`Bot ${agentId}: a parada do dono foi registrada, mas as paradas anteriores que ela substitui não puderam ser listadas ou removidas (${reason}); elas são tomadas junto com ela.`,
 	botSweepFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a caixa de entrada e o trabalho devido dele não puderam ser verificados (${reason}); eles são verificados de novo a cada minuto.`,
 	botStopLinkedSessionLeft: (agentId: string, path: string) =>
