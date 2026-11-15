@@ -15,6 +15,7 @@ import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/
 import { interfaceText } from "../language/interface-text.ts";
 import { resolveSessionHome } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { BotOwnerError } from "./bot-failure-words.ts";
 import type { BotHome } from "./bot-home.ts";
 
 /** The most a pointer file holds: a version, a session id and a file name, with room to spare. */
@@ -77,7 +78,7 @@ function deleted(agentDir: string, home: BotHome, sessionId: string): boolean {
  * link: the load stops with this, in the owner's words, until the link is replaced by the file. Nothing is set aside
  * and no session is started for it.
  */
-export class BotSessionLinkError extends Error {
+export class BotSessionLinkError extends BotOwnerError {
 	readonly path: string;
 	constructor(path: string, options?: ErrorOptions) {
 		super(interfaceText().botTeam.botSessionFileLinked(path), options);

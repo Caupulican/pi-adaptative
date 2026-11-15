@@ -33,6 +33,7 @@ import {
 	routineJournalHasRoom,
 } from "./routine-occurrence-journal.ts";
 import { cancelUndispatchedRoutineOccurrences, withResult } from "./routine-result-writes.ts";
+import { assertRoutineRevision } from "./routine-revision.ts";
 import { withRoutineRunState } from "./routine-run-state.ts";
 
 /**
@@ -216,8 +217,7 @@ export function claimManualRoutineOccurrence(
 		throw new Error("Routine manual claim requires a valid owner, clock and lease.");
 	const routine = state.routines.get(input.routineId);
 	if (!routine) throw new Error("Routine does not exist.");
-	if (input.expectedRevision !== undefined && input.expectedRevision !== routine.revision)
-		throw new Error("Routine revision changed; read current state before retrying.");
+	assertRoutineRevision(routine.revision, input.expectedRevision);
 	if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId)
 		throw new Error("Routine belongs to another parent session.");
 	if (input.nowMs < Date.parse(routine.updatedAt))

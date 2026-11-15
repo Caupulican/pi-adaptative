@@ -102,6 +102,23 @@ export const BOT_TEAM = {
 	/** The bot's session pointer, or the session file it loads, is a symbolic link: the load stops until it is replaced. */
 	botSessionFileLinked: (path: string) =>
 		`the bot session file ${path} is a symbolic link, which bot sessions do not follow (a write would replace the link with a copy); replace the link with the file itself`,
+	/** The bot's session state moved into its own home while it was opened, twice: it opens there at the next attempt. */
+	botSessionHomeChanged: (agentId: string) =>
+		`bot ${agentId}'s session moved into its own home while it was being opened; it opens there at its next message or change`,
+	/** The bot's session lease registry (`file`) does not read as one: the session does not open until it is inspected. */
+	botSessionLeasesUnreadable: (agentId: string, file: string) =>
+		`bot ${agentId}'s session lease registry ${file} does not read as one and needs inspection before the session opens`,
+	/** A move of the bot's session state stopped part way and could not be put back: the pieces stand in two homes. */
+	botSessionStateSplit: (agentId: string, inBot: string, inOwner: string) =>
+		`bot ${agentId}'s session state was moved only in part (in its home: ${inBot}; in the main session's home: ${inOwner || "nothing"}); put the pieces in one home before it opens again`,
+	/** Another process kept a file of the bot locked past the wait. */
+	botFilesLocked: (agentId: string) =>
+		`bot ${agentId}'s files were locked by another process for longer than the wait`,
+	/** A watch of the bot changed (another process wrote it) between its read and its change here. */
+	botWatchChangedMeanwhile: (agentId: string) => `a watch of bot ${agentId} was changed by another process meanwhile`,
+	/** A failure with no words for the owner: its own text goes to the harness log. */
+	botFailureUnworded: (agentId: string) =>
+		`bot ${agentId} met an unexpected failure; its details are in the harness log`,
 	/** A read of the bot's session files failed for a cause that passes on its own. */
 	botSessionStoreBusy: (agentId: string) =>
 		`bot ${agentId}'s session files were busy or changing while they were read; its host opens it again shortly`,
@@ -231,6 +248,9 @@ export const BOT_TEAM = {
 	/** A bot's release (it was retired or left the session path) failed; its host runs it again until it is done. */
 	botReleaseOwed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session's watches and waiting messages were not all dropped yet (${reason}); its host tries again until they are.`,
+	/** A change of the bot the host noticed itself (a refused run, an idle session) was not applied. */
+	botRecordChangeNotApplied: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a change of its definition was not applied to its session yet (${reason}); it applies at its next change or message.`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",

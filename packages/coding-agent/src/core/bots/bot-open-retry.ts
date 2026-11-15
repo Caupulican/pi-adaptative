@@ -10,10 +10,11 @@
  * row, then not again until something asks (an owner's send, which fails with the cause, or a change of the bot).
  */
 import { isAbsolute, relative } from "node:path";
-import { SessionHeldError, type SessionLeaseHolderRef } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { SessionHeldError } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { BotOwnerError } from "./bot-failure-words.ts";
 
 export const BOT_OPEN_RETRY_FIRST_MS = 2_000;
 export const BOT_OPEN_RETRY_MAX_MS = 5 * 60 * 1000;
@@ -28,13 +29,16 @@ const STORE_CODES: ReadonlyMap<string, Exclude<BotOpenFailure, "held">> = new Ma
 	["ENFILE", "busy"],
 	["EAGAIN", "busy"],
 	["EBUSY", "busy"],
+	// A lock another process kept past the wait (proper-lockfile's, or the kernel lock's deadline) passes on its own.
+	["ELOCKED", "busy"],
+	["ELOCKDEADLINE", "busy"],
 	["EIO", "failing"],
 	["EACCES", "permission"],
 	["EPERM", "permission"],
 ]);
 
 /** A read of the bot's session store failed for a cause that passes on its own; its message is the owner's words. */
-export class BotSessionStoreError extends Error {
+export class BotSessionStoreError extends BotOwnerError {
 	readonly failure: Exclude<BotOpenFailure, "held">;
 	constructor(agentId: string, failure: Exclude<BotOpenFailure, "held">, cause: unknown) {
 		const words = interfaceText().botTeam;
@@ -59,11 +63,16 @@ export class BotSessionStoreError extends Error {
 export function storeFailure(agentId: string, error: unknown, within: string | undefined): unknown {
 	if (error instanceof FileSnapshotChangedError)
 		return within === undefined ? new BotSessionStoreError(agentId, "busy", error) : error;
-	const { code, path } = (error ?? {}) as NodeJS.ErrnoException;
+	const { code, path, file, filePath } = (error ?? {}) as NodeJS.ErrnoException & {
+		file?: unknown;
+		filePath?: unknown;
+	};
 	const failure = typeof code === "string" ? STORE_CODES.get(code) : undefined;
 	if (failure === undefined) return error;
 	if (within !== undefined) {
-		const offset = typeof path === "string" ? relative(within, path) : "..";
+		// The file a failure names: an errno's `path`, a lock's `file` (proper-lockfile) or `filePath` (its deadline).
+		const named = [path, file, filePath].find((value): value is string => typeof value === "string");
+		const offset = named === undefined ? ".." : relative(within, named);
 		if (offset.startsWith("..") || isAbsolute(offset)) return error;
 	}
 	return new BotSessionStoreError(agentId, failure, error);
@@ -78,22 +87,6 @@ export function cappedFailure(failure: BotOpenFailure): boolean {
 export function botOpenFailure(error: unknown): BotOpenFailure | undefined {
 	if (error instanceof SessionHeldError) return "held";
 	return error instanceof BotSessionStoreError ? error.failure : undefined;
-}
-
-function holderWords(holder: SessionLeaseHolderRef): string {
-	const words = interfaceText().botTeam;
-	return holder.role === "channel-host"
-		? words.botSessionHolderPhone(holder.pid)
-		: holder.role === "bot-host"
-			? words.botSessionHolderBotHost(holder.pid)
-			: words.botSessionHolderSession(holder.pid);
-}
-
-/** Why the bot's session did not open, in the owner's words: the holders that keep it out by kind, a store failure's words, else the error's text. */
-export function botOpenFailureText(agentId: string, error: unknown): string {
-	if (error instanceof SessionHeldError)
-		return interfaceText().botTeam.botSessionOpenElsewhere(agentId, error.holders.map(holderWords).join(", "));
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** What the retries read from the host. */
@@ -135,7 +128,8 @@ export class BotOpenRetries {
 			return false;
 		}
 		const failures = (previous?.failures ?? 0) + 1;
-		const cappedInRow = (previous?.capped ?? 0) + (capped ? 1 : 0);
+		// Only failures for a capped cause in a row count to the cap: any other failure, like an open, starts it again.
+		const cappedInRow = capped ? (previous?.capped ?? 0) + 1 : 0;
 		const next: Attempts = { failures, capped: cappedInRow, alarm: undefined };
 		this.attempts.set(agentId, next);
 		if (cappedInRow > BOT_OPEN_RETRY_CAPPED) return false;

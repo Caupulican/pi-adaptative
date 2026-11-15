@@ -87,6 +87,16 @@ export interface SessionLeaseHolderRef {
 	readonly role: SessionLeaseRole;
 }
 
+/** A session's lease registry (`file`) that does not read as one: no lease is taken or released there until it is inspected. */
+export class SessionLeaseRegistryError extends Error {
+	readonly file: string;
+	constructor(file: string, message: string) {
+		super(message);
+		this.name = "SessionLeaseRegistryError";
+		this.file = file;
+	}
+}
+
 /** A channel or bot host (`refused`) was refused: the session is open (or held by a process that cannot be judged dead). */
 export class SessionHeldError extends Error {
 	readonly holders: readonly SessionLeaseHolderRef[];
@@ -215,7 +225,7 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 		!Array.isArray(value.holders) ||
 		value.holders.length > MAX_BUNDLE_HOLDERS
 	)
-		throw new Error("Session bundle lifetime leases require inspection.");
+		throw new SessionLeaseRegistryError(file, "Session bundle lifetime leases require inspection.");
 	const legacy = value.schemaVersion === 1;
 	const roles = value.schemaVersion === ROLE_HOLDERS_SCHEMA_VERSION;
 	const tokens = new Set<string>();
@@ -239,7 +249,7 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 			typeof holder.processInstanceId !== "string" ||
 			!UUID_PATTERN.test(holder.processInstanceId)
 		)
-			throw new Error("Session bundle lifetime lease identity is invalid.");
+			throw new SessionLeaseRegistryError(file, "Session bundle lifetime lease identity is invalid.");
 		tokens.add(holder.token);
 		holders.push({
 			token: holder.token,

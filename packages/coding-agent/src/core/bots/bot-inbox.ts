@@ -19,6 +19,7 @@ import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { BotOwnerError } from "./bot-failure-words.ts";
 import {
 	type BotHomeRecord,
 	homeRecordNames,
@@ -137,7 +138,7 @@ export function enqueueBotInbox(
 	const text = `${JSON.stringify(message)}\n`;
 	const bytes = waiting.reduce((sum, file) => sum + (statSync(file, { throwIfNoEntry: false })?.size ?? 0), 0);
 	if (waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
-		throw new Error(interfaceText().botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
+		throw new BotOwnerError(interfaceText().botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
 	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}.json`);
 	writeFileAtomicSync(file, text, { mode: 0o600 });
 	return { file, message };

@@ -5,6 +5,7 @@
  */
 import { interfaceText } from "../language/interface-text.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
+import { BotOwnerError } from "./bot-failure-words.ts";
 
 /**
  * Which rule refuses the bot's model: the host reports it unusable (its own cause), the subscription rule holds it to a
@@ -27,7 +28,7 @@ export interface BotModelRefusal {
 }
 
 /** A run or an open refused because the bot's model may not run now. */
-export class BotModelRefusedError extends Error {
+export class BotModelRefusedError extends BotOwnerError {
 	override readonly name = "BotModelRefusedError";
 	readonly refusal: BotModelRefusal;
 

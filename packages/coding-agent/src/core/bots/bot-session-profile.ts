@@ -41,6 +41,7 @@ import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { requiredEnvelopeCapabilities, toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { allToolNames } from "../tools/tool-definition-factory.ts";
+import { BotOwnerError } from "./bot-failure-words.ts";
 import { botProfileOf } from "./bot-home.ts";
 
 export interface BotSessionDefinition {
@@ -115,10 +116,10 @@ export function ownBotSession(record: PersistentBotRecord, cwd: string, registry
 	const profile = botProfileOf(record);
 	const model = registry.find(profile.provider, profile.modelId);
 	if (!model || !registry.hasConfiguredAuth(model))
-		throw new Error(words.botModelUnavailable(record.agentId, `${profile.provider}/${profile.modelId}`));
+		throw new BotOwnerError(words.botModelUnavailable(record.agentId, `${profile.provider}/${profile.modelId}`));
 	// The soul is judged again here: a stored record can have been edited by hand.
 	const soul = profile.soul === undefined ? { ok: true as const, soul: undefined } : checkSoulText(profile.soul);
-	if (!soul.ok) throw new Error(words.botSoulRefused(record.agentId, soul.reason));
+	if (!soul.ok) throw new BotOwnerError(words.botSoulRefused(record.agentId, soul.reason));
 	return {
 		key: ownBotSessionKey(record),
 		model,

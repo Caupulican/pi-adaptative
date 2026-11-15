@@ -15,9 +15,10 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { botFailureText } from "./bot-failure-words.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
-import { BotOpenRetries, botOpenFailure, botOpenFailureText, cappedFailure, storeFailure } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -337,10 +338,7 @@ export class BotOwedWork {
 		const notResumed = (error: unknown): boolean => {
 			const failure = botOpenFailure(error);
 			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, cappedFailure(failure));
-			this.tellWaits(
-				agentId,
-				interfaceText().botTeam.botWatchesNotResumed(agentId, botOpenFailureText(agentId, error)),
-			);
+			this.tellWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, botFailureText(agentId, error)));
 			return failure !== undefined && retrying;
 		};
 		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox. A

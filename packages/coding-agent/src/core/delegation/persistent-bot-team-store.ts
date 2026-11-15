@@ -123,6 +123,7 @@ import {
 	recordRoutineProgress,
 	withResult,
 } from "./routine-result-writes.ts";
+import { assertRoutineRevision } from "./routine-revision.ts";
 import { awaySettlement, resultSummaryText } from "./routine-run-state.ts";
 import { type RoutineSaveRevertInput, revertRoutineSave, routineViewAfterSave } from "./routine-save-writes.ts";
 import { claimManualRoutineOccurrence, observeWatch, retireEndedRoutines } from "./routine-trigger-writes.ts";
@@ -1214,8 +1215,7 @@ export class PersistentBotTeamStore {
 		return this.mutate(() => {
 			const normalizedId = normalizeBotOrTeamId(input.routineId, "routineId");
 			const existing = this.routines.get(normalizedId);
-			if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision)
-				throw new Error("Routine revision changed; read current state before retrying.");
+			assertRoutineRevision(existing?.revision, input.expectedRevision);
 			// Checked before `createOnly`: a replay of a consumed origin meets its own deterministic routine id.
 			const intake = input.intakeOrigin ? admitRoutineIntake(this.routineState, input) : undefined;
 			if (input.createOnly && existing) throw new Error("Routine already exists.");
@@ -1390,8 +1390,7 @@ export class PersistentBotTeamStore {
 			const normalizedId = normalizeBotOrTeamId(routineId, "routineId");
 			const existing = this.routines.get(normalizedId);
 			if (!existing) return false;
-			if (expectedRevision !== undefined && existing.revision !== expectedRevision)
-				throw new Error("Routine revision changed; read current state before retrying.");
+			assertRoutineRevision(existing.revision, expectedRevision);
 			cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, nowMs);
 			recordRetiredRoutine(this.routineState, existing, "deleted", nowMs);
 			this.routines.delete(normalizedId);

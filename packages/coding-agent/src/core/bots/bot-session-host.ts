@@ -58,6 +58,7 @@ import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
+import { BotOwnerError, botFailureText } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
@@ -209,6 +210,8 @@ export class BotSessionHost {
 	private readonly entries = new Map<string, BotSessionEntry>();
 	/** The bots whose session state was told as kept in the owner's home: told once per process. */
 	private readonly toldNotMoved = new Set<string>();
+	/** Bots whose change the host noticed itself was not applied (`applyRecordChange`): told once until one applies. */
+	private readonly toldChangeNotApplied = new Set<string>();
 	/** Bots whose home's session did not read at the last roster count: told once until it reads again. */
 	private readonly toldWatchesNotCounted = new Set<string>();
 	/** Sessions being built, so two messages in a row build one. */
@@ -505,7 +508,7 @@ export class BotSessionHost {
 		const outcome = await accepted;
 		if (!outcome.accepted) {
 			const words = interfaceText().botTeam;
-			throw new Error(
+			throw new BotOwnerError(
 				outcome.reason === undefined
 					? words.botMessageNotTaken(agentId)
 					: words.botMessageRefused(agentId, outcome.reason),
@@ -535,21 +538,21 @@ export class BotSessionHost {
 	): void {
 		const record = this.ports.store().getBot(agentId);
 		const words = interfaceText().botTeam;
-		if (!record || !model) throw new Error(words.botMissing(agentId));
+		if (!record || !model) throw new BotOwnerError(words.botMissing(agentId));
 		const defined = this.route(record, builtFor);
 		// A record that left the session path (a leader's, a leader, a profile only a worker's run holds) runs here no more:
 		// the session is released once its work settles, and its messages go to a worker.
 		if (defined === "worker") {
-			queueMicrotask(() => this.recordChanged(record));
-			throw new Error(words.botRunsAsWorker(agentId));
+			queueMicrotask(() => this.applyRecordChange(agentId, true));
+			throw new BotOwnerError(words.botRunsAsWorker(agentId));
 		}
 		if (defined.key !== built.key) {
-			queueMicrotask(() => this.recordChanged(record));
-			throw new Error(words.botSessionOutdated(agentId));
+			queueMicrotask(() => this.applyRecordChange(agentId, false));
+			throw new BotOwnerError(words.botSessionOutdated(agentId));
 		}
 		// The session never leaves its model (`pinnedModel`); a run on any other is refused, never moved.
 		if (!modelsAreEqual(model, defined.model))
-			throw new Error(
+			throw new BotOwnerError(
 				words.botModelMoved(
 					agentId,
 					`${model.provider}/${model.id}`,
@@ -589,7 +592,9 @@ export class BotSessionHost {
 		if (profileId === undefined) return ownBotSession(record, sender.cwd(), this.ports.modelRegistry());
 		const compiled = sender.compileProfile({ ...record, profileId });
 		if (!compiled.ok)
-			throw new Error(interfaceText().botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason));
+			throw new BotOwnerError(
+				interfaceText().botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason),
+			);
 		const session = profileBotSession(compiled);
 		return session.route === "worker" ? "worker" : session.definition;
 	}
@@ -597,7 +602,7 @@ export class BotSessionHost {
 	/** The session the record defines now; throws the owner's words when it cannot run as one. */
 	private define(record: PersistentBotRecord, sender: BotSender): BotSessionDefinition {
 		const defined = this.route(record, sender);
-		if (defined === "worker") throw new Error(interfaceText().botTeam.botRunsAsWorker(record.agentId));
+		if (defined === "worker") throw new BotOwnerError(interfaceText().botTeam.botRunsAsWorker(record.agentId));
 		return defined;
 	}
 
@@ -634,14 +639,15 @@ export class BotSessionHost {
 		if (this.stopped) throw stopped();
 		// A close that never ends (a disposal that hangs) refuses the message instead of holding it, and every later one, forever.
 		if (!(await this.endedWithinCloseWait([this.previousStop, this.closing.get(agentId)])))
-			throw new Error(interfaceText().botTeam.botSessionStillClosing(agentId));
+			throw new BotOwnerError(interfaceText().botTeam.botSessionStillClosing(agentId));
 		// A stop that came while the previous session closed has already counted the sessions it must close: none is built now.
 		if (this.stopped) throw stopped();
 		const record = this.ports.store().getBot(agentId);
-		if (!record || record.retired) throw new Error(interfaceText().botTeam.botMissing(agentId));
+		if (!record || record.retired) throw new BotOwnerError(interfaceText().botTeam.botMissing(agentId));
 		// The one predicate the dispatch routes by: a bot it sends to a worker has no session here to diverge from it.
 		const existing = this.entries.get(agentId);
-		if (!this.runsAsSession(record, sender)) throw new Error(interfaceText().botTeam.botRunsAsWorker(agentId));
+		if (!this.runsAsSession(record, sender))
+			throw new BotOwnerError(interfaceText().botTeam.botRunsAsWorker(agentId));
 		if (existing) {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
 			if (this.isBusy(existing) || existing.profileKey === this.keyOf(record, existing.builtFor)) return existing;
@@ -860,8 +866,7 @@ export class BotSessionHost {
 	private recheckIfIdle(entry: BotSessionEntry): boolean {
 		if (!entry.recheckWhenIdle || this.isBusy(entry) || this.entries.get(entry.agentId) !== entry) return false;
 		entry.recheckWhenIdle = false;
-		const record = this.ports.store().getBot(entry.agentId);
-		if (record) this.recordChanged(record);
+		this.applyRecordChange(entry.agentId, false);
 		return true;
 	}
 
@@ -1023,6 +1028,28 @@ export class BotSessionHost {
 		else if (!entry) this.owed.openIfOwed(record.agentId);
 	}
 
+	/**
+	 * {@link recordChanged} for a change the host noticed itself (a run refused on an outdated or off-path definition, a
+	 * change that came while the session worked), from a microtask or a settle with no caller to throw to: a failure of a
+	 * bot that left the session path (`leftPath`) leaves its release owed, run again after a backoff; any other is told
+	 * once until a change applies, and applies at the bot's next change or message.
+	 */
+	private applyRecordChange(agentId: string, leftPath: boolean): void {
+		try {
+			const record = this.ports.store().getBot(agentId);
+			if (record) this.recordChanged(record);
+			this.toldChangeNotApplied.delete(agentId);
+		} catch (error) {
+			if (leftPath) {
+				this.oweRelease(agentId, error);
+				return;
+			}
+			if (this.toldChangeNotApplied.has(agentId)) return;
+			this.toldChangeNotApplied.add(agentId);
+			this.ports.warn(interfaceText().botTeam.botRecordChangeNotApplied(agentId, botFailureText(agentId, error)));
+		}
+	}
+
 	/** What defines the bot's session now; undefined when its profile no longer admits it as one (it is refused when opened). */
 	private currentKey(record: PersistentBotRecord, sender: BotSender): string | undefined {
 		try {
@@ -1068,7 +1095,7 @@ export class BotSessionHost {
 	 */
 	prepareRelease(agentId: string): () => void {
 		const entry = this.entries.get(agentId);
-		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
+		if (entry && this.isBusy(entry)) throw new BotOwnerError(interfaceText().botTeam.botHasActiveWork(agentId));
 		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) this.ports.store().listRoutines({ sessionId, scope: "own-watches" });
 		this.readInbox(agentId);
@@ -1108,13 +1135,13 @@ export class BotSessionHost {
 	 * after a backoff until it is done. A bot back on the session path owes none.
 	 */
 	private releaseOwed(agentId: string): void {
-		const record = this.ports.store().getBot(agentId);
-		if (record && !record.retired && this.runsAsSession(record)) {
-			this.owedReleases.delete(agentId);
-			this.releaseRetries.forget(agentId);
-			return;
-		}
 		try {
+			const record = this.ports.store().getBot(agentId);
+			if (record && !record.retired && this.runsAsSession(record)) {
+				this.owedReleases.delete(agentId);
+				this.releaseRetries.forget(agentId);
+				return;
+			}
 			this.release(agentId);
 		} catch (error) {
 			this.oweRelease(agentId, error);
@@ -1124,7 +1151,7 @@ export class BotSessionHost {
 	/** The bot's release failed with `error`: it is run again after a backoff, and the owner is told once. */
 	private oweRelease(agentId: string, error: unknown): void {
 		if (!this.owedReleases.has(agentId))
-			this.ports.warn(interfaceText().botTeam.botReleaseOwed(agentId, errorText(error)));
+			this.ports.warn(interfaceText().botTeam.botReleaseOwed(agentId, botFailureText(agentId, error)));
 		this.owedReleases.add(agentId);
 		this.releaseRetries.arm(agentId, false);
 	}

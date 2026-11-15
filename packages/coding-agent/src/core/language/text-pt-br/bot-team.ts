@@ -102,6 +102,18 @@ export const BOT_TEAM = {
 	botSessionHolderBotHost: (pid: number) => `outro hospedeiro de bot (processo ${pid})`,
 	botSessionFileLinked: (path: string) =>
 		`o arquivo de sessão de bot ${path} é um link simbólico, que as sessões de bot não seguem (uma escrita trocaria o link por uma cópia); troque o link pelo próprio arquivo`,
+	botSessionHomeChanged: (agentId: string) =>
+		`a sessão do bot ${agentId} foi movida para a casa dele enquanto era aberta; ela abre lá na próxima mensagem ou mudança`,
+	botSessionLeasesUnreadable: (agentId: string, file: string) =>
+		`o registro de leases da sessão do bot ${agentId} (${file}) não pôde ser lido como tal e precisa de inspeção antes de a sessão abrir`,
+	botSessionStateSplit: (agentId: string, inBot: string, inOwner: string) =>
+		`o estado da sessão do bot ${agentId} foi movido só em parte (na casa dele: ${inBot}; na casa da sessão principal: ${inOwner || "nada"}); reúna as partes em uma casa antes de ela abrir de novo`,
+	botFilesLocked: (agentId: string) =>
+		`os arquivos do bot ${agentId} ficaram travados por outro processo por mais tempo que a espera`,
+	botWatchChangedMeanwhile: (agentId: string) =>
+		`uma espera do bot ${agentId} foi mudada por outro processo nesse meio-tempo`,
+	botFailureUnworded: (agentId: string) =>
+		`o bot ${agentId} encontrou uma falha inesperada; os detalhes estão no log do harness`,
 	botSessionStoreBusy: (agentId: string) =>
 		`os arquivos da sessão do bot ${agentId} estavam ocupados ou mudando durante a leitura; o hospedeiro dele a abre de novo em instantes`,
 	botSessionStoreFailing: (agentId: string) =>
@@ -197,6 +209,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos${metered ? " com cobrança por uso" : ""} neste pedido, com os workers dele; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : "o limite de gasto da autonomia desta sessão"}${metered ? " sobre o gasto cobrado por uso" : ""} é $${limitUsd}).`,
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: o turno foi interrompido no limite de tempo (workerDelegation.maxWallClockMs é ${limitSeconds} s).`,
+	botRecordChangeNotApplied: (agentId: string, reason: string) =>
+		`Bot ${agentId}: uma mudança da definição dele ainda não foi aplicada à sessão (${reason}); ela se aplica na próxima mudança ou mensagem.`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
 	botSessionNotClosed: "A sessão do bot não fechou corretamente.",
