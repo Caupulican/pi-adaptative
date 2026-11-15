@@ -292,7 +292,7 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: the record of the notices its session already told could not be read or written (${reason}); one may be told again.`,
 	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>
-		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,
+		`Bot ${agentId}: its history index cannot be read, so the old session bundles of your sessions are not cleaned up until it is written again.`,
 	botHistoryNotIndexed: (reason: string) => `Bot history could not be indexed (${reason}).`,
 	/** The startup sweep cannot tell which session a bot home keeps or its live host holds: it only resumes what it already reserved there. */
 	botHomeHostStateUnreadable: (botName: string) =>
@@ -305,7 +305,7 @@ export const BOT_TEAM = {
 	/** The startup sweep could not list a bot home's session files or session bundles. */
 	/** A bot's directory under `bots/` is a symbolic link that does not resolve: what it holds is unknown, so the whole cleanup waits. */
 	botHomeLinkUnresolved: (botName: string) =>
-		`Bot ${botName}: its directory is a symbolic link that does not resolve, so no old session bundles are cleaned up until it does.`,
+		`Bot ${botName}: its directory is a symbolic link that does not resolve, so no old session bundle of your sessions is cleaned up until it does.`,
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: its session files or old session bundles could not be read, so its old session bundles are not cleaned up until they can.`,
 	/** Deletion records of a bot home's old session bundles that do not read; their bundles stay. */

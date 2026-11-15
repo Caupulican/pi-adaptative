@@ -40,9 +40,8 @@ export function tellReleasedInterruptedRetention(
 	warn: (message: string) => void,
 ): void {
 	const sessionId = sessionManager.getSessionId();
-	if (
-		sessionManager.isPersisted() &&
-		takeReleasedInterruptedRetention(sessionManager.getStorageRoots().orchestrationHome, sessionId)
-	)
-		warn(interfaceText().sessions.retention.interruptedRetentionReleased(sessionId));
+	if (!sessionManager.isPersisted()) return;
+	if (!takeReleasedInterruptedRetention(sessionManager.getStorageRoots().orchestrationHome, sessionId)) return;
+	const words = interfaceText().sessions.retention;
+	warn(words.interruptedRetentionReleased(sessionId, words.releasedByOpen));
 }

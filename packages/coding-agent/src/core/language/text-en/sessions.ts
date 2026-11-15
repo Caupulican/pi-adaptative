@@ -46,9 +46,17 @@ export const SESSIONS = {
 			count === 1
 				? "1 deletion record of your old session bundles could not be read; its bundle stays until it can."
 				: `${count} deletion records of your old session bundles could not be read; their bundles stay until they can.`,
-		/** An open of the session released a cleanup of its stored state that an earlier version began and did not finish. */
-		interruptedRetentionReleased: (session: string) =>
-			`Session ${session}: an earlier version of pi began cleaning up this session's stored state and was interrupted. Opening the session cancelled that cleanup, but it may already have removed some or all of its worker and plan state.`,
+		/**
+		 * A cleanup of the session's stored state that did not record how far it went was cancelled over what is left of it,
+		 * `by` its open (`releasedByOpen`) or by the startup cleanup (`releasedByStartup`).
+		 */
+		interruptedRetentionReleased: (session: string, by: string) =>
+			`Session ${session}: ${by} cancelled an unfinished cleanup of its stored state, which may already have removed some or all of its worker and plan state.`,
+		releasedByOpen: "opening it",
+		releasedByStartup: "the startup cleanup",
+		/** A cleanup of one of the owner's sessions cannot finish while a bot's history does not read. */
+		removalAwaitsBotHistory: (session: string) =>
+			`Session ${session}: its unfinished cleanup waits until every bot's history can be read; opening the session cancels it.`,
 		/** Warnings about single homes past the ones shown; each is in the harness log. */
 		homeWarningsOmitted: (count: number) =>
 			count === 1

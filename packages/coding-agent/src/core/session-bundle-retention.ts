@@ -78,8 +78,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * - no durable usage or accepted-worker receipt is waiting for parent delivery;
  * - no bot's history references a run of its session (`historyReferencedSessionIds`, over every home the run's one
  *   listing of `bots/` found, a symlinked one included): a bot's chat reads its earlier worker conversations from the
- *   bundle. A bot index that exists but does not read, or a home whose link does not resolve, skips the whole run
- *   (reported), since the sessions it holds are unknown.
+ *   bundle. While a bot index that exists does not read, or a home's link does not resolve (each reported), which of
+ *   the owner's sessions it holds is unknown: no bundle of the owner's home is newly reserved, and a retention there
+ *   resumed before its removal began takes only the exits that release it (below) or waits, named; the bot homes,
+ *   whose sessions no history names, are swept as usual.
  *
  * An obligation older than {@link SESSION_BUNDLE_MAX_AGE_MS} can never be answered, because the session that
  * owed it is long gone. Before a bundle is refused for one, it is settled as failed with
@@ -104,8 +106,9 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * gates its bundle already passed and finishes, also when the bundle itself is already gone. A tombstone an earlier
  * build wrote, or one whose remover settled what the bundle owed, does not record how far its removal went
  * (`unrecorded`): it is resumed through the gates; refused by one only the open session settles (receipts awaiting
- * delivery, a younger or project-bound obligation), or held by a process or a bot's history, it is released, and it
- * stays only while its bundle does not read.
+ * delivery, a younger or project-bound obligation), or held by a process or a bot's history, it is released, told
+ * naming the session, and it stays only while its bundle does not read. Opening its session releases it as well
+ * (`session-bundle-lifecycle.ts`, admission mode `open`).
  *
 * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
  * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
@@ -615,6 +618,11 @@ interface SweepRun {
 	 */
 	readonly protectedIds: ReadonlySet<string>;
 	readonly historyHeld: ReadonlySet<string>;
+	/**
+	 * Some bot's history does not read, or some bot home's link does not resolve: which of the owner's sessions a bot's
+	 * history holds is not known (`HomeSweep.rootSessions`).
+	 */
+	readonly historyUnknown: boolean;
 	readonly transcripts: ReadonlyMap<string, readonly string[]>;
 	readonly result: SessionBundleRetentionResult;
 	/** The obligation ledgers this sweep recorded expiries in, one per home that settled any. */
@@ -625,6 +633,12 @@ interface SweepRun {
 /** One home's part of a run. */
 interface HomeSweep {
 	readonly home: OrchestrationHome;
+	/**
+	 * The owner's home: its sessions are the root sessions a bot's history references (`historyReferencedSessionIds`), so
+	 * while those references are unknown (`SweepRun.historyUnknown`) no bundle of it is newly reserved, and a retention of
+	 * it resumed before its removal began takes only the exits that release it, which read no history.
+	 */
+	readonly rootSessions: boolean;
 	/** The bundle directory names under its `sessions/`. */
 	readonly names: readonly string[];
 	/** The sessions whose retention its in-flight index names (`sessionBundleRetentionsInFlight`). */
@@ -713,7 +727,8 @@ async function sweepBundle(
 		// never removed. An `unrecorded` tombstone of such a session is still taken below, to be released.
 		const held = processHeld.has(parentSessionId) || (pending !== "removing" && historyHeld.has(parentSessionId));
 		if (held && pending !== "unrecorded") return;
-		if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) return;
+		const historyUnknown = run.historyUnknown && sweep.rootSessions;
+		if (!resumingDeletion && (resumeOnly || historyUnknown || protectedIds.has(parentSessionId))) return;
 		// Its session's files may be in a home whose files were not listed, which would hold it.
 		if (!resumingDeletion && unfiledHeld && !transcripts.has(parentSessionId)) return;
 		const sessionMtimeMs = latestMtimeMs(transcripts.get(parentSessionId) ?? []);
@@ -738,6 +753,14 @@ async function sweepBundle(
 		// A deferral before anything of the bundle is touched releases a `reserved` tombstone (the bundle is whole) and
 		// keeps an `unrecorded` one: how far an earlier removal went is not known.
 		let outcome: "removed" | "deferred" | "retained" | "released" = "deferred";
+		// A release of a retention that did not record how far it went, over what is left of its bundle, is told.
+		let overRemains = false;
+		// Without the bot histories, a removal that has not begun waits, named, before anything of the bundle is written.
+		const awaitsHistory = (): boolean => {
+			if (!historyUnknown || reservation.phase === "removing") return false;
+			report(interfaceText().sessions.retention.removalAwaitsBotHistory(label));
+			return true;
+		};
 		try {
 			if (!existsSync(bundleDir)) {
 				// Gone before this reservation: a removal that may have begun finishes with the side files; a bundle gone
@@ -750,6 +773,7 @@ async function sweepBundle(
 				}
 				return;
 			}
+			overRemains = reservation.phase === "unrecorded";
 			if (held) {
 				// The session is the open one's: its tombstone goes, unless its removal began meanwhile or its bundle does
 				// not read (evidence that does not read throws: a deferral, which keeps an `unrecorded` tombstone).
@@ -783,6 +807,7 @@ async function sweepBundle(
 						if (verdict !== "unreadable") outcome = "released";
 						return;
 					}
+					if (awaitsHistory()) return;
 					// Settling writes the mailboxes: from here a refusal keeps the tombstone, so the next run resumes
 					// the expiry past the age those writes refreshed.
 					outcome = "retained";
@@ -801,6 +826,7 @@ async function sweepBundle(
 					if (settled === 0 || bundleOwesMailboxWork(home, parentSessionId, bundleDir)) return;
 				}
 			}
+			if (awaitsHistory()) return;
 			outcome = "retained";
 			// Decided before the removal is marked begun, removed after it.
 			const sideFiles = sessionSideFiles(home, parentSessionId);
@@ -815,6 +841,10 @@ async function sweepBundle(
 			outcome = "removed";
 		} finally {
 			settleSessionBundleDeletion(home, reservation, outcome);
+			if (outcome === "released" && overRemains) {
+				const words = interfaceText().sessions.retention;
+				report(words.interruptedRetentionReleased(label, words.releasedByStartup));
+			}
 		}
 		result.removed++;
 		result.removedBytes += walk.bytes;
@@ -987,6 +1017,7 @@ export async function sweepSessionBundles(
 		const ownerSweep = await homeSweep(
 			{
 				home: owner,
+				rootSessions: true,
 				labelOf: (name) => name,
 				resumeOnly: !index.ownerListed,
 				unfiledHeld: index.someBotUnlisted,
@@ -1002,6 +1033,7 @@ export async function sweepSessionBundles(
 			const sweep = await homeSweep(
 				{
 					home: hold.home.orchestrationHome,
+					rootSessions: false,
 					labelOf: (name) => `${BOTS_DIR_NAME}/${hold.name}/${name}`,
 					resumeOnly: hold.kind === "undetermined" || index.unlistedBots.has(hold),
 					unfiledHeld: false,
@@ -1022,22 +1054,21 @@ export async function sweepSessionBundles(
 			processHeld: matrix.processHeld,
 			protectedIds: matrix.ids,
 			historyHeld: history.sessionIds,
+			historyUnknown: history.unreadable.length > 0 || history.unresolvedHomes,
 			transcripts,
 			result,
 			obligationLedgers,
 			report,
 		};
-		// First the retentions earlier runs left in flight, ahead of the rest: until each settles, its session cannot open.
-		// Releases and removals that began need no bot history; the others wait for it below.
+		// First the retentions earlier runs left in flight, ahead of the rest: until a removal that began settles, its
+		// session cannot open. Releases and removals that began need no bot history; the others go through the gates below,
+		// where a removal in the owner's home waits for the histories (`HomeSweep.rootSessions`).
 		const seen = new Set<string>();
 		const gated = await resumeRetentionsInFlight(run, homes, seen);
 		for (const sweep of homes) if (sweep.unreadable > 0) reportHome(sweep.unreadableText(sweep.unreadable));
 		// A home whose link does not resolve was told when the session files were listed (`botHomeLinkUnresolved`).
-		if (history.unreadable.length > 0 || history.unresolvedHomes) {
-			for (const agentId of history.unreadable)
-				reportHome(text.botTeam.botHistoryIndexUnreadable(boundedName(agentId)));
-			return result;
-		}
+		for (const agentId of history.unreadable)
+			reportHome(text.botTeam.botHistoryIndexUnreadable(boundedName(agentId)));
 		for (const { sweep, name } of gated) {
 			if (result.inspected >= MAX_BUNDLES_INSPECTED || budgetSpent(result)) break;
 			await sweepBundle(run, sweep, name, "unrecorded");

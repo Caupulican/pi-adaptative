@@ -59,8 +59,12 @@ export const SESSIONS = {
 			count === 1
 				? "1 registro de exclusão dos seus pacotes de sessão antigos não pôde ser lido; o pacote dele fica até poder ser lido."
 				: `${count} registros de exclusão dos seus pacotes de sessão antigos não puderam ser lidos; os pacotes deles ficam até poderem ser lidos.`,
-		interruptedRetentionReleased: (session: string) =>
-			`Sessão ${session}: uma versão anterior do pi começou a limpar o estado guardado desta sessão e foi interrompida. Abrir a sessão cancelou essa limpeza, mas ela pode já ter removido parte ou todo o estado dos workers e do plano.`,
+		interruptedRetentionReleased: (session: string, by: string) =>
+			`Sessão ${session}: ${by} cancelou uma limpeza inacabada do estado guardado dela, que pode já ter removido parte ou todo o estado dos workers e do plano.`,
+		releasedByOpen: "abri-la",
+		releasedByStartup: "a limpeza de inicialização",
+		removalAwaitsBotHistory: (session: string) =>
+			`Sessão ${session}: a limpeza inacabada dela espera até o histórico de todos os bots poder ser lido; abrir a sessão a cancela.`,
 		homeWarningsOmitted: (count: number) =>
 			count === 1
 				? "Mais 1 aviso sobre a limpeza de pacotes de sessão antigos está no log do harness."

@@ -243,7 +243,7 @@ export const BOT_TEAM = {
 	botHistoryFileUnreadable: (reason: string) =>
 		`Histórico dos bots: um arquivo de sessão não pôde ser lido (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>
-		`Bot ${agentId}: o índice do histórico não pode ser lido, então os pacotes de sessão antigos não são limpos até ele ser gravado de novo.`,
+		`Bot ${agentId}: o índice do histórico não pode ser lido, então os pacotes de sessão antigos das suas sessões não são limpos até ele ser gravado de novo.`,
 	botHistoryNotIndexed: (reason: string) => `O histórico dos bots não pôde ser indexado (${reason}).`,
 	botHomeHostStateUnreadable: (botName: string) =>
 		`Bot ${botName}: o estado do processo que o hospeda não pode ser lido, então os pacotes de sessão antigos dele não são limpos até poder.`,
@@ -252,7 +252,7 @@ export const BOT_TEAM = {
 	botHomeHostSessionUnnamed: (botName: string) =>
 		`Bot ${botName}: o processo que o hospeda ainda não informou a sessão que mantém, então os pacotes de sessão antigos dele não são limpos até informar.`,
 	botHomeLinkUnresolved: (botName: string) =>
-		`Bot ${botName}: o diretório dele é um link simbólico que não resolve, então nenhum pacote de sessão antigo é limpo até que resolva.`,
+		`Bot ${botName}: o diretório dele é um link simbólico que não resolve, então nenhum pacote de sessão antigo das suas sessões é limpo até que resolva.`,
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: os arquivos de sessão ou os pacotes de sessão antigos dele não puderam ser lidos, então os pacotes de sessão antigos dele não são limpos até poderem.`,
 	botDeletionRecordsUnreadable: (botName: string, count: number) =>
