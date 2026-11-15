@@ -616,7 +616,7 @@ export class BotOwedWork {
 	 */
 	private owedBeyondInbox(agentId: string): boolean {
 		if (this.usageDue.has(agentId)) return true;
-		const sessionId = this.ports.savedSessionOf(agentId)?.id;
+		const sessionId = this.savedRead(agentId)?.id;
 		if (sessionId === undefined) return false;
 		const owed = this.workerOwed(agentId, sessionId, this.ports.timers().now());
 		return "unreadable" in owed ? owed.fresh : owed.owed;
