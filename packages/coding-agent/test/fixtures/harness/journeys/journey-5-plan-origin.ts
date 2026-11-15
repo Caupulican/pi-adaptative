@@ -19,7 +19,7 @@ import {
 	reportStep,
 	stepReached,
 } from "./journey-5-shared.ts";
-import { latestBatchResults, REFLECTION_CHECKPOINT_MARKER, requestCarriesMarker } from "./shared.ts";
+import { LIMITS_PATH, latestBatchResults, REFLECTION_CHECKPOINT_MARKER, requestCarriesMarker } from "./shared.ts";
 
 const TITLE = "Read the retry limit, then state it in one line";
 /** Why a third party's run may not change a plan: the gate's own words, as the refused call's result carries them. */
@@ -237,4 +237,137 @@ export async function runJourney5PlanOriginPhase(world: HarnessWorld, session: A
 		"the owner's turn was answered once, and one reflection followed it",
 	).toEqual([`${ROOT_TRACK}:j5-origin-owner-close`, `${ROOT_TRACK}:j5-origin-reflection`]);
 	trace.mark("root", "j5.plan-origin");
+}
+
+const TAINT_TITLE = "Read the retry limit for a teammate, then state it";
+
+/**
+ * A third party's words reach a plan step's worker, and the step that reads its report carries them. The owner starts a plan
+ * of two steps in sequence. While the first step's worker holds its first request, a teammate's turn, under the owner's
+ * standing delegation grant, sends that worker a follow-up: the worker admits it, so its attempt carries the teammate's
+ * origin. The second step reads the first step's report, so it starts with that origin and without the capabilities a third
+ * party's worker loses.
+ */
+export async function runJourney5PlanTaintPhase(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const trace = world.trace;
+	const started = createBarrier();
+	const done = createBarrier();
+	const firstHeld = createBarrier();
+	const releaseFirst = createBarrier();
+	const readTask = () => planTitled(session, TAINT_TITLE).nodes["taint-read"]?.release?.taskId;
+	enqueueStepWorker(
+		world,
+		"taint-read",
+		{
+			name: "j5-taint-read-held",
+			check: () => firstHeld.release(),
+			gate: releaseFirst.promise,
+			reply: {
+				content: [{ type: "toolCall", id: "j5-taint-read-held-1", name: "read", arguments: { path: LIMITS_PATH } }],
+				stopReason: "toolUse",
+			},
+		},
+		reportStep("j5-taint-read-report", { status: "completed", summary: "MAX_RETRIES is 3, set in src/limits.ts." }),
+	);
+	enqueueStepWorker(
+		world,
+		"taint-answer",
+		reportStep("j5-taint-answer-report", { status: "completed", summary: "The retry limit is 3." }),
+	);
+	enqueueRoot(
+		world,
+		...planCallSteps(
+			"j5-taint",
+			{
+				action: "start",
+				title: TAINT_TITLE,
+				steps: [
+					{
+						id: "taint-read",
+						do: "Read src/limits.ts and report the value MAX_RETRIES is set to. Change no file.",
+					},
+					{
+						id: "taint-answer",
+						do: "State the retry limit in one line from the value the earlier step found. Change no file.",
+						uses: ["taint-read"],
+					},
+				],
+			},
+			"PLAN_STARTED",
+			() => started.release(),
+		),
+		// The teammate's turn: the root passes the teammate's request on to the first step's worker.
+		{
+			name: "j5-taint-teammate-call",
+			reply: () => ({
+				content: [
+					{
+						type: "toolCall",
+						id: "j5-taint-teammate-call-1",
+						name: "delegate",
+						arguments: {
+							action: "follow_up",
+							agentId: latestAttemptOf(session, readTask())?.agentId,
+							message: "A teammate asks: also say which file sets the limit.",
+						},
+					},
+				],
+				stopReason: "toolUse",
+			}),
+		},
+		{
+			name: "j5-taint-teammate-sent",
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+				if (result?.isError !== false) throw new Error(`the teammate's follow-up was not sent: ${result?.text}`);
+			},
+			reply: { content: [{ type: "text", text: "The reader has the teammate's request." }] },
+		},
+		planUpdateStep("j5-taint-wake", "PLAN_DONE", () => done.release()),
+	);
+	world.systemOne.enterPhase("j5-taint", PLAN_CALL_JUDGMENTS);
+	await withDeadline(
+		trace,
+		"J5 taint: the owner's turn",
+		session.prompt("Read the retry limit for a teammate, then state it in one line."),
+	);
+	await withDeadline(trace, "J5 taint: the plan started", started.promise);
+	await withDeadline(trace, "J5 taint: the first step holds its first request", firstHeld.promise);
+	// A third party's run may message a worker only under the owner's standing delegation grant.
+	session.grantEdge("agent.delegate", "operator", { note: "the owner's edge command" });
+	await withDeadline(
+		trace,
+		"J5 taint: the teammate's turn",
+		session.sendUserMessage("A teammate on the team chat asks the reader to say which file sets the limit.", {
+			origin: {
+				channel: "team-chat",
+				sender: "a teammate",
+				verified: false,
+				text: "say which file sets the limit",
+				ref: "j5-taint-1",
+			},
+		}),
+	);
+	releaseFirst.release();
+	await withDeadline(trace, "J5 taint: the plan's result woke the root", done.promise, 60_000);
+	await withDeadline(trace, "J5 taint: root idle", session.waitForForegroundIdle());
+	session.revokeEdge("agent.delegate");
+	const plan = planTitled(session, TAINT_TITLE);
+	const read = latestAttemptOf(session, plan.nodes["taint-read"]?.release?.taskId);
+	const answer = latestAttemptOf(session, plan.nodes["taint-answer"]?.release?.taskId);
+	expect(
+		{
+			admitted: read?.admittedTurnOrigin,
+			carried: answer?.dispatch.turnOrigin,
+			messagesBots: answer?.dispatch.executionContract?.worker.authority.capabilities.includes("workflow.message"),
+			closed: plan.closed?.status,
+		},
+		"the first step's worker admitted the teammate's words, and the step that read its report started with their origin",
+	).toEqual({
+		admitted: expect.objectContaining({ thirdParty: true, channel: "team-chat" }),
+		carried: read?.admittedTurnOrigin,
+		messagesBots: false,
+		closed: "settled",
+	});
+	trace.mark("root", "j5.plan-taint");
 }

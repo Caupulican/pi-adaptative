@@ -11,9 +11,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
 import { ManagedLaneRuntimeAdmissionError, NO_MANAGED_LANE_HOST_FACTS } from "../extensions/managed-lane-records.ts";
-import { dispatchReceiptOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
+import { dispatchReceiptOrigin, dispatchTurnOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
 import type { RemoteRefusalCode } from "../fleet/remote-admit.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -104,6 +105,8 @@ export type PreparedOffer =
 			readonly placement: PlacementKey;
 			/** The input the job's work serves, when its dispatch names one (`dispatchReceiptOrigin`). */
 			readonly receiptOrigin?: WorkerReceiptOrigin;
+			/** The third party's origin the job's dispatch carries (`dispatchTurnOrigin`). */
+			readonly turnOrigin?: TurnOriginRecord;
 	  };
 
 /** A committed offer: the job's record, the attempt and task its managed lane runs under, or why it is not placed here. */
@@ -126,6 +129,8 @@ interface OfferWrite {
 	readonly placement?: PlacementKey;
 	/** The input the job's work serves: its lane's attempt serves it, so a bot's spend window holds the job's cost. */
 	readonly receiptOrigin?: WorkerReceiptOrigin;
+	/** The third party's origin the job's dispatch carries: its lane's attempt carries it, so the plan's later steps do. */
+	readonly turnOrigin?: TurnOriginRecord;
 }
 
 /** What writing a job's lane and record came to: the record with its attempt, or the refusal that wrote no record and sent nothing. */
@@ -245,6 +250,7 @@ function offerWrite(prepared: Extract<PreparedOffer, { readonly kind: "offer" }>
 		placement: prepared.placement,
 		...(prepared.goalId ? { goalId: prepared.goalId } : {}),
 		...(prepared.receiptOrigin ? { receiptOrigin: prepared.receiptOrigin } : {}),
+		...(prepared.turnOrigin ? { turnOrigin: prepared.turnOrigin } : {}),
 	};
 }
 
@@ -422,7 +428,7 @@ export class RemoteJobClient {
 	async prepareOffer(
 		dispatch: Pick<
 			FleetDispatch,
-			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "escalation"
+			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "turnOrigin" | "escalation"
 		>,
 		placement: Extract<Placement, { kind: "remote_machine" }>,
 		options: PlaceOptions = {},
@@ -480,6 +486,7 @@ export class RemoteJobClient {
 			hops: [selfId],
 		};
 		const receiptOrigin = dispatchReceiptOrigin(dispatch);
+		const turnOrigin = dispatchTurnOrigin(dispatch);
 		return {
 			kind: "offer",
 			machine,
@@ -490,6 +497,7 @@ export class RemoteJobClient {
 			placement: placementKeyOf(dispatch),
 			...(options.goalId ? { goalId: options.goalId } : {}),
 			...(receiptOrigin ? { receiptOrigin } : {}),
+			...(turnOrigin ? { turnOrigin } : {}),
 		};
 	}
 
@@ -538,7 +546,7 @@ export class RemoteJobClient {
 	async place(
 		dispatch: Pick<
 			FleetDispatch,
-			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "escalation"
+			"idempotencyKey" | "instructions" | "writeScope" | "plan" | "receiptOrigin" | "turnOrigin" | "escalation"
 		>,
 		placement: Extract<Placement, { kind: "remote_machine" }>,
 		options: PlaceOptions = {},
@@ -698,6 +706,7 @@ export class RemoteJobClient {
 				// The key the record is written under: a plan's stop finds this job through its lane when the record cannot be read.
 				...(input.placement ? { placement: input.placement } : {}),
 				...(input.receiptOrigin ? { receiptOrigin: input.receiptOrigin } : {}),
+				...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
 			},
 		);
 		const written = this.session.managedLaneBindings().get(laneId);

@@ -1,4 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { UsageReceipt } from "../cost/usage-receipt.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { ManagedLanePlacement } from "../orchestration/contracts.ts";
@@ -75,6 +76,11 @@ export interface ManagedLaneHostFacts {
 	 * when its dispatch names none. The lane's attempt serves it, as a local start of the same dispatch would.
 	 */
 	readonly receiptOrigin?: WorkerReceiptOrigin;
+	/**
+	 * On a placed job's dispatch, the third party's origin its dispatch carries (`dispatchTurnOrigin`), absent when it carries
+	 * none. A placed lane carries this and never the run in progress, as a local start of the same dispatch does.
+	 */
+	readonly turnOrigin?: TurnOriginRecord;
 	/**
 	 * On a terminal, what the placed job's executor reported it spent. It is charged as received: a field the executor did not
 	 * know stays unknown, and no token split or price is made up.

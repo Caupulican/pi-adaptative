@@ -20,7 +20,7 @@ import { isAbsolute, resolve } from "node:path";
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { dispatchReceiptOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
+import { dispatchReceiptOrigin, dispatchTurnOrigin, type FleetDispatch } from "../fleet/fleet-types.ts";
 import {
 	ESCALATION_AUTHORITY_MISMATCH,
 	type FleetLocalStart,
@@ -196,8 +196,10 @@ export function workerRequestForDispatch(
 				}
 			: {}),
 	};
-	// A rerun answers the original's parent; a plan step serves the input its version was stated for.
+	// A rerun answers the original's parent; a plan step serves the input its version was stated for. A rerun carries its
+	// original's taint, a plan step its predecessors'.
 	const receiptOrigin = dispatchReceiptOrigin(dispatch);
+	const turnOrigin = dispatchTurnOrigin(dispatch);
 	return {
 		instructions: dispatch.instructions,
 		...(dispatch.brief ? { brief: dispatch.brief } : {}),
@@ -223,7 +225,7 @@ export function workerRequestForDispatch(
 		fleetRank: { priority: dispatch.demand.priority, criticalPath: dispatch.demand.onCriticalPath },
 		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
-		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
+		...(turnOrigin !== undefined ? { turnOrigin } : {}),
 		...(receiptOrigin !== undefined ? { receiptOrigin } : {}),
 		...(pinned
 			? { isolation: freshPinnedLane ? ("worktree" as const) : ("shared" as const) }

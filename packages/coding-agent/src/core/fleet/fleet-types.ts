@@ -99,6 +99,12 @@ export interface FleetDispatch {
 	 */
 	receiptOrigin?: WorkerReceiptOrigin;
 	/**
+	 * A plan step whose predecessors' work a third party's words reached: the origin of the first such predecessor attempt
+	 * (`planStepTurnOrigin`), so the step that reads their reports carries the taint. An attempt's own record, so its kind and
+	 * fields are the ones every reader of an attempt's dispatch already parses. Absent for every other dispatch.
+	 */
+	turnOrigin?: TurnOriginRecord;
+	/**
 	 * An escalation rung's rerun. `writeScope` and `pinned` are relative to the original attempt's own cwd (the cwd entry
 	 * itself is ".") and are rebuilt against the session cwd when the rerun is requested.
 	 */
@@ -287,6 +293,16 @@ export function dispatchReceiptOrigin(
 	dispatch: Pick<FleetDispatch, "receiptOrigin" | "escalation">,
 ): WorkerReceiptOrigin | undefined {
 	return dispatch.escalation?.pinned.receiptOrigin ?? dispatch.receiptOrigin;
+}
+
+/**
+ * Who wrote the words a dispatch's work reads, when a third party did: an escalation rerun's original's, else the dispatch's
+ * own (a plan step's predecessors'). One reading for a local start and a placement on another machine.
+ */
+export function dispatchTurnOrigin(
+	dispatch: Pick<FleetDispatch, "turnOrigin" | "escalation">,
+): TurnOriginRecord | undefined {
+	return dispatch.escalation?.pinned.turnOrigin ?? dispatch.turnOrigin;
 }
 
 /** DRR cost of one dispatch of a class: a heavy node spends eight probes' worth of its flow's quantum. */

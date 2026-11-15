@@ -258,7 +258,8 @@ export class ManagedLaneController {
 			let runtimeLease: RuntimeWorkLease | undefined;
 			// The delegated lanes' grant parser: a malformed or oversized claim is refused before any durable state.
 			const knowledgeReferences = parseKnowledgeGrantReferences(event.dispatch.knowledgeReferences ?? []);
-			const runOrigin = this.deps.getRunTurnOrigin?.();
+			// A placed job's lane carries its dispatch's origin (a runtime start, not the run in progress); any other lane the run's.
+			const runOrigin = host.placement ? host.turnOrigin : this.deps.getRunTurnOrigin?.();
 			try {
 				const prepared = this.lifecycle.prepareManaged(
 					{
