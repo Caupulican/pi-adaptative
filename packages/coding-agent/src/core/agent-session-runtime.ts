@@ -31,6 +31,7 @@ import {
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import {
+	hostedRefusalAsAdmission,
 	refuseHostedSessionFile,
 	SessionReplacementCallbackError,
 	SessionReplacementRuntimeError,
@@ -644,7 +645,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		}
 	}
 
-	/** Prepares candidate resources. A failure discards its artifacts and is rethrown as the factory raised it. */
+	/** Prepares candidate resources. A failure discards its artifacts and is rethrown as the factory raised it, a host's lease refusal as an admission failure. */
 	private async prepareReplacement(
 		sessionManager: SessionManager,
 		sessionStartEvent: SessionStartEvent,
@@ -660,7 +661,7 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 			return { runtime, sessionManager };
 		} catch (error: unknown) {
 			await this.discardCreatedSession(sessionManager, created, error);
-			throw unwrapCreation(error);
+			throw hostedRefusalAsAdmission(unwrapCreation(error));
 		}
 	}
 
@@ -1012,7 +1013,6 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, roots, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		// A bot session its host moved between this open and the lease is opened again in its home now, once.
 		const prepared = await retryOnSessionHomeChange(sessionManager, (manager) =>
 			this.prepareReplacement(manager, { type: "session_start", reason: "resume", previousSessionFile }, undefined),
 		);

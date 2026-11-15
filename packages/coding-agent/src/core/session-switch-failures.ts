@@ -86,6 +86,15 @@ export function hostedSessionRefusal(error: SessionHostedError): string {
 }
 
 /**
+ * `error` as a session switch reports it: a lease a channel or bot host refused (`SessionHostedError`, taken after the
+ * file's check, when a host took the session in between) admitted nothing, so it is a recovered admission failure told
+ * in the owner's words; any other error is returned as it is.
+ */
+export function hostedRefusalAsAdmission(error: unknown): unknown {
+	return error instanceof SessionHostedError ? new SessionReplacementRuntimeError("admission", error, true) : error;
+}
+
+/**
  * The owner's words refusing `manager`'s session when a channel or bot host holds it, before anything writes to it;
  * undefined when none does (or it is not persisted). A registry that does not read is thrown.
  */

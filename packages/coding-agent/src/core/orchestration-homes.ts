@@ -184,7 +184,8 @@ export function botSessionStorageRoots(
  * Runs `attempt` (an AgentSession's creation, which takes the session's lease) on `manager`, and once more on the same
  * file opened again in the roots it derives now, when the lease was refused because the session's state moved between
  * the open and the lease (`SessionHomeChangedError`: a bot session's host moved it into the bot's home). The refused
- * attempt wrote nothing; the second open keeps the first's session directory and working directory. A second refusal,
+ * attempt wrote nothing; the second open keeps the first's session id, session directory and working directory, and a
+ * file not written yet stays the session's to start. A second refusal,
  * or any other failure, is thrown.
  */
 export async function retryOnSessionHomeChange<T>(
@@ -198,6 +199,8 @@ export async function retryOnSessionHomeChange<T>(
 		if (!(error instanceof SessionHomeChangedError) || error.sessionId !== manager.getSessionId() || !file)
 			throw error;
 		const roots = sessionStorageRootsOfFile(manager.getStorageRoots().agentDir, file);
-		return attempt(SessionManager.open(file, roots, manager.getSessionDir(), manager.getCwd()));
+		return attempt(
+			SessionManager.openOrStart(file, roots, manager.getSessionId(), manager.getSessionDir(), manager.getCwd()),
+		);
 	}
 }

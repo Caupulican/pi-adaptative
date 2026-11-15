@@ -64,6 +64,7 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
+import { SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
 import { retryOnSessionHomeChange } from "./core/orchestration-homes.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
@@ -92,7 +93,7 @@ import {
 } from "./core/session-manager-factory.ts";
 import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
-import { hostedSessionRefusalOf } from "./core/session-switch-failures.ts";
+import { hostedSessionRefusal, hostedSessionRefusalOf } from "./core/session-switch-failures.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { describeCause, neutralizeControls, TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -1041,7 +1042,11 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager: manager,
 			onTerminalWarnings: (warnings) => terminalWarnings.write(warnings),
 		}),
-	);
+	).catch((error: unknown) => {
+		// A host that took the session after the check above refuses its lease: the same refusal, in the owner's words.
+		if (error instanceof SessionHostedError) refuseInvocation(hostedSessionRefusal(error));
+		throw error;
+	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
 	if (runtimeRestart && session.sessionId !== runtimeRestart.sessionId) {

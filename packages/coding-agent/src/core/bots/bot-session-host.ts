@@ -208,6 +208,8 @@ export class BotSessionHost {
 	private readonly entries = new Map<string, BotSessionEntry>();
 	/** The bots whose session state was told as kept in the owner's home: told once per process. */
 	private readonly toldNotMoved = new Set<string>();
+	/** Bots whose home's session did not read at the last roster count: told once until it reads again. */
+	private readonly toldWatchesNotCounted = new Set<string>();
 	/** Sessions being built, so two messages in a row build one. */
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
 	/** Opens the session of a bot owed work that no process hosts. */
@@ -884,10 +886,13 @@ export class BotSessionHost {
 		try {
 			sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		} catch (error) {
-			// The roster draws what reads: a home whose session does not read now counts no watches, and says why.
-			this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(agentId, errorText(error)));
+			// The roster draws what reads: a home whose session does not read now counts no watches, and says why once.
+			if (!this.toldWatchesNotCounted.has(agentId))
+				this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(agentId, errorText(error)));
+			this.toldWatchesNotCounted.add(agentId);
 			return 0;
 		}
+		this.toldWatchesNotCounted.delete(agentId);
 		if (sessionId === undefined) return 0;
 		const live = liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now());
 		if (live.firstExpiresAt !== undefined) this.watchExpiry.note(agentId, live.firstExpiresAt);
