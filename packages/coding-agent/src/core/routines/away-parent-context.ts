@@ -344,7 +344,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			const runId = awayRunKey(attempt, snapshot);
 			if (runId === undefined) return undefined;
 			const includes = (candidate: AttemptRuntimeState) => awayRunKey(candidate, snapshot) === runId;
-			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
+			// A run away is held to its spend bound on a priced model only: an unpriced one is refused, as before.
+			return { runId, maxCostUsd: input.maxUsdPerRun(), includes, unpriced: "refused" as const };
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		const workers = new WorkerDelegationController(

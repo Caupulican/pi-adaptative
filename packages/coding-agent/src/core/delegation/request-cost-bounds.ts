@@ -122,7 +122,7 @@ export class RequestCostBounds {
 		});
 		const attempt = snapshot.attempts[attemptId];
 		const metered = isMeteredSpend(model, this.billing);
-		const ports: SharedCapabilityBudget[] = this.runBudgetPorts(attempt, attemptId, initialUsage, snapshot, metered);
+		const ports: SharedCapabilityBudget[] = this.runBudgetPorts(attempt, attemptId, initialUsage, snapshot, model);
 		const meteredTree = metered && this.meteredTreePort(treeKey, treeBudget.maxMeteredCostUsd, treeSeeds, input);
 		if (meteredTree) ports.push(meteredTree);
 		if (attempt && metered) {
@@ -175,18 +175,20 @@ export class RequestCostBounds {
 
 	/**
 	 * The budgets the attempt's run shares with its other attempts (`runCostBound`): its whole spend, seeded from every
-	 * durable attempt of the run, and for a metered attempt its metered spend, seeded from the run's metered attempts. None
-	 * when the host bounds no run.
+	 * durable attempt of the run, and for an attempt on a metered `model` its metered spend, seeded from the run's metered
+	 * attempts. None when the host bounds no run, or when `model` declares no price and the bound leaves such an attempt
+	 * unbounded (`RunCostBound.unpriced`); a bound that refuses it prices each of its requests, which refuses them.
 	 */
 	private runBudgetPorts(
 		attempt: AttemptRuntimeState | undefined,
 		attemptId: string,
 		initialUsage: AttemptUsageSnapshot,
 		snapshot: TaskRuntimeProjection,
-		metered: boolean,
+		model: Model<Api>,
 	): SharedCapabilityBudget[] {
 		const bound = attempt ? this.deps.runCostBound?.(attempt, snapshot) : undefined;
-		if (!bound) return [];
+		if (!bound || (model.costDefaulted && bound.unpriced === "unbounded")) return [];
+		const metered = isMeteredSpend(model, this.billing);
 		const runAttempts = Object.values(snapshot.attempts).filter((candidate) => bound.includes(candidate));
 		const seedsOf = (attempts: readonly AttemptRuntimeState[]) =>
 			attempts.map((candidate) => ({
