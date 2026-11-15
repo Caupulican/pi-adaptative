@@ -407,6 +407,15 @@ export class SessionAnalytics {
 	}
 
 	/**
+	 * Whether the session's historical accounting (the usage its transcript no longer holds in full) is loading: until it
+	 * lands, `getCumulativeUsage` may read less than the session spent.
+	 */
+	isAccountingHistoryLoading(): boolean {
+		this.getAccountingEntries();
+		return this.accountingHistory.loading();
+	}
+
+	/**
 	 * Record usage spent by a spawned/subagent session so the footer can roll it into the
 	 * displayed cost. Persisted as a `CustomEntry` (`customType: "spawned_usage"`, Model A) so
 	 * it survives reload and is reconstructed exactly like main usage; a new/forked session

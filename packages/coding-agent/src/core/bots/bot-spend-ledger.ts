@@ -11,7 +11,7 @@
  * file holds it.
  *
  * A record that does not read is set aside (`.unreadable`) and the owner told; the windows then start empty and the
- * charges from what the session has spent at that open.
+ * charges from what the session has spent once its accounting history has loaded (`BotTurnAccounting`).
  */
 
 import { existsSync, readFileSync, renameSync } from "node:fs";

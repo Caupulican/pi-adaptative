@@ -333,7 +333,7 @@ import type { SemanticVerificationObligationView } from "./system-one/verificati
 import { createSessionWorkerControl, type SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
-import type { TaskStepsState } from "./tasks/task-state.ts";
+import { hasOpenWork, type TaskStepsState } from "./tasks/task-state.ts";
 import { writeTerminalWarnings } from "./terminal-warnings.ts";
 import {
 	enforceExplicitOptionalToolRequest,
@@ -1973,7 +1973,7 @@ export class AgentSession {
 			onTurnSettled: () => this._notifySystemSwitchAvailability(),
 			abortAgent: () => this.agent.abort("reflection"),
 			getLastAssistantStopReason: () => this._findLastAssistantMessage()?.stopReason,
-			hasOpenWork: () => this._hasOpenWork(),
+			hasOpenWork: () => hasOpenWork(this),
 			isDisposed: () => this._disposed,
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
@@ -4707,6 +4707,10 @@ export class AgentSession {
 		return this._analytics.getCumulativeUsage();
 	}
 
+	isAccountingHistoryLoading(): boolean {
+		return this._analytics.isAccountingHistoryLoading();
+	}
+
 	addSpawnedUsage(
 		usage: Usage,
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
@@ -4771,13 +4775,6 @@ export class AgentSession {
 	/** Retrieve the latest valid native task-step state from the active session log. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined {
 		return getLatestTaskStepsStateSnapshot(this.sessionManager);
-	}
-
-	/** An active goal or an in-progress task step: work the operator is still waiting on. */
-	private _hasOpenWork(): boolean {
-		const goal = this.getGoalStateSnapshot();
-		if (goal && isGoalExecutionActive(goal.status)) return true;
-		return this.getTaskStepsStateSnapshot()?.steps.some((step) => step.status === "in_progress") ?? false;
 	}
 
 	/** Save the active ICM pipeline run pointer to the session log. */

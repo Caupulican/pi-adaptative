@@ -1,3 +1,4 @@
+import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { MAX_PIPELINE_STAGE_ID_LENGTH } from "../pipelines/types.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -696,4 +697,14 @@ export function parseTaskStepsState(text: string): TaskStepsState | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** An active goal or an in-progress task step: work the operator is still waiting on. */
+export function hasOpenWork(session: {
+	getGoalStateSnapshot(): GoalState | undefined;
+	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
+}): boolean {
+	const goal = session.getGoalStateSnapshot();
+	if (goal && isGoalExecutionActive(goal.status)) return true;
+	return session.getTaskStepsStateSnapshot()?.steps.some((step) => step.status === "in_progress") ?? false;
 }

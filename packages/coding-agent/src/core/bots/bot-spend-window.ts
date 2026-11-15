@@ -129,8 +129,10 @@ export class BotSpendWindows {
 	 * spend the run budgets count from the workers' own usage): the lowest of `ceilings` on all spend less the session's
 	 * own spend in that window (`maxCostUsd`), and the lowest of the metered-only ones less the session's own metered spend
 	 * there (`maxMeteredCostUsd`, which holds the run's metered attempts only). A remainder at or below zero is zero: the
-	 * run's next request is refused as a run whose bound is spent. The attempt is counted to its window first, whatever
-	 * bounds apply. Undefined when it serves no window of this session or no ceiling applies.
+	 * run's next request is refused as a run whose bound is spent. The attempt, starting now, is counted to its window
+	 * first, whatever bounds apply (a window not kept opens again, and stays among the newest while it serves); the bound
+	 * includes every attempt serving the same window. Undefined when it serves no window of this session or no ceiling
+	 * applies.
 	 */
 	runCostBound(
 		attempt: AttemptRuntimeState,
@@ -138,9 +140,10 @@ export class BotSpendWindows {
 		ceilings: readonly BotSpendCeiling[],
 	): RunCostBound | undefined {
 		const windowId = this.windowOfAttempt(attempt, snapshot);
+		const window = windowId === undefined ? undefined : this.windowFor(windowId);
+		if (window) this.serve(window, attempt.attemptId);
 		this.flush();
-		if (windowId === undefined || ceilings.length === 0) return undefined;
-		const window = this.windowFor(windowId);
+		if (!window || ceilings.length === 0) return undefined;
 		const remainder = (meteredOnly: boolean, spentUsd: number): number | undefined => {
 			const usd = ceilings.filter((ceiling) => ceiling.meteredOnly === meteredOnly).map((ceiling) => ceiling.usd);
 			return usd.length === 0 ? undefined : Math.max(0, Math.min(...usd) - spentUsd);
@@ -148,9 +151,10 @@ export class BotSpendWindows {
 		const maxCostUsd = remainder(false, window.foregroundUsd);
 		const maxMeteredCostUsd = remainder(true, window.meteredForegroundUsd);
 		return {
-			runId: windowId,
+			runId: window.id,
 			...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
 			...(maxMeteredCostUsd !== undefined ? { maxMeteredCostUsd } : {}),
+			includes: (candidate) => this.windowOfAttempt(candidate, snapshot) === window.id,
 		};
 	}
 
@@ -167,7 +171,11 @@ export class BotSpendWindows {
 		return { usd, meteredUsd };
 	}
 
-	/** The window an attempt serves: the one its receipt origin's leaf belongs to, when that leaf is this session's. */
+	/**
+	 * The window an attempt serves: the one its receipt origin's leaf belongs to, when that leaf is this session's. Finding
+	 * it opens no window: an attempt read from the ledger's history whose window was dropped leaves it dropped (only an
+	 * attempt starting now opens its window, `runCostBound`); a kept window records the attempt.
+	 */
 	private windowOfAttempt(
 		attempt: AttemptRuntimeState,
 		snapshot: TaskRuntimeProjection | undefined,
@@ -180,12 +188,19 @@ export class BotSpendWindows {
 				? this.windowOfEntry(origin.leafId, snapshot)
 				: undefined;
 		this.attemptWindows.set(attempt.attemptId, windowId ?? null);
-		const window = windowId === undefined ? undefined : this.windowFor(windowId);
-		if (window && !window.attemptIds.includes(attempt.attemptId)) {
-			window.attemptIds.push(attempt.attemptId);
+		const kept = windowId === undefined ? undefined : this.windows.get(windowId);
+		if (kept && !kept.attemptIds.includes(attempt.attemptId)) {
+			kept.attemptIds.push(attempt.attemptId);
 			this.ledger.touch();
 		}
 		return windowId;
+	}
+
+	/** An attempt starts serving `window`: it is recorded there, and the window is as recent as the attempt. */
+	private serve(window: SpendWindowRecord, attemptId: string): void {
+		if (!window.attemptIds.includes(attemptId)) window.attemptIds.push(attemptId);
+		window.updatedAt = this.ports.now();
+		this.ledger.touch();
 	}
 
 	/**
@@ -277,8 +292,6 @@ export class BotSpendWindows {
 		if (kept.length < this.windows.size) {
 			const keptIds = new Set(kept.map((window) => window.id));
 			for (const id of this.windows.keys()) if (!keptIds.has(id)) this.windows.delete(id);
-			for (const [attemptId, windowId] of this.attemptWindows)
-				if (windowId !== null && !keptIds.has(windowId)) this.attemptWindows.delete(attemptId);
 			this.ledger.touch();
 		}
 		this.ledger.flush();

@@ -91,24 +91,18 @@ export interface BotTurnAccountingPorts {
  */
 export class BotTurnAccounting {
 	private readonly agentId: string;
-	private readonly session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">;
+	private readonly session: Pick<
+		AgentSession,
+		"model" | "getCumulativeUsage" | "isAccountingHistoryLoading" | "sessionId" | "messages"
+	>;
 	private readonly ledger: BotSpendLedger;
 	private readonly ports: BotTurnAccountingPorts;
-	/** The watermark: set at construction, the ledger's own. */
-	private readonly state: BotChargeState;
-	/** The watermark was set at this open and is written at `resume`. */
-	private seeded = false;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
 	private startedAt: number | undefined;
 
-	/**
-	 * Reads the watermark from the ledger. A ledger with none (a new bot, a record set aside), or one that reads another
-	 * session (a bot that opened a new session file), starts this session's at what it has spent now, keeping the pending
-	 * charges of the one before: an earlier build charged the turns this session spent before.
-	 */
 	constructor(
 		agentId: string,
-		session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">,
+		session: BotTurnAccounting["session"],
 		ledger: BotSpendLedger,
 		ports: BotTurnAccountingPorts,
 	) {
@@ -116,26 +110,13 @@ export class BotTurnAccounting {
 		this.session = session;
 		this.ledger = ledger;
 		this.ports = ports;
-		const kept = ledger.charge;
-		if (kept && kept.sessionId === session.sessionId) this.state = kept;
-		else {
-			this.state = {
-				sessionId: session.sessionId,
-				through: structuredClone(session.getCumulativeUsage()),
-				pending: kept?.pending ?? [],
-			};
-			ledger.charge = this.state;
-			this.seeded = true;
-		}
 	}
 
 	/**
-	 * The session is ready to report (its ports reach a root): a watermark set at this open is written, the pending charges
-	 * are delivered again, and what the session spent since the watermark is charged.
+	 * The session is ready to report (its ports reach a root): the pending charges are delivered again, and what the
+	 * session spent since the watermark is charged.
 	 */
 	resume(): void {
-		if (this.seeded) this.ledger.write();
-		this.seeded = false;
 		this.charge();
 	}
 
@@ -166,26 +147,51 @@ export class BotTurnAccounting {
 	 */
 	charge(): void {
 		this.deliverPending();
+		const state = this.watermark();
+		if (!state) return;
 		const now = this.session.getCumulativeUsage();
-		const { through, pending } = this.state;
+		const { through, pending } = state;
 		if (now.totalTokens < through.totalTokens || now.cost.total < through.cost.total) return;
 		const charge = botTurnCharge(this.agentId, this.session, through);
 		if (!charge) return;
 		const { through: reached, ...fixed } = charge;
 		pending.push(fixed);
-		this.state.through = reached;
+		state.through = reached;
 		if (!this.ledger.write()) {
 			pending.pop();
-			this.state.through = through;
+			state.through = through;
 			return;
 		}
 		if (this.deliver(fixed)) this.settle([fixed]);
 	}
 
+	/**
+	 * This session's watermark: the ledger's when it reads this session. A ledger with none (a new bot, a record set
+	 * aside) or one that reads another session (a bot that opened a new session file) starts this session's at what it has
+	 * spent now, keeping the pending charges of the one before (an earlier build charged what this session spent before),
+	 * once the session's historical accounting has loaded: a reading taken before it lands can be short of what the
+	 * session spent, and the difference would be charged again. Undefined while it loads; its load's end charges again
+	 * (`usage_updated`).
+	 */
+	private watermark(): BotChargeState | undefined {
+		const kept = this.ledger.charge;
+		const sessionId = this.session.sessionId;
+		if (kept?.sessionId === sessionId) return kept;
+		if (this.session.isAccountingHistoryLoading()) return undefined;
+		const state = {
+			sessionId,
+			through: structuredClone(this.session.getCumulativeUsage()),
+			pending: kept?.pending ?? [],
+		};
+		this.ledger.charge = state;
+		this.ledger.write();
+		return state;
+	}
+
 	/** Delivers each pending charge again, oldest first, and drops the ones the root's file holds now. */
 	private deliverPending(): void {
 		const held: BotCharge[] = [];
-		for (const charge of this.state.pending) {
+		for (const charge of this.ledger.charge?.pending ?? []) {
 			const persisted = this.deliver(charge);
 			if (persisted === undefined) break;
 			if (persisted) held.push(charge);
@@ -205,7 +211,8 @@ export class BotTurnAccounting {
 
 	/** Drops charges the root's file holds from the pending ones and writes the ledger. */
 	private settle(held: readonly BotCharge[]): void {
-		this.state.pending = this.state.pending.filter((charge) => !held.includes(charge));
+		const state = this.ledger.charge;
+		if (state) state.pending = state.pending.filter((charge) => !held.includes(charge));
 		this.ledger.write();
 	}
 }

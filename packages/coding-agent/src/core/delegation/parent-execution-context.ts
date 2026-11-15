@@ -195,6 +195,8 @@ export interface RunCostBound {
 	readonly runId: string;
 	readonly maxCostUsd?: number;
 	readonly maxMeteredCostUsd?: number;
+	/** Whether an attempt of the same snapshot is one of the run's (its spend seeds the run's budgets); asking starts nothing. */
+	includes(attempt: AttemptRuntimeState): boolean;
 }
 
 /** The decisions a worker run consults: model availability, System One judges, context planning, memory, skills, edges. */
@@ -333,8 +335,8 @@ export interface ParentExecutionPolicy {
 	 */
 	runsControlMessage?(controlMessageId: string): boolean;
 	/**
-	 * Present on a host that bounds one run's whole spend: every attempt of the run (subject, retries and verifier) that
-	 * returns the same `runId` shares one cost budget of `maxCostUsd`, and every metered attempt of it one of
+	 * Present on a host that bounds one run's whole spend, asked for each attempt as it starts: every attempt of the run
+	 * (subject, retries and verifier; the bound `includes` them) shares one cost budget of `maxCostUsd`, and every metered attempt of it one of
 	 * `maxMeteredCostUsd` over the run's metered spend (a subscription attempt is not held to it: its plan's usage windows
 	 * are), each checked before each provider request on top of the attempt's own agent tree budget. Absent, undefined
 	 * for an attempt, or a ceiling left out, only the agent tree budget applies in its place.

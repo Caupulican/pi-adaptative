@@ -65,6 +65,8 @@ export { type CollaborationExtensionOptions, piCollaborationExtension } from "./
 export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";
 export * from "./core/decision/index.ts";
 export { mapToolNamesForPlatform } from "./core/default-tool-surface.ts";
+// The bound a host sets on each run of a session's workers (`CreateAgentSessionOptions.workerRunCostBound`)
+export type { RunCostBound } from "./core/delegation/parent-execution-context.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 export {
 	type CiAttemptIdentity,

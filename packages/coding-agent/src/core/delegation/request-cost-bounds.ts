@@ -185,12 +185,9 @@ export class RequestCostBounds {
 		snapshot: TaskRuntimeProjection,
 		metered: boolean,
 	): SharedCapabilityBudget[] {
-		const runCostBound = this.deps.runCostBound;
-		const bound = runCostBound && attempt ? runCostBound(attempt, snapshot) : undefined;
-		if (!runCostBound || !bound) return [];
-		const runAttempts = Object.values(snapshot.attempts).filter(
-			(candidate) => runCostBound(candidate, snapshot)?.runId === bound.runId,
-		);
+		const bound = attempt ? this.deps.runCostBound?.(attempt, snapshot) : undefined;
+		if (!bound) return [];
+		const runAttempts = Object.values(snapshot.attempts).filter((candidate) => bound.includes(candidate));
 		const seedsOf = (attempts: readonly AttemptRuntimeState[]) =>
 			attempts.map((candidate) => ({
 				attemptId: candidate.attemptId,

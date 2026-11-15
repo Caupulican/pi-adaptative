@@ -58,6 +58,11 @@ export class SessionAccountingHistory {
 		return Boolean(this.state?.projection?.groups.length);
 	}
 
+	/** A load of the history is scheduled or running: what the session's accounting reads may still grow when it lands. */
+	loading(): boolean {
+		return Boolean(this.state?.scheduled || this.state?.loading);
+	}
+
 	status(): "pending" | "unavailable" | undefined {
 		return this.state?.loading || this.state?.deferred ? "pending" : this.state?.failed ? "unavailable" : undefined;
 	}

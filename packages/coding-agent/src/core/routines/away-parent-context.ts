@@ -342,7 +342,9 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		// One run's subject, retries and verifier share the run's spend bound, as the away spend gate reserves it.
 		const runCostBound = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection) => {
 			const runId = awayRunKey(attempt, snapshot);
-			return runId === undefined ? undefined : { runId, maxCostUsd: input.maxUsdPerRun() };
+			if (runId === undefined) return undefined;
+			const includes = (candidate: AttemptRuntimeState) => awayRunKey(candidate, snapshot) === runId;
+			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		const workers = new WorkerDelegationController(
