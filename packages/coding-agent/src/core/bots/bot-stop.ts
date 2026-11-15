@@ -607,7 +607,7 @@ export interface LockedBotStop {
 /**
  * The owner's stops this process could not record (`requestBotStop` failed) for bots it does not host, the newest per bot,
  * kept for the process and agent directory across its hosts in turn (`bot-session-registry.ts`: a root session replaced by
- * a new or resumed one keeps them). Each is scoped to the work there was when it was made (`readStopScope`), so wherever
+ * a new or resumed one keeps them, and a child session's host hands over what it still holds as it stops, {@link adopt}). Each is scoped to the work there was when it was made (`readStopScope`), so wherever
  * and whenever it is applied it ends that work and nothing started after it. It is held until one of these ends it:
  * - a take of the bot's stops applies it with the ones waiting, while no process hosts the bot: the unhosted application
  *   under the bot's lock ({@link applyUnhostedBotStop}, {@link underLock}), or this process's open of the bot's session
@@ -694,6 +694,12 @@ export class UnrecordedBotStops {
 		}
 		this.held.clear();
 		return told;
+	}
+
+	/** Takes over every stop `ended` holds (a host that stopped, of this agent directory), the newest per bot kept. */
+	adopt(ended: UnrecordedBotStops): void {
+		for (const stop of ended.held.values()) this.hold(stop);
+		ended.held.clear();
 	}
 
 	/** A take or a write that read `held` (the one held when it began) applied or recorded it: it is held no longer. */

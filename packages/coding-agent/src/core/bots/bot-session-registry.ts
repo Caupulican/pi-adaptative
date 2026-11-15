@@ -53,6 +53,8 @@ interface AttachedRoots {
 
 interface SharedHost extends AttachedRoots {
 	readonly host: BotSessionHost;
+	/** What the host keeps (`keepsFor`): a root's, shared for the process and agent directory; a child's, its own. */
+	readonly keeps: BotHostProcessKeeps;
 	/** The host's stop, once its last root detached: it stays registered until its sessions closed and their locks are free. */
 	stopping?: Promise<void>;
 }
@@ -64,16 +66,21 @@ const hosts = new Map<string, SharedHost>();
  * process could not record, what the owner was told of the work a stop or release left behind a symbolic link, and why
  * each bot's session state was told as kept in the owner's home. A root's host and the one that replaces it (a new,
  * resumed or forked session detaches the old root before the new one attaches) hold the same, kept for the process, so a
- * replaced host neither loses a stop nor tells a notice again.
+ * replaced host neither loses a stop nor tells a notice again. A child session's host keeps its own while it runs and hands
+ * the stops it still holds to these as it stops (`UnrecordedBotStops.adopt`).
  */
 const processKeeps = new Map<string, BotHostProcessKeeps>();
 
 /**
- * This process quits: the owner's stops its root sessions' hosts hold unrecorded are recorded one last time
- * (`UnrecordedBotStops.recordAtQuit`), and none is held after it. What the owner is told of each. Never throws.
+ * A runtime of agent directory `agentDir` quits, its root session detached: the owner's stops its hosts hold unrecorded
+ * (its root's, kept for the process and agent directory, and those its child sessions' hosts handed over as they stopped)
+ * are recorded one last time (`UnrecordedBotStops.recordAtQuit`), and none is held after it. While another root of the
+ * process still holds that host they stay its own, for its runtime's quit. Another agent directory's are never touched.
+ * What the owner is told of each, once. Never throws.
  */
-export function recordHeldBotStopsAtQuit(): string[] {
-	return [...processKeeps.values()].flatMap((keeps) => keeps.unrecorded.recordAtQuit());
+export function recordHeldBotStopsAtQuit(agentDir: string): string[] {
+	const key = resolve(agentDir);
+	return hosts.has(key) ? [] : (processKeeps.get(key)?.unrecorded.recordAtQuit() ?? []);
 }
 
 /** What the hosts of agent directory `key` keep in this process: a root's are shared, a child host's are its own. */
@@ -213,12 +220,13 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		// A root attached while the previous host stops gets a new one that builds no session before that stop ended: the
 		// locks the stopping host still holds are free by then.
 		// A child's host keeps its own; a root's those of its process and agent directory.
+		const keeps = keepsFor(key, root);
 		const host = new BotSessionHost(
 			relayPorts(attachedRoots),
-			keepsFor(key, root),
+			keeps,
 			shared?.stopping?.catch(() => undefined),
 		);
-		shared = { ...attachedRoots, host };
+		shared = { ...attachedRoots, host, keeps };
 		if (root) hosts.set(key, shared);
 	}
 	const attached = shared;
@@ -266,6 +274,9 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			} finally {
 				roots.length = 0;
 				if (hosts.get(key) === attached) hosts.delete(key);
+				// A child's host keeps its own: the stops it still holds go to its process and agent directory's, recorded
+				// there again and at the quit of a runtime of that directory, not lost with the host.
+				if (!root) keepsFor(key, true).unrecorded.adopt(attached.keeps.unrecorded);
 			}
 		},
 	};

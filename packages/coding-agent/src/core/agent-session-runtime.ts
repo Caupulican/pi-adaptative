@@ -1180,9 +1180,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 				invalidateHost: true,
 				progress: this.disposeProgress,
 			});
-			// The quitting session's held warnings, and what its process's bot stops held unrecorded became as it quits
-			// (recorded one last time, or lost), have no live session left to show them: they go to the terminal sink.
-			this.discardedWarnings.push(...this._session.takeUndeliveredWarnings(), ...recordHeldBotStopsAtQuit());
+			// Its held warnings and its bot hosts' unrecorded stops (recorded once more, or lost) go to the terminal sink.
+			const stops = recordHeldBotStopsAtQuit(this.services.agentDir);
+			this.discardedWarnings.push(...this._session.takeUndeliveredWarnings(), ...stops);
 			this.terminalWarnings(this.takeDiscardedWarnings());
 			if (errors.length === 1) throw errors[0];
 			if (errors.length > 1) throw new AggregateError(errors, "Session runtime disposal failed.");

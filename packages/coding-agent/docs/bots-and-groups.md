@@ -142,8 +142,10 @@ by those workers. Wherever and whenever it is applied, it ends that work and not
 hosts the bot, a take in that process applies it under the bot's host lock (a retry, or that process's open of the bot,
 a stop made during the open included), the messages sent before it refused; a take that fails keeps it held. While
 another process hosts the bot, the periodic check records it again in the bot's home until the write lands, for that
-host to take, and you are told it is recorded now. A stop of the bot recorded later covers it. When the process quits
-with the stop still held, it is recorded one last time and you are told whether it was recorded or lost. It is not held
+host to take, and you are told it is recorded now. A stop of the bot recorded later covers it. When the session that
+holds it quits (the last one of the process for its agent directory) with the stop still held, it is recorded one last
+time and you are told once whether it was recorded or lost; a stop a bot's or worker's own session held when it closed is
+kept by the process the same way. It is not held
 when the work there is cannot be read as the stop is made: you are told it was dropped, and why, to send it again. A
 host of an older build never takes a stop recorded late, which then waits until a host of this build takes it. For a bot this process hosts, a stop that could not be
 recorded applies only to the bot's work in this process, and you are told so. A worker the owner stopped opens no turn
