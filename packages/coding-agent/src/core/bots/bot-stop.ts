@@ -38,7 +38,7 @@ import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } fro
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeOwnSessionIds } from "./bot-home.ts";
-import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
+import { LEFTOVER_REREAD_MAX_MINUTES, tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import {
 	type BotInboxStop,
 	readBotInbox,
@@ -708,7 +708,8 @@ function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonC
  * the home's sessions placed are ended by `placedJobs`, which never keeps the stop. A stop that could not be recorded
  * (`memory`) is taken with them, applied when it is the newest; it covers the messages sent before it all the same. A
  * stop that does not read has no date to order it by and stops nothing: it is set aside and told as a stop, or, when it
- * could not be set aside, told as one left in place, read and told again at every take. The stop applied, if any.
+ * could not be set aside, told once as one left in place, a leftover (`bot-home-records.ts`) no listing counts as
+ * waiting until its backoff's read is due or it changes, read again then and not told again. The stop applied, if any.
  */
 function takeStops(
 	agentDir: string,
@@ -723,7 +724,7 @@ function takeStops(
 		ports.warn(
 			setAside
 				? words.botInboxStopUnreadable(agentId, file, reason)
-				: words.botInboxStopNotSetAside(agentId, file, reason),
+				: words.botInboxStopNotSetAside(agentId, file, reason, LEFTOVER_REREAD_MAX_MINUTES),
 		),
 	);
 	const recorded = stops.at(-1)?.message;

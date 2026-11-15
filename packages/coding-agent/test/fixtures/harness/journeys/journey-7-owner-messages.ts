@@ -1,9 +1,15 @@
 import "../builtin-install.ts";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect } from "vitest";
-import { botHostLockFile } from "../../../../src/core/agent-paths.ts";
+import { botHostLockFile, botInboxDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { LEFTOVER_REREAD_MAX_MINUTES } from "../../../../src/core/bots/bot-home-records.ts";
 import { BotHostStateWriter } from "../../../../src/core/bots/bot-host-state.ts";
-import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
+import { botInboxWaiting, readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
+import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
+import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { takeProcessLock } from "../../../../src/core/remote/host-lock.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -49,6 +55,8 @@ const HELD = "held-elsewhere";
 const HELD_SOUL = "You answer owner questions about the cache size with one short sentence.";
 const HELD_QUESTION = "How large is the cache?";
 const HELD_ANSWER = "The cache holds two hundred entries.";
+const LEFTOVER_QUESTION = "How long does a cache entry live?";
+const LEFTOVER_ANSWER = "A cache entry lives for ten minutes.";
 /** Another bot session host: in another process, or another host in this one, the lock names it the same way. */
 const OTHER_HOST = "j7-other-host";
 const OTHER_HOST_SESSION = "0f1e2d3c-4b5a-4968-8776-655443322110";
@@ -308,6 +316,103 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	).toBe(0);
 
 	await sendToBotHeldElsewhere(world, session);
+	await leftoverInInbox(world, session);
+}
+
+/**
+ * An inbox file of a bot hosted here that neither reads nor can be set aside (a directory stands where its `.unreadable`
+ * name goes) is told once however often the inbox is read, is not counted as waiting, and holds back none of the owner's
+ * words; it is read again on its backoff, told nothing more when that read fails too, and read again at once, told as a
+ * new one, when the file changes.
+ */
+async function leftoverInInbox(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const words = interfaceText().botTeam;
+	const file = join(botInboxDir(world.agentDir, HELD), `${String(Date.now()).padStart(15, "0")}-${randomUUID()}.json`);
+	const parseFailure = (text: string): string => {
+		try {
+			JSON.parse(text);
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+		throw new Error(`${text} parsed`);
+	};
+	const told = (text: string) =>
+		words.botHomeRecordNotSetAside(
+			HELD,
+			words.homeRecordKinds.inboxMessage,
+			file,
+			parseFailure(text),
+			LEFTOVER_REREAD_MAX_MINUTES,
+		);
+	const FIRST_TEXT = "not a message";
+	const SECOND_TEXT = "still not a message";
+	writeFileSync(file, FIRST_TEXT);
+	mkdirSync(`${file}.unreadable`);
+	writeFileSync(join(`${file}.unreadable`, "kept"), "");
+	const mark = world.warnings.length;
+	let answered = false;
+	enqueueBot(world, TRACK.held, MODEL_ID.held, HELD_SOUL, {
+		name: "j7-held-leftover",
+		check: (request) => {
+			if (!carries(request, LEFTOVER_QUESTION)) throw new Error("the owner's words beside the leftover are missing");
+		},
+		reply: () => {
+			answered = true;
+			return { content: [{ type: "text", text: LEFTOVER_ANSWER }] };
+		},
+	});
+	try {
+		// Read by the chat twice (and by any drain the home watch asks for meanwhile): told once, and not waiting.
+		chatText(session, HELD);
+		chatText(session, HELD);
+		expect(
+			{
+				waiting: botInboxWaiting(world.agentDir, HELD),
+				warnings: world.warnings.slice(mark),
+				left: existsSync(file),
+			},
+			"an inbox file that neither reads nor can be set aside is told once, stays in place and is not counted as waiting",
+		).toEqual({ waiting: false, warnings: [told(FIRST_TEXT)], left: true });
+		const sent = await session.sendOperatorMessageToBot(HELD, LEFTOVER_QUESTION);
+		await withDeadline(
+			world.trace,
+			"J7 leg 2: the bot answered the owner's words beside the leftover",
+			world.provider.whenReached(reached(TRACK.held, "j7-held-leftover")),
+		);
+		await waitForBotRosterState(world, session, HELD, "idle");
+		expect(
+			{ mode: sent.mode, answered, warnings: world.warnings.slice(mark) },
+			"the owner's words are given to the bot at once, not held behind the leftover, and nothing more is told",
+		).toEqual({ mode: "followed_up", answered: true, warnings: [told(FIRST_TEXT)] });
+		// Changed, the file is listed and read again at once, and told as a new one; its backoff starts again from the first.
+		writeFileSync(file, SECOND_TEXT);
+		const changedWaiting = botInboxWaiting(world.agentDir, HELD);
+		chatText(session, HELD);
+		const realNow = Date.now;
+		const startedAt = realNow();
+		const backoff: boolean[] = [botInboxWaiting(world.agentDir, HELD)];
+		try {
+			// Its read due after the first backoff step: listed, read again, told nothing, and not due again within the next.
+			Date.now = () => startedAt + BOT_OPEN_RETRY_FIRST_MS;
+			backoff.push(botInboxWaiting(world.agentDir, HELD));
+			chatText(session, HELD);
+			backoff.push(botInboxWaiting(world.agentDir, HELD));
+		} finally {
+			Date.now = realNow;
+		}
+		expect(
+			{ changedWaiting, backoff, warnings: world.warnings.slice(mark) },
+			"a changed leftover is listed and told again once, then read again only when its backoff is due, told nothing more",
+		).toEqual({
+			changedWaiting: true,
+			backoff: [false, true, false],
+			warnings: [told(FIRST_TEXT), told(SECOND_TEXT)],
+		});
+	} finally {
+		rmSync(`${file}.unreadable`, { recursive: true, force: true });
+		rmSync(file, { force: true });
+	}
+	expect(botInboxWaiting(world.agentDir, HELD), "the leftover removed, nothing waits").toBe(false);
 }
 
 /**

@@ -27,6 +27,8 @@ export async function runJourney7(): Promise<void> {
 				// The prompt-prefix monitor's report of an intended rewrite: a stopped worker's closing turn adds its HALT CLOSING
 				// TURN section to the system prompt, and the worker's next request drops it. The stop leg halts two workers.
 				/^Prompt cache prefix changed between requests: system prompt changed \(\d+ to \d+ chars\) from char \d+ of \d+: .*HALT CLOSING TURN.*\. Cache reuse may be reduced from that point\.$/,
+				// The owner-messages leg plants an inbox file that neither reads nor can be set aside: told once per file it is.
+				/^Bot held-elsewhere: an inbox message could not be read \(.+\) nor set aside \(.+\); it stays in place, is not counted as waiting, and is read again at most \d+ minutes apart until it reads, told only this once\.$/,
 			],
 		},
 		async (world) => {

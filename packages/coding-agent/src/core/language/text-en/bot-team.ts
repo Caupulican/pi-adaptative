@@ -137,9 +137,12 @@ export const BOT_TEAM = {
 	/** A record of the bot's home (`record`, its words) did not read; it was set aside beside itself. */
 	botHomeRecordSetAside: (agentId: string, record: string, file: string, reason: string) =>
 		`Bot ${agentId}: ${record} could not be read (${reason}) and was set aside as ${file}.unreadable.`,
-	/** A record of the bot's home (`record`, its words) did not read and could not be set aside: it stays, read again each time. */
-	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string) =>
-		`Bot ${agentId}: ${record} could not be read (${reason}) nor set aside (${file}); it stays in place and is read, and told, again at every read.`,
+	/**
+	 * A record of the bot's home (`record`, its words) did not read and could not be set aside: it stays, is not counted
+	 * as waiting, and is read again on a backoff of at most `maxMinutes`, told once.
+	 */
+	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string, maxMinutes: number) =>
+		`Bot ${agentId}: ${record} could not be read (${reason}) nor set aside (${file}); it stays in place, is not counted as waiting, and is read again at most ${maxMinutes} minutes apart until it reads, told only this once.`,
 	/**
 	 * The owner's stop could not be written to the bot's home: only this running process holds it (quitting it drops the
 	 * stop), and applies it only while the bot's work stands where it was when the stop was made.
@@ -152,9 +155,12 @@ export const BOT_TEAM = {
 	/** An owner's stop in the bot's inbox did not read: it was set aside and stops nothing. */
 	botInboxStopUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an owner's stop in its inbox could not be read (${reason}) and was set aside as ${file}.unreadable; it stops nothing, so send the stop again if it is still wanted.`,
-	/** An owner's stop in the bot's inbox did not read and could not be set aside: it stays in place and stops nothing. */
-	botInboxStopNotSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: an owner's stop in its inbox could not be read (${reason}) nor set aside (${file}); it stops nothing, stays in place, and is read and told again at every read.`,
+	/**
+	 * An owner's stop in the bot's inbox did not read and could not be set aside: it stays in place, stops nothing, is not
+	 * counted as waiting, and is read again on a backoff of at most `maxMinutes`, told once.
+	 */
+	botInboxStopNotSetAside: (agentId: string, file: string, reason: string, maxMinutes: number) =>
+		`Bot ${agentId}: an owner's stop in its inbox could not be read (${reason}) nor set aside (${file}); it stops nothing, stays in place, is not counted as waiting, and is read again at most ${maxMinutes} minutes apart, told only this once.`,
 	/** The owner's stop was written, but the older stops it replaces could not be listed or removed: they are taken with it. */
 	botStopOlderLeft: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop was recorded, but the older stops it replaces could not be listed or removed (${reason}); they are taken with it.`,

@@ -35,6 +35,7 @@ import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
+import { fileIdentity } from "./bot-home-records.ts";
 import type { RemoteBotHost } from "./bot-host-state.ts";
 import { type BotInboxItem, botInboxStopNames, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
@@ -126,18 +127,18 @@ type SavedUsageRead =
 
 /**
  * What the host knows of each closed bot's saved session file for its usage wait (`readSavedUsageStop`): read again only
- * once the file's identity (device, inode, size, modification time, taken before the read) changed, so an unchanged
+ * once the file's identity (`fileIdentity`, taken before the read) changed, so an unchanged
  * transcript is not parsed at every attach and host change. A file that did not read is kept with the identity it failed
  * on, reported once. What the stop holds alone is kept, one record per bot, none when it holds no stop.
  */
 class SavedUsageStopLedger {
 	private readonly reads = new Map<
 		string,
-		{ readonly file: string; readonly identity: string; readonly read: SavedUsageRead }
+		{ readonly file: string; readonly identity: string | undefined; readonly read: SavedUsageRead }
 	>();
 
 	read(agentId: string, file: string, agentDir: string): SavedUsageRead {
-		const identity = savedFileIdentity(file);
+		const identity = fileIdentity(file);
 		const known = this.reads.get(agentId);
 		if (known?.file === file && known.identity === identity)
 			return known.read.kind === "unreadable" ? { ...known.read, fresh: false } : known.read;
@@ -154,16 +155,6 @@ class SavedUsageStopLedger {
 	/** The bot's session loaded, or the bot was released: its file is read again when next asked. */
 	forget(agentId: string): void {
 		this.reads.delete(agentId);
-	}
-}
-
-/** A file's device, inode, size and modification time; a stat that fails names its error code. */
-function savedFileIdentity(file: string): string {
-	try {
-		const { dev, ino, size, mtimeMs } = statSync(file);
-		return `${dev}:${ino}:${size}:${mtimeMs}`;
-	} catch (error) {
-		return `!${(error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.message : String(error))}`;
 	}
 }
 

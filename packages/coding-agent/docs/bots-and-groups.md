@@ -198,7 +198,11 @@ directory the message was sent from: every process lists the inboxes of the bots
 happens without the owner's next message even where the watch over the bot homes does not fire (a bot whose session
 failed to open for another reason than its model, such as an unreadable session file, is tried again by that listing only
 once a new message waits or its record changed; a process start or another host's change tries it at once); a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
-least once: a host killed after its session took a message and before it deleted the file gives it again. Like the session
+least once: a host killed after its session took a message and before it deleted the file gives it again. An inbox file
+that does not read is set aside as `<name>.unreadable` and you are told; one that can be neither read nor set aside (a file
+the process may not read in a directory it may not write, a Windows sharing lock) stays in place, is told once, is counted
+as waiting by nothing (it holds back no message, opens no bot and keeps no session loaded), and is read again on a backoff
+of two seconds doubling to five minutes, or at once when the file changes. Like the session
 files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
 the bot homes. `/bot stop` ends everything of the bot's running when it is taken: its turn in flight, its plans, the attempts and queued
 work of its worker tasks and the jobs its sessions placed on other machines (a session file in its home that is a

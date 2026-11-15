@@ -128,16 +128,16 @@ export const BOT_TEAM = {
 	},
 	botHomeRecordSetAside: (agentId: string, record: string, file: string, reason: string) =>
 		`Bot ${agentId}: não foi possível ler ${record} (${reason}); o arquivo foi separado como ${file}.unreadable.`,
-	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string) =>
-		`Bot ${agentId}: não foi possível ler ${record} (${reason}) nem separar o arquivo ${file}; ele continua no lugar e é lido, e avisado, de novo a cada leitura.`,
+	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string, maxMinutes: number) =>
+		`Bot ${agentId}: não foi possível ler ${record} (${reason}) nem separar o arquivo ${file}; ele continua no lugar, não conta como esperando e é lido de novo, com no máximo ${maxMinutes} minutos de intervalo, até ser lido; este aviso é dado só uma vez.`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); só este processo em execução a mantém, então ela não chega a nenhum outro processo, é descartada se este processo for encerrado e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e se aplica só ao trabalho do bot neste processo.`,
 	botInboxStopUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) e foi separada como ${file}.unreadable; ela não para nada, então envie a parada de novo se ainda a quiser.`,
-	botInboxStopNotSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) nem separada (${file}); ela não para nada, continua no lugar e é lida e avisada de novo a cada leitura.`,
+	botInboxStopNotSetAside: (agentId: string, file: string, reason: string, maxMinutes: number) =>
+		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) nem separada (${file}); ela não para nada, continua no lugar, não conta como esperando e é lida de novo com no máximo ${maxMinutes} minutos de intervalo; este aviso é dado só uma vez.`,
 	botStopOlderLeft: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono foi registrada, mas as paradas anteriores que ela substitui não puderam ser listadas ou removidas (${reason}); elas são tomadas junto com ela.`,
 	botSweepFailed: (agentId: string, reason: string) =>
