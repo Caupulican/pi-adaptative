@@ -6,6 +6,7 @@
  */
 import { harnessLog } from "../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import {
@@ -82,6 +83,21 @@ export class SessionReplacementCallbackError extends Error {
 export function hostedSessionRefusal(error: SessionHostedError): string {
 	const words = interfaceText().sessions.hosted;
 	return error.holder.role === "bot-host" ? words.bot(error.holder.pid) : words.phone(error.holder.pid);
+}
+
+/**
+ * The owner's words refusing `manager`'s session when a channel or bot host holds it, before anything writes to it;
+ * undefined when none does (or it is not persisted). A registry that does not read is thrown.
+ */
+export function hostedSessionRefusalOf(manager: SessionManager): string | undefined {
+	if (!manager.isPersisted()) return undefined;
+	try {
+		refuseHostedSession(manager.getStorageRoots().orchestrationHome, manager.getSessionId());
+		return undefined;
+	} catch (error) {
+		if (error instanceof SessionHostedError) return hostedSessionRefusal(error);
+		throw error;
+	}
 }
 
 /**

@@ -22,7 +22,12 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
-import { managerSessionHomeNow, newSessionStorageRoots, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
+import {
+	managerSessionHomeNow,
+	newSessionStorageRoots,
+	retryOnSessionHomeChange,
+	sessionStorageRootsOfFile,
+} from "./orchestration-homes.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import {
@@ -1007,10 +1012,9 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const previousSessionFile = this.session.sessionFile;
 		const sessionManager = SessionManager.open(sessionPath, roots, undefined, options?.cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
-		const prepared = await this.prepareReplacement(
-			sessionManager,
-			{ type: "session_start", reason: "resume", previousSessionFile },
-			undefined,
+		// A bot session its host moved between this open and the lease is opened again in its home now, once.
+		const prepared = await retryOnSessionHomeChange(sessionManager, (manager) =>
+			this.prepareReplacement(manager, { type: "session_start", reason: "resume", previousSessionFile }, undefined),
 		);
 		await this.commitReplacement(prepared, {
 			reason: "resume",

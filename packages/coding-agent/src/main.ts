@@ -64,7 +64,7 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
-import { refuseHostedSession, SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
+import { retryOnSessionHomeChange } from "./core/orchestration-homes.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
@@ -92,7 +92,7 @@ import {
 } from "./core/session-manager-factory.ts";
 import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
-import { hostedSessionRefusal } from "./core/session-switch-failures.ts";
+import { hostedSessionRefusalOf } from "./core/session-switch-failures.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { describeCause, neutralizeControls, TerminalWarnings } from "./core/terminal-warnings.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -777,13 +777,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	// A session a channel or bot host holds is refused with its one message before `--name` or the session writes to it.
-	try {
-		if (sessionManager.isPersisted())
-			refuseHostedSession(sessionManager.getStorageRoots().orchestrationHome, sessionManager.getSessionId());
-	} catch (error) {
-		if (error instanceof SessionHostedError) refuseInvocation(hostedSessionRefusal(error));
-		throw error;
-	}
+	const hosted = hostedSessionRefusalOf(sessionManager);
+	if (hosted !== undefined) refuseInvocation(hosted);
 	if (parsed.name !== undefined) {
 		const name = parsed.name.trim();
 		if (!name) {
@@ -1039,12 +1034,14 @@ export async function main(args: string[], options?: MainOptions) {
 	time("createRuntime");
 	// The warnings a quitting session still holds: the host that owns the terminal decides where they are shown (see the modes).
 	const terminalWarnings = new TerminalWarnings();
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: sessionManager.getCwd(),
-		agentDir,
-		sessionManager,
-		onTerminalWarnings: (warnings) => terminalWarnings.write(warnings),
-	});
+	const runtime = await retryOnSessionHomeChange(sessionManager, (manager) =>
+		createAgentSessionRuntime(createRuntime, {
+			cwd: manager.getCwd(),
+			agentDir,
+			sessionManager: manager,
+			onTerminalWarnings: (warnings) => terminalWarnings.write(warnings),
+		}),
+	);
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
 	if (runtimeRestart && session.sessionId !== runtimeRestart.sessionId) {

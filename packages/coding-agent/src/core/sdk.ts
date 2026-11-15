@@ -82,7 +82,7 @@ import {
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
-import { managerSessionHomeNow } from "./orchestration-homes.ts";
+import { canonicalPath, managerSessionHomeNow } from "./orchestration-homes.ts";
 import { currentProviderLane } from "./provider-admission/lane-context.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import { getAttributionHeaders } from "./provider-attribution-headers.ts";
@@ -378,7 +378,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const agentDir = resolvePath(
 		options.sessionManager?.getStorageRoots().agentDir ?? options.agentDir ?? getAgentDir(),
 	);
-	if (options.agentDir && resolvePath(options.agentDir) !== agentDir)
+	if (options.agentDir && canonicalPath(options.agentDir) !== canonicalPath(agentDir))
 		throw new Error("createAgentSession: agentDir is not the directory its session manager's storage roots name.");
 	let resourceLoader = options.resourceLoader;
 
