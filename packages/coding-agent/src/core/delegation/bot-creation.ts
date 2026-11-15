@@ -81,7 +81,8 @@ export function botToolListEntry(bot: PersistentBotRecord): BotToolListEntry {
 export interface BotToolPort {
 	/** Sends a message to a bot and returns at once; the bot's answer reaches the orchestrator as an event. */
 	ask(agentId: string, message: string): Promise<void>;
-	create(request: BotCreationRequest): CreatedBotView;
+	/** Creates a bot: the orchestrator's own, or with `forLeader` that leader's own bot (the record names it as creator). */
+	create(request: BotCreationRequest, forLeader: string | undefined): CreatedBotView;
 	/** Hands a goal to a leader; its one Outcome reaches the orchestrator as an event when the goal ends. */
 	lead(request: LeadRequest): LeadResult;
 	/** The bots the roster holds, each by the id the caller asks it by and the name its record shows. */

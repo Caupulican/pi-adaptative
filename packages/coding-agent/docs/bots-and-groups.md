@@ -262,7 +262,9 @@ Bots are created on the fly, for whatever purpose you have:
 
 - You create one with `/bot new <id> [--write] [model] [soul...]`.
 - The orchestrator (the root session, always the same one) creates one with its `bot` tool: `action create` with an
-  `agentId`, a `soul` (the bot's standing instructions), an optional `model` and `canWrite`.
+  `agentId`, a `soul` (the bot's standing instructions), an optional `model` and `canWrite`. With `forLeader` (a leader's
+  id) the bot is that leader's own: the store names the leader as its creator, and the leader's message starts it under the
+  leader's goal.
 - A **leader** creates one with `bot_message` `action create`, with the same fields. Only you make a bot a leader:
   `/bot lead <id>` and `/bot unlead <id>` (they take effect from the bot's next worker start; `/bot list` marks a leader).
 

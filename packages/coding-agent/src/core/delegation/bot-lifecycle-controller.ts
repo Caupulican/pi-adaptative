@@ -286,6 +286,28 @@ export class BotLifecycleController {
 	}
 
 	/**
+	 * The orchestrator's `bot create`: a bot of its own, or with `forLeader` a bot of that leader's (the leader asked for
+	 * it). The record names the leader as creator, so the leader's send starts it under the leader's goal; it writes only
+	 * when the leader can, and counts toward the bots the leader keeps.
+	 */
+	createBot(request: BotCreationRequest, forLeader: string | undefined): CreatedBotView {
+		const store = this.host.getBotTeamStore();
+		store.reload();
+		if (forLeader === undefined) return this.saveNewBot(store, request, { createdBy: "root", mayWrite: true }, false);
+		const leader = store.getBot(normalizeBotOrTeamId(forLeader, "forLeader"));
+		if (leader?.leader !== true || leader.retired === true)
+			throw new Error(
+				`${forLeader} is not a leader, so no bot is made for it: name a leader (bot list marks them), or leave forLeader out.`,
+			);
+		return this.saveNewBot(
+			store,
+			request,
+			{ createdBy: leader.agentId, mayWrite: leader.canWrite === true, max: MAX_BOTS_PER_LEADER },
+			false,
+		);
+	}
+
+	/**
 	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
 	 * cannot make a standing leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
 	 * A goal leader (`bot lead` without agentId, appointed by the orchestrator or by a leader) is created a leader, for its one goal.
@@ -297,17 +319,6 @@ export class BotLifecycleController {
 	): CreatedBotView {
 		const store = this.host.getBotTeamStore();
 		store.reload();
-		const agentId = normalizeBotOrTeamId(
-			request.agentId ??
-				suggestBotId(
-					request.description ?? request.soul,
-					new Set([
-						...RESERVED_BOT_CREATOR_IDS,
-						...store.listBots({ includeRetired: true }).map((bot) => bot.agentId),
-					]),
-				),
-			"agentId",
-		);
 		let createdBy = "root";
 		let mayWrite = true;
 		if (creator.kind === "leader") {
@@ -324,8 +335,38 @@ export class BotLifecycleController {
 			createdBy = leader.agentId;
 			mayWrite = leader.canWrite === true;
 		}
-		if (request.canWrite === true && !mayWrite)
-			throw new Error(`${createdBy} cannot give a bot write access: it has none itself.`);
+		return this.saveNewBot(
+			store,
+			request,
+			{ createdBy, mayWrite, ...(creator.kind === "leader" ? { max: MAX_BOTS_PER_LEADER } : {}) },
+			options?.goalLeader === true,
+		);
+	}
+
+	/**
+	 * Saves a new bot for its owner, read from a reloaded store: `createdBy` names it on the record, `mayWrite` whether the
+	 * bot may be granted write access, and `max` bounds the live bots that owner keeps.
+	 */
+	private saveNewBot(
+		store: PersistentBotTeamStore,
+		request: BotCreationRequest,
+		owner: { readonly createdBy: string; readonly mayWrite: boolean; readonly max?: number },
+		goalLeader: boolean,
+	): CreatedBotView {
+		const { createdBy } = owner;
+		const agentId = normalizeBotOrTeamId(
+			request.agentId ??
+				suggestBotId(
+					request.description ?? request.soul,
+					new Set([
+						...RESERVED_BOT_CREATOR_IDS,
+						...store.listBots({ includeRetired: true }).map((bot) => bot.agentId),
+					]),
+				),
+			"agentId",
+		);
+		if (request.canWrite === true && !owner.mayWrite)
+			throw new Error(`${createdBy} cannot write, so a bot of its own cannot either; leave canWrite out.`);
 		const soul = request.soul === undefined ? undefined : normalizeBotSoul(request.soul);
 		const spec = this.host.resolveModelSpec(request.model);
 		const thinkingLevel = request.thinkingLevel ?? spec.thinkingLevel;
@@ -339,10 +380,10 @@ export class BotLifecycleController {
 				...(soul ? { soul } : {}),
 				...(request.description ? { description: request.description } : {}),
 				canWrite: request.canWrite === true,
-				leader: options?.goalLeader === true,
+				leader: goalLeader,
 				createdBy,
 			},
-			creator.kind === "leader" ? { createdBy, max: MAX_BOTS_PER_LEADER } : undefined,
+			owner.max === undefined ? undefined : { createdBy, max: owner.max },
 		);
 		harnessLog.info("bots", "a bot was created", () => ({
 			agentId: bot.agentId,

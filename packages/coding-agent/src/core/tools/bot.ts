@@ -73,13 +73,21 @@ const schema = Type.Object(
 		),
 		thinkingLevel: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
 		canWrite: Type.Optional(Type.Boolean({ description: "Let the bot edit files; read-only when omitted." })),
+		forLeader: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 128,
+				description:
+					"For create: a leader's id (bot list marks leaders). The new bot is that leader's own: its record names the leader as creator, it writes only when the leader can, and the leader's message to it starts it under the leader's goal. Leave it out for a bot of your own.",
+			}),
+		),
 		message: Type.Optional(Type.String({ minLength: 1, description: "For ask: what to tell the bot." })),
 		...LEAD_PROPERTIES,
 	},
 	{ additionalProperties: false },
 );
 
-const CREATE_FIELDS = ["soul", "description", "model", "thinkingLevel", "canWrite"] as const;
+const CREATE_FIELDS = ["soul", "description", "model", "thinkingLevel", "canWrite", "forLeader"] as const;
 
 /** The orchestrator's tool for persistent bots on the fly, and for handing a whole goal to a leader. */
 export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeof schema> {
@@ -87,7 +95,7 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 		name: BOT_TOOL_NAME,
 		label: "Bots",
 		description:
-			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader; a leader creates bots too, and every other bot asks a leader or you for one. For many bots at once, ask the spawner bot if the owner made one.",
+			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite; forLeader makes it a leader's own bot), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader; a leader creates bots too, and every other bot asks a leader or you for one. For many bots at once, ask the spawner bot if the owner made one.",
 		promptSnippet: "Create, list or message bots, or hand a goal to a leader",
 		parameters: schema,
 		async execute(_toolCallId, input, signal) {
@@ -115,12 +123,12 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 				return { content: [{ type: "text", text: JSON.stringify(sent) }], details: sent };
 			}
 			if (input.action === "list") {
-				if (input.agentId || input.soul || input.model || input.canWrite !== undefined)
+				if (input.agentId || input.soul || input.model || input.canWrite !== undefined || input.forLeader)
 					throw new Error("List accepts only action.");
 				const bots = port.list();
 				return { content: [{ type: "text", text: JSON.stringify({ bots }) }], details: { bots } };
 			}
-			const created = port.create(botCreationRequestFrom(input));
+			const created = port.create(botCreationRequestFrom(input), input.forLeader);
 			return { content: [{ type: "text", text: JSON.stringify(created) }], details: created };
 		},
 	};
