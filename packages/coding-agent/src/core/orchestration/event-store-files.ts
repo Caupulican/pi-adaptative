@@ -9,6 +9,8 @@ import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { OrchestrationEventStoreError } from "./event-store-errors.ts";
 
 export const MAX_CURSOR_BYTES = 64 * 1024;
+/** The widest tail a store may be configured with; one event file is read within the configured tail bound, so within this. */
+export const MAX_CONFIGURED_TAIL_BYTES = 16 * 1024 * 1024;
 
 export interface EventCursor {
 	version: 1;

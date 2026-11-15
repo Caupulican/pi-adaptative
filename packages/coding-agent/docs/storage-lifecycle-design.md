@@ -23,7 +23,9 @@ runtime copies cheap, and it does not by itself fix a stall.
   `sessionRootMailboxFile`, derive separate control-plane bundles from parent-session identity.
 - [`orchestration/event-store.ts`](../src/core/orchestration/event-store.ts), `OrchestrationEventStore`,
   uses a session cursor file lock, event files, bounded tails, and projection snapshots. A plan from a newer
-  build is kept verbatim in a carry file beside each snapshot (`snapshot-carry-file.ts`, `plan/plan-carry.ts`).
+  build is kept verbatim in an append-only chain of chunk files under `carried/`, named by a manifest beside each
+  snapshot (`snapshot-carry-file.ts`, `plan/plan-carry.ts`); each chunk is within the per-event bound, so the carry never
+  fails a compaction.
 - [`process-matrix/store.ts`](../src/core/process-matrix/store.ts), `entryPath`, stores one JSON entry
   per process identity. It is not a shared lane SQLite database.
 - [`worktree-sync/store.ts`](../src/core/worktree-sync/store.ts), `syncStorePaths`, locates repository

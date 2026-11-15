@@ -32,6 +32,7 @@ import {
 import {
 	type EventCursor,
 	hasExactFields,
+	MAX_CONFIGURED_TAIL_BYTES,
 	MAX_CURSOR_BYTES,
 	parseCursor,
 	readIfChanged,
@@ -42,12 +43,14 @@ import {
 import { boundedIdempotencyEvents, indexIdempotentEvent } from "./event-store-idempotency.ts";
 import { withSessionBundleAdmission, withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
 import {
+	type CarriedEntry,
 	type CompactionBasis,
 	type CompactionFold,
-	carriedFileName,
+	carriedEntries,
 	isCarriedFileName,
-	readCarriedFile,
-	serializeCarriedFile,
+	pruneCarried,
+	readCarriedManifest,
+	writeCarried,
 } from "./snapshot-carry-file.ts";
 
 const EVENT_FILE_PATTERN = /^(\d{16})\.json$/;
@@ -56,7 +59,6 @@ const DEFAULT_MAX_TAIL_EVENTS = 256;
 const DEFAULT_MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_IDEMPOTENCY_EVENTS = 512;
 const MAX_CONFIGURED_TAIL_EVENTS = 1_024;
-const MAX_CONFIGURED_TAIL_BYTES = 16 * 1024 * 1024;
 const MAX_CONFIGURED_IDEMPOTENCY_EVENTS = 1_024;
 const MAX_EVENT_DIRECTORY_ENTRIES = 2_048;
 const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
@@ -349,6 +351,7 @@ export class OrchestrationEventStore {
 	readonly idempotencyDir: string;
 	readonly cursorPath: string;
 	readonly snapshotsDir: string;
+	readonly carriedDir: string;
 	readonly baselinePath: string;
 	private readonly now: () => string;
 	private readonly createEventId: () => string;
@@ -373,6 +376,7 @@ export class OrchestrationEventStore {
 		this.idempotencyDir = join(this.rootDir, "idempotency");
 		this.cursorPath = join(this.rootDir, "cursor.json");
 		this.snapshotsDir = join(this.rootDir, "snapshots");
+		this.carriedDir = join(this.rootDir, "carried");
 		this.baselinePath = join(this.rootDir, "projection-baseline.json");
 		this.now = options.now ?? (() => new Date().toISOString());
 		this.createEventId = options.createEventId ?? randomUUID;
@@ -615,10 +619,13 @@ export class OrchestrationEventStore {
 	}
 
 	/** The published snapshot, with the carry bound to it (`snapshot-carry-file.ts`) when one is. */
-	readProjectionSnapshot(): { throughOrdinal: number; projection: JsonObject; carried?: JsonObject } | undefined {
+	readProjectionSnapshot():
+		| { throughOrdinal: number; projection: JsonObject; carried?: ReadonlyMap<string, CarriedEntry> }
+		| undefined {
 		const snapshot = this.readProjectionSnapshotUnlocked();
 		if (!snapshot) return undefined;
-		const carried = readCarriedFile(this.snapshotsDir, snapshot.throughOrdinal, snapshot.digest);
+		const manifest = readCarriedManifest(this.snapshotsDir, snapshot.throughOrdinal, snapshot.digest);
+		const carried = manifest && carriedEntries(this.carriedDir, manifest);
 		return { throughOrdinal: snapshot.throughOrdinal, projection: structuredClone(snapshot.projection), carried };
 	}
 
@@ -695,10 +702,12 @@ export class OrchestrationEventStore {
 							[...retainedByKey.values()],
 							this.maxIdempotencyEvents,
 						);
+						const priorCarried =
+							prior && readCarriedManifest(this.snapshotsDir, prior.throughOrdinal, prior.digest);
 						const folded = fold({
 							prior: prior && {
 								projection: prior.projection,
-								carried: readCarriedFile(this.snapshotsDir, prior.throughOrdinal, prior.digest),
+								carried: new Set(Object.keys(priorCarried?.chains ?? {})),
 							},
 							tail,
 						});
@@ -732,12 +741,9 @@ export class OrchestrationEventStore {
 							"Orchestration cursor",
 						);
 						// The carry is written before the baseline that binds it, as the snapshot is (`snapshot-carry-file.ts`).
-						const carriedFile = folded.carried && carriedFileName(throughOrdinal);
-						if (carriedFile) {
-							const carried = canonicalJsonObject(folded.carried, "Orchestration carried snapshot file");
-							const serializedCarried = serializeCarriedFile(throughOrdinal, digest, carried);
-							writeFileAtomicSync(join(this.snapshotsDir, carriedFile), serializedCarried, { fs: this.fs });
-						}
+						const carried =
+							folded.carried &&
+							writeCarried(this, throughOrdinal, digest, priorCarried, folded.carried, this.fs);
 						writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
 						writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
 						this.baselineRead = undefined;
@@ -750,9 +756,10 @@ export class OrchestrationEventStore {
 							if (ordinal <= throughOrdinal) this.unlinkManagedFile(join(this.eventsDir, name));
 						}
 						for (const name of this.snapshotFileNamesUnlocked()) {
-							if (name !== snapshotFile && name !== carriedFile)
+							if (name !== snapshotFile && name !== carried?.file)
 								this.unlinkManagedFile(join(this.snapshotsDir, name));
 						}
+						pruneCarried(this.carriedDir, carried?.manifest, this.fs);
 						writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
 						this.cursorRead = undefined;
 						this.verifiedSnapshotBaseline = undefined;

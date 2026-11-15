@@ -1,4 +1,3 @@
-import type { JsonObject } from "../autonomy/contracts.ts";
 import { projectionWithCarriedPlans } from "../plan/plan-carry.ts";
 import type { OrchestrationEvent } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
@@ -8,7 +7,7 @@ import { projectOrchestrationEvents, reduceOrchestrationEvent } from "./task-run
 import { DurableTaskRuntimeError, type TaskRuntimeProjection } from "./task-runtime-state.ts";
 
 /** A published snapshot's projection, with the plans its carry holds rebuilt over it (`plan-carry.ts`). */
-function projectionOfSnapshot(snapshot: { throughOrdinal: number; projection: JsonObject; carried?: JsonObject }) {
+function projectionOfSnapshot(snapshot: NonNullable<ReturnType<OrchestrationEventStore["readProjectionSnapshot"]>>) {
 	return projectionWithCarriedPlans(
 		projectionFromSnapshot(snapshot.projection, snapshot.throughOrdinal),
 		snapshot.carried,

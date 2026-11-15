@@ -1,53 +1,34 @@
 /**
  * A plan a newer build wrote, carried whole across this build's compactions. This build keeps such a plan by its identity
  * (`isPlanCarried`), and its snapshot holds only that identity, which a build up to 0.104.65 reads as before. What the
- * plan is stays verbatim in the carry file beside the snapshot (`orchestration/snapshot-carry-file.ts`): per plan, its
- * base (the plans-map entry of the snapshot a compaction replaces, or the base the carry of that snapshot already kept)
- * and every `plan.*` event of it since, in journal order. When the session is read, each carried plan is rebuilt over the
- * snapshot's identity from that base and those events (`projectionWithCarriedPlans`) when the build decodes the plan's
- * latest record; a build that does not keeps the snapshot's identity without replaying anything, and each compaction carries
- * the plan on until a build that knows it opens the session.
+ * plan is stays verbatim in its carried chain beside the snapshot (`orchestration/snapshot-carry-file.ts`): its base (the
+ * plans-map entry of the snapshot the compaction that started the chain replaced) and every `plan.*` event of it since,
+ * in journal order, each compaction appending the events it folds. When the session is read, a carried plan whose
+ * snapshot identity is of a version the reading build decodes (the identity an older build, this one, wrote) is rebuilt
+ * from that base and those events (`projectionWithCarriedPlans`); a build that does not decode it keeps the identity
+ * without reading the chain, and each compaction carries the plan on until a build that knows it opens the session.
  */
 
-import type { JsonObject } from "../autonomy/contracts.ts";
-import { isOrchestrationEvent, type OrchestrationEvent, toJsonObject } from "../orchestration/contracts.ts";
-import type { CompactionBasis, CompactionFold } from "../orchestration/snapshot-carry-file.ts";
-import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
+import type { OrchestrationEvent } from "../orchestration/contracts.ts";
+import { toJsonObject } from "../orchestration/contracts.ts";
+import type {
+	CarriedEntry,
+	CarriedWrite,
+	CompactionBasis,
+	CompactionFold,
+} from "../orchestration/snapshot-carry-file.ts";
+import { record } from "../orchestration/task-runtime-projection.ts";
 import { DurableTaskRuntimeError, type TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { planRecordFromValue, planRuntimeStateFromValue } from "./plan-codec.ts";
-import { isPlanCarried, isPlanFromNewerBuild, type PlanRuntimeState, type StoredPlanRecord } from "./plan-graph.ts";
+import { planRuntimeStateFromValue } from "./plan-codec.ts";
+import { isPlanCarried, isPlanLostToOlderBuild, type PlanRuntimeState } from "./plan-graph.ts";
 import { isPlanEventType, reducePlanEvent } from "./plan-reducer.ts";
-
-/** One carried plan: the entry it is rebuilt from (none when its `plan.recorded` is among the events) and its events. */
-interface CarriedPlan {
-	readonly base?: JsonObject;
-	readonly events: readonly OrchestrationEvent[];
-}
 
 const LABEL = "carried plans";
 
-function carriedPlansFromValue(value: JsonObject | undefined): Record<string, CarriedPlan> {
-	if (value === undefined) return {};
-	const plans = record(exactRecord(value, LABEL, ["plans"]).plans, `${LABEL}.plans`);
-	const decoded: Record<string, CarriedPlan> = {};
-	for (const [planId, entry] of Object.entries(plans)) {
-		const label = `${LABEL}.plans.${planId}`;
-		const input = exactRecord(entry, label, ["base", "events"]);
-		if (!Array.isArray(input.events)) throw new DurableTaskRuntimeError(`${label}.events is not a list.`);
-		const events = input.events.map((event, index) => {
-			if (isOrchestrationEvent(event) && isPlanEventType(event.type) && event.aggregateId === planId) return event;
-			throw new DurableTaskRuntimeError(`${label}.events[${index}] is not an event of the plan.`);
-		});
-		const base = input.base === undefined ? undefined : toJsonObject(record(input.base, `${label}.base`));
-		decoded[planId] = { ...(base ? { base } : {}), events };
-	}
-	return decoded;
-}
-
 /**
- * The fold of a compaction through `state`: its projection as the snapshot, and each carried plan's base and events.
- * A plan's base is the one the replaced snapshot's carry kept, else that snapshot's own entry of it; the plan's events in
- * the folded tail follow the events already kept.
+ * The fold of a compaction through `state`: its projection as the snapshot, and per carried plan the plan events of the
+ * folded tail, appended to the plan's chain when the replaced snapshot carried it, else starting one from that snapshot's
+ * entry of the plan (none when the plan was recorded within the tail).
  */
 export function carriedPlansFold(state: TaskRuntimeProjection): (basis: CompactionBasis) => CompactionFold {
 	return (basis) => foldWithCarriedPlans(state, basis);
@@ -55,54 +36,47 @@ export function carriedPlansFold(state: TaskRuntimeProjection): (basis: Compacti
 
 function foldWithCarriedPlans(state: TaskRuntimeProjection, basis: CompactionBasis): CompactionFold {
 	const projection = toJsonObject(state);
-	const kept = carriedPlansFromValue(basis.prior?.carried);
 	// A snapshot written before plans existed has no plans map.
 	const prior = basis.prior?.projection.plans;
 	const priorPlans = prior === undefined ? {} : record(prior, "replaced snapshot plans");
-	const plans: Record<string, CarriedPlan> = {};
+	const carried: Record<string, CarriedWrite> = {};
 	for (const [planId, plan] of Object.entries(state.plans)) {
 		if (!isPlanCarried(plan.record)) continue;
+		const events = basis.tail.filter((event) => isPlanEventType(event.type) && event.aggregateId === planId);
 		const priorEntry = priorPlans[planId];
-		const base = kept[planId] ? kept[planId].base : priorEntry === undefined ? undefined : toJsonObject(priorEntry);
-		const events = [
-			...(kept[planId]?.events ?? []),
-			...basis.tail.filter((event) => isPlanEventType(event.type) && event.aggregateId === planId),
-		];
-		plans[planId] = { ...(base ? { base } : {}), events };
+		carried[planId] =
+			basis.prior?.carried.has(planId) || priorEntry === undefined
+				? { events }
+				: { base: toJsonObject(priorEntry), events };
 	}
-	return Object.keys(plans).length === 0 ? { projection } : { projection, carried: toJsonObject({ plans }) };
-}
-
-/** The latest record of a carried plan: that of its last `plan.recorded`, else its base's; routed by version first. */
-function latestRecordOf(carry: CarriedPlan, label: string): StoredPlanRecord | undefined {
-	for (let index = carry.events.length - 1; index >= 0; index--) {
-		const event = carry.events[index] as OrchestrationEvent;
-		if (event.type === "plan.recorded") return planRecordFromValue(event.payload.record, `${label}.events[${index}]`);
-	}
-	return carry.base && planRecordFromValue(carry.base.record, `${label}.base.record`);
+	return Object.keys(carried).length === 0 ? { projection } : { projection, carried };
 }
 
 /**
- * The projection a snapshot and its carry hold: each carried plan the snapshot keeps by its identity, and whose latest
- * record this build decodes, is rebuilt from its base and events through the same decoder and reducer the journal is read
- * with. One whose latest record this build does not decode stays the snapshot's identity (the snapshot already holds what
- * this build reads of it, its closing included). A plan the snapshot no longer has, or holds whole, is read as the snapshot
- * holds it.
+ * The projection a snapshot and its carry hold: each carried plan whose snapshot identity is of a version this build
+ * decodes is rebuilt from its base and events, through the same decoder and reducer the journal is read with. Any other
+ * carried plan stays the snapshot's identity (the snapshot already holds what this build reads of it, its closing
+ * included) and its chain is not read. A plan the snapshot no longer has, or holds whole, is read as the snapshot holds it.
  */
 export function projectionWithCarriedPlans(
 	state: TaskRuntimeProjection,
-	carried: JsonObject | undefined,
+	carried: ReadonlyMap<string, CarriedEntry> | undefined,
 ): TaskRuntimeProjection {
 	if (carried === undefined) return state;
 	const plans: Record<string, PlanRuntimeState> = { ...state.plans };
-	for (const [planId, carry] of Object.entries(carriedPlansFromValue(carried))) {
-		const identity = plans[planId];
-		if (!identity || !isPlanFromNewerBuild(identity.record)) continue;
-		const latest = latestRecordOf(carry, `${LABEL}.plans.${planId}`);
-		if (!latest || isPlanFromNewerBuild(latest)) continue;
+	let rebuilt = false;
+	for (const [planId, entry] of carried) {
+		if (!isPlanLostToOlderBuild(plans[planId]?.record)) continue;
+		rebuilt = true;
 		delete plans[planId];
-		if (carry.base) plans[planId] = planRuntimeStateFromValue(carry.base, `${LABEL}.plans.${planId}.base`);
-		for (const event of carry.events) reducePlanEvent(plans, state.tasks, event);
+		const base = entry.base();
+		if (base) plans[planId] = planRuntimeStateFromValue(base, `${LABEL}.${planId}.base`);
+		for (const event of entry.events()) reducePlanEvent(plans, state.tasks, planEventOf(planId, event));
 	}
-	return { ...state, plans };
+	return rebuilt ? { ...state, plans } : state;
+}
+
+function planEventOf(planId: string, event: OrchestrationEvent): OrchestrationEvent {
+	if (isPlanEventType(event.type) && event.aggregateId === planId) return event;
+	throw new DurableTaskRuntimeError(`${LABEL}.${planId} holds an event that is not one of the plan's.`);
 }
