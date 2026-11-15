@@ -9,7 +9,7 @@
 import { basename, join } from "node:path";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botSessionStorageRoots, sessionStorageRootsOfFile } from "../orchestration-homes.ts";
-import { moveBotSessionBundle } from "./bot-bundle-move.ts";
+import { type BotBundleMove, moveBotSessionBundle } from "./bot-bundle-move.ts";
 import type { BotHome } from "./bot-home.ts";
 import {
 	type BotPointerSetAsideReason,
@@ -23,8 +23,8 @@ import {
 export interface BotSessionOpenNotices {
 	/** The pointer did not count and was set aside as `file`. */
 	pointerSetAside(file: string, reason: BotPointerSetAsideReason): void;
-	/** The session's state could not be moved out of the owner's home; it is used there. */
-	notMoved(reason: string): void;
+	/** The session's state was not moved out of the owner's home (`BotBundleMove` `kept` says which home it uses). */
+	notMoved(kept: Extract<BotBundleMove, { kind: "kept" }>): void;
 }
 
 /** The session the pointer records, in the roots that hold it; a missing or empty file starts it under its id. */
@@ -64,7 +64,7 @@ export function openHostedBotSession(
 		return { sessionManager, continued: false };
 	}
 	const move = moveBotSessionBundle(agentDir, home.orchestrationHome, pointer.sessionId);
-	if (move.kind === "kept") notices.notMoved(move.reason);
+	if (move.kind === "kept") notices.notMoved(move);
 	const sessionManager = openRecorded(agentDir, home, pointer, join(home.sessionsDir, pointer.file), cwd);
 	return { sessionManager, continued: true };
 }

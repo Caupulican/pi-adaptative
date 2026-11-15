@@ -162,8 +162,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: the record of which session it continues ${POINTER_SET_ASIDE[reason.kind](reason as never)} and was set aside as ${file}; it continues its newest session file, or a new session when it has none, recorded anew.`,
 	botWatchesNotCounted: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its saved session did not read (${reason}); its watches are not counted until it reads.`,
-	botSessionNotMoved: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own (${reason}); it keeps using it where it is.`,
+	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
+		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
+	botSessionStateNotMoved: (agentId: string) =>
+		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own, which lies on another device; it keeps using it in the main session's home.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its spend record could not be written (${reason}); it is written again with its next spend, and its spend is charged once it is.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>

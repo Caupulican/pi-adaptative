@@ -196,7 +196,8 @@ interface BotSessionEntry {
 
 /** What failed, in its own words: each cause of a failure that gathers several. */
 function errorText(error: unknown): string {
-	if (error instanceof AggregateError) return error.errors.map(errorText).join("; ");
+	if (error instanceof AggregateError)
+		return [error.message, ...error.errors.map(errorText)].filter(Boolean).join("; ");
 	return error instanceof Error ? error.message : String(error);
 }
 
@@ -678,10 +679,14 @@ export class BotSessionHost {
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
-				notMoved: (reason) => {
+				notMoved: (kept) => {
 					if (this.toldNotMoved.has(agentId)) return;
 					this.toldNotMoved.add(agentId);
-					this.ports.warn(words.botSessionNotMoved(agentId, reason));
+					this.ports.warn(
+						kept.reason === "in-both-homes"
+							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
+							: words.botSessionStateNotMoved(agentId),
+					);
 				},
 			});
 			const cancelled = cancelOtherSessionsWatches(

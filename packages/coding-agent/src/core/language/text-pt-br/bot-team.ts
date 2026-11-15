@@ -143,8 +143,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o registro de qual sessão ele continua ${POINTER_SET_ASIDE[reason.kind](reason as never)} e foi separado como ${file}; ele continua o arquivo de sessão mais recente, ou uma sessão nova quando não há nenhum, registrado de novo.`,
 	botWatchesNotCounted: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão salva dele não foi lida (${reason}); as esperas dele não são contadas até ela ser lida.`,
-	botSessionNotMoved: (agentId: string, reason: string) =>
-		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele (${reason}); ele continua usando-o onde está.`,
+	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
+		`Bot ${agentId}: o estado de orquestração da sessão dele está tanto na casa dele quanto na da sessão principal; ele usa o da casa dele, e a cópia da sessão principal fica sem uso em ${ownerBundle}.`,
+	botSessionStateNotMoved: (agentId: string) =>
+		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele, que fica em outro dispositivo; ele continua usando-o na casa da sessão principal.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o registro de gasto dele não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto, e o gasto é cobrado quando for.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
