@@ -617,8 +617,9 @@ async function stopRecordedLate(world: HarnessWorld, session: AgentSession): Pro
 		"J7 leg 2: this host took the stop recorded late once the other host gave the bot back",
 		world.io.waitForMutation(() => botInboxStopNames(world.agentDir, LATE).length === 0),
 	);
+	// The leg's warnings are asserted whole here and claimed, so the journey's close finds none of them unclassified.
 	expect(
-		shapes(world.warnings.slice(mark)),
+		shapes(world.warnings.splice(mark)),
 		"the stop recorded late is taken here once the bot is given back, and the owner is told nothing more",
 	).toEqual(["notRecorded", words.botStopRecordedLate(LATE)]);
 }
@@ -752,8 +753,9 @@ async function stopRecordedAtQuit(world: HarnessWorld): Promise<void> {
 			"J7 leg 2: a root of this process took the stop recorded at quit once the other host gave the bot back",
 			world.io.waitForMutation(() => botInboxStopNames(world.agentDir, QUITTER).length === 0),
 		);
+		// The leg's warnings are asserted whole here and claimed, so the journey's close finds none of them unclassified.
 		expect(
-			{ routed, warnings: shapes(world.warnings.slice(mark)) },
+			{ routed, warnings: shapes(world.warnings.splice(mark)) },
 			"the stop recorded at quit is taken once the bot is given back, and the owner is told nothing more",
 		).toEqual({ routed: [words.botStopRecordedLate(QUITTER)], warnings: ["notRecorded"] });
 	} finally {
