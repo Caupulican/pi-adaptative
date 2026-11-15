@@ -573,10 +573,13 @@ export class BotOwedWork {
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
+		// A stop the owner wrote while another process hosted it (`requestBotStop`) holds back the work it stopped: its
+		// workers and its usage wait open nothing until a host takes the stop (opened for anything else, it takes it first).
+		const stopWaiting = botInboxStopWaiting(agentDir, agentId);
 		// Its workers' work, and the next retry they wait on armed; a bundle it cannot read leaves the rest it is owed.
 		let workers = false;
 		try {
-			const facts = worked && this.workerFacts(agentId, worked.id);
+			const facts = worked && !stopWaiting ? this.workerFacts(agentId, worked.id) : undefined;
 			const now = ports.timers().now();
 			workers = facts !== undefined && owesWorkerWorkAt(facts, now);
 			this.armRetry(agentId, facts && nextWorkerRetryAt(facts, now));
@@ -584,7 +587,7 @@ export class BotOwedWork {
 			notResumed(error);
 		}
 		// A usage wait that ended continues the saved session's turn: owed only by a session that ran.
-		const usage = worked !== undefined && this.usageDue.has(agentId);
+		const usage = worked !== undefined && !stopWaiting && this.usageDue.has(agentId);
 		let unrun = "";
 		let unread = false;
 		try {

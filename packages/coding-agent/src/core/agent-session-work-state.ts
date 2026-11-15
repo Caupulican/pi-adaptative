@@ -102,7 +102,7 @@ export class AgentSessionWorkState {
 		};
 		return {
 			...deriveSessionWorkState(input),
-			...workerFacts(lanesInFlight, this.ports.backgroundLanes().getTaskRuntimeSnapshot(), input),
+			...workerFacts(lanesInFlight, () => this.ports.backgroundLanes().getTaskRuntimeSnapshot(), input),
 		};
 	}
 
@@ -159,12 +159,14 @@ export class AgentSessionWorkState {
  * The facts of the lanes in flight (`SessionWorkerFacts`), each worker lane read by its attempt in `snapshot`: leased or
  * running is running; suspended until a retry waits for it; queued, suspended for another reason or awaiting its result's
  * verification is other work. A lane with no attempt, or whose attempt the projection does not hold, counts as running.
+ * The projection is read only when a lane in flight names an attempt.
  */
 function workerFacts(
 	lanes: readonly LaneRecord[],
-	snapshot: TaskRuntimeProjection | undefined,
+	readSnapshot: () => TaskRuntimeProjection | undefined,
 	input: SessionWorkStateInput,
 ): SessionWorkerFacts {
+	const snapshot = lanes.some((lane) => lane.attemptId !== undefined) ? readSnapshot() : undefined;
 	let running = false;
 	let other = false;
 	let until: number | undefined;
