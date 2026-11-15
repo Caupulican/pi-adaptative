@@ -839,9 +839,8 @@ export class BotSessionHost {
 	 */
 	openOwed(): void {
 		this.owed.sweepInboxes();
-		const records = this.ports.store().listBots({ includeRetired: true });
-		this.releases.recoverOwed(records);
-		const bots = records.filter((record) => !record.retired);
+		this.releases.recoverOwed();
+		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
 		this.view.watch();
 		for (const bot of bots) this.owed.unhosted(bot.agentId);

@@ -348,6 +348,11 @@ export function botHistoryScanFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "history-scan.json");
 }
 
+/** `<agentDir>/state/bots/owed-releases` -- one entry per bot whose session release is owed (`bots/bot-owed-releases.ts`). */
+export function botOwedReleasesDir(agentDir: string): string {
+	return stateFile(agentDir, "bots", "owed-releases");
+}
+
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
 export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");

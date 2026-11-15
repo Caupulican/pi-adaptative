@@ -365,6 +365,9 @@ export const BOT_TEAM = {
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,
 	/** A bot's release (it was retired or left the session path) failed; its host runs it again until it is done. */
+	/** The owed-release journal (`bots/bot-owed-releases.ts`) did not read as a session opened the bots. */
+	botOwedReleasesUnread: (reason: string) =>
+		`The bots' owed session releases could not be read (${reason}); they are read again when a session next opens the bots.`,
 	botReleaseOwed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session's workers, watches and waiting messages were not all ended yet (${reason}); its host tries again until they are.`,
 	/** A change of the bot the host noticed itself (a refused run, an idle session) was not applied. */

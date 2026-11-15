@@ -6,8 +6,9 @@
  * once, until it is done or the bot is back on the session path; what it told of the work left behind a symbolic link is
  * told once for the release however often it runs (`LinkedSessionNotices`). A release a process left owed when it ended
  * (it retired the bot, then ended before the release finished, or while a retry waited) is taken up by the next host that
- * opens the bots ({@link BotRelease.recoverOwed}): the bot's record, retired or off the session path, is the debt's durable
- * mark, and what its home still holds of what a release ends is the debt itself.
+ * opens the bots ({@link BotRelease.recoverOwed}): the bot's entry in the owed-release journal (`bot-owed-releases.ts`),
+ * written when the release is prepared and removed when it is done, is the debt's durable mark, and what its home still
+ * holds of what a release ends is the debt itself.
  */
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -19,6 +20,7 @@ import { botFailureText } from "./bot-failure-words.ts";
 import { type BotInboxItem, refuseBotInboxMessage } from "./bot-inbox.ts";
 import { type LinkedSessionNotices, RELEASE_OPERATION } from "./bot-link-notices.ts";
 import { BotOpenRetries } from "./bot-open-retry.ts";
+import { clearOwedRelease, markOwedRelease, owedReleases } from "./bot-owed-releases.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
 import { closedBotWorkLeft, endClosedBotWork, endLoadedBotWork, readClosedBotSession } from "./bot-stop.ts";
@@ -91,6 +93,8 @@ export class BotRelease {
 	 * A release in two steps: what it changes is read now (the bot's session, its watches, its inbox), and a refusal or a
 	 * failed read throws here, before anything changed; the returned step changes it, once the caller's own change (a
 	 * retirement) is made, reading it again then, and never throws: what it could not finish stays owed ({@link finish}).
+	 * The release is marked owed in the journal here, before that change, so a process that ends before it finished leaves
+	 * it to the next host; a failed mark throws.
 	 */
 	prepare(agentId: string): () => void {
 		const { ports } = this;
@@ -99,6 +103,7 @@ export class BotRelease {
 		const sessionId = loaded?.session.sessionId ?? ports.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) ports.store().listRoutines({ sessionId, scope: "own-watches" });
 		ports.waiting(agentId);
+		markOwedRelease(ports.agentDir(), agentId);
 		return () => this.finish(agentId, sessionId, loaded !== undefined);
 	}
 
@@ -110,6 +115,7 @@ export class BotRelease {
 		try {
 			const record = this.ports.store().getBot(agentId);
 			if (record && !record.retired && this.ports.runsAsSession(record)) {
+				clearOwedRelease(this.ports.agentDir(), agentId);
 				this.owed.delete(agentId);
 				this.retries.forget(agentId);
 				this.ports.links.done(agentId, "release");
@@ -122,22 +128,33 @@ export class BotRelease {
 	}
 
 	/**
-	 * Takes up the releases another host left owed (see the module comment): each bot of `records` retired or off the
-	 * session path whose home still holds what a release ends ({@link leftBehind}) is released as an owed release is, run
-	 * again after a backoff until it is done. A bot whose release finished holds none of it and is left as it is, and one
-	 * another live process hosts is that process's to release (on the change it reads; a host that ends first leaves it to
-	 * the next). A read that fails leaves the release owed, the owner told once.
+	 * Takes up the releases another host left owed (see the module comment), read from the owed-release journal alone: each
+	 * bot with an entry whose home still holds what a release ends ({@link leftBehind}) is released as an owed release is,
+	 * run again after a backoff until it is done. The entry of a bot back on the session path, with no home, or whose home
+	 * holds none of it (its release finished) is removed. One another live process hosts is that process's to release (on
+	 * the change it reads; a host that ends first leaves its entry to the next). A read that fails leaves the release
+	 * owed, the owner told once; a journal that does not read is told to the owner, and read again at the next open.
 	 */
-	recoverOwed(records: readonly PersistentBotRecord[]): void {
-		for (const record of records) {
-			const { agentId } = record;
-			if ((!record.retired && this.ports.runsAsSession(record)) || !this.ports.hasHome(agentId)) continue;
+	recoverOwed(): void {
+		const { ports } = this;
+		let owed: readonly string[];
+		try {
+			owed = owedReleases(ports.agentDir());
+		} catch (error) {
+			ports.warn(interfaceText().botTeam.botOwedReleasesUnread(errorText(error)));
+			return;
+		}
+		for (const agentId of owed)
 			try {
-				if (!this.ports.heldElsewhere(agentId) && this.leftBehind(agentId)) this.releaseOwed(agentId);
+				const record = ports.store().getBot(agentId);
+				if ((record && !record.retired && ports.runsAsSession(record)) || !ports.hasHome(agentId))
+					clearOwedRelease(ports.agentDir(), agentId);
+				else if (ports.heldElsewhere(agentId)) continue;
+				else if (this.leftBehind(agentId)) this.releaseOwed(agentId);
+				else clearOwedRelease(ports.agentDir(), agentId);
 			} catch (error) {
 				this.owe(agentId, error);
 			}
-		}
 	}
 
 	/**
@@ -211,6 +228,7 @@ export class BotRelease {
 						ports,
 					),
 				);
+			clearOwedRelease(agentDir, agentId);
 			this.owed.delete(agentId);
 			this.retries.forget(agentId);
 			ports.links.done(agentId, "release");
