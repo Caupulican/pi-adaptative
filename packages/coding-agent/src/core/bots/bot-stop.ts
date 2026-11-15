@@ -23,7 +23,7 @@ import { readSessionHeaderResult } from "../../kernel/session/session-header.ts"
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { stopSessionWorkers, type WorkerFleetStop, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
+import { stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -56,20 +56,20 @@ export interface BotStopPorts {
 export interface HostedBotStopSession {
 	readonly goal: PersistedGoalStateHost;
 	readonly transcript: UsageWakeWriter;
-	readonly fleet: { cancelOwnFleet(stop: WorkerFleetStop): WorkerStopOutcome };
+	readonly fleet: { cancelOwnFleet(reasonCode: string): WorkerStopOutcome };
 }
 
 /**
- * The stop applied at `now` to a hosted bot's live session (its foreground turn already stopped by the host): its fleet's
- * work made by the stop cancelled (`cancelOwnFleet`), then its goal held and its usage wait declined as of when the stop
- * was made. What it left unended, by why.
+ * The stop applied at `now` to a hosted bot's live session (its foreground turn already stopped by the host): its whole
+ * fleet cancelled (`cancelOwnFleet`), then its goal held and its usage wait declined as of when the stop was made. What it
+ * left unended, by why.
  */
 export function applyOwnerStopToSession(
 	session: HostedBotStopSession,
 	stop: BotInboxStop,
 	now: number,
 ): WorkerStopOutcome {
-	const outcome = session.fleet.cancelOwnFleet(stop);
+	const outcome = session.fleet.cancelOwnFleet(stop.reasonCode);
 	holdPersistedGoalForOwnerStop(session.goal, stop.at, new Date(now).toISOString());
 	declineUsageWaitForOwner(session.transcript, stop.at, now);
 	return outcome;
@@ -118,18 +118,18 @@ function endWithOtherSessionsJobs(
 }
 
 /**
- * The work of bot `agentId`'s session this process has loaded, ended by `stop` as the owner's stop of a hosted bot ends
- * it, for a release of the bot (retired, or off the session path): its fleet (`cancelOwnFleet`), then the jobs its home's
- * other sessions placed. What it left unended.
+ * The work of bot `agentId`'s session this process has loaded, ended for `reasonCode` as the owner's stop of a hosted bot
+ * ends it, for a release of the bot (retired, or off the session path): its whole fleet (`cancelOwnFleet`), then the jobs
+ * its home's other sessions placed. What it left unended.
  */
 export function endLoadedBotWork(
 	agentDir: string,
 	agentId: string,
 	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
-	stop: WorkerFleetStop,
+	reasonCode: string,
 ): WorkerStopOutcome {
-	return endWithOtherSessionsJobs(agentDir, agentId, session.sessionId, stop.reasonCode, () =>
-		session.backgroundLanes.cancelOwnFleet(stop),
+	return endWithOtherSessionsJobs(agentDir, agentId, session.sessionId, reasonCode, () =>
+		session.backgroundLanes.cancelOwnFleet(reasonCode),
 	);
 }
 
@@ -182,16 +182,15 @@ export interface LoadedBotSession {
 }
 
 /**
- * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it runs
- * stopped for the owner when it began (`turnSince`, ms since the epoch; undefined while none runs) at or before the stop was
- * made, then {@link applyOwnerStopToSession}. A turn begun since is the bot's answer to the owner's next words, and runs on.
- * The stop applied, undefined when none waits; a failure throws with the stops left waiting.
+ * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it
+ * runs, when `turnRuns`, stopped for the owner, then {@link applyOwnerStopToSession}. The stop applied, undefined when
+ * none waits; a failure throws with the stops left waiting.
  */
 export function stopLoadedBot(
 	agentDir: string,
 	agentId: string,
 	{ session, transcript }: LoadedBotSession,
-	turnSince: number | undefined,
+	turnRuns: boolean,
 	ports: BotStopPorts,
 ): BotInboxStop | undefined {
 	const words = interfaceText().botTeam;
@@ -208,7 +207,7 @@ export function stopLoadedBot(
 		agentId,
 		session.sessionId,
 		(stop) => {
-			if (turnSince !== undefined && turnSince <= stop.at)
+			if (turnRuns)
 				void session
 					.abort(words.botTurnAbortReasons.ownerStopped)
 					.catch((error: unknown) =>
@@ -235,7 +234,7 @@ function stopClosedSession(
 ): WorkerStopOutcome {
 	const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
-	const { outcome } = cancelOwedWorkerWork(agentDir, bundle, placedBy, stop);
+	const { outcome } = cancelOwedWorkerWork(agentDir, bundle, placedBy, stop.reasonCode);
 	if (transcript) {
 		const now = ports.now();
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
@@ -266,7 +265,7 @@ function closedSessionWork(
 }
 
 /**
- * The work bot `agentId`'s closed session `saved` left, ended by `stop` as a stop of it while no process hosts it
+ * The work bot `agentId`'s closed session `saved` left, ended for `reasonCode` as a stop of it while no process hosts it
  * ends it ({@link cancelOwedWorkerWork}), under its host lock: its bundle's queued and recovered attempts and the jobs its
  * home's sessions placed. For a release of the bot (retired, or off the session path) with no session of it loaded here,
  * so nothing a later open of it would resume is left. What it left unended. A lock held (by the host of the bot, or by
@@ -276,13 +275,13 @@ export function endClosedBotWork(
 	agentDir: string,
 	agentId: string,
 	saved: SavedBotSession | undefined,
-	stop: WorkerFleetStop,
+	reasonCode: string,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
 		const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
-		return cancelOwedWorkerWork(agentDir, bundle, placedBy, stop).outcome;
+		return cancelOwedWorkerWork(agentDir, bundle, placedBy, reasonCode).outcome;
 	} finally {
 		taken.lock.release();
 	}
@@ -321,8 +320,8 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
 
 /**
  * The owner's stop of the workers of the bot session `bundle` names (none when the bot has no saved session) while no
- * process hosts the bot, written to its bundle in its home alone (`stopSessionWorkers`): every open plan and unended worker
- * attempt of the work made by `stop.at` closed or cancelled for its reason, so nothing opens the session for them. Their ends are recorded delivered by
+ * process hosts the bot, written to its bundle in its home alone (`stopSessionWorkers`): every open plan closed and every unended
+ * worker attempt cancelled for `reasonCode`, so nothing opens the session for them. Their ends are recorded delivered by
  * the session's next open, when its outbox is replayed (`owner_stopped` wakes no one). Then every job the sessions
  * `placedBy` (every session the bot's home holds) placed on another machine is ended in its record in `agentDir`
  * (`endPlacedJobsOfSessions`), so its executor stops and stops spending; the bundle's cancel comes first, so no open
@@ -333,20 +332,20 @@ export function cancelOwedWorkerWork(
 	agentDir: string,
 	bundle: { readonly home: OrchestrationHome; readonly sessionId: string } | undefined,
 	placedBy: ReadonlySet<string>,
-	stop: WorkerFleetStop,
+	reasonCode: string,
 ): { readonly cancelled: number; readonly outcome: WorkerStopOutcome; readonly placedEnded: number } {
 	const workers =
 		bundle === undefined
 			? { cancelled: 0, outcome: NOTHING_LEFT }
-			: cancelBundleWorkers(bundle.home, bundle.sessionId, stop);
-	const placedEnded = endPlacedJobsOfSessions(agentDir, placedBy, jobCancelReasonOf(stop.reasonCode));
+			: cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
+	const placedEnded = endPlacedJobsOfSessions(agentDir, placedBy, jobCancelReasonOf(reasonCode));
 	return { ...workers, placedEnded };
 }
 
 function cancelBundleWorkers(
 	home: OrchestrationHome,
 	sessionId: string,
-	stop: WorkerFleetStop,
+	reasonCode: string,
 ): { readonly cancelled: number; readonly outcome: WorkerStopOutcome } {
 	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return { cancelled: 0, outcome: NOTHING_LEFT };
 	const runtime = new DurableTaskRuntime({
@@ -357,11 +356,11 @@ function cancelBundleWorkers(
 		runtime,
 		undefined,
 		(attempt) => {
-			runtime.cancelAttempt(attempt.attemptId, stop.reasonCode);
+			runtime.cancelAttempt(attempt.attemptId, reasonCode);
 			cancelled++;
 			return false;
 		},
-		stop,
+		reasonCode,
 	);
 	return { cancelled, outcome };
 }

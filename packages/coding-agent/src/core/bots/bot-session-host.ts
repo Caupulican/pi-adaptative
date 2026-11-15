@@ -199,8 +199,6 @@ interface BotSessionEntry {
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
-	/** When the first of the prompts in flight was given (ms since the epoch); undefined while none is. */
-	promptedSince: number | undefined;
 	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
 	recheckWhenIdle: boolean;
 	/** Its turns' spend and outcome, each reported once per turn. */
@@ -349,7 +347,7 @@ export class BotSessionHost {
 		if (!entry) return false;
 		try {
 			const loaded = { session: entry.session, transcript: entry.sessionManager };
-			stopLoadedBot(this.ports.agentDir(), agentId, loaded, this.turnSince(entry), this.stopPorts());
+			stopLoadedBot(this.ports.agentDir(), agentId, loaded, this.isBusy(entry), this.stopPorts());
 			this.stopRetries.forget(agentId);
 			return true;
 		} catch (error) {
@@ -357,15 +355,6 @@ export class BotSessionHost {
 			this.stopRetries.arm(agentId, false);
 			return false;
 		}
-	}
-
-	/**
-	 * When the turn the session runs began, from the first of its run's start and the owner's prompt that opened it (a
-	 * prompt in flight counts before its run starts); undefined while it runs none. A stop reaches only a turn begun by then.
-	 */
-	private turnSince(entry: BotSessionEntry): number | undefined {
-		const since = [entry.turns.turnStartedAt, entry.promptedSince].filter((at) => at !== undefined);
-		return since.length === 0 ? undefined : Math.min(...since);
 	}
 
 	/** What applying a stop reads: the owner's warnings, and the provider admission clock a usage wait is dated on. */
@@ -557,7 +546,7 @@ export class BotSessionHost {
 			};
 		});
 		this.touch(entry);
-		if (entry.inFlight++ === 0) entry.promptedSince = Date.now();
+		entry.inFlight++;
 		this.changed(agentId);
 		void entry.session
 			.prompt(message, {
@@ -576,7 +565,7 @@ export class BotSessionHost {
 				},
 			)
 			.finally(() => {
-				if (--entry.inFlight === 0) entry.promptedSince = undefined;
+				entry.inFlight--;
 				this.settle(entry);
 			});
 		const outcome = await accepted;
@@ -777,7 +766,6 @@ export class BotSessionHost {
 				spendBudget: definition.spendBudget,
 				unsubscribe: () => {},
 				inFlight: 0,
-				promptedSince: undefined,
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
@@ -808,7 +796,7 @@ export class BotSessionHost {
 			});
 			session.startBackgroundInputs();
 			// A stop written since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
-			stopLoadedBot(agentDir, agentId, { session, transcript: sessionManager }, undefined, this.stopPorts());
+			stopLoadedBot(agentDir, agentId, { session, transcript: sessionManager }, false, this.stopPorts());
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
 			session.backgroundLanes.drainQueuedWorkerDelegations();
