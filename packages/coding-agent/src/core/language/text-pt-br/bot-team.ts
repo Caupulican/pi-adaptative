@@ -126,6 +126,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e não é tentada de novo, então envie-a outra vez.`,
+	botLinkedSessionsJobsLeft: (agentId: string, paths: readonly string[]) =>
+		`Bot ${agentId}: os jobs colocados em outras máquinas por ${paths.join(", ")} não foram encerrados: ${paths.length === 1 ? "é um link simbólico" : "são links simbólicos"}, e nenhum trabalho é encerrado por meio de um.`,
 	botWordsWaitBehindStop: (agentId: string) =>
 		`A parada do bot ${agentId} espera e ainda não pôde ser aplicada; suas palavras chegam ao bot quando ela for.`,
 	botStopNotApplied: (agentId: string, reason: string) =>

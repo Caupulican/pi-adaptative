@@ -6,7 +6,7 @@
  * defining fields changed. This module is the profile's one writer, and it writes only when the content differs, so a
  * store save that touches the record's summary or read marks never rewrites the file.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { botHomeOrchestrationHome, type OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
@@ -82,13 +82,35 @@ export function botHomeAt(dir: string): BotHome {
  * read through, as `links` says (`BotSessionLinks`: a read for the session's writer refuses it).
  */
 export function botHomeSessionIds(sessionsDir: string, links: BotSessionLinks): string[] {
+	return sessionFiles(sessionsDir).flatMap((path) => sessionIdIn(botFileReadPath(path, links)));
+}
+
+/**
+ * The ids of the sessions a bot home's `sessions/` directory holds as files of its own, as {@link botHomeSessionIds}
+ * reads them, for ending the work they placed: a session file that is a symbolic link is not read but returned in
+ * `linked` (what it names is not the bot's work to end, and it holds no end of the rest back).
+ */
+export function botHomeOwnSessionIds(sessionsDir: string): { readonly ids: string[]; readonly linked: string[] } {
+	const ids: string[] = [];
+	const linked: string[] = [];
+	for (const path of sessionFiles(sessionsDir))
+		if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) linked.push(path);
+		else ids.push(...sessionIdIn(path));
+	return { ids, linked };
+}
+
+/** The session files a home's `sessions/` directory holds (its `.jsonl` entries); none when it does not exist. */
+function sessionFiles(sessionsDir: string): string[] {
 	if (!existsSync(sessionsDir)) return [];
 	return readdirSync(sessionsDir)
 		.filter((name) => name.endsWith(".jsonl"))
-		.flatMap((name) => {
-			const header = readSessionHeaderResult(botFileReadPath(join(sessionsDir, name), links));
-			return header.ok ? [header.header.id] : [];
-		});
+		.map((name) => join(sessionsDir, name));
+}
+
+/** The id the session file at `path` names in its header; none when the header does not read. */
+function sessionIdIn(path: string): string[] {
+	const header = readSessionHeaderResult(path);
+	return header.ok ? [header.header.id] : [];
 }
 
 /** `<agentDir>/bots/<id>/orchestration` -- the orchestration home of the bot's sessions. */

@@ -143,7 +143,9 @@ export class BotRelease {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
 			const session = loaded ? ports.loaded(agentId)?.session : undefined;
 			if (session)
-				warnLeft(this.endWork(agentId, () => endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON)));
+				warnLeft(
+					endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON, (message) => ports.warn(message)),
+				);
 			fleetEnded = true;
 			const store = ports.store();
 			const nowMs = ports.timers().now();
@@ -156,7 +158,9 @@ export class BotRelease {
 			if (!loaded)
 				warnLeft(
 					this.endWork(agentId, () =>
-						endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), OWNER_STOPPED_REASON),
+						endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), OWNER_STOPPED_REASON, (message) =>
+							ports.warn(message),
+						),
 					),
 				);
 			this.owed.delete(agentId);
@@ -173,9 +177,10 @@ export class BotRelease {
 	}
 
 	/**
-	 * The bot's workers ended by `end`, what it left unended; undefined when a session file of its home is a symbolic link,
-	 * which no end of work follows (it would end the work of whatever session the link names): the owner is told the
-	 * workers were left, and the release goes on without them. Any other failure throws (the release stays owed).
+	 * The closed bot's work ended by `end`, what it left unended; undefined when its session pointer or the session file it
+	 * names is a symbolic link (`closedSessionOf`), which no end of work follows (it would end the work of whatever session
+	 * the link names): the owner is told the work was left, and the release goes on without it. Any other failure throws
+	 * (the release stays owed).
 	 */
 	private endWork(agentId: string, end: () => WorkerStopOutcome): WorkerStopOutcome | undefined {
 		try {

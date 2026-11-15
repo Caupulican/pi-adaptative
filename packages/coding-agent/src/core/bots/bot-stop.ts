@@ -34,7 +34,7 @@ import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { declineUsageWaitForOwner, type UsageWakeWriter } from "../usage-wake-record.ts";
-import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
+import { botHomeOf, botHomeOwnSessionIds } from "./bot-home.ts";
 import {
 	type BotInboxStop,
 	botInboxStopWaiting,
@@ -91,30 +91,39 @@ export function takeHostedBotStops(
 	return takeStops(
 		agentDir,
 		agentId,
-		(stop) => endWithOtherSessionsJobs(agentDir, agentId, sessionId, stop.reasonCode, () => stopHere(stop)),
+		(stop) =>
+			endWithOtherSessionsJobs(agentDir, agentId, sessionId, stop.reasonCode, ports.warn, () => stopHere(stop)),
 		ports,
 	);
 }
 
 /**
  * Ends the work of bot `agentId`'s session `sessionId` this process hosts through `endHere`, then the jobs its home's
- * other sessions placed on other machines, for `reasonCode` (no client of theirs runs: this process holds the bot). The
- * home is listed before anything ends: one that does not list, or holds a session file that is a symbolic link (the jobs
- * of whatever session it names are not the bot's to end), throws with nothing done. What `endHere` left unended.
+ * other sessions placed on other machines, for `reasonCode` (no client of theirs runs: this process holds the bot). Its
+ * own work ends first: the home is listed only after it ({@link homeSessionIds}). What `endHere` left unended.
  */
 function endWithOtherSessionsJobs(
 	agentDir: string,
 	agentId: string,
 	sessionId: string,
 	reasonCode: string,
+	warn: (message: string) => void,
 	endHere: () => WorkerStopOutcome,
 ): WorkerStopOutcome {
-	const others = botHomeSessionIds(botHomeOf(agentDir, agentId).sessionsDir, "refuse").filter(
-		(id) => id !== sessionId,
-	);
 	const outcome = endHere();
+	const others = homeSessionIds(agentDir, agentId, warn).filter((id) => id !== sessionId);
 	endPlacedJobsOfSessions(agentDir, new Set(others), jobCancelReasonOf(reasonCode));
 	return outcome;
+}
+
+/**
+ * The sessions bot `agentId`'s home holds as files of its own, whose placed jobs are the bot's to end: a session file that
+ * is a symbolic link is skipped (the jobs of whatever session it names are not the bot's), and the owner told which.
+ */
+function homeSessionIds(agentDir: string, agentId: string, warn: (message: string) => void): string[] {
+	const { ids, linked } = botHomeOwnSessionIds(botHomeOf(agentDir, agentId).sessionsDir);
+	if (linked.length > 0) warn(interfaceText().botTeam.botLinkedSessionsJobsLeft(agentId, linked));
+	return ids;
 }
 
 /**
@@ -127,8 +136,9 @@ export function endLoadedBotWork(
 	agentId: string,
 	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
 	reasonCode: string,
+	warn: (message: string) => void,
 ): WorkerStopOutcome {
-	return endWithOtherSessionsJobs(agentDir, agentId, session.sessionId, reasonCode, () =>
+	return endWithOtherSessionsJobs(agentDir, agentId, session.sessionId, reasonCode, warn, () =>
 		session.backgroundLanes.cancelOwnFleet(reasonCode),
 	);
 }
@@ -232,9 +242,9 @@ function stopClosedSession(
 	stop: BotInboxStop,
 	ports: BotStopPorts,
 ): WorkerStopOutcome {
-	const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
+	const bundle = closedBundle(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
-	const { outcome } = cancelOwedWorkerWork(agentDir, bundle, placedBy, stop.reasonCode);
+	const { outcome } = cancelOwedWorkerWork(agentDir, agentId, bundle, stop.reasonCode, ports.warn);
 	if (transcript) {
 		const now = ports.now();
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
@@ -244,24 +254,21 @@ function stopClosedSession(
 }
 
 /**
- * Where a closed bot's work is: its saved session's bundle, in the home its id resolves to now (the bot's, or the owner's
- * it was left in), and every session its home holds, whose placed jobs are the bot's. A session file that is a symbolic
- * link throws (`BotSessionLinkError`): what it names is not the bot's work to end.
+ * Where a closed bot's own work is: its saved session's bundle, in the home its id resolves to now (the bot's, or the
+ * owner's it was left in); none when the bot has no saved session.
  */
-function closedSessionWork(
+function closedBundle(
 	agentDir: string,
 	agentId: string,
 	saved: SavedBotSession | undefined,
-): { readonly bundle: { home: OrchestrationHome; sessionId: string } | undefined; readonly placedBy: Set<string> } {
+): { readonly home: OrchestrationHome; readonly sessionId: string } | undefined {
 	const home = botHomeOf(agentDir, agentId);
-	const bundle = saved && {
-		home: botSessionStorageRoots(agentDir, home.orchestrationHome, saved.id).orchestrationHome,
-		sessionId: saved.id,
-	};
-	return {
-		bundle,
-		placedBy: new Set([...botHomeSessionIds(home.sessionsDir, "refuse"), ...(saved ? [saved.id] : [])]),
-	};
+	return (
+		saved && {
+			home: botSessionStorageRoots(agentDir, home.orchestrationHome, saved.id).orchestrationHome,
+			sessionId: saved.id,
+		}
+	);
 }
 
 /**
@@ -276,12 +283,12 @@ export function endClosedBotWork(
 	agentId: string,
 	saved: SavedBotSession | undefined,
 	reasonCode: string,
+	warn: (message: string) => void,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
-		const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
-		return cancelOwedWorkerWork(agentDir, bundle, placedBy, reasonCode).outcome;
+		return cancelOwedWorkerWork(agentDir, agentId, closedBundle(agentDir, agentId, saved), reasonCode, warn).outcome;
 	} finally {
 		taken.lock.release();
 	}
@@ -322,22 +329,24 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
  * The owner's stop of the workers of the bot session `bundle` names (none when the bot has no saved session) while no
  * process hosts the bot, written to its bundle in its home alone (`stopSessionWorkers`): every open plan closed and every unended
  * worker attempt cancelled for `reasonCode`, so nothing opens the session for them. Their ends are recorded delivered by
- * the session's next open, when its outbox is replayed (`owner_stopped` wakes no one). Then every job the sessions
- * `placedBy` (every session the bot's home holds) placed on another machine is ended in its record in `agentDir`
- * (`endPlacedJobsOfSessions`), so its executor stops and stops spending; the bundle's cancel comes first, so no open
- * dispatches a lane again for a job this ends. The caller holds the bot's host lock, so no process runs what it cancels.
+ * the session's next open, when its outbox is replayed (`owner_stopped` wakes no one). Then every job the bundle's session
+ * and the sessions of the bot's home ({@link homeSessionIds}, listed after the bundle's cancel) placed on another machine is
+ * ended in its record in `agentDir` (`endPlacedJobsOfSessions`), so its executor stops and stops spending; the bundle's
+ * cancel comes first, so no open dispatches a lane again for a job this ends. The caller holds the bot's host lock, so no process runs what it cancels.
  * Returns how many attempts it cancelled, what it left unended, and how many placed jobs it ended.
  */
 export function cancelOwedWorkerWork(
 	agentDir: string,
+	agentId: string,
 	bundle: { readonly home: OrchestrationHome; readonly sessionId: string } | undefined,
-	placedBy: ReadonlySet<string>,
 	reasonCode: string,
+	warn: (message: string) => void,
 ): { readonly cancelled: number; readonly outcome: WorkerStopOutcome; readonly placedEnded: number } {
 	const workers =
 		bundle === undefined
 			? { cancelled: 0, outcome: NOTHING_LEFT }
 			: cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
+	const placedBy = new Set([...homeSessionIds(agentDir, agentId, warn), ...(bundle ? [bundle.sessionId] : [])]);
 	const placedEnded = endPlacedJobsOfSessions(agentDir, placedBy, jobCancelReasonOf(reasonCode));
 	return { ...workers, placedEnded };
 }
