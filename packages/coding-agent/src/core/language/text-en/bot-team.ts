@@ -131,7 +131,7 @@ export const BOT_TEAM = {
 	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
-	/** The owner's stop could not be written to the bot's home: no process takes it, and it is not tried again. */
+	/** The owner's stop could not be written to the bot's home: only this process holds it, and the write is not tried again. */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
 	/** The periodic listing of the bots failed on this one; the others were listed. */

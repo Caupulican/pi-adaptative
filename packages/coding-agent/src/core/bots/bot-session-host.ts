@@ -1060,8 +1060,8 @@ export class BotSessionHost {
 			return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
 		}
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it. One not
-		// written is held in memory until a take here applies it (this one, a retry, or this process's open of the bot).
-		if (!written) this.owed.applyOwnerStop(agentId, false, stop);
+		// written is held in memory until a take here applies it (the ask below, a retry, or this process's open of the bot).
+		if (!written) this.owed.unrecorded.hold(agentId, stop);
 		this.owed.openIfOwed(agentId);
 		this.changed(agentId);
 		const host = this.view.hostOf(agentId);

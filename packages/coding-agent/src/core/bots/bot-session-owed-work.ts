@@ -38,7 +38,7 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { applyUnhostedBotStop, type OwnerStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
+import { applyUnhostedBotStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -913,12 +913,11 @@ export class BotOwedWork {
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open, and true is returned then. The owner's
 	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot
-	 * takes it instead. A stop that could not be written is handed in as `memory` and held (`UnrecordedBotStops`) until a
-	 * take applies it with the ones waiting, the messages sent before it refused: this one, a retry, or this process's open
-	 * of the bot; a host in another process never learns of it.
+	 * takes it instead. A stop that could not be written is held (`UnrecordedBotStops`) and applied with the ones waiting,
+	 * the messages sent before it refused, here or by this process's open of the bot; a host in another process never
+	 * learns of it.
 	 */
-	applyOwnerStop(agentId: string, swept = false, memory?: OwnerStop): boolean {
-		if (memory) this.unrecorded.hold(agentId, memory);
+	applyOwnerStop(agentId: string, swept = false): boolean {
 		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return false;
 		const agentDir = this.ports.agentDir();
 		const held = this.unrecorded.of(agentId);
