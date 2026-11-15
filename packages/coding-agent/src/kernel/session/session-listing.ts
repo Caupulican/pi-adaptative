@@ -17,7 +17,7 @@ import {
 	readSessionHeader,
 	sessionCwdMatches,
 } from "./session-file-reading.ts";
-import { readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
+import { readLinkedSessionHeaderResult, readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
 import { isAutoLearnSessionId } from "./session-id-generation.ts";
 import type { FileEntry, SessionInfo } from "./session-manager-types.ts";
 
@@ -97,7 +97,8 @@ export function newestSessionFileIn(
 	let newest: { path: string; header: SessionHeader; mtimeMs: number } | undefined;
 	for (const name of names.filter((entry) => entry.endsWith(".jsonl"))) {
 		const path = join(dir, name);
-		const read = readSessionHeaderResult(path);
+		// A symlinked session file counts as the file it names; a link to a directory, FIFO or device holds no session.
+		const read = readLinkedSessionHeaderResult(path);
 		if (!read.ok) {
 			const passed = read.reason !== "unreadable" || isMissingFileError(read.cause);
 			if (passed || (read.cause instanceof BoundedReadError && read.cause.reason === "not_regular")) continue;

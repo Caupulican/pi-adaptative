@@ -1,4 +1,4 @@
-import { readSync } from "node:fs";
+import { readSync, realpathSync } from "node:fs";
 import { withRegularFileDescriptorSync } from "../storage/bounded-file.ts";
 import { isValidSessionId, MAX_SESSION_HEADER_BYTES } from "./session-identity.ts";
 
@@ -35,6 +35,24 @@ export function readSessionHeaderResult(
 	} catch (cause) {
 		return { ok: false, reason: "unreadable", cause };
 	}
+}
+
+/**
+ * {@link readSessionHeaderResult} of the file `filePath` names, a symlink followed to it (the session's own load follows
+ * one): a link to a regular file reads it, one to a directory, a FIFO or a device is `not_regular` as that target is,
+ * and one that names nothing is `unreadable` with the missing-file error, as a missing file is.
+ */
+export function readLinkedSessionHeaderResult(
+	filePath: string,
+	maxBytes: number = MAX_SESSION_HEADER_BYTES,
+): SessionHeaderReadResult {
+	let target: string;
+	try {
+		target = realpathSync(filePath);
+	} catch (cause) {
+		return { ok: false, reason: "unreadable", cause };
+	}
+	return readSessionHeaderResult(target, maxBytes);
 }
 
 /** Header identity is validated on the same descriptor as the caller's remaining read. */

@@ -7,7 +7,7 @@
 import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd } from "../../kernel/session/session-file-reading.ts";
-import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
+import { readLinkedSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
@@ -44,7 +44,7 @@ function savedSessionFile(agentDir: string, agentId: string): { id: string; file
 export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
 	const saved = savedSessionFile(agentDir, agentId);
 	if (!saved) return undefined;
-	const header = readSessionHeaderResult(saved.file);
+	const header = readLinkedSessionHeaderResult(saved.file);
 	if (!header.ok && header.reason === "unreadable" && !isMissingFileError(header.cause)) throw header.cause;
 	return { ...saved, cwd: header.ok ? getSessionHeaderCwd(header.header) : undefined };
 }

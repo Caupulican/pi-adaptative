@@ -5,10 +5,10 @@
  * session it creates when the home has none); after that the choice is the pointer's, never a file's modification time.
  * {@link botSessionChoice} is the one reader, for the host's load and for every view of the bot's conversation alike.
  */
-import { existsSync, renameSync, statSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { sessionBundleDeletionPolicy } from "../../kernel/session/session-bundle-lifecycle.ts";
-import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
+import { readLinkedSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { newestSessionFileIn } from "../../kernel/session/session-listing.ts";
 import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
@@ -71,12 +71,26 @@ function deleted(agentDir: string, home: BotHome, sessionId: string): boolean {
 }
 
 /**
+ * The file `path` names, a symlink followed to it (a home may link its pointer or a session file elsewhere); undefined
+ * when it, or the file a link names, is missing. A failure to resolve it is thrown.
+ */
+function linkedPath(path: string): string | undefined {
+	try {
+		return realpathSync(path);
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
+	}
+}
+
+/**
  * Why the file a pointer names does not hold its session, or undefined when it does, is missing or is empty (the
- * session is started there). Only its content decides (a directory, a FIFO or a device holds no session); a failure to
- * read it is thrown, so the load is asked again (after a backoff when it passes on its own: `opensLater`).
+ * session is started there). Only its content decides, a symlink followed to the file it names (a directory, a FIFO or
+ * a device holds no session); a failure to read it is thrown, so the load is asked again (after a backoff when it
+ * passes on its own: `opensLater`).
  */
 function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerSetAsideReason | undefined {
-	const header = readSessionHeaderResult(path);
+	const header = readLinkedSessionHeaderResult(path);
 	if (header.ok)
 		return header.header.id === pointer.sessionId
 			? undefined
@@ -110,9 +124,14 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 	};
 	let text: string | undefined;
 	try {
-		text = readOptionalBoundedTextFileSync(home.pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
+		// A symlinked pointer is read as the file it names.
+		const pointerFile = linkedPath(home.pointerFile);
+		text =
+			pointerFile === undefined
+				? undefined
+				: readOptionalBoundedTextFileSync(pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
 	} catch (error) {
-		// A pointer that is not a regular file, or larger than any pointer, is content that does not count.
+		// A pointer that is not a regular file (a link followed to it), or larger than any pointer, is content that does not count.
 		if (!(error instanceof BoundedReadError) || error.reason === "deadline") throw error;
 		return chosen({ kind: "not-a-pointer" });
 	}
@@ -126,10 +145,10 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 	return { kind: "recorded", pointer, path };
 }
 
-/** Records `pointer` as the bot's session, replacing the file whole. */
+/** Records `pointer` as the bot's session, replacing the file whole: the one a symlinked pointer names, keeping the link. */
 export function writeBotSessionPointer(home: BotHome, pointer: BotSessionPointer): void {
 	const text = `${JSON.stringify({ version: 1, sessionId: pointer.sessionId, file: pointer.file })}\n`;
-	writeFileAtomicSync(home.pointerFile, text, { mode: 0o600 });
+	writeFileAtomicSync(linkedPath(home.pointerFile) ?? home.pointerFile, text, { mode: 0o600 });
 }
 
 /** A name next to the pointer that no earlier set-aside took: `session.json.set-aside-<n>`. */

@@ -8,7 +8,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
-import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
+import { readLinkedSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -99,7 +99,10 @@ export function cancelOtherSessionsWatches(
 ): number {
 	const others = readdirSync(sessionsDir)
 		.filter((name) => name.endsWith(".jsonl"))
-		.flatMap((name) => readSessionHeader(join(sessionsDir, name))?.id ?? [])
+		.flatMap((name) => {
+			const header = readLinkedSessionHeaderResult(join(sessionsDir, name));
+			return header.ok ? [header.header.id] : [];
+		})
 		.filter((id) => id !== sessionId);
 	let cancelled = 0;
 	for (const other of others)
