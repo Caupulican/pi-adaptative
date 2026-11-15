@@ -373,7 +373,7 @@ Enforced by: packages/coding-agent/src/kernel/agent-loop.ts; packages/coding-age
 **A background command occupies neither the exclusive mutation barrier nor the agent's shell
 session.** `background: true` waits only for the file writes its own message emitted before it,
 releases the barrier the instant its body starts, and runs in its own child shell started from the
-session's current directory (its cd and exports do not persist; on Windows a throwaway engine
+session's current directory with the session's exports (its own cd and exports do not persist; on Windows a throwaway engine
 coordinator); a clock or manual handoff releases the barrier the moment the call becomes a session
 task; a call still queued on the barrier unwinds at once when its signal aborts. Why: a background
 `svnproject` held the process-wide writer lock AND the one-command-at-a-time persistent shell for

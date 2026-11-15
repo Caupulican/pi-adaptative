@@ -688,7 +688,8 @@ export function parseShellCompound(tokens: readonly ShellToken[]): ShellCompound
 			const token = tokens[index]!;
 			if (token.kind === "operator" || token.kind === "pipe") {
 				if (LIST_SEPARATORS.has(token.value)) {
-					piped = token.value === "|" || token.value === "|&";
+					// A line break after a pipe continues the pipeline, so it leaves the mark as it is.
+					if (token.value !== "\n" && token.value !== "\r") piped = token.value === "|" || token.value === "|&";
 					index++;
 					continue;
 				}
