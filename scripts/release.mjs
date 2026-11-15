@@ -52,7 +52,7 @@ import { parseGithubOriginSlug } from "./github-origin.mjs";
 import { executeReleaseMutation, ReleaseRaceError } from "./release-recovery.mjs";
 import { releasePhase } from "./release-steward-rules.mjs";
 import {
-	matchesReleaseCandidateSubject,
+	releaseCandidateSubjects,
 	partitionReleaseChanges,
 	mainCiGateDecision,
 	prepareAdoptedChangelog,
@@ -88,7 +88,14 @@ class ReleaseCommandError extends Error {}
 function run(cmd, options = {}) {
 	console.log(`$ ${cmd}`);
 	try {
-		return execSync(cmd, { encoding: "utf-8", stdio: options.silent ? "pipe" : "inherit", ...options });
+		// Every caller reads a captured output whole, so no fixed buffer bounds it: Node's default (1 MiB) is outgrown by the
+		// changelogs and main's history, and a command that outgrows it fails with ENOBUFS instead of returning its output.
+		return execSync(cmd, {
+			encoding: "utf-8",
+			stdio: options.silent ? "pipe" : "inherit",
+			maxBuffer: Number.POSITIVE_INFINITY,
+			...options,
+		});
 	} catch (e) {
 		if (options.ignoreError) {
 			return null;
@@ -371,17 +378,18 @@ function prepareRelease() {
 
 function findReleaseCandidateSha(version, includeRepairs = true, { fetch = true } = {}) {
 	if (fetch) run("git fetch origin --tags", { silent: true });
-	// Git filters the history to the commits naming this version's release, so the output stays small however long main's
-	// history grows (the whole log overflowed the command's output buffer); each subject is still matched exactly below.
-	const log =
-		run(`git log origin/main --format=%H%x1f%s -i -F --grep=${shellQuote(`release v${version}`)}`, { silent: true }) || "";
+	// Git filters the history to the commits whose message holds one of the candidate subjects (repeated --grep are ORed),
+	// so the output stays small however long main's history grows; the same list then matches each subject exactly.
+	const subjects = releaseCandidateSubjects(version, includeRepairs);
+	const greps = subjects.map((subject) => `--grep=${shellQuote(subject)}`).join(" ");
+	const log = run(`git log origin/main --format=%H%x1f%s -F ${greps}`, { silent: true }) || "";
 	for (const line of log.split("\n")) {
 		if (!line) continue;
 		const separatorIndex = line.indexOf("\x1f");
 		if (separatorIndex === -1) continue;
 		const sha = line.slice(0, separatorIndex);
 		const subject = line.slice(separatorIndex + 1);
-		if (includeRepairs ? matchesReleaseCandidateSubject(subject, version) : subject === `Release v${version}`) return sha;
+		if (subjects.includes(subject)) return sha;
 	}
 	return undefined;
 }
@@ -493,7 +501,7 @@ function promoteRelease(versionArg) {
 	const releaseSha = findReleaseCandidateSha(version);
 	if (!releaseSha) {
 		throw new Error(
-			`Could not find a release candidate for v${version} in any ref (local or origin). Run ` +
+			`Could not find a release candidate for v${version} on origin/main. Run ` +
 				'"npm run release:patch|minor|major" to prepare it, or "npm run release:repair" after a corrected failed gate.',
 		);
 	}

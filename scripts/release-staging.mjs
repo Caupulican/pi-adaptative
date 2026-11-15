@@ -107,8 +107,13 @@ export function mainCiGateDecision(runs, sha) {
 	return { verdict: "red", conclusion: picked.conclusion };
 }
 
+/** The commit subjects that make a commit a version's release candidate: its release, then a repair of it. */
+export function releaseCandidateSubjects(version, includeRepairs = true) {
+	return includeRepairs ? [`Release v${version}`, `Repair release v${version}`] : [`Release v${version}`];
+}
+
 export function matchesReleaseCandidateSubject(subject, version) {
-	return subject === `Release v${version}` || subject === `Repair release v${version}`;
+	return releaseCandidateSubjects(version).includes(subject);
 }
 
 /** Fold new notes into an already versioned, untagged candidate; older sections stay byte-identical. */
