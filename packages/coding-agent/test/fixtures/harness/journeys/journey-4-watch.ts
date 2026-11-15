@@ -2,6 +2,8 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
+import { liveWatchCount } from "../../../../src/core/routines/routine-watch-arming.ts";
+import { buildOperatorPovSegments } from "../../../../src/modes/interactive/components/operator-pov-bar.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import type { ShellRequest } from "../virtual-shell.ts";
@@ -131,6 +133,20 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	expect(created, "the watch is saved in the owner's words").toContain(
 		'"scheduleText":"watching notes.txt for changes"',
 	);
+	// The operator bar counts the live watch under its label, read as the interactive layout reads it (the session's routines,
+	// its id, the wall clock): drawn "watching 1", never a bare mark that does not say what it counts.
+	const watchSegment = buildOperatorPovSegments({
+		getProjection: () => session.operatorProjection.getProjection(),
+		getRouteSnapshot: () => session.getForegroundRouteSnapshot(),
+		getSemanticPlaneHealth: () => session.getSemanticPlaneHealth(),
+		getCostSummary: () => session.getCostSummary(),
+		isUsingSubscription: () => false,
+		getWatchCount: () => liveWatchCount(store().listRoutines(), manager.getSessionId(), Date.now()),
+	}).find((segment) => segment.id === "watch");
+	expect(
+		watchSegment && { label: watchSegment.label, value: watchSegment.value, bare: watchSegment.bare === true },
+		"the operator bar labels the live watch count",
+	).toEqual({ label: "Watching", value: "1", bare: false });
 	/** Lets the watch's debounce and its observation pass until `count` runs of the routine exist. */
 	const untilFired = async (count: number): Promise<void> => {
 		for (let step = 0; step < 8 && occurrences().length < count; step++) {

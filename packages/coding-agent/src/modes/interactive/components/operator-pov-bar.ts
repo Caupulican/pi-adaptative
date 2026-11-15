@@ -290,15 +290,14 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 
 	const watchCount = source.getWatchCount?.() ?? 0;
 	if (watchCount > 0) {
-		// Passive state, drawn quiet and dropped early. A dotted ring reads as waiting; `◷` is the cache clock's own mark.
-		const mark = `◌ ${watchCount}`;
+		// Passive state, drawn quiet and dropped early. A bare mark said nothing on its own: the label says what is counted.
+		const count = String(watchCount);
 		segments.push({
 			id: "watch",
-			label: operator.watches,
-			value: mark,
+			label: operator.watching,
+			value: count,
 			dropOrder: 11,
-			bare: true,
-			styled: theme.fg("muted", mark),
+			styled: theme.fg("muted", count),
 		});
 	}
 

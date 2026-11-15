@@ -85,7 +85,8 @@ export const FRAME = {
 		peer: "PEER",
 		systemOne: "S1",
 		goal: "Goal",
-		watches: "Watches",
+		/** Labels the live watch count: "watching 2". */
+		watching: "Watching",
 		ci: "CI",
 		tokensPerSecond: "TPS",
 		task: "TASK",

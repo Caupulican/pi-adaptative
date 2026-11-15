@@ -74,7 +74,7 @@ export const FRAME = {
 		peer: "PEER",
 		systemOne: "S1",
 		goal: "Objetivo",
-		watches: "Esperas",
+		watching: "Monitorando",
 		ci: "CI",
 		tokensPerSecond: "TPS",
 		task: "TAREFA",
