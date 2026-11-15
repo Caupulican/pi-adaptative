@@ -38,7 +38,7 @@ import {
 import type { RoutineHolder, RoutineScope } from "./routine-holder.ts";
 import type { RoutineOriginLoss } from "./routine-origin-reach.ts";
 import { lostOriginRoutines, settleUndeliverableResults } from "./routine-origin-settlement.ts";
-import { routineTurnOrigin } from "./routine-parent-input.ts";
+import { type RoutineDeliveryReceipt, routineTurnOrigin } from "./routine-parent-input.ts";
 import type { RoutineRunFacts } from "./routine-progress.ts";
 import { routineInstructions } from "./routine-run-brief.ts";
 import { routineReceiptOrigin } from "./routine-save-origin.ts";
@@ -204,7 +204,7 @@ export interface RoutineHostEventPort {
 
 /** How finished routine results reach the parent session; only a host with the parent open has it. */
 export interface RoutineResultDelivery {
-	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
+	deliver(delivery: RoutineDelivery): Promise<RoutineDeliveryReceipt>;
 	/**
 	 * The parent input still carrying an earlier quiet result of this delivery's routine to the owner's next turn, when the
 	 * delivery is itself quiet. Absent, the delivery is its own input.
@@ -1052,7 +1052,7 @@ export class RoutineSchedulerController {
 		const delivery = Promise.resolve()
 			.then(() => parent.findCarriedQuietResult(pending) ?? parent.deliver(pending))
 			.then((receipt) => {
-				if (!this.active) return;
+				if (!this.active || receipt === "settled") return;
 				if (result.outcome !== "uncertain") parent.acknowledgeWorkerNotification(occurrence);
 				this.deps.store.acknowledgeRoutineDelivery({
 					occurrenceId: occurrence.occurrenceId,

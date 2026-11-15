@@ -1281,7 +1281,7 @@ export class AgentSession {
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
 			routineScope: () => this._caps.routineScope,
-			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
+			deliverParentInput: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),

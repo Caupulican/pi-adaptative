@@ -34,10 +34,13 @@ import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import { routineOriginReach } from "./routine-origin-reach.ts";
 import {
+	deliverWhilePending,
 	isCarriedRoutineCompletion,
 	ROUTINE_COMPLETION_TYPE,
 	ROUTINE_RESULT_WAKES_HOLD,
+	type RoutineDeliveryReceipt,
 	routineParentInput,
+	routineResultInputIds,
 	routineResultIsQuiet,
 } from "./routine-parent-input.ts";
 import { routineRunOpener } from "./routine-run-opener.ts";
@@ -239,7 +242,11 @@ export class RoutineRuntimeAssembly {
 	 * does not take it now is retried for {@link WORKER_WAKE_RETRY_MS}, then the session is woken with the event instead, so
 	 * a stuck worker never holds the deliveries behind it and the event is never lost.
 	 */
-	private async deliverToWorker(runtimeId: string, delivery: RoutineDelivery): Promise<{ entryId: string }> {
+	private async deliverToWorker(
+		runtimeId: string,
+		delivery: RoutineDelivery,
+		send: (input: ParentInputDelivery) => Promise<RoutineDeliveryReceipt>,
+	): Promise<RoutineDeliveryReceipt> {
 		const input = routineParentInput(delivery);
 		const wake = wakeWorkerRuntime(
 			this.workerWakeHost(),
@@ -251,9 +258,9 @@ export class RoutineRuntimeAssembly {
 		if (wake.kind === "void") return { entryId: `worker-unwoken:${input.deliveryId}` };
 		if (this.deps.getTimers().port("routines").now() - delivery.occurrence.createdAt < WORKER_WAKE_RETRY_MS)
 			throw new Error(`Worker ${runtimeId} could not take the watch wake now (${wake.reason}); it is tried again.`);
-		return this.deps.deliverParentInput(
+		return send(
 			this.sessionWake(
-				`${input.deliveryId}:session`,
+				routineResultInputIds(delivery)[1],
 				`${this.workerUnreachable(runtimeId, wake.reason)}\n${routineWakeText(delivery)}`,
 				input.message.details,
 			),
@@ -342,7 +349,12 @@ export class RoutineRuntimeAssembly {
 				deliver: async (delivery) => {
 					const { occurrence } = delivery;
 					const address = routineWakeAddress(occurrence.definition);
-					if (address?.kind === "worker") return this.deliverToWorker(address.runtimeId, delivery);
+					// Each input is appended only while the result is still pending, so one settled meanwhile is not delivered too.
+					const send = (input: ParentInputDelivery) =>
+						deliverWhilePending(store, delivery, input, (next, options) =>
+							this.deps.deliverParentInput(next, options),
+						);
+					if (address?.kind === "worker") return this.deliverToWorker(address.runtimeId, delivery, send);
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
 					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
 					// result waits while one cannot land yet. A run of this session wrote its claims itself.
@@ -357,9 +369,9 @@ export class RoutineRuntimeAssembly {
 					}
 					const input = routineParentInput(delivery);
 					// Quiet results and expiry notices already ride with the owner's next turn and never count as wakes.
-					if (input.mode === "next-owner-turn") return this.deps.deliverParentInput(input);
+					if (input.mode === "next-owner-turn") return send(input);
 					// A one-shot watch is bounded by its slots and its deadline: its wake is never held by the day's bound.
-					if (isOneShotWatch(occurrence.definition.schedule)) return this.deps.deliverParentInput(input);
+					if (isOneShotWatch(occurrence.definition.schedule)) return send(input);
 					const manager = this.deps.getSessionManager();
 					// A replay repeats the saved mode, so a saved or steered delivery is never measured again.
 					const saved = manager.getParentInput(input.deliveryId);
@@ -377,7 +389,7 @@ export class RoutineRuntimeAssembly {
 							if (carried) return carried;
 						} else this.deps.observeHarnessNotice?.("routine-result-wakes", () => "clear");
 					}
-					return this.deps.deliverParentInput(held ? routineParentInput(delivery, true) : input);
+					return send(held ? routineParentInput(delivery, true) : input);
 				},
 				findCarriedQuietResult: ({ occurrence, result }) =>
 					routineResultIsQuiet(result) ? this.findCarriedRoutineResult(occurrence.routineId, "quiet") : undefined,

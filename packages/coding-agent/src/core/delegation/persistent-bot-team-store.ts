@@ -1729,15 +1729,14 @@ export class PersistentBotTeamStore {
 				input.deliveryMarker.includes("\0")
 			)
 				throw new Error("Routine delivery marker is invalid.");
+			// Already settled for this recipient and digest, by this delivery or by another (an owner's stop's note): done.
 			if (
 				(item.result?.delivery === "acknowledged" &&
 					item.result.digest === input.resultDigest &&
-					item.result.recipient === input.recipient &&
-					item.result.deliveryMarker === input.deliveryMarker) ||
+					item.result.recipient === input.recipient) ||
 				(item.priorUncertaintyResult?.delivery === "acknowledged" &&
 					item.priorUncertaintyResult.digest === input.resultDigest &&
-					item.priorUncertaintyResult.recipient === input.recipient &&
-					item.priorUncertaintyResult.deliveryMarker === input.deliveryMarker)
+					item.priorUncertaintyResult.recipient === input.recipient)
 			)
 				return;
 			if (!Number.isSafeInteger(input.nowMs) || input.nowMs < item.updatedAt || input.nowMs > 8_640_000_000_000_000)

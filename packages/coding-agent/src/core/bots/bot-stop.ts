@@ -50,6 +50,7 @@ import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions, type PlacedJobCover, placedJobsOfSessionsLeft } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { MAX_ROUTINE_OCCURRENCES } from "../routines/routine-contract.ts";
+import { routineResultInputIds } from "../routines/routine-parent-input.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
@@ -98,14 +99,15 @@ export type BotWatchStore = Pick<
 export const BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE = "bot_stop_watch_results";
 
 /** A bot session's transcript as the stop notes in it the results it settled. */
-type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDurableForSession">;
+type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDurableForSession" | "getParentInput">;
 
 /**
  * What bot `agentId`'s session `sessionId` armed or was fired for before the owner's stop made at `stop.at`, ended by it:
  * every watch the session holds that was armed at or before then is deleted (`deleteRoutine`, which also cancels its runs
  * not yet dispatched), and every result fired for the session at or before then that it has not taken is settled without a
  * turn, marked acknowledged by a note in its `transcript` that names them; none is settled while the session has no
- * transcript of its own to note them in. A watch armed after the stop, and a result fired after it, are the bot's later
+ * transcript of its own to note them in. One whose parent input its session's delivery appended while the stop waited is
+ * delivered, not settled: it is marked by that input, as the delivery would mark it, so it is never both. A watch armed after the stop, and a result fired after it, are the bot's later
  * work and stay. What it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and
  * is tried again, which finds them ended, has told them once. A failure throws.
  */
@@ -128,22 +130,37 @@ function endWatchesBeforeStop(
 			.listPendingRoutineDeliveries(sessionId, 2 * MAX_ROUTINE_OCCURRENCES)
 			.filter(({ occurrence }) => occurrence.createdAt <= stop.at);
 		if (!transcript || fired.length === 0) return;
-		const note = transcript.appendCustomEntry(BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE, {
-			version: 1,
-			stoppedAt: stop.at,
-			occurrenceIds: fired.map(({ occurrence }) => occurrence.occurrenceId),
-		});
-		if (!transcript.isEntryDurableForSession(note))
+		const carried = new Map(
+			fired.map((delivery) => [
+				delivery,
+				routineResultInputIds(delivery)
+					.map((id) => transcript.getParentInput(id)?.entryId)
+					.find((entryId) => entryId !== undefined),
+			]),
+		);
+		const unsettled = fired.filter((delivery) => carried.get(delivery) === undefined);
+		const note =
+			unsettled.length === 0
+				? undefined
+				: transcript.appendCustomEntry(BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE, {
+						version: 1,
+						stoppedAt: stop.at,
+						occurrenceIds: unsettled.map(({ occurrence }) => occurrence.occurrenceId),
+					});
+		if (note !== undefined && !transcript.isEntryDurableForSession(note))
 			throw new Error("the note of the watch results the stop settles was not saved");
-		for (const { occurrence, result } of fired) {
+		for (const delivery of fired) {
+			const { occurrence, result } = delivery;
+			const marker = carried.get(delivery) ?? note;
+			if (marker === undefined) continue;
 			store.acknowledgeRoutineDelivery({
 				occurrenceId: occurrence.occurrenceId,
 				recipient: result.recipient,
 				resultDigest: result.digest,
-				deliveryMarker: note,
+				deliveryMarker: marker,
 				nowMs: Math.max(now, occurrence.updatedAt),
 			});
-			settled++;
+			if (marker === note) settled++;
 		}
 	} finally {
 		if (ended + settled > 0) ports.warn(interfaceText().botTeam.botStopWatchesEnded(agentId, ended, settled));

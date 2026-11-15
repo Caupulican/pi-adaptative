@@ -5,11 +5,12 @@ import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { isCiAttemptEvent } from "../events/host-event-contract.ts";
 import { HOST_EVENT_KINDS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
-import type { ParentInputDelivery } from "../parent-input-delivery.ts";
+import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
 import {
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
+	MAX_ROUTINE_OCCURRENCES,
 	type RoutineDelivery,
 	type RoutineEventTrigger,
 	type RoutineIntakeNoticeRecord,
@@ -18,6 +19,7 @@ import {
 	type RoutineWatchTrigger,
 	routineTriggerEvents,
 } from "./routine-contract.ts";
+import type { RoutineStorePort } from "./routine-store-port.ts";
 import { isOneShotWatch, watchCauseText, watchFiredWakeText, watchTimedOutWakeText } from "./routine-watch-wake.ts";
 import { watchFiredLine } from "./watch-contract.ts";
 
@@ -163,6 +165,52 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 		},
 	};
 	return routineCompletionInput({ occurrence, result }, message, quiet || holds ? "next-owner-turn" : undefined);
+}
+
+/**
+ * The parent inputs that can carry a stored result to its session: its own input, and the session wake that stands in for
+ * the worker that armed its watch when that worker cannot take it (`routine-runtime-assembly.ts`).
+ */
+export function routineResultInputIds(delivery: RoutineDelivery): readonly [own: string, sessionWake: string] {
+	const own = routineParentInput(delivery).deliveryId;
+	return [own, `${own}:session`];
+}
+
+/** A delivered result's parent input receipt, or `"settled"`: it was settled elsewhere first and nothing was appended. */
+export type RoutineDeliveryReceipt = { readonly entryId: string } | "settled";
+
+/** Thrown under the transcript lock by {@link deliverWhilePending}'s append: the result is no longer pending. */
+class RoutineResultSettled extends Error {}
+
+/**
+ * Delivers `input`, a parent input of `delivery`, through `deliver` only while its result is still pending in `store`: the
+ * store is read again under the transcript lock, right before the append, so a result settled while the delivery waited
+ * for the session (an owner's stop marks the results it ends by its note) is never delivered too, and resolves
+ * `"settled"`. A replay of an input already saved appends nothing and resolves its receipt.
+ */
+export async function deliverWhilePending(
+	store: Pick<RoutineStorePort, "reload" | "listPendingRoutineDeliveries">,
+	{ occurrence, result }: RoutineDelivery,
+	input: ParentInputDelivery,
+	deliver: (input: ParentInputDelivery, options: ParentInputDeliveryOptions) => Promise<ParentInputReceipt>,
+): Promise<RoutineDeliveryReceipt> {
+	const withAppend: ParentInputDeliveryOptions["withAppend"] = (append) => {
+		store.reload();
+		const pending = store
+			.listPendingRoutineDeliveries(result.recipient, 2 * MAX_ROUTINE_OCCURRENCES)
+			.some(
+				(entry) =>
+					entry.occurrence.occurrenceId === occurrence.occurrenceId && entry.result.digest === result.digest,
+			);
+		if (!pending) throw new RoutineResultSettled("The routine result was settled before its delivery.");
+		return append();
+	};
+	try {
+		return await deliver(input, { withAppend });
+	} catch (error) {
+		if (error instanceof RoutineResultSettled) return "settled";
+		throw error;
+	}
 }
 
 /** One stored result's parent input: its identity is the occurrence and result digest, so a redelivery is the same. */
