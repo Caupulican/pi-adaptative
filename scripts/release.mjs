@@ -371,7 +371,10 @@ function prepareRelease() {
 
 function findReleaseCandidateSha(version, includeRepairs = true, { fetch = true } = {}) {
 	if (fetch) run("git fetch origin --tags", { silent: true });
-	const log = run("git log origin/main --format=%H%x1f%s", { silent: true }) || "";
+	// Git filters the history to the commits naming this version's release, so the output stays small however long main's
+	// history grows (the whole log overflowed the command's output buffer); each subject is still matched exactly below.
+	const log =
+		run(`git log origin/main --format=%H%x1f%s -i -F --grep=${shellQuote(`release v${version}`)}`, { silent: true }) || "";
 	for (const line of log.split("\n")) {
 		if (!line) continue;
 		const separatorIndex = line.indexOf("\x1f");
