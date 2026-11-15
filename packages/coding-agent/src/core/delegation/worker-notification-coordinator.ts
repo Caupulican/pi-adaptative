@@ -1,6 +1,7 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import type { TimerPort } from "../util/timer-port.ts";
+import { isOwnerStoppedEnd } from "./worker-fleet-stop.ts";
 
 const FAILED_TERMINAL_STATUSES: ReadonlySet<LaneTerminalStatus> = new Set(["failed", "timeout", "budget_exhausted"]);
 /**
@@ -190,6 +191,10 @@ export class WorkerNotificationCoordinator {
 			// wake as soon as the first delivery settles.
 			return;
 		}
+		if (isOwnerStoppedEnd(record)) {
+			this.settleOwnerStopped(record, key, durableNotificationId);
+			return;
+		}
 		const identity = workerTerminalGenerationIdentity(record);
 		const observedAt = this.observedTerminals.get(identity);
 		if (observedAt) this.rememberObserved(identity, observedAt);
@@ -224,6 +229,32 @@ export class WorkerNotificationCoordinator {
 			...(reportedInStatus ? { reportedInStatus } : {}),
 		});
 		this.schedule();
+	}
+
+	/**
+	 * An end the owner's stop made: the owner already sees the stop, so it is recorded delivered at once and wakes no one, its
+	 * captured ownership dropped and the status flushed. An acknowledgment that fails stays pending in the ledger; the replay
+	 * of the next open records it again.
+	 */
+	private settleOwnerStopped(
+		record: WorkerTerminalHandoffRecord,
+		key: string,
+		durableNotificationId: string | undefined,
+	): void {
+		if (record.attemptId !== undefined) {
+			this.attemptOwnerEpochs.delete(record.attemptId);
+			this.ownerDirectAttempts.delete(record.attemptId);
+		}
+		this.pending.delete(key);
+		this.schedule();
+		try {
+			const durableId = durableNotificationId ?? this.options.ensureDurableNotification?.(record);
+			if (durableId !== undefined) this.options.markDurableDelivered([durableId]);
+		} catch (error) {
+			this.warnBestEffort(
+				`Background worker stop acknowledgment failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	/** Mark exact terminal generations as already exposed to the parent model. */

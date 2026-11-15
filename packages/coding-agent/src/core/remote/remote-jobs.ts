@@ -15,6 +15,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
+import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import type { RemotePlacementSession } from "./abandoned-placements.ts";
@@ -62,10 +63,12 @@ const REMOTE_TASK_ID = /^remote-([A-Za-z0-9_-]{1,64})(?::turn:\d+)?$/;
 
 /**
  * The job protocol's reason for a fleet cancel: the fleet's own reason (a plan's close, join or step end) when the protocol
- * names it. A reason it does not name ends the job as `superseded`, and the rename is logged rather than silent.
+ * names it, and `owner` for the owner's stop. A reason it does not name ends the job as `superseded`, and the rename is
+ * logged rather than silent.
  */
 function jobCancelReasonOf(reasonCode: string): JobCancelReason {
 	if (isOneOf(JOB_CANCEL_REASONS, reasonCode)) return reasonCode;
+	if (reasonCode === OWNER_STOPPED_REASON) return "owner";
 	harnessLog.warn("placement", "a placed job was cancelled for a reason the job protocol does not name", {
 		reasonCode,
 	});

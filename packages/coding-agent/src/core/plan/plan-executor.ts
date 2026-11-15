@@ -300,6 +300,15 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.requestDrain();
 	}
 
+	/**
+	 * Closes every open plan as cancelled for `reason` (the owner's stop, `stopSessionWorkers`): its running steps, prepared
+	 * dispatches and placed jobs stop for `reasonCode`, as a planner's cancel stops them for `plan_closed`.
+	 */
+	cancelOpenPlans(reason: string, reasonCode: string): void {
+		for (const [planId, plan] of Object.entries(this.deps.runtime().getSnapshot().plans))
+			if (!plan.closed) this.closePlan(planId, "cancelled", reason, reasonCode);
+	}
+
 	/** The terminal route's predicate: the task runs (or ran) a step of a retained plan. */
 	ownsTask(taskId: string): boolean {
 		return planNodeOfTask(this.deps.runtime().getSnapshot(), taskId) !== undefined;
@@ -317,6 +326,7 @@ export class PlanExecutor implements PlanExecutorPort {
 				active.planId,
 				"cancelled",
 				input.reason?.trim().slice(0, PLAN_LIMITS.reasonChars) || "cancelled by the planner",
+				"plan_closed",
 			);
 			harnessLog.info("plan", "a plan is cancelled", { planId: active.planId });
 			await this.releaseNow();
@@ -378,11 +388,11 @@ export class PlanExecutor implements PlanExecutorPort {
 	 * Closes a plan. Its running steps stop through their own cancels (the reconcile); a prepared step that was never
 	 * admitted is released here, by the plan's scope, since nothing else would release it.
 	 */
-	private closePlan(planId: string, status: PlanCloseStatus, reason: string): void {
+	private closePlan(planId: string, status: PlanCloseStatus, reason: string, laneReasonCode: string): void {
 		this.deps.runtime().closePlan({ planId, status, reason });
 		this.resultGates.forgetPlan(planId);
 		this.merges.forgetPlan(planId);
-		this.deps.fleet().cancel({ kind: "plan", planId }, "plan_closed");
+		this.deps.fleet().cancel({ kind: "plan", planId }, laneReasonCode);
 	}
 
 	/**
@@ -568,7 +578,7 @@ export class PlanExecutor implements PlanExecutorPort {
 				});
 				return;
 			case "close":
-				this.closePlan(action.planId, action.status, action.reason);
+				this.closePlan(action.planId, action.status, action.reason, "plan_closed");
 				harnessLog.info("plan", "a plan is closed", {
 					planId: action.planId,
 					status: action.status,
