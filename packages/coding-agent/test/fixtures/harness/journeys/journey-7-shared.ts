@@ -82,6 +82,11 @@ export const MODEL_ID = {
 	boundedDelegator: "worker-b",
 	/** The workers the delegating bots start, each told apart by the marker its task carries. */
 	delegateWorker: "worker-c",
+	/**
+	 * The owner's read-only bot that plans; its soul tells it apart on the shared model, and its plan steps' workers, which run
+	 * on the session's model, are told apart by the step header their tasks start with.
+	 */
+	planner: "worker-a",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -126,6 +131,7 @@ export const TRACK = {
 	readOnlyDelegateWorker: "j7-read-only-delegate-worker",
 	boundedDelegator: "j7-bounded-delegator",
 	boundedDelegateWorker: "j7-bounded-delegate-worker",
+	planner: "j7-planner",
 } as const;
 
 /**

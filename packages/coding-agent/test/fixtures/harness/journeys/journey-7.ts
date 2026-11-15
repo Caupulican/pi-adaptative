@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { runJourney7BotDelegatePhase } from "./journey-7-bot-delegate.ts";
 import { runJourney7BotHomePhase } from "./journey-7-bot-home.ts";
+import { runJourney7BotPlanPhase } from "./journey-7-bot-plan.ts";
 import { runJourney7BotSpendPhase } from "./journey-7-bot-spend.ts";
 import { runJourney7BotWatchPhase } from "./journey-7-bot-watch.ts";
 import { runJourney7DepthPhase } from "./journey-7-depth.ts";
@@ -34,6 +35,7 @@ export async function runJourney7(): Promise<void> {
 			await runJourney7BotSpendPhase(world);
 			await runJourney7BotWatchPhase(world);
 			await runJourney7BotDelegatePhase(world);
+			await runJourney7BotPlanPhase(world);
 			await runJourney7LeaderPhase(world);
 			await runJourney7WorkerHeadroomPhase(world);
 			await runJourney7TreeAttemptAdmission(world);

@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import type { TaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-state.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import type { HarnessWorld } from "../session-fixture.ts";
 import { currentRequestCarries, ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
@@ -214,16 +215,28 @@ export function whenPlanState(session: AgentSession, holds: () => boolean): Prom
 	});
 }
 
-/** The newest attempt of a task, as the durable projection holds it. */
-export function latestAttemptOf(session: AgentSession, taskId: string | undefined) {
-	const snapshot = session.backgroundLanes.getTaskRuntimeSnapshot();
+/** The newest attempt of a task in one durable projection: the session's own, or one read out of a bundle. */
+function latestAttemptIn(snapshot: TaskRuntimeProjection | undefined, taskId: string | undefined) {
 	const attemptId = taskId === undefined ? undefined : snapshot?.tasks[taskId]?.attemptIds.at(-1);
 	return attemptId === undefined ? undefined : snapshot?.attempts[attemptId];
 }
 
+/** The newest attempt of a task, as the durable projection holds it. */
+export function latestAttemptOf(session: AgentSession, taskId: string | undefined) {
+	return latestAttemptIn(session.backgroundLanes.getTaskRuntimeSnapshot(), taskId);
+}
+
 /** What a step's worker may change, as the contract it was admitted with records it. */
 export function stepWriteAuthority(session: AgentSession, taskId: string | undefined) {
-	const worker = latestAttemptOf(session, taskId)?.dispatch.executionContract?.worker;
+	return writeAuthorityIn(session.backgroundLanes.getTaskRuntimeSnapshot(), taskId);
+}
+
+/**
+ * What a step's worker may change, read from one durable projection: a session whose `AgentSession` the journey does not
+ * hold (a bot's own) is read out of its bundle.
+ */
+export function writeAuthorityIn(snapshot: TaskRuntimeProjection | undefined, taskId: string | undefined) {
+	const worker = latestAttemptIn(snapshot, taskId)?.dispatch.executionContract?.worker;
 	return (
 		worker && {
 			readOnly: worker.profile.readOnly === true,
