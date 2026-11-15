@@ -2,10 +2,14 @@ import "../builtin-install.ts";
 import { join } from "node:path";
 import type { CommandCodeAccountUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
+import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { interfaceText } from "../../../../src/core/language/interface-text.ts";
+import { createSubscriptionAllowanceReader } from "../../../../src/core/provider-admission/subscription-allowance.ts";
 import {
 	COMMAND_CODE_PROVIDER,
 	commandCodeUsageSnapshot,
 } from "../../../../src/core/provider-admission/usage-overview.ts";
+import { USAGE_RESET_MIN_WAIT_MS } from "../../../../src/core/provider-admission/usage-reset.ts";
 import { WALL_ALARM_RECHECK_MS } from "../../../../src/kernel/timer-port.ts";
 import { type Barrier, createBarrier, HARNESS_API, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -23,7 +27,9 @@ import { expectOwnerWords, INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
 /**
  * Leg 4: Command Code subscription allowance holds new subscription starts while a usage window is at 100%,
  * never lets extra purchased/free credits mask the exhausted window, leaves metered starts on another account
- * free to run, and wakes the queued subscription worker once the reset time passes.
+ * free to run, and wakes the queued subscription worker once the reset time passes. A worker already running when its
+ * account's reading turns exhausted is refused at its next request, waits for the reset on its durable retry, and resumes
+ * then on the same model, which nothing marked exhausted.
  */
 
 const CC_MODEL = "cc-sub-worker";
@@ -33,6 +39,9 @@ const NOTE_TEXT = "the retry limit is three\n";
 const RESET_MS = 60_000;
 const MAX_REOPEN_JITTER_MS = 6_000;
 const REOPEN_SLACK_MS = 5_000;
+/** Further off than a worker request waits inside its lane, so the running worker's ladder waits the reset out. */
+const RUNNING_RESET_MS = 180_000;
+const RUNNING_PROMPT = "Start one Command Code subscription worker to read the note and report it.";
 
 const WARM_PROMPT = "Start one Command Code subscription worker to read the note.";
 const HELD_PROMPT = "Start a second Command Code worker and one metered worker on the harness account.";
@@ -145,63 +154,60 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 
 	const usageFetched = createBarrier();
 	const fetchedPaths: string[] = [];
+	// The warm worker's request is admitted on an unknown reading: every account response waits for it, since the fleet's
+	// dispatch-time read starts the fetch on the same monitor the admission gate reads, and a reading landed before that
+	// request would hold it for the 5h window's reset inside its lane.
+	const warmRequest = createBarrier();
+	let account = { hold: warmRequest.promise, fiveHourResetIso: resetAtIso, onSummary: () => usageFetched.release() };
+
+	const commandCodeResponse = (pathname: string, fiveHourResetIso: string): Response => {
+		if (pathname === "/alpha/whoami")
+			return jsonResponse({ success: true, user: { id: "u-cc-1", email: "dev@example.com" } });
+		if (pathname === "/alpha/billing/credits") {
+			return jsonResponse({
+				credits: {
+					planId: "pro",
+					monthlyCredits: 12,
+					purchasedCredits: 25,
+					freeCredits: 5,
+				},
+				windowLimits: {
+					limited: true,
+					fiveHour: { used: 100, cap: 100, resetAt: fiveHourResetIso },
+					weekly: { used: 40, cap: 500, resetAt: weeklyResetIso },
+				},
+			});
+		}
+		if (pathname === "/alpha/billing/subscriptions") {
+			return jsonResponse({
+				success: true,
+				data: {
+					planId: "pro",
+					status: "active",
+					currentPeriodStart: periodStartIso,
+					currentPeriodEnd: weeklyResetIso,
+				},
+			});
+		}
+		if (pathname === "/alpha/usage/summary") {
+			return jsonResponse({
+				totalCost: 8,
+				totalCount: 14,
+				periodBasis: "billing-period",
+			});
+		}
+		return new Response("Not found", { status: 404 });
+	};
 
 	world.fetchResponder = (input) => {
 		const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 		if (!rawUrl.startsWith(`${CC_BASE_URL}/`)) return undefined;
 		const parsed = new URL(rawUrl);
 		fetchedPaths.push(`${parsed.pathname}${parsed.search}`);
-		if (parsed.pathname === "/alpha/whoami") {
-			return Promise.resolve(
-				jsonResponse({
-					success: true,
-					user: { id: "u-cc-1", email: "dev@example.com" },
-				}),
-			);
-		}
-		if (parsed.pathname === "/alpha/billing/credits") {
-			return Promise.resolve(
-				jsonResponse({
-					credits: {
-						planId: "pro",
-						monthlyCredits: 12,
-						purchasedCredits: 25,
-						freeCredits: 5,
-					},
-					windowLimits: {
-						limited: true,
-						fiveHour: { used: 100, cap: 100, resetAt: resetAtIso },
-						weekly: { used: 40, cap: 500, resetAt: weeklyResetIso },
-					},
-				}),
-			);
-		}
-		if (parsed.pathname === "/alpha/billing/subscriptions") {
-			return Promise.resolve(
-				jsonResponse({
-					success: true,
-					data: {
-						planId: "pro",
-						status: "active",
-						currentPeriodStart: periodStartIso,
-						currentPeriodEnd: weeklyResetIso,
-					},
-				}),
-			);
-		}
-		if (parsed.pathname === "/alpha/usage/summary") {
-			usageFetched.release();
-			return Promise.resolve(
-				jsonResponse({
-					totalCost: 8,
-					totalCount: 14,
-					periodBasis: "billing-period",
-				}),
-			);
-		}
-		return Promise.resolve(new Response("Not found", { status: 404 }));
+		const served = account;
+		if (parsed.pathname === "/alpha/usage/summary") served.onSummary();
+		return served.hold.then(() => commandCodeResponse(parsed.pathname, served.fiveHourResetIso));
 	};
-
 	let created: Awaited<ReturnType<typeof world.createRootSession>> | undefined;
 	try {
 		world.authStorage.set(COMMAND_CODE_PROVIDER, {
@@ -245,7 +251,6 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 			models: [...session.getRouterCandidatePool().models, ccModel],
 		});
 
-		const warmRequest = createBarrier();
 		const meteredRequest = createBarrier();
 		const heldRequest = createBarrier();
 		const wakes: Barrier[] = [createBarrier(), createBarrier(), createBarrier()];
@@ -431,6 +436,189 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 			"the Command Code allowance root disposes cleanly",
 		).toBeUndefined();
 		trace.mark("root", "j8.command-code-allowance");
+
+		// A worker already running when its account's reading turns exhausted: the fleet dispatches it on an unknown reading
+		// (every account response waits for its first request), the reading lands while that request is answered, and its next
+		// request is refused at admission for the 5h window, whose reset is further off than a request waits in its lane. The
+		// ladder waits the reset out on the worker's durable retry and resumes it on the same model; nothing marks it exhausted.
+		// The session reads the production subscription reader the journey builds, so the leg hears the reading land.
+		const providerClock = world.timers.port("provider-admission");
+		const runningResetAtMs = providerClock.now() + RUNNING_RESET_MS;
+		const runningFirstRequest = createBarrier();
+		const readingLanded = createBarrier();
+		const runningResumed = createBarrier();
+		const runningWake = createBarrier();
+		const usageWaits = createBarrier();
+		account = {
+			hold: runningFirstRequest.promise,
+			fiveHourResetIso: new Date(runningResetAtMs).toISOString(),
+			onSummary: () => {},
+		};
+		let runningSession: AgentSession | undefined;
+		const runningAllowance = createSubscriptionAllowanceReader({
+			getRegistry: () => world.modelRegistry,
+			getModel: () => runningSession?.model,
+			now: () => providerClock.now(),
+		});
+		const stopHearingReading = runningAllowance.subscribe(() => readingLanded.release());
+		const runningAgentDir = `${world.agentDir}-j8d-running`;
+		const runningManager = world.createSessionManager(runningAgentDir);
+		created = await world.createRootSession("root", {
+			agentDir: runningAgentDir,
+			sessionManager: runningManager,
+			subscriptionAllowance: runningAllowance,
+			settings: {
+				modelFavorites: [
+					...world.settingsManager.getModelFavorites(),
+					{ provider: COMMAND_CODE_PROVIDER, modelId: CC_MODEL },
+				],
+			},
+		});
+		const running = created.session;
+		runningSession = running;
+		running.setRouterPool({
+			source: "sdk_models",
+			models: [...running.getRouterCandidatePool().models, ccModel],
+		});
+		const runningWarnings: string[] = [];
+		running.subscribe((event) => {
+			if (event.type !== "warning") return;
+			runningWarnings.push(event.message);
+			if (event.message.includes("its subscription's usage is used up")) usageWaits.release();
+		});
+		const exhaustedLines = (): string[] =>
+			running
+				.getModelRouterStatus()
+				.split("\n")
+				.filter((line) => line.includes(interfaceText().localModels.routerStatus.exhaustedModels));
+		const ccRequests = () => world.provider.requests.filter((request) => request.model.id === CC_MODEL);
+		const ccRequestsBefore = ccRequests().length;
+
+		world.provider.enqueueTrack(
+			"j8d-running",
+			CC_MODEL,
+			carriesMarker("You are worker cc-running."),
+			{
+				name: "j8d-running-read",
+				check: () => runningFirstRequest.release(),
+				gate: readingLanded.promise,
+				reply: {
+					content: [
+						{
+							type: "toolCall",
+							id: "j8d-running-read-1",
+							name: "read",
+							arguments: { path: join(HARNESS_PROJECT_CWD, "notes.md") },
+						},
+					],
+					stopReason: "toolUse",
+				},
+			},
+			{
+				name: "j8d-running-report",
+				check: () => runningResumed.release(),
+				reply: submitReport("j8d-running-report-1", "Command Code worker resumed after the 5h window reset."),
+			},
+		);
+		world.provider.enqueue(
+			"root",
+			{
+				name: "j8d-start-running",
+				reply: () => ({
+					content: [
+						{
+							type: "toolCall",
+							...startOnProvider(
+								"j8d-running-1",
+								COMMAND_CODE_PROVIDER,
+								CC_MODEL,
+								instructionsOf("cc-running"),
+								startedAgents(running),
+							),
+						},
+					],
+					stopReason: "toolUse",
+				}),
+			},
+			text("j8d-running-done", "Started the Command Code worker."),
+			handoffTurn("j8d-wake-running", runningWake),
+		);
+		world.systemOne.enterPhase("j8d-command-code-running-reset", INTAKE_JUDGMENTS_WITHOUT_GRANT, {
+			expect: expectOwnerWords({
+				sessionManager: () => runningManager,
+				userRequests: [RUNNING_PROMPT],
+				optionalToolNames: ["secret_store"],
+			}),
+		});
+
+		await withDeadline(trace, "J8D running start turn", running.prompt(RUNNING_PROMPT));
+		await withDeadline(trace, "J8D running worker's reading landed", readingLanded.promise);
+		await withDeadline(trace, "J8D running worker waits for the usage reset", usageWaits.promise);
+		const retryDelayMs = await withDeadline(
+			trace,
+			"J8D running worker's usage-reset retry armed",
+			world.timers.whenArmed("orchestration"),
+		);
+		const runningStart = delegateReceipts(running).map(startOf)[0];
+		if (runningStart === undefined) throw new Error("expected the running Command Code worker's start receipt");
+		expect(
+			{
+				started: runningStart.started,
+				codes: runningStart.h,
+				ccRequests: ccRequests().length - ccRequestsBefore,
+				attempts: Object.values(running.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).map((attempt) => [
+					attempt.status,
+					attempt.retry?.retriesUsed,
+					attempt.retry?.resetWaits,
+				]),
+				waits: runningWarnings.filter((message) =>
+					message.startsWith(
+						`Worker ${runningStart.laneId}: its subscription's usage is used up; it resumes on its own when the usage resets (`,
+					),
+				).length,
+				armed: world.timers.armedDelays("orchestration"),
+				waitedOutAsReset: retryDelayMs > USAGE_RESET_MIN_WAIT_MS && retryDelayMs <= RUNNING_RESET_MS,
+				exhausted: exhaustedLines(),
+			},
+			"a running worker whose reading turns exhausted is refused at its next request and waits for the reset on its durable retry, with no model marked exhausted",
+		).toEqual({
+			started: true,
+			codes: undefined,
+			ccRequests: 1,
+			attempts: [["suspended", 1, 1]],
+			waits: 1,
+			armed: [retryDelayMs],
+			waitedOutAsReset: true,
+			exhausted: [],
+		});
+
+		// The reset passes on the reader's clock, then the retry's alarm fires: the worker resumes on the same model.
+		world.timers.advance("provider-admission", runningResetAtMs - providerClock.now() + REOPEN_SLACK_MS);
+		expect(world.timers.advance("orchestration", retryDelayMs), "the usage-reset retry fires at its delay").toBe(1);
+		await withDeadline(trace, "J8D running worker resumed after the reset", runningResumed.promise);
+		await withDeadline(trace, "J8D running worker handoff", runningWake.promise);
+		await withDeadline(trace, "J8D running worker handoff settles", running.waitForForegroundIdle());
+		const resumed = ccRequests().slice(ccRequestsBefore);
+		expect(
+			{
+				laneStatus: running.getLaneRecords().find((record) => record.laneId === runningStart.laneId)?.status,
+				models: resumed.map((request) => `${request.model.provider}/${request.model.id}`),
+				waits: runningWarnings.filter((message) => message.includes("its subscription's usage is used up")).length,
+				exhausted: exhaustedLines(),
+			},
+			"after the reset the worker resumes on the same Command Code model and finishes, with nothing marked exhausted",
+		).toEqual({
+			laneStatus: "succeeded",
+			models: [`${COMMAND_CODE_PROVIDER}/${CC_MODEL}`, `${COMMAND_CODE_PROVIDER}/${CC_MODEL}`],
+			waits: 1,
+			exhausted: [],
+		});
+		stopHearingReading();
+		expect(
+			await world.disposeSessionInBody(running),
+			"the running Command Code worker's root disposes cleanly",
+		).toBeUndefined();
+		trace.mark("root", "j8.command-code-running-reset");
 	} finally {
 		Date.now = realDateNow;
 		world.fetchResponder = previousFetchResponder;
