@@ -20,6 +20,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	BOT_DELEGATION_JUDGMENTS,
 	botCharges,
+	botSessionFilesText,
 	botSessionIds,
 	createChargedRoot,
 	createOwnerBot,
@@ -50,6 +51,7 @@ const FIRST_REPORT = "The pool holds eight connections.";
 const FIRST_ANSWER = "The worker read that the pool holds eight connections.";
 const READ_ONLY_REPORT = "The oldest idle connection is closed first.";
 const READ_ONLY_ANSWER = "The worker read that the oldest idle connection is closed first.";
+const SECOND_STARTED = "Another worker is counting the idle connections.";
 /** What the product tells the owner of a stop that ended the bot's work (text-en/bot-team.ts `botStopped`), whole. */
 const STOPPED = `Stopped ${DELEGATOR} (halt).`;
 const HANDOFF = "Background worker terminal handoff:";
@@ -182,7 +184,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 		},
 		{
 			name: "j7-delegator-second-started",
-			reply: { content: [{ type: "text", text: "Another worker is counting the idle connections." }] },
+			reply: { content: [{ type: "text", text: SECOND_STARTED }] },
 		},
 	);
 	world.provider.enqueueTrack(TRACK.delegateWorker, MODEL_ID.delegateWorker, carriesMarker(FIRST_MARKER), {
@@ -233,7 +235,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 				holdsAssign: seen.offered.includes("assign"),
 				holdsTaskWatch: seen.offered.includes("task_watch"),
 				holdsPlan: seen.offered.includes("plan"),
-				holdsBot: seen.offered.includes("bot"),
 				workerTranscriptInBotHome: world.io.existsSync(location.sessionFile),
 				botSessionInOwnerHome: world.io.existsSync(
 					orchestrationSessionDir(ownerOrchestrationHome(world.agentDir), botSessionId),
@@ -248,7 +249,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			holdsAssign: true,
 			holdsTaskWatch: true,
 			holdsPlan: false,
-			holdsBot: false,
 			workerTranscriptInBotHome: true,
 			botSessionInOwnerHome: false,
 			charged: expect.closeTo(WORKER_USAGE.cost.total, 10),
@@ -262,11 +262,14 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			"J7 bot delegate: the second worker is working",
 			world.provider.whenReached(reached(TRACK.heldDelegateWorker, "j7-held-delegate-worker")),
 		);
+		// The stop lands after the bot's turn ended, so what it ends is the worker alone: the turn's last words are durable, then
+		// the turn settles.
 		await withDeadline(
 			trace,
 			"J7 bot delegate: the bot told the owner of its second worker",
-			world.provider.whenReached(reached(TRACK.delegator, "j7-delegator-second-started")),
+			world.io.waitForMutation(() => botSessionFilesText(world, DELEGATOR).includes(SECOND_STARTED)),
 		);
+		for (let step = 0; step < 8; step++) await settle();
 		const stopped = session.stopPersistentBot(DELEGATOR);
 		const requestsAtStop = requestsOf(world, DELEGATOR_SOUL);
 		await withDeadline(trace, "J7 bot delegate: the stopped worker's request ended", heldWorkerEnded.promise);
@@ -355,8 +358,9 @@ async function runReadOnlyStep(world: HarnessWorld, session: AgentSession): Prom
 			sent: sent.mode,
 			workerReads: seen.workerTools.includes("read"),
 			workerWrites: seen.workerTools.some((name) => name === "write" || name === "edit"),
+			grantReads: grantedTools.includes("read"),
 			grantWrites: grantedTools.some((name) => name === "write" || name === "edit"),
 		},
 		"a read-only bot's worker reads and is offered no write or edit tool, as its start result's grant says",
-	).toEqual({ sent: "started", workerReads: true, workerWrites: false, grantWrites: false });
+	).toEqual({ sent: "started", workerReads: true, workerWrites: false, grantReads: true, grantWrites: false });
 }
