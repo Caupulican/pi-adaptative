@@ -223,7 +223,7 @@ export const BOT_TEAM = {
 			.join(" and ")}; a watch it arms after the stop is kept.`,
 	/** The turn inputs the owner's stop declined: accepted before it, their wake never ran (`declineWakesBeforeStop`). */
 	botStopWakesDeclined: (agentId: string, count: number) =>
-		`Bot ${agentId}: the owner's stop declined ${count} ${count === 1 ? "report" : "reports"} of its helpers and watches it had received before the stop and not acted on yet; what reaches it after the stop wakes it as usual.`,
+		`Bot ${agentId}: the owner's stop declined ${count} ${count === 1 ? "report" : "reports"} it had received before the stop and not acted on yet; what reaches it after the stop wakes it as usual.`,
 	/** The watches of a bot whose stop was held in memory, or the turn inputs it had not run, could not be ended. */
 	botStopWatchesNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not end the watches it had armed or decline the reports it had not acted on yet (${reason}).`,

@@ -185,7 +185,7 @@ export const BOT_TEAM = {
 			.filter((part) => part !== "")
 			.join(" e ")}; uma espera que ele armar depois da parada é mantida.`,
 	botStopWakesDeclined: (agentId: string, count: number) =>
-		`Bot ${agentId}: a parada do dono recusou ${count} ${count === 1 ? "relato dos auxiliares e esperas que ele tinha recebido" : "relatos dos auxiliares e esperas que ele tinha recebido"} antes da parada e ainda não tratado; o que chegar depois da parada o acorda como de costume.`,
+		`Bot ${agentId}: a parada do dono recusou ${count} ${count === 1 ? "relato que ele tinha recebido antes da parada e ainda não tinha tratado" : "relatos que ele tinha recebido antes da parada e ainda não tinha tratado"}; o que chegar depois da parada o acorda como de costume.`,
 	botStopWatchesNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não conseguiu encerrar as esperas que ele tinha armado nem recusar os relatos que ele ainda não tinha tratado (${reason}).`,
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
