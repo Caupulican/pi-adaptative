@@ -65,6 +65,11 @@ function wordsFor(agentId: string, error: unknown): string | undefined {
 	return undefined;
 }
 
+/** A failure of the bots' own upkeep that names no bot (`what`), its cause chain written to the harness log. */
+export function logBotsFailure(what: string, error: unknown): void {
+	harnessLog.warn("bots", what, () => ({ error: causeChain(error).join(" <- caused by ") }));
+}
+
 /** What failed for bot `agentId` with `error`, in the owner's words; the failure's cause chain goes to the harness log. */
 export function botFailureText(agentId: string, error: unknown): string {
 	const worded = wordsFor(agentId, error);

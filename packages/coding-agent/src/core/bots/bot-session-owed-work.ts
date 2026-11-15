@@ -31,7 +31,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
-import { botFailureText } from "./bot-failure-words.ts";
+import { botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
 import { type BotInboxItem, botInboxStopNames, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
@@ -355,6 +355,8 @@ export class BotOwedWork {
 	private readonly ports: BotOwedWorkPorts;
 	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
 	private readonly told = new Map<string, string>();
+	/** What the owner was last told of a bot the periodic listing failed on: told once per cause. */
+	private readonly sweepTold = new Map<string, string>();
 	/** The wakes the bots' session files hold unrun. */
 	private readonly wakes = new UnrunWakeLedger();
 	/** Why each bot's session was last refused, while no run of it was admitted since. */
@@ -634,22 +636,40 @@ export class BotOwedWork {
 		if (this.sweep !== undefined || this.ports.stopped()) return;
 		this.sweep = repeatEvery(this.ports.timers(), OWED_INBOX_SWEEP_MS, () => {
 			const agentDir = this.ports.agentDir();
-			for (const { agentId } of this.ports.store().listBots()) {
-				const waiting = botInboxWaiting(agentDir, agentId);
-				if (this.ports.hostedHere(agentId)) {
-					if (waiting || botInboxStopWaiting(agentDir, agentId)) this.ports.takeInbox(agentId);
-				} else {
-					// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
-					if (!this.ports.heldElsewhere(agentId) && botInboxStopWaiting(agentDir, agentId))
-						this.applyOwnerStop(agentId, true);
-					if (
-						!this.openRetries.pending(agentId) &&
-						(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
-					)
-						this.openIfOwed(agentId, true);
-				}
+			let bots: readonly { readonly agentId: string }[];
+			try {
+				bots = this.ports.store().listBots();
+			} catch (error) {
+				logBotsFailure("the owed-work listing could not list the bots", error);
+				return;
 			}
+			// Each bot on its own: one whose files fail to read is told once per cause, and the bots after it are listed.
+			for (const { agentId } of bots)
+				try {
+					this.sweepBot(agentDir, agentId);
+				} catch (error) {
+					const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
+					if (this.sweepTold.get(agentId) !== message) this.ports.warn(message);
+					this.sweepTold.set(agentId, message);
+				}
 		});
+	}
+
+	/** One bot of the periodic listing ({@link sweepInboxes}). */
+	private sweepBot(agentDir: string, agentId: string): void {
+		const waiting = botInboxWaiting(agentDir, agentId);
+		if (this.ports.hostedHere(agentId)) {
+			if (waiting || botInboxStopWaiting(agentDir, agentId)) this.ports.takeInbox(agentId);
+			return;
+		}
+		// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
+		if (!this.ports.heldElsewhere(agentId) && botInboxStopWaiting(agentDir, agentId))
+			this.applyOwnerStop(agentId, true);
+		if (
+			!this.openRetries.pending(agentId) &&
+			(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
+		)
+			this.openIfOwed(agentId, true);
 	}
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {

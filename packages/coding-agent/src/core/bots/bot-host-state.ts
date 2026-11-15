@@ -8,7 +8,7 @@
  * writes only on a change of state and compares the text, so a burst of session events is one write.
  */
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import {
 	isProcessOwnerRecord,
 	type OwnerStanding,
@@ -17,7 +17,7 @@ import {
 } from "../../kernel/reliability/owner-identity.ts";
 import { botHostLockFile, botHostStateFile } from "../agent-paths.ts";
 import { processLockHolder } from "../remote/host-lock.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 /** What a loaded bot session is doing; a bot with no loaded session has no state. */
@@ -94,7 +94,8 @@ export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: 
 	const holder = processLockHolder(botHostLockFile(agentDir, agentId));
 	if (!holder || holder.holder === ownHolder) return undefined;
 	const file = botHostStateFile(agentDir, agentId);
-	const written = existsSync(file) ? parseState(readFileSync(file, "utf8")) : undefined;
+	const text = stateText(file);
+	const written = text === undefined ? undefined : parseState(text);
 	// A file another host wrote earlier (it is gone, a new one has not published yet) says nothing of this host.
 	const own =
 		written?.owner.pid === holder.owner.pid && written.holder === holder.holder && written.agentId === agentId
@@ -108,6 +109,19 @@ export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: 
 		hostKind: own?.hostKind,
 		hostSessionId: own?.hostSessionId,
 	};
+}
+
+/**
+ * The text of a host's state file; undefined when there is none. Read without a check first: a closing host deletes the
+ * file, so it can go between any check and the read.
+ */
+function stateText(file: string): string | undefined {
+	try {
+		return readFileSync(file, "utf8");
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
+	}
 }
 
 /** The one writer of a bot's `host-state.json`: the process holding the bot's lock. */
