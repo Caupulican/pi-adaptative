@@ -216,8 +216,14 @@ export const BOT_TEAM = {
 	botHistoryIndexUnreadable: (agentId: string) =>
 		`Bot ${agentId}: o índice do histórico não pode ser lido, então os pacotes de sessão antigos não são limpos até ele ser gravado de novo.`,
 	botHistoryNotIndexed: (reason: string) => `O histórico dos bots não pôde ser indexado (${reason}).`,
-	botHomeSessionsUnknown: (agentId: string, reason: string) =>
-		`Bot ${agentId}: não é possível dizer qual das sessões dele ele mantém (${reason}), então os pacotes de sessão antigos dele não são limpos até ser possível.`,
+	botHomeHostStateUnreadable: (agentId: string, detail: string) =>
+		`Bot ${agentId}: o estado do processo que o hospeda não pode ser lido (${detail}), então os pacotes de sessão antigos dele não são limpos até poder.`,
+	botHomeNewestSessionUnreadable: (agentId: string, file: string, detail: string) =>
+		`Bot ${agentId}: ele não registra sessão e o arquivo de sessão mais novo dele, ${file}, não pode ser lido como sessão (${detail}), então os pacotes de sessão antigos dele não são limpos até poder.`,
+	botHomeHostSessionUnnamed: (agentId: string) =>
+		`Bot ${agentId}: o processo que o hospeda ainda não informou a sessão que mantém, então os pacotes de sessão antigos dele não são limpos até informar.`,
+	botHomeRetentionFailed: (agentId: string, detail: string) =>
+		`Bot ${agentId}: os pacotes de sessão antigos dele não puderam ser lidos para limpeza (${detail}).`,
 	botHistoryRunUnreadable: (reason: string) =>
 		`Histórico dos bots: uma conversa anterior não pôde ser lida (${reason}).`,
 	botModelNotAllowed: (modelRef: string) => `sua política de modelos não permite ${modelRef}`,

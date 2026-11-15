@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
 import { sameOrchestrationHome } from "../kernel/session/session-bundle-paths.ts";
 import {
@@ -13,7 +13,7 @@ import {
 	sessionsDir,
 } from "./agent-paths.ts";
 import { historyReferencedSessionIds } from "./bots/bot-history.ts";
-import { type BotSessionHolds, readBotSessionHolds } from "./bots/bot-session-holds.ts";
+import { type BotHomeUnknown, type BotSessionHolds, readBotSessionHolds } from "./bots/bot-session-holds.ts";
 import { OBLIGATION_LEDGER_NAME, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
 import { PersistentBotTeamStore } from "./delegation/persistent-bot-team-store.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
@@ -41,7 +41,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * `bots/<id>/orchestration/sessions/<session-key>/` (see `agent-paths.ts`), with or without its profile. Retention
  * removes bundles only: a bot home itself, its session files and its other state are never removed here (deleting a
  * bot is its own action). Each home is swept by the same gates; the bot homes are read once per run
- * (`readBotSessionHolds`), and a bot home whose sessions cannot be told is left alone and reported.
+ * (`readBotSessionHolds`), and in a bot home whose sessions cannot be told (reported) no bundle is reserved: only the
+ * reservations an earlier run made are resumed, so none is stranded.
  *
  * A bundle is removed only when every gate holds:
  * - no live or resumable process-matrix entry (and not this process's own session) names its session;
@@ -177,17 +178,17 @@ function walkBundle(root: string): BundleWalk {
 }
 
 /**
- * Sessions that a live, winding-down, or resumable process-matrix entry still refers to, and the sessions the bot homes
- * hold (`readBotSessionHolds`): a bot's session runs inside its host's process, which the matrix names by its own
- * session only, so each bot's current session and each live host's session are counted beside the matrix's.
- * `tracked`: this process's own session has a live entry, so processes register here and a session neither names is
- * held by no process and runs no worker (process tracking off, this process's registration failed, or a live bot host
- * whose session cannot be told, proves nothing).
+ * Sessions that a live, winding-down, or resumable process-matrix entry still refers to (`processHeld`), and with them
+ * (`ids`) the sessions the bot homes hold (`botHeldSessionIds`): a bot's session runs inside its host's process, which
+ * the matrix names by its own session only, so each bot's current session and each live host's session are counted
+ * beside the matrix's. `tracked`: this process's own session has a live entry, so processes register here and a session
+ * neither names is held by no process and runs no worker (process tracking off, or this process's registration failed,
+ * proves nothing).
  */
 async function protectedSessionIds(
 	agentDir: string,
 	currentSessionId: string,
-	bots: BotSessionHolds,
+	botHeld: ReadonlySet<string>,
 ): Promise<{
 	readonly ids: ReadonlySet<string>;
 	readonly processHeld: ReadonlySet<string>;
@@ -202,10 +203,29 @@ async function protectedSessionIds(
 		if (entry.agent.resumeContext.sessionId === currentSessionId) tracked = true;
 	}
 	return {
-		ids: new Set([...processHeld, ...bots.heldSessionIds]),
+		ids: new Set([...processHeld, ...botHeld]),
 		processHeld,
-		tracked: tracked && !bots.liveSessionUnknown,
+		tracked,
 	};
+}
+
+/**
+ * The sessions the bot homes hold (`readBotSessionHolds`), and in a home where a live host may hold a session its hold
+ * does not name, every session that home has a file of: the host holds one of them, or one it is creating, which has no
+ * routine work yet and no bundle the sweep would reserve.
+ */
+function botHeldSessionIds(
+	bots: BotSessionHolds,
+	transcripts: ReadonlyMap<string, readonly string[]> | undefined,
+): ReadonlySet<string> {
+	const held = new Set(bots.heldSessionIds);
+	const unknownDirs = bots.homes.flatMap((hold) =>
+		hold.kind === "undetermined" && hold.maybeLive ? [resolve(hold.home.sessionsDir)] : [],
+	);
+	if (unknownDirs.length === 0 || !transcripts) return held;
+	for (const [sessionId, paths] of transcripts)
+		if (paths.some((path) => unknownDirs.includes(dirname(resolve(path))))) held.add(sessionId);
+	return held;
 }
 
 /** Session id -> transcript paths, from file names alone (`<timestamp>_<session-id>.jsonl`); undefined when over budget. */
@@ -481,17 +501,34 @@ interface SweepRun {
 	report(message: string): void;
 }
 
+/** One home's part of a run. */
+interface HomeSweep {
+	readonly home: OrchestrationHome;
+	readonly names: readonly string[];
+	/** How a bundle is named in the run's diagnostics and in the expiry ledger. */
+	labelOf(name: string): string;
+	/** The home's sessions cannot be told: no bundle is reserved, only the reservations an earlier run made are resumed. */
+	readonly resumeOnly: boolean;
+}
+
+/** The startup warning for a bot home whose sessions cannot be told. */
+function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
+	const text = interfaceText().botTeam;
+	switch (unknown.kind) {
+		case "host-state-unreadable":
+			return text.botHomeHostStateUnreadable(name, unknown.detail);
+		case "newest-file-unreadable":
+			return text.botHomeNewestSessionUnreadable(name, unknown.file, unknown.detail);
+		case "host-session-unnamed":
+			return text.botHomeHostSessionUnnamed(name);
+	}
+}
+
 /**
  * Sweeps the bundles of one orchestration home, at most {@link MAX_BUNDLES_INSPECTED} of them, starting at a different
- * bundle each startup; the run's removal and byte budget is shared by every home. `labelOf` names a bundle in the
- * run's diagnostics and in the expiry ledger.
+ * bundle each startup; the run's removal and byte budget is shared by every home.
  */
-async function sweepHomeBundles(
-	run: SweepRun,
-	home: OrchestrationHome,
-	names: readonly string[],
-	labelOf: (name: string) => string,
-): Promise<void> {
+async function sweepHomeBundles(run: SweepRun, { home, names, labelOf, resumeOnly }: HomeSweep): Promise<void> {
 	const { agentDir, now, processHeld, protectedIds, historyHeld, transcripts, result, report } = run;
 	const root = orchestrationSessionsDir(home);
 	// Remembering nothing: the window starts at a different bundle each startup (the clock picks it), so
@@ -508,7 +545,7 @@ async function sweepHomeBundles(
 			const parentSessionId = recoverParentSessionId(home, name);
 			if (!parentSessionId || processHeld.has(parentSessionId) || historyHeld.has(parentSessionId)) continue;
 			const resumingDeletion = hasPendingSessionBundleRetention(home, parentSessionId);
-			if (!resumingDeletion && protectedIds.has(parentSessionId)) continue;
+			if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) continue;
 			const sessionMtimeMs = latestMtimeMs(transcripts.get(parentSessionId) ?? []);
 			if (
 				!resumingDeletion &&
@@ -630,21 +667,21 @@ export async function sweepSessionBundles(
 	try {
 		// The bot homes are read once per run: their sessions, which homes exist and which transcripts they hold.
 		const bots = readBotSessionHolds(agentDir);
-		const matrix = await protectedSessionIds(agentDir, currentSessionId, bots);
 		const transcripts = indexSessionTranscripts(agentDir, bots);
+		const matrix = await protectedSessionIds(agentDir, currentSessionId, botHeldSessionIds(bots, transcripts));
 		if (transcripts) {
 			const settled = settleRoutinesOfGoneSessions(agentDir, matrix, transcripts, now);
 			result.uncertainRoutineRuns = settled.uncertainRuns;
 			result.settledRoutineResults = settled.settledResults;
 			result.retiredRoutines = settled.retiredRoutines;
 		}
-		const homes: { home: OrchestrationHome; names: string[]; labelOf(name: string): string }[] = [];
+		const homes: HomeSweep[] = [];
 		const found = sessionHomes(agentDir);
 		if ("unreadable" in found.bots) throw found.bots.unreadable;
 		for (const home of [found.owner, ...found.bots.homes]) {
 			if (sameOrchestrationHome(home, owner)) {
 				const names = await bundleNames(home);
-				if (names) homes.push({ home, names, labelOf: (name) => name });
+				if (names) homes.push({ home, names, labelOf: (name) => name, resumeOnly: false });
 				continue;
 			}
 			// A bot home the read of `bots/` did not find was made since: the next startup sweeps it.
@@ -653,13 +690,11 @@ export async function sweepSessionBundles(
 			try {
 				const names = await bundleNames(home);
 				if (!names) continue;
-				if (hold.kind === "undetermined") {
-					report(interfaceText().botTeam.botHomeSessionsUnknown(hold.name, hold.reason));
-					continue;
-				}
-				homes.push({ home, names, labelOf: (name) => `${BOTS_DIR_NAME}/${hold.name}/${name}` });
+				const resumeOnly = hold.kind === "undetermined";
+				if (hold.kind === "undetermined") report(botHomeUnknownText(hold.name, hold.unknown));
+				homes.push({ home, names, labelOf: (name) => `${BOTS_DIR_NAME}/${hold.name}/${name}`, resumeOnly });
 			} catch (error) {
-				report(`session bundle retention failed in ${BOTS_DIR_NAME}/${hold.name}: ${describe(error)}`);
+				report(interfaceText().botTeam.botHomeRetentionFailed(hold.name, describe(error)));
 			}
 		}
 		if (homes.length === 0) return result;
@@ -682,9 +717,9 @@ export async function sweepSessionBundles(
 			result,
 			report,
 		};
-		for (const { home, names, labelOf } of homes) {
+		for (const sweep of homes) {
 			if (budgetSpent(result)) break;
-			await sweepHomeBundles(run, home, names, labelOf);
+			await sweepHomeBundles(run, sweep);
 		}
 	} catch (error) {
 		report(`session bundle retention failed: ${describe(error)}`);

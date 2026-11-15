@@ -3,7 +3,8 @@
  * home's current session (the one its pointer records, `bot-session-pointer.ts`, or else the newest session file its
  * host's first load would choose) and the session a live host holds (`readBotHomeHost`). A home holds its current
  * session as long as it exists, profile or not, and a live host its session until the host ends. A home whose current
- * session, or whose live host's session, cannot be told is named with why, so the sweep leaves its bundles alone.
+ * session, or whose live host's session, cannot be told is marked with why, so the sweep only resumes what an earlier
+ * run reserved there.
  */
 import { type Dirent, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -13,23 +14,27 @@ import { type BotHome, botHomeAt } from "./bot-home.ts";
 import { readBotHomeHost } from "./bot-host-state.ts";
 import { botSessionChoice } from "./bot-session-pointer.ts";
 
+/** Why a home's sessions cannot be told; the owner is told it in their language. */
+export type BotHomeUnknown =
+	| { readonly kind: "host-state-unreadable"; readonly detail: string }
+	| { readonly kind: "newest-file-unreadable"; readonly file: string; readonly detail: string }
+	| { readonly kind: "host-session-unnamed" };
+
 /** What one bot home holds. */
 export type BotHomeHold = {
 	/** The home's directory name under `bots/`. */
 	readonly name: string;
 	readonly home: BotHome;
+	/** The session the bot keeps its conversation in; undefined when the home has none yet or it cannot be told. */
+	readonly currentSessionId: string | undefined;
 	/** The session a live host holds, as far as it is known; undefined when no live host holds the home's lock. */
 	readonly liveSessionId: string | undefined;
 } & (
-	| {
-			readonly kind: "held";
-			/** The session the bot keeps its conversation in; undefined when the home has none yet. */
-			readonly currentSessionId: string | undefined;
-	  }
+	| { readonly kind: "held" }
 	| {
 			readonly kind: "undetermined";
-			readonly reason: string;
-			/** Whether a live host may hold a session `liveSessionId` does not name (its lock is held, or could not be read). */
+			readonly unknown: BotHomeUnknown;
+			/** Whether a live host may hold a session neither id names (its lock is held, or could not be read). */
 			readonly maybeLive: boolean;
 	  }
 );
@@ -38,53 +43,48 @@ export type BotHomeHold = {
 export interface BotSessionHolds {
 	/** Every home, in directory name order. */
 	readonly homes: readonly BotHomeHold[];
-	/** Each home's current session and each live host's session: none is a session no process will open again. */
+	/** Each home's current session and each live host's session, as far as they are known. */
 	readonly heldSessionIds: ReadonlySet<string>;
-	/** Whether a live host may hold a session no hold names (its home's sessions could not be told). */
-	readonly liveSessionUnknown: boolean;
 	/** The hold of the home whose directory is `homeDir`; undefined for a home the read did not find. */
 	holdAt(homeDir: string): BotHomeHold | undefined;
 }
 
 type CurrentSession =
 	| { readonly ok: true; readonly sessionId: string | undefined }
-	| { readonly ok: false; readonly reason: string };
+	| { readonly ok: false; readonly unknown: BotHomeUnknown };
 
-/**
- * The session the bot keeps its conversation in: the recorded one, else the newest file the host's first load chooses.
- * A read that only judges which session the home holds follows a symlinked pointer or session file to what it names.
- */
+/** The session the bot keeps its conversation in: the recorded one, else the newest file the host's first load chooses. */
 function currentSession(agentDir: string, home: BotHome): CurrentSession {
+	// Judging which session the home holds only reads: a symlinked pointer or session file is followed to what it names.
 	const choice = botSessionChoice(agentDir, home, "follow");
 	if (choice.kind === "recorded") return { ok: true, sessionId: choice.pointer.sessionId };
 	return { ok: true, sessionId: choice.newest?.sessionId };
 }
 
-function describe(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function holdOf(agentDir: string, name: string, home: BotHome): BotHomeHold {
+	const current = currentSession(agentDir, home);
+	const currentSessionId = current.ok ? current.sessionId : undefined;
 	let live: { readonly botSessionId: string | undefined } | undefined;
 	try {
 		live = readBotHomeHost(home.dir);
 	} catch (error) {
-		const reason = `its host state cannot be read (${describe(error)})`;
-		return { kind: "undetermined", name, home, liveSessionId: undefined, maybeLive: true, reason };
+		const detail = error instanceof Error ? error.message : String(error);
+		const unknown: BotHomeUnknown = { kind: "host-state-unreadable", detail };
+		return { kind: "undetermined", name, home, currentSessionId, liveSessionId: undefined, maybeLive: true, unknown };
 	}
 	const published = live?.botSessionId;
-	const current = currentSession(agentDir, home);
 	if (!current.ok) {
 		const maybeLive = live !== undefined && published === undefined;
-		return { kind: "undetermined", name, home, liveSessionId: published, maybeLive, reason: current.reason };
+		const { unknown } = current;
+		return { kind: "undetermined", name, home, currentSessionId, liveSessionId: published, maybeLive, unknown };
 	}
 	// A host records the pointer before it builds the session, so until it publishes, the session it holds is the current one.
-	const liveSessionId = live ? (published ?? current.sessionId) : undefined;
+	const liveSessionId = live ? (published ?? currentSessionId) : undefined;
 	if (live && liveSessionId === undefined) {
-		const reason = "its host has not yet named the session it holds";
-		return { kind: "undetermined", name, home, liveSessionId, maybeLive: true, reason };
+		const unknown: BotHomeUnknown = { kind: "host-session-unnamed" };
+		return { kind: "undetermined", name, home, currentSessionId, liveSessionId, maybeLive: true, unknown };
 	}
-	return { kind: "held", name, home, currentSessionId: current.sessionId, liveSessionId };
+	return { kind: "held", name, home, currentSessionId, liveSessionId };
 }
 
 /**
@@ -109,13 +109,8 @@ export function readBotSessionHolds(agentDir: string): BotSessionHolds {
 	const homes = [...byDir.values()];
 	const heldSessionIds = new Set<string>();
 	for (const hold of homes) {
-		if (hold.kind === "held" && hold.currentSessionId !== undefined) heldSessionIds.add(hold.currentSessionId);
+		if (hold.currentSessionId !== undefined) heldSessionIds.add(hold.currentSessionId);
 		if (hold.liveSessionId !== undefined) heldSessionIds.add(hold.liveSessionId);
 	}
-	return {
-		homes,
-		heldSessionIds,
-		liveSessionUnknown: homes.some((hold) => hold.kind === "undetermined" && hold.maybeLive),
-		holdAt: (homeDir) => byDir.get(resolve(homeDir)),
-	};
+	return { homes, heldSessionIds, holdAt: (homeDir) => byDir.get(resolve(homeDir)) };
 }
