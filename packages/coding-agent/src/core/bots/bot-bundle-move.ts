@@ -47,7 +47,7 @@ import {
 	ownerOrchestrationHome,
 	workerConversationSessionsDir,
 } from "../../kernel/session/session-bundle-paths.ts";
-import { fleetQueueMetadataPath } from "../fleet/fleet-queue-store.ts";
+import { sessionFleetQueueMetadataPaths } from "../fleet/fleet-queue-store.ts";
 
 /**
  * `none`: the owner's home has nothing of the session. `moved`: the bot's home holds it now. `deleting`: a tombstone
@@ -91,7 +91,7 @@ export class BotBundleSplitError extends AggregateError {
 
 /**
  * The indexes of the bundle, the lease registry and the fleet queue files among {@link sessionStatePieces}: the
- * session's, and its away runs' (`<id>.away.json`, beside it with the same sanitised stem).
+ * session's, and its away runs' (`sessionFleetQueueMetadataPaths`).
  */
 const BUNDLE = 0;
 const LEASES = 1;
@@ -99,12 +99,10 @@ const FLEET_QUEUES: readonly number[] = [2, 3];
 
 /** The pieces of one session's orchestration state in `home` that move, in the order they move. */
 export function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
-	const fleetQueue = fleetQueueMetadataPath(home, sessionId);
 	return [
 		orchestrationSessionDir(home, sessionId),
 		`${orchestrationSessionDeletionFile(home, sessionId)}.leases.json`,
-		fleetQueue,
-		fleetQueue.replace(/\.json$/, ".away.json"),
+		...sessionFleetQueueMetadataPaths(home, sessionId),
 	];
 }
 

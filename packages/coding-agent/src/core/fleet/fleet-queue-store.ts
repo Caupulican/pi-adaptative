@@ -3,7 +3,8 @@
  * time, plus whether the session's fleet was stopped. The orchestration ledger stays the owner of which attempts exist
  * and are queued; this file carries only what the ledger does not (ordering and the stop), so a restart re-enqueues the
  * ledger's queued attempts with their aging intact and keeps a stopped fleet stopped. One file per session under its
- * orchestration home's state directory, `<stateDir>/fleet/queue/<sessionId>.json` (the owner's `<agentDir>/state`), bounded, written atomically and at most once per microtask; an
+ * orchestration home's state directory, `<stateDir>/fleet/queue/<sessionId>.json` (the owner's `<agentDir>/state`), and
+ * one for its away controller, `<sessionId>@away.json`; bounded, written atomically and at most once per microtask; an
  * empty, running fleet removes it. Entries no recovered attempt claims are dropped by the first write.
  */
 
@@ -11,6 +12,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
+import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { FleetPriority } from "./fleet-types.ts";
 
@@ -33,13 +35,22 @@ export interface FleetQueueMetadata {
 	readonly entries: readonly FleetQueueMetadataEntry[];
 }
 
-export function fleetQueueMetadataPath(home: OrchestrationHome, sessionId: string): string {
-	return join(home.stateDir, "fleet", "queue", `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+const AWAY_SUFFIX = "@away";
+
+/**
+ * The metadata file of the fleet queue `key` in `home`, named by the key itself: a session id (`isValidSessionId`), or
+ * its away controller's key ({@link awayFleetQueueKey}), which no session id can be, so no two keys share a file. Any
+ * other key throws.
+ */
+export function fleetQueueMetadataPath(home: OrchestrationHome, key: string): string {
+	const sessionId = key.endsWith(AWAY_SUFFIX) ? key.slice(0, -AWAY_SUFFIX.length) : key;
+	if (!isValidSessionId(sessionId)) throw new Error(`Fleet queue key ${JSON.stringify(key)} names no session.`);
+	return join(home.stateDir, "fleet", "queue", `${key}.json`);
 }
 
 /** The fleet queue key of the worker controller a session's parent runs away (`away-parent-context.ts`), beside its own. */
 export function awayFleetQueueKey(sessionId: string): string {
-	return `${sessionId}.away`;
+	return `${sessionId}${AWAY_SUFFIX}`;
 }
 
 /** Every fleet queue metadata file of session `sessionId` in `home`: its own and its away controller's. */
