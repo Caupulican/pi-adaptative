@@ -68,6 +68,9 @@ const STOPPED = `Stopped ${DELEGATOR} (halt).`;
 const HANDOFF = "Background worker terminal handoff:";
 /** The usage each scripted System One answer reports (`ScriptedSystemOneTransport`), as a receipt records it: input/output. */
 const SYSTEM_ONE_ANSWER_TOKENS = "10/5";
+/** The product's refusal of a message to a delegate worker's id (`assertBotId`, bot-runtime-bindings.ts), whole. */
+const notABot = (id: string): string =>
+	`"${id}" is a delegate worker, not a bot; manage it with the delegate tool (status, send, cancel). Bots are created with /bot new or the bot tool under another name.`;
 
 /** The worker's priced reply: the dollars split between input and output, binary-exact so the sums stay exact. */
 function priced(input: number, output: number, usd: number): Usage {
@@ -131,7 +134,8 @@ function requestsOf(world: HarnessWorld, soul: string): number {
  * `delegate`, `assign`, `plan` and `task_watch`, starts a worker, and the worker's terminal handoff opens the
  * bot's next turn, in which it answers. The worker's conversation lies in the bot's home, under the bot's session, and
  * nothing of that session is in the owner's orchestration home; the worker's spend reaches the main session as the bot
- * session's charge. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
+ * session's charge. While a worker runs it is no bot: the roster lists no entry for it, and a message naming it is refused
+ * with the product's sentence and leaves no bot record. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
  * of the bot. A read-only bot's worker is planned read-only: the bot changes no file, so neither does its worker. Under
  * the main session's worker bound (`workerDelegation.maxUsd`), a bot's request is held to it with its worker's spend: the
  * bot's answer to its worker's handoff that takes the request past it is stopped with the product's sentence.
@@ -175,6 +179,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 	const seen = {
 		offered: [] as string[],
 		firstAgent: undefined as string | undefined,
+		heldAgent: undefined as string | undefined,
 		heldEnd: undefined as string | undefined,
 	};
 	const firstAgent = (): string => {
@@ -218,6 +223,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 		},
 		{
 			name: "j7-delegator-second-started",
+			check: (request) => {
+				seen.heldAgent = startedAgentId(request);
+			},
 			reply: { content: [{ type: "text", text: SECOND_STARTED }] },
 		},
 	);
@@ -314,6 +322,19 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			"ended the turn that told the owner of its second worker",
 			(view) => view?.lastSummary === SECOND_STARTED,
 		);
+		// The running worker is no bot: the roster the owner sees lists no entry for it, a message naming it is refused with
+		// the product's sentence, and the refusal leaves no bot record behind.
+		const heldAgent = seen.heldAgent;
+		if (heldAgent === undefined) throw new Error("the second worker's id was not read from its start result");
+		const rostered = session.listPersistentBots().some((bot) => bot.agentId === heldAgent);
+		const refusal = await session.sendOperatorMessageToBot(heldAgent, SECOND_QUESTION).then(
+			(result) => `sent: ${result.mode}`,
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+		expect(
+			{ rostered, refusal, stored: session.getBotTeamStore().getBot(heldAgent) !== undefined },
+			"a running delegate worker is not listed as a bot, a message naming it is refused with the product's sentence, and no bot record is written for it",
+		).toEqual({ rostered: false, refusal: notABot(heldAgent), stored: false });
 		const stopped = session.stopPersistentBot(DELEGATOR);
 		const requestsAtStop = requestsOf(world, DELEGATOR_SOUL);
 		await withDeadline(trace, "J7 bot delegate: the stopped worker's request ended", heldWorkerEnded.promise);
