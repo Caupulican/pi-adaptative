@@ -342,8 +342,9 @@ function indexSessionFiles(
 		harnessLog.warn("bots", "a bot home's session files do not list", { home: hold.home.dir, detail: failure });
 		reportHome(interfaceText().botTeam.botHomeRetentionFailed(boundedName(hold.displayName)));
 	}
+	// What such a home holds is unknown, its history included, so the run's cleanup past what is in flight waits for it.
 	for (const { name } of bots.unresolvedHomes)
-		reportHome(interfaceText().botTeam.botHomeRetentionFailed(boundedName(name)));
+		reportHome(interfaceText().botTeam.botHomeLinkUnresolved(boundedName(name)));
 	return {
 		files,
 		ownerListed: ownerFailure === undefined,
@@ -1025,7 +1026,7 @@ export async function sweepSessionBundles(
 		const seen = new Set<string>();
 		const gated = await resumeRetentionsInFlight(run, homes, seen);
 		for (const sweep of homes) if (sweep.unreadable > 0) reportHome(sweep.unreadableText(sweep.unreadable));
-		// A home whose link does not resolve was told as its failed cleanup when the session files were listed.
+		// A home whose link does not resolve was told when the session files were listed (`botHomeLinkUnresolved`).
 		if (history.unreadable.length > 0 || history.unresolvedHomes) {
 			for (const agentId of history.unreadable)
 				reportHome(text.botTeam.botHistoryIndexUnreadable(boundedName(agentId)));

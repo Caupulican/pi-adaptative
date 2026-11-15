@@ -154,7 +154,7 @@ export interface HistoryReferences {
 	readonly unreadable: readonly string[];
 	/**
 	 * Some home's index could not be looked for: its symbolic link under `bots/` does not resolve
-	 * (`BotSessionHolds.unresolvedHomes`, told to the owner as that home's failed cleanup).
+	 * (`BotSessionHolds.unresolvedHomes`, told to the owner when the sweep lists the session files: `botHomeLinkUnresolved`).
 	 */
 	readonly unresolvedHomes: boolean;
 }

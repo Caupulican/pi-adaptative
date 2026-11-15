@@ -250,6 +250,8 @@ export const BOT_TEAM = {
 		`Bot ${botName}: não dá para saber agora qual sessão ele mantém, então os pacotes de sessão antigos dele não são limpos até dar.`,
 	botHomeHostSessionUnnamed: (botName: string) =>
 		`Bot ${botName}: o processo que o hospeda ainda não informou a sessão que mantém, então os pacotes de sessão antigos dele não são limpos até informar.`,
+	botHomeLinkUnresolved: (botName: string) =>
+		`Bot ${botName}: o diretório dele é um link simbólico que não resolve, então nenhum pacote de sessão antigo é limpo até que resolva.`,
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: os arquivos de sessão ou os pacotes de sessão antigos dele não puderam ser lidos, então os pacotes de sessão antigos dele não são limpos até poderem.`,
 	botDeletionRecordsUnreadable: (botName: string, count: number) =>

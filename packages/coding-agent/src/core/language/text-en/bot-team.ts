@@ -302,6 +302,9 @@ export const BOT_TEAM = {
 	botHomeHostSessionUnnamed: (botName: string) =>
 		`Bot ${botName}: the process hosting it has not yet named the session it holds, so its old session bundles are not cleaned up until it does.`,
 	/** The startup sweep could not list a bot home's session files or session bundles. */
+	/** A bot's directory under `bots/` is a symbolic link that does not resolve: what it holds is unknown, so the whole cleanup waits. */
+	botHomeLinkUnresolved: (botName: string) =>
+		`Bot ${botName}: its directory is a symbolic link that does not resolve, so no old session bundles are cleaned up until it does.`,
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: its session files or old session bundles could not be read, so its old session bundles are not cleaned up until they can.`,
 	/** Deletion records of a bot home's old session bundles that do not read; their bundles stay. */
