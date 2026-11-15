@@ -11,8 +11,9 @@
  * the stop was made (`holdPersistedGoalForOwnerStop`; the owner resumes it), and the usage-limit wait of every usage stop
  * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop), and what the bot's session armed or was
  * fired for before the stop is ended: its watches armed until then are deleted and the results it has not taken, fired for
- * it until then or by those watches since, are settled without a turn (`endWatchesBeforeStop`). The stop is then taken, and every job a
- * session of the bot's home placed on another machine is ended, so nothing goes on spending; a failure there is told to the
+ * it until then or by those watches since, are settled without a turn (`endWatchesBeforeStop`), and the turn inputs its
+ * transcript accepted until then and never ran are declined, so none wakes it to run the stopped work
+ * (`declineWakesBeforeStop`). The stop is then taken, and every job a session of the bot's home placed on another machine is ended, so nothing goes on spending; a failure there is told to the
  * owner and does not keep the stop. A managed lane is left to the extension that runs it, and the owner is told.
  *
  * Order: a stop ends the work there is when it is made. An inbox message whose `at` is at or before the stop's (sent before
@@ -100,7 +101,15 @@ export type BotWatchStore = Pick<
 export const BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE = "bot_stop_watch_results";
 
 /** A bot session's transcript as the stop notes in it the results it settled. */
-type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDurableForSession" | "getParentInput">;
+type StopNoteTranscript = Pick<
+	SessionManager,
+	| "appendCustomEntry"
+	| "isEntryDurableForSession"
+	| "getParentInput"
+	| "getPendingParentInputs"
+	| "getEntry"
+	| "declinePendingParentInput"
+>;
 
 /**
  * The delivery marker of the fired results an owner's stop settled for a session with no transcript of its own to note
@@ -115,8 +124,8 @@ export const BOT_STOP_UNNOTED_MARKER_PREFIX = "bot-stop-unnoted:";
  * those watches (between the stop and its take), is settled without a turn: marked acknowledged by a note in its
  * `transcript` that names them, or, while the session has no transcript of its own, by a marker naming the stop
  * (`BOT_STOP_UNNOTED_MARKER_PREFIX`), so none is delivered when the session opens. One whose parent input its session's
- * delivery appended while the stop waited is delivered, not settled: it is marked by that input, as the delivery would
- * mark it, so it is never both. A watch armed after the stop, and what it fires, are the bot's later work and stay. What
+ * delivery appended while the stop waited is marked by that input, as the delivery would mark it, so it is never both;
+ * that input is the session's as any other is ({@link declineWakesBeforeStop}). A watch armed after the stop, and what it fires, are the bot's later work and stay. What
  * it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and is tried again,
  * which finds them ended, has told them once. A failure throws.
  */
@@ -177,6 +186,51 @@ function endWatchesBeforeStop(
 	} finally {
 		if (ended + settled > 0) ports.warn(interfaceText().botTeam.botStopWatchesEnded(agentId, ended, settled));
 	}
+}
+
+/** The reason a turn input the owner's stop declined is recorded with (`declinePendingParentInput`). */
+const OWNER_STOP_DECLINE_REASON = "owner-stopped";
+
+/**
+ * The turn inputs bot `agentId`'s session `transcript` accepted at or before the owner's stop made at `stop.at` and never
+ * ran (a worker's report, a fired watch's result), declined (`declinePendingParentInput`): none wakes the session after the
+ * stop to run the work it stopped, nor opens a closed one for it, and none reaches the model. One its open wake holds (a
+ * wake turn the stop cut) stays that wake's and runs again: a build older than the decline, reading the transcript, could
+ * close no such wake and would refuse every later one. One accepted after the stop is the bot's later work and stays. What
+ * it declined is told through `ports.warn`. A failure throws.
+ */
+function declineWakesBeforeStop(
+	agentId: string,
+	transcript: StopNoteTranscript,
+	stop: OwnerStop,
+	ports: Pick<BotStopPorts, "warn">,
+): void {
+	let declined = 0;
+	try {
+		for (const { entryId, metadata } of transcript.getPendingParentInputs("turn")) {
+			const accepted = transcript.getEntry(entryId)?.timestamp;
+			if (accepted === undefined || Date.parse(accepted) > stop.at) continue;
+			if (transcript.declinePendingParentInput(metadata.deliveryId, OWNER_STOP_DECLINE_REASON)) declined++;
+		}
+	} finally {
+		if (declined > 0) ports.warn(interfaceText().botTeam.botStopWakesDeclined(agentId, declined));
+	}
+}
+
+/**
+ * What bot `agentId`'s session `sessionId` was fired for before the owner's stop, ended by it: its watches and their
+ * results ({@link endWatchesBeforeStop}), then the turn inputs its transcript accepted by then and never ran
+ * ({@link declineWakesBeforeStop}). A failure throws.
+ */
+function endFiredWorkBeforeStop(
+	agentId: string,
+	sessionId: string,
+	transcript: StopNoteTranscript | undefined,
+	stop: OwnerStop,
+	ports: Pick<BotStopPorts, "warn" | "now" | "watches">,
+): void {
+	endWatchesBeforeStop(agentId, sessionId, transcript, stop, ports);
+	if (transcript) declineWakesBeforeStop(agentId, transcript, stop, ports);
 }
 
 /** What ending the jobs a bot's home placed tells the owner through: its notices, and what they were told of its links. */
@@ -360,7 +414,7 @@ export function endUnrecordedStopWork(
 			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
 		}
 		try {
-			endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, stop, ports);
+			endFiredWorkBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, stop, ports);
 		} catch (error) {
 			ports.warn(interfaceText().botTeam.botStopWatchesNotEnded(agentId, botFailureText(agentId, error)));
 		}
@@ -525,7 +579,7 @@ export function stopLoadedBot(
 			(taken) => {
 				stopTurn(taken);
 				outcome = applyOwnerStopToSession(live, taken, ports.now());
-				endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, taken, ports);
+				endFiredWorkBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, taken, ports);
 				return outcome;
 			},
 			ports,
@@ -711,7 +765,7 @@ export class UnrecordedBotStops {
 /**
  * The stop applied to a closed bot's own work, its host lock held: its saved session's transcript read first, then its
  * bundle's workers ended, then the transcript written, then its watches and the results they fired ended
- * ({@link endWatchesBeforeStop}, told through `tell` as they end).
+ * and the turn inputs it accepted by then and never ran declined ({@link endFiredWorkBeforeStop}, told through `tell` as they end).
  */
 function stopClosedSession(
 	agentDir: string,
@@ -730,7 +784,7 @@ function stopClosedSession(
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
 		declineUsageWaitForOwner(transcript, stop.at, now);
 	}
-	if (saved) endWatchesBeforeStop(agentId, saved.id, transcript, stop, { ...ports, warn: tell });
+	if (saved) endFiredWorkBeforeStop(agentId, saved.id, transcript, stop, { ...ports, warn: tell });
 	return outcome;
 }
 

@@ -82,9 +82,9 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/continuous-chat-view-limits.ts` | Shared ICM view budgets used by projection and worker birth snapshots. |
 | `kernel/session/lifecycle-ledger.ts` | (no header comment) |
 | `kernel/session/message-retention.ts` | Retention budget for tool result details kept in long-lived process memory. |
-| `kernel/session/parent-input-consumption-source.ts` | The indexed source a session's parent-input consumption reads, live and for historical imports alike (`ParentInputConsumptionSource`): its entries by id, durable for the session, and the ancestry of its entry tree. |
 | `kernel/session/parent-input-consumption.ts` | (no header comment) |
 | `kernel/session/parent-input-ledger.ts` | (no header comment) |
+| `kernel/session/parent-input-session-indexes.ts` | The indexes a session keeps over every entry it holds, on any branch, for its parent inputs: the saved input of each delivery (`ParentInputReceipts`), and the source its parent-input consumption reads, live and for historical imports alike (`ParentInputConsumptionSources`): its entries by id, durable for the session, a |
 | `kernel/session/session-append-receipt.ts` | (no header comment) |
 | `kernel/session/session-bundle-lifecycle.ts` | (no header comment) |
 | `kernel/session/session-bundle-paths.ts` | (no header comment) |

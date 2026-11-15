@@ -266,8 +266,17 @@ export function parentInputRequestBindingOf(entry: SessionEntry): ParentInputReq
 export const PARENT_INPUT_SKIPPED_CUSTOM_TYPE = "parent_input_skipped";
 
 /**
- * A held next-owner-turn input its producer proved stale before any owner turn selected it. It names the exact pending
- * input; the input leaves the pending set and never reaches the model.
+ * A turn input accepted and never run that the owner's stop of a bot declined before any wake named it: it names the
+ * exact pending input, which leaves the pending set, never wakes the session and never reaches the model. A reader that
+ * does not know the record (a build older than it) keeps the input pending and runs it; a wake such a reader opened
+ * for it takes it back (`ParentInputIndex.apply`).
+ */
+export const PARENT_INPUT_DECLINED_CUSTOM_TYPE = "parent_input_declined";
+
+/**
+ * A held next-owner-turn input its producer proved stale before any owner turn selected it, or a turn input the owner's
+ * stop declined (`PARENT_INPUT_DECLINED_CUSTOM_TYPE`). It names the exact pending input; the input leaves the pending set
+ * and never reaches the model.
  */
 export interface ParentInputSkip {
 	readonly version: 1;
@@ -279,7 +288,19 @@ export interface ParentInputSkip {
 }
 
 export function parentInputSkipOf(entry: SessionEntry): ParentInputSkip | undefined {
-	if (entry.type !== "custom" || entry.customType !== PARENT_INPUT_SKIPPED_CUSTOM_TYPE) return undefined;
+	return parentInputWithdrawalOf(entry, PARENT_INPUT_SKIPPED_CUSTOM_TYPE, "Parent input skip is invalid.");
+}
+
+export function parentInputDeclineOf(entry: SessionEntry): ParentInputSkip | undefined {
+	return parentInputWithdrawalOf(entry, PARENT_INPUT_DECLINED_CUSTOM_TYPE, "Parent input decline is invalid.");
+}
+
+function parentInputWithdrawalOf(
+	entry: SessionEntry,
+	customType: string,
+	invalid: string,
+): ParentInputSkip | undefined {
+	if (entry.type !== "custom" || entry.customType !== customType) return undefined;
 	const data = entry.data;
 	if (
 		!isPlainRecord(data) ||
@@ -294,7 +315,7 @@ export function parentInputSkipOf(entry: SessionEntry): ParentInputSkip | undefi
 		typeof data.reason !== "string" ||
 		!/^[a-z][a-z_-]{0,63}$/.test(data.reason)
 	)
-		throw new Error("Parent input skip is invalid.");
+		throw new Error(invalid);
 	return {
 		version: 1,
 		deliveryId: data.deliveryId,
@@ -512,6 +533,8 @@ export class ParentInputIndex {
 	private readonly accepted = new Map<string, PersistedParentInput>();
 	private readonly pending = new Map<string, PersistedParentInput>();
 	private readonly skipped = new Set<string>();
+	/** The turn inputs the owner's stop declined, by delivery id (`PARENT_INPUT_DECLINED_CUSTOM_TYPE`). */
+	private readonly declined = new Map<string, PersistedParentInput>();
 	private readonly wakes = new Map<string, ParentInputWake>();
 	private readonly settled = new Set<string>();
 	private currentRequestId: string | undefined;
@@ -631,6 +654,21 @@ export class ParentInputIndex {
 			this.skipped.add(skip.deliveryId);
 			return;
 		}
+		const decline = parentInputDeclineOf(entry);
+		if (decline) {
+			const held = this.pending.get(decline.deliveryId);
+			if (
+				held?.metadata.mode !== "turn" ||
+				held.entryId !== decline.entryId ||
+				held.metadata.payloadDigest !== decline.payloadDigest ||
+				this.openWake()?.inputs.some((item) => item.deliveryId === decline.deliveryId)
+			)
+				throw new Error("Parent input decline does not name an exact pending turn input no wake holds.");
+			this.pending.delete(decline.deliveryId);
+			this.declined.set(decline.deliveryId, held);
+			this.skipped.add(decline.deliveryId);
+			return;
+		}
 		const input = parentInputOf(entry);
 		if (input) {
 			if (this.accepted.has(input.metadata.deliveryId))
@@ -645,13 +683,21 @@ export class ParentInputIndex {
 			if (this.openWake() || this.wakes.has(wake.wakeId))
 				throw new Error("Overlapping parent wake manifests require inspection.");
 			for (const item of wake.inputs) {
-				const accepted = this.pending.get(item.deliveryId);
+				const accepted = this.pending.get(item.deliveryId) ?? this.declined.get(item.deliveryId);
 				if (
 					accepted?.entryId !== item.entryId ||
 					accepted.metadata.payloadDigest !== item.payloadDigest ||
 					accepted.metadata.mode !== "turn"
 				)
 					throw new Error("Parent wake does not name exact pending input.");
+			}
+			// A wake opened by a writer that does not know declines (an older build, which runs a declined input) takes back what it names.
+			for (const item of wake.inputs) {
+				const declined = this.declined.get(item.deliveryId);
+				if (!declined) continue;
+				this.declined.delete(item.deliveryId);
+				this.skipped.delete(item.deliveryId);
+				this.pending.set(item.deliveryId, declined);
 			}
 			this.wakes.set(wake.wakeId, wake);
 			this.currentWakeId = wake.wakeId;
@@ -772,6 +818,7 @@ export class ParentInputIndex {
 	bound(deliveryId: string): boolean {
 		return [...this.requestNotes.values()].some((inputs) => inputs.some((item) => item.deliveryId === deliveryId));
 	}
+	/** The inputs that never reach the model: held ones their producer skipped and turn inputs the owner's stop declined. */
 	skippedInputs(): ReadonlySet<string> {
 		return this.skipped;
 	}

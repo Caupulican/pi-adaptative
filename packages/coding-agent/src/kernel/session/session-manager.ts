@@ -42,7 +42,6 @@ import {
 	validateSessionLifecycleEntry,
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
-import { ParentInputConsumptionSources } from "./parent-input-consumption-source.ts";
 import {
 	assertParentInputVisible,
 	isParentNoteOwnerId,
@@ -50,6 +49,7 @@ import {
 	MAX_PARENT_WAKE_INPUTS,
 	MAX_PENDING_PARENT_INPUTS,
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+	PARENT_INPUT_DECLINED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
 	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
 	PARENT_INPUT_WAKE_CUSTOM_TYPE,
@@ -62,13 +62,18 @@ import {
 	type ParentInputOrigin,
 	type ParentInputWake,
 	type ParentNoteSelection,
+	type ParentWakeInput,
 	type PersistedParentInput,
 	parentInputMetadataOfMessage,
-	parentInputOf,
 	parentNoteMarker,
 	parentWakeContent,
 	parentWakeMarker,
 } from "./parent-input-ledger.ts";
+import {
+	ParentInputConsumptionSources,
+	ParentInputReceipts,
+	type ParentInputSessionView,
+} from "./parent-input-session-indexes.ts";
 import {
 	captureSessionAppendIdentity,
 	captureSessionAppendWriteIdentity,
@@ -344,9 +349,6 @@ export class SessionManager {
 	private parentInputCache:
 		| { byId: Map<string, SessionEntry>; leafId: string | null; index: ParentInputIndex }
 		| undefined;
-	private parentInputReceipts:
-		| { byId: Map<string, SessionEntry>; count: number; deliveries: Map<string, PersistedParentInput> }
-		| undefined;
 	private activeParentWake: { wakeId: string; assertCurrent: () => void } | undefined;
 	private parentNoteAdmission:
 		| {
@@ -358,12 +360,14 @@ export class SessionManager {
 	private plannedParentNotes: ParentNoteSelection | undefined;
 	/** The session the constructor's file starts when it is missing or empty (`openOrStart`); none once constructed. */
 	private startingSession: NewSessionOptions | undefined;
-	private readonly parentEvidence = new ParentInputConsumptionSources({
+	private readonly parentInputEntries: ParentInputSessionView = {
 		byId: () => this.byId,
 		entries: () => this.entries,
 		sessionId: () => this.sessionId,
 		isEntryDurable: (id) => this.isEntryDurableForSession(id),
-	});
+	};
+	private readonly parentEvidence = new ParentInputConsumptionSources(this.parentInputEntries);
+	private readonly parentInputReceipts = new ParentInputReceipts(this.parentInputEntries);
 
 	private constructor(
 		cwd: string,
@@ -2084,10 +2088,10 @@ export class SessionManager {
 	 * metadata exactly (`appendParentInput`), so a caller that chooses a mode reads the saved one first.
 	 */
 	getParentInput(deliveryId: string): PersistedParentInput | undefined {
-		return this._parentInputReceipt(deliveryId);
+		return this.parentInputReceipts.find(deliveryId);
 	}
 
-	/** Held inputs their producer skipped on this branch; their saved bodies never reach the model. */
+	/** Inputs that never reach the model on this branch: held ones their producer skipped, turn ones a stop declined. */
 	getSkippedParentInputIds(): ReadonlySet<string> {
 		return this._parentInputIndex().skippedInputs();
 	}
@@ -2098,36 +2102,43 @@ export class SessionManager {
 	 * that is not pending on this branch.
 	 */
 	skipPendingParentInput(deliveryId: string, reason: string): boolean {
-		const held = () =>
-			this._parentInputIndex()
-				.pendingInputs("next-owner-turn")
-				.find((input) => input.metadata.deliveryId === deliveryId);
-		const selected = () =>
-			[
-				this.plannedParentNotes,
-				...[...(this.parentNoteAdmission?.owners.values() ?? [])].map((owner) => owner.selection),
-			].some((selection) => selection?.inputs.some((input) => input.deliveryId === deliveryId)) ||
-			this._parentInputIndex().bound(deliveryId);
+		return this._withdrawPendingParentInput(deliveryId, "next-owner-turn", reason);
+	}
+
+	/**
+	 * Records that the owner's stop declined a turn input accepted on this branch whose wake never ran: it wakes the session
+	 * no more and never reaches the model. One the open wake holds stays: the result is `false`, as for one not pending.
+	 */
+	declinePendingParentInput(deliveryId: string, reason: string): boolean {
+		return this._withdrawPendingParentInput(deliveryId, "turn", reason);
+	}
+
+	private _withdrawPendingParentInput(deliveryId: string, mode: ParentInputMode, reason: string): boolean {
+		const named = (inputs?: readonly ParentWakeInput[]) =>
+			inputs?.some((item) => item.deliveryId === deliveryId) === true;
+		const held = () => this.getPendingParentInputs(mode).find((input) => input.metadata.deliveryId === deliveryId);
+		const owners = () => [...(this.parentNoteAdmission?.owners.values() ?? [])].map((owner) => owner.selection);
+		const kept = () =>
+			mode === "turn"
+				? named(this.getParentInputWake()?.inputs)
+				: [this.plannedParentNotes, ...owners()].some((notes) => named(notes?.inputs)) ||
+					this._parentInputIndex().bound(deliveryId);
 		const input = held();
-		if (!input || selected()) return false;
+		if (!input || kept()) return false;
 		return this._withParentInputMutation(input.metadata.origin, () => {
 			const current = held();
-			if (!current || selected()) return false;
-			const id = this.appendCustomEntry(PARENT_INPUT_SKIPPED_CUSTOM_TYPE, {
-				version: 1,
-				deliveryId,
-				entryId: current.entryId,
-				payloadDigest: current.metadata.payloadDigest,
-				reason,
-			});
-			if (!this.isEntryDurableForSession(id)) throw new Error("Parent input skip was not physically persisted.");
+			if (!current || kept()) return false;
+			const type = mode === "turn" ? PARENT_INPUT_DECLINED_CUSTOM_TYPE : PARENT_INPUT_SKIPPED_CUSTOM_TYPE;
+			const [entryId, payloadDigest] = [current.entryId, current.metadata.payloadDigest];
+			const id = this.appendCustomEntry(type, { version: 1, deliveryId, entryId, payloadDigest, reason });
+			if (!this.isEntryDurableForSession(id)) throw new Error(`Parent input ${type} was not physically persisted.`);
 			return true;
 		});
 	}
 
 	/** Indexed canonical source for both live ingestion and the same proof used by historical imports. */
 	getParentInputConsumptionSource(): ParentInputConsumptionSource {
-		return this.parentEvidence.current();
+		return this.parentEvidence.source();
 	}
 
 	private _pendingParentBatch(mode: ParentInputMode): readonly PersistedParentInput[] {
@@ -2310,22 +2321,6 @@ export class SessionManager {
 		return receipt;
 	}
 
-	private _parentInputReceipt(deliveryId: string): PersistedParentInput | undefined {
-		let cache = this.parentInputReceipts;
-		if (!cache || cache.byId !== this.byId || cache.count > this.entries.length) {
-			cache = { byId: this.byId, count: 0, deliveries: new Map() };
-			this.parentInputReceipts = cache;
-		}
-		for (; cache.count < this.entries.length; cache.count++) {
-			const input = parentInputOf(this.entries[cache.count]!);
-			if (!input) continue;
-			if (cache.deliveries.has(input.metadata.deliveryId))
-				throw new Error("Duplicate parent input delivery requires inspection.");
-			cache.deliveries.set(input.metadata.deliveryId, input);
-		}
-		return cache.deliveries.get(deliveryId);
-	}
-
 	/** The physical parent-input boundary; lookup and append share the canonical transcript lock. */
 	appendParentInput(
 		message: CustomMessage<unknown>,
@@ -2335,7 +2330,7 @@ export class SessionManager {
 		if (!metadata) throw new Error("Parent input metadata is required.");
 		return this._withParentInputMutation(metadata.origin, () => {
 			const index = this._parentInputIndex();
-			const existing = this._parentInputReceipt(metadata.deliveryId);
+			const existing = this.parentInputReceipts.find(metadata.deliveryId);
 			if (existing) {
 				if (JSON.stringify(existing.metadata) !== JSON.stringify(metadata))
 					throw new Error("Parent input delivery ID conflicts with its saved payload.");
