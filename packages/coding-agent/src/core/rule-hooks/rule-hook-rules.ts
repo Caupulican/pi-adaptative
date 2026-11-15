@@ -1,5 +1,6 @@
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
 import { PLAN_OFFERED_JOIN_KINDS } from "../plan/plan-graph.ts";
+import { ASSIGN_TOOL_NAME } from "../tools/assign-tool-name.ts";
 import { PLAN_TOOL_NAME } from "../tools/plan-tool-name.ts";
 import type { RuleHookCall, RuleHookSource, RuleHookTrigger } from "./rule-hook-catalog.ts";
 
@@ -21,12 +22,14 @@ function callTouchesPackageRoot(call: RuleHookCall): boolean {
  * core/tools/goal.ts (createGoalSchema). goal: `action` start (goalSchema).
  * task_steps: every action of taskStepsSchema (core/tools/task-steps.ts). delegate: `action` is an optional string
  * that defaults to start (core/tools/delegate.ts); only dispatching or steering a worker is routing, so start,
- * follow_up and an absent action trigger. plan: `action` start or revise (core/tools/plan.ts); cancel ends work. Each
- * rule is delivered once per context under its own id.
+ * follow_up and an absent action trigger. assign: every call starts a worker (core/tools/assign.ts, no action field),
+ * so a session that directs only through assign (a bot whose profile names it) gets the rules too. plan: `action` start
+ * or revise (core/tools/plan.ts); cancel ends work. Each rule is delivered once per context under its own id, which
+ * hashes its topic and body (`ruleHookId`), not its trigger.
  */
 const ROOT_WORK_TRIGGER: RuleHookTrigger = {
 	kind: "tool-call",
-	tools: ["create_goal", "goal", "task_steps", "delegate", PLAN_TOOL_NAME],
+	tools: ["create_goal", "goal", "task_steps", "delegate", ASSIGN_TOOL_NAME, PLAN_TOOL_NAME],
 	matches: (call) => {
 		if (call.toolName === "goal") return callAction(call.args) === "start";
 		if (call.toolName === PLAN_TOOL_NAME) {

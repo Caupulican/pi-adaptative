@@ -80,7 +80,7 @@ Ultra-only switch. User restrictions remain binding. The rule hook `delegation`
 (`src/core/rule-hooks/rule-hook-rules.ts`) owns the playbook for how to delegate (when, split by write ownership,
 reuse, right-sizing, briefing, parallel start, proportional review, steering, cost, integration); `work-lifecycle`
 keeps the phases and state owners. The host appends each, under its own id, to the result of the first successful
-`create_goal`, `goal` (`start`), `task_steps` or `delegate` (`start`, `follow_up`) call of the context (see
+`create_goal`, `goal` (`start`), `task_steps`, `delegate` (`start`, `follow_up`), `assign` or `plan` (`start`, `revise`) call of the context (see
 `RuleHookDelivery`), so they hold for custom and routed prompts alike; bundled commands defer to that policy. Workers
 never receive this director policy.
 Workers open with `ROLE: worker, an executor with one assignment from the root` (`SUBAGENT_CORE_SYSTEM_PROMPT`); the
