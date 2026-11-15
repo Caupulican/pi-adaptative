@@ -14,7 +14,8 @@
  * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`): a reopened session resumes a window's
  * foreground spend. A window is dropped only once no worker serving it can still run (every attempt it names has ended,
  * or the delegation ledger shows none of them a week after the window last changed), the oldest first, and only past
- * the newest 64. A worker's spend is never copied: it is read from the delegation ledger's per-attempt usage each time.
+ * the newest 64; the window the transcript is in now and every window a run bound handed out still serves are never
+ * dropped, so a turn or a worker is never counted against a window opened again at nothing. A worker's spend is never copied: it is read from the delegation ledger's per-attempt usage each time.
  */
 
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
@@ -34,8 +35,10 @@ import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
 const MAX_WINDOWS_KEPT = 64;
 
 /**
- * How long after it last changed a window is kept for an attempt the delegation ledger does not show (no projection
- * yet after a reopen, or one that no longer holds it): such an attempt may still run, so its window stays this long.
+ * How long after it last changed a window is kept for an attempt the delegation ledger does not show (an attempt of the
+ * bot's earlier session file, whose ledger this session does not read, or one its projection no longer holds; a reopened
+ * session's projection is read back as the session is built, `BackgroundLaneController.signalWorkerReceiptDelivery`):
+ * such an attempt may still run, so its window stays this long.
  */
 const UNSEEN_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -109,6 +112,11 @@ export class BotSpendWindows {
 	private readonly attemptWindows = new Map<string, string | null>();
 	/** The window id each walked entry belongs to, where the walk settled it. */
 	private readonly entryWindows = new Map<string, string>();
+	/**
+	 * The attempts handed a run bound in this process (`runCostBound`), with the window each bound serves: kept until the
+	 * projection shows the attempt ended, and their windows never dropped meanwhile.
+	 */
+	private readonly bounded = new Map<string, string>();
 	/** An unsettled walk's window for each entry it passed, with the projection's attempt count it was read at. */
 	private readonly unsettledWindows = new Map<string, { readonly windowId: string; readonly attempts: number }>();
 	private readonly ledger: BotSpendLedger;
@@ -170,7 +178,10 @@ export class BotSpendWindows {
 	): RunCostBound | undefined {
 		const windowId = this.windowOfAttempt(attempt, snapshot);
 		const window = windowId === undefined ? undefined : this.windowFor(windowId);
-		if (window) this.serve(window, attempt.attemptId);
+		if (window) {
+			this.serve(window, attempt.attemptId);
+			this.bounded.set(attempt.attemptId, window.id);
+		}
 		this.flush(snapshot);
 		if (!window || ceilings.length === 0) return undefined;
 		const remainder = (meteredOnly: boolean, spentUsd: number): number | undefined => {
@@ -371,14 +382,17 @@ export class BotSpendWindows {
 
 	/**
 	 * Writes the changes with the ledger. Past the kept many, the oldest windows no worker can still serve are dropped
-	 * until the kept many remain or none such is left: a window a live worker serves is never dropped.
+	 * until the kept many remain or none such is left: a window a live worker serves is never dropped, nor the window the
+	 * transcript is in now (the one the session's turn counts to) nor one a run bound handed out here still serves, so
+	 * a window being counted or bounded is never dropped and opened again at nothing, whatever the others hold.
 	 */
 	private flush(snapshot: TaskRuntimeProjection | undefined): void {
 		const excess = this.windows.size - MAX_WINDOWS_KEPT;
 		if (excess > 0) {
 			const now = this.ports.now();
+			const held = this.heldWindows(snapshot);
 			const done = [...this.windows.values()]
-				.filter((window) => !this.mayStillServe(window, snapshot, now))
+				.filter((window) => !held.has(window.id) && !this.mayStillServe(window, snapshot, now))
 				.sort((a, b) => a.updatedAt - b.updatedAt)
 				.slice(0, excess);
 			for (const window of done) this.windows.delete(window.id);
@@ -388,8 +402,26 @@ export class BotSpendWindows {
 	}
 
 	/**
+	 * The windows dropping must leave whatever the workers hold: the one the transcript's leaf is in, and those the run
+	 * bounds handed out serve while their attempts have not ended (a bound whose attempt the projection shows ended is
+	 * forgotten).
+	 */
+	private heldWindows(snapshot: TaskRuntimeProjection | undefined): Set<string> {
+		const held = new Set<string>();
+		const leafId = this.transcript.getLeafId();
+		const leafWindow = leafId === null ? undefined : this.windowOfEntry(leafId, snapshot)?.windowId;
+		if (leafWindow !== undefined) held.add(leafWindow);
+		for (const [attemptId, windowId] of this.bounded) {
+			const attempt = snapshot?.attempts[attemptId];
+			if (attempt && !ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) this.bounded.delete(attemptId);
+			else held.add(windowId);
+		}
+		return held;
+	}
+
+	/**
 	 * Whether a worker serving `window` may still run: one of its attempts has not ended, or the projection does not show
-	 * it (none yet after a reopen, or one that no longer holds it) and the window changed within the unseen retention.
+	 * it (`UNSEEN_ATTEMPT_RETENTION_MS`) and the window changed within the unseen retention.
 	 */
 	private mayStillServe(window: SpendWindowRecord, snapshot: TaskRuntimeProjection | undefined, now: number): boolean {
 		return window.attemptIds.some((attemptId) => {
