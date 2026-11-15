@@ -33,10 +33,11 @@ import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
+import type { RemoteBotHost } from "./bot-host-state.ts";
 import { type BotInboxItem, botInboxStopNames, botInboxStopWaiting, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
-import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
+import { readSessionSnapshot, remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 import { applyUnhostedBotStop, type OwnerStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
 
@@ -318,6 +319,8 @@ export interface BotOwedWorkPorts {
 	hostedHere(agentId: string): boolean;
 	/** Whether another host holds the bot's lock now; the host takes the bot up again when that hold changes. */
 	heldElsewhere(agentId: string): boolean;
+	/** The host, in another process or another host of this one, holding the bot's lock now; it throws when it does not read. */
+	hostOf(agentId: string): RemoteBotHost | undefined;
 	/** The bot's own session as its home saved it last. */
 	savedSessionOf(agentId: string): SavedBotSession | undefined;
 	/** The messages waiting in the bot's inbox, oldest first. */
@@ -405,7 +408,10 @@ export class BotOwedWork {
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
-		this.unrecorded = new UnrecordedBotStops(() => ports.agentDir());
+		this.unrecorded = new UnrecordedBotStops(
+			() => ports.agentDir(),
+			(message) => ports.warn(message),
+		);
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
@@ -955,15 +961,25 @@ export class BotOwedWork {
 
 	/**
 	 * The owner's stop of a bot this process does not host, once `requestBotStop` wrote it, or failed to (`unrecorded`, then
-	 * held: {@link UnrecordedBotStops.hold}): the bot is asked open, which applies the stops waiting first. It never throws, so
-	 * the owner's stop of this process's other work goes on: a read that fails is told to the owner as a later pass's is.
+	 * held: {@link UnrecordedBotStops.hold}): the bot is asked open, which applies the stops waiting first. A written stop is
+	 * taken by the host running the bot, if one does: that host is returned, for the owner to be told where the stop went.
+	 * It never throws, so the owner's stop of this process's other work goes on: a read that fails is told to the owner, the
+	 * open's as a later pass's is, the host's as the one place the stop went that could not be named.
 	 */
-	ownerStopped(agentId: string, unrecorded: OwnerStop | undefined): void {
+	ownerStopped(agentId: string, unrecorded: OwnerStop | undefined): RemoteBotHost | undefined {
 		if (unrecorded) this.unrecorded.hold(agentId, unrecorded);
 		try {
 			this.openIfOwed(agentId);
 		} catch (error) {
 			this.tellWaits(agentId, this.waitsText(agentId, botFailureText(agentId, error)));
+		}
+		if (unrecorded) return undefined;
+		try {
+			const host = this.ports.hostOf(agentId);
+			return remoteHostActive(host) ? host : undefined;
+		} catch (error) {
+			this.ports.warn(interfaceText().botTeam.botStopHostUnread(agentId, botFailureText(agentId, error)));
+			return undefined;
 		}
 	}
 

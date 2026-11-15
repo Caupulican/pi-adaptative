@@ -125,7 +125,7 @@ export const BOT_TEAM = {
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e não é tentada de novo, então envie-a outra vez.`,
+		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
 	botSweepFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a caixa de entrada e o trabalho devido dele não puderam ser verificados (${reason}); eles são verificados de novo a cada minuto.`,
 	botStopLinkedSessionLeft: (agentId: string, path: string) =>
@@ -146,6 +146,14 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a parada do dono, aplicada aqui sem o registro dela, não pôde recusar as mensagens enviadas a ele antes da parada (${reason}); elas ainda podem chegar a ele.`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
+	botStopDropped: (agentId: string, why: string) =>
+		`Bot ${agentId}: a parada do dono que não pôde ser registrada foi descartada: ${why}; envie-a outra vez.`,
+	botStopDropReasons: {
+		workChanged: "o trabalho do bot mudou desde que ela foi feita",
+		workUnread: (reason: string) => `não foi possível ler onde está o trabalho do bot (${reason})`,
+	},
+	botStopHostUnread: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada do dono foi registrada e o processo que hospeda o bot a toma, ou este enquanto nenhum o hospeda; não foi possível ler qual processo o hospeda (${reason}).`,
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
 		`Bot ${agentId}: a parada do dono encerrou os workers dele e os jobs que ele colocou em outras máquinas, mas deixou o objetivo e a espera pelo limite de uso como estavam: ${file} não contém a sessão ${sessionId}.`,
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>

@@ -287,6 +287,7 @@ export class BotSessionHost {
 			stopped: () => this.stopped,
 			hostedHere: (agentId) => this.entries.has(agentId),
 			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
+			hostOf: (agentId) => this.view.hostOf(agentId),
 			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),
@@ -1061,10 +1062,9 @@ export class BotSessionHost {
 		}
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it. One not
 		// written is held in memory until a take here applies it (the ask, a retry, or this process's open of the bot).
-		this.owed.ownerStopped(agentId, written ? undefined : stop);
+		const host = this.owed.ownerStopped(agentId, written ? undefined : stop);
 		this.changed(agentId);
-		const host = written ? this.view.hostOf(agentId) : undefined;
-		return remoteHostActive(host)
+		return host
 			? {
 					stopped: false,
 					elsewhere: interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId),

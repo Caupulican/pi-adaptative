@@ -19,7 +19,6 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { harnessLog } from "../../kernel/harness-log.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
@@ -419,14 +418,17 @@ interface HeldOwnerStop {
  * since a process ran the bot since and what is there now came after the stop. Its own failed take marks it again where
  * that take left the bot. A stop held while this process opens or closes the bot is marked where it found the bot then:
  * the open's take once the session is built applies it under the same lock, and what an open that failed, or a close,
- * wrote after drops it. One whose mark does not read is not held, as the owner was told (`botStopNotRecorded`).
+ * wrote after drops it. One whose mark does not read is not held. A stop dropped by either is told to the owner once
+ * (`botStopDropped`), with the way to make it again.
  */
 export class UnrecordedBotStops {
 	private readonly held = new Map<string, HeldOwnerStop>();
 	private readonly agentDir: () => string;
+	private readonly warn: (message: string) => void;
 
-	constructor(agentDir: () => string) {
+	constructor(agentDir: () => string, warn: (message: string) => void) {
 		this.agentDir = agentDir;
+		this.warn = warn;
 	}
 
 	/** Holds `stop` for the bot, marked where its work stands now, unless a newer one is held. */
@@ -458,7 +460,11 @@ export class UnrecordedBotStops {
 	underLock(agentId: string, session: ClosedBotSession, ports: BotStopPorts): OwnerStop | undefined {
 		const agentDir = this.agentDir();
 		const marked = this.held.get(agentId);
-		if (marked && !sameWorkMark(marked.mark, workMark(agentDir, agentId))) this.held.delete(agentId);
+		if (marked && !sameWorkMark(marked.mark, workMark(agentDir, agentId))) {
+			this.held.delete(agentId);
+			const text = interfaceText().botTeam;
+			this.warn(text.botStopDropped(agentId, text.botStopDropReasons.workChanged));
+		}
 		const memory = this.held.get(agentId);
 		try {
 			const applied = applyBotStopUnderLock(agentDir, agentId, session, ports, memory?.stop);
@@ -487,16 +493,14 @@ export class UnrecordedBotStops {
 		if (held !== undefined && this.held.get(agentId) === held) this.held.delete(agentId);
 	}
 
-	/** Holds `stop` marked where the bot's work stands now; one whose mark does not read is not held (see the class). */
+	/** Holds `stop` marked where the bot's work stands now; one whose mark does not read is dropped (see the class). */
 	private mark(agentId: string, stop: OwnerStop): void {
 		try {
 			this.held.set(agentId, { stop, mark: workMark(this.agentDir(), agentId) });
 		} catch (error) {
 			this.held.delete(agentId);
-			harnessLog.warn("bots", "an owner's stop that could not be recorded could not be held", {
-				agentId,
-				reason: error instanceof Error ? error.message : String(error),
-			});
+			const text = interfaceText().botTeam;
+			this.warn(text.botStopDropped(agentId, text.botStopDropReasons.workUnread(botFailureText(agentId, error))));
 		}
 	}
 }

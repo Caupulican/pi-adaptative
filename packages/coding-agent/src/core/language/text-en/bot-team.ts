@@ -131,9 +131,12 @@ export const BOT_TEAM = {
 	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
-	/** The owner's stop could not be written to the bot's home: only this process holds it, and the write is not tried again. */
+	/**
+	 * The owner's stop could not be written to the bot's home: only this process holds it, and applies it only while the
+	 * bot's work stands where it was when the stop was made.
+	 */
 	botStopNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is applied here only while the bot's work is unchanged since the stop.`,
 	/** The periodic listing of the bots failed on this one; the others were listed. */
 	botSweepFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its inbox and owed work could not be checked (${reason}); they are checked again every minute.`,
@@ -164,6 +167,16 @@ export const BOT_TEAM = {
 	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,
+	/** A stop this process could not record was dropped (`why`, one of {@link botStopDropReasons}): it ends nothing. */
+	botStopDropped: (agentId: string, why: string) =>
+		`Bot ${agentId}: the owner's stop that could not be recorded was dropped: ${why}; send it again.`,
+	botStopDropReasons: {
+		workChanged: "the bot's work changed since it was made",
+		workUnread: (reason: string) => `where the bot's work stands could not be read (${reason})`,
+	},
+	/** The owner's stop was written, but the process hosting the bot, which takes it, could not be read to name it. */
+	botStopHostUnread: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop was recorded and the process hosting the bot takes it, or this one while none does; which process hosts it could not be read (${reason}).`,
 	/** The owner's stop of a closed bot found its saved session's file holding another session, and left the file. */
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
 		`Bot ${agentId}: the owner's stop ended its workers and the jobs it placed on other machines, but left its goal and its usage-limit wait as they were: ${file} does not hold its session ${sessionId}.`,

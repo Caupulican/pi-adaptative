@@ -138,7 +138,8 @@ stop that could not be recorded for a bot no process hosts is held in memory by 
 there applies it whole under the bot's host lock (a retry, or that process's open of the bot, a stop made during the open
 included), the messages sent before it refused. No other process learns of it, so it ends only the work there was when it
 was made: it is dropped once a process ran the bot since (the bot's saved session, or that session's worker records,
-moved), and it is not held when where the bot's work stands cannot be read then. A worker the owner stopped opens no
+moved), and it is not held when where the bot's work stands cannot be read then; either way you are told once that it
+was dropped, and why, to send it again. A worker the owner stopped opens no
 turn of the bot. A
 profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
@@ -197,11 +198,12 @@ the bot homes. `/bot stop` ends everything of the bot's running when it is taken
 work of its worker tasks and the jobs its sessions placed on other machines (a session file in its home that is a
 symbolic link is skipped, and you are told). Your words sent after it never start a turn before it is applied: while a
 stop waits unapplied they wait in the bot's inbox behind it, and you are told so. It reaches the bot
-wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which),
+wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which, or that it could not be read),
 or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end
 with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
 they end when they fire, at their end time or when the bot is retired. A stop
-that cannot be written to the bot's home is not recorded, and you are told to send it again. A session started after every other one closed lists each bot with its whole conversation.
+that cannot be written to the bot's home is not recorded: you are told it reaches no other process and is applied here
+only while the bot's work is unchanged, and to send it again once it is dropped. A session started after every other one closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime
