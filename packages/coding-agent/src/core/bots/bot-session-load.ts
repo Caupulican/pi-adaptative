@@ -157,9 +157,13 @@ export class BotSessionLoader {
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
 							: kept.reason === "worker-records"
 								? words.botSessionStateKeptForWorkers(agentId)
-								: kept.reason === "still-held"
-									? words.botSessionStateStillHeld(agentId, kept.pids.join(", "))
-									: words.botSessionStateNotMoved(agentId),
+								: kept.reason === "worker-mail-pending"
+									? words.botSessionStateKeptForWorkerMail(agentId)
+									: kept.reason === "records-unreadable"
+										? words.botSessionStateMoveUndecided(agentId, kept.error)
+										: kept.reason === "still-held"
+											? words.botSessionStateStillHeld(agentId, kept.pids.join(", "))
+											: words.botSessionStateNotMoved(agentId),
 					);
 				},
 			});

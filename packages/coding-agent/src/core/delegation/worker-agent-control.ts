@@ -66,6 +66,7 @@ import type {
 import { type WorkerConversationRoots, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
+import { isPendingTaskBearingMessage, workerMailboxHasOpenObligation } from "./worker-mailbox-obligations.ts";
 import {
 	readWorkerMailboxRecord,
 	type WorkerMailboxContextReference,
@@ -1482,26 +1483,6 @@ function pruneDeliveredHistory(
 }
 
 /**
- * A mailbox owes work while any message is undelivered and unfailed, a delivered request still awaits
- * its reply, or a reply acknowledgement is mid-flight. Quiescence and bundle retention share this rule.
- */
-export function workerMailboxHasOpenObligation(
-	state: Pick<WorkerAgentMailboxState, "messages" | "replyAcknowledgements">,
-): boolean {
-	return (
-		state.replyAcknowledgements.length > 0 ||
-		state.messages.some(
-			(message) =>
-				(message.deliveredAt === undefined && message.failedAt === undefined) ||
-				(message.deliveredAt !== undefined &&
-					message.expectReply === true &&
-					message.repliedAt === undefined &&
-					message.failedAt === undefined),
-		)
-	);
-}
-
-/**
  * The one rule for settling expired obligations: what {@link WorkerAgentMailbox.expireOpenObligations} writes and
  * what {@link WorkerAgentMailbox.settlesEveryOpenObligation} predicts. Pure; the input is never modified.
  */
@@ -1916,7 +1897,7 @@ export class WorkerAgentMailbox {
 
 	/** Oldest-first executable intents that have not reached the durable transcript boundary. */
 	pendingTaskBearing(): WorkerAgentMessage[] {
-		return this.pending().filter((message) => message.task !== undefined && message.task.kind !== "host_event");
+		return this.pending().filter(isPendingTaskBearingMessage);
 	}
 
 	/** Cancellation eligibility shared with the durable ordinary-task transition. */

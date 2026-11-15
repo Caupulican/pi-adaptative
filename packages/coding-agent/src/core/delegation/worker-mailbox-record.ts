@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { currentStoragePath, workerFileStorage } from "../../kernel/session/worker-storage-identity.ts";
 import { type OrchestrationHome, workerAgentMailboxFile } from "../agent-paths.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
@@ -25,6 +26,10 @@ export function workerMailboxPath(home: OrchestrationHome, parentSessionId: stri
 	return workerAgentMailboxFile(home, parentSessionId, digest);
 }
 
+/**
+ * The mailbox record at `file`. A project mailbox's reference names its specialist's transcript by the path recorded
+ * when it was bound, read as the bundle holding the mailbox names it now (`currentStoragePath`).
+ */
 export function readWorkerMailboxRecord(file: string): {
 	reference?: WorkerMailboxContextReference;
 	mailbox?: unknown;
@@ -57,7 +62,7 @@ export function readWorkerMailboxRecord(file: string): {
 			parentSessionId: ref.parentSessionId as string,
 			logicalAgentId: ref.logicalAgentId as string,
 			sessionId: ref.sessionId as string,
-			sessionFile: ref.sessionFile,
+			sessionFile: currentStoragePath(workerFileStorage(file), ref.sessionFile),
 		},
 	};
 }

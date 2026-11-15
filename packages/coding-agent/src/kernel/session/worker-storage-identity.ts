@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeFileAtomicSync } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
@@ -146,19 +146,29 @@ export function recordBundleFormerRoot(bundleDir: string, formerRoot: string): v
 }
 
 /**
- * The path `recorded` names now: under the bundle's directory when it was recorded under a former one, else itself. A
- * file URL (a worker's terminal output artifact is recorded as one) is read the same way, by its URL prefix.
+ * The path `recorded` names in the bundle's directory now, when it was recorded under a former one: one that resolves
+ * inside that former directory reads as the same place inside the bundle's. Anything else, a path that only starts with
+ * a former directory's text and resolves outside it included, is not the bundle's and reads as recorded.
+ */
+function translatedPath(storage: WorkerStorageIdentity, recorded: string): string | undefined {
+	for (const former of storage.formerBundleDirs) {
+		if (recorded !== former && !recorded.startsWith(former + sep)) continue;
+		const inside = relative(former, resolve(recorded));
+		if (inside.startsWith("..") || isAbsolute(inside)) return undefined;
+		return inside === "" ? storage.bundleDir : join(storage.bundleDir, inside);
+	}
+	return undefined;
+}
+
+/**
+ * The path `recorded` names now ({@link translatedPath}), else itself. A file URL (a worker's terminal output artifact
+ * is recorded as one) is read the same way, by the path it names.
  */
 export function currentStoragePath(storage: WorkerStorageIdentity, recorded: string): string {
-	const url = recorded.startsWith("file:");
-	for (const former of storage.formerBundleDirs) {
-		const [from, to, separator] = url
-			? [pathToFileURL(former).href, pathToFileURL(storage.bundleDir).href, "/"]
-			: [former, storage.bundleDir, sep];
-		if (recorded === from) return to;
-		if (recorded.startsWith(from + separator)) return to + recorded.slice(from.length);
-	}
-	return recorded;
+	if (!recorded.startsWith("file:")) return translatedPath(storage, recorded) ?? recorded;
+	if (!storage.formerBundleDirs.some((former) => recorded.startsWith(pathToFileURL(former).href))) return recorded;
+	const translated = translatedPath(storage, fileURLToPath(recorded));
+	return translated === undefined ? recorded : pathToFileURL(translated).href;
 }
 
 /** `value`, JSON read from the bundle's records, with every path in it as {@link currentStoragePath} names it. */

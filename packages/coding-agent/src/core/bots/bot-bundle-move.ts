@@ -26,11 +26,11 @@
  * session's event store and retention archives name the transcripts by absolute path in the owner's home, which a rename
  * does not rewrite: the bundle records the owner's home root as a former root (`former-roots.json`, written into it
  * before the rename so it travels with it), and every reader of those records reads such a path under the bundle's
- * directory now (`worker-storage-identity.ts`). A session whose workers another session of the owner's home shares
- * (`sessionWorkersShared`: a specialist of another session's bundle it claimed, or one born in its bundle that the
- * home's specialist directory offers to every session there) is not moved at all, since those records name the
- * transcripts in the owner's home: it keeps its state there (`kept`, `worker-records`) and keeps using it there, as
- * every opener derives (`resolveSessionHome`: no bot home holds it).
+ * directory now (`worker-storage-identity.ts`). A session whose workers keep it in the owner's home
+ * (`bundleWorkersStay`: shared with another session of that home; work an earlier build's load would deliver into a
+ * worker's transcript by its recorded path still open; or those records unreadable) is not moved: it keeps its state
+ * there (`kept`) and keeps using it there, as every opener derives (`resolveSessionHome`: no bot home holds it), and
+ * a later load decides again.
  *
  * A rename that fails puts back what moved before it. Across devices (`EXDEV`) the state is kept where it was: the
  * session is then opened in the owner's home, which still holds it (`botSessionStorageRoots`), and the host tells the
@@ -60,7 +60,7 @@ import {
 	earlierAwayFleetQueueMetadataPath,
 	sessionFleetQueueMetadataPaths,
 } from "../fleet/fleet-queue-store.ts";
-import { sessionWorkersShared } from "./bot-bundle-workers.ts";
+import { type BundleWorkersStay, bundleWorkersStay } from "./bot-bundle-workers.ts";
 
 /**
  * `none`: the owner's home has nothing of the session. `moved`: the bot's home holds it now. `deleting`: a tombstone
@@ -70,9 +70,11 @@ import { sessionWorkersShared } from "./bot-bundle-workers.ts";
  * the host's own lease there is refused while that holder keeps it out, which is what the owner is told. `kept`: the
  * move was not made (`reason`), and the host tells the owner once: the bot's home already has a bundle of the session
  * (`in-both-homes`, the session uses the bot's, and the owner's stays unused at `ownerBundle`), the session's workers
- * are shared with another session of the owner's home (`worker-records`), the homes lie on different devices
+ * stay for its workers (`bundleWorkersStay`: shared with another session of the owner's home, `worker-records`; work a
+ * load would deliver into a worker's transcript still open, `worker-mail-pending`; their records unreadable,
+ * `records-unreadable`, decided again at the next load), the homes lie on different devices
  * (`cross-device`), or processes `pids` not proven dead still hold it in the owner's home, none of which keeps the
- * bot's host out (away runs' hosts: `still-held`); in those three the session uses the owner's.
+ * bot's host out (away runs' hosts: `still-held`); in all but the first the session uses the owner's.
  */
 export type BotBundleMove =
 	| { readonly kind: "none" }
@@ -80,7 +82,8 @@ export type BotBundleMove =
 	| { readonly kind: "deleting" }
 	| { readonly kind: "held" }
 	| { readonly kind: "kept"; readonly reason: "in-both-homes"; readonly ownerBundle: string }
-	| { readonly kind: "kept"; readonly reason: "worker-records" | "cross-device" }
+	| ({ readonly kind: "kept" } & BundleWorkersStay)
+	| { readonly kind: "kept"; readonly reason: "cross-device" }
 	| { readonly kind: "kept"; readonly reason: "still-held"; readonly pids: readonly number[] };
 
 /**
@@ -199,10 +202,10 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			const inBoth = pieces.filter((index) => existsSync(to[index] as string));
 			if (inBoth.includes(BUNDLE))
 				return { kind: "kept", reason: "in-both-homes", ownerBundle: from[BUNDLE] as string };
-			// The bot's bundle, when there is one, is the one the session uses; else the owner's stays where another session
-			// of that home shares its workers.
-			if (pieces.includes(BUNDLE) && sessionWorkersShared(owner, sessionId))
-				return { kind: "kept", reason: "worker-records" };
+			// The bot's bundle, when there is one, is the one the session uses; else the owner's stays while its workers keep it
+			// there.
+			const stay = pieces.includes(BUNDLE) ? bundleWorkersStay(owner, sessionId) : undefined;
+			if (stay) return { kind: "kept", ...stay };
 			// What the bot's home already has wins where the owner's records nothing newer: a registry of dead holders only,
 			// or a fleet queue file older than the bot's. A newer owner's fleet queue file replaces the bot's below.
 			const dropped = inBoth.filter(

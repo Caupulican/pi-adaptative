@@ -25,8 +25,9 @@ import {
 import { obligationLedgerFile, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
 import { PersistentBotTeamStore } from "./delegation/persistent-bot-team-store.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
-import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
+import { WorkerAgentMailbox } from "./delegation/worker-agent-control.ts";
 import { reserveWorkerBundleDeletion } from "./delegation/worker-bundle-deletion.ts";
+import { workerMailboxHasOpenObligation } from "./delegation/worker-mailbox-obligations.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
 import {
 	earlierAwayFleetQueueMetadataFile,
