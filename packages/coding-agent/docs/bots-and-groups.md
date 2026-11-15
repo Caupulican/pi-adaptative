@@ -119,8 +119,9 @@ while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
 orchestrator as a worker's terminal does.
 
-A bot directs workers of its own with `delegate` and its one-call form `assign`, the tools the main session directs its
-workers with; it holds no `plan`. Its system prompt carries the director role in a bot's words (its own work is
+A bot directs workers of its own with `delegate`, its one-call form `assign` and `plan`, the tools the main session directs
+its workers with; its plans run through the same fleet as its other workers ([Plans](plans.md)), and the plan rule and the
+director role's plan line reach it with the tool. Its system prompt carries the director role in a bot's words (its own work is
 integration, verification, security and every answer in its conversation; a writing bot writes instruction files only in
 the project's `.pi`, and a read-only bot's words say it and its workers change no files), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
 since a bot lends its workers no memory. Its workers are held to the bot's own reach: they write, read, run commands and
@@ -131,8 +132,10 @@ bot's own workers hold no `bot_message` (the bot holds no messaging to lend), an
 are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every worker it started, and says the
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
 taken still ends the turn and the workers of the bot this process hosts. A worker the owner stopped opens no turn of the bot. A
-profile bot holds both `delegate` and `assign` when its profile's tools name either, since `assign` runs `delegate`; a
-worker of any profile holds neither.
+profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
+`delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
+plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
+writer), so each step is planned as the read-only work its worker does.
 The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session; the one
 orchestration directory a bot can write is the project's `.pi` in its working directory, since its home `bots/<id>` is
 private to its path scope. A bot is never hosted in a worker process.
