@@ -52,7 +52,7 @@ export interface SessionCapabilities {
 	readonly writesOwnerSettings: boolean;
 	/** Answers for its checkout: pins the GitHub origin and acts ahead on the checkout's failing CI. */
 	readonly answersForCheckout: boolean;
-	/** Manages bots: the `bot` tool, leaders and their terminal route, the retire-leader refusal. */
+	/** Manages bots: the `bot` tool, leaders and their terminal route, the retire-leader refusal, its workers' bot directory. */
 	readonly managesBots: boolean;
 	/**
 	 * Directs workers: the delegation gate, director prompt, delegation and plan rules, plan tool and executor, retention.
