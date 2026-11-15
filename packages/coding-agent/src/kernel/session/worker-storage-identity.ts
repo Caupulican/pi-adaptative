@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeFileAtomicSync } from "../storage/atomic-file.ts";
@@ -98,9 +99,35 @@ export interface WorkerStorageIdentity {
 const FORMER_ROOTS_FILE = "former-roots.json";
 const MAX_FORMER_ROOTS_BYTES = 64 * 1024;
 
+const MAX_CACHED_FORMER_ROOTS = 1024;
+
+/**
+ * The former roots read per bundle directory in this process, each with the identity of the file it was read from
+ * (absent, or its device, inode, size and change times): a read whose file has the same identity is answered from here,
+ * so the readers of a bundle's records (every mailbox record read among them) stat the file instead of reading it. A
+ * write replaces the file (`writeFileAtomicSync`'s rename), which changes its identity.
+ */
+const formerRootsRead = new Map<string, { readonly identity: string; readonly roots: readonly string[] }>();
+
+function fileIdentity(file: string): string {
+	const stat = statSync(file, { throwIfNoEntry: false, bigint: true });
+	return stat ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` : "absent";
+}
+
 /** The orchestration home roots the bundle at `bundleDir` lived in before; none for a bundle never moved. */
-function readFormerRoots(bundleDir: string): string[] {
+function readFormerRoots(bundleDir: string): readonly string[] {
 	const file = join(bundleDir, FORMER_ROOTS_FILE);
+	const identity = fileIdentity(file);
+	const known = formerRootsRead.get(bundleDir);
+	if (known?.identity === identity) return known.roots;
+	const roots = parseFormerRoots(file);
+	formerRootsRead.delete(bundleDir);
+	formerRootsRead.set(bundleDir, { identity, roots });
+	if (formerRootsRead.size > MAX_CACHED_FORMER_ROOTS) formerRootsRead.delete(formerRootsRead.keys().next().value!);
+	return roots;
+}
+
+function parseFormerRoots(file: string): readonly string[] {
 	const text = readOptionalBoundedTextFileSync(file, MAX_FORMER_ROOTS_BYTES, "Session bundle former roots");
 	if (text === undefined) return [];
 	const value: unknown = JSON.parse(text);
@@ -137,7 +164,7 @@ export function workerFileStorage(file: string): WorkerStorageIdentity {
  * already records is not written again.
  */
 export function recordBundleFormerRoot(bundleDir: string, formerRoot: string): void {
-	const roots = readFormerRoots(bundleDir);
+	const roots = readFormerRoots(resolve(bundleDir));
 	const root = resolve(formerRoot);
 	if (roots.includes(root)) return;
 	writeFileAtomicSync(join(bundleDir, FORMER_ROOTS_FILE), `${JSON.stringify({ formerRoots: [...roots, root] })}\n`, {

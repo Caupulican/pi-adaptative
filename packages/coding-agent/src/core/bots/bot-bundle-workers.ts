@@ -7,10 +7,14 @@
  *   projection or its retention archives) names a worker transcript outside its bundle (a specialist another session's
  *   bundle holds, which the session claimed), or a specialist directory of the home names the session (a specialist
  *   born in its bundle, claimable by every session of the home);
- * - `worker-mail-pending`: work its load would deliver into a worker's transcript is still open: a worker mailbox of the
- *   bundle holds an undelivered task-bearing message, or a worker started for another worker of the session has a
- *   terminal handoff not yet delivered. An earlier build loading the session opens that transcript by its recorded
- *   path, which a moved bundle no longer holds; this build settles them in the owner's home, and a later load moves it;
+ * - `workers-open`: a worker of the bundle is still open to work a load delivers into its transcript: an agent binding
+ *   of the projection that is not retired names a transcript inside the bundle (this build may steer it, and an owner's
+ *   stop then cancels it in the event store only, leaving the steer to settle there), a worker mailbox of the bundle
+ *   holds an undelivered task-bearing message, or a worker started for another worker of the session has a terminal
+ *   handoff not yet delivered. An earlier build loading the session settles those by opening the transcript at its
+ *   recorded path, which a moved bundle no longer holds, and fails the load; this build settles them in the owner's
+ *   home, and a load after every bound worker is retired moves it (a retired worker's transcript is reached only where
+ *   an earlier build catches the failure);
  * - `records-unreadable`: one of these records could not be read, so nothing is decided: the bundle stays where it is,
  *   as an earlier build keeps it, and the next load decides again.
  */
@@ -31,7 +35,7 @@ import { isPlainRecord } from "../util/value-guards.ts";
 
 /** Why the bundle stays in the owner's home; undefined when it moves. */
 export type BundleWorkersStay =
-	| { readonly reason: "worker-records" | "worker-mail-pending" }
+	| { readonly reason: "worker-records" | "workers-open" }
 	| { readonly reason: "records-unreadable"; readonly error: string };
 
 const MAX_MAILBOX_FILES = 4096;
@@ -111,8 +115,15 @@ function decide(home: OrchestrationHome, sessionId: string): BundleWorkersStay |
 		projectSpecialistsNameSession(home, sessionId)
 	)
 		return { reason: "worker-records" };
-	if ((projection && workerHandoffPending(projection)) || workerMailPending(bundle))
-		return { reason: "worker-mail-pending" };
+	const openBinding = Object.values(projection?.agents ?? {}).some(
+		(agent) =>
+			agent.status !== "retired" &&
+			agent.resumeContext.provider === "pi" &&
+			agent.resumeContext.sessionFile !== undefined &&
+			!outside(agent.resumeContext.sessionFile),
+	);
+	if (openBinding || (projection && workerHandoffPending(projection)) || workerMailPending(bundle))
+		return { reason: "workers-open" };
 	return undefined;
 }
 

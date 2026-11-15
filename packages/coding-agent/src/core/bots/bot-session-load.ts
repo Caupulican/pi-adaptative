@@ -157,8 +157,8 @@ export class BotSessionLoader {
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
 							: kept.reason === "worker-records"
 								? words.botSessionStateKeptForWorkers(agentId)
-								: kept.reason === "worker-mail-pending"
-									? words.botSessionStateKeptForWorkerMail(agentId)
+								: kept.reason === "workers-open"
+									? words.botSessionStateKeptForOpenWorkers(agentId)
 									: kept.reason === "records-unreadable"
 										? words.botSessionStateMoveUndecided(agentId, kept.error)
 										: kept.reason === "still-held"

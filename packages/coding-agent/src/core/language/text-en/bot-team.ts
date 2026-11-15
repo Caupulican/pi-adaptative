@@ -302,8 +302,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>
 		`Bot ${agentId}: its session's orchestration state stays in the main session's home, whose other sessions share its workers' conversations; it keeps using it there.`,
-	botSessionStateKeptForWorkerMail: (agentId: string) =>
-		`Bot ${agentId}: its session's orchestration state stays in the main session's home until its workers' pending messages are delivered there; it keeps using it there, and a later load moves it.`,
+	botSessionStateKeptForOpenWorkers: (agentId: string) =>
+		`Bot ${agentId}: its session's orchestration state stays in the main session's home while its workers there are still open (not retired, or with messages still to deliver); it keeps using it there, and a load after they settle moves it.`,
 	botSessionStateMoveUndecided: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session's orchestration state stays in the main session's home for now: its workers' records could not be read to decide the move (${reason}); it keeps using it there, and the next load decides again.`,
 	botSessionStateStillHeld: (agentId: string, pids: string) =>

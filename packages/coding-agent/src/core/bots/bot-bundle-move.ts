@@ -27,8 +27,8 @@
  * does not rewrite: the bundle records the owner's home root as a former root (`former-roots.json`, written into it
  * before the rename so it travels with it), and every reader of those records reads such a path under the bundle's
  * directory now (`worker-storage-identity.ts`). A session whose workers keep it in the owner's home
- * (`bundleWorkersStay`: shared with another session of that home; work an earlier build's load would deliver into a
- * worker's transcript by its recorded path still open; or those records unreadable) is not moved: it keeps its state
+ * (`bundleWorkersStay`: shared with another session of that home; a bound worker not retired, or work an earlier
+ * build's load would deliver into a worker's transcript by its recorded path still open; or those records unreadable) is not moved: it keeps its state
  * there (`kept`) and keeps using it there, as every opener derives (`resolveSessionHome`: no bot home holds it), and
  * a later load decides again.
  *
@@ -70,8 +70,8 @@ import { type BundleWorkersStay, bundleWorkersStay } from "./bot-bundle-workers.
  * the host's own lease there is refused while that holder keeps it out, which is what the owner is told. `kept`: the
  * move was not made (`reason`), and the host tells the owner once: the bot's home already has a bundle of the session
  * (`in-both-homes`, the session uses the bot's, and the owner's stays unused at `ownerBundle`), the session's workers
- * stay for its workers (`bundleWorkersStay`: shared with another session of the owner's home, `worker-records`; work a
- * load would deliver into a worker's transcript still open, `worker-mail-pending`; their records unreadable,
+ * stay for its workers (`bundleWorkersStay`: shared with another session of the owner's home, `worker-records`; a bound
+ * worker not retired, or work a load would deliver into a worker's transcript still open, `workers-open`; their records unreadable,
  * `records-unreadable`, decided again at the next load), the homes lie on different devices
  * (`cross-device`), or processes `pids` not proven dead still hold it in the owner's home, none of which keeps the
  * bot's host out (away runs' hosts: `still-held`); in all but the first the session uses the owner's.
