@@ -110,13 +110,10 @@ export function savedUsageResumeAt(file: string, agentDir: string, rules: SavedU
 	return until !== undefined && until > stop.at ? until : stop.at;
 }
 
-/**
- * A bundle as the host read it: none; its facts, with `stamp`, the identity of the state read (its store and the last
- * ordinal committed); or the error it did not read with, `fresh` the first time its files read so.
- */
+/** A bundle as the host read it: none; its facts; or the error it did not read with, `fresh` the first time its files read so. */
 type BundleRead =
 	| { readonly kind: "none" }
-	| { readonly kind: "facts"; readonly facts: WorkerWorkFacts; readonly stamp: string }
+	| { readonly kind: "facts"; readonly facts: WorkerWorkFacts }
 	| { readonly kind: "unreadable"; readonly error: unknown; readonly fresh: boolean };
 
 /**
@@ -146,12 +143,12 @@ class WorkerWorkLedger {
 			const ino = statSync(store.rootDir).ino;
 			const known = this.reads.get(agentId);
 			if (known?.dir === store.rootDir && known.ino === ino && committedNothingAfter(store, known.lastOrdinal))
-				return { kind: "facts", facts: known.facts, stamp: stampOf(store.rootDir, ino, known.lastOrdinal) };
+				return { kind: "facts", facts: known.facts };
 			const state = readTaskRuntimeProjection(store);
 			const facts = workerWorkFacts(state);
 			this.reads.set(agentId, { dir: store.rootDir, ino, lastOrdinal: state.lastOrdinal, facts });
 			this.failures.delete(agentId);
-			return { kind: "facts", facts, stamp: stampOf(store.rootDir, ino, state.lastOrdinal) };
+			return { kind: "facts", facts };
 		} catch (error) {
 			// Kept with the identity of the files it failed on: reported once, read again once they change.
 			this.reads.delete(agentId);
@@ -165,10 +162,6 @@ class WorkerWorkLedger {
 		this.reads.delete(agentId);
 		this.failures.delete(agentId);
 	}
-}
-
-function stampOf(dir: string, ino: number, lastOrdinal: number): string {
-	return `${dir}\0${ino}\0${lastOrdinal}`;
 }
 
 /**
@@ -344,10 +337,10 @@ export class BotOwedWork {
 	/** The alarm at the next time a bot's workers come due (a retry, an unbound lease's term), with its time. */
 	private readonly retryWaits = new Map<string, { readonly at: number; readonly alarm: WallAlarm }>();
 	/**
-	 * The bundle each bot's session left when it last closed here, by the identity of the state read (`closed`): what that
-	 * state holds to deliver, the session's open could not deliver, so it does not open the session again.
+	 * The items each bot's bundle held to deliver when its session last closed here (`closed`): the session's open could not
+	 * deliver them, so they do not open the session again.
 	 */
-	private readonly offered = new Map<string, string>();
+	private readonly offered = new Map<string, ReadonlySet<string>>();
 	/** The stops waiting for each bot when applying them last failed here ({@link applyOwnerStop}). */
 	private readonly failedStops = new Map<string, string>();
 
@@ -400,15 +393,15 @@ export class BotOwedWork {
 	}
 
 	/**
-	 * The bot's session closed here, its bundle's writes done: what the bundle holds to deliver now is what the session could
-	 * not deliver while it ran (a receipt or an end an owner that only a live session registers holds, a parent write whose
-	 * import keeps failing), so it opens the session for none of it until the bundle changes. Kept in this process only: a
-	 * process that starts opens such a bot once.
+	 * The bot's session closed here, its bundle's writes done: the items the bundle holds to deliver now are what the session
+	 * could not deliver while it ran (a receipt or an end an owner that only a live session registers holds, a parent write
+	 * whose import keeps failing), so it opens the session for none of them; only an item not among them does. Kept in this
+	 * process only: a process that starts opens such a bot once.
 	 */
 	closed(agentId: string): void {
 		const sessionId = this.ports.savedSessionOf(agentId)?.id;
 		const read = sessionId === undefined ? undefined : this.workerFacts(agentId, sessionId);
-		if (read?.kind === "facts") this.offered.set(agentId, read.stamp);
+		if (read?.kind === "facts") this.offered.set(agentId, new Set(read.facts.deliveryItems));
 		else this.offered.delete(agentId);
 	}
 
@@ -486,8 +479,8 @@ export class BotOwedWork {
 
 	/**
 	 * Whether the workers of the bot's saved session `sessionId` owe its open at `nowMs`, and the next time they come due:
-	 * execution (`owesWorkerExecutionAt`), or something to deliver in a bundle that changed since the session last closed
-	 * here (`closed`). A bundle that does not read is returned as such.
+	 * execution (`owesWorkerExecutionAt`), or an item to deliver the session did not hold when it last closed here
+	 * (`closed`). A bundle that does not read is returned as such.
 	 */
 	private workerOwed(
 		agentId: string,
@@ -499,9 +492,10 @@ export class BotOwedWork {
 		const read = this.workerFacts(agentId, sessionId);
 		if (read.kind === "none") return { owed: false, dueAt: undefined };
 		if (read.kind === "unreadable") return { unreadable: read.error, fresh: read.fresh };
-		const { facts, stamp } = read;
+		const { facts } = read;
+		const offered = this.offered.get(agentId);
 		return {
-			owed: owesWorkerExecutionAt(facts, nowMs) || (facts.delivery && this.offered.get(agentId) !== stamp),
+			owed: owesWorkerExecutionAt(facts, nowMs) || facts.deliveryItems.some((item) => offered?.has(item) !== true),
 			dueAt: nextWorkerDueAt(facts, nowMs),
 		};
 	}

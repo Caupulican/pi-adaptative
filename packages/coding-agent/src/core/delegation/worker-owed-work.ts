@@ -30,12 +30,15 @@ export interface WorkerLeaseFact {
 	readonly bound: boolean;
 }
 
-/** What a bundle owes, as its projection read: `execution` and `delivery` whatever the clock reads, the rest by the clock. */
+/** What a bundle owes, as its projection read: `execution` and `deliveryItems` whatever the clock reads, the rest by the clock. */
 export interface WorkerWorkFacts {
 	/** Work the open runs now. */
 	readonly execution: boolean;
-	/** What the open delivers, when a try can deliver it. */
-	readonly delivery: boolean;
+	/**
+	 * What the open delivers, when a try can deliver it, one id per item: a usage receipt, a parent write, a publishable
+	 * receipt, an end's notification. A commit that changes none of them (a lease renewed) leaves the list as it was.
+	 */
+	readonly deliveryItems: readonly string[];
 	/** The recorded retry time of each attempt suspended until a retry. */
 	readonly retriesAt: readonly number[];
 	/** The leases of attempts leased or running. */
@@ -46,28 +49,33 @@ export interface WorkerWorkFacts {
 export function workerWorkFacts(snapshot: TaskRuntimeProjection): WorkerWorkFacts {
 	const retriesAt: number[] = [];
 	const leases: WorkerLeaseFact[] = [];
-	// The same reading the open's receipt deliveries take: a receipt they would skip is not owed.
-	let delivery = Object.values(snapshot.attempts).some(
-		(attempt) =>
-			Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
-			Object.keys(attempt.parentWrites ?? {}).length > 0 ||
-			deliverableWorkerReceipt(snapshot, attempt) !== undefined,
-	);
+	const delivery = new Set<string>();
+	for (const attempt of Object.values(snapshot.attempts)) {
+		for (const id of Object.keys(attempt.usageReceipts ?? {})) delivery.add(`usage:${attempt.attemptId}:${id}`);
+		for (const id of Object.keys(attempt.parentWrites ?? {})) delivery.add(`parent:${attempt.attemptId}:${id}`);
+		// The same reading the open's receipt deliveries take: a receipt they would skip is not owed.
+		if (deliverableWorkerReceipt(snapshot, attempt) !== undefined) delivery.add(`receipt:${attempt.attemptId}`);
+	}
 	// A pending end of an attempt its task no longer selects is replayed at the open as well.
-	delivery ||= Object.values(snapshot.notifications).some(
-		(notification) =>
+	for (const [id, notification] of Object.entries(snapshot.notifications))
+		if (
 			notification.status === "pending" &&
 			notification.attemptId !== undefined &&
-			endNotOwnerStopped(snapshot, notification.attemptId),
-	);
+			endNotOwnerStopped(snapshot, notification.attemptId)
+		)
+			delivery.add(`notification:${id}`);
 	let execution = false;
 	for (const taskId of Object.keys(snapshot.tasks)) {
 		const attempt = selectedWorkerAttempt(snapshot, taskId);
 		if (!attempt) continue;
 		if (!NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
 			// The open enqueues the end of the selected attempt when no notification holds it yet.
-			if (snapshot.notifications[workerTerminalNotificationId(attempt.attemptId)]?.status !== "delivered")
-				delivery ||= endNotOwnerStopped(snapshot, attempt.attemptId);
+			const notificationId = workerTerminalNotificationId(attempt.attemptId);
+			if (
+				snapshot.notifications[notificationId]?.status !== "delivered" &&
+				endNotOwnerStopped(snapshot, attempt.attemptId)
+			)
+				delivery.add(`notification:${notificationId}`);
 			execution ||= attemptAwaitsVerification(snapshot, attempt) && !verifierUnended(snapshot, taskId);
 			continue;
 		}
@@ -87,7 +95,7 @@ export function workerWorkFacts(snapshot: TaskRuntimeProjection): WorkerWorkFact
 			});
 		} else execution = true;
 	}
-	return { execution, delivery, retriesAt, leases };
+	return { execution, deliveryItems: [...delivery].sort(), retriesAt, leases };
 }
 
 /** Whether the attempt has ended (as its lane reads) other than by the owner's stop. */
