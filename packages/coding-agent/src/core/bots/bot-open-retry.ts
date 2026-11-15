@@ -69,6 +69,11 @@ export function storeFailure(agentId: string, error: unknown, within: string | u
 	return new BotSessionStoreError(agentId, failure, error);
 }
 
+/** Whether `failure` is tried again only `BOT_OPEN_RETRY_CAPPED` times in a row: a failing disk or a permission. */
+export function cappedFailure(failure: BotOpenFailure): boolean {
+	return failure === "failing" || failure === "permission";
+}
+
 /** Why the bot's session failed to open, when it is for a cause that passes on its own. */
 export function botOpenFailure(error: unknown): BotOpenFailure | undefined {
 	if (error instanceof SessionHeldError) return "held";
@@ -97,7 +102,7 @@ export interface BotOpenRetryPorts {
 	timers(): TimerPort;
 	/** Whether the host stopped: nothing is armed after. */
 	stopped(): boolean;
-	/** Asks again for the bot. */
+	/** Asks again for the bot (opens its session, or runs its owed release). */
 	retry(agentId: string): void;
 }
 
@@ -118,11 +123,11 @@ export class BotOpenRetries {
 	}
 
 	/**
-	 * Arms the bot's next attempt after a failure for `failure`, a backoff after the last: each failure in a row doubles
-	 * it, up to the cap. False, and nothing armed, when the host stopped or a failing disk or a permission failed
+	 * Arms the bot's next attempt after a failure, a backoff after the last: each failure in a row doubles it, up to the
+	 * cap. False, and nothing armed, when the host stopped or `capped` failures (`cappedFailure`) failed
 	 * `BOT_OPEN_RETRY_CAPPED` times in a row before this one.
 	 */
-	arm(agentId: string, failure: BotOpenFailure): boolean {
+	arm(agentId: string, capped: boolean): boolean {
 		const previous = this.attempts.get(agentId);
 		previous?.alarm?.stop();
 		if (this.ports.stopped()) {
@@ -130,10 +135,10 @@ export class BotOpenRetries {
 			return false;
 		}
 		const failures = (previous?.failures ?? 0) + 1;
-		const capped = (previous?.capped ?? 0) + (failure === "failing" || failure === "permission" ? 1 : 0);
-		const next: Attempts = { failures, capped, alarm: undefined };
+		const cappedInRow = (previous?.capped ?? 0) + (capped ? 1 : 0);
+		const next: Attempts = { failures, capped: cappedInRow, alarm: undefined };
 		this.attempts.set(agentId, next);
-		if (capped > BOT_OPEN_RETRY_CAPPED) return false;
+		if (cappedInRow > BOT_OPEN_RETRY_CAPPED) return false;
 		const delay = Math.min(BOT_OPEN_RETRY_FIRST_MS * 2 ** (failures - 1), BOT_OPEN_RETRY_MAX_MS);
 		const timers = this.ports.timers();
 		next.alarm = alarmAt(timers, timers.now() + delay, () => {

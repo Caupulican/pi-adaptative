@@ -199,6 +199,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
 	botSessionNotClosed: "A sessão do bot não fechou corretamente.",
 	botSessionsNotClosed: "As sessões dos bots não fecharam corretamente.",
+	botReleaseOwed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: as esperas e mensagens aguardando da sessão dele ainda não foram todas descartadas (${reason}); o hospedeiro dele tenta de novo até que sejam.`,
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem trabalho de esperas ou mensagens aguardando mas não pôde ser aberta, então eles aguardam até que seja (${reason}).`,
 	botOwedWorkNoRoot: (agentId: string, directories: string) =>

@@ -17,7 +17,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
-import { BotOpenRetries, botOpenFailure, botOpenFailureText, storeFailure } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure, botOpenFailureText, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -198,7 +198,7 @@ export class BotOwedWork {
 	 */
 	openLater(agentId: string, error: unknown): boolean {
 		const failure = botOpenFailure(error);
-		return failure !== undefined && this.openRetries.arm(agentId, failure);
+		return failure !== undefined && this.openRetries.arm(agentId, cappedFailure(failure));
 	}
 
 	/**
@@ -339,7 +339,7 @@ export class BotOwedWork {
 		let retrying = false;
 		const notResumed = (error: unknown): boolean => {
 			const failure = botOpenFailure(error);
-			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, failure);
+			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, cappedFailure(failure));
 			this.tellWaits(
 				agentId,
 				interfaceText().botTeam.botWatchesNotResumed(agentId, botOpenFailureText(agentId, error)),

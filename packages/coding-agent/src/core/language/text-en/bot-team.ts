@@ -225,6 +225,9 @@ export const BOT_TEAM = {
 	/** A turn ran past the owner's time bound on a worker's run, and was stopped. */
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,
+	/** A bot's release (it was retired or left the session path) failed; its host runs it again until it is done. */
+	botReleaseOwed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its session's watches and waiting messages were not all dropped yet (${reason}); its host tries again until they are.`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",

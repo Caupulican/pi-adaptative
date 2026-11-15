@@ -74,7 +74,7 @@ import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { botOpenFailure, storeFailure } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure, botOpenFailureText, storeFailure } from "./bot-open-retry.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
@@ -220,6 +220,13 @@ export class BotSessionHost {
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
 	private stopped = false;
+	/** Bots whose release failed: it runs again after a backoff until it is done, and the owner was told once. */
+	private readonly owedReleases = new Set<string>();
+	private readonly releaseRetries = new BotOpenRetries({
+		timers: () => this.idleTimers(),
+		stopped: () => this.stopped,
+		retry: (agentId) => this.releaseOwed(agentId),
+	});
 	/** This host among any other in its process: the bots' locks and published states name it (`HostLockRecord.holder`). */
 	private readonly holder = randomBytes(8).toString("hex");
 	/** The bots this host does not run, as their homes say (see `BotRemoteView`). */
@@ -1006,7 +1013,7 @@ export class BotSessionHost {
 			return;
 		}
 		if (!this.runsAsSession(record)) {
-			this.release(record.agentId);
+			this.releaseOwed(record.agentId);
 			return;
 		}
 		if (entry && entry.profileKey !== this.currentKey(record, entry.builtFor))
@@ -1059,28 +1066,75 @@ export class BotSessionHost {
 	/**
 	 * {@link release} in two steps: what it changes is read now (the bot's session, its watches, its inbox), and a refusal or
 	 * a failed read throws here, before anything changed; the returned step changes it, once the caller's own change (a
-	 * retirement) is made.
+	 * retirement) is made, reading it again then, and never throws: what it could not finish stays owed
+	 * ({@link finishRelease}).
 	 */
 	prepareRelease(agentId: string): () => void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
 		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
-		const store = this.ports.store();
-		const watches = sessionId === undefined ? [] : store.listRoutines({ sessionId, scope: "own-watches" });
-		const waiting = this.readInbox(agentId).waiting;
-		return () => {
-			this.owed.released(agentId);
+		if (sessionId !== undefined) this.ports.store().listRoutines({ sessionId, scope: "own-watches" });
+		this.readInbox(agentId);
+		return () => this.finishRelease(agentId, sessionId, entry !== undefined);
+	}
+
+	/**
+	 * The change step of a release: the watches and the inbox are read again now, so a watch armed or changed and a
+	 * message sent since the preparation go too, each watch dropped at the revision read. A failure (a revision that
+	 * changed again, a read) leaves the release owed: it runs whole again after a backoff ({@link releaseOwed}).
+	 */
+	private finishRelease(agentId: string, sessionId: string | undefined, loaded: boolean): void {
+		this.owed.released(agentId);
+		try {
+			const store = this.ports.store();
 			const nowMs = this.idleTimers().now();
+			const watches = sessionId === undefined ? [] : store.listRoutines({ sessionId, scope: "own-watches" });
 			for (const watch of watches) store.deleteRoutine(watch.routineId, watch.revision, nowMs);
+			const { waiting } = this.readInbox(agentId);
 			const agentDir = this.ports.agentDir();
 			for (const item of waiting)
 				refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
 			if (waiting.length > 0) this.changed(agentId);
-			if (!entry) return;
-			void this.close(agentId).catch((error: unknown) =>
-				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
+			this.owedReleases.delete(agentId);
+			this.releaseRetries.forget(agentId);
+		} catch (error) {
+			this.oweRelease(agentId, error);
+		}
+		if (!loaded) return;
+		void this.close(agentId).catch((error: unknown) =>
+			this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
+		);
+	}
+
+	/**
+	 * Releases the bot (it left the session path, or a release it owes runs again): a failure leaves it owed, run again
+	 * after a backoff until it is done. A bot back on the session path owes none.
+	 */
+	private releaseOwed(agentId: string): void {
+		const record = this.ports.store().getBot(agentId);
+		if (record && !record.retired && this.runsAsSession(record)) {
+			this.owedReleases.delete(agentId);
+			this.releaseRetries.forget(agentId);
+			return;
+		}
+		try {
+			this.release(agentId);
+		} catch (error) {
+			this.oweRelease(agentId, error);
+		}
+	}
+
+	/** The bot's release failed with `error`: it is run again after a backoff, and the owner is told once. */
+	private oweRelease(agentId: string, error: unknown): void {
+		if (!this.owedReleases.has(agentId))
+			this.ports.warn(
+				interfaceText().botTeam.botReleaseOwed(
+					agentId,
+					botOpenFailureText(agentId, storeFailure(agentId, error, undefined)),
+				),
 			);
-		};
+		this.owedReleases.add(agentId);
+		this.releaseRetries.arm(agentId, false);
 	}
 
 	/**
@@ -1113,6 +1167,7 @@ export class BotSessionHost {
 		} finally {
 			this.inbox.stop();
 			this.owed.stop();
+			this.releaseRetries.stop();
 			this.view.stop();
 			this.watchExpiry.stop();
 			this.listeners.clear();
