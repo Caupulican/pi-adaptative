@@ -26,6 +26,7 @@ import {
 	readBotInboxRefusals,
 } from "../../../../src/core/bots/bot-inbox.ts";
 import { BOT_OPEN_RETRY_FIRST_MS, BOT_OPEN_RETRY_MAX_MS } from "../../../../src/core/bots/bot-open-retry.ts";
+import { markOwedRelease, owedReleases } from "../../../../src/core/bots/bot-owed-releases.ts";
 import { continueBotSession } from "../../../../src/core/bots/bot-session-open.ts";
 import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fleet-queue-store.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
@@ -176,14 +177,18 @@ async function replacedHostTellsNothing(world: HarnessWorld, ownerBundle: string
 
 /**
  * Leg: a release a process left owed when it ended is taken up by the next host. The bot is retired and its release
- * finished (`replacedHostTellsNothing`); a message then waiting in its inbox is what a process that retired the bot and
- * ended before its release finished leaves (the record retired, the home still holding the message, the release kept
- * only in that process's memory). The next root session's host takes the release up as it opens the bots: the message
- * is refused with the release's reason, the bot's lock is given back and the owner is told nothing.
+ * finished (`replacedHostTellsNothing`); a message then waiting in its inbox, with the bot's owed-release journal entry
+ * standing, is what a process that retired the bot and ended before its release finished leaves (the record retired, the
+ * release marked owed in the journal when it was prepared, the home still holding the message). The next root session's
+ * host takes the release up from the journal as it opens the bots: the message is refused with the release's reason, the
+ * bot's journal entry is removed, the bot's lock is given back and the owner is told nothing.
  */
 async function owedReleaseTakenUp(world: HarnessWorld): Promise<void> {
 	const words = interfaceText().botTeam;
 	const hostLock = resolve(botHostLockFile(world.agentDir, KEEPER));
+	// The mark the release's preparation writes before the retirement (`BotRelease.prepare`), which a process that ended
+	// before the release finished leaves standing.
+	markOwedRelease(world.agentDir, KEEPER);
 	const left = enqueueBotInbox(world.agentDir, {
 		agentId: KEEPER,
 		text: OWED_QUESTION,
@@ -206,11 +211,18 @@ async function owedReleaseTakenUp(world: HarnessWorld): Promise<void> {
 			{
 				retired: botRecord(session, KEEPER).retired,
 				refused: refusals.filter((item) => item.message.id === left.message.id).map((item) => item.message.reason),
+				owed: owedReleases(world.agentDir).includes(KEEPER),
 				lock: processLockHolder(hostLock),
 				warnings: world.warnings.slice(mark),
 			},
-			"the next host released the retired bot whose release a process left owed: the message left waiting refused with the release's reason, the lock given back, the owner told nothing",
-		).toEqual({ retired: true, refused: [words.botInboxReleased(KEEPER)], lock: undefined, warnings: [] });
+			"the next host released the retired bot whose release a process left owed: the message left waiting refused with the release's reason, the journal entry removed, the lock given back, the owner told nothing",
+		).toEqual({
+			retired: true,
+			refused: [words.botInboxReleased(KEEPER)],
+			owed: false,
+			lock: undefined,
+			warnings: [],
+		});
 	} finally {
 		expect(
 			await world.disposeSessionInBody(session),
