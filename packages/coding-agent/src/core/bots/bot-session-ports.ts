@@ -139,14 +139,19 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				reportId: report.reportId,
 				provider: report.provider,
 				model: report.model,
-				through: report.through,
+				through: structuredClone(report.through),
 			}),
 		// Read where its charges are delivered: the session files of every project (or the custom session directory) and
 		// the live session's entries, the unwritten ones included.
 		chargesHeld: (sessionId) => {
 			const session = deps.getSessionManager();
 			return botChargesHeld(
-				{ scope: usageScope(session), root: session.usesDefaultSessionDir(), entries: session.getEntries() },
+				{
+					scope: usageScope(session),
+					root: session.usesDefaultSessionDir(),
+					file: session.getSessionFile(),
+					entries: session.getEntries(),
+				},
 				sessionId,
 			);
 		},

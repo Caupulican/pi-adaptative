@@ -5,8 +5,8 @@
  * reads, with nothing between two files to disagree.
  *
  * The charge watermark reads the bot session's recorded cumulative usage (`AgentSession.getDurableCumulativeUsage`: every
- * usage entry of its transcript, spawned usage included), which a compaction does not shrink: it only appends. It names the session it
- * reads, so a bot that opens another session file starts that one's watermark and still holds the charges it fixed for
+ * usage entry of its transcript, spawned usage included), which a compaction does not shrink: it only appends. It names
+ * the session it reads, so a bot that opens another session file starts that one's watermark and still holds the charges it fixed for
  * the first: a charge's range, report id and usage are written here before it is reported, and stay until the root's
  * file holds it.
  *
@@ -14,8 +14,8 @@
  * written over it, its windows count in memory meanwhile and are merged with the file's once it reads, and no charge is
  * fixed until then. A record that does not read is set aside (`spend.json.unreadable-<time>`) and what of it reads is
  * kept: windows that did not read start empty, and a charge watermark that did not read is recovered from the charges the
- * main session holds (`BotTurnAccounting`). One that cannot be set aside is held as one that cannot be read. The owner
- * is told once.
+ * main session holds (`BotTurnAccounting`); what of it reads is written at once as the new record. One that cannot be
+ * set aside is held as one that cannot be read. The owner is told once that a record is held, and of each set-aside.
  */
 
 import { readFileSync, renameSync } from "node:fs";
@@ -163,8 +163,8 @@ export class BotSpendLedger {
 	private writeFailed = false;
 	/** The file is in place and was not read: nothing is written over it, and it is read again (`readable`). */
 	private held = false;
-	/** The owner was told the record did not read. */
-	private toldNotRead = false;
+	/** The owner was told the record is held in place. */
+	private toldHeld = false;
 
 	constructor(file: string, ports: BotSpendLedgerPorts) {
 		this.file = file;
@@ -230,8 +230,7 @@ export class BotSpendLedger {
 				this.held = false;
 				return;
 			}
-			this.held = true;
-			this.tell(() => this.ports.held(errorText(error)));
+			this.hold(errorText(error));
 			return;
 		}
 		const record = readRecord(text);
@@ -241,15 +240,26 @@ export class BotSpendLedger {
 			try {
 				renameSync(this.file, aside);
 			} catch (error) {
-				this.held = true;
-				this.tell(() => this.ports.held(reason, errorText(error)));
+				this.hold(reason, errorText(error));
 				return;
 			}
-			this.tell(() => this.ports.setAside(aside, reason, record.charge !== undefined));
-			this.dirty = true;
+			this.held = false;
+			this.merge(record);
+			this.ports.setAside(aside, reason, record.charge !== undefined);
+			// What of it read is written at once as the new record, so a crash before the next spend keeps it.
+			this.write();
+			return;
 		}
 		this.held = false;
 		this.merge(record);
+	}
+
+	/** The record stays in place, read again with the next write; the owner is told once while it does. */
+	private hold(reason: string, setAsideError?: string): void {
+		this.held = true;
+		if (this.toldHeld) return;
+		this.toldHeld = true;
+		this.ports.held(reason, setAsideError);
 	}
 
 	/**
@@ -271,12 +281,5 @@ export class BotSpendLedger {
 			counted.updatedAt = Math.max(counted.updatedAt, window.updatedAt);
 			this.dirty = true;
 		}
-	}
-
-	/** Tells the owner the record did not read, once. */
-	private tell(notice: () => void): void {
-		if (this.toldNotRead) return;
-		this.toldNotRead = true;
-		notice();
 	}
 }

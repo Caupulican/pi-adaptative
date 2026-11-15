@@ -12,6 +12,9 @@ import { usageReach, usageSince } from "../cost/usage-delta.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
 import type { BotCharge, BotChargeReport, BotChargeState, BotSpendLedger } from "./bot-spend-ledger.ts";
 
+/** How long after a failed read-back of a lost watermark the next one may start. */
+const RECOVERY_RETRY_MS = 60_000;
+
 /** A cumulative usage reading's fields, in a fixed order: what a range's report id is derived from. */
 function readingKey(usage: Usage): string[] {
 	const { input, output, cacheRead, cacheWrite, totalTokens, cost } = usage;
@@ -125,6 +128,8 @@ export class BotTurnAccounting {
 	private startedAt: number | undefined;
 	/** The session whose watermark is being read back from the root. */
 	private recovering: string | undefined;
+	/** After a read-back failed: no new one starts before this time (ms since the epoch). */
+	private recoverAfter = 0;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */
 	private notRecordedTold = false;
 	private closed = false;
@@ -216,10 +221,11 @@ export class BotTurnAccounting {
 	/**
 	 * Starts this session's watermark at how far the root holds its charges, keeping the pending charges of the session
 	 * before (they are its own ranges, delivered under their own ids), then charges past it. One that fails is tried again
-	 * with the next charge; its reason is told as a charge not recorded.
+	 * with the first charge a minute or more later (a read-back reads every session file of the root); its reason is told
+	 * as a charge not recorded.
 	 */
 	private recover(sessionId: string): void {
-		if (this.recovering === sessionId) return;
+		if (this.recovering === sessionId || Date.now() < this.recoverAfter) return;
 		this.recovering = sessionId;
 		void Promise.resolve()
 			.then(() => this.ports.chargesHeld(sessionId))
@@ -238,6 +244,7 @@ export class BotTurnAccounting {
 				},
 				(error: unknown) => {
 					this.recovering = undefined;
+					this.recoverAfter = Date.now() + RECOVERY_RETRY_MS;
 					if (!this.closed) this.notRecorded(error);
 				},
 			);
