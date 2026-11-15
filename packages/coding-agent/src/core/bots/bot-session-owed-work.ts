@@ -405,10 +405,7 @@ export class BotOwedWork {
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
-		this.unrecorded = new UnrecordedBotStops(
-			() => ports.agentDir(),
-			(agentId) => ports.savedSessionOf(agentId),
-		);
+		this.unrecorded = new UnrecordedBotStops(() => ports.agentDir());
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
@@ -927,7 +924,11 @@ export class BotOwedWork {
 		let stops = ["unread", ...heldName].join("\n");
 		try {
 			stops = [...botInboxStopNames(agentDir, agentId), ...heldName].join("\n");
-			if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
+			if (stops === "") {
+				this.failedStops.delete(agentId);
+				return false;
+			}
+			if (swept && this.failedStops.get(agentId) === stops) return false;
 			// A saved session that is a symbolic link is left, and the rest of the stop applies: it is taken all the same.
 			const session = readClosedBotSession(() => this.ports.savedSessionOf(agentId));
 			const ports = {

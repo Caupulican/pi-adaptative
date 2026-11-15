@@ -1063,8 +1063,8 @@ export class BotSessionHost {
 		// written is held in memory until a take here applies it (the ask, a retry, or this process's open of the bot).
 		this.owed.ownerStopped(agentId, written ? undefined : stop);
 		this.changed(agentId);
-		const host = this.view.hostOf(agentId);
-		return written && remoteHostActive(host)
+		const host = written ? this.view.hostOf(agentId) : undefined;
+		return remoteHostActive(host)
 			? {
 					stopped: false,
 					elsewhere: interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId),
