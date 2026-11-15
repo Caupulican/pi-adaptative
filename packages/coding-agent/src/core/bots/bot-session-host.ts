@@ -356,7 +356,7 @@ export class BotSessionHost {
 			this.stopTold.delete(agentId);
 			return true;
 		} catch (error) {
-			const message = interfaceText().botTeam.botStopNotApplied(agentId, errorText(error));
+			const message = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, error));
 			if (this.stopTold.get(agentId) !== message) this.ports.warn(message);
 			this.stopTold.set(agentId, message);
 			this.stopRetries.arm(agentId, false);

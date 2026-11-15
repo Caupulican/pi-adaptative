@@ -16,8 +16,7 @@ import { type BotInboxItem, refuseBotInboxMessage } from "./bot-inbox.ts";
 import { BotOpenRetries } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
-import { BotSessionLinkError } from "./bot-session-pointer.ts";
-import { endClosedBotWork, endLoadedBotWork } from "./bot-stop.ts";
+import { endClosedBotWork, endLoadedBotWork, readClosedBotSession } from "./bot-stop.ts";
 
 /** What a release reads from the host of the bots' sessions. */
 export interface BotReleasePorts {
@@ -157,10 +156,12 @@ export class BotRelease {
 			if (waiting.length > 0) ports.changed(agentId);
 			if (!loaded)
 				warnLeft(
-					this.endWork(agentId, () =>
-						endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), OWNER_STOPPED_REASON, (message) =>
-							ports.warn(message),
-						),
+					endClosedBotWork(
+						agentDir,
+						agentId,
+						readClosedBotSession(() => ports.closedSessionOf(agentId)),
+						OWNER_STOPPED_REASON,
+						(message) => ports.warn(message),
 					),
 				);
 			this.owed.delete(agentId);
@@ -174,22 +175,6 @@ export class BotRelease {
 			.catch((error: unknown) =>
 				ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
 			);
-	}
-
-	/**
-	 * The closed bot's work ended by `end`, what it left unended; undefined when its session pointer or the session file it
-	 * names is a symbolic link (`closedSessionOf`), which no end of work follows (it would end the work of whatever session
-	 * the link names): the owner is told the work was left, and the release goes on without it. Any other failure throws
-	 * (the release stays owed).
-	 */
-	private endWork(agentId: string, end: () => WorkerStopOutcome): WorkerStopOutcome | undefined {
-		try {
-			return end();
-		} catch (error) {
-			if (!(error instanceof BotSessionLinkError)) throw error;
-			this.ports.warn(interfaceText().botTeam.botReleaseWorkersLeft(agentId, error.path));
-			return undefined;
-		}
 	}
 
 	/** The bot's release failed with `error`: it is run again after a backoff, and the owner is told once. */

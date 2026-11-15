@@ -248,7 +248,7 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: os workers, as esperas e as mensagens aguardando da sessão dele ainda não foram todos encerrados (${reason}); o hospedeiro dele tenta de novo até que sejam.`,
 	botReleaseHeldBy: (pid: number) => `o processo ${pid} mantém a sessão dele`,
 	botReleaseWorkersLeft: (agentId: string, path: string) =>
-		`O bot ${agentId} foi liberado, mas os workers da sessão dele e os jobs que ele colocou em outras máquinas não foram encerrados: ${path} é um link simbólico, e nenhum trabalho é encerrado através de um.`,
+		`O bot ${agentId} foi liberado, mas os workers da sessão salva dele e os jobs que essa sessão colocou em outras máquinas foram deixados: ${path} é um link simbólico, e nenhum trabalho é encerrado por meio de um.`,
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou) mas não pôde ser aberta, então o trabalho aguarda até que seja (${reason}).`,
 	botOwedWorkNoRoot: (agentId: string, directories: string) =>

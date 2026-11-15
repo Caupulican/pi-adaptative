@@ -355,7 +355,7 @@ export class BotOwedWork {
 	private readonly ports: BotOwedWorkPorts;
 	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
 	private readonly told = new Map<string, string>();
-	/** What the owner was last told of a bot the periodic listing failed on: told once per cause. */
+	/** What the owner was last told of a bot the periodic listing failed on: told once per cause, forgotten once it lists clean. */
 	private readonly sweepTold = new Map<string, string>();
 	/** The wakes the bots' session files hold unrun. */
 	private readonly wakes = new UnrunWakeLedger();
@@ -643,10 +643,12 @@ export class BotOwedWork {
 				logBotsFailure("the owed-work listing could not list the bots", error);
 				return;
 			}
-			// Each bot on its own: one whose files fail to read is told once per cause, and the bots after it are listed.
+			// Each bot on its own: one whose files fail to read is told once per cause until it lists clean again, and the
+			// bots after it are listed.
 			for (const { agentId } of bots)
 				try {
 					this.sweepBot(agentDir, agentId);
+					this.sweepTold.delete(agentId);
 				} catch (error) {
 					const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
 					if (this.sweepTold.get(agentId) !== message) this.ports.warn(message);

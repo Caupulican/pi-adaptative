@@ -308,22 +308,27 @@ function closedBundle(
 }
 
 /**
- * The work bot `agentId`'s closed session `saved` left, ended for `reasonCode` as a stop of it while no process hosts it
- * ends it, under its host lock: its bundle's queued and recovered attempts ({@link cancelBundleWorkers}), then the jobs its
- * home's sessions placed ({@link endHomePlacedJobs}). For a release of the bot (retired, or off the session path) with no session of it loaded here,
- * so nothing a later open of it would resume is left. What it left unended. A lock held (by the host of the bot, or by
- * this process opening or closing it) throws the owner's words: the release stays owed and runs again.
+ * The work bot `agentId`'s closed session left, ended for `reasonCode` as a stop of it while no process hosts it ends
+ * it, under its host lock: its bundle's queued and recovered attempts ({@link cancelBundleWorkers}), then the jobs its
+ * home's sessions placed ({@link endHomePlacedJobs}). A saved session that is a symbolic link ({@link ClosedBotSession})
+ * has its own work left, the owner told, and the jobs its home's other sessions placed still end. For a release of the bot
+ * (retired, or off the session path) with no session of it loaded here, so nothing a later open of it would resume is
+ * left. What it left unended. A lock held (by the host of the bot, or by this process opening or closing it) throws the
+ * owner's words: the release stays owed and runs again.
  */
 export function endClosedBotWork(
 	agentDir: string,
 	agentId: string,
-	saved: SavedBotSession | undefined,
+	session: ClosedBotSession,
 	reasonCode: string,
 	warn: (message: string) => void,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
+		const saved = "saved" in session ? session.saved : undefined;
+		// Nothing is ended through the link: the owner is told, under the lock, so a release owed again tells it once.
+		if ("linked" in session) warn(interfaceText().botTeam.botReleaseWorkersLeft(agentId, session.linked));
 		const bundle = closedBundle(agentDir, agentId, saved);
 		const outcome =
 			bundle === undefined ? NOTHING_LEFT : cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
