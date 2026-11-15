@@ -57,7 +57,7 @@ import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
-import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
+import { botFailureCause, botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
@@ -89,6 +89,7 @@ import {
 	type BotStopPorts,
 	endUnrecordedStopWork,
 	type OwnerStop,
+	STOP_TAKE,
 	stopLoadedBot,
 	type UnrecordedBotStops,
 	writeOwnerStop,
@@ -204,7 +205,7 @@ export class BotSessionHost {
 		stopped: () => this.stopped,
 		retry: (agentId) => this.takeInbox(agentId),
 	});
-	/** What the owner was last told of a bot's stop that its loaded session could not take: told once per cause. */
+	/** The cause last told of a bot's stop that its loaded session could not take (`botFailureCause`): told once per cause. */
 	private readonly stopTold = new Map<string, string>();
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
@@ -384,9 +385,12 @@ export class BotSessionHost {
 			this.stopTold.delete(agentId);
 			return taken;
 		}
-		const message = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, taken.failure.cause));
-		if (this.stopTold.get(agentId) !== message) this.ports.warn(message);
-		this.stopTold.set(agentId, message);
+		const cause = botFailureCause(STOP_TAKE, agentId, taken.failure.cause);
+		if (this.stopTold.get(agentId) !== cause)
+			this.ports.warn(
+				interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, taken.failure.cause)),
+			);
+		this.stopTold.set(agentId, cause);
 		this.stopRetries.arm(agentId, false);
 		return taken;
 	}

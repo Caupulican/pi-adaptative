@@ -33,7 +33,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
-import { botFailureText, logBotsFailure } from "./bot-failure-words.ts";
+import { botFailureCause, botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
 import { fileIdentity } from "./bot-home-records.ts";
 import type { RemoteBotHost } from "./bot-host-state.ts";
@@ -47,6 +47,7 @@ import {
 	type BotStopPorts,
 	type OwnerStopRequest,
 	readStopScope,
+	STOP_TAKE,
 	type UnrecordedBotStops,
 	writeOwnerStop,
 } from "./bot-stop.ts";
@@ -418,10 +419,10 @@ export class BotOwedWork {
 	 */
 	private readonly offered = new Map<string, ReadonlySet<string>>();
 	/**
-	 * The stops waiting for each bot when applying them last failed here, and what the owner was told of it
-	 * ({@link applyOwnerStop}).
+	 * The stops waiting for each bot when applying them last failed here, and the cause the owner was told of it
+	 * ({@link applyOwnerStop}, `botFailureCause`).
 	 */
-	private readonly failedStops = new Map<string, { readonly key: string; readonly sentence: string }>();
+	private readonly failedStops = new Map<string, { readonly key: string; readonly cause: string }>();
 	/**
 	 * The owner's stops this process could not record, held until a take applies them; its opens of a bot take them too.
 	 * They are its process's and agent directory's, kept across its hosts (`bot-session-registry.ts`).
@@ -1037,11 +1038,12 @@ export class BotOwedWork {
 			const known = this.failedStops.get(agentId);
 			if (swept && known?.key === key) return { waits, failed: true, retrying: false };
 			const failure = storeFailure(agentId, error, undefined);
-			const sentence = interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure));
-			this.failedStops.set(agentId, { key, sentence });
+			const cause = botFailureCause(STOP_TAKE, agentId, failure);
+			this.failedStops.set(agentId, { key, cause });
 			const passing = botOpenFailure(failure);
 			const retrying = passing !== undefined && this.openRetries.arm(agentId, cappedFailure(passing));
-			if (known?.key !== key || known.sentence !== sentence) this.ports.warn(sentence);
+			if (known?.key !== key || known.cause !== cause)
+				this.ports.warn(interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure)));
 			return { waits, failed: true, retrying };
 		}
 	}

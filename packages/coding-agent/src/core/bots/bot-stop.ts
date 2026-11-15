@@ -175,6 +175,9 @@ export function applyOwnerStopToSession(
 	return outcome;
 }
 
+/** The take of an owner's stop, as a failure of it is told once per cause (`botFailureCause`). */
+export const STOP_TAKE = "stop take";
+
 /** What applying an owner's stop reads of it: when it was made, the reason its cancelled work ends with, and what it ends. */
 export type OwnerStop = Pick<BotInboxStop, "at" | "reasonCode" | "scope">;
 

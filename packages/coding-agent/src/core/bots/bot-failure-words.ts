@@ -69,6 +69,29 @@ function wordsFor(agentId: string, error: unknown): string | undefined {
 	return undefined;
 }
 
+/**
+ * The cause of `operation`'s failure for bot `agentId` with `error`, as a notice told once per cause compares it: each link
+ * of the cause chain by its kind, a system error by its code and call (never by its message, which names the file it
+ * met, a random temporary one included), any other by its name and message. Two failures of one cause give one key.
+ */
+export function botFailureCause(operation: string, agentId: string, error: unknown): string {
+	const links: string[] = [];
+	let link: unknown = error;
+	while (links.length <= MAX_LOGGED_CAUSES) {
+		const { code, syscall } = (link ?? {}) as NodeJS.ErrnoException;
+		links.push(
+			!(link instanceof Error)
+				? String(link)
+				: typeof code === "string"
+					? `${link.name} ${code} ${syscall ?? ""}`
+					: `${link.name}: ${link.message}`,
+		);
+		if (!(link instanceof Error) || link.cause === undefined) break;
+		link = link.cause;
+	}
+	return [operation, agentId, ...links].join("\n");
+}
+
 /** A failure of the bots' own upkeep that names no bot (`what`), its cause chain written to the harness log. */
 export function logBotsFailure(what: string, error: unknown): void {
 	harnessLog.warn("bots", what, () => ({ error: causeChain(error).join(" <- caused by ") }));
