@@ -5,7 +5,7 @@
  * The session's credential guard meets it as it meets the shell's command: a session whose commands keep owner credentials
  * out (`deny`) refuses a check that reaches one, and any other runs it and masks the output it keeps (the goal's evidence,
  * the results the goal tool shows) with the mask its shell's output gets. The check runs in the environment the session's
- * shell commands get (`SessionCommandEnvironment.shellEnvironment`).
+ * shell commands get (`SessionCommandEnvironment.shellEnvironment`). The same admission holds when a check is attached.
  */
 
 import { getShellEnv } from "../../utils/shell.ts";
@@ -41,7 +41,7 @@ export interface HostRequirementChecks {
 	recordProof?(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
 }
 
-/** Why the session may not run `check` in `cwd`, as a sentence, or undefined when it may. */
+/** Why the session may not run `check` in `cwd`, as a sentence, or undefined when it may: judged when it is attached and run. */
 export function sessionRequirementCheckViolation(
 	check: RequirementCheck,
 	session: RequirementCheckSession,

@@ -34,7 +34,7 @@ import {
 } from "../goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
-import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
+import type { RequirementCheckResult } from "../goals/requirement-checks.ts";
 import { requirementCoverageProbe } from "../goals/requirement-dependencies.ts";
 import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -414,8 +414,8 @@ export interface GoalToolDependencies {
 		| (Pick<SystemOneController, "completionView" | "executeCompletionTransaction"> &
 				Partial<Pick<SystemOneController, "noteCompletionAccount">>)
 		| undefined;
-	/** Where requirement checks run and are validated: the session's task directory. */
-	getCwd?: () => string;
+	/** Why the session would not run a check (`sessionRequirementCheckViolation`): a check attaches only if it would run. */
+	admitRequirementCheck: (check: RequirementCheck) => string | undefined;
 	/**
 	 * Rerun one requirement check. Wired by the host to {@link runRequirementCheck}; when absent,
 	 * completion cannot prove checked requirements and refuses rather than skipping their checks.
@@ -997,7 +997,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 
 			let action: GoalAction = mapped;
 			if ((action.action === "add_requirement" || action.action === "set_requirement_check") && action.check) {
-				const violation = requirementCheckViolation(action.check, deps.getCwd?.() ?? process.cwd());
+				const violation = deps.admitRequirementCheck(action.check);
 				if (violation) {
 					return {
 						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${violation}` }],
@@ -1470,7 +1470,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
  */
 export function createGoalLifecycleToolDefinitions(
 	goalTool: GoalToolDefinition,
-	options: { getCwd?: () => string } = {},
+	options: { admitRequirementCheck: (check: RequirementCheck) => string | undefined },
 ) {
 	const createGoal: ToolDefinition = {
 		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
@@ -1485,7 +1485,7 @@ export function createGoalLifecycleToolDefinitions(
 			// exists, instead of leaving a started goal holding only the requirements before it.
 			for (const requirement of input.requirements ?? []) {
 				if (typeof requirement === "string" || !requirement.check) continue;
-				const violation = requirementCheckViolation(requirement.check, options.getCwd?.() ?? process.cwd());
+				const violation = options.admitRequirementCheck(requirement.check);
 				if (violation) {
 					const error = `requirement "${requirement.text}": ${violation} No goal was created.`;
 					return {

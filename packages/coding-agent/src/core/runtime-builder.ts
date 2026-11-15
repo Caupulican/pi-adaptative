@@ -125,7 +125,7 @@ import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { GoalStartGrant } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
-import { runSessionRequirementCheck } from "./goals/session-requirement-check.ts";
+import { runSessionRequirementCheck, sessionRequirementCheckViolation } from "./goals/session-requirement-check.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
 import type { KnowledgeCollectionStatus } from "./memory/knowledge-collector.ts";
@@ -1871,7 +1871,7 @@ export class RuntimeBuilder {
 									this.deps.getCompletionRuleRefusal?.(toolCallId),
 							}
 						: {}),
-					getCwd: () => this._taskDirectories.cwd,
+					admitRequirementCheck: (check) => sessionRequirementCheckViolation(check, this, this.taskCwd),
 					buildCompletionProofSheet: (input) => {
 						const sessionManager = this.deps.getSessionManager();
 						return buildGoalProofSheet({
@@ -1986,7 +1986,7 @@ export class RuntimeBuilder {
 					);
 				}
 				for (const definition of createGoalLifecycleToolDefinitions(goalToolDefinition, {
-					getCwd: () => this._taskDirectories.cwd,
+					admitRequirementCheck: (check) => sessionRequirementCheckViolation(check, this, this.taskCwd),
 				})) {
 					if (toolAccess.allows(definition.name)) {
 						this._baseToolDefinitions.set(
