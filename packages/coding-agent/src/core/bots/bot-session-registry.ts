@@ -23,6 +23,7 @@ import {
 	BotSessionHost,
 	type BotSessionHostPorts,
 } from "./bot-session-host.ts";
+import { UnrecordedBotStops } from "./bot-stop.ts";
 
 /** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */
 export interface BotSessionRootPorts
@@ -55,6 +56,13 @@ interface SharedHost extends AttachedRoots {
 }
 
 const hosts = new Map<string, SharedHost>();
+
+/**
+ * The owner's stops each agent directory's hosts in this process could not record (`UnrecordedBotStops`): a root's host and
+ * the one that replaces it (a new, resumed or forked session detaches the old root before the new one attaches) hold the
+ * same stops, kept while one is held or a host is registered.
+ */
+const heldStops = new Map<string, UnrecordedBotStops>();
 
 /** One root session's attachment to its process's bot session host. */
 export interface BotSessionAttachment {
@@ -179,8 +187,15 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		const attachedRoots: AttachedRoots = { roots: [], followers: new Set() };
 		// A root attached while the previous host stops gets a new one that builds no session before that stop ended: the
 		// locks the stopping host still holds are free by then.
+		// A child's host holds its own; a root's those of its process and agent directory.
+		let stops = root ? heldStops.get(key) : undefined;
+		if (!stops) {
+			stops = new UnrecordedBotStops(key);
+			if (root) heldStops.set(key, stops);
+		}
 		const host = new BotSessionHost(
 			relayPorts(attachedRoots),
+			stops,
 			shared?.stopping?.catch(() => undefined),
 		);
 		shared = { ...attachedRoots, host };
@@ -231,6 +246,8 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			} finally {
 				roots.length = 0;
 				if (hosts.get(key) === attached) hosts.delete(key);
+				// The stops still held wait for the next root's host in this process.
+				if (!hosts.has(key) && heldStops.get(key)?.isEmpty()) heldStops.delete(key);
 			}
 		},
 	};

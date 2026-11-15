@@ -71,7 +71,6 @@ import {
 	botInboxWaiting,
 	readBotInbox,
 	readBotInboxRefusals,
-	requestBotStop,
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
@@ -94,7 +93,13 @@ import { type BotSessionDefinition, botMayRunAsSession, profileBotSession } from
 import { BotSessionSpend } from "./bot-session-spend.ts";
 import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
-import { type BotStopPorts, endUnrecordedStopWork, stopLoadedBot } from "./bot-stop.ts";
+import {
+	type BotStopPorts,
+	endUnrecordedStopWork,
+	stopLoadedBot,
+	type UnrecordedBotStops,
+	writeOwnerStop,
+} from "./bot-stop.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -250,7 +255,11 @@ export class BotSessionHost {
 	/** Takes the inboxes of the bots this host runs: the owner's messages sent from other processes. */
 	private readonly inbox: BotInboxDrain;
 
-	constructor(ports: BotSessionHostPorts, previousStop?: Promise<void>) {
+	/**
+	 * `unrecorded` holds the owner's stops its process could not record, kept for the process and agent directory across
+	 * its hosts (`bot-session-registry.ts`).
+	 */
+	constructor(ports: BotSessionHostPorts, unrecorded: UnrecordedBotStops, previousStop?: Promise<void>) {
 		this.ports = ports;
 		this.previousStop = previousStop ?? Promise.resolve();
 		this.admission = new BotSessionAdmission({
@@ -279,29 +288,33 @@ export class BotSessionHost {
 			},
 			this.holder,
 		);
-		this.owed = new BotOwedWork({
-			agentDir: () => ports.agentDir(),
-			store: () => ports.store(),
-			timers: () => this.idleTimers(),
-			warn: (message) => ports.warn(message),
-			stopped: () => this.stopped,
-			hostedHere: (agentId) => this.entries.has(agentId),
-			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
-			hostOf: (agentId) => this.view.hostOf(agentId),
-			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
-			waiting: (agentId) => this.readInbox(agentId).waiting,
-			runsAsSession: (record) => this.runsAsSession(record),
-			definedCwd: (record, sender) => this.admission.define(record, sender).cwd,
-			currentKey: (record, sender) => this.admission.currentKey(record, sender),
-			modelRefusal: (record, sender) => this.admission.modelRefusal(record, this.admission.define(record, sender)),
-			admissionTimers: () => ports.timers().port("provider-admission"),
-			retake: (agentId) => this.retakeRefused(agentId),
-			takeInbox: (agentId) => this.takeInbox(agentId),
-			sender: () => ports.sender(),
-			senderIn: (cwd) => ports.senderIn(cwd),
-			open: (agentId, sender) => this.open(agentId, sender),
-			usageRules: () => ports.usageRules(),
-		});
+		this.owed = new BotOwedWork(
+			{
+				agentDir: () => ports.agentDir(),
+				store: () => ports.store(),
+				timers: () => this.idleTimers(),
+				warn: (message) => ports.warn(message),
+				stopped: () => this.stopped,
+				hostedHere: (agentId) => this.entries.has(agentId),
+				heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
+				hostOf: (agentId) => this.view.hostOf(agentId),
+				savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
+				waiting: (agentId) => this.readInbox(agentId).waiting,
+				runsAsSession: (record) => this.runsAsSession(record),
+				definedCwd: (record, sender) => this.admission.define(record, sender).cwd,
+				currentKey: (record, sender) => this.admission.currentKey(record, sender),
+				modelRefusal: (record, sender) =>
+					this.admission.modelRefusal(record, this.admission.define(record, sender)),
+				admissionTimers: () => ports.timers().port("provider-admission"),
+				retake: (agentId) => this.retakeRefused(agentId),
+				takeInbox: (agentId) => this.takeInbox(agentId),
+				sender: () => ports.sender(),
+				senderIn: (cwd) => ports.senderIn(cwd),
+				open: (agentId, sender) => this.open(agentId, sender),
+				usageRules: () => ports.usageRules(),
+			},
+			unrecorded,
+		);
 		this.inbox = new BotInboxDrain({
 			agentDir: () => ports.agentDir(),
 			timers: () => this.idleTimers(),
@@ -703,7 +716,7 @@ export class BotSessionHost {
 		let storeWithin: string | undefined;
 		try {
 			// The owner's stop waiting for it is applied to its closed session under the lock first: nothing it stopped resumes.
-			this.owed.unrecorded.underLock(agentId, { saved: this.view.savedSessionOf(agentId) }, this.stopPorts());
+			this.owed.unrecorded.underLock(agentId, this.stopPorts());
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
@@ -1027,9 +1040,9 @@ export class BotSessionHost {
 	 * The owner's stop of the bot's session (`bot-stop.ts`), written to its home dated now (`requestBotStop`) and taken by
 	 * whichever process can: here when this host runs it (its turn and workers stopped; `stopped` says whether it ended a
 	 * turn or input in flight, or at least one worker lane in flight), else by this process while no process hosts it, else by the
-	 * process hosting it, which `elsewhere` names for the owner. A bot that runs as no session of its own is not written to.
-	 * A stop that could not be written is told to the owner; one not written or not taken still ends the turn and the bot's
-	 * own work this host runs (`endUnrecordedStopWork`), and one not written applies whole, held in memory, here or unhosted.
+	 * process hosting it, which `elsewhere` names for the owner ({@link BotOwedWork.ownerStopped}). A bot that runs as no
+	 * session of its own is not written to. A stop that could not be written is told to the owner; here it still ends the
+	 * turn and the bot's work this host runs, whole (`endUnrecordedStopWork`).
 	 */
 	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);
@@ -1037,39 +1050,27 @@ export class BotSessionHost {
 		if (!entry && (!record || record.retired || !this.runsAsSession(record))) return { stopped: false };
 		const sender = this.ports.sender();
 		const from = { pid: process.pid, sessionId: sender.hostSessionId(), cwd: sender.cwd() };
+		if (!entry) {
+			// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
+			const host = this.owed.ownerStopped(agentId, from);
+			this.changed(agentId);
+			const elsewhere = host && interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId);
+			return elsewhere ? { stopped: false, elsewhere } : { stopped: false };
+		}
 		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() };
-		let written = true;
-		try {
-			requestBotStop(this.ports.agentDir(), stop);
-		} catch (error) {
-			written = false;
-			this.ports.warn(interfaceText().botTeam.botStopNotRecorded(agentId, errorText(error)));
-		}
-		if (entry) {
-			const state = entry.session.getSessionWorkState();
-			// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).
-			const turn = entry.inFlight > 0 || entry.session.deliverablePendingMessageCount > 0 || state.busyBesideWorkers;
-			// Not taken from its record, the stop still ends the turn and own work; held in memory, it also applies whole.
-			const taken = written ? this.applyWaitingStops(agentId, entry) : undefined;
-			const memory = taken?.stop || taken?.failure ? undefined : stop;
-			const [dir, end] = [this.ports.agentDir(), () => this.stopTurn(entry)];
-			// What a failed take ended before it failed counts with what the fallback ends after it.
-			const rest = taken?.stop
-				? undefined
-				: endUnrecordedStopWork(dir, agentId, entry, end, memory, this.stopPorts());
-			this.takeInbox(agentId);
-			return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
-		}
-		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it. One not
-		// written is held in memory until a take here applies it (the ask, a retry, or this process's open of the bot).
-		const host = this.owed.ownerStopped(agentId, written ? undefined : stop);
-		this.changed(agentId);
-		return host
-			? {
-					stopped: false,
-					elsewhere: interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId),
-				}
-			: { stopped: false };
+		const unwritten = writeOwnerStop(this.ports.agentDir(), stop);
+		const state = entry.session.getSessionWorkState();
+		// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).
+		const turn = entry.inFlight > 0 || entry.session.deliverablePendingMessageCount > 0 || state.busyBesideWorkers;
+		// Not taken from its record, the stop still ends the turn and own work; held in memory, it also applies whole.
+		const taken = unwritten === undefined ? this.applyWaitingStops(agentId, entry) : undefined;
+		const memory = taken?.stop || taken?.failure ? undefined : stop;
+		const [dir, end] = [this.ports.agentDir(), () => this.stopTurn(entry)];
+		// What a failed take ended before it failed counts with what the fallback ends after it.
+		const rest = taken?.stop ? undefined : endUnrecordedStopWork(dir, agentId, entry, end, memory, this.stopPorts());
+		if (unwritten !== undefined) this.ports.warn(interfaceText().botTeam.botStopNotRecordedHere(agentId, unwritten));
+		this.takeInbox(agentId);
+		return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
 	}
 
 	/**

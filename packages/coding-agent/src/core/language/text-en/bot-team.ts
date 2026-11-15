@@ -137,6 +137,9 @@ export const BOT_TEAM = {
 	 */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is applied here only while the bot's work is unchanged since the stop.`,
+	/** The owner's stop of a bot this process runs could not be written to its home: it was applied here, whole, at once. */
+	botStopNotRecordedHere: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process, so it was applied at once to the bot's work in this process.`,
 	/** The periodic listing of the bots failed on this one; the others were listed. */
 	botSweepFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its inbox and owed work could not be checked (${reason}); they are checked again every minute.`,

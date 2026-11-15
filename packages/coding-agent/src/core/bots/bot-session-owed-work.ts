@@ -15,6 +15,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import {
 	nextWorkerDueAt,
 	owesWorkerExecutionAt,
@@ -39,7 +40,13 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { applyUnhostedBotStop, type OwnerStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
+import {
+	applyUnhostedBotStop,
+	type OwnerStopRequest,
+	readWorkMark,
+	type UnrecordedBotStops,
+	writeOwnerStop,
+} from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -403,15 +410,15 @@ export class BotOwedWork {
 	private readonly offered = new Map<string, ReadonlySet<string>>();
 	/** The stops waiting for each bot when applying them last failed here ({@link applyOwnerStop}). */
 	private readonly failedStops = new Map<string, string>();
-	/** The owner's stops this process could not record, held until a take applies them; its opens of a bot take them too. */
+	/**
+	 * The owner's stops this process could not record, held until a take applies them; its opens of a bot take them too.
+	 * They are its process's and agent directory's, kept across its hosts (`bot-session-registry.ts`).
+	 */
 	readonly unrecorded: UnrecordedBotStops;
 
-	constructor(ports: BotOwedWorkPorts) {
+	constructor(ports: BotOwedWorkPorts, unrecorded: UnrecordedBotStops) {
 		this.ports = ports;
-		this.unrecorded = new UnrecordedBotStops(
-			() => ports.agentDir(),
-			(message) => ports.warn(message),
-		);
+		this.unrecorded = unrecorded;
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
@@ -556,9 +563,11 @@ export class BotOwedWork {
 		this.unrecorded.drop(agentId);
 	}
 
-	/** The host stopped: no alarm takes work up after it, and no stop it held is applied. */
+	/**
+	 * The host stopped: no alarm takes work up after it. The stops it held stay held, for the host that replaces it in its
+	 * process (`bot-session-registry.ts`).
+	 */
 	stop(): void {
-		this.unrecorded.clear();
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
 		this.openRetries.stop();
@@ -939,16 +948,19 @@ export class BotOwedWork {
 				return false;
 			}
 			if (swept && this.failedStops.get(agentId) === stops) return false;
-			// A saved session that is a symbolic link is left, and the rest of the stop applies: it is taken all the same.
-			const session = readClosedBotSession(() => this.ports.savedSessionOf(agentId));
 			const ports = {
 				warn: (message: string) => this.ports.warn(message),
 				now: () => this.ports.admissionTimers().now(),
 			};
-			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote.
-			if (applyUnhostedBotStop(agentDir, agentId, session, ports, this.unrecorded) === "applied") {
+			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote to the session the
+			// take read (a saved session that is a symbolic link is left, and the rest of the stop applies all the same).
+			const taken = applyUnhostedBotStop(agentDir, agentId, ports, this.unrecorded);
+			if (taken !== "held" && taken.stop) {
 				this.forgetOwedTimes(agentId);
-				this.armUsageWait(agentId, this.usageResumeAt(agentId, "saved" in session ? session.saved : undefined));
+				this.armUsageWait(
+					agentId,
+					this.usageResumeAt(agentId, "saved" in taken.session ? taken.session.saved : undefined),
+				);
 			}
 			this.failedStops.delete(agentId);
 			return false;
@@ -971,20 +983,28 @@ export class BotOwedWork {
 	}
 
 	/**
-	 * The owner's stop of a bot this process does not host, once `requestBotStop` wrote it, or failed to (`unrecorded`, then
-	 * held: {@link UnrecordedBotStops.hold}): the bot is asked open, which applies the stops waiting first. A written stop is
+	 * The owner's stop of a bot this process does not host, made from `from`: dated now, with where the bot's work stands as
+	 * it is dated (`readWorkMark`), and written (`requestBotStop`), or held when it cannot be (told to the owner, then
+	 * {@link UnrecordedBotStops.hold}); the bot is asked open, which applies the stops waiting first. A written stop is
 	 * taken by the host running the bot, if one does: that host is returned, for the owner to be told where the stop went.
 	 * It never throws, so the owner's stop of this process's other work goes on: a read that fails is told to the owner, the
 	 * open's as a later pass's is, the host's as the one place the stop went that could not be named.
 	 */
-	ownerStopped(agentId: string, unrecorded: OwnerStop | undefined): RemoteBotHost | undefined {
-		if (unrecorded) this.unrecorded.hold(agentId, unrecorded);
+	ownerStopped(agentId: string, from: OwnerStopRequest["from"]): RemoteBotHost | undefined {
+		const agentDir = this.ports.agentDir();
+		const mark = readWorkMark(agentDir, agentId);
+		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() };
+		const unwritten = writeOwnerStop(agentDir, stop);
+		if (unwritten !== undefined) {
+			this.ports.warn(interfaceText().botTeam.botStopNotRecorded(agentId, unwritten));
+			this.unrecorded.hold(agentId, { stop, mark }, (message) => this.ports.warn(message));
+		}
 		try {
 			this.openIfOwed(agentId);
 		} catch (error) {
 			this.tellWaits(agentId, this.waitsText(agentId, botFailureText(agentId, error)));
 		}
-		if (unrecorded) return undefined;
+		if (unwritten !== undefined) return undefined;
 		try {
 			const host = this.ports.hostOf(agentId);
 			return remoteHostActive(host) ? host : undefined;

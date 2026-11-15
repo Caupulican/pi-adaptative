@@ -134,12 +134,16 @@ are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every 
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
 taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also pauses its
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
-stop that could not be recorded for a bot no process hosts is held in memory by the process that made it until a take
-there applies it whole under the bot's host lock (a retry, or that process's open of the bot, a stop made during the open
-included), the messages sent before it refused. No other process learns of it, so it ends only the work there was when it
-was made: it is dropped once a process ran the bot since (the bot's saved session, or that session's worker records,
-moved), and it is not held when where the bot's work stands cannot be read then; either way you are told once that it
-was dropped, and why, to send it again. A worker the owner stopped opens no
+stop that could not be recorded for a bot no process hosts is held in memory by the process that made it, across the
+root sessions it runs in turn (a new, resumed or forked session keeps it), until a take there applies it whole under the
+bot's host lock (a retry, or that process's open of the bot, a stop made during the open included), the messages sent
+before it refused. No other process learns of it, so it ends only the work there was when it was made: where the bot's
+work stands is read as the stop is dated, and each take reads the bot's saved session from its home on disk under the
+lock, for that comparison and for the stop it applies. The stop is dropped once a process ran the bot since (the bot's
+saved session, or that session's worker records, moved), and it is not held when where the bot's work stands cannot be
+read as the stop is made or after a take of it failed; either way you are told once that it was dropped, and why, to
+send it again. A read that fails inside a take keeps the stop held and fails that take, for the next. For a bot this
+process hosts, a stop that could not be recorded is applied at once, whole, to the bot's work here, and you are told so. A worker the owner stopped opens no
 turn of the bot. A
 profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
@@ -203,7 +207,8 @@ or applied in place when no process does. It does not drop the bot's own armed w
 with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
 they end when they fire, at their end time or when the bot is retired. A stop
 that cannot be written to the bot's home is not recorded: you are told it reaches no other process and is applied here
-only while the bot's work is unchanged, and to send it again once it is dropped. A session started after every other one closed lists each bot with its whole conversation.
+only while the bot's work is unchanged (for a bot this process hosts, that it was applied at once to its work here), and
+to send it again once it is dropped. A session started after every other one closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime
