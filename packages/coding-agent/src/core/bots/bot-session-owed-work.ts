@@ -38,7 +38,7 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { applyUnhostedBotStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
+import { applyUnhostedBotStop, type OwnerStop, readClosedBotSession, UnrecordedBotStops } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -405,7 +405,10 @@ export class BotOwedWork {
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
-		this.unrecorded = new UnrecordedBotStops(() => ports.agentDir());
+		this.unrecorded = new UnrecordedBotStops(
+			() => ports.agentDir(),
+			(agentId) => ports.savedSessionOf(agentId),
+		);
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
@@ -547,10 +550,12 @@ export class BotOwedWork {
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);
 		this.forgetOwedTimes(agentId);
+		this.unrecorded.drop(agentId);
 	}
 
-	/** The host stopped: no alarm takes work up after it. */
+	/** The host stopped: no alarm takes work up after it, and no stop it held is applied. */
 	stop(): void {
+		this.unrecorded.clear();
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
 		this.openRetries.stop();
@@ -691,8 +696,7 @@ export class BotOwedWork {
 			return;
 		}
 		// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
-		if (this.ports.heldElsewhere(agentId)) this.unrecorded.drop(agentId);
-		else if (botInboxStopWaiting(agentDir, agentId) || this.unrecorded.of(agentId))
+		if (!this.ports.heldElsewhere(agentId) && (this.unrecorded.of(agentId) || botInboxStopWaiting(agentDir, agentId)))
 			this.applyOwnerStop(agentId, true);
 		if (
 			!this.openRetries.pending(agentId) &&
@@ -802,11 +806,7 @@ export class BotOwedWork {
 		const agentDir = ports.agentDir();
 		if (ports.stopped()) return;
 		// Its host continues what a usage limit stopped (its session's own wait): this process owes it nothing.
-		// Nor the stop it could not record: that host never learns of it (`UnrecordedBotStops`).
-		if (ports.heldElsewhere(agentId)) {
-			this.usageDue.delete(agentId);
-			this.unrecorded.drop(agentId);
-		}
+		if (ports.heldElsewhere(agentId)) this.usageDue.delete(agentId);
 		// The owner's stop first, whatever else it is owed: a stop that failed for a cause that passes on its own is retried.
 		const stopRetrying = !ports.heldElsewhere(agentId) && this.applyOwnerStop(agentId, swept);
 		const record = ports.store().getBot(agentId);
@@ -912,19 +912,22 @@ export class BotOwedWork {
 	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told;
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open, and true is returned then. The owner's
-	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot
-	 * takes it instead. A stop that could not be written is held (`UnrecordedBotStops`) and applied with the ones waiting,
-	 * the messages sent before it refused, here or by this process's open of the bot; a host in another process never
-	 * learns of it.
+	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and asks the bot open ({@link ownerStopped}),
+	 * which calls this; a host holding the bot takes it instead. A stop that could not be written is held
+	 * (`UnrecordedBotStops`) and applied with the ones waiting, the messages sent before it refused, here or by this
+	 * process's open of the bot, while the bot's work stands where it was when the stop was made.
 	 */
 	applyOwnerStop(agentId: string, swept = false): boolean {
 		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return false;
 		const agentDir = this.ports.agentDir();
 		const held = this.unrecorded.of(agentId);
+		const heldName = held ? [`held ${held.at}`] : [];
 		// The stop held counts among the ones waiting: a failed application is tried again by the listing once either changes.
-		const stops = [...botInboxStopNames(agentDir, agentId), ...(held ? [`held ${held.at}`] : [])].join("\n");
-		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
+		// Until the stops waiting read, a failure is kept under the reading's own name.
+		let stops = ["unread", ...heldName].join("\n");
 		try {
+			stops = [...botInboxStopNames(agentDir, agentId), ...heldName].join("\n");
+			if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
 			// A saved session that is a symbolic link is left, and the rest of the stop applies: it is taken all the same.
 			const session = readClosedBotSession(() => this.ports.savedSessionOf(agentId));
 			const ports = {
@@ -932,20 +935,34 @@ export class BotOwedWork {
 				now: () => this.ports.admissionTimers().now(),
 			};
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote.
-			if (applyUnhostedBotStop(agentDir, agentId, session, ports, held) === "applied") {
-				this.unrecorded.taken(agentId, held);
+			if (applyUnhostedBotStop(agentDir, agentId, session, ports, this.unrecorded) === "applied") {
 				this.forgetOwedTimes(agentId);
 				this.armUsageWait(agentId, this.usageResumeAt(agentId, "saved" in session ? session.saved : undefined));
 			}
 			this.failedStops.delete(agentId);
 			return false;
 		} catch (error) {
+			if (swept && this.failedStops.get(agentId) === stops) return false;
 			this.failedStops.set(agentId, stops);
 			const failure = storeFailure(agentId, error, undefined);
 			const passing = botOpenFailure(failure);
 			const later = passing !== undefined && this.openRetries.arm(agentId, cappedFailure(passing));
 			this.tellWaits(agentId, interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure)));
 			return later;
+		}
+	}
+
+	/**
+	 * The owner's stop of a bot this process does not host, once `requestBotStop` wrote it, or failed to (`unrecorded`, then
+	 * held: {@link UnrecordedBotStops.hold}): the bot is asked open, which applies the stops waiting first. It never throws, so
+	 * the owner's stop of this process's other work goes on: a read that fails is told to the owner as a later pass's is.
+	 */
+	ownerStopped(agentId: string, unrecorded: OwnerStop | undefined): void {
+		if (unrecorded) this.unrecorded.hold(agentId, unrecorded);
+		try {
+			this.openIfOwed(agentId);
+		} catch (error) {
+			this.tellWaits(agentId, this.waitsText(agentId, botFailureText(agentId, error)));
 		}
 	}
 

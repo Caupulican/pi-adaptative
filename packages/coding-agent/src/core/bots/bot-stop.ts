@@ -19,6 +19,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
@@ -30,6 +31,7 @@ import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/se
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
+import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions } from "../remote/job-client.ts";
@@ -231,21 +233,21 @@ function refuseMessagesBeforeStop(
  * covers refused and the stops deleted, then the jobs every session of its home placed ended, all in one synchronous run
  * that releases the lock at its end. A bot with no saved session has only its home's placed jobs, its messages and its stops to
  * take; one whose saved session is a symbolic link ({@link ClosedBotSession}) has its session's work left, the owner told. `held` when another process holds the lock (its host takes the stop), `none` when no stop waits. A failure
- * throws, the lock released and the stop left waiting. A stop that could not be recorded (`memory`) is applied with them,
- * as the newest when it is.
+ * throws, the lock released and the stop left waiting. A stop this process could not record (`unrecorded`) is applied
+ * with them, as the newest when it is, while the bot's work stands where it was when the stop was made ({@link UnrecordedBotStops}).
  */
 export function applyUnhostedBotStop(
 	agentDir: string,
 	agentId: string,
 	session: ClosedBotSession,
 	ports: BotStopPorts,
-	memory?: OwnerStop,
+	unrecorded: UnrecordedBotStops,
 ): "applied" | "held" | "none" {
-	if (!memory && !botInboxStopWaiting(agentDir, agentId)) return "none";
+	if (!unrecorded.of(agentId) && !botInboxStopWaiting(agentDir, agentId)) return "none";
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) return "held";
 	try {
-		return applyBotStopUnderLock(agentDir, agentId, session, ports, memory) ? "applied" : "none";
+		return unrecorded.underLock(agentId, session, ports) ? "applied" : "none";
 	} finally {
 		taken.lock.release();
 	}
@@ -367,56 +369,133 @@ export function stopLoadedBot(
 const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [], stopped: 0 };
 
 /**
+ * Where a closed bot's own work stood: its saved session as its stop reads it (none, or the link it is), and the last event
+ * of that session's bundle (0 when it has none). A process that runs the bot moves one of them before any work it starts
+ * there: a worker it starts, a plan it opens or a job it places is an event of that bundle, and a new session is a new one.
+ */
+interface BotWorkMark {
+	readonly session: string | undefined;
+	readonly linked: string | undefined;
+	readonly head: number;
+}
+
+/** Where bot `agentId`'s closed session `session` stands now ({@link BotWorkMark}), read without writing it. */
+function workMark(agentDir: string, agentId: string, session: ClosedBotSession): BotWorkMark {
+	if ("linked" in session) return { session: undefined, linked: session.linked, head: 0 };
+	const bundle = closedBundle(agentDir, agentId, session.saved);
+	const store =
+		bundle &&
+		existsSync(orchestrationEventStoreDir(bundle.home, bundle.sessionId)) &&
+		new OrchestrationEventStore({ orchestrationHome: bundle.home, sessionId: bundle.sessionId });
+	return {
+		session: session.saved?.id,
+		linked: undefined,
+		head: store ? readTaskRuntimeProjection(store).lastOrdinal : 0,
+	};
+}
+
+const sameWorkMark = (a: BotWorkMark, b: BotWorkMark): boolean =>
+	a.session === b.session && a.linked === b.linked && a.head === b.head;
+
+/** A stop held in memory, with where the bot's work stood when it was made. */
+interface HeldOwnerStop {
+	readonly stop: OwnerStop;
+	readonly mark: BotWorkMark;
+}
+
+/**
  * The owner's stops this process could not record (`requestBotStop` failed) for bots it does not host, the newest per bot,
- * held until a take of the bot's stops applies one: the unhosted application (`BotOwedWork.applyOwnerStop`), or this
+ * held until a take of the bot's stops applies one: the unhosted application ({@link applyUnhostedBotStop}), or this
  * process's open of the bot's session, under its lock before the session is built ({@link underLock}) and once it is
  * built ({@link loaded}), so a stop made while the open runs is taken by it. A take that applied it, or a newer stop that
- * covers it, ends the hold; a failed one keeps it for the next. It is dropped once another process holds the bot
- * ({@link drop}): that process never learns of it, and the work it runs came after it.
+ * covers it, ends the hold; a failed one keeps it for the next.
+ *
+ * No other process learns of it, so it ends only the work there was when it was made: each stop is held with where the
+ * bot's work stood then ({@link BotWorkMark}), and a take under the lock this process takes anew drops it when that moved,
+ * since a process ran the bot since and what is there now came after the stop. Its own failed take marks it again where
+ * that take left the bot. A stop held while this process opens or closes the bot is marked where it found the bot then:
+ * the open's take once the session is built applies it under the same lock, and what an open that failed, or a close,
+ * wrote after drops it. One whose mark does not read is not held, as the owner was told (`botStopNotRecorded`).
  */
 export class UnrecordedBotStops {
-	private readonly held = new Map<string, OwnerStop>();
+	private readonly held = new Map<string, HeldOwnerStop>();
 	private readonly agentDir: () => string;
+	private readonly savedSessionOf: (agentId: string) => SavedBotSession | undefined;
 
-	constructor(agentDir: () => string) {
+	constructor(agentDir: () => string, savedSessionOf: (agentId: string) => SavedBotSession | undefined) {
 		this.agentDir = agentDir;
+		this.savedSessionOf = savedSessionOf;
 	}
 
-	/** Holds `stop` for the bot unless a newer one is held. */
+	/** Holds `stop` for the bot, marked where its work stands now, unless a newer one is held. */
 	hold(agentId: string, stop: OwnerStop): void {
 		const held = this.held.get(agentId);
-		if (!held || stop.at >= held.at) this.held.set(agentId, stop);
+		if (held && stop.at < held.stop.at) return;
+		this.mark(agentId, stop, () => readClosedBotSession(() => this.savedSessionOf(agentId)));
 	}
 
 	/** The stop held for the bot. */
 	of(agentId: string): OwnerStop | undefined {
-		return this.held.get(agentId);
+		return this.held.get(agentId)?.stop;
 	}
 
-	/** A take that read `stop` (the one held when it began) applied it or a newer one: it is held no longer. */
-	taken(agentId: string, stop: OwnerStop | undefined): void {
-		if (stop !== undefined && this.held.get(agentId) === stop) this.held.delete(agentId);
-	}
-
-	/** Another process holds the bot: the stop held for it is dropped (see the class). */
+	/** The bot was released (retired, or off the session path): no stop is held for it. */
 	drop(agentId: string): void {
 		this.held.delete(agentId);
 	}
 
-	/** {@link applyBotStopUnderLock}, the stop held for the bot taken with the ones waiting. */
-	underLock(agentId: string, session: ClosedBotSession, ports: BotStopPorts): OwnerStop | undefined {
-		const memory = this.held.get(agentId);
-		const applied = applyBotStopUnderLock(this.agentDir(), agentId, session, ports, memory);
-		this.taken(agentId, memory);
-		return applied;
+	/** This process's host stopped: nothing it held is applied after. */
+	clear(): void {
+		this.held.clear();
 	}
 
-	/** {@link stopLoadedBot} of a session just built, no turn running yet; the held stop is kept when the take failed. */
+	/**
+	 * {@link applyBotStopUnderLock} under the lock the caller just took, the stop held for the bot taken with the ones
+	 * waiting while the bot's work stands where it was when the stop was made, and dropped otherwise (see the class).
+	 */
+	underLock(agentId: string, session: ClosedBotSession, ports: BotStopPorts): OwnerStop | undefined {
+		const agentDir = this.agentDir();
+		const marked = this.held.get(agentId);
+		if (marked && !sameWorkMark(marked.mark, workMark(agentDir, agentId, session))) this.held.delete(agentId);
+		const memory = this.held.get(agentId);
+		try {
+			const applied = applyBotStopUnderLock(agentDir, agentId, session, ports, memory?.stop);
+			this.taken(agentId, memory);
+			return applied;
+		} catch (error) {
+			// What the take ended before it failed is this process's own move of the bot's work.
+			if (memory) this.mark(agentId, memory.stop, () => session);
+			throw error;
+		}
+	}
+
+	/**
+	 * {@link stopLoadedBot} of a session just built, no turn running yet, under the lock its open took: the held stop was
+	 * made since the take under it ({@link underLock}), so it ends the session's whole work; it is kept when the take failed.
+	 */
 	loaded(agentId: string, loaded: LoadedBotSession, ports: BotStopPorts): LoadedBotStop {
 		const memory = this.held.get(agentId);
-		const taken = stopLoadedBot(this.agentDir(), agentId, loaded, () => {}, ports, memory);
+		const taken = stopLoadedBot(this.agentDir(), agentId, loaded, () => {}, ports, memory?.stop);
 		if (taken.failure === undefined) this.taken(agentId, memory);
 		return taken;
+	}
+
+	/** A take that read `held` (the one held when it began) applied it or a newer one: it is held no longer. */
+	private taken(agentId: string, held: HeldOwnerStop | undefined): void {
+		if (held !== undefined && this.held.get(agentId) === held) this.held.delete(agentId);
+	}
+
+	/** Holds `stop` marked where the bot's `session` stands now; one whose mark does not read is not held (see the class). */
+	private mark(agentId: string, stop: OwnerStop, session: () => ClosedBotSession): void {
+		try {
+			this.held.set(agentId, { stop, mark: workMark(this.agentDir(), agentId, session()) });
+		} catch (error) {
+			this.held.delete(agentId);
+			harnessLog.warn("bots", "an owner's stop that could not be recorded could not be held", {
+				agentId,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 }
 

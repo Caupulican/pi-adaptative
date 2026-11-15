@@ -136,8 +136,10 @@ taken still ends the turn and the workers of the bot this process hosts, and one
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
 stop that could not be recorded for a bot no process hosts is held in memory by the process that made it until a take
 there applies it whole under the bot's host lock (a retry, or that process's open of the bot, a stop made during the open
-included), the messages sent before it refused; once another process holds the bot it is dropped, as that host never
-learns of it. A worker the owner stopped opens no turn of the bot. A
+included), the messages sent before it refused. No other process learns of it, so it ends only the work there was when it
+was made: it is dropped once a process ran the bot since (the bot's saved session, or that session's worker records,
+moved), and it is not held when where the bot's work stands cannot be read then. A worker the owner stopped opens no
+turn of the bot. A
 profile bot holds `delegate`, `assign` and `plan` when its profile's tools name any of them, since `assign` runs
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
 plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
