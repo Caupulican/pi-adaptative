@@ -5,9 +5,11 @@
  * id starts its usage at zero, so its ranges are another source's). A reader sums such charges as the union of their ranges, per source and
  * per usage field, so a range delivered twice, to several root sessions, again after a reopen, or overlapping another
  * counts once by construction; with dates (`sweepChargedRanges`), each covered stretch counts on the earliest
- * `recordedAt` of the charges covering it. A report without a range (worker receipts, an earlier build's charges) is
- * not one: its readers keep the report-id dedupe; nor is a bot session's charge that names no instance (an earlier build's). A charge with per-model components carries no range (its components
- * cannot be split by range), so it is not one either (`chargedRangeOf`, in session-usage.ts).
+ * `recordedAt` of the charges covering it. A bot session's charge that names both ends but no instance (an earlier
+ * build's) reads its session as one source, as that build's readers did (`legacyChargedRangeSource`). A report without a
+ * range (worker receipts, an earlier build's charges) is not one: its readers keep the report-id dedupe. A charge with
+ * per-model components carries no range (its components cannot be split by range), so it is not one either
+ * (`chargedRangeOf`, in session-usage.ts).
  */
 
 import type { Usage } from "@caupulican/pi-ai";
@@ -15,15 +17,30 @@ import { createEmptyUsage } from "../../kernel/usage.ts";
 
 /** One charged range of a source's cumulative usage. */
 export interface ChargedRange {
-	/** The source whose cumulative usage the range reads: the bot session's file instance (`chargedRangeSource`). */
+	/**
+	 * The source whose cumulative usage the range reads: the bot session's file instance (`chargedRangeSource`), or the
+	 * session alone for an earlier build's charge that names no instance (`legacyChargedRangeSource`).
+	 */
 	readonly source: string;
 	readonly from: Usage;
 	readonly through: Usage;
 }
 
-/** The key of the source a bot session's ranges read: its session id and the instance of its file. */
+/**
+ * The key of the source a bot session's ranges read: its session id and the instance of its file. It is a two-item JSON
+ * array, so it never equals the key of an earlier build's charge that names no instance (`legacyChargedRangeSource`).
+ */
 export function chargedRangeSource(sessionId: string, instance: string): string {
 	return JSON.stringify([sessionId, instance]);
+}
+
+/**
+ * The key of the source an earlier build's bot-session charges read when they name no instance: the session id alone,
+ * the key that build's readers used, as a one-item JSON array, so it never equals an instance's (`chargedRangeSource`).
+ * @deprecated Reads charges written before `sourceInstance` (`chargedRangeSource` replaces it); remove once no session file can hold a bot-session charge that names its range but no instance.
+ */
+export function legacyChargedRangeSource(sessionId: string): string {
+	return JSON.stringify([sessionId]);
 }
 
 /** The fields a range covers, each a cumulative counter of its own. */

@@ -13,15 +13,15 @@
  * charges past what the mark holds. A live root's file is not read: its
  * entries are, each charge counted held once the root holds it for good (`holds`), and the ones it holds
  * unwritten are taken back as charges still to deliver (`unwritten`), since a root that ends unwritten drops them; one
- * held unwritten that does not name its whole range is counted neither: its range is charged again, and the readers take
+ * held unwritten that does not name its whole range and its instance is counted neither: its range is charged again, and the readers take
  * an overlapping range once (`ChargedRanges`). A file that only grows while it is read (a writer appending) is read as
  * it was when opened; one that changes otherwise is read again; one that is no session file (no valid header) holds no
  * charge; one removed since it was listed holds none any more. A file or directory that cannot be read (or stat'ed, or
  * listed) is read as holding none and named (`unread`): the watermark starts lower, its ranges are charged again, and
- * the readers take an overlapping range once. A charge an earlier build reported without a range end or without its
- * instance counts as its usage, once by report id, all of them together reaching as far as their sum, as the root's
- * readers count it (`chargedRangeOf`); one without its instance counts for an instance created at or before its range
- * was fixed (`recordedAt`, else when it was recorded).
+ * the readers take an overlapping range once. A charge an earlier build reported without its instance counts for an
+ * instance created at or before its range was fixed (`recordedAt`, else when it was recorded), and reaches as far as its
+ * range end as one with its instance does. One reported without a range end counts as its usage, once by report id, all
+ * of them together reaching as far as their sum, as the root's readers count it (`chargedRangeOf`).
  */
 
 import { readdir, realpath, stat } from "node:fs/promises";
@@ -197,14 +197,17 @@ function chargeOf(entry: SessionEntry, source: ChargeSource): Record<string, unk
 	return fixed >= source.createdAt ? entry.data : undefined;
 }
 
-/** Whether `data` charges a range of the instance's usage: one without its instance counts as its usage (`chargeOf`). */
+/**
+ * Where the range a charge of the instance (`chargeOf`) charges ends, with or without its instance; undefined for one
+ * that names no range end, which counts as its usage.
+ */
 function rangeOf(data: Record<string, unknown>): Usage | undefined {
-	return typeof data.sourceInstance === "string" && isUsage(data.through) ? data.through : undefined;
+	return isUsage(data.through) ? data.through : undefined;
 }
 
-/** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
+/** A charge a live root holds unwritten, when it names everything its delivery is matched by, its instance included. */
 function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
-	if (rangeOf(data) === undefined) return undefined;
+	if (typeof data.sourceInstance !== "string") return undefined;
 	const { usage, reportId, provider, model, from, through, recordedAt } = data;
 	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;

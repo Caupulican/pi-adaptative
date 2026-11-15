@@ -44,7 +44,8 @@ export interface SpawnedUsageReport {
 	/**
 	 * The instance of the source session's file the report's range reads (a bot session's: its header's creation time),
 	 * for a source that charges ranges: a file created again under the same session id starts its usage at zero, so its
-	 * ranges are another source's. A bot session's report without it (an earlier build's) charges no range.
+	 * ranges are another source's. A bot session's report without it (an earlier build's) charges its range under the
+	 * session alone (`legacyChargedRangeSource`).
 	 */
 	sourceInstance?: string;
 	/**

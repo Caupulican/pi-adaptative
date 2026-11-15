@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
-import { type ChargedRange, ChargedRanges, chargedRangeSource } from "./charged-ranges.ts";
+import { type ChargedRange, ChargedRanges, chargedRangeSource, legacyChargedRangeSource } from "./charged-ranges.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -36,22 +36,24 @@ export function isUsage(value: unknown): value is Usage {
 }
 
 /**
- * The range a spawned report charges, when it names one: both ends, its source session and that session's file instance,
- * and no per-model components (`ChargedRanges`). A bot session's report without its instance (an earlier build's) charges
- * none: it counts by report id.
+ * The range a spawned report charges, when it names one: both ends, its source session and no per-model components
+ * (`ChargedRanges`). Its source is that session's file instance (`chargedRangeSource`); a bot session's report that names
+ * no instance (an earlier build's) charges its range under the session alone, as that build's readers took it
+ * (`legacyChargedRangeSource`), and one whose instance is no string charges none.
  */
 export function chargedRangeOf(report: SpawnedUsageReport | undefined): ChargedRange | undefined {
 	if (
 		!report ||
 		report.label !== BOT_SESSION_USAGE_LABEL ||
 		report.usageComponents !== undefined ||
-		typeof report.sourceSessionId !== "string" ||
-		typeof report.sourceInstance !== "string"
+		typeof report.sourceSessionId !== "string"
 	)
 		return undefined;
-	const { from, through } = report;
-	return isUsage(from) && isUsage(through)
-		? { source: chargedRangeSource(report.sourceSessionId, report.sourceInstance), from, through }
+	const { from, through, sourceSessionId, sourceInstance } = report;
+	if (!isUsage(from) || !isUsage(through)) return undefined;
+	if (sourceInstance === undefined) return { source: legacyChargedRangeSource(sourceSessionId), from, through };
+	return typeof sourceInstance === "string"
+		? { source: chargedRangeSource(sourceSessionId, sourceInstance), from, through }
 		: undefined;
 }
 
