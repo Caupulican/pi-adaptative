@@ -101,6 +101,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-listing.ts` | Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. |
 | `kernel/session/session-manager-types.ts` | Public record types of the session transcript: the header and entry file union, the context and tree views, session info, and persisted-entry events and listeners. |
 | `kernel/session/session-manager.ts` | (no header comment) |
+| `kernel/session/session-retention-index.ts` | What a home's session tombstones (`deletions/<session-key>.json`, `session-bundle-lifecycle.ts`) record beside their schema-3 marker, in files of their own, so a build that reads only the marker reads every tombstone as before: - `<session-key>.removing`: the retention's remover may have begun removing the bundle. |
 | `kernel/session/session-tree.ts` | Walks session entry ancestry from a leaf to the root with parent-cycle detection and collects the active branch ending at a leaf. |
 | `kernel/session/session-version-migration.ts` | Session transcript format versions: the current version constants and the ordered migrations that upgrade entries from older formats to the current one. |
 | `kernel/session/session-write-confirmation.ts` | Confirms, under the original file lock, that an attempted suffix was fully written to a session file by checking file identity, size and suffix SHA-256. |
@@ -151,7 +152,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-117 kernel modules, 58 with a header comment.
+118 kernel modules, 59 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

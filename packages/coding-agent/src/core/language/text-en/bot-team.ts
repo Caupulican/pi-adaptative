@@ -261,6 +261,11 @@ export const BOT_TEAM = {
 	/** The startup sweep could not list a bot home's session files or session bundles. */
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: its session files or old session bundles could not be read, so its old session bundles are not cleaned up until they can.`,
+	/** Deletion records of a bot home's old session bundles that do not read; their bundles stay. */
+	botDeletionRecordsUnreadable: (botName: string, count: number) =>
+		count === 1
+			? `Bot ${botName}: 1 deletion record of its old session bundles could not be read; its bundle stays until it can.`
+			: `Bot ${botName}: ${count} deletion records of its old session bundles could not be read; their bundles stay until they can.`,
 	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
 	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
 	botModelNotAllowed: (modelRef: string) => `your model policy does not allow ${modelRef}`,

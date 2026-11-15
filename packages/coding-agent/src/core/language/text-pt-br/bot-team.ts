@@ -224,6 +224,10 @@ export const BOT_TEAM = {
 		`Bot ${botName}: o processo que o hospeda ainda não informou a sessão que mantém, então os pacotes de sessão antigos dele não são limpos até informar.`,
 	botHomeRetentionFailed: (botName: string) =>
 		`Bot ${botName}: os arquivos de sessão ou os pacotes de sessão antigos dele não puderam ser lidos, então os pacotes de sessão antigos dele não são limpos até poderem.`,
+	botDeletionRecordsUnreadable: (botName: string, count: number) =>
+		count === 1
+			? `Bot ${botName}: 1 registro de exclusão dos pacotes de sessão antigos dele não pôde ser lido; o pacote dele fica até poder ser lido.`
+			: `Bot ${botName}: ${count} registros de exclusão dos pacotes de sessão antigos dele não puderam ser lidos; os pacotes deles ficam até poderem ser lidos.`,
 	botHistoryRunUnreadable: (reason: string) =>
 		`Histórico dos bots: uma conversa anterior não pôde ser lida (${reason}).`,
 	botModelNotAllowed: (modelRef: string) => `sua política de modelos não permite ${modelRef}`,

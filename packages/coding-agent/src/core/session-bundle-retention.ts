@@ -2,7 +2,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { harnessLog } from "../kernel/harness-log.ts";
-import { orchestrationSessionDeletionsDir, sessionKeyOfDeletionFile } from "../kernel/session/session-bundle-paths.ts";
+import { isValidSessionId } from "../kernel/session/session-identity.ts";
 import {
 	BOTS_DIR_NAME,
 	capabilityArtifactsDir,
@@ -30,11 +30,12 @@ import { sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
+	inspectSessionBundleRetention,
 	markSessionBundleRemoving,
 	pendingSessionBundleRetention,
-	releaseSessionBundleRetention,
 	type SessionBundleDeletionPhase,
 	type SessionBundleDeletionReservation,
+	sessionBundleRetentionsInFlight,
 	settleSessionBundleDeletion,
 	withSessionBundleRetention,
 } from "./orchestration/session-bundle-lifecycle.ts";
@@ -51,17 +52,18 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * removes bundles only: a bot home itself, its session files and its other state are never removed here (deleting a
  * bot is its own action). Each home is swept by the same gates; the bot homes are read once per run
  * (`readBotSessionHolds`), and each home's session files are listed on their own. In a home whose sessions cannot be
- * told, or whose session files do not list (reported), no bundle is reserved: only the reservations an earlier run made
- * are resumed, so none is stranded; while a bot home's files do not list, no owner-home bundle whose session has no
- * listed file is reserved either (it may be that bot's).
+ * told, or whose session files do not list (reported; a symbolic link that does not resolve fails the listing), no
+ * bundle is reserved: only the reservations an earlier run made are resumed, so none is stranded, and every session
+ * such a home has a file of is held; while a bot home's files do not list, no owner-home bundle whose session has no
+ * listed file is reserved either (it may be that bot's). A home whose bundles or deletion records do not list is
+ * reported and left; the others are swept.
  *
  * A bundle is removed only when every gate holds:
  * - no live or resumable process-matrix entry (and not this process's own session) names its session;
- * - it is not a bot home's current session (its pointer's, `bot-session-pointer.ts`) nor the session a live bot host
+- it is not a bot home's current session (its pointer's, `bot-session-pointer.ts`) nor the session a live bot host
  *   holds (`host.lock` held by a process not proven dead, its session read from `host-state.json`); one of those whose
- *   removal an earlier run had begun is resumed rather than kept, since no lease is admitted to a reserved bundle (its
- *   bot could not open it again) until the removal settles, while a held session's tombstone that never reached removal
- *   (`releaseSessionBundleRetention`) is released, its bundle whole;
+ *   retention an earlier run left in flight is resumed rather than kept, since no lease is admitted to a reserved bundle
+ *   (its bot could not open it again) until the removal settles;
  * - its newest file is older than {@link SESSION_BUNDLE_QUIET_FLOOR_MS}, which also protects sessions whose
  *   transcript lives outside `<agentDir>/sessions` and the bot homes or has not been written yet;
  * - its parent session transcript (under `<agentDir>/sessions`, or a bot's own under `bots/<id>/sessions`) is
@@ -91,17 +93,21 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * bound skips it; work whose origin session file lies in a bot home whose files did not list, or where a live host may
  * hold a session no id names, is left.
  *
- * Each removal is reserved in its home's tombstone and marked `removing` there just before anything is removed: a
- * deferral before that releases the tombstone (the bundle is whole), a held session's tombstone that never reached it
- * is released, and a resumed removal marked begun skips the gates its bundle already passed and finishes, its bundle's
- * side files (fleet queue, capability artifacts) included, also when the bundle itself is already gone. A tombstone an
- * earlier build wrote does not record how far its removal went: it is resumed through the gates and never released
- * with its bundle standing. In a home whose holds are unknown only a removal that may have begun is resumed.
+* Each removal is reserved in its home's tombstone (`session-bundle-lifecycle.ts`) and marked `removing` there just
+ * before anything is removed (the bundle's side files, its fleet queue and capability artifacts, first): a deferral
+ * before that releases a tombstone this run created (the bundle is whole), and a resumed removal marked begun skips the
+ * gates its bundle already passed and finishes, also when the bundle itself is already gone. A tombstone an earlier
+ * build wrote, or one whose remover settled what the bundle owed, does not record how far its removal went
+ * (`unrecorded`): it is resumed through the gates; refused by one only the open session settles (receipts awaiting
+ * delivery, a younger or project-bound obligation) it is released, and it stays only while its bundle does not read.
  *
- * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first resumes,
- * in every home and ahead of the removal budget, the reservations earlier runs left; then it scans every home's bundles
- * as one list, starting at a different bundle each time, so permanently refused bundles cannot starve later ones in any
- * home. Failures are returned as bounded diagnostics and never thrown.
+* Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
+ * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
+ * releases, and removals that began, before the bot history is read; the others once it reads; all within the removal
+ * budget and from a window the clock rotates across the homes. Then it scans every home's bundles as one list, starting
+ * at a different bundle each time, so permanently refused bundles cannot starve later ones in any home. Failures are
+ * returned as bounded diagnostics and never thrown; warnings about single homes take at most
+ * {@link MAX_HOME_DIAGNOSTICS} of them.
  */
 
 /** A mailbox obligation older than this can never be answered and is settled as expired. */
@@ -131,6 +137,12 @@ const MAX_MAILBOX_FILES = 512;
 const MAX_MAILBOX_BYTES = 16 * 1024 * 1024;
 const MAX_DIAGNOSTICS = 8;
 const MAX_DIAGNOSTIC_CHARS = 240;
+/** Warnings about single homes shown per run; the rest are counted in one line (each is in the harness log). */
+const MAX_HOME_DIAGNOSTICS = 4;
+/** A bot's name in a warning, at most this many characters. */
+const MAX_NAME_CHARS = 48;
+/** Retentions in flight (`sessionBundleRetentionsInFlight`) inspected per run, across every home. */
+const MAX_RESUMES_PER_RUN = 64;
 const KEY_DIGEST_SUFFIX = /-[0-9a-f]{16}$/;
 const KEY_DIGEST_SUFFIX_LENGTH = 17;
 const SESSION_FILE_SUFFIX = ".jsonl";
@@ -234,9 +246,9 @@ async function protectedSessionIds(
 }
 
 /**
- * The sessions the bot homes hold (`readBotSessionHolds`), and in a home where a live host may hold a session its hold
- * does not name, every session that home has a file of: the host holds one of them, or one it is creating, which has no
- * routine work yet and no bundle the sweep would reserve.
+ * The sessions the bot homes hold (`readBotSessionHolds`), and in a home whose holds cannot be told, every session that
+ * home has a file of: its current session, or a live host's, is one of them (or one it is creating, which has no
+ * routine work yet and no bundle the sweep would reserve).
  */
 function botHeldSessionIds(
 	bots: BotSessionHolds,
@@ -244,7 +256,7 @@ function botHeldSessionIds(
 ): ReadonlySet<string> {
 	const held = new Set(bots.heldSessionIds);
 	const unknownDirs = bots.homes.flatMap((hold) =>
-		hold.kind === "undetermined" && hold.maybeLive ? [resolve(hold.home.sessionsDir)] : [],
+		hold.kind === "undetermined" ? [resolve(hold.home.sessionsDir)] : [],
 	);
 	if (unknownDirs.length === 0) return held;
 	for (const [sessionId, paths] of transcripts)
@@ -260,6 +272,8 @@ interface SessionFileIndex {
 	readonly ownerListed: boolean;
 	/** The bot homes whose session files were not listed (unreadable, or over the bound): their sessions are unknown. */
 	readonly unlistedBots: ReadonlySet<BotHomeHold>;
+	/** Whether any bot home's files were not listed, an unresolved one's included: a session's file may be among them. */
+	readonly someBotUnlisted: boolean;
 }
 
 /**
@@ -297,7 +311,7 @@ function listSessionFiles(directories: () => readonly string[], files: Map<strin
 function indexSessionFiles(
 	agentDir: string,
 	bots: BotSessionHolds,
-	report: (message: string) => void,
+	reportHome: (message: string) => void,
 ): SessionFileIndex {
 	const files = new Map<string, string[]>();
 	const ownerRoot = sessionsDir(agentDir);
@@ -305,29 +319,41 @@ function indexSessionFiles(
 		() =>
 			existsSync(ownerRoot)
 				? readdirSync(ownerRoot, { withFileTypes: true }).flatMap((entry) => {
-						// A symlinked directory holds session files as a directory does; a link that names none holds none.
 						const dir = join(ownerRoot, entry.name);
-						return entry.isDirectory() ||
-							(entry.isSymbolicLink() && statSync(dir, { throwIfNoEntry: false })?.isDirectory())
-							? [dir]
-							: [];
+						if (entry.isDirectory()) return [dir];
+						// A symlinked directory holds session files as a directory does; a link that does not resolve may
+						// hold some, so it fails the listing (thrown by the stat).
+						return entry.isSymbolicLink() && statSync(dir).isDirectory() ? [dir] : [];
 					})
 				: [],
 		files,
 	);
-	if (ownerFailure !== undefined)
-		report(
-			`session bundle retention: the owner's session files could not be listed (${ownerFailure}); the owner's bundles are only resumed and deleted sessions' routine work is not settled`,
-		);
+	if (ownerFailure !== undefined) {
+		harnessLog.warn("sessions", "the owner's session files do not list", { detail: ownerFailure });
+		reportHome(interfaceText().sessions.retention.ownerFilesUnlisted);
+	}
 	const unlistedBots = new Set<BotHomeHold>();
 	for (const hold of bots.homes) {
 		const failure = listSessionFiles(() => [hold.home.sessionsDir], files);
 		if (failure === undefined) continue;
 		unlistedBots.add(hold);
 		harnessLog.warn("bots", "a bot home's session files do not list", { home: hold.home.dir, detail: failure });
-		report(interfaceText().botTeam.botHomeRetentionFailed(hold.displayName));
+		reportHome(interfaceText().botTeam.botHomeRetentionFailed(boundedName(hold.displayName)));
 	}
-	return { files, ownerListed: ownerFailure === undefined, unlistedBots };
+	for (const { name } of bots.unresolvedHomes)
+		reportHome(interfaceText().botTeam.botHomeRetentionFailed(boundedName(name)));
+	return {
+		files,
+		ownerListed: ownerFailure === undefined,
+		unlistedBots,
+		someBotUnlisted: unlistedBots.size > 0 || bots.unresolvedHomes.length > 0,
+	};
+}
+
+/** A name told to the owner, cut to {@link MAX_NAME_CHARS} characters. */
+function boundedName(name: string): string {
+	const characters = [...name];
+	return characters.length <= MAX_NAME_CHARS ? name : `${characters.slice(0, MAX_NAME_CHARS - 1).join("")}…`;
 }
 
 /**
@@ -358,15 +384,15 @@ function settleRoutinesOfGoneSessions(
 	}
 }
 
-/** The directory name is `<readable prefix>-<digest>`; only ids that round-trip exactly can be reserved. */
+/**
+ * The directory name is `<readable prefix>-<digest>`; only a session id whose bundle name round-trips exactly can be
+ * reserved.
+ */
 function recoverParentSessionId(home: OrchestrationHome, bundleName: string): string | undefined {
 	if (!KEY_DIGEST_SUFFIX.test(bundleName)) return undefined;
 	const candidate = bundleName.slice(0, -KEY_DIGEST_SUFFIX_LENGTH);
-	try {
-		return basename(orchestrationSessionDir(home, candidate)) === bundleName ? candidate : undefined;
-	} catch {
-		return undefined;
-	}
+	if (!isValidSessionId(candidate)) return undefined;
+	return basename(orchestrationSessionDir(home, candidate)) === bundleName ? candidate : undefined;
 }
 
 function readBoundedJson(file: string): unknown {
@@ -413,37 +439,43 @@ function bundleOwesMailboxWork(home: OrchestrationHome, parentSessionId: string,
 }
 
 /**
- * Read-only: whether settling at the retention age would leave this bundle owing nothing, every open
- * obligation expired and settleable by the mailbox's own rule. Fail-closed like {@link bundleOwesMailboxWork}.
+ * What the bundle's open obligations ask of its expiry, read-only: `expires` when settling at the retention age would
+ * leave it owing nothing (every open obligation expired and settleable by the mailbox's own rule); `younger` or
+ * `project-bound` when one is the session's to answer (younger than the age, or in a mailbox only its specialist
+ * context's claim may change); `unreadable` when one could not be read, which wins over the others. Fail-closed like
+ * {@link bundleOwesMailboxWork}.
  */
-function everyOpenObligationExpires(
+type ObligationVerdict = "expires" | "younger" | "project-bound" | "unreadable";
+
+function openObligationsVerdict(
 	agentDir: string,
 	home: OrchestrationHome,
 	parentSessionId: string,
 	bundleDir: string,
 	now: number,
-): boolean {
+): ObligationVerdict {
 	const cutoffMs = now - SESSION_BUNDLE_MAX_AGE_MS;
+	let verdict: ObligationVerdict = "expires";
 	try {
 		if (
 			existsSync(sessionRootMailboxFile(home, parentSessionId)) &&
 			!new SessionRootMailbox({ orchestrationHome: home, parentSessionId }).expiresEveryMandatoryReply(cutoffMs)
 		)
-			return false;
+			verdict = "younger";
 		const mailboxDir = join(bundleDir, "worker-mailboxes");
-		if (!existsSync(mailboxDir)) return true;
+		if (!existsSync(mailboxDir)) return verdict;
 		const names = readdirSync(mailboxDir);
-		if (names.length > MAX_MAILBOX_FILES) return false;
+		if (names.length > MAX_MAILBOX_FILES) return "unreadable";
 		for (const name of names) {
 			const file = join(mailboxDir, name);
-			if (!name.endsWith(".json") || statSync(file).size > MAX_MAILBOX_BYTES) return false;
+			if (!name.endsWith(".json") || statSync(file).size > MAX_MAILBOX_BYTES) return "unreadable";
 			const { reference, mailbox } = readWorkerMailboxRecord(file);
 			if (
 				!isPlainRecord(mailbox) ||
 				!Array.isArray(mailbox.messages) ||
 				!Array.isArray(mailbox.replyAcknowledgements)
 			)
-				return false;
+				return "unreadable";
 			if (
 				!workerMailboxHasOpenObligation({
 					messages: mailbox.messages,
@@ -451,9 +483,13 @@ function everyOpenObligationExpires(
 				})
 			)
 				continue;
+			if (reference) {
+				verdict = "project-bound";
+				continue;
+			}
 			const agentId = mailbox.agentId;
-			if (reference || typeof agentId !== "string" || workerMailboxPath(home, parentSessionId, agentId) !== file)
-				return false;
+			if (typeof agentId !== "string" || workerMailboxPath(home, parentSessionId, agentId) !== file)
+				return "unreadable";
 			if (
 				!new WorkerAgentMailbox({
 					agentDir,
@@ -462,11 +498,11 @@ function everyOpenObligationExpires(
 					agentId,
 				}).settlesEveryOpenObligation(cutoffMs, SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON)
 			)
-				return false;
+				verdict = "younger";
 		}
-		return true;
+		return verdict;
 	} catch {
-		return false;
+		return "unreadable";
 	}
 }
 
@@ -582,7 +618,16 @@ interface SweepRun {
 /** One home's part of a run. */
 interface HomeSweep {
 	readonly home: OrchestrationHome;
+	/** The bundle directory names under its `sessions/`. */
 	readonly names: readonly string[];
+	/** The sessions whose retention its in-flight index names (`sessionBundleRetentionsInFlight`). */
+	readonly inFlight: readonly string[];
+	/** Its deletion records that did not read this run: index entries, and tombstones inspected. */
+	unreadable: number;
+	/** The warning that `count` of its deletion records do not read. */
+	unreadableText(count: number): string;
+	/** How the harness log names the home. */
+	readonly logName: string;
 	/** How a bundle is named in the run's diagnostics and in the expiry ledger. */
 	labelOf(name: string): string;
 	/**
@@ -610,49 +655,6 @@ function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
 	}
 }
 
-/** Whether a session is held this run: by a process, by a bot's history or as a protected (current or bot-held) session. */
-function isHeld(run: SweepRun, sessionId: string): boolean {
-	return run.processHeld.has(sessionId) || run.historyHeld.has(sessionId) || run.protectedIds.has(sessionId);
-}
-
-/**
- * Whether a pending retention of `phase` (`pendingSessionBundleRetention`) is resumed in `sweep`: in a home whose holds
- * are unknown, only a removal that may have begun, since a `reserved` one's bundle is whole and may be held.
- */
-function resumes(sweep: HomeSweep, phase: SessionBundleDeletionPhase | undefined): boolean {
-	return phase !== undefined && (!sweep.resumeOnly || phase !== "reserved");
-}
-
-/**
- * The bundles of `sweep` whose retention an earlier run left pending, by its tombstones, resumed first: no lease is
- * admitted to them (their session cannot open) until their removal settles; those whose bundle is already gone
- * included, so their removal settles. A held session's tombstone that never reached removal is released here, ahead of
- * the budget (`releaseSessionBundleRetention`): its bundle is whole and its session opens again. A tombstone that does
- * not read is reported and stands; the others are still read.
- */
-async function resumableTombstones(run: SweepRun, sweep: HomeSweep): Promise<string[]> {
-	const deletions = orchestrationSessionDeletionsDir(sweep.home);
-	if (!existsSync(deletions)) return [];
-	const names: string[] = [];
-	let read = 0;
-	for (const file of await readdir(deletions)) {
-		const name = sessionKeyOfDeletionFile(file);
-		const sessionId = name === undefined ? undefined : recoverParentSessionId(sweep.home, name);
-		if (name === undefined || sessionId === undefined) continue;
-		// Every tombstone is read, the permanent ones too: yield now and then.
-		if (++read % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
-		try {
-			if (isHeld(run, sessionId) && releaseSessionBundleRetention(sweep.home, sessionId)) continue;
-			if (resumes(sweep, pendingSessionBundleRetention(sweep.home, sessionId))) names.push(name);
-		} catch (error) {
-			run.report(
-				`session bundle ${sweep.labelOf(name)} retained: its deletion tombstone does not read (${describe(error)})`,
-			);
-		}
-	}
-	return names.sort();
-}
-
 /**
  * The session's files outside its bundle that name only what the bundle held, removed under the bundle's reservation
  * once the bundle is gone: its fleet queue files (they order and stop attempts the bundle's ledger held) and its
@@ -668,9 +670,15 @@ const GONE_BUNDLE_WALK: BundleWalk = { bytes: 0, newestMtimeMs: 0, complete: tru
 
 /**
  * Sweeps one bundle of one orchestration home through every gate; the run's removal and byte budget is shared by every
- * home and checked by the caller.
+ * home and checked by the caller. `resume`: the phase of its retention in flight, when the caller inspected it;
+ * otherwise its tombstone is read here.
  */
-async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promise<void> {
+async function sweepBundle(
+	run: SweepRun,
+	sweep: HomeSweep,
+	name: string,
+	resume?: Exclude<SessionBundleDeletionPhase, "reserved">,
+): Promise<void> {
 	const { agentDir, now, processHeld, protectedIds, historyHeld, transcripts, result, report } = run;
 	const { home, labelOf, resumeOnly, unfiledHeld } = sweep;
 	const root = orchestrationSessionsDir(home);
@@ -680,8 +688,11 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 	const label = labelOf(name);
 	try {
 		const parentSessionId = recoverParentSessionId(home, name);
-		if (!parentSessionId || processHeld.has(parentSessionId) || historyHeld.has(parentSessionId)) return;
-		const resumingDeletion = resumes(sweep, pendingSessionBundleRetention(home, parentSessionId));
+		if (!parentSessionId || processHeld.has(parentSessionId)) return;
+		const pending = resume ?? pendingSessionBundleRetention(home, parentSessionId);
+		const resumingDeletion = pending !== undefined;
+		// A removal that began passed every gate before it began: a bot history naming its session is not read for it.
+		if (pending !== "removing" && historyHeld.has(parentSessionId)) return;
 		if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) return;
 		// Its session's files may be in a home whose files were not listed, which would hold it.
 		if (!resumingDeletion && unfiledHeld && !transcripts.has(parentSessionId)) return;
@@ -695,7 +706,8 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 		const bundleDir = join(root, name);
 		// A resumed retention whose bundle is already gone settles under its reservation below.
 		const walk = resumingDeletion && !existsSync(bundleDir) ? GONE_BUNDLE_WALK : walkBundle(bundleDir);
-		if (!walk.complete) return;
+		// A removal that began finishes whatever is left of its bundle; the walk only measures it then.
+		if (!walk.complete && pending !== "removing") return;
 		const quietMs = now - walk.newestMtimeMs;
 		if (!resumingDeletion && quietMs <= SESSION_BUNDLE_QUIET_FLOOR_MS) return;
 		if (!resumingDeletion && sessionMtimeMs !== undefined && quietMs <= SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS) return;
@@ -703,10 +715,10 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 		// The tombstone excludes new worker contexts for this session while the checks and removal run.
 		const reservation = reserveWorkerBundleDeletion(agentDir, home, parentSessionId, "retention", resumingDeletion);
 		if (!reservation) return;
-		let outcome: "removed" | "deferred" | "retained" = "retained";
+		// A deferral before anything of the bundle is touched releases a `reserved` tombstone (the bundle is whole) and
+		// keeps an `unrecorded` one: how far an earlier removal went is not known.
+		let outcome: "removed" | "deferred" | "retained" | "released" = "deferred";
 		try {
-			// A deferral before anything of the bundle is removed releases the tombstone: the bundle is whole.
-			outcome = "deferred";
 			if (!existsSync(bundleDir)) {
 				// Gone before this reservation: a removal that may have begun finishes with the side files; a bundle gone
 				// any other way (moved to another home, or deleted) is released and nothing else is touched.
@@ -719,8 +731,7 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 			// A removal this build marked begun passed every gate before it began, and what is left of its bundle proves
 			// nothing; a tombstone an earlier build left (`unrecorded`) goes through the gates again.
 			if (reservation.phase !== "removing") {
-				// Unknown evidence is also a deferral: the tombstone must not keep the session from resuming to deliver
-				// its receipts.
+				// Evidence that does not read throws: a deferral.
 				const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
 					const state = readTaskRuntimeProjection(
 						new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
@@ -732,14 +743,21 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 					);
 				});
 				if (pendingReceipts) {
+					// Only the open session delivers them: the tombstone goes, whatever its phase, so the session opens.
+					outcome = "released";
 					report(`session bundle ${label} retained: worker receipts await parent delivery`);
 					return;
 				}
 				if (bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
 					// Obligations older than the retention age can never be answered: settle them, then re-check.
-					// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
-					// is refused untouched, because settling part of it would only postpone its removal.
-					if (!everyOpenObligationExpires(agentDir, home, parentSessionId, bundleDir, now)) return;
+					// Only when every one of them expires: a bundle that keeps a younger or project-bound obligation is
+					// the open session's to answer, so it is refused untouched and its tombstone goes (settling part of
+					// it would only postpone its removal); one that does not read keeps the tombstone's barrier.
+					const verdict = openObligationsVerdict(agentDir, home, parentSessionId, bundleDir, now);
+					if (verdict !== "expires") {
+						if (verdict !== "unreadable") outcome = "released";
+						return;
+					}
 					// Settling writes the mailboxes: from here a refusal keeps the tombstone, so the next run resumes
 					// the expiry past the age those writes refreshed.
 					outcome = "retained";
@@ -760,12 +778,13 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 			}
 			outcome = "retained";
 			markSessionBundleRemoving(home, reservation);
+			// The side files name only what the bundle held: they go first, so a removal left partial strands none.
+			removeSessionSideFiles(home, parentSessionId);
 			await rm(bundleDir, { recursive: true, force: true });
 			if (existsSync(bundleDir)) {
 				report(`session bundle ${label} was only partly removed; it stays reserved for the next startup`);
 				return;
 			}
-			removeSessionSideFiles(home, parentSessionId);
 			outcome = "removed";
 		} finally {
 			settleSessionBundleDeletion(home, reservation, outcome);
@@ -778,13 +797,88 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 }
 
 /** The bundle directory names of a home's `sessions/`, sorted; none when it has no `sessions/`. */
-async function bundleNames(home: OrchestrationHome): Promise<string[] | undefined> {
+async function bundleNames(home: OrchestrationHome): Promise<string[]> {
 	const root = orchestrationSessionsDir(home);
-	if (!existsSync(root)) return undefined;
+	if (!existsSync(root)) return [];
 	return (await readdir(root, { withFileTypes: true }))
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => entry.name)
 		.sort();
+}
+/** Lists one home's bundles and retentions in flight; why it could not, told to the owner, when it could not. */
+async function homeSweep(
+	base: Omit<HomeSweep, "names" | "inFlight" | "unreadable">,
+	failureText: string,
+	reportHome: (message: string) => void,
+): Promise<HomeSweep | undefined> {
+	try {
+		const names = await bundleNames(base.home);
+		const inFlight = sessionBundleRetentionsInFlight(base.home);
+		return { ...base, names, inFlight: inFlight.sessionIds, unreadable: inFlight.unreadable };
+	} catch (error) {
+		harnessLog.warn("sessions", "a home's session bundles or deletion records do not list", {
+			home: base.logName,
+			detail: describe(error),
+		});
+		reportHome(failureText);
+		return undefined;
+	}
+}
+
+/**
+ * Inspects the retentions in flight of every home (`inspectSessionBundleRetention`), at most
+ * {@link MAX_RESUMES_PER_RUN} per run from a window the clock rotates across the homes: a `reserved` one no live remover
+ * holds is released there (its bundle whole), one whose removal began (`removing`) is finished now, within the run's
+ * budget, and the `unrecorded` ones are returned to go through the gates. Each bundle inspected is added to `seen`.
+ */
+async function resumeRetentionsInFlight(
+	run: SweepRun,
+	homes: readonly HomeSweep[],
+	seen: Set<string>,
+): Promise<{ sweep: HomeSweep; name: string }[]> {
+	const entries = homes.flatMap((sweep) => sweep.inFlight.map((sessionId) => ({ sweep, sessionId })));
+	const start = entries.length > 0 ? Math.floor(run.now / 1000) % entries.length : 0;
+	const window = [...entries.slice(start), ...entries.slice(0, start)].slice(0, MAX_RESUMES_PER_RUN);
+	const gated: { sweep: HomeSweep; name: string }[] = [];
+	for (const { sweep, sessionId } of window) {
+		let state: ReturnType<typeof inspectSessionBundleRetention>;
+		try {
+			state = inspectSessionBundleRetention(sweep.home, sessionId);
+		} catch (error) {
+			sweep.unreadable++;
+			harnessLog.warn("sessions", "a session bundle's deletion record does not read", {
+				home: sweep.logName,
+				session: sessionId,
+				detail: describe(error),
+			});
+			continue;
+		}
+		if (state.kind !== "pending") continue;
+		const name = basename(orchestrationSessionDir(sweep.home, sessionId));
+		seen.add(bundleKey(sweep, name));
+		if (state.phase === "unrecorded") gated.push({ sweep, name });
+		else if (!budgetSpent(run.result) && run.result.inspected < MAX_BUNDLES_INSPECTED)
+			await sweepBundle(run, sweep, name, state.phase);
+	}
+	return gated;
+}
+
+function bundleKey(sweep: HomeSweep, name: string): string {
+	return join(sweep.home.root, name);
+}
+
+/** The evidence line of a run that settled expired obligations, its ledgers counted rather than cut. */
+function expiredObligationsLine(agentDir: string, settled: number, ledgers: ReadonlySet<string>): string {
+	const head = `settled ${settled} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: `;
+	const paths = [...ledgers].map((ledger) => `<agentDir>/${relative(agentDir, ledger).split(sep).join(posix.sep)}`);
+	const more = (count: number): string => (count > 0 ? ` (+${count} more)` : "");
+	let shown = 0;
+	while (
+		shown < paths.length &&
+		`${head}${paths.slice(0, shown + 1).join(", ")}${more(paths.length - shown - 1)}`.length <= MAX_DIAGNOSTIC_CHARS
+	)
+		shown++;
+	return `${head}${paths.slice(0, shown).join(", ")}${more(paths.length - shown)}`;
 }
 
 /**
@@ -812,63 +906,69 @@ export async function sweepSessionBundles(
 	const report = (message: string): void => {
 		if (result.diagnostics.length < MAX_DIAGNOSTICS) result.diagnostics.push(message.slice(0, MAX_DIAGNOSTIC_CHARS));
 	};
+	// Warnings about single homes take at most MAX_HOME_DIAGNOSTICS slots; the rest are counted.
+	let homeWarnings = 0;
+	let omittedHomeWarnings = 0;
+	const reportHome = (message: string): void => {
+		if (homeWarnings++ < MAX_HOME_DIAGNOSTICS) report(message);
+		else {
+			omittedHomeWarnings++;
+			harnessLog.warn("sessions", message);
+		}
+	};
 	try {
 		// The bot homes are read once per run: their sessions, which homes exist and which session files they hold.
 		const bots = readBotSessionHolds(agentDir);
-		const index = indexSessionFiles(agentDir, bots, report);
+		const index = indexSessionFiles(agentDir, bots, reportHome);
 		const transcripts = index.files;
 		const matrix = await protectedSessionIds(agentDir, currentSessionId, botHeldSessionIds(bots, transcripts));
-		// A live host whose session is unknown may hold any session of its home, file or none; so may a home not listed.
-		const heldSessionDirs = new Set(
-			bots.homes.flatMap((hold) =>
-				(hold.kind === "undetermined" && hold.maybeLive) || index.unlistedBots.has(hold)
-					? [resolve(hold.home.sessionsDir)]
-					: [],
+		// A home whose holds cannot be told may hold any session of its home, file or none; so may a home not listed.
+		const heldSessionDirs = new Set([
+			...bots.homes.flatMap((hold) =>
+				hold.kind === "undetermined" || index.unlistedBots.has(hold) ? [resolve(hold.home.sessionsDir)] : [],
 			),
-		);
+			...bots.unresolvedHomes.map(({ home }) => resolve(home.sessionsDir)),
+		]);
 		if (index.ownerListed) {
 			const settled = settleRoutinesOfGoneSessions(agentDir, matrix, transcripts, heldSessionDirs, now);
 			result.uncertainRoutineRuns = settled.uncertainRuns;
 			result.settledRoutineResults = settled.settledResults;
 			result.retiredRoutines = settled.retiredRoutines;
 		}
+		const text = interfaceText();
 		const homes: HomeSweep[] = [];
-		const ownerNames = await bundleNames(owner);
-		if (ownerNames)
-			homes.push({
+		const ownerSweep = await homeSweep(
+			{
 				home: owner,
-				names: ownerNames,
 				labelOf: (name) => name,
 				resumeOnly: !index.ownerListed,
-				unfiledHeld: index.unlistedBots.size > 0,
-			});
+				unfiledHeld: index.someBotUnlisted,
+				unreadableText: (count) => text.sessions.retention.ownerDeletionRecordsUnreadable(count),
+				logName: owner.root,
+			},
+			text.sessions.retention.ownerStateUnreadable,
+			reportHome,
+		);
+		if (ownerSweep) homes.push(ownerSweep);
 		for (const hold of bots.homes) {
-			const home = hold.home.orchestrationHome;
-			try {
-				const names = await bundleNames(home);
-				if (!names) continue;
-				if (hold.kind === "undetermined") report(botHomeUnknownText(hold.displayName, hold.unknown));
-				homes.push({
-					home,
-					names,
+			const botName = boundedName(hold.displayName);
+			const sweep = await homeSweep(
+				{
+					home: hold.home.orchestrationHome,
 					labelOf: (name) => `${BOTS_DIR_NAME}/${hold.name}/${name}`,
 					resumeOnly: hold.kind === "undetermined" || index.unlistedBots.has(hold),
 					unfiledHeld: false,
-				});
-			} catch (error) {
-				harnessLog.warn("bots", "a bot home's session bundles do not list", {
-					home: hold.home.dir,
-					detail: describe(error),
-				});
-				report(interfaceText().botTeam.botHomeRetentionFailed(hold.displayName));
-			}
+					unreadableText: (count) => text.botTeam.botDeletionRecordsUnreadable(botName, count),
+					logName: hold.home.dir,
+				},
+				text.botTeam.botHomeRetentionFailed(botName),
+				reportHome,
+			);
+			if (!sweep || (sweep.names.length === 0 && sweep.inFlight.length === 0 && sweep.unreadable === 0)) continue;
+			if (hold.kind === "undetermined") reportHome(botHomeUnknownText(botName, hold.unknown));
+			homes.push(sweep);
 		}
-		if (homes.length === 0) return result;
 		const history = historyReferencedSessionIds(agentDir);
-		if (history.unreadable.length > 0) {
-			for (const agentId of history.unreadable) report(interfaceText().botTeam.botHistoryIndexUnreadable(agentId));
-			return result;
-		}
 		const run: SweepRun = {
 			agentDir,
 			now,
@@ -880,41 +980,45 @@ export async function sweepSessionBundles(
 			obligationLedgers,
 			report,
 		};
-		// First, in every home, the reservations earlier runs left, ahead of the removal budget: until each settles, its
-		// session cannot open. They share the inspection bound with the rest.
-		const resumed = new Map<HomeSweep, ReadonlySet<string>>();
-		for (const sweep of homes) {
-			const names = await resumableTombstones(run, sweep);
-			resumed.set(sweep, new Set(names));
-			for (const name of names) {
-				if (result.inspected >= MAX_BUNDLES_INSPECTED) break;
-				await sweepBundle(run, sweep, name);
-			}
+		// First the retentions earlier runs left in flight, ahead of the rest: until each settles, its session cannot open.
+		// Releases and removals that began need no bot history; the others wait for it below.
+		const seen = new Set<string>();
+		const gated = await resumeRetentionsInFlight(run, homes, seen);
+		for (const sweep of homes) if (sweep.unreadable > 0) reportHome(sweep.unreadableText(sweep.unreadable));
+		if (history.unreadable.length > 0) {
+			for (const agentId of history.unreadable)
+				reportHome(text.botTeam.botHistoryIndexUnreadable(boundedName(agentId)));
+			return result;
+		}
+		for (const { sweep, name } of gated) {
+			if (result.inspected >= MAX_BUNDLES_INSPECTED || budgetSpent(result)) break;
+			await sweepBundle(run, sweep, name, "unrecorded");
 		}
 		// Then every home's bundles as one list, in home order (the owner's first). Remembering nothing: the window starts
 		// at a different bundle each startup (the clock picks it), so bundles that stay refused at the head of the order
-		// cannot starve the ones behind them, in any home.
+		// cannot starve the ones behind them, in any home. A retention an earlier build left without an index entry is
+		// resumed here, by its tombstone.
 		const bundles = homes.flatMap((sweep) => sweep.names.map((name) => ({ sweep, name })));
 		const start = bundles.length > 0 ? Math.floor(now / 1000) % bundles.length : 0;
 		for (const { sweep, name } of [...bundles.slice(start), ...bundles.slice(0, start)]) {
 			if (result.inspected >= MAX_BUNDLES_INSPECTED || budgetSpent(result)) break;
-			if (resumed.get(sweep)?.has(name)) continue;
+			if (seen.has(bundleKey(sweep, name))) continue;
 			await sweepBundle(run, sweep, name);
 		}
 	} catch (error) {
 		report(`session bundle retention failed: ${describe(error)}`);
-	}
-	if (result.expiredObligations > 0) {
-		const evidence = [...obligationLedgers]
-			.map((ledger) => `<agentDir>/${relative(agentDir, ledger).split(sep).join(posix.sep)}`)
-			.join(", ");
+	} finally {
+		const leading =
+			result.expiredObligations > 0
+				? [expiredObligationsLine(agentDir, result.expiredObligations, obligationLedgers)]
+				: [];
+		const trailing =
+			omittedHomeWarnings > 0 ? [interfaceText().sessions.retention.homeWarningsOmitted(omittedHomeWarnings)] : [];
 		result.diagnostics = [
-			`settled ${result.expiredObligations} expired mailbox obligation(s) in old session bundles as ${SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON}; evidence: ${evidence}`.slice(
-				0,
-				MAX_DIAGNOSTIC_CHARS,
-			),
-			...result.diagnostics,
-		].slice(0, MAX_DIAGNOSTICS);
+			...leading,
+			...result.diagnostics.slice(0, MAX_DIAGNOSTICS - leading.length - trailing.length),
+			...trailing,
+		];
 	}
 	return result;
 }

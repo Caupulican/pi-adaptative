@@ -40,6 +40,20 @@ export const SESSIONS = {
 		bot: (pid: number) =>
 			`Esta sessão é a conversa do próprio bot; o host dele (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo para abrir a sessão aqui.`,
 	},
+	retention: {
+		ownerFilesUnlisted:
+			"Seus arquivos de sessão não puderam ser listados, então os pacotes de sessão antigos das suas sessões não são limpos até poderem (uma remoção já começada ainda termina), e o trabalho de rotinas das sessões apagadas não é resolvido.",
+		ownerStateUnreadable:
+			"Os pacotes de sessão antigos das suas sessões ou os registros de exclusão deles não puderam ser lidos, então eles não são limpos até poderem.",
+		ownerDeletionRecordsUnreadable: (count: number) =>
+			count === 1
+				? "1 registro de exclusão dos seus pacotes de sessão antigos não pôde ser lido; o pacote dele fica até poder ser lido."
+				: `${count} registros de exclusão dos seus pacotes de sessão antigos não puderam ser lidos; os pacotes deles ficam até poderem ser lidos.`,
+		homeWarningsOmitted: (count: number) =>
+			count === 1
+				? "Mais 1 aviso sobre a limpeza de pacotes de sessão antigos está no log do harness."
+				: `Mais ${count} avisos sobre a limpeza de pacotes de sessão antigos estão no log do harness.`,
+	},
 	model: {
 		chosen: (modelId: string) => `Modelo: ${modelId}`,
 		defaultChosen: (modelId: string) => `Modelo padrão: ${modelId}`,

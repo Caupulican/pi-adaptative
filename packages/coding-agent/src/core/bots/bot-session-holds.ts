@@ -34,20 +34,17 @@ export type BotHomeHold = {
 	readonly setAsideSessionId: string | undefined;
 	/** The session a live host holds, as far as it is known; undefined when no live host holds the home's lock. */
 	readonly liveSessionId: string | undefined;
-} & (
-	| { readonly kind: "held" }
-	| {
-			readonly kind: "undetermined";
-			readonly unknown: BotHomeUnknown;
-			/** Whether a live host may hold a session neither id names (its lock is held, or could not be read). */
-			readonly maybeLive: boolean;
-	  }
-);
+} & ({ readonly kind: "held" } | { readonly kind: "undetermined"; readonly unknown: BotHomeUnknown });
 
 /** What every bot home holds, from one read of `bots/`. */
 export interface BotSessionHolds {
 	/** Every home, in directory name order. */
 	readonly homes: readonly BotHomeHold[];
+	/**
+	 * The homes whose symbolic link under `bots/` does not resolve (named by directory name): what they hold is unknown, so
+	 * they count as homes whose session files did not list.
+	 */
+	readonly unresolvedHomes: readonly { readonly name: string; readonly home: BotHome }[];
 	/** Each home's current session, the session a pointer to be set aside names, and each live host's session. */
 	readonly heldSessionIds: ReadonlySet<string>;
 }
@@ -92,18 +89,15 @@ function holdOf(agentDir: string, name: string, home: BotHome): BotHomeHold {
 		const detail = error instanceof Error ? error.message : String(error);
 		harnessLog.warn("bots", "a bot's host state does not read", { home: home.dir, detail });
 		const unknown: BotHomeUnknown = { kind: "host-state-unreadable" };
-		return { kind: "undetermined", ...known, liveSessionId: undefined, maybeLive: true, unknown };
+		return { kind: "undetermined", ...known, liveSessionId: undefined, unknown };
 	}
 	const published = live?.botSessionId;
-	if (!current.ok) {
-		const maybeLive = live !== undefined && published === undefined;
-		return { kind: "undetermined", ...known, liveSessionId: published, maybeLive, unknown: current.unknown };
-	}
+	if (!current.ok) return { kind: "undetermined", ...known, liveSessionId: published, unknown: current.unknown };
 	// A host records the pointer before it builds the session, so until it publishes, the session it holds is the current one.
 	const liveSessionId = live ? (published ?? currentSessionId) : undefined;
 	if (live && liveSessionId === undefined) {
 		const unknown: BotHomeUnknown = { kind: "host-session-unnamed" };
-		return { kind: "undetermined", ...known, liveSessionId, maybeLive: true, unknown };
+		return { kind: "undetermined", ...known, liveSessionId, unknown };
 	}
 	return { kind: "held", ...known, liveSessionId };
 }
@@ -122,11 +116,16 @@ export function readBotSessionHolds(agentDir: string): BotSessionHolds {
 		entries = [];
 	}
 	const homes: BotHomeHold[] = [];
+	const unresolvedHomes: { name: string; home: BotHome }[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		// A symlinked bot directory is a home, as `sessionHomes` counts it; a link that names no directory is not.
+		// A symlinked bot directory is a home, as `sessionHomes` counts it; a link to anything else is not.
 		const dir = join(bots, entry.name);
-		if (entry.isDirectory() || (entry.isSymbolicLink() && statSync(dir, { throwIfNoEntry: false })?.isDirectory()))
-			homes.push(holdOf(agentDir, entry.name, botHomeAt(dir)));
+		if (entry.isSymbolicLink()) {
+			const target = linkTarget(dir);
+			if (target === "unresolved") unresolvedHomes.push({ name: entry.name, home: botHomeAt(dir) });
+			if (target !== "directory") continue;
+		} else if (!entry.isDirectory()) continue;
+		homes.push(holdOf(agentDir, entry.name, botHomeAt(dir)));
 	}
 	const heldSessionIds = new Set<string>();
 	for (const hold of homes) {
@@ -134,5 +133,16 @@ export function readBotSessionHolds(agentDir: string): BotSessionHolds {
 		if (hold.liveSessionId !== undefined) heldSessionIds.add(hold.liveSessionId);
 		if (hold.setAsideSessionId !== undefined) heldSessionIds.add(hold.setAsideSessionId);
 	}
-	return { homes, heldSessionIds };
+	return { homes, unresolvedHomes, heldSessionIds };
+}
+
+/** What a symbolic link under `bots/` names: a directory, something else, or nothing that can be read. */
+function linkTarget(dir: string): "directory" | "other" | "unresolved" {
+	try {
+		return statSync(dir).isDirectory() ? "directory" : "other";
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		harnessLog.warn("bots", "a bot home's symbolic link does not resolve", { home: dir, detail });
+		return "unresolved";
+	}
 }

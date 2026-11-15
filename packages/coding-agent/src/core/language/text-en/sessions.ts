@@ -14,6 +14,24 @@ export const SESSIONS = {
 		bot: (pid: number) =>
 			`This session is a bot's own conversation; its host (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process to open the session here.`,
 	},
+	/** The startup sweep of old session bundles (`session-bundle-retention.ts`), for the owner's home and the run. */
+	retention: {
+		/** The owner's session files did not list: which session a bundle belongs to is unknown. */
+		ownerFilesUnlisted:
+			"Your session files could not be listed, so your old session bundles are not cleaned up until they can (a removal already begun still finishes), and the routine work of deleted sessions is not settled.",
+		/** The owner's home's bundles or deletion records did not list. */
+		ownerStateUnreadable:
+			"The old session bundles of your sessions or their deletion records could not be read, so they are not cleaned up until they can.",
+		ownerDeletionRecordsUnreadable: (count: number) =>
+			count === 1
+				? "1 deletion record of your old session bundles could not be read; its bundle stays until it can."
+				: `${count} deletion records of your old session bundles could not be read; their bundles stay until they can.`,
+		/** Warnings about single homes past the ones shown; each is in the harness log. */
+		homeWarningsOmitted: (count: number) =>
+			count === 1
+				? "1 more warning about cleaning up old session bundles is in the harness log."
+				: `${count} more warnings about cleaning up old session bundles are in the harness log.`,
+	},
 	model: {
 		chosen: (modelId: string) => `Model: ${modelId}`,
 		defaultChosen: (modelId: string) => `Default model: ${modelId}`,
