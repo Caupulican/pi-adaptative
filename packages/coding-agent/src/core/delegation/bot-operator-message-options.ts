@@ -32,6 +32,6 @@ export interface BotOperatorMessageDispatchResult {
 	readonly modelRef: string;
 	/** Another process hosts the bot's session: the message waits in the bot's inbox for that host (`bots/bot-inbox.ts`). */
 	readonly deliveredTo?: { readonly pid: number; readonly sessionId?: string };
-	/** The bot's session opens later: the message waits in its inbox for that, and this says why, in the owner's words. */
+	/** The message waits in the bot's inbox (its session opens later, or a stop of it waits): the owner's whole sentence saying so and why. */
 	readonly waitsFor?: string;
 }

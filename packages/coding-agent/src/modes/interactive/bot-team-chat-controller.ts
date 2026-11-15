@@ -43,7 +43,7 @@ function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult
 	const text = interfaceText().chat;
 	if (result.modelRef === "link/remote") return text.sentRemote(agentId);
 	if (result.deliveredTo) return text.sentToHost(agentId, result.deliveredTo.pid, result.deliveredTo.sessionId);
-	if (result.waitsFor !== undefined) return text.sentWaiting(agentId, result.waitsFor);
+	if (result.waitsFor !== undefined) return result.waitsFor;
 	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
 		started: text.sentStarted,
 		followed_up: text.sentFollowedUp,

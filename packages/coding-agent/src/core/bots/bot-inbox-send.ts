@@ -99,7 +99,8 @@ export async function sendToBotHost(
 			return { agentId, mode: "queued", messageId: item.message.id, modelRef };
 		} catch (error) {
 			// A session that opens later keeps the words waiting, and the owner is told why; any other failure takes them back.
-			if (ports.openLater(agentId, error)) waitsFor = botFailureText(agentId, error);
+			if (ports.openLater(agentId, error))
+				waitsFor = interfaceText().botTeam.botWordsWaitForOpen(agentId, botFailureText(agentId, error));
 			else if (!(error instanceof BotSessionHeldError)) {
 				takeBotInboxMessage(item);
 				ports.changed(agentId);

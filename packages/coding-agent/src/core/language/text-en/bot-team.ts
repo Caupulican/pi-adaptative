@@ -147,9 +147,12 @@ export const BOT_TEAM = {
 	/** A stop or a release of a bot left the jobs that its home's session files which are symbolic links placed. */
 	botLinkedSessionsJobsLeft: (agentId: string, paths: readonly string[]) =>
 		`Bot ${agentId}: the jobs placed on other machines by ${paths.join(", ")} were not ended: ${paths.length === 1 ? "it is a symbolic link" : "they are symbolic links"}, and work is never ended through one.`,
-	/** The owner's words to a bot whose waiting stop could not be taken yet: they wait in its inbox behind the stop. */
+	/** The owner's words wait in the bot's inbox for its session, which opens later; `reason` says why, in the owner's words. */
+	botWordsWaitForOpen: (agentId: string, reason: string) =>
+		`Left in ${agentId}'s inbox: its session opens once it can (${reason}).`,
+	/** The owner's words wait in the bot's inbox behind its stop, which could not be taken yet. */
 	botWordsWaitBehindStop: (agentId: string) =>
-		`Bot ${agentId}'s stop waits and could not be applied yet; your words reach the bot once it is.`,
+		`Left in ${agentId}'s inbox behind its stop, which could not be applied yet: your words reach the bot once the stop is taken.`,
 	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,

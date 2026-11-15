@@ -134,8 +134,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o trabalho próprio dele foi encerrado, mas os jobs que as sessões da casa dele colocaram em outras máquinas não puderam ser encerrados (${reason}).`,
 	botLinkedSessionsJobsLeft: (agentId: string, paths: readonly string[]) =>
 		`Bot ${agentId}: os jobs colocados em outras máquinas por ${paths.join(", ")} não foram encerrados: ${paths.length === 1 ? "é um link simbólico" : "são links simbólicos"}, e nenhum trabalho é encerrado por meio de um.`,
+	botWordsWaitForOpen: (agentId: string, reason: string) =>
+		`Deixado na caixa de entrada de ${agentId}: a sessão dele abre assim que puder (${reason}).`,
 	botWordsWaitBehindStop: (agentId: string) =>
-		`A parada do bot ${agentId} espera e ainda não pôde ser aplicada; suas palavras chegam ao bot quando ela for.`,
+		`Deixado na caixa de entrada de ${agentId} atrás da parada dele, que ainda não pôde ser aplicada: suas palavras chegam ao bot quando a parada for aplicada.`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
