@@ -2,7 +2,8 @@
  * How far the roots hold a bot session's charges, kept in the bot's own transcript: once a root's file holds the
  * session's charges up to a range end, that end is appended as a `bot-charge-mark-v1` entry. The mark lives as long as
  * the usage it measures, so a watermark read back after the root files that held the charges were removed (session
- * retention) still starts past them (`BotTurnAccounting`). A transcript that copies another's entries copies its marks
+ * retention) still starts past them (`BotTurnAccounting`). The mark lives in the session's file, so it measures that file
+ * instance's usage only: a file created again under the same session id holds none of the earlier one's marks. A transcript that copies another's entries copies its marks
  * with the usage they measure. The entry is a custom one: no model reads it, and a spend window walks past it to the input
  * before it.
  */
@@ -14,6 +15,17 @@ import { usageReach } from "../cost/usage-delta.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const BOT_CHARGE_MARK_CUSTOM_TYPE = "bot-charge-mark-v1";
+
+/**
+ * The instance of the bot session's file: when its header was written (`SessionHeader.timestamp`). A file created again
+ * under the same session id (its recorded file was lost) is another instance: its recorded usage starts at zero, its
+ * transcript holds none of the earlier file's marks, and its charges are ranges of their own.
+ */
+export function botSessionInstance(transcript: Pick<SessionManager, "getHeader">): string {
+	const header = transcript.getHeader();
+	if (!header) throw new Error("The bot session has no header: its file instance is unknown.");
+	return header.timestamp;
+}
 
 /** Whether every field of `a` and `b` is the same. */
 function sameReading(a: Usage, b: Usage): boolean {
@@ -31,14 +43,21 @@ function sameReading(a: Usage, b: Usage): boolean {
 	);
 }
 
-/** The bot session's charge mark (see the module comment), read from its transcript once per session file. */
+/** What the marks of one session file instance hold. */
+interface MarkRead {
+	readonly sessionId: string;
+	readonly instance: string;
+	/** How far its marks reach; undefined: it holds none. */
+	reach: Usage | undefined;
+	/** When the last was written (ms since the epoch); undefined: it holds none. */
+	at: number | undefined;
+}
+
+/** The bot session's charge mark (see the module comment), read from its transcript once per session file instance. */
 export class BotChargeMark {
-	private readonly transcript: Pick<SessionManager, "getEntries" | "getSessionId" | "appendCustomEntry">;
-	/**
-	 * The session the reach was read for, how far its marks reach and when the last was written (ms since the epoch;
-	 * undefined: it holds none).
-	 */
-	private read: { readonly sessionId: string; reach: Usage | undefined; at: number | undefined } | undefined;
+	private readonly transcript: Pick<SessionManager, "getHeader" | "getEntries" | "getSessionId" | "appendCustomEntry">;
+	/** The session file instance the reach was read for, and what its marks hold. */
+	private read: MarkRead | undefined;
 
 	constructor(transcript: BotChargeMark["transcript"]) {
 		this.transcript = transcript;
@@ -57,9 +76,10 @@ export class BotChargeMark {
 		return this.marks().at;
 	}
 
-	private marks(): { readonly sessionId: string; reach: Usage | undefined; at: number | undefined } {
+	private marks(): MarkRead {
 		const sessionId = this.transcript.getSessionId();
-		if (this.read?.sessionId === sessionId) return this.read;
+		const instance = botSessionInstance(this.transcript);
+		if (this.read?.sessionId === sessionId && this.read.instance === instance) return this.read;
 		let reach: Usage | undefined;
 		let at: number | undefined;
 		for (const entry of this.transcript.getEntries()) {
@@ -69,7 +89,7 @@ export class BotChargeMark {
 			const written = Date.parse(entry.timestamp);
 			if (Number.isFinite(written)) at = Math.max(at ?? written, written);
 		}
-		this.read = { sessionId, reach, at };
+		this.read = { sessionId, instance, reach, at };
 		return this.read;
 	}
 

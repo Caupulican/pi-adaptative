@@ -148,10 +148,10 @@ export interface BotSender {
 	 */
 	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 	/**
-	 * How far the root sessions of the process hold the charges of bot session `sessionId` in the files changed since
-	 * `since`, and the charges they hold unwritten (`botChargesHeld`).
+	 * How far the root sessions of the process hold the charges of file instance `instance` of bot session `sessionId` in
+	 * the files changed since `since`, and the charges they hold unwritten (`botChargesHeld`).
 	 */
-	chargesHeld(sessionId: string, since: number): Promise<BotChargesHeld>;
+	chargesHeld(sessionId: string, instance: string, since: number): Promise<BotChargesHeld>;
 	/**
 	 * Calls `listener` with the bot charges (their report ids) the root session's file holds, as each write lands, with
 	 * the session written to; returns the unsubscribe.
@@ -754,7 +754,7 @@ export class BotSessionHost {
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
-					chargesHeld: (sessionId, since) => entry.sender.chargesHeld(sessionId, since),
+					chargesHeld: (sessionId, instance, since) => entry.sender.chargesHeld(sessionId, instance, since),
 					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
 					rootSessionId: () => entry.sender.hostSessionId(),
 					rootKeepsFile: () => entry.sender.hostKeepsFile(),

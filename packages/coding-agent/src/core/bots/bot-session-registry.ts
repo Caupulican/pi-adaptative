@@ -103,11 +103,12 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 		reportUsage: (usage, report) => current().reportUsage(usage, report),
 		chargesPersisted: (listener) => current().chargesPersisted(listener),
 		// Every attached root may hold a charge it took while it answered: each is read, none attached answering nothing.
-		chargesHeld: (sessionId, since) => {
+		chargesHeld: (sessionId, instance, since) => {
 			answering(shared);
 			return botChargesHeld(
 				shared.roots.map((attached) => attached.chargeHolder()),
 				sessionId,
+				instance,
 				since,
 			);
 		},

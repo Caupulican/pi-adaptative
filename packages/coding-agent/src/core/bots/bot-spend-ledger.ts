@@ -49,6 +49,8 @@ export interface BotChargeReport {
 	readonly reportId: string;
 	/** The bot's own session id. */
 	readonly sessionId: string;
+	/** The instance of that session's file the range reads (`botSessionInstance`). */
+	readonly instance: string;
 	readonly provider: string;
 	readonly model: string;
 	/** The bot session's cumulative usage the charge's range starts at: the root's readers take ranges once (`ChargedRanges`). */
@@ -68,6 +70,11 @@ export interface BotCharge {
 export interface BotChargeState {
 	/** The bot session whose cumulative usage `through` reads. */
 	sessionId: string;
+	/**
+	 * The instance of that session's file `through` reads (`botSessionInstance`): a file created again under the same id
+	 * is another instance, whose usage starts at zero, so it starts a watermark of its own.
+	 */
+	instance: string;
 	/** That session's cumulative usage the charges cover: the next charge starts there. */
 	through: Usage;
 	/** Charges whose range is fixed and written and whose report the root's file does not hold yet, oldest first. */
@@ -113,11 +120,12 @@ function parseWindow(value: unknown): SpendWindowRecord | undefined {
 
 function parseCharge(value: unknown): BotCharge | undefined {
 	if (!isPlainRecord(value) || !isUsage(value.usage) || !isPlainRecord(value.report)) return undefined;
-	const { agentId, reportId, sessionId, provider, model, from, through, recordedAt } = value.report;
+	const { agentId, reportId, sessionId, instance, provider, model, from, through, recordedAt } = value.report;
 	if (
 		typeof agentId !== "string" ||
 		typeof reportId !== "string" ||
 		typeof sessionId !== "string" ||
+		typeof instance !== "string" ||
 		typeof provider !== "string" ||
 		typeof model !== "string" ||
 		!isUsage(from) ||
@@ -125,15 +133,19 @@ function parseCharge(value: unknown): BotCharge | undefined {
 		typeof recordedAt !== "string"
 	)
 		return undefined;
-	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model, from, through, recordedAt } };
+	return {
+		usage: value.usage,
+		report: { agentId, reportId, sessionId, instance, provider, model, from, through, recordedAt },
+	};
 }
 
 function parseChargeState(value: unknown): BotChargeState | undefined {
-	if (!isPlainRecord(value) || typeof value.sessionId !== "string" || !isUsage(value.through)) return undefined;
-	if (!Array.isArray(value.pending)) return undefined;
+	if (!isPlainRecord(value) || !Array.isArray(value.pending)) return undefined;
+	const { sessionId, instance, through } = value;
+	if (typeof sessionId !== "string" || typeof instance !== "string" || !isUsage(through)) return undefined;
 	const pending = value.pending.map(parseCharge);
 	if (!pending.every((charge): charge is BotCharge => charge !== undefined)) return undefined;
-	return { sessionId: value.sessionId, through: value.through, pending };
+	return { sessionId, instance, through, pending };
 }
 
 /** What of the record `text` reads (see `ReadRecord`). */

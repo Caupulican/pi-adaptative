@@ -13,7 +13,7 @@ import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-recei
 import { usageReach, usageSince } from "../cost/usage-delta.ts";
 import { BOT_SESSION_USAGE_LABEL } from "../cost/usage-records.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
-import { BotChargeMark } from "./bot-charge-mark.ts";
+import { BotChargeMark, botSessionInstance } from "./bot-charge-mark.ts";
 import type { BotChargesHeld, BotChargeUnread } from "./bot-charges-held.ts";
 import type { BotCharge, BotChargeReport, BotChargeState, BotSpendLedger } from "./bot-spend-ledger.ts";
 
@@ -43,13 +43,14 @@ function readingKey(usage: Usage): string[] {
 /**
  * The charge of what the session spent between its cumulative usage readings `from` and `through` (each field of
  * `through` at or past `from`'s): undefined when the session has no model or spent nothing reportable between them.
- * Its report id is derived from the range it covers (the session, and every field of both ends), so the same range is
- * always the same charge; the report names the range's end, so the root holds how far the charges reach, and `recordedAt`,
+ * Its report id is derived from the range it covers (the session, the instance of its file, and every field of both ends),
+ * so the same range is always the same charge, and a file created again under the same id never repeats an earlier one's; the report names the range's end, so the root holds how far the charges reach, and `recordedAt`,
  * when the range was fixed: the day it counts on, in whichever root's file holds it.
  */
 export function botTurnCharge(
 	agentId: string,
 	session: Pick<AgentSession, "model" | "sessionId">,
+	instance: string,
 	from: Usage,
 	through: Usage,
 	recordedAt: string,
@@ -64,10 +65,12 @@ export function botTurnCharge(
 		report: {
 			agentId,
 			reportId: deriveSpawnedUsageReportId(BOT_SESSION_USAGE_LABEL, sessionId, [
+				instance,
 				...readingKey(from),
 				...readingKey(through),
 			]),
 			sessionId,
+			instance,
 			provider: model.provider,
 			model: model.id,
 			from,
@@ -103,11 +106,11 @@ export interface BotTurnAccountingPorts {
 	 */
 	charge(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 	/**
-	 * How far the roots of the process hold the charges of bot session `sessionId` in the files written since `since` (ms
-	 * since the epoch), the charges they hold unwritten and the files that could not be read (`botChargesHeld`); rejects
-	 * when no root answers.
+	 * How far the roots of the process hold the charges of file instance `instance` of bot session `sessionId` in the
+	 * files written since `since` (ms since the epoch), the charges they hold unwritten and the files that could not be
+	 * read (`botChargesHeld`); rejects when no root answers.
 	 */
-	chargesHeld(sessionId: string, since: number): Promise<BotChargesHeld>;
+	chargesHeld(sessionId: string, instance: string, since: number): Promise<BotChargesHeld>;
 	/** Calls `listener` with the charges the answering root's file holds as each of its writes lands; returns the unsubscribe. */
 	chargesPersisted(listener: (rootSessionId: string, reportIds: readonly string[]) => void): () => void;
 	/** The session of the root the bot answers now. */
@@ -156,7 +159,8 @@ export interface BotTurnAccountingPorts {
  * root's files hold the session's charges is marked in the bot's own transcript (`BotChargeMark`). Ranges reach the root
  * in order: while an earlier one fails to be delivered, later ones are fixed and wait behind it. A reopen delivers the
  * pending charges again under their own ids. A session the ledger holds no watermark for (a new bot, a new session
- * file, a ledger whose watermark was lost) never starts one at what it spent: a session that recorded no reportable usage
+ * file or one created again under the same id: each file instance has a watermark of its own, `botSessionInstance`; a
+ * ledger whose watermark was lost) never starts one at what it spent: a session that recorded no reportable usage
  * starts at zero (none of its spend can have been charged), any other at the furthest of how far the roots' files hold its
  * charges (`botChargesHeld`), its transcript's mark, and the ledger's pending charges of it, the charges a live root holds
  * unwritten taken back as pending; nothing is charged until that read-back lands. The turn's last words written since its
@@ -172,8 +176,8 @@ export class BotTurnAccounting {
 	private readonly ports: BotTurnAccountingPorts;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
 	private startedAt: number | undefined;
-	/** The session whose watermark is being read back from the root. */
-	private recovering: string | undefined;
+	/** The session file instance whose watermark is being read back from the root. */
+	private recovering: { readonly sessionId: string; readonly instance: string } | undefined;
 	/** After a failed read-back: no new one starts before this time (ms since the epoch). */
 	private recoverAfter = 0;
 	/** The pending charges a root holds unwritten, by report id, with that root's session. */
@@ -186,7 +190,7 @@ export class BotTurnAccounting {
 	/** The root whose writes are watched for the awaited charges, and the unsubscribe. */
 	private watching: { readonly root: string; readonly stop: () => void } | undefined;
 	/** How far the root's files hold this session's charges past its transcript's last mark: marked at the turn's end. */
-	private unmarked: { readonly sessionId: string; readonly through: Usage } | undefined;
+	private unmarked: { readonly sessionId: string; readonly instance: string; readonly through: Usage } | undefined;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */
 	private notRecordedTold = false;
 	/** The root files and directories a read-back could not read that the owner was told of: each is told once. */
@@ -259,10 +263,11 @@ export class BotTurnAccounting {
 		const delivered = this.deliverPending(keepsFile);
 		const state = this.watermark();
 		if (!state) return;
-		const { through, pending } = state;
+		const { instance, through, pending } = state;
 		const charge = botTurnCharge(
 			this.agentId,
 			this.session,
+			instance,
 			through,
 			usageReach(through, this.session.getDurableCumulativeUsage().usage),
 			new Date().toISOString(),
@@ -279,15 +284,21 @@ export class BotTurnAccounting {
 		if (delivered && this.deliver(charge, keepsFile)) this.settled([charge], keepsFile);
 	}
 
+	/** The instance of this session's file (`botSessionInstance`). */
+	private instance(): string {
+		return botSessionInstance(this.transcript);
+	}
+
 	/**
-	 * This session's watermark: the ledger's when it reads this session. Otherwise it is read back (`recover`) and
-	 * undefined until then.
+	 * This session's watermark: the ledger's when it reads this session's file instance. Otherwise it is read back
+	 * (`recover`) and undefined until then.
 	 */
 	private watermark(): BotChargeState | undefined {
 		const kept = this.ledger.charge;
 		const sessionId = this.session.sessionId;
-		if (kept?.sessionId === sessionId) return kept;
-		this.recover(sessionId);
+		const instance = this.instance();
+		if (kept?.sessionId === sessionId && kept.instance === instance) return kept;
+		this.recover(sessionId, instance);
 		return undefined;
 	}
 
@@ -296,26 +307,30 @@ export class BotTurnAccounting {
 	 * usage starts at zero at once; any other is read back from the roots' files changed since the session began. A read-back
 	 * that fails is tried again with the first charge a minute or more later; its reason is told as a charge not recorded.
 	 */
-	private recover(sessionId: string): void {
-		if (this.recovering === sessionId || Date.now() < this.recoverAfter) return;
+	private recover(sessionId: string, instance: string): void {
+		const recovering = this.recovering;
+		if ((recovering?.sessionId === sessionId && recovering.instance === instance) || Date.now() < this.recoverAfter)
+			return;
 		const reading = this.session.getDurableCumulativeUsage();
 		if (reading.settled && !hasReportableUsage(reading.usage)) {
-			this.adopt(sessionId, { through: createEmptyUsage(), unwritten: [] });
+			this.adopt(sessionId, instance, { through: createEmptyUsage(), unwritten: [] });
 			return;
 		}
-		this.recovering = sessionId;
-		// The roots' files written since the session began, or since its last mark: one not written since holds none of its
-		// charges past the mark (a range read again anyway is taken once by the root's readers, `ChargedRanges`).
-		const began = Date.parse(this.transcript.getHeader()?.timestamp ?? "");
+		this.recovering = { sessionId, instance };
+		// The roots' files written since the session's file began (its instance), or since its last mark: one not written
+		// since holds none of its charges past the mark (a range read again anyway is taken once by the root's readers,
+		// `ChargedRanges`).
+		const began = Date.parse(instance);
 		const since = Math.max(Number.isFinite(began) ? began : 0, this.mark.markedAt() ?? 0);
 		void Promise.resolve()
-			.then(() => this.ports.chargesHeld(sessionId, since))
+			.then(() => this.ports.chargesHeld(sessionId, instance, since))
 			.then(
 				(held) => {
 					this.recovering = undefined;
 					if (this.closed) return;
-					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
-					if (!this.adopt(sessionId, held)) return;
+					if (this.session.sessionId !== sessionId || this.instance() !== instance || !this.ledger.readable())
+						return;
+					if (!this.adopt(sessionId, instance, held)) return;
 					// Told only once the watermark it lowered is adopted: a read-back dropped changes nothing.
 					const newly = held.unread.filter(({ key }) => !this.unreadTold.has(key));
 					for (const { key } of newly) this.unreadTold.add(key);
@@ -332,29 +347,45 @@ export class BotTurnAccounting {
 	}
 
 	/**
-	 * Writes the watermark of `sessionId` read back as `held`: the furthest of the roots' files, the transcript's mark and
-	 * the pending charges of the session, the ones a live root holds unwritten taken back as pending before the pending
-	 * charges kept (those of the session before stay: they are their own ranges, delivered under their own ids). True
-	 * once written.
+	 * Writes the watermark of file instance `instance` of `sessionId` read back as `held`: the furthest of the roots' files,
+	 * the transcript's mark and the pending charges of that instance, the ones a live root holds unwritten taken back as
+	 * pending before the pending charges kept (those of the session or file instance before stay: they are their own
+	 * ranges, delivered under their own ids). True once written.
 	 */
-	private adopt(sessionId: string, held: Pick<BotChargesHeld, "through" | "unwritten">): boolean {
+	private adopt(sessionId: string, instance: string, held: Pick<BotChargesHeld, "through" | "unwritten">): boolean {
 		const kept = this.ledger.charge;
-		if (kept?.sessionId === sessionId) return false;
+		if (kept?.sessionId === sessionId && kept.instance === instance) return false;
 		const keptPending = kept?.pending ?? [];
 		const keptIds = new Set(keptPending.map((charge) => charge.report.reportId));
 		let through = usageReach(held.through, this.mark.reach() ?? held.through);
-		for (const charge of keptPending)
-			if (charge.report.sessionId === sessionId) through = usageReach(through, charge.report.through);
+		for (const { report } of keptPending)
+			if (report.sessionId === sessionId && report.instance === instance)
+				through = usageReach(through, report.through);
 		const taken: BotCharge[] = [];
 		for (const { usage, reportId, provider, model, from, through: end, recordedAt } of held.unwritten) {
 			through = usageReach(through, end);
 			if (keptIds.has(reportId)) continue;
 			taken.push({
 				usage,
-				report: { agentId: this.agentId, reportId, sessionId, provider, model, from, through: end, recordedAt },
+				report: {
+					agentId: this.agentId,
+					reportId,
+					sessionId,
+					instance,
+					provider,
+					model,
+					from,
+					through: end,
+					recordedAt,
+				},
 			});
 		}
-		this.ledger.charge = { sessionId, through: structuredClone(through), pending: [...taken, ...keptPending] };
+		this.ledger.charge = {
+			sessionId,
+			instance,
+			through: structuredClone(through),
+			pending: [...taken, ...keptPending],
+		};
 		if (this.ledger.write()) return true;
 		this.ledger.charge = kept;
 		return false;
@@ -476,15 +507,17 @@ export class BotTurnAccounting {
 		}
 		if (this.awaiting.size === 0) this.unwatch();
 		const sessionId = this.session.sessionId;
+		const instance = this.instance();
 		let settled: Usage | undefined;
 		for (const charge of pending) {
-			if (charge.report.sessionId !== sessionId) continue;
+			if (charge.report.sessionId !== sessionId || charge.report.instance !== instance) continue;
 			if (!held.includes(charge)) break;
 			settled = charge.report.through;
 		}
 		if (!settled) return false;
-		const kept = this.unmarked?.sessionId === sessionId ? this.unmarked.through : undefined;
-		this.unmarked = { sessionId, through: kept ? usageReach(kept, settled) : settled };
+		const unmarked = this.unmarked;
+		const kept = unmarked?.sessionId === sessionId && unmarked.instance === instance ? unmarked.through : undefined;
+		this.unmarked = { sessionId, instance, through: kept ? usageReach(kept, settled) : settled };
 		return true;
 	}
 
@@ -496,7 +529,7 @@ export class BotTurnAccounting {
 	private keepMark(): void {
 		const unmarked = this.unmarked;
 		if (this.closed || unmarked === undefined) return;
-		if (unmarked.sessionId !== this.session.sessionId) {
+		if (unmarked.sessionId !== this.session.sessionId || unmarked.instance !== this.instance()) {
 			this.unmarked = undefined;
 			return;
 		}

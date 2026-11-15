@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
-import { type ChargedRange, ChargedRanges } from "./charged-ranges.ts";
+import { type ChargedRange, ChargedRanges, chargedRangeSource } from "./charged-ranges.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -35,17 +35,24 @@ export function isUsage(value: unknown): value is Usage {
 	);
 }
 
-/** The range a spawned report charges, when it names one: both ends, its source, and no per-model components (`ChargedRanges`). */
+/**
+ * The range a spawned report charges, when it names one: both ends, its source session and that session's file instance,
+ * and no per-model components (`ChargedRanges`). A bot session's report without its instance (an earlier build's) charges
+ * none: it counts by report id.
+ */
 export function chargedRangeOf(report: SpawnedUsageReport | undefined): ChargedRange | undefined {
 	if (
 		!report ||
 		report.label !== BOT_SESSION_USAGE_LABEL ||
 		report.usageComponents !== undefined ||
-		typeof report.sourceSessionId !== "string"
+		typeof report.sourceSessionId !== "string" ||
+		typeof report.sourceInstance !== "string"
 	)
 		return undefined;
 	const { from, through } = report;
-	return isUsage(from) && isUsage(through) ? { source: report.sourceSessionId, from, through } : undefined;
+	return isUsage(from) && isUsage(through)
+		? { source: chargedRangeSource(report.sourceSessionId, report.sourceInstance), from, through }
+		: undefined;
 }
 
 export function readAutoLearnSessionIdFromFile(filePath: string): string | undefined {

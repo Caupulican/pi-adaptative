@@ -20,11 +20,16 @@ export type SpawnedUsageReceiptDisposition = "persisted" | "pending" | "foreign_
 
 /**
  * Whether the recorded report `data` is this receipt. A receipt that charges a range (`from` and `through`) is the same
- * charge as a report of the same source, range and usage, whatever model or date it was recorded with: a range fixed again
+ * charge as a report of the same source (its session and file instance), range and usage, whatever model or date it was recorded with: a range fixed again
  * after the source's model changed is still the one charge. Any other matches on every field it records.
  */
 function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: SpawnedUsageReceiptOptions): boolean {
-	if (!isPlainRecord(data) || data.reportId !== options.reportId || data.sourceSessionId !== options.sourceSessionId)
+	if (
+		!isPlainRecord(data) ||
+		data.reportId !== options.reportId ||
+		data.sourceSessionId !== options.sourceSessionId ||
+		data.sourceInstance !== options.sourceInstance
+	)
 		return false;
 	if (
 		!isDeepStrictEqual(data.from, options.from) ||

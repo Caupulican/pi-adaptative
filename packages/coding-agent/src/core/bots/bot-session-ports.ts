@@ -139,6 +139,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				parentSessionId: deps.getSessionId(),
 				label: BOT_SESSION_USAGE_LABEL,
 				sourceSessionId: report.sessionId,
+				sourceInstance: report.instance,
 				reportId: report.reportId,
 				provider: report.provider,
 				model: report.model,

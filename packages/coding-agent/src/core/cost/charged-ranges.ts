@@ -1,11 +1,12 @@
 /**
  * Spawned usage charged as ranges of one source's cumulative usage: a bot session's charges each name the range of the
- * session's recorded cumulative usage they cover (`from` to `through`), keyed by the bot session (`sourceSessionId`,
- * whose one cumulative usage the ranges read). A reader sums such charges as the union of their ranges, per source and
+ * session's recorded cumulative usage they cover (`from` to `through`), keyed by the bot session's file instance
+ * (`sourceSessionId` and `sourceInstance`, whose one cumulative usage the ranges read: a file created again under the same
+ * id starts its usage at zero, so its ranges are another source's). A reader sums such charges as the union of their ranges, per source and
  * per usage field, so a range delivered twice, to several root sessions, again after a reopen, or overlapping another
  * counts once by construction; with dates (`sweepChargedRanges`), each covered stretch counts on the earliest
  * `recordedAt` of the charges covering it. A report without a range (worker receipts, an earlier build's charges) is
- * not one: its readers keep the report-id dedupe. A charge with per-model components carries no range (its components
+ * not one: its readers keep the report-id dedupe; nor is a bot session's charge that names no instance (an earlier build's). A charge with per-model components carries no range (its components
  * cannot be split by range), so it is not one either (`chargedRangeOf`, in session-usage.ts).
  */
 
@@ -14,10 +15,15 @@ import { createEmptyUsage } from "../../kernel/usage.ts";
 
 /** One charged range of a source's cumulative usage. */
 export interface ChargedRange {
-	/** The source whose cumulative usage the range reads: the bot session's id. */
+	/** The source whose cumulative usage the range reads: the bot session's file instance (`chargedRangeSource`). */
 	readonly source: string;
 	readonly from: Usage;
 	readonly through: Usage;
+}
+
+/** The key of the source a bot session's ranges read: its session id and the instance of its file. */
+export function chargedRangeSource(sessionId: string, instance: string): string {
+	return JSON.stringify([sessionId, instance]);
 }
 
 /** The fields a range covers, each a cumulative counter of its own. */

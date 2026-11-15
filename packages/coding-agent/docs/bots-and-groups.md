@@ -61,7 +61,9 @@ to the main session's cost at each turn's end and each time a worker's usage rea
 ledger: each charge's range is written there before it is reported and kept until the main session's file holds it, so a
 reopen or a crash loses no range. The watermark only moves forward, field by field, over the usage the bot's session has
 recorded, so a reading short of it (its history still loading, or failed to load) charges nothing twice. Each charge names
-its range (where it starts and ends in the bot session's spend), and the main session's cost, its task costs and the daily
+its range (where it starts and ends in the bot session's spend) and the bot session's file it reads (when that file
+began: a file created again under the same session id starts its spend at zero, so its watermark and ranges are its own,
+and the earlier file's charges still held are delivered under their own ids), and the main session's cost, its task costs and the daily
 brake count a bot session's charges as the union of their ranges: within one main session's file a range recorded again
 after a reopen or overlapping another counts once. A main session's cost and task costs read only its own file, so a
 range delivered to two main sessions counts in each one's view. The daily brake reads the main sessions' files changed

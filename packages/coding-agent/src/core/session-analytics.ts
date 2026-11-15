@@ -446,6 +446,7 @@ export class SessionAnalytics {
 			usageComponents: opts?.usageComponents,
 			label: opts?.label,
 			sourceSessionId: opts?.sourceSessionId,
+			sourceInstance: opts?.sourceInstance,
 			provider: opts?.provider,
 			model: opts?.model,
 			goalId: opts?.goalId,

@@ -6,6 +6,8 @@ import type { UsageComponent } from "../kernel/usage-components.ts";
 export interface SpawnedUsageOptions {
 	label?: string;
 	sourceSessionId?: string;
+	/** The instance of the source session's file a charged range reads (`SpawnedUsageReport.sourceInstance`). */
+	sourceInstance?: string;
 	reportId?: string;
 	/** Originating worker binding; cumulative usage may also include other models. */
 	provider?: string;

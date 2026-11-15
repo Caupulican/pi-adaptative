@@ -42,6 +42,12 @@ export interface SpawnedUsageReport {
 	costBasis?: "response";
 	sourceSessionId?: string;
 	/**
+	 * The instance of the source session's file the report's range reads (a bot session's: its header's creation time),
+	 * for a source that charges ranges: a file created again under the same session id starts its usage at zero, so its
+	 * ranges are another source's. A bot session's report without it (an earlier build's) charges no range.
+	 */
+	sourceInstance?: string;
+	/**
 	 * The source session's cumulative usage the report's range starts at, beside `through`: a reader sums the reports of
 	 * one source that carry both as the union of their ranges (`ChargedRanges`), so a range recorded twice counts once.
 	 */

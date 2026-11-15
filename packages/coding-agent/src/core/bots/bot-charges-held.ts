@@ -1,7 +1,8 @@
 /**
  * How far the root sessions of the process hold a bot session's charges, read back from the roots' own records when the
  * bot's spend ledger lost its watermark (`BotTurnAccounting`): every `spawned_usage` charge labelled `bot-session` from
- * that bot session. A charge names the cumulative usage its range ends at (`through`), and the roots hold the session's
+ * that bot session's file instance (`sourceInstance`; a file created again under the same id starts its usage at zero,
+ * so an earlier instance's charges say nothing of it). A charge names the cumulative usage its range ends at (`through`), and the roots hold the session's
  * charges up to the furthest of them their files hold, field by field: charges are delivered in range order, a later
  * range only once every earlier one reached a root, so the furthest end held covers every range before it.
  *
@@ -17,8 +18,10 @@
  * it was when opened; one that changes otherwise is read again; one that is no session file (no valid header) holds no
  * charge; one removed since it was listed holds none any more. A file or directory that cannot be read (or stat'ed, or
  * listed) is read as holding none and named (`unread`): the watermark starts lower, its ranges are charged again, and
- * the readers take an overlapping range once. A charge an earlier build reported without a range end counts as its usage, once by
- * report id, all of them together reaching as far as their sum.
+ * the readers take an overlapping range once. A charge an earlier build reported without a range end or without its
+ * instance counts as its usage, once by report id, all of them together reaching as far as their sum, as the root's
+ * readers count it (`chargedRangeOf`); one without its instance counts for an instance created at or before its range
+ * was fixed (`recordedAt`, else when it was recorded).
  */
 
 import { readdir, realpath, stat } from "node:fs/promises";
@@ -171,16 +174,37 @@ async function readFileCharges(
 	}
 }
 
-/** The data of a `bot-session` charge from bot session `sessionId`; undefined for any other entry. */
-function chargeOf(entry: SessionEntry, sessionId: string): Record<string, unknown> | undefined {
+/** The bot session file instance whose charges are read: its session id, its instance and when that began. */
+interface ChargeSource {
+	readonly sessionId: string;
+	readonly instance: string;
+	/** When the instance began (ms since the epoch). */
+	readonly createdAt: number;
+}
+
+/**
+ * The data of a `bot-session` charge of `source` (or one an earlier build reported without an instance, for an instance
+ * created at or before its range was fixed); undefined for any other entry.
+ */
+function chargeOf(entry: SessionEntry, source: ChargeSource): Record<string, unknown> | undefined {
 	if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE || !isPlainRecord(entry.data))
 		return undefined;
-	const { label, sourceSessionId } = entry.data;
-	return label === BOT_SESSION_USAGE_LABEL && sourceSessionId === sessionId ? entry.data : undefined;
+	const { label, sourceSessionId, sourceInstance, recordedAt } = entry.data;
+	if (label !== BOT_SESSION_USAGE_LABEL || sourceSessionId !== source.sessionId) return undefined;
+	if (sourceInstance !== undefined) return sourceInstance === source.instance ? entry.data : undefined;
+	const fixedAt = typeof recordedAt === "string" ? Date.parse(recordedAt) : Number.NaN;
+	const fixed = Number.isFinite(fixedAt) ? fixedAt : Date.parse(entry.timestamp);
+	return fixed >= source.createdAt ? entry.data : undefined;
+}
+
+/** Whether `data` charges a range of the instance's usage: one without its instance counts as its usage (`chargeOf`). */
+function rangeOf(data: Record<string, unknown>): Usage | undefined {
+	return typeof data.sourceInstance === "string" && isUsage(data.through) ? data.through : undefined;
 }
 
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
 function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
+	if (rangeOf(data) === undefined) return undefined;
 	const { usage, reportId, provider, model, from, through, recordedAt } = data;
 	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;
@@ -189,18 +213,25 @@ function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefi
 }
 
 /**
- * How far the roots `holders` hold the charges of bot session `sessionId` in the files changed since `since` (ms since
- * the epoch), and the charges they hold unwritten (see the module comment).
+ * How far the roots `holders` hold the charges of file instance `instance` (`botSessionInstance`) of bot session
+ * `sessionId` in the files changed since `since` (ms since the epoch), and the charges they hold unwritten (see the
+ * module comment).
  */
 export async function botChargesHeld(
 	holders: readonly BotChargeHolder[],
 	sessionId: string,
+	instance: string,
 	since: number,
 ): Promise<BotChargesHeld> {
+	const createdAt = Date.parse(instance);
+	if (!Number.isFinite(createdAt))
+		throw new Error(`Bot session ${sessionId} has a file instance that is no time: ${instance}.`);
+	const source: ChargeSource = { sessionId, instance, createdAt };
 	let reach = createEmptyUsage();
 	const unranged = new Map<string, Usage>();
 	const held = (data: Record<string, unknown>): void => {
-		if (isUsage(data.through)) reach = usageReach(reach, data.through);
+		const through = rangeOf(data);
+		if (through) reach = usageReach(reach, through);
 		else if (isUsage(data.usage) && typeof data.reportId === "string") unranged.set(data.reportId, data.usage);
 	};
 	const unread: UnreadPath[] = [];
@@ -221,7 +252,7 @@ export async function botChargesHeld(
 				file,
 				sessionId,
 				(entry) => {
-					const data = chargeOf(entry, sessionId);
+					const data = chargeOf(entry, source);
 					if (data) held(data);
 				},
 				unread,
@@ -230,14 +261,14 @@ export async function botChargesHeld(
 	const unwritten = new Map<string, UnwrittenBotCharge>();
 	for (const { live: root } of holders)
 		for (const entry of root.entries) {
-			const data = chargeOf(entry, sessionId);
+			const data = chargeOf(entry, source);
 			if (!data) continue;
 			if (root.holds(entry)) {
 				held(data);
 				continue;
 			}
-			// A live root holds unwritten only charges this process delivered, each naming its range: one that does not is
-			// counted neither (see the module comment).
+			// A live root holds unwritten only charges this process delivered, each naming its range and instance: one that
+			// does not is counted neither (see the module comment).
 			const charge = unwrittenOf(data);
 			if (charge && !unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
 		}
