@@ -592,7 +592,7 @@ export class AgentSession {
 		extensionRunner: () => this._extensionRunner,
 		isClosingRuntimeWaitOnly: () => this._closingRuntimeWaitOnly,
 		getListeners: () => this._eventListeners,
-		holdUnlistenedWarning: (message) => this._holdUnlistenedWarning(message),
+		holdUnlistenedWarning: (message) => this._foregroundLifecycle.hold(message),
 		emitQueueUpdate: () => this._emitQueueUpdate(),
 		setDeliveryState: (state) => this.setDeliveryState(state),
 		refreshForegroundEnvelope: () => this._refreshForegroundEnvelope(),
@@ -3420,9 +3420,9 @@ export class AgentSession {
 		this._agentEvents.emit(event);
 	}
 
-	/** Holds a warning no listener takes, bounded like `emitHostWarning` bounds its message. */
-	private _holdUnlistenedWarning(message: string): void {
-		this._foregroundLifecycle.hold(message);
+	/** A harness notice the session's host observes (the open's own, `sdk.ts`), told where the session keeps its notices. */
+	observeHarnessNoticeOrWarn(...args: Parameters<HarnessNoticeController["observeOrWarn"]>): boolean {
+		return this._harnessNotices.observeOrWarn(...args);
 	}
 
 	private _emitQueueUpdate(): void {
@@ -3556,7 +3556,7 @@ export class AgentSession {
 		} catch (error: unknown) {
 			// Closing the compaction owner failed (typically its durable end record could not be written to a fenced or closed session
 			// file): disclosed at close, never dropped.
-			this._holdUnlistenedWarning(
+			this._foregroundLifecycle.hold(
 				`Closing the running compaction failed at quit: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
@@ -3597,7 +3597,7 @@ export class AgentSession {
 		track(() => this._backgroundLanes.channels.stop());
 		track(() =>
 			Promise.allSettled(processesEnded).then(() =>
-				this._runtimeBuilder.dispose((message) => this._holdUnlistenedWarning(message)),
+				this._runtimeBuilder.dispose((message) => this._foregroundLifecycle.hold(message)),
 			),
 		);
 		safely(() => this._localRuntimeController.dispose());
@@ -3631,7 +3631,7 @@ export class AgentSession {
 				},
 				shutdownMemory: () => this._memory.shutdown(),
 				disposeSemanticUsage: () => safely(() => this._semanticUsage.dispose()),
-				holdWarning: (message) => this._holdUnlistenedWarning(message),
+				holdWarning: (message) => this._foregroundLifecycle.hold(message),
 				holdLateWork: (work) => this._runtimeAdmission.holdBundleUntil(work),
 			}),
 		);

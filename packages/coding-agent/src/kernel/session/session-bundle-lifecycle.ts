@@ -24,6 +24,7 @@ import {
 	sameOrchestrationHome,
 	sessionKeyOfDeletionFile,
 } from "./session-bundle-paths.ts";
+import { recordSessionCleanupRelease } from "./session-cleanup-release.ts";
 import {
 	bundleWholeToken,
 	forgetBundleWhole,
@@ -486,7 +487,7 @@ export function acquireSessionBundleLease(
 	parentSessionId: string,
 	/**
 	 * `opening`: the AgentSession open of the session. A `session` hold is then refused while a channel or bot host holds
-	 * the session, and an interrupted retention of it is released ({@link takeReleasedInterruptedRetention}).
+	 * the session, and an interrupted retention of it is released and recorded (`session-cleanup-release.ts`).
 	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease.
 	 */
 	options: { role?: SessionLeaseRole; opening?: boolean; homeNow: SessionHomeNow },
@@ -895,28 +896,11 @@ export function withSessionBundleMaintenance<T>(
 }
 
 /**
- * The tombstones of sessions whose open released an interrupted retention, by tombstone path: kept in this process until
- * an open of the session takes them ({@link takeReleasedInterruptedRetention}).
- */
-const releasedInterruptedRetentions = new Set<string>();
-
-/**
- * Whether an open of the session in `home` released an `unrecorded` retention of it since this was last asked: an
- * earlier build's removal, or one whose wholeness proof does not read, that may have removed part of the bundle before
- * it was interrupted. True once per release, so the owner is told once.
- */
-export function takeReleasedInterruptedRetention(home: OrchestrationHome, parentSessionId: string): boolean {
-	return releasedInterruptedRetentions.delete(
-		orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), parentSessionId),
-	);
-}
-
-/**
  * How a session's bundle is admitted over its tombstone: `maintenance` never past one; `write` past a retention that
  * never began removing (`reserved`) or whose bundle is gone, when no live remover holds it; `open` (the AgentSession
  * open) past an `unrecorded` one no live remover holds as well, released once the open's own write succeeded: the
  * owner's open wins over an interrupted cleanup, every file left of the bundle is a whole file, and a reader takes a
- * missing one as absent. A retention whose removal this build began (`removing`) is never admitted past.
+ * missing one as absent; the release is recorded in the bundle before the tombstone goes, for the owner to be told once. A retention whose removal this build began (`removing`) is never admitted past.
  */
 type BundleAdmissionMode = "maintenance" | "write" | "open";
 
@@ -966,8 +950,8 @@ function admitSessionBundle<T>(
 				admittedBundles.delete(key);
 			}
 			if (interrupted) {
+				recordSessionCleanupRelease(home, parentSessionId, "open");
 				removeTombstone(home, tombstone, parentSessionId);
-				releasedInterruptedRetentions.add(tombstone);
 				harnessLog.warn("sessions", "an open released an interrupted retention of its session", {
 					session: parentSessionId,
 					tombstone,

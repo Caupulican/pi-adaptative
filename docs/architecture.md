@@ -87,6 +87,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-append-receipt.ts` | (no header comment) |
 | `kernel/session/session-bundle-lifecycle.ts` | (no header comment) |
 | `kernel/session/session-bundle-paths.ts` | (no header comment) |
+| `kernel/session/session-cleanup-release.ts` | The record a session's bundle keeps of an unfinished cleanup of it that the owner's open of the session cancelled over what is left of the bundle (`session-bundle-lifecycle.ts`, admission mode `open`). |
 | `kernel/session/session-context-builder.ts` | Model-facing session context: compaction-aware selection of retained entries, the context messages and their delivered metadata, and the branch views built from them. |
 | `kernel/session/session-default-dirs.ts` | The default session directories of a working directory under `<agentDir>/sessions`: the current encoding of the directory's path, then the legacy one when it differs. |
 | `kernel/session/session-entries.ts` | (no header comment) |

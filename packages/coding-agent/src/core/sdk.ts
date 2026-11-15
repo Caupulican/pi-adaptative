@@ -89,7 +89,7 @@ import { applyResourceProfileOptions } from "./resource-profile-blocks.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
-import { acquireOpeningSessionLease, tellReleasedInterruptedRetention } from "./session-open-lease.ts";
+import { acquireOpeningSessionLease, observeSessionCleanupRelease } from "./session-open-lease.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { resolveSessionStanding, type SessionStanding, sessionCapabilities } from "./session-standing.ts";
 import type {
@@ -1272,7 +1272,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const extensionsResult = resourceLoader.getExtensions();
 			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			session.startBackgroundInputs();
-			tellReleasedInterruptedRetention(sessionManager, (message) => session.emitHostWarning(message));
+			observeSessionCleanupRelease(session, sessionManager);
 
 			return {
 				session,

@@ -336,8 +336,8 @@ export class AwayChannelHosts {
 
 	/**
 	 * Reports every warning `session` raises while the host runs it. Subscribed before any other listener of the session,
-	 * so the warnings it held from before anyone listened (its open's, the release of an interrupted cleanup among them),
-	 * which go to its first subscriber, are reported here once instead of reaching a listener that reads no warnings.
+	 * so the warnings it held from before anyone listened (its open's), which go to its first subscriber, are reported
+	 * here once instead of reaching a listener that reads no warnings.
 	 */
 	private subscribeSessionWarnings(session: AgentSession, source: string): () => void {
 		const report = this.sessionWarningReport(source);
