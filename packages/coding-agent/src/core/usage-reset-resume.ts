@@ -211,7 +211,7 @@ export class UsageResetResume {
 		// The owner's stop declined this wait after it was armed (a failed try of the same stop is retried).
 		if (usageStopContinuesAt(pending.stopAt, pending.at, prior) === undefined) return;
 		if (this.deps.resumeUsageLimitedGoal()) {
-			recordUsageWake(transcript, "resumed", this.deps.clock.now(), 0);
+			recordUsageWake(transcript, "resumed", pending.stopAt, this.deps.clock.now(), 0);
 			return;
 		}
 		if (!pending.refusal || !isSameRefusal(this.lastMessage(), pending.refusal)) return;
@@ -223,15 +223,15 @@ export class UsageResetResume {
 		}
 		const now = this.deps.clock.now();
 		if (!failure) {
-			recordUsageWake(transcript, "resumed", now, 0);
+			recordUsageWake(transcript, "resumed", pending.stopAt, now, 0);
 			return;
 		}
-		const failures = prior?.outcome === "failed" && pending.stopAt <= prior.at ? prior.failures + 1 : 1;
+		const failures = prior?.outcome === "failed" && pending.stopAt <= prior.stopAt ? prior.failures + 1 : 1;
 		const retryAt = now + usageWakeRetryDelayMs(failures);
 		this.arm(pending, retryAt);
 		const detail = failure.error instanceof Error ? failure.error.message : String(failure.error);
 		this.deps.warn(interfaceText().notices.usageReset.sessionResumeFailed(detail, new Date(retryAt).toISOString()));
-		recordUsageWake(transcript, "failed", now, failures);
+		recordUsageWake(transcript, "failed", pending.stopAt, now, failures);
 	}
 
 	/**
@@ -294,7 +294,7 @@ export interface RestoredUsageStop {
  * classified against the model whose refusal it recorded (a stop recorded without one is read from the transcript
  * instead), else the refusal `lastMessage`, the transcript's last message, is. The same rule as a live stop's
  * ({@link usageResetWait}); undefined when it calls for none. A reset the provider admission recorded later is not folded in.
- * `wake`, the session's latest wake record, answers a stop made at or before it: resumed or declined, it calls for no
+ * `wake`, the session's latest wake record, answers a stop made at or before the one it names: resumed or declined, it calls for no
  * wait; failed, for the next try (`usageStopContinuesAt`).
  */
 export function restoredUsageStop(
