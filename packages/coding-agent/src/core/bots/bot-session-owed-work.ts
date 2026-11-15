@@ -595,6 +595,8 @@ export class BotOwedWork {
 		if (ports.stopped()) return;
 		// Its host continues what a usage limit stopped (its session's own wait): this process owes it nothing.
 		if (ports.heldElsewhere(agentId)) this.usageDue.delete(agentId);
+		// The owner's stop first, whatever else it is owed: a stop that failed for a cause that passes on its own is retried.
+		const stopRetrying = !ports.heldElsewhere(agentId) && this.applyOwnerStop(agentId, swept);
 		const record = ports.store().getBot(agentId);
 		// Nothing of it is this host's to open: no attempt stays armed for it.
 		if (
@@ -609,7 +611,7 @@ export class BotOwedWork {
 		}
 		// A cause that passes on its own is asked again after a backoff, armed once for this attempt whichever read or open
 		// failed; any other cause at the next change. Whether the session opens later is returned.
-		let retrying = false;
+		let retrying = stopRetrying;
 		const notResumed = (error: unknown): boolean => {
 			const failure = botOpenFailure(error);
 			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, cappedFailure(failure));
@@ -625,7 +627,6 @@ export class BotOwedWork {
 			notResumed(storeFailure(agentId, error, undefined));
 			return;
 		}
-		this.applyOwnerStop(agentId, swept);
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
 		// A stop the owner wrote while another process hosted it (`requestBotStop`) holds back the work it stopped: its
@@ -650,7 +651,7 @@ export class BotOwedWork {
 		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? ports.waiting(agentId) : [];
 		if (!watching && !workers && !usage && !unrun && waiting.length === 0) {
 			// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this read is.
-			if (!unread) this.openRetries.forget(agentId);
+			if (!unread && !stopRetrying) this.openRetries.forget(agentId);
 			return;
 		}
 		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
@@ -697,14 +698,16 @@ export class BotOwedWork {
 	/**
 	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
 	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told;
-	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change. The owner's stop of a bot this
-	 * process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot takes it instead.
+	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
+	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open, and true is returned then. The owner's
+	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot
+	 * takes it instead.
 	 */
-	applyOwnerStop(agentId: string, swept = false): void {
-		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return;
+	applyOwnerStop(agentId: string, swept = false): boolean {
+		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return false;
 		const agentDir = this.ports.agentDir();
 		const stops = botInboxStopNames(agentDir, agentId).join("\n");
-		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return;
+		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
 		try {
 			const saved = this.ports.savedSessionOf(agentId);
 			const ports = {
@@ -713,15 +716,14 @@ export class BotOwedWork {
 			};
 			if (applyUnhostedBotStop(agentDir, agentId, saved, ports) === "applied") this.forgetOwedTimes(agentId);
 			this.failedStops.delete(agentId);
+			return false;
 		} catch (error) {
 			this.failedStops.set(agentId, stops);
-			this.tellWaits(
-				agentId,
-				interfaceText().botTeam.botStopNotApplied(
-					agentId,
-					botFailureText(agentId, storeFailure(agentId, error, undefined)),
-				),
-			);
+			const failure = storeFailure(agentId, error, undefined);
+			const passing = botOpenFailure(failure);
+			const later = passing !== undefined && this.openRetries.arm(agentId, cappedFailure(passing));
+			this.tellWaits(agentId, interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure)));
+			return later;
 		}
 	}
 

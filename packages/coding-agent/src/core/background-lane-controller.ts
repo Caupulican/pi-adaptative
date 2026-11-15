@@ -1335,10 +1335,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._agentControl().cancelWorkerAgent(agentId, reasonCode, scope);
 	}
 
-	/**
-	 * The owner's stop (`stopSessionWorkers`): every open plan closed, then every unended worker lane cancelled through the
-	 * fleet for `reasonCode`, bound or not. Returns what it left unended, by why; nothing for a session with no workers.
-	 */
+	/** The owner's stop (`stopSessionWorkers`): plans closed, unended worker lanes cancelled; what it left unended, by why. */
 	cancelOwnFleet(reasonCode: string): WorkerStopOutcome {
 		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [] };
 		const fleet = () => this._getWorkerController().getFleet();

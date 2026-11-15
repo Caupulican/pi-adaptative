@@ -19,7 +19,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
-import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
+import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import { stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
@@ -146,11 +146,15 @@ function stopClosedSession(
 	ports: BotStopPorts,
 ): WorkerStopOutcome {
 	const home = botHomeOf(agentDir, agentId);
-	const transcript = saved && closedTranscript(agentDir, agentId, home.orchestrationHome, saved, ports);
+	// The saved session's state, in the home its id resolves to now (the bot's, or the owner's it was left in).
+	const bundle = saved && {
+		home: botSessionStorageRoots(agentDir, home.orchestrationHome, saved.id).orchestrationHome,
+		sessionId: saved.id,
+	};
+	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
 	const { outcome } = cancelOwedWorkerWork(
-		home.orchestrationHome,
 		agentDir,
-		saved?.id,
+		bundle,
 		new Set([...botHomeSessionIds(home.sessionsDir, "follow"), ...(saved ? [saved.id] : [])]),
 		stop.reasonCode,
 	);
@@ -174,11 +178,14 @@ function closedTranscript(
 	ports: BotStopPorts,
 ): SessionManager | undefined {
 	if (!existsSync(saved.file) || statSync(saved.file).size === 0) return undefined;
-	if (readSessionHeader(saved.file)?.id !== saved.id) {
+	const header = readSessionHeaderResult(saved.file);
+	// A file that does not read leaves the stop waiting; one that reads as another session's, or none, is not the bot's.
+	if (!header.ok && header.reason === "unreadable") throw header.cause;
+	if (!header.ok || header.header.id !== saved.id) {
 		ports.warn(interfaceText().botTeam.botStopSessionFileForeign(agentId, saved.file, saved.id));
 		return undefined;
 	}
-	return SessionManager.open(saved.file, botSessionStorageRoots(agentDir, orchestrationHome, saved.id));
+	return SessionManager.open(saved.file, { agentDir, orchestrationHome });
 }
 
 /** The goal of a closed session's transcript, read and written as the session's own goal store does. */
@@ -191,8 +198,8 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
 }
 
 /**
- * The owner's stop of the workers of bot session `sessionId` (none when the bot has no saved session) while no process
- * hosts the bot, written to its bundle in `home` alone (`stopSessionWorkers`): every open plan closed and every unended
+ * The owner's stop of the workers of the bot session `bundle` names (none when the bot has no saved session) while no
+ * process hosts the bot, written to its bundle in its home alone (`stopSessionWorkers`): every open plan closed and every unended
  * worker attempt cancelled for `reasonCode`, so nothing opens the session for them. Their ends are recorded delivered by
  * the session's next open, when its outbox is replayed (`owner_stopped` wakes no one). Then every job the sessions
  * `placedBy` (every session the bot's home holds) placed on another machine is ended in its record in `agentDir`
@@ -201,18 +208,17 @@ function closedGoalHost(transcript: SessionManager): PersistedGoalStateHost {
  * Returns how many attempts it cancelled, what it left unended, and how many placed jobs it ended.
  */
 export function cancelOwedWorkerWork(
-	home: OrchestrationHome,
 	agentDir: string,
-	sessionId: string | undefined,
+	bundle: { readonly home: OrchestrationHome; readonly sessionId: string } | undefined,
 	placedBy: ReadonlySet<string>,
 	reasonCode: string,
 ): { readonly cancelled: number; readonly outcome: WorkerStopOutcome; readonly placedEnded: number } {
-	const bundle =
-		sessionId === undefined
+	const workers =
+		bundle === undefined
 			? { cancelled: 0, outcome: NOTHING_LEFT }
-			: cancelBundleWorkers(home, sessionId, reasonCode);
+			: cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
 	const placedEnded = endPlacedJobsOfSessions(agentDir, placedBy, jobCancelReasonOf(reasonCode));
-	return { ...bundle, placedEnded };
+	return { ...workers, placedEnded };
 }
 
 function cancelBundleWorkers(
