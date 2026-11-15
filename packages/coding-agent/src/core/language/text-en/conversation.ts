@@ -13,6 +13,8 @@ export const CONVERSATION = {
 	/** A message that arrived from another machine, and one that came on a named channel. */
 	fromAnotherMachine: (mark: string) => `${mark} Message from another machine`,
 	onChannel: (channel: string) => `${channel} message`,
+	/** Mail from another agent (a bot's name, or "You" for the owner's side of a group), and the group it was written in. */
+	mailReceived: (from: string, room?: string) => `${from} wrote${room ? ` in ${room}` : ""}`,
 	/** The byline of a reply that a router sent to another model, and the route value beside it. */
 	routed: "routed",
 	noModelName: "none",

@@ -54,6 +54,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
+import { createBotMailToolDefinition } from "../tools/bot-mail.ts";
 import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/timer-port.ts";
@@ -76,6 +77,8 @@ import {
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
+import { BotMail } from "./bot-mail.ts";
+import { sendBotMailAnswers } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
@@ -233,8 +236,18 @@ export class BotSessionHost {
 
 	/** The stop of the host this one replaced in its process, which no session is built before. */
 	private readonly previousStop: Promise<void>;
-	/** Takes the inboxes of the bots this host runs: the owner's messages sent from other processes. */
+	/** Takes the inboxes of the bots this host runs: the owner's messages sent from other processes, and mail. */
 	private readonly inbox: BotInboxDrain;
+	/** The mail of the bots it runs to the other bots (`bot-mail.ts`): it names each mail's sender from its session. */
+	private readonly mail = new BotMail({
+		store: () => this.ports.store(),
+		sending: (agentId) => {
+			const entry = this.entries.get(agentId);
+			return entry && { branch: entry.sessionManager.getBranch(), sender: entry.sender };
+		},
+		runsAsSession: (record, sender) => this.runsAsSession(record, sender),
+		deliver: (agentId, message, options, origin, sender) => this.deliver(agentId, message, options, origin, sender),
+	});
 	/** Builds the bots' sessions this host loads. */
 	private readonly loader: BotSessionLoader;
 
@@ -359,6 +372,25 @@ export class BotSessionHost {
 				toldNotMoved: keeps.notMoved,
 				notify: (agentId, text, mark, deliveryId) => this.notify(agentId, text, mark, deliveryId),
 				recordOutcome: (agentId, summary) => this.recordOutcome(agentId, summary),
+				mailTool: (agentId) => createBotMailToolDefinition(this.mail.port(agentId)),
+				turnEnded: (entry, since) => {
+					if (this.stopped) return;
+					sendBotMailAnswers(
+						{
+							store: () => ports.store(),
+							deliver: (agentId, message, options, origin, sender) =>
+								this.deliver(agentId, message, options, origin, sender),
+							warn: (message) => entry.sender.warn(message),
+						},
+						{
+							agentId: entry.agentId,
+							messages: entry.session.messages,
+							since,
+							branch: entry.sessionManager.getBranch(),
+							sender: entry.sender,
+						},
+					);
+				},
 				settle: (entry) => this.settle(entry),
 				register: (entry, continued) => this.register(entry, continued),
 				drainInbox: (agentId) => this.inbox.drain(agentId),

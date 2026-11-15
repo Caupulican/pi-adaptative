@@ -11,6 +11,7 @@
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { HostLock } from "../remote/host-lock.ts";
@@ -100,6 +101,10 @@ export interface BotSessionLoadPorts {
 	notify(agentId: string, text: string, mark?: boolean, deliveryId?: string): boolean;
 	/** A turn ended with words: the bot's summary in the roster. */
 	recordOutcome(agentId: string, summary: string): void;
+	/** The `bot_mail` tool of the bot's session: its mail goes through the host, which names it the sender. */
+	mailTool(agentId: string): ToolDefinition;
+	/** The session's turn that began at `since` ended: its answers to the mail it took go back (`bot-mail-replies.ts`). */
+	turnEnded(entry: BotSessionEntry, since: number): void;
 	/** After an event of the session: its idle bound and published state follow it. */
 	settle(entry: BotSessionEntry): void;
 	/** Puts the built session to work in the host: kept, published, its idle bound armed and its inbox watched. */
@@ -192,6 +197,7 @@ export class BotSessionLoader {
 				displayName: profile.displayName,
 				memoryBlock: this.ports.store().composeBotUnifiedMemoryContext(agentId, undefined, undefined, "session")
 					.promptBlock,
+				customTools: [this.ports.mailTool(agentId)],
 				sessionManager,
 				settingsManager,
 				registry,
@@ -266,7 +272,9 @@ export class BotSessionLoader {
 					entry.turnSince = Date.now();
 				},
 				ended: () => {
+					const since = entry.turnSince;
 					entry.turnSince = undefined;
+					if (since !== undefined) this.ports.turnEnded(entry, since);
 				},
 			});
 			entry.unsubscribe = unobserveSince;

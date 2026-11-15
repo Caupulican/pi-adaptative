@@ -203,6 +203,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: as mensagens enviadas de outras sessões não puderam ser recebidas (${reason}).`,
 	botInboxReleased: (agentId: string) =>
 		`o bot ${agentId} não roda mais como sessão própria (aposentado, ou suas mensagens agora vão para um worker); envie de novo`,
+	botMailReplyNotSent: (agentId: string, to: string, reason: string) =>
+		`Bot ${agentId}: a resposta ao correio de ${to} não foi enviada (${reason}).`,
 	botInboxWaitingLine: (text: string) => `Esperando a sessão que hospeda o bot: ${text}`,
 	botInboxRefusedLine: (reason: string, text: string) => `Não entregue (${reason}): ${text}`,
 	botStopSentElsewhere: (agentId: string, pid: number, sessionId?: string) =>

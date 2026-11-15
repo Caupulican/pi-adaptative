@@ -2020,7 +2020,7 @@ export class InteractiveMode {
 					const skillBlock = origin?.shown === undefined ? parseSkillBlock(textContent) : undefined;
 					if (origin?.shown !== undefined && origin.channel !== undefined) {
 						// A third party's words read as who wrote them and what they said, not as the frame the model gets.
-						container.addChild(new ChannelMessageComponent(origin.channel, origin.shown, mdTheme));
+						container.addChild(new ChannelMessageComponent(origin.channel, origin.shown, mdTheme, origin.from));
 					} else if (skillBlock) {
 						const component = new SkillInvocationMessageComponent(skillBlock, mdTheme);
 						component.setExpanded(this.toolOutputExpanded);

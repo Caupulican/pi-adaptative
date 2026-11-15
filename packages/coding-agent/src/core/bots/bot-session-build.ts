@@ -2,7 +2,8 @@
  * Builds a loaded bot's own `AgentSession` from its definition: a resource loader that gives it the project context files
  * its read scope reaches and a profile's resources (none of the owner's system prompt files, extensions, skills, prompt
  * templates or themes), System One as the main session runs it (read at each use), and the options a bot's own session
- * takes: its pinned model, its standing, its identity, its tools, its private-path scope and its capability ceiling. What
+ * takes: its pinned model, its standing, its identity, its tools (`bot_mail` among them, which its host builds), its
+ * private-path scope and its capability ceiling. What
  * only its host decides (each run's admission, where its notices go, its workers' run bound) comes in as the host's own.
  */
 
@@ -10,6 +11,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { contextFilesWithinReadScope } from "../delegation/worker-execution-policy.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
@@ -27,6 +29,8 @@ export interface BotAgentSessionInput {
 	readonly displayName: string;
 	/** Its memory block (its blackboard), as the store composes it for a session. */
 	readonly memoryBlock: string;
+	/** The tools its host builds for it: `bot_mail`, whose sends the host names it the sender of. */
+	readonly customTools: readonly ToolDefinition[];
 	readonly sessionManager: SessionManager;
 	/** Its own settings manager over the main session's settings storage. */
 	readonly settingsManager: SettingsManager;
@@ -99,6 +103,7 @@ export async function createBotAgentSession(input: BotAgentSessionInput): Promis
 		// agent's in the prompt, as a worker-path start opens on the same block.
 		agentIdentity: namedAgentIdentity(input.displayName, definition.soul, agentId, input.memoryBlock),
 		tools: [...definition.tools],
+		customTools: [...input.customTools],
 		privatePathScope: definition.privatePathScope,
 		...(definition.capabilityEnvelope ? { capabilityEnvelope: definition.capabilityEnvelope } : {}),
 		timers: input.timers,

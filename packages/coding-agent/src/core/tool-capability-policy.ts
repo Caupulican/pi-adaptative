@@ -18,6 +18,7 @@ import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME, WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
+import { BOT_MAIL_TOOL_NAME } from "./tools/bot-mail-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 
@@ -128,6 +129,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["list_peers", policy([["workflow.delegate"]], "control-plane")],
 	["agent_send", policy([["workflow.delegate"]], "control-plane")],
 	[BOT_MESSAGE_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
+	// A bot's own session mails another bot's session; the words carry no owner's authority.
+	[BOT_MAIL_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 	["task_automation", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);

@@ -14,6 +14,7 @@ export const CONVERSATION = {
 	everyone: "todos",
 	fromAnotherMachine: (mark: string) => `${mark} Mensagem de outra máquina`,
 	onChannel: (channel: string) => `mensagem de ${channel}`,
+	mailReceived: (from: string, room?: string) => `${from} escreveu${room ? ` em ${room}` : ""}`,
 	routed: "roteado",
 	noModelName: "nenhum",
 	tierRouted: "roteado",

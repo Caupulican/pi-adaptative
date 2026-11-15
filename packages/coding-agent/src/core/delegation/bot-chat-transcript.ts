@@ -119,7 +119,8 @@ export class BotChatTranscript {
 	/**
 	 * What the bot's inbox holds, drawn in its chat and never sent to a model: each message another session sent that waits
 	 * for the session hosting the bot, each one that session refused, with its reason, and each notice its session raised
-	 * for the owner (a warning, a turn that failed or was stopped at its bound).
+	 * for the owner (a warning, a turn that failed or was stopped at its bound). Mail shows its words as the owner reads
+	 * them (its origin's `shown`), never the frame written for the model.
 	 */
 	private inboxMessages(agentId: string): AgentMessage[] {
 		const words = interfaceText().botTeam;
@@ -132,8 +133,12 @@ export class BotChatTranscript {
 			timestamp,
 		});
 		return [
-			...refused.map(({ message }) => line(words.botInboxRefusedLine(message.reason, message.text), message.at)),
-			...waiting.map(({ message }) => line(words.botInboxWaitingLine(message.text), message.at)),
+			...refused.map(({ message }) =>
+				line(words.botInboxRefusedLine(message.reason, message.origin?.shown ?? message.text), message.at),
+			),
+			...waiting.map(({ message }) =>
+				line(words.botInboxWaitingLine(message.origin?.shown ?? message.text), message.at),
+			),
 			...this.host.botSessions.readNotices(agentId).map((notice) => line(notice.text, notice.at)),
 		].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
 	}
