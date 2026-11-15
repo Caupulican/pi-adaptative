@@ -1280,8 +1280,8 @@ export class AgentSession {
 				for (const record of records) this.reportOutboxWorkerTerminal(record);
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
+			botAgentId: config.standing.kind === "bot" ? config.standing.agentId : undefined,
 			routineScope: () => this._caps.routineScope,
-			deliverParentInput: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
@@ -1299,7 +1299,7 @@ export class AgentSession {
 			requirementChecks: this.goalProof.hostRequirementChecks,
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
-			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
+			deliverParentInput: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
 			captureReviewContext: (maxChars) => this._memory.captureReviewContext(maxChars),
 			aggregateUsageWindow: (window) => this._analytics.aggregateUsageWindow(window),
 			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),

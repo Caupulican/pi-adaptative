@@ -17,7 +17,6 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
 import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
-import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "./parent-input-delivery.ts";
 import type { ProactivityControllerDeps } from "./proactivity/proactivity-controller.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import type { LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
@@ -39,7 +38,7 @@ export interface BackgroundLaneControllerDeps
 		LaneModelResolverDeps,
 		Pick<
 			ProactivityControllerDeps,
-			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
+			"deliverParentInput" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
 		> {
 	/**
 	 * Observe a capability's kept state; true when the owner is told of it (the session can keep the notice). `onLost`
@@ -84,6 +83,11 @@ export interface BackgroundLaneControllerDeps
 		SessionSemanticPlaneController,
 		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured" | "enabled" | "source"
 	>;
+	/**
+	 * The bot whose own session this is (its standing), undefined for any other session: an owner's stop waiting in that
+	 * bot's inbox holds the session's routine wakes until it is taken (`routine-runtime-assembly.ts`).
+	 */
+	readonly botAgentId: string | undefined;
 	/** What the session's routine runtime holds (`routine-holder.ts`): undefined for a child session that holds none. */
 	routineScope(): RoutineScope | undefined;
 	/** The session standing's capabilities the lanes read (session-standing.ts). */
@@ -104,7 +108,6 @@ export interface BackgroundLaneControllerDeps
 	admitNestedToolCall: NestedCallAdmitter;
 	/** The session's own tool surface: a routine save arms a watch's check only with a tool the session holds. */
 	getForegroundToolNames(): readonly string[];
-	deliverParentInput(input: ParentInputDelivery, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
 	/** The session's owner channel: an owner batch enters as the owner's words through it (`OwnerChannelSession`). */

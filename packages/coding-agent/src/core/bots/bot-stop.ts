@@ -10,8 +10,8 @@
  * the bot's goal is paused when it runs or the system would resume it on its own and the owner has not set it going since
  * the stop was made (`holdPersistedGoalForOwnerStop`; the owner resumes it), and the usage-limit wait of every usage stop
  * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop), and what the bot's session armed or was
- * fired for before the stop is ended: its watches armed until then are deleted and the results fired for it until then that
- * it has not taken are settled without a turn (`endWatchesBeforeStop`). The stop is then taken, and every job a
+ * fired for before the stop is ended: its watches armed until then are deleted and the results it has not taken, fired for
+ * it until then or by those watches since, are settled without a turn (`endWatchesBeforeStop`). The stop is then taken, and every job a
  * session of the bot's home placed on another machine is ended, so nothing goes on spending; a failure there is told to the
  * owner and does not keep the stop. A managed lane is left to the extension that runs it, and the owner is told.
  *
@@ -49,8 +49,9 @@ import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions, type PlacedJobCover, placedJobsOfSessionsLeft } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
-import { MAX_ROUTINE_OCCURRENCES } from "../routines/routine-contract.ts";
+import { MAX_ROUTINE_OCCURRENCES, type PersistentRoutineDefinition } from "../routines/routine-contract.ts";
 import { routineResultInputIds } from "../routines/routine-parent-input.ts";
+import { isWatchSchedule } from "../routines/routine-watch-arming.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
@@ -102,14 +103,22 @@ export const BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE = "bot_stop_watch_results";
 type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDurableForSession" | "getParentInput">;
 
 /**
+ * The delivery marker of the fired results an owner's stop settled for a session with no transcript of its own to note
+ * them in (its file not written yet, or holding another session): the store's acknowledgement is their only record.
+ */
+export const BOT_STOP_UNNOTED_MARKER_PREFIX = "bot-stop-unnoted:";
+
+/**
  * What bot `agentId`'s session `sessionId` armed or was fired for before the owner's stop made at `stop.at`, ended by it:
  * every watch the session holds that was armed at or before then is deleted (`deleteRoutine`, which also cancels its runs
- * not yet dispatched), and every result fired for the session at or before then that it has not taken is settled without a
- * turn, marked acknowledged by a note in its `transcript` that names them; none is settled while the session has no
- * transcript of its own to note them in. One whose parent input its session's delivery appended while the stop waited is
- * delivered, not settled: it is marked by that input, as the delivery would mark it, so it is never both. A watch armed after the stop, and a result fired after it, are the bot's later
- * work and stay. What it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and
- * is tried again, which finds them ended, has told them once. A failure throws.
+ * not yet dispatched), and every result it has not taken that was fired for it at or before then, or fired since by one of
+ * those watches (between the stop and its take), is settled without a turn: marked acknowledged by a note in its
+ * `transcript` that names them, or, while the session has no transcript of its own, by a marker naming the stop
+ * (`BOT_STOP_UNNOTED_MARKER_PREFIX`), so none is delivered when the session opens. One whose parent input its session's
+ * delivery appended while the stop waited is delivered, not settled: it is marked by that input, as the delivery would
+ * mark it, so it is never both. A watch armed after the stop, and what it fires, are the bot's later work and stay. What
+ * it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and is tried again,
+ * which finds them ended, has told them once. A failure throws.
  */
 function endWatchesBeforeStop(
 	agentId: string,
@@ -120,21 +129,22 @@ function endWatchesBeforeStop(
 ): void {
 	const store = ports.watches();
 	const now = ports.now();
+	const armedBefore = (routine: Pick<PersistentRoutineDefinition, "schedule" | "createdAt">) =>
+		isWatchSchedule(routine.schedule) && Date.parse(routine.createdAt) <= stop.at;
 	let [ended, settled] = [0, 0];
 	try {
 		store.reload(true);
 		for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
-			if (Date.parse(watch.createdAt) <= stop.at && store.deleteRoutine(watch.routineId, watch.revision, now))
-				ended++;
+			if (armedBefore(watch) && store.deleteRoutine(watch.routineId, watch.revision, now)) ended++;
 		const fired = store
 			.listPendingRoutineDeliveries(sessionId, 2 * MAX_ROUTINE_OCCURRENCES)
-			.filter(({ occurrence }) => occurrence.createdAt <= stop.at);
-		if (!transcript || fired.length === 0) return;
+			.filter(({ occurrence }) => occurrence.createdAt <= stop.at || armedBefore(occurrence.definition));
+		if (fired.length === 0) return;
 		const carried = new Map(
 			fired.map((delivery) => [
 				delivery,
 				routineResultInputIds(delivery)
-					.map((id) => transcript.getParentInput(id)?.entryId)
+					.map((id) => transcript?.getParentInput(id)?.entryId)
 					.find((entryId) => entryId !== undefined),
 			]),
 		);
@@ -142,12 +152,14 @@ function endWatchesBeforeStop(
 		const note =
 			unsettled.length === 0
 				? undefined
-				: transcript.appendCustomEntry(BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE, {
-						version: 1,
-						stoppedAt: stop.at,
-						occurrenceIds: unsettled.map(({ occurrence }) => occurrence.occurrenceId),
-					});
-		if (note !== undefined && !transcript.isEntryDurableForSession(note))
+				: transcript === undefined
+					? `${BOT_STOP_UNNOTED_MARKER_PREFIX}${stop.at}`
+					: transcript.appendCustomEntry(BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE, {
+							version: 1,
+							stoppedAt: stop.at,
+							occurrenceIds: unsettled.map(({ occurrence }) => occurrence.occurrenceId),
+						});
+		if (note !== undefined && transcript !== undefined && !transcript.isEntryDurableForSession(note))
 			throw new Error("the note of the watch results the stop settles was not saved");
 		for (const delivery of fired) {
 			const { occurrence, result } = delivery;

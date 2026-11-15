@@ -166,7 +166,7 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	emit(event: AgentSessionEvent): void;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Resolves after canonical acceptance; consumption is owned by the mode-aware parent ledger. */
-	deliverNotes(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
+	deliverParentInput(input: ParentInputDelivery, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** The `proactivity` port; defaults to the system timers. */
 	timers?: TimerPort;
 	/** The session's harness notices: a gate the owner can act on is told once, a started review clears it. */
@@ -559,7 +559,7 @@ export class ProactivityController {
 			const mode: ParentInputMode =
 				settings.delivery === "turn" && deliveryHold === undefined ? "turn" : "next-owner-turn";
 			const payloadDigest = strictCanonicalDigest({ message, mode });
-			await this.deps.deliverNotes(
+			await this.deps.deliverParentInput(
 				{
 					deliveryId: `proactivity:${strictCanonicalDigest({ origin, mode, payloadDigest })}`,
 					payloadDigest,

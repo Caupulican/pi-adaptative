@@ -86,28 +86,35 @@
 		},
 		{
 			"file": "packages/coding-agent/src/core/proactivity/proactivity-controller.ts",
-			"transport": "this.deps.deliverNotes(",
+			"transport": "this.deps.deliverParentInput(",
 			"enclosing": ["runOnce"],
 			"count": 1,
 			"reason": "owner-session note: the delivery id is the parent ledger's idempotency key, and the ledger accepts the note canonically before it is consumed, so an accepted note is not delivered again"
 		},
 		{
 			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
-			"transport": "this.deps.deliverNotes(",
+			"transport": "this.deps.deliverParentInput(",
 			"enclosing": ["openHostEventSession"],
 			"count": 1,
 			"reason": "port adapter of the host-event session: its root delivery is guarded and receipted by the session controller, and the delivery id is the parent ledger's idempotency key"
 		},
 		{
 			"file": "packages/coding-agent/src/core/routines/routine-runtime-assembly.ts",
-			"transport": "this.deps.deliverNotes(",
+			"transport": "this.deps.deliverParentInput(",
 			"enclosing": ["assemble"],
-			"count": 1,
-			"reason": "port adapter of routine intake: announce claims the notice (claimThenEffect) before it calls deliver, and isDelivered reads the same delivery id"
+			"count": 2,
+			"reason": "port adapters of routine intake, whose announce claims the notice (claimThenEffect) before it calls deliver and whose isDelivered reads the same delivery id, and of routine results, which deliverWhilePending appends only while the result is pending in the store, read again under the transcript lock; the delivery id is the parent ledger's idempotency key"
 		},
 		{
 			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
-			"transport": "this.deps.deliverNotes(",
+			"transport": "this.deps.deliverParentInput(",
+			"enclosing": ["_getLeaders"],
+			"count": 1,
+			"reason": "port adapter of the leader coordinator: it skips a delivery the parent ledger holds (hasDelivered) or this process delivered, and the delivery id is the parent ledger's idempotency key"
+		},
+		{
+			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
+			"transport": "this.deps.deliverParentInput(",
 			"enclosing": ["_composePlanExecutor"],
 			"count": 1,
 			"reason": "port adapter of the plan executor: it skips a delivery the parent ledger holds (isDelivered) and a delivery in flight in this process (delivering); the delivery id is the parent ledger's idempotency key"

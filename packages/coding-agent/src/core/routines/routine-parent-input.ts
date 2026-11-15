@@ -186,13 +186,16 @@ class RoutineResultSettled extends Error {}
  * Delivers `input`, a parent input of `delivery`, through `deliver` only while its result is still pending in `store`: the
  * store is read again under the transcript lock, right before the append, so a result settled while the delivery waited
  * for the session (an owner's stop marks the results it ends by its note) is never delivered too, and resolves
- * `"settled"`. A replay of an input already saved appends nothing and resolves its receipt.
+ * `"settled"`. While `stopWaiting` (an owner's stop of the bot whose session this is waits to be taken) nothing is
+ * appended either: the delivery fails, to be tried again once the stop, taken, has settled what it covers, so no wake
+ * starts a turn across a stop. A replay of an input already saved appends nothing and resolves its receipt.
  */
 export async function deliverWhilePending(
 	store: Pick<RoutineStorePort, "reload" | "listPendingRoutineDeliveries">,
 	{ occurrence, result }: RoutineDelivery,
 	input: ParentInputDelivery,
 	deliver: (input: ParentInputDelivery, options: ParentInputDeliveryOptions) => Promise<ParentInputReceipt>,
+	stopWaiting: () => boolean,
 ): Promise<RoutineDeliveryReceipt> {
 	const withAppend: ParentInputDeliveryOptions["withAppend"] = (append) => {
 		store.reload();
@@ -203,6 +206,7 @@ export async function deliverWhilePending(
 					entry.occurrence.occurrenceId === occurrence.occurrenceId && entry.result.digest === result.digest,
 			);
 		if (!pending) throw new RoutineResultSettled("The routine result was settled before its delivery.");
+		if (stopWaiting()) throw new Error("The routine result waits for the owner's stop of the bot to be taken.");
 		return append();
 	};
 	try {

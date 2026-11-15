@@ -216,9 +216,10 @@ symbolic link is skipped, and you are told once for that stop, however often its
 stop waits unapplied they wait in the bot's inbox behind it, and you are told so. It reaches the bot
 wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which, or that it could not be read),
 or applied in place when no process does. It also ends the watches the bot's session armed by the time of the stop (a
-stopped worker's watches end with it) and settles the results of its watches that fired by then and that it had not read
-yet, recorded by a note in its conversation, and you are told how many of each it ended; a watch the bot arms after the
-stop is kept and wakes it as usual. A watch's wake its conversation had already taken before the stop is not withdrawn:
+stopped worker's watches end with it) and settles the results it had not read yet that fired by then, or that those
+watches fired after the stop while it waited to be taken, recorded by a note in its conversation (or, when the session has
+no conversation written yet, in the bot's watch records alone), and you are told how many of each it ended; while the stop
+waits, no watch result wakes the bot. A watch the bot arms after the stop is kept and wakes it as usual. A watch's wake its conversation had already taken before the stop is not withdrawn:
 it still runs when the bot next opens or is next sent words. A stop that cannot be written to the bot's home
 is not recorded: you are told this process holds it and records it again until it lands, and that wherever it is applied
 it ends only the work there was when it was made (for a bot this process hosts, that it applies only to the bot's work in

@@ -905,7 +905,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			rootDelivered: (delivery) => {
 				this._lastEventDelivery = delivery;
 			},
-			deliverParent: (input, options) => this.deps.deliverNotes(input, options),
+			deliverParent: (input, options) => this.deps.deliverParentInput(input, options),
 			heldParentInputs: () =>
 				manager.getPendingParentInputs("next-owner-turn").map((input) => input.metadata.deliveryId),
 			skipParentInput: (deliveryId, reason) => manager.skipPendingParentInput(deliveryId, reason),
@@ -2034,7 +2034,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					attemptId,
 				)?.claim,
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			deliver: (delivery, signal) => this.deps.deliverNotes(delivery, { signal }),
+			deliver: (delivery, signal) => this.deps.deliverParentInput(delivery, { signal }),
 			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			acknowledge: (notificationIds) => lifecycle.markNotificationsDelivered(notificationIds),
 			retireWorker: (agentId) => void this.retireWorkerAgent(agentId),

@@ -25,8 +25,8 @@ const adopterCall = "claimThenEffect(";
 
 /**
  * The transport tokens: each is a call. `function appendOutwardDraftReleased(` is a declaration, not a call, and is skipped.
- * `provider.send(` is the channel transport every owner push, control reply and reply part goes through; `deliverNotes(`
- * is the parent-input port a note or a host event is delivered through.
+ * `provider.send(` is the channel transport every owner push, control reply and reply part goes through;
+ * `deliverParentInput(` is the parent-input port a note, a host event or a routine result is delivered through.
  */
 const TRANSPORT_TOKENS = [
 	"sendReplyParts(",
@@ -34,7 +34,7 @@ const TRANSPORT_TOKENS = [
 	"appendOutwardDraftReleased(",
 	"options.notify(",
 	"provider.send(",
-	"this.deps.deliverNotes(",
+	"this.deps.deliverParentInput(",
 ];
 /** The forms a transport token is matched in: the direct call and the optional call `name?.(`. */
 const callForms = (transport) => [transport, transport.replace(/\($/, "?.(")];

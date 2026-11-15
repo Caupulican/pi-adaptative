@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import { botInboxStopWaiting } from "../bots/bot-inbox.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import type {
 	BotOperatorMessageDispatchResult,
@@ -314,7 +315,7 @@ export class RoutineRuntimeAssembly {
 	 * and has no intake: its scheduler only delivers the firings of its watches and retires the ended ones.
 	 */
 	assemble(store: PersistentBotTeamStore, scope: RoutineScope): RoutineRuntime {
-		const parentSessionId = this.deps.getSessionId();
+		const [parentSessionId, bot] = [this.deps.getSessionId(), this.deps.botAgentId];
 		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean =>
 			routineOriginReach(this.deps.getSessionManager(), origin) === "usable";
 		const worker = new RoutineWorkerExecutor({
@@ -349,10 +350,14 @@ export class RoutineRuntimeAssembly {
 				deliver: async (delivery) => {
 					const { occurrence } = delivery;
 					const address = routineWakeAddress(occurrence.definition);
-					// Each input is appended only while the result is still pending, so one settled meanwhile is not delivered too.
+					// Each input is appended only while the result is still pending and no owner's stop of the bot waits.
 					const send = (input: ParentInputDelivery) =>
-						deliverWhilePending(store, delivery, input, (next, options) =>
-							this.deps.deliverParentInput(next, options),
+						deliverWhilePending(
+							store,
+							delivery,
+							input,
+							(next, options) => this.deps.deliverParentInput(next, options),
+							() => bot !== undefined && botInboxStopWaiting(this.deps.getAgentDir(), bot),
 						);
 					if (address?.kind === "worker") return this.deliverToWorker(address.runtimeId, delivery, send);
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
@@ -501,7 +506,7 @@ export class RoutineRuntimeAssembly {
 						captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 						captureBranchGuard: () =>
 							this.sessionBranchGuard("Routine intake session changed before its decision was saved."),
-						deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
+						deliver: (notice, signal) => this.deps.deliverParentInput(notice, { signal }),
 						isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 						observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
 						runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
