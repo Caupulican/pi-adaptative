@@ -4,21 +4,23 @@
  * until a process on its host proves it gone, and only an acquisition of that same session pruned it; meanwhile the
  * registry's presence reads as the home holding the session (`orchestrationHomeHoldsSession`) and it is never removed.
  * Each registry is pruned here under its tombstone's lock, as every acquisition and release takes it, of the holders
- * proven dead on this host ({@link liveHolders}: `judgeOwner` `dead`); no holder is ended by age, and a registry left with
- * none is removed. A holder on another machine, or one that cannot be judged yet, is kept: only a process on its own host
- * proves it gone, which this same sweep does there when pi starts on that machine. A registry that does not read, or that
+ * whose record names this machine by its machine id and whose process is proven gone (`isOwnerProvenDeadOnThisMachine`);
+ * no holder is ended by age, and a registry left with none is removed. A record naming only a hostname (an older build's)
+ * may be another system's under the same name (Windows beside WSL), whose pid cannot be probed here: it is left to the
+ * acquisition of its session, as before. A holder on another machine, or one that cannot be judged yet, is kept: only a
+ * process on its own host proves it gone, which this same sweep does there when pi starts on that machine. A registry that does not read, or that
  * names a session whose tombstone it is not beside, is left as it is and logged.
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../harness-log.ts";
-import { judgeOwner } from "../reliability/owner-identity.ts";
+import { isOwnerProvenDeadOnThisMachine, judgeOwner } from "../reliability/owner-identity.ts";
 import { isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
 import {
-	liveHolders,
 	readLeaseRegistry,
 	type SessionLeaseHolderRef,
 	sessionLeaseHolderRef,
+	writeHolders,
 } from "./session-bundle-lifecycle.ts";
 import {
 	type OrchestrationHome,
@@ -66,7 +68,10 @@ export async function sweepSessionLeaseRegistries(
 					});
 					return;
 				}
-				const elsewhere = liveHolders(file, registry.parentSessionId).flatMap((holder) => {
+				const { parentSessionId, holders } = registry;
+				const kept = holders.filter((holder) => !isOwnerProvenDeadOnThisMachine(holder.owner));
+				if (kept.length !== holders.length) writeHolders(file, parentSessionId, kept);
+				const elsewhere = kept.flatMap((holder) => {
 					const standing = judgeOwner(holder.owner);
 					return standing === "foreign" ? [sessionLeaseHolderRef(holder, standing)] : [];
 				});

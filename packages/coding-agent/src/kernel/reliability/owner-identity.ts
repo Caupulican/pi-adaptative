@@ -105,6 +105,18 @@ export function judgeOwner(owner: ProcessOwner, options: JudgeOwnerOptions = {})
 	return probe;
 }
 
+/**
+ * True only for an owner whose record names this machine by its machine id and whose process is PROVEN gone: the rule a
+ * sweep no acquisition of the record prompts uses before it removes one. A record naming only a hostname (an older build's,
+ * or one from a host that exposes no machine id) may be another system's under the same name, such as Windows beside WSL,
+ * whose pid this process cannot probe: it is left to the acquisition that needs it, which judges it as {@link judgeOwner}.
+ */
+export function isOwnerProvenDeadOnThisMachine(owner: ProcessOwner, options: JudgeOwnerOptions = {}): boolean {
+	const host = options.host ?? readHostIdentity();
+	if (owner.machineId === undefined || owner.machineId !== host.machineId) return false;
+	return judgeOwner(owner, { ...options, host }) === "dead";
+}
+
 /** True only for a same-host owner PROVEN gone: the sole standing that authorizes reclaiming its record. */
 export function isOwnerProvenDead(owner: ProcessOwner, options?: JudgeOwnerOptions): boolean {
 	return judgeOwner(owner, options) === "dead";

@@ -13,6 +13,7 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch } fr
 import { basename, dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
+	isOwnerProvenDeadOnThisMachine,
 	isProcessOwnerRecord,
 	judgeOwner,
 	type OwnerStanding,
@@ -136,15 +137,17 @@ export function takeProcessLock(path: string, holder?: string): HostLockResult {
 }
 
 /**
- * Removes a lock file whose process is proven gone on this host ({@link judgeOwner} `dead`), under the file's lock, as
- * {@link takeProcessLock} would replace it: the start sweep's, for a host that ended without letting go. A live owner,
- * one on another host, one that cannot be judged and a file that names no owner all stay. True when it was removed.
+ * Removes a lock file whose record names this machine by its machine id and whose process is proven gone
+ * ({@link isOwnerProvenDeadOnThisMachine}), under the file's lock: the start sweep's, for a host that ended without letting
+ * go. A live owner, one on another host, one that cannot be judged, a record naming only a hostname (it may be another
+ * system's under the same name; {@link takeProcessLock} judges it when the lock is next taken) and a file that names no
+ * owner all stay. True when it was removed.
  */
 export function removeDeadProcessLock(path: string): boolean {
 	if (!existsSync(path)) return false;
 	return withFileLockSync(path, () => {
 		const current = readRecord(path);
-		if (!current || judgeOwner(current) !== "dead") return false;
+		if (!current || !isOwnerProvenDeadOnThisMachine(current)) return false;
 		rmSync(path, { force: true });
 		harnessLog.info("link", "a lock whose process is gone was removed", { pid: current.pid });
 		return true;

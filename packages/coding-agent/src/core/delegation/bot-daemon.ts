@@ -30,6 +30,7 @@
  */
 import { type FSWatcher, statSync, watch } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
+import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
@@ -290,11 +291,16 @@ export interface BotDaemonCommandOptions {
 	readonly channelProviders?: AwayChannelProviderFactory;
 }
 
-export function runBotDaemonCommand(args: readonly string[], options: BotDaemonCommandOptions = {}): Promise<number> {
+export async function runBotDaemonCommand(
+	args: readonly string[],
+	options: BotDaemonCommandOptions = {},
+): Promise<number> {
+	// Before anything is written: the daemon's lease, the leases and locks of what it hosts and every other owner record
+	// it writes name their owner by the machine id (off Linux it is read asynchronously): a record naming only a hostname may be judged by another system sharing the name and the agent directory (Windows beside WSL), whose pids are not this one's.
+	await warmHostIdentity();
 	const [agentDir, token] = args;
 	if (args.length === 1 && agentDir && isAbsolute(agentDir)) return runServiceBotDaemon(agentDir, options);
-	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token))
-		return Promise.resolve(2);
+	if (args.length !== 2 || !agentDir || !isAbsolute(agentDir) || !token || !isDaemonLeaseToken(token)) return 2;
 	return runClaimedBotDaemon(agentDir, token, options);
 }
 

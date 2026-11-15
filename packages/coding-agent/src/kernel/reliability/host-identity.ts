@@ -9,9 +9,12 @@
  * - Linux: `/etc/machine-id`, else `/var/lib/dbus/machine-id`.
  * - macOS: `IOPlatformUUID` from `ioreg` (spawned without a shell, bounded, once per process).
  * - Windows: `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` via `reg.exe` (same bounded pattern).
- * Linux reads a file synchronously. macOS and Windows need a process spawn, which must never block startup: they are
- * read asynchronously by `warmHostIdentity()` (started once by the process-matrix runtime), and `readHostIdentity()`
- * reports the machine id only once that read has finished. A record written before then carries only the hostname.
+ * Linux reads a file synchronously. macOS and Windows need a process spawn (bounded): it is read asynchronously by
+ * `warmHostIdentity()`, and `readHostIdentity()` reports the machine id only once that read has finished. Every process
+ * entry awaits it before its first write (`cli.ts`, which starts it beside the program's loading and awaits it before
+ * `main`; the bot daemon's command; `createAgentSession`, before the session's lease, `acquireOpeningSessionLease`), so the leases, locks and other owner records this
+ * build writes carry the machine id: a record naming only the hostname could be judged by another system that shares the
+ * name and the agent directory (Windows beside WSL), probing a pid that is not its own.
  * When none is readable the process records no machine id, and only the hostname identifies it.
  */
 import { execFile } from "node:child_process";

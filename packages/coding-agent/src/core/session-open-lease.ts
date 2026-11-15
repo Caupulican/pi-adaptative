@@ -8,6 +8,7 @@
  * kernel's (`session-bundle-lifecycle.ts`).
  */
 
+import { warmHostIdentity } from "../kernel/reliability/host-identity.ts";
 import { readSessionCleanupRelease } from "../kernel/session/session-cleanup-release.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentSession } from "./agent-session.ts";
@@ -21,12 +22,16 @@ import { managerSessionHomeNow } from "./orchestration-homes.ts";
 
 /**
  * The open's lease on its session, in the home its manager's roots name; none for a session that is not persisted. A
- * session a channel or bot host holds is refused (`SessionHostedError`): theirs is that host's own.
+ * session a channel or bot host holds is refused (`SessionHostedError`): theirs is that host's own. First, persisted or
+ * not, the host identity is settled (`warmHostIdentity`): the lease and every record the session writes after it name
+ * their owner by the machine id, which off Linux is read asynchronously; a record naming only a hostname may be judged by
+ * another system sharing the name and the agent directory (Windows beside WSL), whose pids are not this one's.
  */
-export function acquireOpeningSessionLease(
+export async function acquireOpeningSessionLease(
 	sessionManager: SessionManager,
 	role: SessionLeaseRole,
-): SessionBundleLease | undefined {
+): Promise<SessionBundleLease | undefined> {
+	await warmHostIdentity();
 	if (!sessionManager.isPersisted()) return undefined;
 	return acquireSessionBundleLease(sessionManager.getStorageRoots().orchestrationHome, sessionManager.getSessionId(), {
 		role,

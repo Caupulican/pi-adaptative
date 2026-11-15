@@ -10,6 +10,7 @@ import { DECISIONS_COMMAND } from "./cli/maintenance-command.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 import { BOT_DAEMON_COMMAND } from "./core/delegation/bot-daemon-command.ts";
 import { CI_STATUS_COMMAND, runCiStatusCommand } from "./host/ci/ci-status-command.ts";
+import { warmHostIdentity } from "./kernel/reliability/host-identity.ts";
 
 process.title = APP_NAME;
 process.env.PI_CODING_AGENT = "true";
@@ -102,6 +103,9 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !commandArguments.
 
 const supervised = launchArgs !== undefined && (await superviseBeforeLoading(launchArgs));
 if (!supervised) {
+	// Off Linux the machine id is read by a spawned process: it starts here, beside the program's loading, and is awaited
+	// before `main` writes anything (`host-identity.ts`).
+	void warmHostIdentity();
 	const processEnd = await import("./core/process-end-recorder.ts");
 	// The interactive runtime (a supervisor's child, or an unsupervised interactive session) observes every end of its process from
 	// here, before its program loads; the supervisor parent never reaches this. Print and RPC hosts are not observed: their modes end
@@ -114,6 +118,7 @@ if (!supervised) {
 		const { registerBuiltInApiProviders } = await import("@caupulican/pi-ai/register-builtins");
 		registerBuiltInApiProviders();
 		const { main } = await import("./main.ts");
+		await warmHostIdentity();
 		await main(cliArgs);
 	} catch (error: unknown) {
 		processEnd.exitForEntryFailure(error);

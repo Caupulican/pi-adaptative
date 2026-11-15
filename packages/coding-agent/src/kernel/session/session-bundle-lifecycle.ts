@@ -347,7 +347,8 @@ function readHolders(file: string, parentSessionId: string): BundleHolder[] {
 	return registry?.holders ?? [];
 }
 
-function writeHolders(file: string, parentSessionId: string, holders: BundleHolder[]): void {
+/** Writes the registry's holders whole (atomically), or removes it when none is left. */
+export function writeHolders(file: string, parentSessionId: string, holders: BundleHolder[]): void {
 	if (holders.length === 0) {
 		unlinkSync(file);
 		return;
@@ -363,7 +364,7 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 }
 
 /** Prunes only holders PROVEN gone; an `alive`, `foreign` or `unknown` holder keeps serving the session. */
-export function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
+function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
 	const holders = readHolders(file, parentSessionId);
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
 	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
