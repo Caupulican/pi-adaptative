@@ -1,7 +1,8 @@
 /**
  * Hosts each bot as an `AgentSession` of its own, in this process: one session per bot, created on its first message
- * (`createAgentSession`, as the daemon's channel sessions are), continued from the newest file of the bot's own
- * `sessions/` directory (one conversation per bot, whatever the working directory), kept while a turn runs or input is
+ * (`createAgentSession`, as the daemon's channel sessions are), continued from the session its home's pointer records
+ * (`bot-session-open.ts`: one conversation per bot, whatever the working directory, with its bundle, leases and
+ * transcripts in the bot's own `orchestration/`), kept while a turn runs or input is
  * queued, and closed after `BOT_SESSION_IDLE_BOUND_MS` of idleness or when the host stops.
  *
  * The session runs on the bot's own model (a profile bot's on the binding its profile admits), never replaced by another: a model that is missing, has no credentials, or that
@@ -37,8 +38,6 @@ import { existsSync } from "node:fs";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
-import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
@@ -52,7 +51,6 @@ import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { ownerSessionStorageRoots } from "../orchestration/session-bundle-lifecycle.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -77,6 +75,7 @@ import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
+import { openHostedBotSession } from "./bot-session-open.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
 	type BotSessionDefinition,
@@ -206,6 +205,8 @@ export class BotSessionHost {
 	/** The bot's earlier worker conversations, indexed in its home. */
 	private readonly history: BotHistory;
 	private readonly entries = new Map<string, BotSessionEntry>();
+	/** The bots whose session state was told as kept in the owner's home: told once per process. */
+	private readonly toldNotMoved = new Set<string>();
 	/** Sessions being built, so two messages in a row build one. */
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
 	/** Opens the session of a bot owed work that no process hosts. */
@@ -674,11 +675,15 @@ export class BotSessionHost {
 		let settings: ReturnType<BotSender["settings"]> | undefined;
 		let built: BotSessionEntry | undefined;
 		try {
-			// The newest session file of the bot, whatever directory it worked in: a bot keeps one conversation.
-			const newest = findMostRecentSessionInDirs([home.sessionsDir]);
-			const sessionManager = newest
-				? SessionManager.open(newest, ownerSessionStorageRoots(agentDir), home.sessionsDir, cwd)
-				: SessionManager.create(cwd, ownerSessionStorageRoots(agentDir), home.sessionsDir);
+			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
+			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
+				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
+				notMoved: (reason) => {
+					if (this.toldNotMoved.has(agentId)) return;
+					this.toldNotMoved.add(agentId);
+					this.ports.warn(words.botSessionNotMoved(agentId, reason));
+				},
+			});
 			const cancelled = cancelOtherSessionsWatches(
 				this.ports.store(),
 				home.sessionsDir,
@@ -786,7 +791,7 @@ export class BotSessionHost {
 			// A saved note an earlier holder left (pending or compacted) is handed off now, on the bounds and relay above.
 			session.resumeSelfCompaction();
 			this.armIdle(entry);
-			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
+			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued }));
 			this.changed(agentId);
 			// What other processes sent while another host held the bot is given first, before the message that opened it;
 			// the home watch announces the next ones (the timer reads them while it does not run).

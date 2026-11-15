@@ -24,8 +24,9 @@
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
- *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/,      -- botHomeDir
- *                                      host.lock, host-state.json, history.json, typesafe-reviews/
+ *   bots/<id>/                         one bot's home: profile.json, sessions/, session.json, -- botHomeDir
+ *                                      host.lock, host-state.json, history.json, typesafe-reviews/,
+ *                                      orchestration/ (its sessions' orchestration home)
  *   state/orchestration/              the owner's orchestration home                         -- ownerOrchestrationHome
  *     sessions/<session-key>/         one foreground-session-owned control-plane bundle      -- orchestrationSessionDir
  *       worker-context-forks/<identity-digest>-<content-digest>.json                       -- immutable birth snapshots

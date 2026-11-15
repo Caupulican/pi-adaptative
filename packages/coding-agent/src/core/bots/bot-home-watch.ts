@@ -39,6 +39,7 @@ function isObservedHomeFile(file: string): boolean {
 		file === "host-state.json" ||
 		file === "host.lock" ||
 		file === "history.json" ||
+		file === "session.json" ||
 		file.startsWith("sessions/") ||
 		((file.startsWith("inbox/") || file.startsWith("notices/")) && file.endsWith(".json"))
 	);

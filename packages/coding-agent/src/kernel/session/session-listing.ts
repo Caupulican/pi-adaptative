@@ -7,6 +7,7 @@ import type { Message, TextContent } from "@caupulican/pi-ai/types";
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { isSessionLifecycleEntry } from "./lifecycle-ledger.ts";
+import { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
 import type { SessionMessageEntry } from "./session-entries.ts";
 import {
 	getSessionHeaderCwd,
@@ -297,4 +298,98 @@ export function requiresSessionFile(entry: FileEntry): boolean {
 		isSessionLifecycleEntry(entry) ||
 		(entry.type === "custom" && entry.customType === "continuous_chat_work_report")
 	);
+}
+
+/**
+ * Every session of `cwd`, newest first (`SessionManager.list`): those in `sessionDir` whose cwd matches when it is a
+ * custom directory, else those in the default session directories of `cwd` under `agentDir`.
+ */
+export async function listCwdSessions(
+	cwd: string,
+	agentDir: string,
+	sessionDir?: string,
+	onProgress?: SessionListProgress,
+): Promise<SessionInfo[]> {
+	const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
+	const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
+	const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
+	const resolvedCwd = resolvePath(cwd);
+	const dirs = sessionDir ? [dir] : defaultDirs;
+	const progressCounts = await Promise.all(dirs.map((candidateDir) => countSessionFiles(candidateDir)));
+	const progressTotal = progressCounts.reduce((sum, count) => sum + count, 0);
+	const allSessions: SessionInfo[] = [];
+	let progressOffset = 0;
+	for (let i = 0; i < dirs.length; i++) {
+		const candidateDir = dirs[i];
+		const sessions = (await listSessionsFromDir(candidateDir, onProgress, progressOffset, progressTotal)).filter(
+			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
+		);
+		progressOffset += progressCounts[i];
+		allSessions.push(...sessions);
+	}
+	allSessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	return allSessions;
+}
+
+/**
+ * Every session under the sessions root `sessionsDir` (each project's directory), or in `customSessionDirOrOnProgress`
+ * when it names one directory, newest first (`SessionManager.listAll`); an unreadable root lists none.
+ */
+export async function listAllSessionFiles(
+	sessionsDir: string,
+	customSessionDirOrOnProgress?: string | SessionListProgress,
+	onProgress?: SessionListProgress,
+): Promise<SessionInfo[]> {
+	const customSessionDir =
+		typeof customSessionDirOrOnProgress === "string" ? normalizePath(customSessionDirOrOnProgress) : undefined;
+	const progress = typeof customSessionDirOrOnProgress === "function" ? customSessionDirOrOnProgress : onProgress;
+	if (customSessionDir) {
+		const sessions = await listSessionsFromDir(customSessionDir, progress);
+		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		return sessions;
+	}
+
+	const resolvedSessionsDir = normalizePath(sessionsDir);
+
+	try {
+		if (!existsSync(resolvedSessionsDir)) {
+			return [];
+		}
+		const entries = await readdir(resolvedSessionsDir, { withFileTypes: true });
+		const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(resolvedSessionsDir, e.name));
+
+		// Count total files first for accurate progress
+		let totalFiles = 0;
+		const dirFiles: string[][] = [];
+		for (const dir of dirs) {
+			try {
+				const files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
+				dirFiles.push(files.map((f) => join(dir, f)));
+				totalFiles += files.length;
+			} catch {
+				dirFiles.push([]);
+			}
+		}
+
+		// Process all files with progress tracking
+		let loaded = 0;
+		const sessions: SessionInfo[] = [];
+		const allFiles = dirFiles.flat();
+
+		const results = await buildSessionInfosWithConcurrency(allFiles, () => {
+			loaded++;
+			progress?.(loaded, totalFiles);
+		});
+
+		for (const info of results) {
+			if (info) {
+				sessions.push(info);
+			}
+		}
+
+		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		return sessions;
+	} catch {
+		return [];
+	}
 }

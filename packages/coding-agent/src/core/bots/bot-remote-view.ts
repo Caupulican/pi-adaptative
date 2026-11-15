@@ -7,7 +7,6 @@
 import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
-import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -19,6 +18,7 @@ import type { TimerSource } from "../util/timer-port.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
+import { botSessionChoice } from "./bot-session-pointer.ts";
 
 /** How often the hosts a view holds are judged alive again: a host that was killed publishes nothing. */
 const REMOTE_LIVENESS_MS = 5 * 1000;
@@ -26,15 +26,30 @@ const REMOTE_LIVENESS_MS = 5 * 1000;
 /** The bot's own session as its home saved it: its id, its file and the directory it worked in. */
 export type SavedBotSession = { readonly id: string; readonly file: string; readonly cwd?: string };
 
+/** The file of the session the bot's home keeps its conversation in (`botSessionChoice`), if it has one. */
+function savedSessionFile(agentDir: string, agentId: string): { id?: string; file: string } | undefined {
+	const choice = botSessionChoice(botHomeOf(agentDir, agentId));
+	if (choice.kind === "recorded") return { id: choice.pointer.sessionId, file: choice.path };
+	return choice.newest === undefined ? undefined : { file: choice.newest };
+}
+
 /**
- * The bot's own session as its home holds it: the newest session file, the one its next session continues, with the
- * directory it works in; undefined while it has none. Another process reads the bot's watches by its id, since they
- * target it.
+ * The bot's own session as its home holds it: the one its pointer records (the one its next session continues), else
+ * the one its host's first load would choose, with the directory it works in; undefined while it has none. Another
+ * process reads the bot's watches by its id, since they target it.
  */
 export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
-	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
-	const header = file ? readSessionHeader(file) : null;
-	return file && header ? { id: header.id, file, cwd: getSessionHeaderCwd(header) } : undefined;
+	const saved = savedSessionFile(agentDir, agentId);
+	if (!saved) return undefined;
+	const header = readSessionHeader(saved.file);
+	if (saved.id !== undefined)
+		return { id: saved.id, file: saved.file, cwd: header ? getSessionHeaderCwd(header) : undefined };
+	return header ? { id: header.id, file: saved.file, cwd: getSessionHeaderCwd(header) } : undefined;
+}
+
+/** A change of which session the home keeps (its pointer) or of a session file. */
+function isSessionChange(file: string): boolean {
+	return file === "session.json" || file.startsWith("sessions/");
 }
 
 /** How many times a transcript read is opened again when a write changed the file under it. */
@@ -133,7 +148,7 @@ export class BotRemoteView {
 					// A home's session files changed: what it saved is read again, before a host's change below opens it.
 					for (const { home, file } of changes) {
 						const agentId = ids.get(home);
-						if (agentId !== undefined && file.startsWith("sessions/")) this.saved.delete(agentId);
+						if (agentId !== undefined && isSessionChange(file)) this.saved.delete(agentId);
 					}
 					for (const { home, file } of changes) {
 						const agentId = ids.get(home);
@@ -146,7 +161,7 @@ export class BotRemoteView {
 							continue;
 						}
 						// The host's own bot sessions announce themselves; a change it wrote is not news.
-						if (this.ports.runsLocally(agentId) && (hostFile || file.startsWith("sessions/"))) continue;
+						if (this.ports.runsLocally(agentId) && (hostFile || isSessionChange(file))) continue;
 						if (hostFile) {
 							this.remote.delete(agentId);
 							this.ports.hostChanged(agentId);
@@ -192,15 +207,17 @@ export class BotRemoteView {
 	}
 
 	/**
-	 * The conversation the bot's home holds: its newest session file, read without opening it for writing, and read
-	 * again only once the file changed. Undefined when the bot has no session of its own yet.
+	 * The conversation the bot's home holds: its session's file (`botSessionChoice`), read without opening it for
+	 * writing, and read again only once the file changed. Undefined when the bot has no session of its own yet, or its
+	 * recorded session wrote nothing yet.
 	 */
 	readMessages(agentId: string): AgentMessage[] | undefined {
 		this.watch();
 		const agentDir = this.ports.agentDir();
-		const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
+		const file = savedSessionFile(agentDir, agentId)?.file;
 		if (!file) return undefined;
-		const stat = statSync(file);
+		const stat = statSync(file, { throwIfNoEntry: false });
+		if (!stat) return undefined;
 		const cached = this.transcriptCache;
 		if (
 			cached?.agentId === agentId &&

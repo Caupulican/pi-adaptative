@@ -11,7 +11,6 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
 import {
@@ -123,17 +122,15 @@ import {
 	readSessionHeader,
 	retainedStringChars,
 	type SessionEntryFileLocation,
-	sessionCwdMatches,
 } from "./session-file-reading.ts";
 import { appendToExistingSessionFile, withSessionFileLock, writeSessionFile } from "./session-file-writing.ts";
 import type { SessionHeader } from "./session-header.ts";
 import { assistantToolIdentityKey, createSessionId, generateId, pendingIdSpace } from "./session-id-generation.ts";
 import { assertValidSessionId } from "./session-identity.ts";
 import {
-	buildSessionInfosWithConcurrency,
-	countSessionFiles,
 	findMostRecentSessionInDirs,
-	listSessionsFromDir,
+	listAllSessionFiles,
+	listCwdSessions,
 	requiresSessionFile,
 	type SessionListProgress,
 } from "./session-listing.ts";
@@ -358,6 +355,8 @@ export class SessionManager {
 		  }
 		| undefined;
 	private plannedParentNotes: ParentNoteSelection | undefined;
+	/** The session the constructor's file starts when it is missing or empty (`openOrStart`); none once constructed. */
+	private startingSession: NewSessionOptions | undefined;
 	private parentEvidenceCache:
 		| { byId: Map<string, SessionEntry>; count: number; index: SessionEntryEvidenceIndex }
 		| undefined;
@@ -385,7 +384,12 @@ export class SessionManager {
 				assertAdoptableSessionHeader(resolvePath(sessionFile));
 				this._setSessionFile(sessionFile);
 			} else {
-				this.setSessionFile(sessionFile);
+				this.startingSession = newSessionOptions;
+				try {
+					this.setSessionFile(sessionFile);
+				} finally {
+					this.startingSession = undefined;
+				}
 			}
 		} else {
 			this.newSession(newSessionOptions);
@@ -513,7 +517,7 @@ export class SessionManager {
 				}
 				const explicitPath = this.sessionFile;
 				this._resetEntryFileIndex(true);
-				this.newSession();
+				this.newSession(this.startingSession);
 				this.sessionFile = explicitPath;
 				const receipt = this._rewriteFile(this.sessionFile, sourceRevision);
 				this.flushed = true;
@@ -560,7 +564,7 @@ export class SessionManager {
 		} else {
 			if (this.readOnly || mustReadComplete) throw new Error("Cannot open a missing existing session file.");
 			const explicitPath = this.sessionFile;
-			this.newSession();
+			this.newSession(this.startingSession);
 			this.sessionFile = explicitPath; // preserve explicit path from --session flag
 		}
 	}
@@ -3247,6 +3251,23 @@ export class SessionManager {
 		return SessionManager._open(path, roots, sessionDir, cwdOverride, false, false);
 	}
 
+	/**
+	 * Open the session file at `path`, or start session `id` in it when it is missing or empty: the file of a session
+	 * whose owner recorded its id (a bot's pointer). A file that holds another session is refused.
+	 */
+	static openOrStart(
+		path: string,
+		roots: SessionStorageRoots,
+		id: string,
+		sessionDir: string,
+		cwd: string,
+	): SessionManager {
+		assertValidSessionId(id);
+		const manager = SessionManager._open(path, roots, sessionDir, cwd, false, false, { id });
+		if (manager.getSessionId() !== id) throw new Error(`Session file ${path} holds another session than ${id}.`);
+		return manager;
+	}
+
 	/** Inspect existing history without repairing, migrating or creating any file on disk. */
 	static openReadOnly(path: string, roots: SessionStorageRoots): ReadonlySessionManager {
 		return SessionManager._open(path, roots, undefined, undefined, true, false);
@@ -3264,6 +3285,7 @@ export class SessionManager {
 		cwdOverride: string | undefined,
 		readOnly: boolean,
 		canonicalOnly: boolean,
+		starting?: NewSessionOptions,
 	): SessionManager {
 		const resolvedPath = resolvePath(path);
 		// Read only the header here; the constructor performs the one full session load.
@@ -3271,7 +3293,7 @@ export class SessionManager {
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, roots, undefined, readOnly, canonicalOnly);
+		return new SessionManager(cwd, dir, resolvedPath, true, roots, starting, readOnly, canonicalOnly);
 	}
 
 	/**
@@ -3380,25 +3402,7 @@ export class SessionManager {
 		sessionDir?: string,
 		onProgress?: SessionListProgress,
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd, agentDir);
-		const defaultDirs = getDefaultSessionDirCandidates(cwd, agentDir);
-		const filterCwd = sessionDir !== undefined && !defaultDirs.includes(dir);
-		const resolvedCwd = resolvePath(cwd);
-		const dirs = sessionDir ? [dir] : defaultDirs;
-		const progressCounts = await Promise.all(dirs.map((candidateDir) => countSessionFiles(candidateDir)));
-		const progressTotal = progressCounts.reduce((sum, count) => sum + count, 0);
-		const allSessions: SessionInfo[] = [];
-		let progressOffset = 0;
-		for (let i = 0; i < dirs.length; i++) {
-			const candidateDir = dirs[i];
-			const sessions = (await listSessionsFromDir(candidateDir, onProgress, progressOffset, progressTotal)).filter(
-				(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
-			);
-			progressOffset += progressCounts[i];
-			allSessions.push(...sessions);
-		}
-		allSessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-		return allSessions;
+		return listCwdSessions(cwd, agentDir, sessionDir, onProgress);
 	}
 
 	/**
@@ -3418,57 +3422,6 @@ export class SessionManager {
 		customSessionDirOrOnProgress?: string | SessionListProgress,
 		onProgress?: SessionListProgress,
 	): Promise<SessionInfo[]> {
-		const customSessionDir =
-			typeof customSessionDirOrOnProgress === "string" ? normalizePath(customSessionDirOrOnProgress) : undefined;
-		const progress = typeof customSessionDirOrOnProgress === "function" ? customSessionDirOrOnProgress : onProgress;
-		if (customSessionDir) {
-			const sessions = await listSessionsFromDir(customSessionDir, progress);
-			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-			return sessions;
-		}
-
-		const resolvedSessionsDir = normalizePath(sessionsDir);
-
-		try {
-			if (!existsSync(resolvedSessionsDir)) {
-				return [];
-			}
-			const entries = await readdir(resolvedSessionsDir, { withFileTypes: true });
-			const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(resolvedSessionsDir, e.name));
-
-			// Count total files first for accurate progress
-			let totalFiles = 0;
-			const dirFiles: string[][] = [];
-			for (const dir of dirs) {
-				try {
-					const files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
-					dirFiles.push(files.map((f) => join(dir, f)));
-					totalFiles += files.length;
-				} catch {
-					dirFiles.push([]);
-				}
-			}
-
-			// Process all files with progress tracking
-			let loaded = 0;
-			const sessions: SessionInfo[] = [];
-			const allFiles = dirFiles.flat();
-
-			const results = await buildSessionInfosWithConcurrency(allFiles, () => {
-				loaded++;
-				progress?.(loaded, totalFiles);
-			});
-
-			for (const info of results) {
-				if (info) {
-					sessions.push(info);
-				}
-			}
-
-			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
-			return sessions;
-		} catch {
-			return [];
-		}
+		return listAllSessionFiles(sessionsDir, customSessionDirOrOnProgress, onProgress);
 	}
 }

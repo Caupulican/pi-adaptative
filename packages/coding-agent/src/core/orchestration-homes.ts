@@ -17,6 +17,7 @@ import {
 	type SessionStorageRoots,
 	sameOrchestrationHome,
 } from "../kernel/session/session-bundle-paths.ts";
+import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { isMissingFileError } from "../kernel/storage/atomic-file.ts";
 import { botHomeSessionsDir, botsDir } from "./agent-paths.ts";
 
@@ -72,8 +73,9 @@ export function followedOrchestrationHome(
 }
 
 /**
- * The storage roots of the sessions whose files live in `sessionDir`: a bot's (`<agentDir>/bots/<name>/sessions`, its
- * home's orchestration directory) or else the owner's. Decided by the path alone, so it reads nothing and cannot fail.
+ * The storage roots of the sessions written to `sessionDir`: a bot's (`<agentDir>/bots/<name>/sessions`, its home's
+ * orchestration directory) or else the owner's. Decided by the path alone, so it reads nothing and cannot fail: the roots
+ * a new session in that directory is created in.
  */
 export function sessionStorageRootsOfDir(agentDir: string, sessionDir: string): SessionStorageRoots {
 	const dir = resolve(sessionDir);
@@ -83,7 +85,33 @@ export function sessionStorageRootsOfDir(agentDir: string, sessionDir: string): 
 	return ownerSessionStorageRoots(agentDir);
 }
 
-/** The storage roots of the session file `file`: those of the directory it lies in ({@link sessionStorageRootsOfDir}). */
+/**
+ * The storage roots of the session file `file`: those of the directory it lies in ({@link sessionStorageRootsOfDir}),
+ * and for a bot's file the ones {@link botSessionStorageRoots} finds for the session its header names (a file whose
+ * header does not read is opened in its bot's, where the open itself refuses it).
+ */
 export function sessionStorageRootsOfFile(agentDir: string, file: string): SessionStorageRoots {
-	return sessionStorageRootsOfDir(agentDir, dirname(resolve(file)));
+	const roots = sessionStorageRootsOfDir(agentDir, dirname(resolve(file)));
+	if (sameOrchestrationHome(roots.orchestrationHome, ownerOrchestrationHome(agentDir))) return roots;
+	const header = readSessionHeaderResult(resolve(file));
+	return header.ok ? botSessionStorageRoots(agentDir, roots.orchestrationHome, header.header.id) : roots;
+}
+
+/**
+ * The storage roots of bot session `sessionId`, whose bot's home is `botHome`: the bot's, unless only the owner's home
+ * holds the session (its bundle, tombstone or leases), as a bot session's state an earlier build kept there does until its
+ * host moves it (`moveBotSessionBundle`), and as one whose move failed across devices keeps it. Every opener of a bot
+ * session, its host and another process alike, asks this, so all take its lease in the same home.
+ */
+export function botSessionStorageRoots(
+	agentDir: string,
+	botHome: OrchestrationHome,
+	sessionId: string,
+): SessionStorageRoots {
+	if (
+		!orchestrationHomeHoldsSession(botHome, sessionId) &&
+		orchestrationHomeHoldsSession(ownerOrchestrationHome(agentDir), sessionId)
+	)
+		return ownerSessionStorageRoots(agentDir);
+	return { agentDir, orchestrationHome: botHome };
 }

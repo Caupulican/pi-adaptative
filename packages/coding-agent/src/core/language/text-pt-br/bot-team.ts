@@ -128,6 +128,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o registro de gasto dele ${setAsideError === undefined ? `não pôde ser lido (${reason})` : `não é legível (${reason}) e não pôde ser separado (${setAsideError})`}; ele fica como está e é tentado de novo no próximo gasto. Até lá, o gasto dos pedidos conta a partir de agora e o gasto é cobrado à sessão principal quando ele ${setAsideError === undefined ? "for lido" : "for separado"}.`,
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: o registro de gasto dele não foi lido por inteiro (${reason}) e foi separado como ${file}; os pedidos cujo gasto não foi lido contam a partir de agora, e as cobranças à sessão principal continuam ${chargesKept ? "do registro dele" : "do que a sessão principal registrou delas"}.`,
+	botSessionPointerSetAside: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: o registro de qual sessão ele continua não foi lido (${reason}) e foi separado como ${file}; ele continua o arquivo de sessão mais recente, registrado de novo.`,
+	botSessionNotMoved: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele (${reason}); ele continua usando-o onde está.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o registro de gasto dele não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto, e o gasto é cobrado quando for.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>

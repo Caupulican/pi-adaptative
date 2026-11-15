@@ -1,11 +1,19 @@
+import { dirname, resolve } from "node:path";
 import { getAgentDir, getSessionsDir } from "../config.ts";
-import { ownerSessionStorageRoots, type SessionStorageRoots } from "../kernel/session/session-bundle-paths.ts";
+import {
+	ownerOrchestrationHome,
+	ownerSessionStorageRoots,
+	type SessionStorageRoots,
+	sameOrchestrationHome,
+} from "../kernel/session/session-bundle-paths.ts";
 import {
 	type NewSessionOptions,
 	type SessionInfo,
 	type SessionListProgress,
 	SessionManager,
 } from "../kernel/session/session-manager.ts";
+import { botHomeAt } from "./bots/bot-home.ts";
+import { continueBotSession } from "./bots/bot-session-open.ts";
 import { sessionStorageRootsOfDir, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
 
 /**
@@ -33,8 +41,18 @@ export function openSession(path: string, sessionDir?: string, cwdOverride?: str
 	return SessionManager.open(path, sessionStorageRootsOfFile(getAgentDir(), path), sessionDir, cwdOverride);
 }
 
+/**
+ * Continues the most recent session of `sessionDir`; in a bot's `sessions/`, the session the bot keeps its
+ * conversation in, as its home's pointer records it (`continueBotSession`), never the newest file by time.
+ */
 export function continueRecentSession(cwd: string, sessionDir?: string): SessionManager {
-	return SessionManager.continueRecent(cwd, rootsOfDir(sessionDir), sessionDir);
+	const roots = rootsOfDir(sessionDir);
+	if (
+		sessionDir !== undefined &&
+		!sameOrchestrationHome(roots.orchestrationHome, ownerOrchestrationHome(roots.agentDir))
+	)
+		return continueBotSession(roots.agentDir, botHomeAt(dirname(resolve(sessionDir))), cwd);
+	return SessionManager.continueRecent(cwd, roots, sessionDir);
 }
 
 /** A session that writes no file, in the owner's roots: the session of a run that saves nothing. */
