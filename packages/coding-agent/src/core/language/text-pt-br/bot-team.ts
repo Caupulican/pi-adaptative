@@ -147,8 +147,8 @@ export const BOT_TEAM = {
 		`o bot ${agentId} não roda mais como sessão própria (aposentado, ou suas mensagens agora vão para um worker); envie de novo`,
 	botInboxWaitingLine: (text: string) => `Esperando a sessão que hospeda o bot: ${text}`,
 	botInboxRefusedLine: (reason: string, text: string) => `Não entregue (${reason}): ${text}`,
-	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
-		`O bot ${agentId} está trabalhando em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Pare por lá.`,
+	botStopSentElsewhere: (agentId: string, pid: number, sessionId?: string) =>
+		`O bot ${agentId} está trabalhando em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}); a parada foi enviada para lá e encerra o trabalho dele quando essa sessão a receber.`,
 	botHomesNotWatched: (reason: string) =>
 		`Os bots de outras sessões não são mais observados (${reason}); as mudanças deles aparecem quando esta sessão os lê.`,
 	botHomesRemoved: (dir: string) => `${dir} foi removido`,

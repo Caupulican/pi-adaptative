@@ -1,7 +1,8 @@
 /**
  * How the host holding a bot's lock takes the bot's inbox (`bot-inbox.ts`): every waiting message, oldest first, given to
  * the bot's loaded session as the owner's words. A message the session accepted leaves the queue; one it refused is kept as
- * a refused record with its reason, which every session's chat shows, and the host's own session is warned. One pass runs
+ * a refused record with its reason, which every session's chat shows, and the host's own session is warned. The owner's
+ * stop is taken before any message, at every pass while one waits: a message waits behind a stop not taken. One pass runs
  * per bot at a time; a change during a pass reads the inbox again when it ends. Passes start when the session is loaded,
  * when the home watch sees a message written and, while that watch does not run, on a timer.
  */
@@ -9,6 +10,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import {
 	type BotInboxMessage,
+	botInboxStopWaiting,
 	botInboxWaiting,
 	readBotInbox,
 	refuseBotInboxMessage,
@@ -30,6 +32,11 @@ export interface BotInboxDrainPorts {
 	 * the bot is loaded here any more (the message waits for the next host); rejects with the session's refusal.
 	 */
 	give(agentId: string, message: BotInboxMessage): Promise<boolean>;
+	/**
+	 * Takes the owner's stops waiting for the bot (`bot-stop.ts`) in its loaded session: false when none is loaded here or
+	 * they could not be taken (the host tells the owner and tries again); the bot's messages wait then.
+	 */
+	takeStops(agentId: string): boolean;
 	/** An owner-facing warning of the host's own session. */
 	warn(message: string): void;
 	/** The bot's chat changed (a message left the queue). */
@@ -72,6 +79,7 @@ export class BotInboxDrain {
 	private async pass(agentId: string): Promise<boolean> {
 		const agentDir = this.ports.agentDir();
 		const words = interfaceText().botTeam;
+		if (botInboxStopWaiting(agentDir, agentId) && !this.ports.takeStops(agentId)) return false;
 		const items = readBotInbox(agentDir, agentId, (file, reason) =>
 			this.ports.warn(words.botInboxUnreadable(agentId, file, reason)),
 		);
@@ -96,7 +104,7 @@ export class BotInboxDrain {
 
 	/**
 	 * While the home watch does not run, reads the hosted bots' inboxes on a timer: nothing else tells this host a message
-	 * was written. Armed again after each read while it hosts a bot.
+	 * or a stop was written. Armed again after each read while it hosts a bot.
 	 */
 	arm(): void {
 		if (this.poll !== undefined || this.stopped || this.ports.hosted().length === 0 || this.ports.watching()) return;
@@ -105,7 +113,7 @@ export class BotInboxDrain {
 			this.poll = undefined;
 			const agentDir = this.ports.agentDir();
 			for (const agentId of this.ports.hosted())
-				if (botInboxWaiting(agentDir, agentId))
+				if (botInboxWaiting(agentDir, agentId) || botInboxStopWaiting(agentDir, agentId))
 					void this.drain(agentId).catch((error: unknown) =>
 						this.ports.warn(interfaceText().botTeam.botInboxNotTaken(agentId, errorText(error))),
 					);

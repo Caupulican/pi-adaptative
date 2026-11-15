@@ -24,19 +24,20 @@ import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPor
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 
 /**
- * When the recorded quota exhaustion of `model` resets, on the provider admission clock: read from the store every process
- * shares (`state/provider-admission/exhausted/`), where an exhaustion with a reset time is recorded; undefined when none
- * is (an exhaustion with no reset time lasts for the process that met it).
+ * The quota exhaustions every process shares (`state/provider-admission/exhausted/`), on the provider admission clock: an
+ * exhaustion with a reset time is recorded there (one with none lasts for the process that met it).
  */
+function sharedExhaustions(deps: BackgroundLaneControllerDeps): ExhaustedProviderRegistry {
+	const clock = deps.getTimers().port("provider-admission");
+	return new ExhaustedProviderRegistry(join(providerAdmissionDir(deps.getAgentDir()), "exhausted"), () => clock.now());
+}
+
+/** When the recorded quota exhaustion of `model` resets; undefined when none with a reset time is recorded. */
 function exhaustionReset(
 	deps: BackgroundLaneControllerDeps,
 	model: { provider: string; id: string },
 ): number | undefined {
-	const clock = deps.getTimers().port("provider-admission");
-	const registry = new ExhaustedProviderRegistry(join(providerAdmissionDir(deps.getAgentDir()), "exhausted"), () =>
-		clock.now(),
-	);
-	return registry.exhaustion(`${model.provider}/${model.id}`)?.until;
+	return sharedExhaustions(deps).exhaustion(`${model.provider}/${model.id}`)?.until;
 }
 
 /**
@@ -116,6 +117,12 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		hostSessionId: () => deps.getSessionId(),
 		hostKeepsFile: () => deps.getSessionManager().isPersisted(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
+		// A closed bot's saved usage wait is read as its own session's wake reads it, against the exhaustions every process shares.
+		usageRules: () => ({
+			modelRegistry: deps.getModelRegistry(),
+			inRunRetryMaxMs: () => deps.getSettingsManager().getProviderRetrySettings().maxRetryDelayMs,
+			modelExhaustion: (ref) => sharedExhaustions(deps).exhaustion(ref),
+		}),
 		// A worker's budget is the owner's worker bound, intersected with the main session's own ceilings: on all spend, and
 		// on metered spend (a subscription's limit is its usage windows). None set, none applies.
 		spendCeilings: () => {

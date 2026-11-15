@@ -161,9 +161,9 @@ export const BOT_TEAM = {
 	botInboxWaitingLine: (text: string) => `Waiting for the session hosting the bot: ${text}`,
 	/** A message the bot's session refused, as the chat shows it. */
 	botInboxRefusedLine: (reason: string, text: string) => `Not delivered (${reason}): ${text}`,
-	/** The bot's turn runs in another process; only that session can stop it. */
-	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
-		`Bot ${agentId} is working in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}). Stop it from there.`,
+	/** The bot works in another process: the owner's stop was written for that session to take. */
+	botStopSentElsewhere: (agentId: string, pid: number, sessionId?: string) =>
+		`Bot ${agentId} is working in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}); the stop was sent there and ends its work when that session takes it.`,
 	/** The watch over the bot homes failed. */
 	botHomesNotWatched: (reason: string) =>
 		`Bots of other sessions are no longer watched (${reason}); their changes show when this session reads them.`,

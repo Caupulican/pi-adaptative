@@ -22,6 +22,7 @@ import type { OrchestrationHome } from "../../kernel/session/session-bundle-path
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
+import type { AgentSession } from "../agent-session.ts";
 import { stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
@@ -120,16 +121,72 @@ export function applyUnhostedBotStop(
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) return "held";
 	try {
-		const stop = takeStops(
-			agentDir,
-			agentId,
-			(stop) => stopClosedSession(agentDir, agentId, saved, stop, ports),
-			ports,
-		);
-		return stop ? "applied" : "none";
+		return applyBotStopUnderLock(agentDir, agentId, saved, ports) ? "applied" : "none";
 	} finally {
 		taken.lock.release();
 	}
+}
+
+/**
+ * The stop waiting for bot `agentId` applied to its closed session `saved` while the caller holds the bot's host lock and
+ * no session of it is open: by {@link applyUnhostedBotStop}, and by a host that took the lock to open the bot's session,
+ * before the session is built, so nothing the session's recovery would resume runs. The stop applied, undefined when none
+ * waits; a failure throws with the stop left waiting.
+ */
+export function applyBotStopUnderLock(
+	agentDir: string,
+	agentId: string,
+	saved: SavedBotSession | undefined,
+	ports: BotStopPorts,
+): BotInboxStop | undefined {
+	return takeStops(agentDir, agentId, (stop) => stopClosedSession(agentDir, agentId, saved, stop, ports), ports);
+}
+
+/** A bot's session loaded in this process, and the transcript it writes, as the owner's stop reaches them. */
+export interface LoadedBotSession {
+	readonly session: Pick<
+		AgentSession,
+		"sessionId" | "abort" | "getGoalStateSnapshot" | "saveGoalStateSnapshot" | "backgroundLanes"
+	>;
+	readonly transcript: UsageWakeWriter;
+}
+
+/**
+ * Takes the stops waiting for the bot whose session this process hosts ({@link takeHostedBotStops}): the turn it
+ * runs, when `turnRuns`, stopped for the owner, then {@link applyOwnerStopToSession}. The stop applied, undefined when
+ * none waits; a failure throws with the stops left waiting.
+ */
+export function stopLoadedBot(
+	agentDir: string,
+	agentId: string,
+	{ session, transcript }: LoadedBotSession,
+	turnRuns: boolean,
+	ports: BotStopPorts,
+): BotInboxStop | undefined {
+	const words = interfaceText().botTeam;
+	const live: HostedBotStopSession = {
+		goal: {
+			getGoalStateSnapshot: () => session.getGoalStateSnapshot(),
+			saveGoalStateSnapshot: (state, expected) => session.saveGoalStateSnapshot(state, expected),
+		},
+		transcript,
+		fleet: session.backgroundLanes,
+	};
+	return takeHostedBotStops(
+		agentDir,
+		agentId,
+		session.sessionId,
+		(stop) => {
+			if (turnRuns)
+				void session
+					.abort(words.botTurnAbortReasons.ownerStopped)
+					.catch((error: unknown) =>
+						ports.warn(words.botTurnFailed(agentId, error instanceof Error ? error.message : String(error))),
+					);
+			return applyOwnerStopToSession(live, stop, ports.now());
+		},
+		ports,
+	);
 }
 
 const NOTHING_LEFT: WorkerStopOutcome = { remote: [], managed: [], failed: [] };
