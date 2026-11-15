@@ -901,7 +901,8 @@ export function withSessionBundleMaintenance<T>(
 
 /**
  * How a session's bundle is admitted over its tombstone: `maintenance` never past one; `write` past a retention that
- * never began removing (`reserved`) or whose bundle is gone, when no live remover holds it; `open` (the AgentSession
+ * never began removing (`reserved`) or whose bundle is gone (the release recorded in the recreated bundle, for the
+ * owner to be told once), when no live remover holds it; `open` (the AgentSession
  * open) past any other retention no live remover holds as well (`unrecorded`, or `removing`: its removal began and
  * stopped), released once the open's own write succeeded: the owner's open wins over an interrupted cleanup, every
  * file left of the bundle is a whole file, and a reader takes a missing one as absent; the release is recorded in the
@@ -928,6 +929,7 @@ function admitSessionBundle<T>(
 				if (mode === "maintenance") return { admitted: false };
 				// A retention that never began removing leaves the bundle whole: opening the session releases it.
 				let removalConfirmed = isReleasableRetention(home, marker);
+				let bundleGone = false;
 				if (
 					!removalConfirmed &&
 					marker.policy === "retention" &&
@@ -937,12 +939,21 @@ function admitSessionBundle<T>(
 						lstatSync(orchestrationSessionDir(home, parentSessionId));
 					} catch (error) {
 						if (!isMissingFileError(error)) throw error;
+						bundleGone = true;
 						removalConfirmed = true;
 					}
 				}
 				if (!removalConfirmed) return { admitted: false };
 				// The original remover is settled/dead and its bundle is absent, or it never began removing. Recover an
-				// interrupted marker cleanup here, or release the untouched bundle.
+				// interrupted marker cleanup here, or release the untouched bundle. A bundle the cleanup removed whole is
+				// recreated by this write: the release is recorded in it first, for the session's open to tell once.
+				if (bundleGone) {
+					recordSessionCleanupRelease(home, parentSessionId, mode);
+					harnessLog.warn("sessions", "a write recovered a session bundle its interrupted retention removed", {
+						session: parentSessionId,
+						tombstone,
+					});
+				}
 				removeTombstone(home, tombstone, parentSessionId);
 			}
 			const scope = currentSynchronousFileLockScope(tombstone)!;

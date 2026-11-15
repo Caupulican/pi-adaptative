@@ -47,12 +47,14 @@ export const SESSIONS = {
 				? "1 deletion record of your old session bundles could not be read; its bundle stays until it can."
 				: `${count} deletion records of your old session bundles could not be read; their bundles stay until they can.`,
 		/**
-		 * A cleanup of the session's stored state that did not record how far it went was cancelled over what is left of it,
-		 * `by` its open (`releasedByOpen`) or by the startup cleanup (`releasedByStartup`).
+		 * An unfinished cleanup of the session's stored state was cancelled over what is left of it, `by` its open
+		 * (`releasedByOpen`), by work written to it once the cleanup had removed all of it (`releasedByWrite`) or by the
+		 * startup cleanup (`releasedByStartup`).
 		 */
 		interruptedRetentionReleased: (session: string, by: string) =>
 			`Session ${session}: ${by} cancelled an unfinished cleanup of its stored state, which may already have removed some or all of its worker and plan state.`,
 		releasedByOpen: "opening it",
+		releasedByWrite: "work written to it",
 		releasedByStartup: "the startup cleanup",
 		/** A cleanup of one of the owner's sessions cannot finish while a bot's history does not read. */
 		removalAwaitsBotHistory: (session: string) =>

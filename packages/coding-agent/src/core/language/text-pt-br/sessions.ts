@@ -62,6 +62,7 @@ export const SESSIONS = {
 		interruptedRetentionReleased: (session: string, by: string) =>
 			`Sessão ${session}: ${by} cancelou uma limpeza inacabada do estado guardado dela, que pode já ter removido parte ou todo o estado dos workers e do plano.`,
 		releasedByOpen: "abri-la",
+		releasedByWrite: "um trabalho gravado nela",
 		releasedByStartup: "a limpeza de inicialização",
 		removalAwaitsBotHistory: (session: string) =>
 			`Sessão ${session}: a limpeza inacabada dela espera até o histórico de todos os bots poder ser lido; abrir a sessão a cancela.`,

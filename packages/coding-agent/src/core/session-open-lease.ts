@@ -2,8 +2,8 @@
  * The AgentSession open's side of its session's lifetime lease: the lease it takes on a persisted session, and what the
  * open owes the owner. The open releases an interrupted retention of the session (one whose removal began and stopped,
  * an earlier build's cleanup, or one whose wholeness proof does not read), which may already have removed part of its
- * worker and plan state, and records
- * the release in the bundle (`session-cleanup-release.ts`); the owner is told so once, as a harness notice the release's
+ * worker and plan state, and records the release in the bundle (`session-cleanup-release.ts`), as a write that
+ * recovers a bundle such a cleanup removed whole does; the owner is told each once, as a harness notice the release's
  * id names, so an open that ends before telling it leaves it for the next one. The lease and its admission are the
  * kernel's (`session-bundle-lifecycle.ts`).
  */
@@ -52,7 +52,9 @@ function sessionCleanupReleaseNotice(sessionManager: SessionManager): HarnessNot
 	const sessionId = sessionManager.getSessionId();
 	const release = readSessionCleanupRelease(sessionManager.getStorageRoots().orchestrationHome, sessionId);
 	if (!release) return undefined;
-	return wordedNotice(`cleanup-released:${release.releaseId}`, (words) =>
-		words.sessions.retention.interruptedRetentionReleased(sessionId, words.sessions.retention.releasedByOpen),
-	);
+	return wordedNotice(`cleanup-released:${release.releaseId}`, (words) => {
+		const retention = words.sessions.retention;
+		const by = { open: retention.releasedByOpen, write: retention.releasedByWrite }[release.by];
+		return retention.interruptedRetentionReleased(sessionId, by);
+	});
 }
