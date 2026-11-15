@@ -357,6 +357,8 @@ export class BotOwedWork {
 	private readonly told = new Map<string, string>();
 	/** What the owner was last told of a bot the periodic listing failed on: told once per cause, forgotten once it lists clean. */
 	private readonly sweepTold = new Map<string, string>();
+	/** Bots whose ask to open (`openIfOwed`) is reading them now. */
+	private readonly asking = new Set<string>();
 	/** The wakes the bots' session files hold unrun. */
 	private readonly wakes = new UnrunWakeLedger();
 	/** Why each bot's session was last refused, while no run of it was admitted since. */
@@ -741,9 +743,21 @@ export class BotOwedWork {
 	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
 	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
 	 * sent from. Another process that opened it first is not a failure. `swept` (the periodic listing asks) skips a bot
-	 * whose last open failed on what defines it now and the inbox files waiting now.
+	 * whose last open failed on what defines it now and the inbox files waiting now. An ask for the bot made while this one
+	 * reads it (a host change the home watch reports as it starts, when this ask's read starts it) is this ask's to answer:
+	 * two would share one open and arm its next attempt twice.
 	 */
 	openIfOwed(agentId: string, swept = false): void {
+		if (this.asking.has(agentId)) return;
+		this.asking.add(agentId);
+		try {
+			this.askOpen(agentId, swept);
+		} finally {
+			this.asking.delete(agentId);
+		}
+	}
+
+	private askOpen(agentId: string, swept: boolean): void {
 		const { ports } = this;
 		const agentDir = ports.agentDir();
 		if (ports.stopped()) return;

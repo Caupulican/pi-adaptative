@@ -405,6 +405,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		const deliverHomeNotices = async () => {
 			world.timers.advance("bot-home-watch", BOT_HOME_COALESCE_MS);
 			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(
+				world.timers.armedSnapshot("bot-home-watch"),
+				"the bot-home watch delivered its batch and gathered no other change after it",
+			).toEqual([]);
 		};
 		// The owner's `/bot msg` shows why the message waits (the chat's status line), so the host tells nothing more.
 		const sent = await session.sendOperatorMessageToBot(KEEPER, FIFTH_QUESTION, { showsWaits: true });
