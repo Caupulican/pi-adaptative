@@ -1028,25 +1028,39 @@ export class RemoteJobClient {
 	}
 
 	/**
-	 * Sends the usage of an applied job's outcome to its lane: an outcome the executor delivered after the lane ended (at the
-	 * deadline, the offline hold or a lost lease) was still run and paid for. The ended lane takes the receipt alone and charges its
-	 * report id once, so the outcome applied with the end, or this job sent again after a restart, records nothing more. Once per
-	 * job in this process; a failure is logged and the next process sends it again.
+	 * Charges the usage of an applied job's outcome to the attempt it ran as: an outcome the executor delivered after the lane ended
+	 * (at the deadline, the offline hold or a lost lease) was still run and paid for. The charge goes under that attempt's terminal
+	 * report id, so the outcome applied with the end, or this job charged again after a restart, records nothing more. A record that
+	 * names no attempt (an older build's, or a replayed dispatch's) is charged to the attempt its placement names, else to the lane's
+	 * selected attempt (`ManagedLaneController.chargeLateReceipt`). Once per job in this process once charged, or once nothing can
+	 * name its attempt; an attempt still running, or a charge that failed, is tried again at the next reconcile.
 	 */
 	private chargeLateUsage(record: PlacerJobRecord): void {
-		const terminal = placedJobTerminal(record);
-		if (!record.outcome?.usage || !terminal || this.usageSent.has(record.jobId)) return;
-		// Only the ended attempt the job ran as takes it: a lane the session no longer holds, or one that now runs another
-		// attempt, would take the outcome as a new end or refuse it as an unknown worker.
-		const binding = this.session.managedLaneBindings().get(record.laneId);
-		if (!binding?.ended || (record.attemptId !== undefined && binding.attemptId !== record.attemptId)) return;
+		const usage = record.outcome?.usage;
+		if (!usage || this.usageSent.has(record.jobId)) return;
 		this.usageSent.add(record.jobId);
-		void this.recordEnd(record, terminal).catch((error: unknown) => {
-			harnessLog.warn("placement", "a placed job's reported usage could not be charged on its ended lane", {
-				jobId: record.jobId,
-				reason: error instanceof Error ? error.name : "unknown",
+		void runtimeRetry(() =>
+			this.session.chargeLateReceipt({
+				laneId: record.laneId,
+				attemptId: record.attemptId,
+				placement: record.placement,
+				receipt: usage,
+			}),
+		)
+			.then((charged) => {
+				if (charged === "running") this.usageSent.delete(record.jobId);
+				else if (charged === "unattributed")
+					harnessLog.warn("placement", "a placed job's reported usage names no attempt its lane holds", {
+						jobId: record.jobId,
+					});
+			})
+			.catch((error: unknown) => {
+				this.usageSent.delete(record.jobId);
+				harnessLog.warn("placement", "a placed job's reported usage could not be charged on its ended lane", {
+					jobId: record.jobId,
+					reason: error instanceof Error ? error.name : "unknown",
+				});
 			});
-		});
 	}
 
 	/** Records the end on the job's managed lane once; a lane that is gone or already ended takes nothing more. */

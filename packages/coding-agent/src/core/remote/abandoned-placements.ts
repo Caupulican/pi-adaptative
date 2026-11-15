@@ -14,12 +14,14 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { UsageReceipt } from "../cost/usage-receipt.ts";
 import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
 import {
 	type ManagedLaneEvent,
 	type ManagedLaneHostFacts,
 	NO_MANAGED_LANE_HOST_FACTS,
 } from "../extensions/managed-lane-records.ts";
+import type { ManagedLanePlacement } from "../orchestration/contracts.ts";
 import type { JobCancelReason } from "./job-protocol.ts";
 import { endingOfCancel, type JobStore, placedRecordName } from "./job-store.ts";
 
@@ -38,13 +40,33 @@ export const remoteJobLaneId = (jobId: string): string => `${REMOTE_LANE_PREFIX}
 /** The authorization a placed job's managed lane is dispatched under: the machine that runs it (a lane is bound to one). */
 export const remoteJobAuthorization = (machineId: string): string => `${REMOTE_JOB_AUTHORIZATION_PREFIX}${machineId}`;
 
-export interface RemotePlacementSession {
+/** A placed job's usage that reached its lane after the lane took its end, with the identities its record names the attempt by. */
+export interface PlacedLateReceipt {
+	readonly laneId: string;
+	/** The attempt the job was placed for; undefined on a record an older build or a replayed dispatch wrote. */
+	readonly attemptId: string | undefined;
+	/** The placement the job was dispatched with; undefined on a record an older build wrote. */
+	readonly placement: ManagedLanePlacement | undefined;
+	readonly receipt: UsageReceipt;
+}
+
+/** What charging a late receipt did: charged (or found it charged), found its attempt still running, or found no attempt to name. */
+export type PlacedLateCharge = "charged" | "running" | "unattributed";
+
+/** The managed lane book of a session, as the placer's lane ends read and write it. */
+export interface PlacedLaneBook {
 	recordManagedLane(event: ManagedLaneEvent, host: ManagedLaneHostFacts): LaneRecord | undefined;
 	/**
 	 * The durable attempts of the managed lanes, by lane id: a replayed dispatch of a durable lane reads its attempt back here, and
 	 * a restart finds the placer-side lanes a predecessor left open.
 	 */
 	managedLaneBindings(): ReadonlyMap<string, ManagedLaneBinding>;
+}
+
+/** The session a placer runs in: its lane book, and the charge of a job's usage that reached a lane after its end. */
+export interface RemotePlacementSession extends PlacedLaneBook {
+	/** Charges a placed job's late usage to the attempt it ran as (`ManagedLaneController.chargeLateReceipt`). */
+	chargeLateReceipt(charge: PlacedLateReceipt): PlacedLateCharge;
 }
 
 /**
@@ -69,7 +91,7 @@ export function placedJobOfLane(
  * holds none or holds one bound elsewhere. The lane book is this session's, so its binding stands for the job's owner.
  */
 export function placedJobLaneBinding(
-	session: RemotePlacementSession,
+	session: PlacedLaneBook,
 	machineId: string,
 	jobId: string,
 ): ManagedLaneBinding | undefined {
@@ -83,7 +105,7 @@ export function placedJobLaneBinding(
  * reported once per sweep: its job may be live.
  */
 export function endAbandonedPlacements(
-	session: RemotePlacementSession,
+	session: PlacedLaneBook,
 	store: Pick<JobStore, "placedState" | "placedCancelMarks">,
 ): number {
 	const marks = new Map<string, JobCancelReason>();
@@ -116,11 +138,7 @@ export function endAbandonedPlacements(
  * Ends one abandoned placement lane. A failure is logged and the lane stays as it was (the next start tries again). True when
  * this call ended the lane: the lane's record came back, not the undefined of a lane that had already ended.
  */
-export function endAbandonedPlacement(
-	session: RemotePlacementSession,
-	laneId: string,
-	dispatchSequence: number,
-): boolean {
+export function endAbandonedPlacement(session: PlacedLaneBook, laneId: string, dispatchSequence: number): boolean {
 	try {
 		return (
 			session.recordManagedLane(
@@ -150,7 +168,7 @@ export function endAbandonedPlacement(
  * readable record's ending would take: the status and the reason code `placedJobTerminal` gives that ending. True when this call ended it.
  */
 export function endMarkedPlacement(
-	session: RemotePlacementSession,
+	session: PlacedLaneBook,
 	machineId: string,
 	jobId: string,
 	reason: JobCancelReason,

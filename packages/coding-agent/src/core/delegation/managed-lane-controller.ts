@@ -26,7 +26,11 @@ import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";
 import { type AttemptRuntimeState, attemptAwaitingLease } from "../orchestration/task-runtime-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
-import { endAbandonedPlacements } from "../remote/abandoned-placements.ts";
+import {
+	endAbandonedPlacements,
+	type PlacedLateCharge,
+	type PlacedLateReceipt,
+} from "../remote/abandoned-placements.ts";
 import { JobStore } from "../remote/job-store.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -509,6 +513,34 @@ export class ManagedLaneController {
 			}
 		}
 		return record;
+	}
+
+	/**
+	 * Charges a placed job's usage that reached its lane after the lane took its end to the attempt the job ran as, under the
+	 * report id that attempt's own terminal charges (`managed-worker:<attemptId>`), so an outcome already charged with the end
+	 * records nothing more. The attempt is the one the record names. A record an older build or a replayed dispatch wrote names
+	 * none: its attempt is then the lane's attempt dispatched with the record's placement, else the lane's selected attempt, the
+	 * one whose terminal took the job's end. "running" while that attempt has not ended, since its own terminal charges it then;
+	 * "unattributed" when the lane holds no attempt the record could name, since a report id no terminal used could charge an
+	 * outcome the end already charged a second time.
+	 */
+	chargeLateReceipt(charge: PlacedLateReceipt): PlacedLateCharge {
+		const attempts = this.lifecycle.getTaskRuntimeSnapshot().attempts;
+		const attemptId =
+			charge.attemptId ??
+			(charge.placement
+				? Object.values(attempts).find(
+						(attempt) =>
+							attempt.dispatch.logicalLaneId === charge.laneId &&
+							attempt.dispatch.placement?.idempotencyKey === charge.placement?.idempotencyKey,
+					)?.attemptId
+				: undefined) ??
+			this.lifecycle.getManagedAttempt(charge.laneId)?.attemptId;
+		if (attemptId === undefined) return "unattributed";
+		const attempt = attempts[attemptId];
+		if (attempt && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) return "running";
+		this.chargeReceipt(`managed-worker:${attemptId}`, validUsageReceipt(charge.receipt));
+		return "charged";
 	}
 
 	/** Records a terminal's usage receipt once under its report id, and tells the session its usage grew when this recorded it. */

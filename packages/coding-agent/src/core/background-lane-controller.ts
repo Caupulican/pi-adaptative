@@ -189,6 +189,7 @@ import {
 } from "./proactivity/proactivity-controller.ts";
 import { observeReviewGauge } from "./proof/review-gauge.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
+import type { PlacedLateCharge, PlacedLateReceipt } from "./remote/abandoned-placements.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
 import { finishedPlacedJobReferences } from "./remote/job-store.ts";
 import { withLinkPolicy } from "./remote/link-policy.ts";
@@ -980,6 +981,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Delegate the out-of-process dispatch/terminal claim to its single lifecycle owner. */
 	recordManagedLane(event: ManagedLaneEvent, host: ManagedLaneHostFacts): LaneRecord | undefined {
 		return this._getManagedLaneController().record(event, host);
+	}
+
+	/** Charges a placed job's late usage to the attempt it ran as; see ManagedLaneController.chargeLateReceipt. */
+	chargeLateReceipt(charge: PlacedLateReceipt): PlacedLateCharge {
+		return this._getManagedLaneController().chargeLateReceipt(charge);
 	}
 
 	/** The durable attempts of every managed lane, by lane id: id, turn, dispatch authorization and whether each has ended. */
