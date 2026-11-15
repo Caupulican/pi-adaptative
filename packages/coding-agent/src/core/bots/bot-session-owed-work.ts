@@ -1016,8 +1016,10 @@ export class BotOwedWork {
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote to the session the
 			// take read (a saved session that is a symbolic link is left, and the rest of the stop applies all the same).
 			const taken = applyUnhostedBotStop(agentDir, agentId, this.ports.stopPorts(), this.unrecorded);
-			if (taken === "held") this.unrecorded.recordLate(agentId, (line) => this.ports.warn(line));
-			else if (taken.stop) {
+			if (taken === "held") {
+				// Held by another host, which takes it once it is recorded; held by this process's own open, that open takes it.
+				if (this.ports.heldElsewhere(agentId)) this.unrecorded.recordLate(agentId, (line) => this.ports.warn(line));
+			} else if (taken.stop) {
 				this.forgetOwedTimes(agentId);
 				this.armUsageWait(
 					agentId,
