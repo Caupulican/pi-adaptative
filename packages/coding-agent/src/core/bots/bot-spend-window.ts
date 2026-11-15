@@ -11,14 +11,16 @@
  * retries, its verifier and the children it starts carry). An entry that is no outside input (a continuation, a host
  * steer, a notice) belongs to the window before it; the transcript's first entry opens one when nothing later did.
  *
- * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`), the newest windows only: a reopened session
- * resumes a window's foreground spend. A worker's spend is never copied: it is read from the delegation ledger's
- * per-attempt usage each time.
+ * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`): a reopened session resumes a window's
+ * foreground spend. A window is dropped only once no worker serving it can still run (every attempt it names has ended,
+ * or the delegation ledger shows none of them a week after the window last changed), the oldest first, and only past
+ * the newest 64. A worker's spend is never copied: it is read from the delegation ledger's per-attempt usage each time.
  */
 
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginKind } from "../../kernel/turn-origin-stamp.ts";
+import { ACTIVE_ATTEMPT_STATUSES } from "../delegation/delegation-spend.ts";
 import type { RunCostBound } from "../delegation/parent-execution-context.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -27,11 +29,28 @@ import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
 
-/** Windows kept, the newest: the current request's, and enough before it for a late worker's handoff to find its own. */
+/** Windows kept however old: past this many, the oldest no worker can still serve are dropped. */
 const MAX_WINDOWS_KEPT = 64;
+
+/**
+ * How long after it last changed a window is kept for an attempt the delegation ledger does not show (no projection
+ * yet after a reopen, or one that no longer holds it): such an attempt may still run, so its window stays this long.
+ */
+const UNSEEN_ATTEMPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Entries whose window is remembered, the most recent; past it the memory starts over (a walk reads the transcript again). */
 const MAX_ENTRIES_REMEMBERED = 4096;
+
+/** The window of an entry, and whether it is final: unsettled when the walk passed a handoff whose attempts it could not place. */
+interface EntryWindow {
+	readonly windowId: string;
+	readonly settled: boolean;
+}
+
+/** How many attempts the projection holds: an unsettled answer is asked again once it holds more. */
+function attemptCount(snapshot: TaskRuntimeProjection | undefined): number {
+	return snapshot ? Object.keys(snapshot.attempts).length : -1;
+}
 
 /** The inputs that open a window: words or a wake from outside the session's own work. */
 const OPENING_KINDS: ReadonlySet<TurnOriginKind> = new Set<TurnOriginKind>([
@@ -78,10 +97,16 @@ export interface WindowSpend {
 export class BotSpendWindows {
 	/** The windows kept, the ledger's own. */
 	private readonly windows: Map<string, SpendWindowRecord>;
-	/** The window an attempt serves (`null`: none of this session's), as found from its receipt origin. */
+	/**
+	 * The window an attempt serves (`null`: none of this session's, as its receipt origin names none here), once that is
+	 * final: an attempt whose origin leaf the transcript does not hold, or whose window rests on a handoff not yet placed,
+	 * is asked again.
+	 */
 	private readonly attemptWindows = new Map<string, string | null>();
-	/** The window id each walked entry belongs to. */
+	/** The window id each walked entry belongs to, where the walk settled it. */
 	private readonly entryWindows = new Map<string, string>();
+	/** An unsettled walk's window for each entry it passed, with the projection's attempt count it was read at. */
+	private readonly unsettledWindows = new Map<string, { readonly windowId: string; readonly attempts: number }>();
 	private readonly ledger: BotSpendLedger;
 	private readonly transcript: Pick<SessionManager, "getEntry" | "getLeafId" | "getSessionId">;
 	private readonly ports: BotSpendWindowPorts;
@@ -107,7 +132,7 @@ export class BotSpendWindows {
 	count(addedUsd: number, metered: boolean): WindowSpend | undefined {
 		const leafId = this.transcript.getLeafId();
 		const snapshot = this.ports.snapshot();
-		const windowId = leafId === null ? undefined : this.windowOfEntry(leafId, snapshot);
+		const windowId = leafId === null ? undefined : this.windowOfEntry(leafId, snapshot)?.windowId;
 		if (windowId === undefined) return undefined;
 		const window = this.windowFor(windowId);
 		if (addedUsd > 0) {
@@ -117,7 +142,7 @@ export class BotSpendWindows {
 			this.ledger.touch();
 		}
 		const workers = this.workerSpend(window, snapshot);
-		this.flush();
+		this.flush(snapshot);
 		return {
 			usd: window.foregroundUsd + workers.usd,
 			meteredUsd: window.meteredForegroundUsd + workers.meteredUsd,
@@ -142,7 +167,7 @@ export class BotSpendWindows {
 		const windowId = this.windowOfAttempt(attempt, snapshot);
 		const window = windowId === undefined ? undefined : this.windowFor(windowId);
 		if (window) this.serve(window, attempt.attemptId);
-		this.flush();
+		this.flush(snapshot);
 		if (!window || ceilings.length === 0) return undefined;
 		const remainder = (meteredOnly: boolean, spentUsd: number): number | undefined => {
 			const usd = ceilings.filter((ceiling) => ceiling.meteredOnly === meteredOnly).map((ceiling) => ceiling.usd);
@@ -176,7 +201,8 @@ export class BotSpendWindows {
 	/**
 	 * The window an attempt serves: the one its receipt origin's leaf belongs to, when that leaf is this session's. Finding
 	 * it opens no window: an attempt read from the ledger's history whose window was dropped leaves it dropped (only an
-	 * attempt starting now opens its window, `runCostBound`); a kept window records the attempt.
+	 * attempt starting now opens its window, `runCostBound`); a kept window records the attempt. Only a final answer is
+	 * remembered (`attemptWindows`).
 	 */
 	private windowOfAttempt(
 		attempt: AttemptRuntimeState,
@@ -185,17 +211,19 @@ export class BotSpendWindows {
 		const known = this.attemptWindows.get(attempt.attemptId);
 		if (known !== undefined) return known ?? undefined;
 		const origin = attempt.dispatch.receiptOrigin;
-		const windowId =
-			origin && origin.sessionId === this.transcript.getSessionId()
-				? this.windowOfEntry(origin.leafId, snapshot)
-				: undefined;
-		this.attemptWindows.set(attempt.attemptId, windowId ?? null);
-		const kept = windowId === undefined ? undefined : this.windows.get(windowId);
+		if (!origin || origin.sessionId !== this.transcript.getSessionId()) {
+			this.attemptWindows.set(attempt.attemptId, null);
+			return undefined;
+		}
+		const found = this.windowOfEntry(origin.leafId, snapshot);
+		if (!found) return undefined;
+		if (found.settled) this.attemptWindows.set(attempt.attemptId, found.windowId);
+		const kept = this.windows.get(found.windowId);
 		if (kept && !kept.attemptIds.includes(attempt.attemptId)) {
 			kept.attemptIds.push(attempt.attemptId);
 			this.ledger.touch();
 		}
-		return windowId;
+		return found.windowId;
 	}
 
 	/** An attempt starts serving `window`: it is recorded there, and the window is as recent as the attempt. */
@@ -210,9 +238,16 @@ export class BotSpendWindows {
 	 * belongs to the window of the first attempt it delivers that serves one; a handoff whose attempts serve none, and
 	 * every entry that is no outside input, belong to the window before it. The earliest entry the walk reaches (the
 	 * transcript's first) opens the window nothing later opened. Undefined only for an entry the transcript does not hold.
+	 * A settled answer is remembered for every entry the walk passed; an unsettled one (a handoff whose attempts the
+	 * projection does not hold yet was passed) only until the projection holds more attempts.
 	 */
-	private windowOfEntry(entryId: string, snapshot: TaskRuntimeProjection | undefined, depth = 0): string | undefined {
-		const walked: string[] = [];
+	private windowOfEntry(
+		entryId: string,
+		snapshot: TaskRuntimeProjection | undefined,
+		depth = 0,
+	): EntryWindow | undefined {
+		const attempts = attemptCount(snapshot);
+		const walked = new Set<string>();
 		let settled = true;
 		let windowId: string | undefined;
 		let id: string | null = entryId;
@@ -223,22 +258,30 @@ export class BotSpendWindows {
 				windowId = remembered;
 				break;
 			}
+			const unsettled = this.unsettledWindows.get(id);
+			if (unsettled?.attempts === attempts) {
+				windowId = unsettled.windowId;
+				settled = false;
+				break;
+			}
 			const entry = this.transcript.getEntry(id);
-			if (!entry || walked.includes(id)) break;
-			walked.push(id);
+			if (!entry || walked.has(id)) break;
+			walked.add(id);
 			last = entry;
 			const kind = entryTurnOrigin(entry)?.k;
 			if (kind !== undefined && OPENING_KINDS.has(kind)) windowId = this.windowIdOf(entry.id);
 			else if (kind === "worker-result" && depth < 8) {
 				const attemptIds = deliveredAttemptIds(entry);
-				windowId = this.windowOfDelivered(attemptIds, snapshot, depth);
-				if (windowId === undefined && attemptIds.length > 0) settled = false;
+				const delivered = this.windowOfDelivered(attemptIds, snapshot, depth);
+				windowId = delivered?.windowId;
+				if (attemptIds.length > 0 && !delivered?.settled) settled = false;
 			}
 			id = entry.parentId;
 		}
 		if (windowId === undefined && last) windowId = this.windowIdOf(last.id);
-		if (windowId !== undefined && settled) this.remember(walked, windowId);
-		return windowId;
+		if (windowId === undefined) return undefined;
+		this.remember(walked, windowId, settled ? undefined : attempts);
+		return { windowId, settled };
 	}
 
 	/** The window of the first delivered attempt that serves one of this session's. */
@@ -246,22 +289,28 @@ export class BotSpendWindows {
 		attemptIds: readonly string[],
 		snapshot: TaskRuntimeProjection | undefined,
 		depth: number,
-	): string | undefined {
+	): EntryWindow | undefined {
 		for (const attemptId of attemptIds) {
 			const known = this.attemptWindows.get(attemptId);
-			if (known) return known;
+			if (known === null) continue;
+			if (known !== undefined) return { windowId: known, settled: true };
 			const attempt = snapshot?.attempts[attemptId];
 			const origin = attempt?.dispatch.receiptOrigin;
 			if (!origin || origin.sessionId !== this.transcript.getSessionId()) continue;
-			const windowId = this.windowOfEntry(origin.leafId, snapshot, depth + 1);
-			if (windowId !== undefined) return windowId;
+			const found = this.windowOfEntry(origin.leafId, snapshot, depth + 1);
+			if (found !== undefined) return found;
 		}
 		return undefined;
 	}
 
-	private remember(entryIds: readonly string[], windowId: string): void {
-		if (this.entryWindows.size + entryIds.length > MAX_ENTRIES_REMEMBERED) this.entryWindows.clear();
-		for (const entryId of entryIds) this.entryWindows.set(entryId, windowId);
+	/** Remembers `windowId` for each walked entry: settled, or unsettled at the projection's `attempts` count. */
+	private remember(entryIds: ReadonlySet<string>, windowId: string, attempts: number | undefined): void {
+		const memory = attempts === undefined ? this.entryWindows : this.unsettledWindows;
+		if (memory.size + entryIds.size > MAX_ENTRIES_REMEMBERED) memory.clear();
+		for (const entryId of entryIds) {
+			if (attempts === undefined) this.entryWindows.set(entryId, windowId);
+			else this.unsettledWindows.set(entryId, { windowId, attempts });
+		}
 	}
 
 	private windowIdOf(entryId: string): string {
@@ -288,14 +337,34 @@ export class BotSpendWindows {
 		return window;
 	}
 
-	/** Writes the changes with the ledger, keeping the newest windows and dropping the oldest beyond the kept many. */
-	private flush(): void {
-		const kept = [...this.windows.values()].sort((a, b) => a.updatedAt - b.updatedAt).slice(-MAX_WINDOWS_KEPT);
-		if (kept.length < this.windows.size) {
-			const keptIds = new Set(kept.map((window) => window.id));
-			for (const id of this.windows.keys()) if (!keptIds.has(id)) this.windows.delete(id);
-			this.ledger.touch();
+	/**
+	 * Writes the changes with the ledger. Past the kept many, the oldest windows no worker can still serve are dropped
+	 * until the kept many remain or none such is left: a window a live worker serves is never dropped.
+	 */
+	private flush(snapshot: TaskRuntimeProjection | undefined): void {
+		const excess = this.windows.size - MAX_WINDOWS_KEPT;
+		if (excess > 0) {
+			const now = this.ports.now();
+			const done = [...this.windows.values()]
+				.filter((window) => !this.mayStillServe(window, snapshot, now))
+				.sort((a, b) => a.updatedAt - b.updatedAt)
+				.slice(0, excess);
+			for (const window of done) this.windows.delete(window.id);
+			if (done.length > 0) this.ledger.touch();
 		}
 		this.ledger.flush();
+	}
+
+	/**
+	 * Whether a worker serving `window` may still run: one of its attempts has not ended, or the projection does not show
+	 * it (none yet after a reopen, or one that no longer holds it) and the window changed within the unseen retention.
+	 */
+	private mayStillServe(window: SpendWindowRecord, snapshot: TaskRuntimeProjection | undefined, now: number): boolean {
+		return window.attemptIds.some((attemptId) => {
+			const attempt = snapshot?.attempts[attemptId];
+			return attempt
+				? ACTIVE_ATTEMPT_STATUSES.has(attempt.status)
+				: now - window.updatedAt < UNSEEN_ATTEMPT_RETENTION_MS;
+		});
 	}
 }
