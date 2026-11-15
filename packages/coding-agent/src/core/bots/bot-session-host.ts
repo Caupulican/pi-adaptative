@@ -209,7 +209,7 @@ export class BotSessionHost {
 	/** The bot's earlier worker conversations, indexed in its home. */
 	private readonly history: BotHistory;
 	private readonly entries = new Map<string, BotSessionEntry>();
-	/** The bots whose session state was told as kept in the owner's home: told once per process. */
+	/** Why each bot's session state was told as kept in the owner's home: each bot's reason told once per process. */
 	private readonly toldNotMoved = new Set<string>();
 	/** Bots whose change the host noticed itself was not applied (`applyRecordChange`): told once until one applies. */
 	private readonly toldChangeNotApplied = new Set<string>();
@@ -705,8 +705,9 @@ export class BotSessionHost {
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),
 				notMoved: (kept) => {
-					if (this.toldNotMoved.has(agentId)) return;
-					this.toldNotMoved.add(agentId);
+					const told = `${agentId}\0${kept.reason}`;
+					if (this.toldNotMoved.has(told)) return;
+					this.toldNotMoved.add(told);
 					this.ports.warn(
 						kept.reason === "in-both-homes"
 							? words.botSessionStateInBothHomes(agentId, kept.ownerBundle)
