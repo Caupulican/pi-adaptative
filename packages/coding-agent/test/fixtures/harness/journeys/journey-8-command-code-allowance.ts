@@ -448,7 +448,6 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 		const readingLanded = createBarrier();
 		const runningResumed = createBarrier();
 		const runningWake = createBarrier();
-		const usageWaits = createBarrier();
 		account = {
 			hold: runningFirstRequest.promise,
 			fiveHourResetIso: new Date(runningResetAtMs).toISOString(),
@@ -480,12 +479,8 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 			source: "sdk_models",
 			models: [...running.getRouterCandidatePool().models, ccModel],
 		});
-		const runningWarnings: string[] = [];
-		running.subscribe((event) => {
-			if (event.type !== "warning") return;
-			runningWarnings.push(event.message);
-			if (event.message.includes("its subscription's usage is used up")) usageWaits.release();
-		});
+		const warningsMark = world.warnings.length;
+		const runningWarnings = (): string[] => world.warnings.slice(warningsMark);
 		const exhaustedLines = (): string[] =>
 			running
 				.getModelRouterStatus()
@@ -508,7 +503,7 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 							type: "toolCall",
 							id: "j8d-running-read-1",
 							name: "read",
-							arguments: { path: join(HARNESS_PROJECT_CWD, "notes.md") },
+							arguments: { path: "notes.md" },
 						},
 					],
 					stopReason: "toolUse",
@@ -553,7 +548,13 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 
 		await withDeadline(trace, "J8D running start turn", running.prompt(RUNNING_PROMPT));
 		await withDeadline(trace, "J8D running worker's reading landed", readingLanded.promise);
-		await withDeadline(trace, "J8D running worker waits for the usage reset", usageWaits.promise);
+		await withDeadline(
+			trace,
+			"J8D running worker waits for the usage reset",
+			world.whenWarnings(warningsMark, (seen) =>
+				seen.some((message) => message.includes("its subscription's usage is used up")),
+			),
+		);
 		const retryDelayMs = await withDeadline(
 			trace,
 			"J8D running worker's usage-reset retry armed",
@@ -571,7 +572,7 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 					attempt.retry?.retriesUsed,
 					attempt.retry?.resetWaits,
 				]),
-				waits: runningWarnings.filter((message) =>
+				waits: runningWarnings().filter((message) =>
 					message.startsWith(
 						`Worker ${runningStart.laneId}: its subscription's usage is used up; it resumes on its own when the usage resets (`,
 					),
@@ -603,7 +604,8 @@ export async function runJourney8CommandCodeAllowancePhase(world: HarnessWorld):
 			{
 				laneStatus: running.getLaneRecords().find((record) => record.laneId === runningStart.laneId)?.status,
 				models: resumed.map((request) => `${request.model.provider}/${request.model.id}`),
-				waits: runningWarnings.filter((message) => message.includes("its subscription's usage is used up")).length,
+				waits: runningWarnings().filter((message) => message.includes("its subscription's usage is used up"))
+					.length,
 				exhausted: exhaustedLines(),
 			},
 			"after the reset the worker resumes on the same Command Code model and finishes, with nothing marked exhausted",
