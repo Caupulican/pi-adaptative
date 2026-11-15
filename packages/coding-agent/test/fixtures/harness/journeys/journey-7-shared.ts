@@ -165,8 +165,16 @@ export function enqueueRoot(world: HarnessWorld, ...steps: ScriptStep[]): void {
  * worker generation, so two bots that share a model cannot be confused for each other.
  */
 export function soulMatcher(fragment: string): (request: ScriptedRequest) => boolean {
-	return (request) => (request.context.systemPrompt ?? "").includes(fragment);
+	let matcher = soulMatchers.get(fragment);
+	if (!matcher) {
+		matcher = (request) => (request.context.systemPrompt ?? "").includes(fragment);
+		soulMatchers.set(fragment, matcher);
+	}
+	return matcher;
 }
+
+/** One matcher per soul, so a track scripted again for the same bot keeps the identity the provider checks. */
+const soulMatchers = new Map<string, (request: ScriptedRequest) => boolean>();
 
 /** Scripts one bot's requests on its own track, told apart from the actors that share its model. */
 export function enqueueBot(
