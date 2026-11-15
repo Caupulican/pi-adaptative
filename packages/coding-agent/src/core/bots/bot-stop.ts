@@ -24,7 +24,7 @@ import { readSessionHeaderResult } from "../../kernel/session/session-header.ts"
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
+import { OWNER_STOPPED_REASON, stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -140,8 +140,9 @@ function homeSessionIds(agentDir: string, agentId: string, warn: (message: strin
 
 /**
  * The work of bot `agentId`'s session this process has loaded, ended for `reasonCode` as the owner's stop of a hosted bot
- * ends it, for a release of the bot (retired, or off the session path): its whole fleet (`cancelOwnFleet`), then the jobs
- * its home's other sessions placed. What it left unended.
+ * ends it, for a release of the bot (retired, or off the session path) and for a stop that could not be recorded or taken
+ * ({@link endUnrecordedStopWork}): its whole fleet (`cancelOwnFleet`), then the jobs its home's other sessions placed.
+ * What it left unended.
  */
 export function endLoadedBotWork(
 	agentDir: string,
@@ -153,6 +154,31 @@ export function endLoadedBotWork(
 	const outcome = session.backgroundLanes.cancelOwnFleet(reasonCode);
 	endHomePlacedJobs(agentDir, agentId, (ids) => ids.filter((id) => id !== session.sessionId), reasonCode, warn);
 	return outcome;
+}
+
+/**
+ * The owner's stop of bot `agentId`, whose session this process hosts, when it could not be recorded or taken: what needs
+ * no record ends all the same, its foreground turn (`stopTurn`) and its own work ({@link endLoadedBotWork}). Its goal hold
+ * and usage-wait decline are dated by the stop's record and wait for it (a stop written and not taken is tried again).
+ * Whether its workers were ended; a failure to end them is told to the owner with its cause.
+ */
+export function endUnrecordedStopWork(
+	agentDir: string,
+	agentId: string,
+	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
+	stopTurn: () => void,
+	warn: (message: string) => void,
+): boolean {
+	stopTurn();
+	try {
+		const outcome = endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON, warn);
+		if (outcome.failed.length > 0 || outcome.managed.length > 0)
+			warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
+		return true;
+	} catch (error) {
+		warn(interfaceText().botTeam.botStopWorkersNotEnded(agentId, botFailureText(agentId, error)));
+		return false;
+	}
 }
 
 /**

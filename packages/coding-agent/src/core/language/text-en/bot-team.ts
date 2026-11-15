@@ -153,6 +153,9 @@ export const BOT_TEAM = {
 	botWordsWaitBehindStop: (agentId: string) =>
 		`Left in ${agentId}'s inbox behind its stop, which could not be applied yet: your words reach the bot once the stop is taken.`,
 	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
+	/** The owner's stop of a bot hosted here could not be recorded or taken, and ending its workers directly failed too. */
+	botStopWorkersNotEnded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop could not end its workers (${reason}); they keep running until a stop of it is applied.`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,
 	/** The owner's stop of a closed bot found its saved session's file holding another session, and left the file. */
