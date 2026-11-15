@@ -101,7 +101,7 @@ export const BOT_TEAM = {
 	botSessionHolderPhone: (pid: number) => `o daemon da sessão do telefone (processo ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `outro hospedeiro de bot (processo ${pid})`,
 	botSessionHolderOnMachine: (holder: string, machine: string) =>
-		`${holder} em ${machine}, liberada quando ele fechar a conversa ou, se terminou sem liberá-la, quando o pi naquela máquina a abrir`,
+		`${holder} em ${machine}, liberada quando esse processo a fechar ou, se ele terminou sem liberá-la, quando o pi naquela máquina a abrir`,
 	botSessionFileLinked: (path: string) =>
 		`o arquivo de sessão de bot ${path} é um link simbólico, que as sessões de bot não seguem (uma escrita trocaria o link por uma cópia); troque o link pelo próprio arquivo`,
 	botSessionHomeChanged: (agentId: string) =>
