@@ -8,7 +8,8 @@
  * no holder is ended by age, and a registry left with none is removed. A record naming only a hostname (an older build's)
  * may be another system's under the same name (Windows beside WSL), whose pid cannot be probed here: it is left to the
  * acquisition of its session, as before. A holder on another machine, or one that cannot be judged yet, is kept: only a
- * process on its own host proves it gone, which this same sweep does there when pi starts on that machine. A registry that does not read, or that
+ * process on its own host proves it gone, which pi there does when it opens the session, and this same sweep at its start
+ * for a record carrying that machine's id. A registry that does not read, or that
  * names a session whose tombstone it is not beside, is left as it is and logged.
  */
 import { readdirSync } from "node:fs";

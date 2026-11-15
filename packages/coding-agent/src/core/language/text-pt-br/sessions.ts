@@ -65,7 +65,7 @@ export const SESSIONS = {
 		releasedByWrite: "um trabalho gravado nela",
 		releasedByStartup: "a limpeza de inicialização",
 		keptElsewhere: (session: string, place: HolderPlace) =>
-			`Sessão ${session}: o estado guardado antigo dela fica enquanto um processo ${place.at} mantém a sessão; essa retenção termina quando o pi rodar de novo ${place.there}.`,
+			`Sessão ${session}: o estado guardado antigo dela fica enquanto um processo ${place.at} mantém a sessão; essa retenção termina quando o pi ${place.there} abrir a sessão.`,
 		removalAwaitsBotHistory: (session: string) =>
 			`Sessão ${session}: a limpeza inacabada dela espera até o histórico de todos os bots poder ser lido; abrir a sessão a cancela.`,
 		homeWarningsOmitted: (count: number) =>

@@ -61,7 +61,7 @@ export const SESSIONS = {
 		 * state the cleanup would remove: only pi there can prove it gone.
 		 */
 		keptElsewhere: (session: string, place: HolderPlace) =>
-			`Session ${session}: its old stored state stays while a process ${place.at} holds the session; that hold ends when pi runs ${place.there} again.`,
+			`Session ${session}: its old stored state stays while a process ${place.at} holds the session; that hold ends once pi ${place.there} opens the session.`,
 		/** A cleanup of one of the owner's sessions cannot finish while a bot's history does not read. */
 		removalAwaitsBotHistory: (session: string) =>
 			`Session ${session}: its unfinished cleanup waits until every bot's history can be read; opening the session cancels it.`,

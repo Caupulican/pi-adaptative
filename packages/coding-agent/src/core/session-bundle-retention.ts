@@ -116,10 +116,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * removal that began and stopped too (`session-bundle-lifecycle.ts`, admission mode `open`).
  *
  * Before any bundle, every home's holds of processes that ended without letting go (a crash) are swept, whatever its
- * bundles: each lease registry's holders proven dead on this host (`sweepSessionLeaseRegistries`) and a bot home's
- * `host.lock` whose process is (`removeDeadProcessLock`); nothing is ended by age, and a holder on another machine is kept.
- * Such a holder keeps a bundle the gates would remove; the owner is told on which machine, where its hold ends when pi
- * runs there again.
+ * bundles: each lease registry's holders, and a bot home's `host.lock`, whose record names this machine by its machine id
+ * and whose process is proven dead (`sweepSessionLeaseRegistries`, `removeDeadProcessLock`); nothing is ended by age, a
+ * record naming only a hostname is left to its acquisition, and a holder on another machine is kept. Such a holder keeps
+ * a bundle the gates would remove; the owner is told on which machine, where its hold ends once pi there opens the session.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
  * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
@@ -870,7 +870,10 @@ async function sweepBundle(
 	}
 }
 
-/** Removes a bot home's host lock whose process is proven gone here; one that cannot be judged or locked is left, logged. */
+/**
+ * Removes a bot home's host lock whose record names this machine by its machine id and whose process is proven gone; any
+ * other, and one that cannot be locked (logged), is left.
+ */
 function sweepBotHostLock(homeDir: string): void {
 	try {
 		removeDeadProcessLock(botHomeHostLockFile(homeDir));
@@ -884,7 +887,8 @@ function sweepBotHostLock(homeDir: string): void {
 
 /**
  * Names the machine of each holder on another machine that keeps the session's bundle from its retention: only a process
- * there can prove it gone (the start sweep there, `sweepSessionLeaseRegistries`), so the owner is told where.
+ * there can prove it gone (pi there opening the session, or its start sweep for a record carrying that machine's id), so
+ * the owner is told where.
  */
 function reportKeptElsewhere(
 	holders: readonly SessionLeaseHolderRef[],
