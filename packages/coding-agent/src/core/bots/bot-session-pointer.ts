@@ -5,8 +5,8 @@
  * session it creates when the home has none); after that the choice is the pointer's, never a file's modification time.
  * {@link botSessionChoice} is the one reader, for the host's load and for every view of the bot's conversation alike.
  */
-import { existsSync, lstatSync, renameSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, lstatSync, readlinkSync, renameSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { sessionBundleDeletionPolicy } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
@@ -87,9 +87,22 @@ export class BotSessionLinkError extends BotOwnerError {
 	}
 }
 
+/**
+ * How a read of the bot's home meets a pointer or session file that is a symbolic link: a read for a session's writer
+ * refuses it ({@link BotSessionLinkError}); a read that only reads (a release) reads the file the link names.
+ */
+export type BotSessionLinks = "refuse" | "follow";
+
+/** The path a read of `path` reads: `path` itself, or for a symbolic link the path it names (see {@link BotSessionLinks}). */
+function readPath(path: string, links: BotSessionLinks): string {
+	if (!lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) return path;
+	if (links === "refuse") throw new BotSessionLinkError(path);
+	return resolve(dirname(path), readlinkSync(path));
+}
+
 /** Throws {@link BotSessionLinkError} when `path` is a symbolic link. */
-function refuseLink(path: string): void {
-	if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new BotSessionLinkError(path);
+export function refuseLink(path: string): void {
+	readPath(path, "refuse");
 }
 
 /**
@@ -98,9 +111,12 @@ function refuseLink(path: string): void {
  * link is thrown ({@link BotSessionLinkError}), as is a failure to read it, so the load is asked again (after a backoff
  * when it passes on its own: `storeFailure`).
  */
-function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerSetAsideReason | undefined {
-	refuseLink(path);
-	const header = readSessionHeaderResult(path);
+function pointedFileFault(
+	path: string,
+	pointer: BotSessionPointer,
+	links: BotSessionLinks,
+): BotPointerSetAsideReason | undefined {
+	const header = readSessionHeaderResult(readPath(path, links));
 	if (header.ok)
 		return header.header.id === pointer.sessionId
 			? undefined
@@ -120,14 +136,15 @@ function pointedFileFault(path: string, pointer: BotSessionPointer): BotPointerS
 /**
  * The bot's session as its home records it. A pointer counts when it parses, its file holds its session (or is missing
  * or empty) and that session was not deleted; only those contents set it aside. A pointer or session file that is a
- * symbolic link ({@link BotSessionLinkError}), and any other failure to read the pointer, its file, a tombstone or the
- * home's session files, is thrown to the reader: the home is not judged on what it could not read.
+ * symbolic link is refused or read through, as `links` says ({@link BotSessionLinks}); any other failure to read the
+ * pointer, its file, a tombstone or the home's session files is thrown to the reader: the home is not judged on what it
+ * could not read.
  */
-export function botSessionChoice(agentDir: string, home: BotHome): BotSessionChoice {
+export function botSessionChoice(agentDir: string, home: BotHome, links: BotSessionLinks): BotSessionChoice {
 	const chosen = (setAside?: BotPointerSetAsideReason): BotSessionChoice => {
 		let newest: ReturnType<typeof newestSessionFileIn>;
 		try {
-			newest = newestSessionFileIn(home.sessionsDir, (id) => deleted(agentDir, home, id));
+			newest = newestSessionFileIn(home.sessionsDir, (id) => deleted(agentDir, home, id), links);
 		} catch (error) {
 			if (error instanceof SessionFileLinkError) throw new BotSessionLinkError(error.path, { cause: error });
 			throw error;
@@ -138,10 +155,13 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 			...(setAside === undefined ? {} : { setAside }),
 		};
 	};
-	refuseLink(home.pointerFile);
 	let text: string | undefined;
 	try {
-		text = readOptionalBoundedTextFileSync(home.pointerFile, MAX_POINTER_BYTES, "Bot session pointer");
+		text = readOptionalBoundedTextFileSync(
+			readPath(home.pointerFile, links),
+			MAX_POINTER_BYTES,
+			"Bot session pointer",
+		);
 	} catch (error) {
 		// A pointer that is not a regular file (a directory, a FIFO), or larger than any pointer, is content that does not count.
 		if (!(error instanceof BoundedReadError) || error.reason === "deadline") throw error;
@@ -151,7 +171,7 @@ export function botSessionChoice(agentDir: string, home: BotHome): BotSessionCho
 	const pointer = parsePointer(text);
 	if (!pointer) return chosen({ kind: "not-a-pointer" });
 	const path = join(home.sessionsDir, pointer.file);
-	const fault = pointedFileFault(path, pointer);
+	const fault = pointedFileFault(path, pointer, links);
 	if (fault) return chosen(fault);
 	if (deleted(agentDir, home, pointer.sessionId)) return chosen({ kind: "deleted", sessionId: pointer.sessionId });
 	return { kind: "recorded", pointer, path };
@@ -183,7 +203,7 @@ export function settleBotSessionPointer(
 	home: BotHome,
 	setAside: (file: string, reason: BotPointerSetAsideReason) => void,
 ): BotSessionPointer | undefined {
-	const choice = botSessionChoice(agentDir, home);
+	const choice = botSessionChoice(agentDir, home, "refuse");
 	if (choice.kind === "recorded") return choice.pointer;
 	if (choice.setAside !== undefined) {
 		const file = setAsideName(home);

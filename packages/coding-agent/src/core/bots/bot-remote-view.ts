@@ -20,7 +20,7 @@ import type { TimerSource } from "../util/timer-port.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
-import { botSessionChoice } from "./bot-session-pointer.ts";
+import { type BotSessionLinks, botSessionChoice } from "./bot-session-pointer.ts";
 
 /** How often the hosts a view holds are judged alive again: a host that was killed publishes nothing. */
 const REMOTE_LIVENESS_MS = 5 * 1000;
@@ -29,8 +29,12 @@ const REMOTE_LIVENESS_MS = 5 * 1000;
 export type SavedBotSession = { readonly id: string; readonly file: string; readonly cwd?: string };
 
 /** The file of the session the bot's home keeps its conversation in (`botSessionChoice`), if it has one. */
-function savedSessionFile(agentDir: string, agentId: string): { id: string; file: string } | undefined {
-	const choice = botSessionChoice(agentDir, botHomeOf(agentDir, agentId));
+export function savedSessionFile(
+	agentDir: string,
+	agentId: string,
+	links: BotSessionLinks,
+): { id: string; file: string } | undefined {
+	const choice = botSessionChoice(agentDir, botHomeOf(agentDir, agentId), links);
 	if (choice.kind === "recorded") return { id: choice.pointer.sessionId, file: choice.path };
 	return choice.newest === undefined ? undefined : { id: choice.newest.sessionId, file: choice.newest.path };
 }
@@ -42,7 +46,7 @@ function savedSessionFile(agentDir: string, agentId: string): { id: string; file
  * cannot be read is thrown, as {@link botSessionChoice} throws.
  */
 export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
-	const saved = savedSessionFile(agentDir, agentId);
+	const saved = savedSessionFile(agentDir, agentId, "refuse");
 	if (!saved) return undefined;
 	const header = readSessionHeaderResult(saved.file);
 	if (!header.ok && header.reason === "unreadable" && !isMissingFileError(header.cause)) throw header.cause;
@@ -216,7 +220,7 @@ export class BotRemoteView {
 	readMessages(agentId: string): AgentMessage[] | undefined {
 		this.watch();
 		const agentDir = this.ports.agentDir();
-		const file = savedSessionFile(agentDir, agentId)?.file;
+		const file = savedSessionFile(agentDir, agentId, "refuse")?.file;
 		if (!file) return undefined;
 		const stat = statSync(file, { throwIfNoEntry: false });
 		if (!stat) return undefined;

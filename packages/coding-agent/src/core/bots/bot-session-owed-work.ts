@@ -21,6 +21,7 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
+import { refuseLink } from "./bot-session-pointer.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -90,7 +91,8 @@ interface RecordedRefusal {
 /**
  * The invariant of the one place a bot's session id is chosen (the host's `load`): the bot's watches target that id. A
  * watch is held by the runtime of the session it targets, so a watch another session of the bot's home armed would be held
- * by none once the bot continues another: such watches are cancelled. Returns how many were.
+ * by none once the bot continues another: such watches are cancelled. Returns how many were. A session file that is a
+ * symbolic link stops the load before any is cancelled (`BotSessionLinkError`), as the load's own choice does.
  */
 export function cancelOtherSessionsWatches(
 	store: WatchStore,
@@ -100,7 +102,11 @@ export function cancelOtherSessionsWatches(
 ): number {
 	const others = readdirSync(sessionsDir)
 		.filter((name) => name.endsWith(".jsonl"))
-		.flatMap((name) => readSessionHeader(join(sessionsDir, name))?.id ?? [])
+		.map((name) => join(sessionsDir, name))
+		.flatMap((path) => {
+			refuseLink(path);
+			return readSessionHeader(path)?.id ?? [];
+		})
 		.filter((id) => id !== sessionId);
 	let cancelled = 0;
 	for (const other of others)

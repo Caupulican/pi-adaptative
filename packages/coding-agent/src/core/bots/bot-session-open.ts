@@ -75,7 +75,7 @@ export function openHostedBotSession(
  * pointer, the move and a pointer that does not count are its host's.
  */
 export function continueBotSession(agentDir: string, home: BotHome, cwd: string): SessionManager {
-	const choice = botSessionChoice(agentDir, home);
+	const choice = botSessionChoice(agentDir, home, "refuse");
 	if (choice.kind === "recorded") return openRecorded(agentDir, home, choice.pointer, choice.path, cwd);
 	if (choice.newest === undefined) return createInHome(agentDir, home, cwd);
 	const { path } = choice.newest;

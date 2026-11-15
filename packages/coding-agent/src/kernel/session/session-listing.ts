@@ -1,7 +1,7 @@
 /** Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. */
-import { createReadStream, existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Message, TextContent } from "@caupulican/pi-ai/types";
 import { isMissingFileError } from "../storage/atomic-file.ts";
@@ -94,12 +94,14 @@ export class SessionFileLinkError extends Error {
  * The newest session file in `dir` by modification time, with its header (auto-learn sessions and those `skip` names
  * left out), for a caller that must tell a directory that holds none from one it could not read: a missing directory
  * holds none, and a file removed while it is read, one that is not a regular file and one whose first line is not a
- * session header are passed over. A symbolic link among them is thrown ({@link SessionFileLinkError}), as is any other
- * failure to read the directory, a header or a file's time.
+ * session header are passed over. A symbolic link among them is thrown ({@link SessionFileLinkError}) for a caller that
+ * writes its session (`links` "refuse"), and read at the path it names for one that only reads (`links` "follow"). Any
+ * other failure to read the directory, a header or a file's time is thrown.
  */
 export function newestSessionFileIn(
 	dir: string,
-	skip?: (sessionId: string) => boolean,
+	skip: ((sessionId: string) => boolean) | undefined,
+	links: "refuse" | "follow",
 ): { path: string; header: SessionHeader } | undefined {
 	let names: string[];
 	try {
@@ -111,8 +113,9 @@ export function newestSessionFileIn(
 	let newest: { path: string; header: SessionHeader; mtimeMs: number } | undefined;
 	for (const name of names.filter((entry) => entry.endsWith(".jsonl"))) {
 		const path = join(dir, name);
-		if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new SessionFileLinkError(path);
-		const read = readSessionHeaderResult(path);
+		const linked = lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() === true;
+		if (linked && links === "refuse") throw new SessionFileLinkError(path);
+		const read = readSessionHeaderResult(linked ? resolve(dir, readlinkSync(path)) : path);
 		if (!read.ok) {
 			const passed = read.reason !== "unreadable" || isMissingFileError(read.cause);
 			if (passed || (read.cause instanceof BoundedReadError && read.cause.reason === "not_regular")) continue;

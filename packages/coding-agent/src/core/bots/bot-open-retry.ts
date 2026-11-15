@@ -1,7 +1,8 @@
 /**
  * The opening of a bot's session again after a failure that passes on its own, judged by where it came from: a read of
  * the bot's session store (its pointer, its session file, the move of its state, its lease registry) that found the
- * process or the system out of file handles, a file or lock busy, or a file replaced while it was read (`busy`), a disk
+ * process or the system out of file handles, a file busy, or a file replaced while it was read, or that waited past a
+ * lock another process holds, wherever the lock lies (the bot team's store, a session file) (`busy`), a disk
  * that failed to read (`failing`), a file this process may not read (`permission`), or a holder of the bot's
  * conversation that keeps its host out (`held`: `SessionHeldError`). Such a failure is not the bot's definition's, so
  * it does not wait for the definition or the inbox to change: the session is opened again after a backoff that doubles
@@ -14,6 +15,7 @@ import { SessionHeldError } from "../../kernel/session/session-bundle-lifecycle.
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { isLockBusy } from "./bot-failure-words.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 
 export const BOT_OPEN_RETRY_FIRST_MS = 2_000;
@@ -29,9 +31,6 @@ const STORE_CODES: ReadonlyMap<string, Exclude<BotOpenFailure, "held">> = new Ma
 	["ENFILE", "busy"],
 	["EAGAIN", "busy"],
 	["EBUSY", "busy"],
-	// A lock another process kept past the wait (proper-lockfile's, or the kernel lock's deadline) passes on its own.
-	["ELOCKED", "busy"],
-	["ELOCKDEADLINE", "busy"],
 	["EIO", "failing"],
 	["EACCES", "permission"],
 	["EPERM", "permission"],
@@ -58,21 +57,19 @@ export class BotSessionStoreError extends BotOwnerError {
 /**
  * `error` as {@link BotSessionStoreError} when it is a read of bot `agentId`'s session store that passes on its own,
  * else `error` itself. `within`: the directory the store's files of this step lie in (a step that does other work
- * too: only a file error on a path inside it is the store's); undefined when the whole step reads the store.
+ * too: only a file error on a path inside it is the store's); undefined when the whole step reads the store. A lock
+ * another process holds past the wait (`isLockBusy`) is busy wherever it lies: it passes on its own, and a Windows
+ * `EPERM` that is such contention is not a permission.
  */
 export function storeFailure(agentId: string, error: unknown, within: string | undefined): unknown {
+	if (isLockBusy(error)) return new BotSessionStoreError(agentId, "busy", error);
 	if (error instanceof FileSnapshotChangedError)
 		return within === undefined ? new BotSessionStoreError(agentId, "busy", error) : error;
-	const { code, path, file, filePath } = (error ?? {}) as NodeJS.ErrnoException & {
-		file?: unknown;
-		filePath?: unknown;
-	};
+	const { code, path } = (error ?? {}) as NodeJS.ErrnoException;
 	const failure = typeof code === "string" ? STORE_CODES.get(code) : undefined;
 	if (failure === undefined) return error;
 	if (within !== undefined) {
-		// The file a failure names: an errno's `path`, a lock's `file` (proper-lockfile) or `filePath` (its deadline).
-		const named = [path, file, filePath].find((value): value is string => typeof value === "string");
-		const offset = named === undefined ? ".." : relative(within, named);
+		const offset = typeof path === "string" ? relative(within, path) : "..";
 		if (offset.startsWith("..") || isAbsolute(offset)) return error;
 	}
 	return new BotSessionStoreError(agentId, failure, error);

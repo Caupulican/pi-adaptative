@@ -58,7 +58,7 @@ import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
-import { botFailureText } from "./bot-failure-words.ts";
+import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
@@ -76,7 +76,7 @@ import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
-import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
+import { BotRemoteView, remoteHostActive, savedSessionFile } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
@@ -435,7 +435,8 @@ export class BotSessionHost {
 		} catch (error) {
 			// Another host runs it, or it may open later (a holder keeps its host out, a passing read failure): the words wait
 			// in its inbox, taken by that host or by this one's next open, which the send arms (`BotOwedWork.openLater`).
-			if (!(error instanceof BotSessionHeldError) && botOpenFailure(error) === undefined) throw error;
+			if (!(error instanceof BotSessionHeldError) && botOpenFailure(error) === undefined)
+				throw inOwnerWords(agentId, error);
 			return sendToBotHost(
 				{
 					agentDir: this.ports.agentDir(),
@@ -890,7 +891,7 @@ export class BotSessionHost {
 				this.takeInbox(entry.agentId);
 				return this.armIdle(entry);
 			}
-			if (this.recheckIfIdle(entry)) return;
+			if (this.recheckIfIdle(entry)) return this.armIdle(entry);
 			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
 			if (owesWatchWork(this.ports.store(), entry.session.sessionId, this.idleTimers().now()))
 				return this.armIdle(entry);
@@ -1031,24 +1032,22 @@ export class BotSessionHost {
 
 	/**
 	 * {@link recordChanged} for a change the host noticed itself (a run refused on an outdated or off-path definition, a
-	 * change that came while the session worked), from a microtask or a settle with no caller to throw to. A failure for a
-	 * bot not proven on the session path (it left it, or its record did not read) leaves its release owed, run again after
-	 * a backoff that forgets it once the bot reads as on the path; any other is told once until a change applies, and
-	 * applies at the bot's next change or message.
+	 * change that came while the session worked), with no caller to throw to. A failure for a bot whose record read as off
+	 * the session path leaves its release owed (retried after a backoff); any other, an unread record among them, is told
+	 * once until a change applies, and is applied again once the session is idle or at the bot's next change or message.
 	 */
 	private applyRecordChange(agentId: string): void {
-		let onPath = false;
+		let offPath = false;
 		try {
 			const record = this.ports.store().getBot(agentId);
-			onPath = record !== undefined && !record.retired && this.runsAsSession(record);
+			offPath = record === undefined || record.retired || !this.runsAsSession(record);
 			if (record) this.recordChanged(record);
 			this.toldChangeNotApplied.delete(agentId);
 		} catch (error) {
-			if (!onPath) {
-				this.oweRelease(agentId, error);
-				return;
-			}
-			if (this.toldChangeNotApplied.has(agentId)) return;
+			const entry = this.entries.get(agentId);
+			if (offPath) this.oweRelease(agentId, error);
+			else if (entry) entry.recheckWhenIdle = true;
+			if (offPath || this.toldChangeNotApplied.has(agentId)) return;
 			this.toldChangeNotApplied.add(agentId);
 			this.ports.warn(interfaceText().botTeam.botRecordChangeNotApplied(agentId, botFailureText(agentId, error)));
 		}
@@ -1100,7 +1099,8 @@ export class BotSessionHost {
 	prepareRelease(agentId: string): () => void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new BotOwnerError(interfaceText().botTeam.botHasActiveWork(agentId));
-		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
+		// Read through a link: a release only reads, so a linked pointer or session file never keeps the bot.
+		const sessionId = entry?.session.sessionId ?? savedSessionFile(this.ports.agentDir(), agentId, "follow")?.id;
 		if (sessionId !== undefined) this.ports.store().listRoutines({ sessionId, scope: "own-watches" });
 		this.readInbox(agentId);
 		return () => this.finishRelease(agentId, sessionId, entry !== undefined);
