@@ -62,12 +62,6 @@ export interface BotChargeReport {
 export interface BotCharge {
 	readonly usage: Usage;
 	readonly report: BotChargeReport;
-	/**
-	 * The session of a root that keeps no file (`--no-session`, an in-memory SDK session) that took the charge: it holds it
-	 * only while it lives, so the charge stays pending for a root with a file and is never taken by another root without
-	 * one (after `/new`, a session switch or a restart). Absent while no such root took it.
-	 */
-	heldBy?: string;
 }
 
 /** How far the bot's charges reach. */
@@ -131,9 +125,7 @@ function parseCharge(value: unknown): BotCharge | undefined {
 		typeof recordedAt !== "string"
 	)
 		return undefined;
-	const report = { agentId, reportId, sessionId, provider, model, from, through, recordedAt };
-	if (value.heldBy !== undefined && typeof value.heldBy !== "string") return undefined;
-	return { usage: value.usage, report, ...(value.heldBy !== undefined ? { heldBy: value.heldBy } : {}) };
+	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model, from, through, recordedAt } };
 }
 
 function parseChargeState(value: unknown): BotChargeState | undefined {

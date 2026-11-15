@@ -132,8 +132,8 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 			return ceilings.filter((ceiling) => ceiling.usd > 0);
 		},
 		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
-		// only once read back from its file. A session that keeps no file never holds it so: the charge stays in the bot's
-		// ledger, held by that session alone (`BotCharge.heldBy`), until a session with a file takes it.
+		// only once read back from its file. A session that keeps no file holds it as it holds its own spend, for as long as
+		// it lives: the charge is settled when it takes it (`BotTurnAccounting`).
 		reportUsage: (usage, report) =>
 			deliverSpawnedUsageReceipt(deps.getSessionManager(), deps, usage, {
 				parentSessionId: deps.getSessionId(),
@@ -147,7 +147,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				recordedAt: report.recordedAt,
 			}),
 		// Where its charges are read back: the session files of every project (or the custom session directory) and the live
-		// session's entries, each held once its file holds it exactly.
+		// session's entries, each held once it holds it for good.
 		chargeHolder: () => {
 			const session = deps.getSessionManager();
 			return {
@@ -155,17 +155,18 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				root: session.usesDefaultSessionDir(),
 				live: {
 					file: session.getSessionFile(),
-					heldBy: session.isPersisted() ? undefined : session.getSessionId(),
 					entries: session.getEntries(),
-					// The row its file holds is the entry as it was written: the same JSON.
-					persisted: (entry) =>
-						entry.type === "custom" &&
-						classifyCustomEntryPersisted(
-							session,
-							entry.id,
-							entry.customType,
-							(data) => JSON.stringify(data) === JSON.stringify(entry.data),
-						) === "persisted",
+					// A session that keeps no file holds a charge as it holds its own spend, while it lives; one with a file holds
+					// the row its file holds as the entry was written: the same JSON.
+					holds: (entry) =>
+						!session.isPersisted() ||
+						(entry.type === "custom" &&
+							classifyCustomEntryPersisted(
+								session,
+								entry.id,
+								entry.customType,
+								(data) => JSON.stringify(data) === JSON.stringify(entry.data),
+							) === "persisted"),
 				},
 			};
 		},

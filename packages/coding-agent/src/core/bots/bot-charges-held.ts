@@ -5,11 +5,12 @@
  * charges up to the furthest of them their files hold, field by field: charges are delivered in range order, a later
  * range only once every earlier one reached a root, so the furthest end held covers every range before it.
  *
- * Only a session file holds a charge for good. The session files are read as they were written (an accounting projection
+ * Only a session file holds a charge for good, or a live root that keeps no file, which holds it as it holds its own
+ * spend: for as long as it lives (a charge to it is settled when it takes it, `BotTurnAccounting`). The session files are read as they were written (an accounting projection
  * overlays a file without changing it, and may show a grouped charge under another type), only those changed since
  * `since` (when the bot session began, or its transcript's last charge mark): a file not written since holds none of its
  * charges past what the mark holds. A live root's file is not read: its
- * entries are, each charge counted held once the root's file holds it exactly (`persisted`), and the ones it holds
+ * entries are, each charge counted held once the root holds it for good (`holds`), and the ones it holds
  * unwritten are taken back as charges still to deliver (`unwritten`), since a root that ends unwritten drops them; one
  * held unwritten that does not name its whole range is counted neither: its range is charged again, and the readers take
  * an overlapping range once (`ChargedRanges`). A file that only grows while it is read (a writer appending) is read as
@@ -49,11 +50,12 @@ const MTIME_GRANULARITY_MS = 2_000;
 export interface BotChargeLiveRoot {
 	/** Its file, which its entries stand for; undefined when it has none. */
 	readonly file: string | undefined;
-	/** Its session when it keeps no file: the charges it holds unwritten are held by it alone (`BotCharge.heldBy`). */
-	readonly heldBy: string | undefined;
 	readonly entries: readonly SessionEntry[];
-	/** Whether the root's file holds `entry` exactly as it is (`classifyCustomEntryPersisted`). */
-	persisted(entry: SessionEntry): boolean;
+	/**
+	 * Whether the root holds `entry` for good: its file holds it exactly as it is (`classifyCustomEntryPersisted`), or it
+	 * keeps no file and holds it at all.
+	 */
+	holds(entry: SessionEntry): boolean;
 }
 
 /** Where one root's charges are read: the session files it keeps, and the live root itself. */
@@ -73,8 +75,6 @@ export interface UnwrittenBotCharge {
 	readonly from: Usage;
 	readonly through: Usage;
 	readonly recordedAt: string;
-	/** The root that keeps no file holding it, when one does (`BotCharge.heldBy`). */
-	readonly heldBy: string | undefined;
 }
 
 /** A root's session file or directory the read-back could not read, and why. */
@@ -161,12 +161,12 @@ function chargeOf(entry: SessionEntry, sessionId: string): Record<string, unknow
 }
 
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
-function unwrittenOf(data: Record<string, unknown>, heldBy: string | undefined): UnwrittenBotCharge | undefined {
+function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
 	const { usage, reportId, provider, model, from, through, recordedAt } = data;
 	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;
 	if (typeof recordedAt !== "string") return undefined;
-	return { usage, reportId, provider, model, from, through, recordedAt, heldBy };
+	return { usage, reportId, provider, model, from, through, recordedAt };
 }
 
 /**
@@ -213,13 +213,13 @@ export async function botChargesHeld(
 		for (const entry of root.entries) {
 			const data = chargeOf(entry, sessionId);
 			if (!data) continue;
-			if (root.persisted(entry)) {
+			if (root.holds(entry)) {
 				held(data);
 				continue;
 			}
 			// A live root holds unwritten only charges this process delivered, each naming its range: one that does not is
 			// counted neither (see the module comment).
-			const charge = unwrittenOf(data, root.heldBy);
+			const charge = unwrittenOf(data);
 			if (charge && !unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
 		}
 	return {
