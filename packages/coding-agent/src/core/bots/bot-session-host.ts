@@ -48,7 +48,7 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
+import { OWNER_STOPPED_REASON, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
@@ -1088,9 +1088,10 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Closes the bot's idle session (the bot was retired, or left the session path) and drops the watches its session armed:
-	 * it is never woken there again, as a worker's watches go with the runtime that armed them. The messages waiting in its
-	 * inbox are refused with the reason, which its chat shows: no session of it takes them now. Refuses while it works.
+	 * Ends the bot's workers and closes its idle session (the bot was retired, or left the session path), and drops the
+	 * watches its session armed: it is never woken there again, as a worker's watches go with the runtime that armed them.
+	 * The messages waiting in its inbox are refused with the reason, which its chat shows: no session of it takes them now.
+	 * Refuses while it works.
 	 */
 	release(agentId: string): void {
 		this.prepareRelease(agentId)();
@@ -1113,20 +1114,30 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * The change step of a release: its workers end first, a closed session's under its host lock (`endClosedBotWork`); the
-	 * watches and the inbox are read again now, so a watch armed or changed and a message sent since the preparation go too, each watch dropped at the revision read. A failure (a revision that
-	 * changed again, a read) leaves the release owed: it runs whole again after a backoff ({@link releaseOwed}).
+	 * The change step of a release: the watches and the inbox are read again now, so a watch armed or changed and a message
+	 * sent since the preparation go too, each watch dropped at the revision read. A loaded session's workers end first, and it
+	 * closes once they did; a closed session's work ends last, under its host lock (`endClosedBotWork`), once a load or a
+	 * close of it this process runs settled. A failure (a revision that changed again, a read, the lock another process
+	 * holds) leaves the release owed: it runs whole again after a backoff ({@link releaseOwed}).
 	 */
 	private finishRelease(agentId: string, sessionId: string | undefined, loaded: boolean): void {
+		const settling = loaded ? undefined : (this.loading.get(agentId) ?? this.closing.get(agentId));
+		if (settling) {
+			void settling.then(
+				() => this.releaseOwed(agentId),
+				() => this.releaseOwed(agentId),
+			);
+			return;
+		}
 		this.owed.released(agentId);
+		const warnLeft = (left: WorkerStopOutcome | undefined) => {
+			if (left && left.failed.length + left.managed.length > 0)
+				this.ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, left.failed.length, left.managed.length));
+		};
 		let fleetEnded = !loaded;
 		try {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
-			const left = loaded
-				? this.entries.get(agentId)?.session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON)
-				: endClosedBotWork(this.ports.agentDir(), agentId, this.view.savedSessionOf(agentId), OWNER_STOPPED_REASON);
-			if (left && left.failed.length + left.managed.length > 0)
-				this.ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, left.failed.length, left.managed.length));
+			if (loaded) warnLeft(this.entries.get(agentId)?.session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON));
 			fleetEnded = true;
 			const store = this.ports.store();
 			const nowMs = this.idleTimers().now();
@@ -1137,6 +1148,8 @@ export class BotSessionHost {
 			for (const item of waiting)
 				refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
 			if (waiting.length > 0) this.changed(agentId);
+			if (!loaded)
+				warnLeft(endClosedBotWork(agentDir, agentId, this.view.savedSessionOf(agentId), OWNER_STOPPED_REASON));
 			this.owedReleases.delete(agentId);
 			this.releaseRetries.forget(agentId);
 		} catch (error) {
