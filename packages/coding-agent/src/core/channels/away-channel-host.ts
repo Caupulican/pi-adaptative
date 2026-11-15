@@ -112,6 +112,10 @@ export interface AwayChannelHostsInput {
 	report(message: string): void;
 }
 
+/** How the daemon's reports name the warnings of a channel's child session and of its phone session. */
+const awaySessionSource = (name: string): string => `Channel ${name} away`;
+const phoneSessionSource = (name: string): string => `Channel ${name} phone session`;
+
 /** One channel's headless session. */
 interface AwayChannelHost {
 	readonly name: string;
@@ -325,13 +329,30 @@ export class AwayChannelHosts {
 		host.channels.registerChannel(provider);
 	}
 
+	/** The daemon's report of a warning one of a host's sessions raised, named by that session (`warningSource`). */
+	private sessionWarningReport(source: string): (warning: string) => void {
+		return (warning) => this.input.report(`${source}: ${warning}`);
+	}
+
+	/**
+	 * Reports every warning `session` raises while the host runs it. Subscribed before any other listener of the session,
+	 * so the warnings it held from before anyone listened (its open's, the release of an interrupted cleanup among them),
+	 * which go to its first subscriber, are reported here once instead of reaching a listener that reads no warnings.
+	 */
+	private subscribeSessionWarnings(session: AgentSession, source: string): () => void {
+		const report = this.sessionWarningReport(source);
+		return session.subscribe((event) => {
+			if (event.type === "warning") report(event.message);
+		});
+	}
+
 	/** What every session a host opens shares: its directory, the daemon's credential owners and clock, its warnings. */
 	private sessionOptions(
 		cwd: string,
 		settingsManager: SettingsManager,
 		resourceLoader: DefaultResourceLoader,
 		sessionManager: SessionManager,
-		warningPrefix: string,
+		warningSource: string,
 	): CreateAgentSessionOptions {
 		return {
 			cwd,
@@ -344,7 +365,7 @@ export class AwayChannelHosts {
 			timers: this.input.timers,
 			machineFacts: this.input.machineFacts,
 			onClosingWarnings: (warnings) => {
-				for (const warning of warnings) this.input.report(`${warningPrefix}: ${warning}`);
+				for (const warning of warnings) this.sessionWarningReport(warningSource)(warning);
 			},
 		};
 	}
@@ -385,7 +406,7 @@ export class AwayChannelHosts {
 			await resourceLoader.reload();
 			session = (
 				await createAgentSession({
-					...this.sessionOptions(cwd, settingsManager, resourceLoader, sessionManager, `Channel ${name} away`),
+					...this.sessionOptions(cwd, settingsManager, resourceLoader, sessionManager, awaySessionSource(name)),
 					standing: { kind: "vehicle" },
 					disableSystemOne: true,
 					tools: AWAY_CHANNEL_TOOLS,
@@ -479,7 +500,7 @@ export class AwayChannelHosts {
 		});
 		await resourceLoader.reload();
 		const { session } = await createAgentSession({
-			...this.sessionOptions(cwd, settingsManager, resourceLoader, sessionManager, `Channel ${name} phone session`),
+			...this.sessionOptions(cwd, settingsManager, resourceLoader, sessionManager, phoneSessionSource(name)),
 			bundleLeaseRole: "channel-host",
 			hostedChannels: "daemon",
 		});
@@ -535,6 +556,8 @@ export class AwayChannelHosts {
 		const { agentDir, settings } = this.input;
 		const { name, cwd } = channel;
 		const activity = new Set<() => void>();
+		const unsubscribeWarnings = this.subscribeSessionWarnings(session, awaySessionSource(name));
+		const unsubscribeOwnerWarnings = owner && this.subscribeSessionWarnings(owner.session, phoneSessionSource(name));
 		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
 		const limit = () => ({ usd: settings.getRoutineAwaySettings().maxUsdPerRun });
 		const unsubscribeSpend = boundSessionTurnSpend(session, {
@@ -554,6 +577,7 @@ export class AwayChannelHosts {
 			if (event.type === "agent_end") for (const listener of activity) listener();
 		});
 		const unsubscribe = () => {
+			unsubscribeWarnings();
 			unsubscribeSpend();
 			unsubscribeActivity();
 		};
@@ -628,6 +652,7 @@ export class AwayChannelHosts {
 			unsubscribe: () => {
 				unsubscribe();
 				unsubscribeOwner?.();
+				unsubscribeOwnerWarnings?.();
 			},
 			holder: "",
 			ownerWanted: ownerWanted(channel),
