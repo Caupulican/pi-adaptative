@@ -6,7 +6,8 @@
  * - `<session-key>.whole` (its content an operation token): the proof that the bundle was whole when the operation of
  *   that token reserved it. Written before the marker that names the token, removed once removal may begin or the
  *   marker names no operation. A marker an earlier build wrote has no such proof (that build wrote `fresh` and removed
- *   with no `.removing`), so its tombstone never reads as one whose bundle is whole.
+ *   with no `.removing`), so its tombstone never reads as one whose bundle is whole; nor does one whose proof does not
+ *   read.
  * - `pending/<session-key>` (its content the session id): the index of the retention tombstones in flight, created
  *   before such a marker is written and removed after the tombstone goes, under the same lock. A startup lists the
  *   retentions it resumes from it without reading every tombstone (the permanent ones accumulate). An entry whose
@@ -18,6 +19,7 @@
  */
 import { lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
+import { harnessLog } from "../harness-log.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import {
@@ -78,13 +80,22 @@ export function forgetRemovalBegun(home: OrchestrationHome, parentSessionId: str
 	rmSync(removalFile(home, parentSessionId), { force: true });
 }
 
-/** The token of the operation that proved the session's bundle whole in `home` when it reserved it; undefined for none. */
+/**
+ * The token of the operation that proved the session's bundle whole in `home` when it reserved it; undefined for none.
+ * A proof that does not read (too large, not a file, unreadable) proves nothing: its tombstone reads `unrecorded`, the
+ * safe direction, and the proof is removed with the tombstone or once removal may begin, like any other.
+ */
 export function bundleWholeToken(home: OrchestrationHome, parentSessionId: string): string | undefined {
-	return readOptionalBoundedTextFileSync(
-		wholeFile(home, parentSessionId),
-		MAX_ENTRY_BYTES,
-		"Session bundle wholeness proof",
-	)?.trim();
+	const file = wholeFile(home, parentSessionId);
+	try {
+		return readOptionalBoundedTextFileSync(file, MAX_ENTRY_BYTES, "Session bundle wholeness proof")?.trim();
+	} catch (error) {
+		harnessLog.warn("sessions", "a session bundle wholeness proof does not read; it proves nothing", {
+			file,
+			detail: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 }
 
 export function recordBundleWhole(home: OrchestrationHome, parentSessionId: string, token: string): void {
@@ -92,7 +103,7 @@ export function recordBundleWhole(home: OrchestrationHome, parentSessionId: stri
 }
 
 export function forgetBundleWhole(home: OrchestrationHome, parentSessionId: string): void {
-	rmSync(wholeFile(home, parentSessionId), { force: true });
+	rmSync(wholeFile(home, parentSessionId), { recursive: true, force: true });
 }
 
 export function recordRetentionInFlight(home: OrchestrationHome, parentSessionId: string): void {
