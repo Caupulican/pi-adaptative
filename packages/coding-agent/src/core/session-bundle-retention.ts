@@ -26,7 +26,11 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { reserveWorkerBundleDeletion } from "./delegation/worker-bundle-deletion.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
-import { earlierAwayFleetQueueMetadataFile, sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
+import {
+	earlierAwayFleetQueueMetadataFile,
+	earlierAwayFleetQueueSetAsideFiles,
+	sessionFleetQueueMetadataPaths,
+} from "./fleet/fleet-queue-store.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
@@ -662,13 +666,15 @@ function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
  * The session's files outside its bundle that name only what the bundle held, removed under the bundle's reservation
  * once the bundle is gone: its fleet queue files (they order and stop attempts the bundle's ledger held), the away
  * controller's an earlier build named `<id>.away.json` among them when it is the session's
- * (`earlierAwayFleetQueueMetadataFile`), and its capability artifacts.
+ * (`earlierAwayFleetQueueMetadataFile`) and the ones its away runs set aside under that name
+ * (`earlierAwayFleetQueueSetAsideFiles`), and its capability artifacts.
  */
 function sessionSideFiles(home: OrchestrationHome, sessionId: string): string[] {
 	const earlier = earlierAwayFleetQueueMetadataFile(home, sessionId);
 	return [
 		...sessionFleetQueueMetadataPaths(home, sessionId),
 		...(earlier !== undefined ? [earlier] : []),
+		...earlierAwayFleetQueueSetAsideFiles(home, sessionId),
 		capabilityArtifactsDir(home, sessionId),
 	];
 }

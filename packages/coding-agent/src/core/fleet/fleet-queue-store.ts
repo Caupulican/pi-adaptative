@@ -12,8 +12,8 @@
  * its own ledger claims every entry ({@link settleEarlierAwayFleetQueue}).
  */
 
-import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { orchestrationHomeHoldsSession } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
@@ -42,6 +42,8 @@ export interface FleetQueueMetadata {
 }
 
 const AWAY_SUFFIX = "@away";
+/** What {@link settleEarlierAwayFleetQueue} adds to the name of an earlier-named file it sets aside, before the time. */
+const SET_ASIDE_INFIX = ".unowned-";
 
 /**
  * The metadata file of the fleet queue `key` in `home`, named by the key itself: a session id (`isValidSessionId`), or
@@ -117,7 +119,7 @@ export function settleEarlierAwayFleetQueue(
 			retryTransientWin32Sync(() => renameSync(earlier, path));
 			return undefined;
 		}
-		const aside = `${earlier}.unowned-${now}`;
+		const aside = `${earlier}${SET_ASIDE_INFIX}${now}`;
 		retryTransientWin32Sync(() => renameSync(earlier, aside));
 		harnessLog.warn(
 			"fleet",
@@ -128,6 +130,22 @@ export function settleEarlierAwayFleetQueue(
 		);
 		return aside;
 	});
+}
+
+/**
+ * The files {@link settleEarlierAwayFleetQueue} set aside for session `sessionId`'s away controller in `home`
+ * (`<sessionId>.away.json.unowned-<time>`): kept, never adopted, and removed with the session's bundle by the retention
+ * that removes it, as the session's other side files are. No other session's settlement writes that name: another
+ * session's set-aside file begins with its own id's earlier name.
+ */
+export function earlierAwayFleetQueueSetAsideFiles(home: OrchestrationHome, sessionId: string): string[] {
+	const earlier = earlierAwayFleetQueueMetadataPath(home, sessionId);
+	const dir = dirname(earlier);
+	if (!existsSync(dir)) return [];
+	const prefix = `${basename(earlier)}${SET_ASIDE_INFIX}`;
+	return readdirSync(dir)
+		.filter((name) => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length)))
+		.map((name) => join(dir, name));
 }
 
 /**
