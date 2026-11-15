@@ -24,10 +24,13 @@ import {
 	sessionKeyOfDeletionFile,
 } from "./session-bundle-paths.ts";
 import {
+	bundleWholeToken,
+	forgetBundleWhole,
 	forgetRemovalBegun,
 	forgetRetentionInFlight,
 	markRetentionIndexComplete,
 	readRetentionIndex,
+	recordBundleWhole,
 	recordRemovalBegun,
 	recordRetentionInFlight,
 	removalBegun,
@@ -46,10 +49,12 @@ export type SessionBundleDeletionPolicy = "retention" | "permanent";
 
 /**
  * How far a tombstone's deletion went, read from the schema-3 marker an earlier build reads the same way and from its
- * `.removing` sibling (`session-retention-index.ts`): `removing` once its remover may have begun removing the bundle
- * (the sibling, created under the lock just before the first removal, {@link markSessionBundleRemoving}); else
- * `reserved` while its operation created it (`fresh`) and nothing of the bundle was touched; else `unrecorded` (an
- * earlier build's, or one whose remover settled what the bundle owed): how far it went is not known. Only a `reserved`
+ * `.removing` and `.whole` siblings (`session-retention-index.ts`): `removing` once its remover may have begun removing
+ * the bundle (the sibling, created under the lock just before the first removal, {@link markSessionBundleRemoving});
+ * else `reserved` while its operation created it (`fresh`) and nothing of the bundle was touched, proven by the
+ * `.whole` sibling holding that operation's token; else `unrecorded` (an earlier build's, whose `fresh` marker proves
+ * nothing since that build removed without `.removing`, or one whose remover settled what the bundle owed): how far it
+ * went is not known. Only a `reserved`
  * retention tombstone may be released with its bundle whole whatever refused it; an `unrecorded` one only when its
  * expiry was refused by something the open session settles ({@link settleSessionBundleDeletion} `released`), a
  * `removing` one never. Only a `removing` one proves its bundle passed the expiry's gates. A permanent tombstone
@@ -618,21 +623,27 @@ function writeMarker(file: string, marker: DeletionMarker): void {
 
 /**
  * Writes the session's tombstone in `home` under its lock, keeping the in-flight index (`session-retention-index.ts`):
- * a retention is indexed before its marker is written, a permanent one leaves the index and its removal record.
+ * a retention is indexed before its marker is written, a permanent one leaves the index and its removal record. An
+ * operation that found the bundle whole (`fresh`) records its token as the wholeness proof before the marker names it;
+ * the proof goes once a marker names no such operation.
  */
 function writeTombstone(home: OrchestrationHome, tombstone: string, marker: DeletionMarker): void {
 	if (marker.policy === "retention") recordRetentionInFlight(home, marker.parentSessionId);
+	const whole = marker.operation?.fresh ? marker.operation.token : undefined;
+	if (whole !== undefined) recordBundleWhole(home, marker.parentSessionId, whole);
 	writeMarker(tombstone, marker);
+	if (whole === undefined) forgetBundleWhole(home, marker.parentSessionId);
 	if (marker.policy === "permanent") {
 		forgetRemovalBegun(home, marker.parentSessionId);
 		forgetRetentionInFlight(home, marker.parentSessionId);
 	}
 }
 
-/** Removes the session's tombstone in `home` under its lock, then its removal record and index entry. */
+/** Removes the session's tombstone in `home` under its lock, then its removal record, wholeness proof and index entry. */
 function removeTombstone(home: OrchestrationHome, tombstone: string, parentSessionId: string): void {
 	unlinkSync(tombstone);
 	forgetRemovalBegun(home, parentSessionId);
+	forgetBundleWhole(home, parentSessionId);
 	forgetRetentionInFlight(home, parentSessionId);
 }
 
@@ -642,7 +653,8 @@ function tombstonePhase(
 	marker: DeletionMarker,
 ): SessionBundleDeletionPhase {
 	if (removalBegun(home, parentSessionId)) return "removing";
-	return marker.operation?.fresh ? "reserved" : "unrecorded";
+	const operation = marker.operation;
+	return operation?.fresh && bundleWholeToken(home, parentSessionId) === operation.token ? "reserved" : "unrecorded";
 }
 
 /** This process may take over an operation it finished itself, or one whose remover is PROVEN gone. */
@@ -1014,6 +1026,7 @@ export function markSessionBundleRemoving(
 ): void {
 	withReservedSessionBundleDeletion(home, reservation, "retention", () => {
 		if (!removalBegun(home, reservation.parentSessionId)) recordRemovalBegun(home, reservation.parentSessionId);
+		forgetBundleWhole(home, reservation.parentSessionId);
 	});
 }
 

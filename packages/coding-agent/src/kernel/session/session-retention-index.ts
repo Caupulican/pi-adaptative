@@ -3,6 +3,10 @@
  * schema-3 marker, in files of their own, so a build that reads only the marker reads every tombstone as before:
  * - `<session-key>.removing`: the retention's remover may have begun removing the bundle. Created under the tombstone's
  *   lock just before the first removal, removed with the tombstone.
+ * - `<session-key>.whole` (its content an operation token): the proof that the bundle was whole when the operation of
+ *   that token reserved it. Written before the marker that names the token, removed once removal may begin or the
+ *   marker names no operation. A marker an earlier build wrote has no such proof (that build wrote `fresh` and removed
+ *   with no `.removing`), so its tombstone never reads as one whose bundle is whole.
  * - `pending/<session-key>` (its content the session id): the index of the retention tombstones in flight, created
  *   before such a marker is written and removed after the tombstone goes, under the same lock. A startup lists the
  *   retentions it resumes from it without reading every tombstone (the permanent ones accumulate). An entry whose
@@ -33,6 +37,10 @@ function sessionKey(home: OrchestrationHome, parentSessionId: string): string {
 
 function removalFile(home: OrchestrationHome, parentSessionId: string): string {
 	return join(orchestrationSessionDeletionsDir(home), `${sessionKey(home, parentSessionId)}.removing`);
+}
+
+function wholeFile(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDeletionsDir(home), `${sessionKey(home, parentSessionId)}.whole`);
 }
 
 function indexDir(home: OrchestrationHome): string {
@@ -68,6 +76,23 @@ export function recordRemovalBegun(home: OrchestrationHome, parentSessionId: str
 
 export function forgetRemovalBegun(home: OrchestrationHome, parentSessionId: string): void {
 	rmSync(removalFile(home, parentSessionId), { force: true });
+}
+
+/** The token of the operation that proved the session's bundle whole in `home` when it reserved it; undefined for none. */
+export function bundleWholeToken(home: OrchestrationHome, parentSessionId: string): string | undefined {
+	return readOptionalBoundedTextFileSync(
+		wholeFile(home, parentSessionId),
+		MAX_ENTRY_BYTES,
+		"Session bundle wholeness proof",
+	)?.trim();
+}
+
+export function recordBundleWhole(home: OrchestrationHome, parentSessionId: string, token: string): void {
+	writeFileAtomicSync(wholeFile(home, parentSessionId), `${token}\n`);
+}
+
+export function forgetBundleWhole(home: OrchestrationHome, parentSessionId: string): void {
+	rmSync(wholeFile(home, parentSessionId), { force: true });
 }
 
 export function recordRetentionInFlight(home: OrchestrationHome, parentSessionId: string): void {
