@@ -222,12 +222,24 @@ export class BotRemoteView {
 
 	/**
 	 * Whether another host holds the bot's lock now. A host that finds it held leaves the bot to that hold and takes the
-	 * bot up again when the hold changes, so the hold read here is the one a later change is judged against.
+	 * bot up again when the hold changes, so the hold read here is the one a later change is judged against. `opening`:
+	 * the host opens the bot itself when no other holds it, so no other hold is left to judge against (one it held before,
+	 * of a host since gone, is not); a read after a failed open leaves the hold it judges against as it was, so a release
+	 * not yet read still takes the bot up.
 	 */
-	heldElsewhere(agentId: string): boolean {
+	heldElsewhere(agentId: string, opening = false): boolean {
 		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-		if (host !== undefined) this.holds.set(agentId, host.lockToken);
+		if (host !== undefined || opening) this.holds.set(agentId, host?.lockToken);
 		return host !== undefined;
+	}
+
+	/**
+	 * The host that kept this host out of the bot's lock: its hold (`token`, as the refused take read it) is the one a later
+	 * change is judged against, so its release takes the bot up even when its take and release reach the watch together.
+	 */
+	keptOutBy(agentId: string, token: string): RemoteBotHost | undefined {
+		this.holds.set(agentId, token);
+		return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 	}
 
 	/** The token of another host's hold on the bot's lock now; undefined when none holds it or the hold is this host's. */

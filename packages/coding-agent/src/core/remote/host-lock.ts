@@ -45,7 +45,8 @@ export interface LinkHostOwner {
 
 export type HostLockResult =
 	| { readonly held: true; readonly lock: HostLock }
-	| { readonly held: false; readonly owner: LinkHostOwner };
+	/** `token`: the hold that kept the lock (`processLockHolder` reads the same token while it stands). */
+	| { readonly held: false; readonly owner: LinkHostOwner; readonly token: string };
 
 const lockPath = (agentDir: string, name: string): string => join(agentDir, "remote", name);
 
@@ -120,7 +121,7 @@ export function takeProcessLock(path: string, holder?: string): HostLockResult {
 		const current = readRecord(path);
 		if (current) {
 			const standing = judgeOwner(current);
-			if (standing !== "dead") return { held: false, owner: { pid: current.pid, standing } };
+			if (standing !== "dead") return { held: false, owner: { pid: current.pid, standing }, token: current.token };
 			harnessLog.info("link", "a host lock whose process is gone was replaced", { pid: current.pid });
 		}
 		const record: HostLockRecord = {

@@ -63,7 +63,7 @@ import { errorText } from "./bot-error-text.ts";
 import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
-import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
+import { BotHostStateWriter, type BotSessionState } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
 	type BotInboxRefusal,
@@ -290,7 +290,7 @@ export class BotSessionHost {
 			warn: (message) => ports.warn(message),
 			stopped: () => this.stopped,
 			hostedHere: (agentId) => this.entries.has(agentId),
-			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
+			heldElsewhere: (agentId, opening) => this.view.heldElsewhere(agentId, opening),
 			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),
@@ -690,7 +690,7 @@ export class BotSessionHost {
 		this.admission.admit(agentId, model, definition, sender);
 		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
 		if (!taken.held) {
-			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
+			const sessionId = this.view.keptOutBy(agentId, taken.token)?.hostSessionId;
 			throw new BotSessionHeldError(words.botSessionHeld(agentId, taken.owner.pid, sessionId));
 		}
 		const { lock } = taken;

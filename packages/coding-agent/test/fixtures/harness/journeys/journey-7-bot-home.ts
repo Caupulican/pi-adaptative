@@ -388,6 +388,13 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	try {
 		const [holder] = readSessionLeaseHolders(home.orchestrationHome, sessionId());
 		if (holder === undefined) throw new Error("the owner's session took no lease of the bot's session");
+		const armedBefore = new Set(world.timers.armedSnapshot("provider-admission").map((alarm) => alarm.handle));
+		/** The alarms on the admission clock armed since the send, each placed in the backoff step its delay is due in. */
+		const retrySteps = () =>
+			world.timers
+				.armedSnapshot("provider-admission")
+				.filter((alarm) => !armedBefore.has(alarm.handle))
+				.map((alarm) => Math.ceil(alarm.remainingMs / BOT_OPEN_RETRY_FIRST_MS));
 		const sent = await session.sendOperatorMessageToBot(KEEPER, FIFTH_QUESTION);
 		const waiting = readBotInbox(world.agentDir, KEEPER, (file, reason) => {
 			throw new Error(`the bot's inbox holds an unreadable message ${file}: ${reason}`);
@@ -415,18 +422,23 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			holders: [{ role: "session", self: true }],
 			requests: 3,
 		});
-		// The host asks again while the session still holds it: its retry, due the backoff's first step after the send's
-		// own attempt, finds the session held and arms the next at twice that. Its own take and release of the bot's lock
-		// on each attempt ask nothing more (the home watch tells them from another host's), and the owner, told by the
-		// send, is told nothing more.
+		// The host asks again while the session still holds it: its retry, due within the backoff's first step after the
+		// send's own attempt, finds the session held and arms the next within the second. Its own take and release of the
+		// bot's lock on each attempt ask nothing more (the home watch tells them from another host's, so no attempt of its
+		// own doubles the backoff), and the owner, told by the send, is told nothing more.
+		expect(
+			retrySteps(),
+			"the send's attempt armed the host's one retry, due within the backoff's first step",
+		).toEqual([1]);
 		const asked = world.io.waitForOperation((operation) => operation.kind === "rm" && operation.path === hostLock);
 		const rearmed = world.timers.nextArmed("provider-admission");
 		world.timers.advance("provider-admission", BOT_OPEN_RETRY_FIRST_MS);
 		await withDeadline(trace, "J7 bot home: the host asked again for the held session", asked);
+		await withDeadline(trace, "J7 bot home: the host armed its next attempt", rearmed);
 		expect(
-			await withDeadline(trace, "J7 bot home: the host armed its next attempt", rearmed),
-			"the held session's retry arms the next attempt one backoff step later, no other attempt having doubled it",
-		).toBe(2 * BOT_OPEN_RETRY_FIRST_MS);
+			retrySteps(),
+			"the held session's retry armed the host's one next attempt, due within the backoff's second step",
+		).toEqual([2]);
 	} finally {
 		lease.release();
 	}
