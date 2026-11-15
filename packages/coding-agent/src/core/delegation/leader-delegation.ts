@@ -359,7 +359,7 @@ export function renderLeaderBrief(input: {
 		"Subscription turns cost nothing in metered terms, so the budget does not count them; the goal also stops when a subscription it uses has no allowance left.",
 		...(input.clipped.length > 0 ? ["", "Held back:", ...input.clipped.map((text) => `- ${text}`)] : []),
 		"",
-		"How to lead: split the goal into parts, give each part to a bot with bot_message (when none of yours fits, ask the orchestrator for one with bot_message action ask_root, naming its purpose: only the orchestrator creates bots, and it makes the bot yours), collect their replies, and end with one report of what was done, what is proven and what is left. Ask the orchestrator in your report only when you cannot go on without its answer; it answers you with a new message.",
+		"How to lead: split the goal into parts, give each part to a bot with bot_message (when none of yours fits, ask for one with bot_message action ask_root, naming its purpose: only the orchestrator creates bots, a leader that handed you a part asks it on, and the bot is made yours), collect their replies, and end with one report of what was done, what is proven and what is left. Ask the orchestrator in your report only when you cannot go on without its answer; it answers you with a new message.",
 		...(envelope.capabilities.includes("delegate")
 			? [
 					"You may hand a part of the goal to a leader of your own with bot_message action lead (the same goal fields, and agentId naming a standing leader that is free). It reports back to you once; a message you send to it reaches it as an update.",

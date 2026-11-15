@@ -63,7 +63,7 @@ const leadSchema = Type.Object(
 
 function describeActions(broker: BotMessageBroker): string {
 	return broker.askRoot
-		? `You are a leader. Action ask_root (message) puts a question to the orchestrator now, while your goal stays open; its answer is your next turn. Only the orchestrator creates bots: for a new bot of your own, ask it with ask_root, naming the bot's purpose, and it makes the bot yours and tells you its id. ${
+		? `You are a leader. Action ask_root (message) puts a question now to whoever handed you your goal (the orchestrator, or the leader that handed you a part of its goal), while your goal stays open; its answer is your next turn. Only the orchestrator creates bots: for a new bot of your own, ask with ask_root, naming the bot's purpose (a leader that handed you a part asks the orchestrator on), and you are told the id of the bot made yours. ${
 				broker.lead
 					? "Action lead (goal, and the goal fields of the orchestrator's lead action) hands a part of your goal to a standing leader you name with agentId. It reports back to you once, and a send to it reaches it as an update. You cannot make a leader."
 					: "You cannot make a leader."
