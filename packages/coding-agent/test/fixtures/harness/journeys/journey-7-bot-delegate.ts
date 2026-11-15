@@ -467,6 +467,8 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 		},
 		reply: submitReport("j7-root-delegate-worker-report-1", "The pool queues four waiting requests."),
 	});
+	// The host's own start asks nothing (the worker fitness gate is off), and the worker asks nothing.
+	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-delegate-root-worker", {});
 	try {
 		const started = await session.backgroundLanes.startWorkerDelegation({
 			instructions: `${ROOT_MARKER} Read the pool settings and report how many requests wait for a connection.`,
@@ -485,8 +487,25 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 			(error: unknown) => (error instanceof Error ? error.message : String(error)),
 		);
 		const stored = session.getBotTeamStore().getBot(workerId) !== undefined;
+		const requestsAtStop = world.provider.requests.length;
 		const stop = session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON);
 		await withDeadline(trace, "J7 bot delegate: the root's stopped worker's request ended", workerEnded.promise);
+		// An end the owner's stop made is recorded delivered at once and wakes no one: once it is, a turn it opened would
+		// already have been asked for.
+		const attempts = () => {
+			const projection = session.backgroundLanes.getTaskRuntimeSnapshot();
+			return Object.values(projection?.attempts ?? {}).map((attempt) => ({
+				status: attempt.status,
+				end: projection?.notifications[workerTerminalNotificationId(attempt.attemptId)]?.status,
+			}));
+		};
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the root's cancelled worker's end was delivered",
+			world.io.waitForMutation(() =>
+				attempts().some((attempt) => attempt.status === "cancelled" && attempt.end === "delivered"),
+			),
+		);
 		expect(
 			{
 				roster,
@@ -495,8 +514,10 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 				stored,
 				stopped: stop.stopped,
 				workerEnd,
+				attempts: attempts(),
+				requests: world.provider.requests.length - requestsAtStop,
 			},
-			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the owner's stop ends it",
+			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the owner's stop ends it, its delivered end waking no turn",
 		).toEqual({
 			roster: rosterBefore,
 			rostered: false,
@@ -504,6 +525,8 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 			stored: false,
 			stopped: 1,
 			workerEnd: "aborted",
+			attempts: [{ status: "cancelled", end: "delivered" }],
+			requests: 0,
 		});
 	} finally {
 		workerGate.release();
