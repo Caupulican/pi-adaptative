@@ -57,6 +57,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
+import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
@@ -142,8 +143,16 @@ export interface BotSender {
 	 * root's file holds it.
 	 */
 	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
-	/** How far the root session holds the charges of bot session `sessionId` (`botChargesHeld`). */
-	chargesHeld(sessionId: string): Promise<Usage>;
+	/**
+	 * How far the root sessions of the process hold the charges of bot session `sessionId`, which began at `since`, and
+	 * the charges they hold unwritten (`botChargesHeld`).
+	 */
+	chargesHeld(sessionId: string, since: number): Promise<BotChargesHeld>;
+	/**
+	 * Calls `listener` with the bot charges (their report ids) the root session's file holds, as each write lands, with
+	 * the session written to; returns the unsubscribe.
+	 */
+	chargesPersisted(listener: (rootSessionId: string, reportIds: readonly string[]) => void): () => void;
 }
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
@@ -723,7 +732,9 @@ export class BotSessionHost {
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
-					chargesHeld: (sessionId) => entry.sender.chargesHeld(sessionId),
+					chargesHeld: (sessionId, since) => entry.sender.chargesHeld(sessionId, since),
+					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
+					rootSessionId: () => entry.sender.hostSessionId(),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),

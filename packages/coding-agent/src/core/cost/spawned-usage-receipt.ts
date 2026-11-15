@@ -28,32 +28,23 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		(data.goalId === undefined || data.goalId === options.goalId) &&
 		isDeepStrictEqual(data.usageComponents, options.usageComponents) &&
 		isDeepStrictEqual(data.through, options.through) &&
+		data.recordedAt === options.recordedAt &&
 		isDeepStrictEqual(data.usage, usage)
 	);
 }
 
 /** Confirm physical parent persistence through its existing idempotent ingestion owner. */
 export function deliverSpawnedUsageReceipt(
-	session: Pick<SessionManager, "getSessionId" | "getEntry" | "getEntries" | "readEntryJsonPrefix">,
+	session: Pick<SessionManager, "getSessionId" | "getEntry" | "readEntryJsonPrefix">,
 	reporter: SpawnedUsageReporter,
 	usage: Usage,
 	options: SpawnedUsageReceiptOptions,
 ): SpawnedUsageReceiptDisposition {
 	if (session.getSessionId() !== options.parentSessionId) return "foreign_session";
 	if (!options.reportId.trim()) throw new Error("Spawned usage receipt requires an identity.");
+	// The entry holding the report: the one appended, or on a replay the one that recorded its id (the report-id index).
 	const entryId = reporter.addSpawnedUsage(structuredClone(usage), options);
-	// Normal delivery is an indexed lookup. Only replay locates the original ledger entry.
-	const entry = entryId
-		? session.getEntry(entryId)
-		: session
-				.getEntries()
-				.find(
-					(candidate) =>
-						candidate.type === "custom" &&
-						candidate.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
-						isPlainRecord(candidate.data) &&
-						candidate.data.reportId === options.reportId,
-				);
+	const entry = entryId === undefined ? undefined : session.getEntry(entryId);
 	if (
 		entry?.type !== "custom" ||
 		entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE ||

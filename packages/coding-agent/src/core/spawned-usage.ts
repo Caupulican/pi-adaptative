@@ -14,6 +14,8 @@ export interface SpawnedUsageOptions {
 	usageComponents?: readonly UsageComponent[];
 	/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
 	through?: Usage;
+	/** When the report was first recorded (`SpawnedUsageReport.recordedAt`). */
+	recordedAt?: string;
 }
 
 export interface SpawnedUsageReporter {

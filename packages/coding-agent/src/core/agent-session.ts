@@ -296,7 +296,7 @@ import {
 } from "./runtime-generation-admission.ts";
 import { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
-import { SessionAnalytics, type SpawnedUsageOptions } from "./session-analytics.ts";
+import { type DurableUsageReading, SessionAnalytics, type SpawnedUsageOptions } from "./session-analytics.ts";
 import { SessionCacheController } from "./session-cache-controller.ts";
 import { SessionEdgeIntentController } from "./session-edge-intent-controller.ts";
 import { SessionImageStore } from "./session-image-store.ts";
@@ -4707,7 +4707,7 @@ export class AgentSession {
 		return this._analytics.getCumulativeUsage();
 	}
 
-	getDurableCumulativeUsage(): Usage {
+	getDurableCumulativeUsage(): DurableUsageReading {
 		return this._analytics.getDurableCumulativeUsage();
 	}
 

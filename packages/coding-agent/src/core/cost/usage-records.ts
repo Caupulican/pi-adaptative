@@ -42,6 +42,11 @@ export interface SpawnedUsageReport {
 	 * record of them is lost.
 	 */
 	through?: Usage;
+	/**
+	 * When the report was first recorded (ISO time), for a report that may be recorded again in another session file (a
+	 * bot's charge, delivered again to the root that answers after a reopen): the day it counts on, in every file.
+	 */
+	recordedAt?: string;
 	/** Stable idempotency identity for retry-safe ingestion. */
 	reportId?: string;
 }

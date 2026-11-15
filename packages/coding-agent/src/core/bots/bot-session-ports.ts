@@ -9,7 +9,8 @@
 import { join } from "node:path";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { ExhaustedProviderRegistry } from "../billing-failover-controller.ts";
-import { deliverSpawnedUsageReceipt } from "../cost/spawned-usage-receipt.ts";
+import { classifyCustomEntryPersisted, deliverSpawnedUsageReceipt } from "../cost/spawned-usage-receipt.ts";
+import { SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
 import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
@@ -17,7 +18,7 @@ import type { WorkerDelegationController } from "../delegation/worker-delegation
 import { interfaceText } from "../language/interface-text.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import { usageScope } from "../session-analytics.ts";
-import { botChargesHeld } from "./bot-charges-held.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
@@ -140,20 +141,45 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				provider: report.provider,
 				model: report.model,
 				through: structuredClone(report.through),
+				recordedAt: report.recordedAt,
 			}),
-		// Read where its charges are delivered: the session files of every project (or the custom session directory) and
-		// the live session's entries, the unwritten ones included.
-		chargesHeld: (sessionId) => {
+		// Where its charges are read back: the session files of every project (or the custom session directory) and the live
+		// session's entries, each held once its file holds it exactly.
+		chargeHolder: () => {
 			const session = deps.getSessionManager();
-			return botChargesHeld(
-				{
-					scope: usageScope(session),
-					root: session.usesDefaultSessionDir(),
+			return {
+				scope: usageScope(session),
+				root: session.usesDefaultSessionDir(),
+				live: {
 					file: session.getSessionFile(),
 					entries: session.getEntries(),
+					// The row its file holds is the entry as it was written: the same JSON.
+					persisted: (entry) =>
+						entry.type === "custom" &&
+						classifyCustomEntryPersisted(
+							session,
+							entry.id,
+							entry.customType,
+							(data) => JSON.stringify(data) === JSON.stringify(entry.data),
+						) === "persisted",
 				},
-				sessionId,
-			);
+			};
 		},
+		// The bot charges the session's file now holds, as each write lands; an observer never throws (none is retried).
+		chargesPersisted: (listener) =>
+			deps.getSessionManager().onEntriesPersisted((event) => {
+				const session = deps.getSessionManager();
+				const reportIds = event.entryIds.flatMap((entryId) => {
+					const entry = session.getEntry(entryId);
+					return entry?.type === "custom" &&
+						entry.customType === SPAWNED_USAGE_CUSTOM_TYPE &&
+						isPlainRecord(entry.data) &&
+						entry.data.label === "bot-session" &&
+						typeof entry.data.reportId === "string"
+						? [entry.data.reportId]
+						: [];
+				});
+				if (reportIds.length > 0) listener(event.sessionId, reportIds);
+			}),
 	};
 }

@@ -59,9 +59,16 @@ to the main session's cost at each turn's end and each time a worker's usage rea
 ledger: each charge's range is written there before it is reported and kept until the main session's file holds it, so a
 reopen or a crash charges no range twice and loses none. The watermark only moves forward, field by field, over the usage the
 bot's session has recorded, so a reading short of it (its history still loading, or failed to load) charges nothing
-twice. A session with no watermark (a new bot, a new session file, a lost record) starts at how far the main session
-holds its charges: each charge names the end of its range, and the main session's files and unwritten entries are read
-back for it; ranges reach the main session in order. A spend record that cannot be read is left in place and read again,
+twice. A session with no watermark (a new bot, a new session file, a lost record) starts at zero when it recorded no spend,
+with nothing read, and otherwise at the furthest of how far the main sessions of the process hold its charges, the
+charge mark in its own transcript and the charges the ledger still holds for it. Each charge names the end of its range;
+only the main sessions' files changed since the bot's session began are read back for it (a file that changes while it is
+read is read again, one that is no session file holds none), and a live main session's charges count once its file
+holds them, the ones it holds unwritten being delivered again. Once a main session's file holds the bot's charges up to
+a range end, that end is marked in the bot's transcript (`bot-charge-mark-v1`), so a range is not charged again after
+session retention removed the files that held it. A charge a main session holds unwritten is settled when its write
+lands, and it counts in the daily brake on the day its range was fixed, whichever file holds it. Ranges reach the main
+session in order. A spend record that cannot be read is left in place and read again,
 counting in memory meanwhile; one that does not read is set aside as `spend.json.unreadable-<time>`, keeping what of it
 reads. You are told once either way. A turn's spend counts, with its model calls, the
 compactions that serve it: one while it runs or between its runs, and one just before its first run in the same

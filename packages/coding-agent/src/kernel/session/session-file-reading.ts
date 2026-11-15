@@ -16,6 +16,14 @@ import type { FileEntry } from "./session-manager-types.ts";
 
 const MAX_SESSION_LINEAGE_DEPTH = 64;
 
+/** A file read as a session history whose first line is no session header: it holds no session's entries. */
+export class InvalidSessionHeaderError extends Error {
+	constructor() {
+		super("Session file header is invalid.");
+		this.name = "InvalidSessionHeaderError";
+	}
+}
+
 /** Decode captured session bytes without reopening the path. Recovery callers require every row. */
 export function parseSessionEntries(
 	content: string,
@@ -222,7 +230,7 @@ export async function visitSessionEntriesAsync(
 		if (!sameFileVersion(before, await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		const headerResult = readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES);
-		if (!headerResult.ok) throw new Error("Session file header is invalid.");
+		if (!headerResult.ok) throw new InvalidSessionHeaderError();
 		const decoder = options?.requireComplete
 			? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 			: new StringDecoder("utf8");

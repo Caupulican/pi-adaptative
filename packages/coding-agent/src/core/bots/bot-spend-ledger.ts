@@ -53,6 +53,8 @@ export interface BotChargeReport {
 	readonly model: string;
 	/** The bot session's cumulative usage the charge's range ends at: how far the root holds its charges. */
 	readonly through: Usage;
+	/** When the range was fixed (ISO time): the day the charge counts on, in whichever root's file holds it. */
+	readonly recordedAt: string;
 }
 
 export interface BotCharge {
@@ -109,17 +111,18 @@ function parseWindow(value: unknown): SpendWindowRecord | undefined {
 
 function parseCharge(value: unknown): BotCharge | undefined {
 	if (!isPlainRecord(value) || !isUsage(value.usage) || !isPlainRecord(value.report)) return undefined;
-	const { agentId, reportId, sessionId, provider, model, through } = value.report;
+	const { agentId, reportId, sessionId, provider, model, through, recordedAt } = value.report;
 	if (
 		typeof agentId !== "string" ||
 		typeof reportId !== "string" ||
 		typeof sessionId !== "string" ||
 		typeof provider !== "string" ||
 		typeof model !== "string" ||
-		!isUsage(through)
+		!isUsage(through) ||
+		typeof recordedAt !== "string"
 	)
 		return undefined;
-	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model, through } };
+	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model, through, recordedAt } };
 }
 
 function parseChargeState(value: unknown): BotChargeState | undefined {

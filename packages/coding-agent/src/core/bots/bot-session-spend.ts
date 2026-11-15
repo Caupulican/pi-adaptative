@@ -79,6 +79,7 @@ export class BotSessionSpend {
 	private readonly ports: BotSessionSpendPorts;
 	private readonly ledger: BotSpendLedger;
 	private readonly windows: BotSpendWindows;
+	private readonly transcript: SessionManager;
 
 	constructor(
 		agentId: string,
@@ -92,6 +93,7 @@ export class BotSessionSpend {
 		this.definition = definition;
 		this.registry = registry;
 		this.ports = ports;
+		this.transcript = transcript;
 		const words = () => interfaceText().botTeam;
 		this.ledger = new BotSpendLedger(botSpendLedgerFile(agentDir, agentId), {
 			now: () => ports.now(),
@@ -177,6 +179,6 @@ export class BotSessionSpend {
 
 	/** The accounting of the built session's charges and turns. */
 	accounting(session: AgentSession, ports: BotTurnAccountingPorts): BotTurnAccounting {
-		return new BotTurnAccounting(this.agentId, session, this.ledger, ports);
+		return new BotTurnAccounting(this.agentId, session, this.transcript, this.ledger, ports);
 	}
 }

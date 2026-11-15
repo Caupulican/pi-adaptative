@@ -58,6 +58,19 @@ export class SessionAccountingHistory {
 		return Boolean(this.state?.projection?.groups.length);
 	}
 
+	/**
+	 * Whether the entries read (`entries`) are the session's whole accounting: its history loaded and current, or a session
+	 * with no durable file, whose entries are all in memory. False before the first read.
+	 */
+	settled(): boolean {
+		const state = this.state;
+		if (!state) return false;
+		if (!state.file || !state.session.hasDurableSessionFile()) return true;
+		return (
+			state.loaded && !state.loading && !state.scheduled && !state.needsRefresh && !state.deferred && !state.failed
+		);
+	}
+
 	status(): "pending" | "unavailable" | undefined {
 		return this.state?.loading || this.state?.deferred ? "pending" : this.state?.failed ? "unavailable" : undefined;
 	}

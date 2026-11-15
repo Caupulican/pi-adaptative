@@ -323,8 +323,13 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 	if (entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) return [];
 	const data = entry.data as SpawnedUsageReport | undefined;
 	if (!data?.usage) return [];
+	// A report recorded again in another file counts on the day it was first recorded, whichever file holds it.
+	const recordedAt =
+		typeof data.recordedAt === "string" && Number.isFinite(Date.parse(data.recordedAt))
+			? data.recordedAt
+			: entry.timestamp;
 	if (data.usageComponents !== undefined)
-		return getSpawnedUsageComponents(data, entry.timestamp).map((part) => ({
+		return getSpawnedUsageComponents(data, recordedAt).map((part) => ({
 			timestamp: part.timestamp,
 			usage: part.usage,
 			kind: "spawned",
@@ -337,7 +342,7 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 		}));
 	return [
 		{
-			timestamp: entry.timestamp,
+			timestamp: recordedAt,
 			usage: data.usage,
 			kind: "spawned",
 			...(typeof data.model === "string" ? { model: data.model } : {}),

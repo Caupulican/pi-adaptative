@@ -8,13 +8,15 @@
  * root attached last answers. A bot's settings read their storage again after a change any attached root announces and when
  * a root attaches, so a root that replaces the one the bot loaded from (a new or resumed session) is followed from its
  * attach, and no root's detach leaves them stale; a root working in the bot's directory also hands it its project trust.
- * The last root to detach stops the host. A child session (a bot's own session, a worker) hosts no bots: it gets a host of
+ * How far the roots hold a bot's charges is read from every attached root, since each may hold one it took while it
+ * answered. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts no bots: it gets a host of
  * its own that no other session shares.
  */
 import { resolve } from "node:path";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
 import {
 	type BotSender,
 	type BotSessionDelivery,
@@ -25,9 +27,11 @@ import {
 /** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */
 export interface BotSessionRootPorts
 	extends Omit<BotSessionHostPorts, "sender" | "senderIn">,
-		Omit<BotSender, "settings"> {
+		Omit<BotSender, "settings" | "chargesHeld"> {
 	/** The root's settings manager: a bot's settings read the same storage and follow the changes it announces. */
 	settingsManager(): SettingsManager;
+	/** Where this root keeps the charges of a bot's spend: its session files and itself (`botChargesHeld`). */
+	chargeHolder(): BotChargeHolder;
 }
 
 /** A bot's settings manager, with its subscription to each attached root's changes. */
@@ -96,7 +100,16 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 		hostSessionId: () => current().hostSessionId(),
 		warn: (message) => current().warn(message),
 		reportUsage: (usage, report) => current().reportUsage(usage, report),
-		chargesHeld: (sessionId) => current().chargesHeld(sessionId),
+		chargesPersisted: (listener) => current().chargesPersisted(listener),
+		// Every attached root may hold a charge it took while it answered: each is read, none attached answering nothing.
+		chargesHeld: (sessionId, since) => {
+			answering(shared);
+			return botChargesHeld(
+				shared.roots.map((attached) => attached.chargeHolder()),
+				sessionId,
+				since,
+			);
+		},
 	};
 }
 

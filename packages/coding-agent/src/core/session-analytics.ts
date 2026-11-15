@@ -82,6 +82,12 @@ import {
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export type { SpawnedUsageOptions };
 
+/** A session's recorded cumulative usage, and whether its historical accounting is settled so the reading is all of it. */
+export interface DurableUsageReading {
+	readonly usage: Usage;
+	readonly settled: boolean;
+}
+
 export interface SessionAnalyticsSettingsSource {
 	getTheme(): string | undefined;
 }
@@ -179,7 +185,7 @@ export class SessionAnalytics {
 		computedAt: number;
 		summary: SessionTaskAndModelSummary;
 	};
-	private _rawSpawnedReports?: { entryCount: number; ids: Set<string> };
+	private _rawSpawnedReports?: { entryCount: number; entries: Map<string, string> };
 	/** Cumulative stats initialized once from persisted telemetry, then updated without retaining record details. */
 	private _toolArgumentValidationStats: ToolArgumentValidationStats | undefined;
 	/** Incremental context-usage state keyed by the append-only branch leaf. */
@@ -411,10 +417,11 @@ export class SessionAnalytics {
 	/**
 	 * The cumulative usage the session's ledger holds (`getCumulativeUsage` without the paid System One usage not recorded
 	 * yet): what a charge of the session's spend reads, so it covers recorded usage only. Until the historical accounting
-	 * has loaded, or when its load failed, it may read less than the session spent.
+	 * has loaded, or when its load failed, it may read less than the session spent: `settled` says it is all of it.
 	 */
-	getDurableCumulativeUsage(): Usage {
-		return aggregateCumulativeUsageFromSessionEntries(this.getAccountingEntries());
+	getDurableCumulativeUsage(): DurableUsageReading {
+		const usage = aggregateCumulativeUsageFromSessionEntries(this.getAccountingEntries());
+		return { usage, settled: this.accountingHistory.settled() };
 	}
 
 	/**
@@ -427,13 +434,13 @@ export class SessionAnalytics {
 	 * previously-seen id is ignored, so cost cannot be double-counted. Honors the single-hop
 	 * invariant documented on {@link SpawnedUsageReport}.
 	 *
-	 * @returns the id of the appended entry, or `undefined` if the report was a duplicate.
+	 * @returns the id of the entry that holds the report: the one appended, or for a report id already recorded the entry
+	 * that recorded it first (found through the report-id index, never a scan).
 	 */
 	addSpawnedUsage(usage: Usage, opts?: SpawnedUsageOptions): string | undefined {
 		const reportId = opts?.reportId;
-		if (reportId && this.getRawSpawnedReportIds().has(reportId)) {
-			return undefined;
-		}
+		const held = reportId === undefined ? undefined : this.getRawSpawnedReportEntries().get(reportId);
+		if (held !== undefined) return held;
 		const report: SpawnedUsageReport = {
 			usage,
 			usageComponents: opts?.usageComponents,
@@ -443,10 +450,11 @@ export class SessionAnalytics {
 			model: opts?.model,
 			goalId: opts?.goalId,
 			through: opts?.through,
+			recordedAt: opts?.recordedAt,
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
-		if (reportId) this.getRawSpawnedReportIds();
+		if (reportId) this.getRawSpawnedReportEntries();
 		// The session's usage grew: its views redraw, and a bot's host charges what its session spent (`BotTurnAccounting`).
 		this.deps.onDailyUsageUpdated?.();
 		return entryId;
@@ -506,19 +514,22 @@ export class SessionAnalytics {
 		return sessionManager;
 	}
 
-	/** Physical append idempotency must not consult recovered or virtual accounting rows. */
-	private getRawSpawnedReportIds(): ReadonlySet<string> {
+	/**
+	 * The entry that first recorded each spawned report id in the session's own transcript. Physical append idempotency must
+	 * not consult recovered or virtual accounting rows.
+	 */
+	private getRawSpawnedReportEntries(): ReadonlyMap<string, string> {
 		const session = this.getAccountingSession();
 		const count = session.getEntryCount();
-		const index = this._rawSpawnedReports ?? { entryCount: 0, ids: new Set<string>() };
+		const index = this._rawSpawnedReports ?? { entryCount: 0, entries: new Map<string, string>() };
 		for (const entry of session.getEntriesSince(index.entryCount)) {
 			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
 			const report = entry.data as SpawnedUsageReport | undefined;
-			if (report?.reportId) index.ids.add(report.reportId);
+			if (report?.reportId && !index.entries.has(report.reportId)) index.entries.set(report.reportId, entry.id);
 		}
 		index.entryCount = count;
 		this._rawSpawnedReports = index;
-		return index.ids;
+		return index.entries;
 	}
 
 	private getCurrentSessionCostTotals(): CurrentSessionCostAccumulator {
