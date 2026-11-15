@@ -3,8 +3,14 @@ import { createEmptyUsage, type Usage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
+import { botInboxStopNames, requestBotStop } from "../../../../src/core/bots/bot-inbox.ts";
+import { readStopScope } from "../../../../src/core/bots/bot-stop.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
-import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../../../../src/core/delegation/worker-fleet-stop.ts";
+import {
+	OWNER_STOPPED_REASON,
+	unendedWorkerAttempts,
+	WHOLE_FLEET_STOP_SCOPE,
+} from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
 import { workerTerminalNotificationId } from "../../../../src/core/orchestration/worker-terminal-notification.ts";
@@ -20,7 +26,7 @@ import {
 	type ScriptedRequest,
 	type ScriptStep,
 } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	BOT_DELEGATION_JUDGMENTS,
 	botCharges,
@@ -47,6 +53,8 @@ const READ_ONLY_DELEGATOR = "pool-reader";
 const READ_ONLY_SOUL = "You direct read-only workers over the connection pool settings and answer in one sentence.";
 const BOUNDED_DELEGATOR = "pool-timer";
 const BOUNDED_SOUL = "You direct workers that read the pool's timeout settings and answer the owner in one sentence.";
+const SCOPER = "pool-retrier";
+const SCOPER_SOUL = "You direct workers that read the pool's retry settings and answer the owner in one sentence.";
 
 /** Every question asks what something is, and every answer states a fact that names no test, check, commit or change. */
 const FIRST_QUESTION = "How many connections does the pool hold? Have a worker read the settings.";
@@ -58,6 +66,16 @@ const HELD_MARKER = "[j7-delegate-held]";
 const READ_ONLY_MARKER = "[j7-delegate-read-only]";
 const BOUNDED_MARKER = "[j7-delegate-bounded]";
 const ROOT_MARKER = "[j7-delegate-root]";
+const SCOPED_FIRST_MARKER = "[j7-delegate-scoped-first]";
+const SCOPED_LATER_MARKER = "[j7-delegate-scoped-later]";
+const SCOPED_FIRST_QUESTION = "How many retries does a connection get? Have a worker read the settings.";
+const SCOPED_LATER_QUESTION = "How long does a retry wait? Have another worker read the settings.";
+const SCOPED_FIRST_STARTED = "A worker is reading the retry settings.";
+const SCOPED_LATER_STARTED = "Another worker is reading how long a retry waits.";
+const SCOPED_LATER_REPORT = "A retry waits two seconds.";
+const SCOPED_LATER_ANSWER = "The worker read that a retry waits two seconds.";
+/** The session of the other root that made the scoped bot's stop and recorded it late. */
+const SCOPED_STOP_MAKER_SESSION = "7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d";
 /** The owner's message to the root's worker by its id: it asks what a bot would be asked. */
 const ROOT_WORKER_MESSAGE = "How many requests wait for a connection?";
 const FIRST_REPORT = "The pool holds eight connections.";
@@ -143,7 +161,8 @@ function requestsOf(world: HarnessWorld, soul: string): number {
  * the main session's worker bound (`workerDelegation.maxUsd`), a bot's request is held to it with its worker's spend: the
  * bot's answer to its worker's handoff that takes the request past it is stopped with the product's sentence. A delegate
  * worker of the owner's own session is never a bot: while it runs the roster lists no entry for it, and a message naming
- * it is refused with the product's sentence and leaves no bot record.
+ * it is refused with the product's sentence and leaves no bot record. A stop of a bot recorded late by the process that made
+ * it ends only the work there was when it was made: the worker that ran then, never the worker or the turn begun after it.
  */
 export async function runJourney7BotDelegatePhase(world: HarnessWorld): Promise<void> {
 	const { session, rootFile } = await createChargedRoot(world, "bot-delegate");
@@ -373,6 +392,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 
 	await runReadOnlyStep(world, session);
 	await runRootWorkerStep(world, session);
+	await runScopedStopStep(world, session);
 }
 
 /** Step 6: a read-only bot's worker, started without `readOnly`, is planned read-only: its parent changes no file. */
@@ -546,6 +566,233 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 		});
 	} finally {
 		workerGate.release();
+	}
+}
+
+/**
+ * Step 8: the owner's stop recorded late ends only the work there was when it was made. Another root's process makes the
+ * stop of a bot this host runs while the bot's first worker runs and its turn has ended, and cannot record it then; it
+ * holds the stop scoped to that work (`readStopScope`: the bot's saved bundle names the first worker's attempt alone) and
+ * records it once the bot's second turn, begun after it, has started a second worker and still runs. This host takes the
+ * stop from the bot's inbox: the first worker is cancelled, its end delivered at once; the second worker and the turn that
+ * started it go on (a turn begun after the stop is not aborted), the owner is told nothing of the bot, and the second
+ * worker's handoff opens the bot's answering turn.
+ */
+async function runScopedStopStep(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const { trace } = world;
+	createOwnerBot(session, SCOPER, MODEL_ID.scoper, SCOPER_SOUL);
+	const firstWorkerGate = createBarrier();
+	const firstWorkerEnded = createBarrier();
+	const laterWorkerGo = createBarrier();
+	const laterTurnGo = createBarrier();
+	const seen = {
+		firstAgent: undefined as string | undefined,
+		firstEnd: undefined as string | undefined,
+		laterTurnEnd: undefined as string | undefined,
+	};
+	const firstAgent = (): string => {
+		if (seen.firstAgent === undefined)
+			throw new Error("the scoped bot's first worker id was read before its start result");
+		return seen.firstAgent;
+	};
+	enqueueBot(
+		world,
+		TRACK.scoper,
+		MODEL_ID.scoper,
+		SCOPER_SOUL,
+		{
+			name: "j7-scoper-start",
+			reply: botStart(
+				"j7-scoper-start-1",
+				`${SCOPED_FIRST_MARKER} Read the pool settings and report how many retries a connection gets.`,
+			),
+		},
+		{
+			name: "j7-scoper-started",
+			check: (request) => {
+				seen.firstAgent = startedAgentId(request);
+			},
+			reply: { content: [{ type: "text", text: SCOPED_FIRST_STARTED }] },
+		},
+		{
+			name: "j7-scoper-second-start",
+			// A second start names the worker already made, so it asks for a worker of its own.
+			reply: () =>
+				botStart(
+					"j7-scoper-start-2",
+					`${SCOPED_LATER_MARKER} Read the pool settings and report how long a retry waits.`,
+					[firstAgent()],
+				),
+		},
+		{
+			name: "j7-scoper-second-started",
+			// Held while the stop recorded late is taken: the turn runs then, begun after the stop was made.
+			gate: laterTurnGo.promise,
+			onTerminal: (_request, message) => {
+				seen.laterTurnEnd = message.stopReason;
+			},
+			reply: { content: [{ type: "text", text: SCOPED_LATER_STARTED }] },
+		},
+		handoffStep("j7-scoper-later-handoff", SCOPED_LATER_REPORT, SCOPED_LATER_ANSWER),
+	);
+	world.provider.enqueueTrack(TRACK.scopedFirstWorker, MODEL_ID.delegateWorker, carriesMarker(SCOPED_FIRST_MARKER), {
+		name: "j7-scoped-first-worker",
+		// Held until the stop cancels the worker: the cancel aborts the request.
+		gate: firstWorkerGate.promise,
+		onTerminal: (_request, message) => {
+			seen.firstEnd = message.stopReason;
+			firstWorkerEnded.release();
+		},
+		reply: submitReport("j7-scoped-first-worker-report-1", "A connection gets three retries."),
+	});
+	world.provider.enqueueTrack(TRACK.scopedLaterWorker, MODEL_ID.delegateWorker, carriesMarker(SCOPED_LATER_MARKER), {
+		name: "j7-scoped-later-worker",
+		gate: laterWorkerGo.promise,
+		reply: submitReport("j7-scoped-later-worker-report-1", SCOPED_LATER_REPORT),
+	});
+
+	try {
+		if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-delegate-scoped", BOT_DELEGATION_JUDGMENTS);
+		const firstSent = await session.sendOperatorMessageToBot(SCOPER, SCOPED_FIRST_QUESTION);
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the scoped bot's first worker is working",
+			world.provider.whenReached(reached(TRACK.scopedFirstWorker, "j7-scoped-first-worker")),
+		);
+		await waitForBotRosterView(
+			world,
+			session,
+			SCOPER,
+			"ended the turn that told the owner of its first worker",
+			(view) => view?.lastSummary === SCOPED_FIRST_STARTED,
+		);
+		const [botSessionId] = botSessionIds(world, SCOPER);
+		if (botSessionId === undefined) throw new Error("the scoped bot opened no session file");
+		const bundle = new OrchestrationEventStore({
+			orchestrationHome: botOrchestrationHome(world.agentDir, SCOPER),
+			sessionId: botSessionId,
+		});
+		const unended = () =>
+			unendedWorkerAttempts(readTaskRuntimeProjection(bundle))
+				.map((attempt) => attempt.attemptId)
+				.sort();
+		const endOf = (attemptId: string) => {
+			const projection = readTaskRuntimeProjection(bundle);
+			return {
+				status: projection.attempts[attemptId]?.status,
+				end: projection.notifications[workerTerminalNotificationId(attemptId)]?.status,
+			};
+		};
+		const [firstAttempt, ...beside] = unended();
+		if (firstAttempt === undefined || beside.length > 0)
+			throw new Error(
+				`the scoped bot's bundle holds ${beside.length + (firstAttempt ? 1 : 0)} unended attempts, not its first worker's alone`,
+			);
+
+		// The stop is made now, in another root's process, which could not record it: it holds what it ends, read from the
+		// bot's home, and the time it was made on the wall clock the bot's turns are dated on.
+		const made = readStopScope(world.agentDir, SCOPER);
+		if ("unread" in made) throw new Error(`the scoped bot's work did not read: ${String(made.unread)}`);
+		const at = Date.now();
+		// A turn begun in the stop's millisecond counts as begun by then: the next turn begins on a later one.
+		while (Date.now() <= at) await new Promise((resolve) => setTimeout(resolve, 1));
+
+		if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-delegate-scoped-later", BOT_DELEGATION_JUDGMENTS);
+		const laterSent = await session.sendOperatorMessageToBot(SCOPER, SCOPED_LATER_QUESTION);
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the scoped bot's second worker is working",
+			world.provider.whenReached(reached(TRACK.scopedLaterWorker, "j7-scoped-later-worker")),
+		);
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the scoped bot's second turn runs on after its start",
+			world.provider.whenReached(reached(TRACK.scoper, "j7-scoper-second-started")),
+		);
+		const laterAttempt = unended().find((attemptId) => attemptId !== firstAttempt);
+		if (laterAttempt === undefined) throw new Error("the scoped bot's second worker has no unended attempt");
+
+		// The other process records the stop it held, dated, sent and scoped as it was made (`UnrecordedBotStops`).
+		const mark = world.warnings.length;
+		requestBotStop(world.agentDir, {
+			agentId: SCOPER,
+			reasonCode: OWNER_STOPPED_REASON,
+			from: { pid: process.pid, sessionId: SCOPED_STOP_MAKER_SESSION, cwd: HARNESS_PROJECT_CWD },
+			at,
+			scope: made.scope,
+		});
+		await withDeadline(
+			trace,
+			"J7 bot delegate: this host took the stop recorded late from the scoped bot's inbox",
+			world.io.waitForMutation(() => botInboxStopNames(world.agentDir, SCOPER).length === 0),
+		);
+		await withDeadline(trace, "J7 bot delegate: the scoped stop's worker request ended", firstWorkerEnded.promise);
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the scoped stop's cancelled worker's end was delivered",
+			world.io.waitForMutation(() => endOf(firstAttempt).end === "delivered"),
+		);
+		expect(
+			{
+				firstSent: firstSent.mode,
+				laterSent: laterSent.mode,
+				scope: made.scope,
+				firstEnd: seen.firstEnd,
+				first: endOf(firstAttempt),
+				unended: unended(),
+				laterTurnEnded: seen.laterTurnEnd,
+				// What a take tells the owner names the bot.
+				told: world.warnings.slice(mark).filter((warning) => warning.includes(SCOPER)),
+			},
+			"a stop recorded late ends the work there was when it was made: the first worker, cancelled with its end delivered at once, while the worker and the turn begun after it run on, and the owner is told nothing of the bot",
+		).toEqual({
+			firstSent: "started",
+			laterSent: "followed_up",
+			scope: { kind: "scoped", attempts: [firstAttempt], plans: [] },
+			firstEnd: "aborted",
+			first: { status: "cancelled", end: "delivered" },
+			unended: [laterAttempt],
+			laterTurnEnded: undefined,
+			told: [],
+		});
+
+		laterTurnGo.release();
+		await waitForBotRosterView(
+			world,
+			session,
+			SCOPER,
+			"ended the turn begun after the stop with its own words",
+			(view) => view?.lastSummary === SCOPED_LATER_STARTED,
+		);
+		laterWorkerGo.release();
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the second worker's handoff opened the scoped bot's answering turn",
+			world.provider.whenReached(reached(TRACK.scoper, "j7-scoper-later-handoff")),
+		);
+		await waitForBotRosterView(
+			world,
+			session,
+			SCOPER,
+			"answered on its second worker's handoff",
+			(view) => view?.lastSummary === SCOPED_LATER_ANSWER,
+		);
+		expect(
+			{
+				laterTurnAborted: seen.laterTurnEnd === "aborted",
+				later: endOf(laterAttempt),
+				unended: unended(),
+			},
+			"the turn begun after the stop ends with its own words, and its worker completes and hands its report to the bot",
+		).toEqual({
+			laterTurnAborted: false,
+			later: { status: "completed", end: "delivered" },
+			unended: [],
+		});
+	} finally {
+		firstWorkerGate.release();
+		laterTurnGo.release();
+		laterWorkerGo.release();
 	}
 }
 

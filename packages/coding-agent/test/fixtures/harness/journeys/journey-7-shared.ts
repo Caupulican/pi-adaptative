@@ -89,6 +89,11 @@ export const MODEL_ID = {
 	 * on the session's model, are told apart by the step header their tasks start with.
 	 */
 	planner: "worker-a",
+	/**
+	 * The owner's bot whose stop, made before its second worker started and recorded late, ends only its first; its soul tells
+	 * it apart on the shared model.
+	 */
+	scoper: "worker-b",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -136,6 +141,9 @@ export const TRACK = {
 	boundedDelegator: "j7-bounded-delegator",
 	boundedDelegateWorker: "j7-bounded-delegate-worker",
 	planner: "j7-planner",
+	scoper: "j7-scoper",
+	scopedFirstWorker: "j7-scoped-first-worker",
+	scopedLaterWorker: "j7-scoped-later-worker",
 } as const;
 
 /**

@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { expect } from "vitest";
 import { botHostLockFile, botInboxDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { createAgentSessionRuntime, prepareAgentSessionRuntime } from "../../../../src/core/agent-session-runtime.ts";
 import { LEFTOVER_REREAD_MAX_MINUTES } from "../../../../src/core/bots/bot-home-records.ts";
 import { BotHostStateWriter } from "../../../../src/core/bots/bot-host-state.ts";
 import {
@@ -14,12 +15,13 @@ import {
 	readBotInboxStops,
 } from "../../../../src/core/bots/bot-inbox.ts";
 import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
+import { BOT_SESSION_IDLE_BOUND_MS } from "../../../../src/core/bots/bot-session-host.ts";
 import { OWED_INBOX_SWEEP_MS } from "../../../../src/core/bots/bot-session-owed-work.ts";
 import { OWNER_STOPPED_REASON } from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { takeProcessLock } from "../../../../src/core/remote/host-lock.ts";
 import { createBarrier } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	agentsOn,
 	BOT_SESSION_JUDGMENTS,
@@ -69,6 +71,8 @@ const OTHER_HOST = "j7-other-host";
 const OTHER_HOST_SESSION = "0f1e2d3c-4b5a-4968-8776-655443322110";
 const LATE = "late-stop";
 const LATE_SOUL = "You answer owner questions about the queue depth with one short sentence.";
+const QUITTER = "quit-stop";
+const QUITTER_SOUL = "You answer owner questions about the batch size with one short sentence.";
 
 /**
  * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its own session (no worker stands
@@ -78,7 +82,8 @@ const LATE_SOUL = "You answer owner questions about the queue depth with one sho
  * starts a root turn: the owner talks to the bots, not through the orchestrator. A message to a bot another host holds
  * waits in the bot's inbox, naming that host's session and process, and builds nothing here; once that host gives the bot
  * back, this host takes the message and the bot answers it here, once. A stop of a bot another host holds that the bot's
- * home refused is held here and recorded by the periodic check once the home takes writes again, for that host to take.
+ * home refused is held here and recorded by the periodic check once the home takes writes again, for that host to take;
+ * one still held as the runtime quits is recorded then, the notice that it is recorded routed to the terminal once.
  */
 export async function runJourney7OwnerMessagesPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -88,6 +93,8 @@ export async function runJourney7OwnerMessagesPhase(world: HarnessWorld): Promis
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the owner's session disposes cleanly").toBeUndefined();
 	}
+	// With the leg's root gone, the runtime's root is the only root of the process attached as it quits.
+	await stopRecordedAtQuit(world);
 	trace.mark("root", "j7.owner-messages");
 }
 
@@ -559,7 +566,19 @@ async function stopRecordedLate(world: HarnessWorld, session: AgentSession): Pro
 			"a stop the bot's home refused is not recorded, and the owner is told it is held here",
 		).toEqual({ stops: [], warnings: ["notRecorded"] });
 		const recorded = world.io.waitForMutation(() => botInboxStopNames(world.agentDir, LATE).length > 0);
+		// The bots' sessions share the clock the check runs on, each closed when idle for BOT_SESSION_IDLE_BOUND_MS: the
+		// check's minute is shorter, so every idle bound armed before it is still armed after it, the same alarm a minute nearer.
+		const idleBounds = () =>
+			world.timers.armedSnapshot("bot-sessions").filter((alarm) => alarm.delayMs === BOT_SESSION_IDLE_BOUND_MS);
+		const idleBefore = idleBounds();
 		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
+		expect(
+			{ armed: idleBefore.length > 0, after: idleBounds() },
+			"the periodic check's minute closes no idle bot session: each idle bound armed before it is the same alarm after it, a minute nearer",
+		).toEqual({
+			armed: true,
+			after: idleBefore.map((alarm) => ({ ...alarm, remainingMs: alarm.remainingMs - OWED_INBOX_SWEEP_MS })),
+		});
 		await withDeadline(world.trace, "J7 leg 2: the periodic check recorded the stop held here", recorded);
 		const stops = readBotInboxStops(world.agentDir, LATE, (file, reason) => {
 			throw new Error(`the bot's inbox holds an unreadable stop ${file}: ${reason}`);
@@ -602,6 +621,147 @@ async function stopRecordedLate(world: HarnessWorld, session: AgentSession): Pro
 		shapes(world.warnings.slice(mark)),
 		"the stop recorded late is taken here once the bot is given back, and the owner is told nothing more",
 	).toEqual(["notRecorded", words.botStopRecordedLate(LATE)]);
+}
+
+/**
+ * The owner's stop of a bot another host holds, refused by the bot's home and held by this process, is recorded one last
+ * time as the runtime quits: its root is the only root of the process attached, so its host's stops are the runtime's own.
+ * The runtime routes the notice that the stop is recorded now to its terminal, once, while the live session was told only
+ * that it could not be recorded; the stop waits in the bot's inbox, dated and sent as it was made and scoped to the work
+ * there was then (a bot that never ran has none). Once the other host gives the bot back, a root of this process takes it
+ * and tells nothing more.
+ */
+async function stopRecordedAtQuit(world: HarnessWorld): Promise<void> {
+	const words = interfaceText().botTeam;
+	const routed: string[] = [];
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir }) =>
+			prepareAgentSessionRuntime({
+				activate: async (freshManager) => {
+					const root = await world.createRootSession(MODEL_ID.root, { agentDir, sessionManager: freshManager });
+					return {
+						session: root.session,
+						sessionManager: root.sessionManager,
+						getExtensionRunner: root.getExtensionRunner,
+						extensionsResult: root.extensionsResult,
+						services: {
+							cwd,
+							agentDir,
+							authStorage: world.authStorage,
+							settingsManager: root.settingsManager,
+							modelRegistry: world.modelRegistry,
+							resourceLoader: root.session.resourceLoader,
+							diagnostics: [],
+						},
+						diagnostics: [],
+					};
+				},
+				dispose: () => {},
+			}),
+		{
+			cwd: HARNESS_PROJECT_CWD,
+			agentDir: world.agentDir,
+			sessionManager: world.createSessionManager(),
+			onTerminalWarnings: (warnings) => {
+				routed.push(...warnings);
+			},
+		},
+	);
+	const quitting = runtime.session;
+	const quittingSessionId = quitting.sessionId;
+	createOwnerBot(quitting, QUITTER, MODEL_ID.held, QUITTER_SOUL);
+	const inbox = resolve(botInboxDir(world.agentDir, QUITTER));
+	const taken = takeProcessLock(botHostLockFile(world.agentDir, QUITTER), OTHER_HOST);
+	if (!taken.held) throw new Error("the other host could not take the quitting bot's lock");
+	const otherState = new BotHostStateWriter(world.agentDir, {
+		agentId: QUITTER,
+		hostKind: "session",
+		hostSessionId: OTHER_HOST_SESSION,
+		botSessionId: "j7-quit-stop-session",
+		holder: OTHER_HOST,
+	});
+	otherState.publish("idle");
+	const [notRecordedHead, notRecordedTail] = words.botStopNotRecorded(QUITTER, "\0").split("\0");
+	const shapes = (warnings: readonly string[]) =>
+		warnings.map((warning) =>
+			warning.startsWith(notRecordedHead ?? "") && warning.endsWith(notRecordedTail ?? "") ? "notRecorded" : warning,
+		);
+	const mark = world.warnings.length;
+	let taker: AgentSession | undefined;
+	try {
+		const unwritable = world.io.denyUntilCleared({
+			name: "j7-quit-stop-unwritten",
+			kind: "write",
+			matches: (operation) => resolve(operation.path).startsWith(inbox),
+			code: "EACCES",
+		});
+		const madeFrom = Date.now();
+		try {
+			quitting.stopPersistentBot(QUITTER);
+		} finally {
+			unwritable.clear();
+		}
+		const madeBy = Date.now();
+		expect(
+			{ stops: botInboxStopNames(world.agentDir, QUITTER), warnings: shapes(world.warnings.slice(mark)) },
+			"a stop the bot's home refused is not recorded, and the owner is told it is held here",
+		).toEqual({ stops: [], warnings: ["notRecorded"] });
+		// No periodic check runs before the quit (the bots' clock is not moved): the quit is what records it.
+		await withDeadline(world.trace, "J7 leg 2: the runtime holding the stop quits", runtime.dispose());
+		const stops = readBotInboxStops(world.agentDir, QUITTER, (file, reason) => {
+			throw new Error(`the quitting bot's inbox holds an unreadable stop ${file}: ${reason}`);
+		});
+		expect(
+			{
+				routed,
+				warnings: shapes(world.warnings.slice(mark)),
+				stops: stops.map((item) => ({
+					scopedFile: item.file.endsWith(".scoped.stop.json"),
+					madeThen: item.message.at >= madeFrom && item.message.at <= madeBy,
+					from: { pid: item.message.from.pid, sessionId: item.message.from.sessionId },
+					reasonCode: item.message.reasonCode,
+					scope: item.message.scope,
+				})),
+			},
+			"the runtime's quit records the stop its root held, dated, sent and scoped as it was made, and routes the notice that it is recorded now to its terminal once, the live session told only that it could not be recorded",
+		).toEqual({
+			routed: [words.botStopRecordedLate(QUITTER)],
+			warnings: ["notRecorded"],
+			stops: [
+				{
+					scopedFile: true,
+					madeThen: true,
+					from: { pid: process.pid, sessionId: quittingSessionId },
+					reasonCode: OWNER_STOPPED_REASON,
+					scope: { kind: "scoped", attempts: [], plans: [] },
+				},
+			],
+		});
+		// A root of this process watches the bot's home when the other host gives the bot back.
+		taker = (await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() })).session;
+	} finally {
+		// The other host gives the bot back: its state is cleared and its lock released.
+		otherState.clear();
+		taken.lock.release();
+	}
+	if (taker === undefined) throw new Error("no root of this process was made to take the stop recorded at quit");
+	const takingRoot = taker;
+	try {
+		await withDeadline(
+			world.trace,
+			"J7 leg 2: a root of this process took the stop recorded at quit once the other host gave the bot back",
+			world.io.waitForMutation(() => botInboxStopNames(world.agentDir, QUITTER).length === 0),
+		);
+		expect(
+			{ routed, warnings: shapes(world.warnings.slice(mark)) },
+			"the stop recorded at quit is taken once the bot is given back, and the owner is told nothing more",
+		).toEqual({ routed: [words.botStopRecordedLate(QUITTER)], warnings: ["notRecorded"] });
+	} finally {
+		expect(
+			await world.disposeSessionInBody(takingRoot),
+			"the taking root's session disposes cleanly",
+		).toBeUndefined();
+	}
 }
 
 /** How many user messages of a conversation carry `text`: the owner's words delivered once are in one of them. */
