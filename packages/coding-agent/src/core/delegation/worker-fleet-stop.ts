@@ -9,7 +9,6 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { LaneRecord, LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import type { AttemptRuntimeState, DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { REMOTE_LANE_PREFIX } from "../remote/abandoned-placements.ts";
 import {
 	isManagedWorkerAttempt,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
@@ -46,7 +45,7 @@ function unendedSelectedAttempts(snapshot: TaskRuntimeProjection): AttemptRuntim
 
 /** What the owner's stop left unended, by why. */
 export interface WorkerStopOutcome {
-	/** Placed jobs' lanes, handed to the remote backend: each ends when its job's end comes back from the executor. */
+	/** Lanes whose cancel the remote backend took: each ends when its placed job's end comes back from the executor. */
 	readonly remote: readonly AttemptRuntimeState[];
 	/** Managed lanes' attempts, left to the extension that runs each: the host neither runs nor cancels them. */
 	readonly managed: readonly AttemptRuntimeState[];
@@ -62,27 +61,29 @@ export interface OpenPlansStop {
 /**
  * The owner's stop of a session's workers: every open plan closed as cancelled (through `plans`, the session's plan
  * executor, which also releases the plan's prepared dispatches and placed jobs; else in the store, for a session that runs
- * none), then every unended worker attempt cancelled through `cancel`, both for `reasonCode`. Plans close first, so no
+ * none), then every unended worker attempt cancelled through `cancel` (true when the remote backend took the cancel),
+ * both for `reasonCode`. Plans close first, so no
  * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why.
  */
 export function stopSessionWorkers(
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "closePlan">,
 	plans: OpenPlansStop | undefined,
-	cancel: (attempt: AttemptRuntimeState) => void,
+	cancel: (attempt: AttemptRuntimeState) => boolean,
 	reasonCode: string,
 ): WorkerStopOutcome {
 	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode);
 	else
 		for (const [planId, plan] of Object.entries(runtime.getSnapshot().plans))
 			if (!plan.closed) runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
-	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot())) cancel(attempt);
+	const handed = new Set<string>();
+	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot()))
+		if (cancel(attempt)) handed.add(attempt.attemptId);
 	const unended = unendedSelectedAttempts(runtime.getSnapshot());
-	const managed = unended.filter(isManagedWorkerAttempt);
 	const own = unended.filter((attempt) => !isManagedWorkerAttempt(attempt));
 	return {
-		remote: own.filter((attempt) => attempt.taskId.startsWith(REMOTE_LANE_PREFIX)),
-		managed,
-		failed: own.filter((attempt) => !attempt.taskId.startsWith(REMOTE_LANE_PREFIX)),
+		remote: own.filter((attempt) => handed.has(attempt.attemptId)),
+		managed: unended.filter(isManagedWorkerAttempt),
+		failed: own.filter((attempt) => !handed.has(attempt.attemptId)),
 	};
 }
 

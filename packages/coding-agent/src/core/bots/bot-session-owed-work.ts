@@ -348,7 +348,7 @@ export class BotOwedWork {
 	 * state holds to deliver, the session's open could not deliver, so it does not open the session again.
 	 */
 	private readonly offered = new Map<string, string>();
-	/** The stops waiting for each bot when applying them last failed here ({@link applyStop}). */
+	/** The stops waiting for each bot when applying them last failed here ({@link applyOwnerStop}). */
 	private readonly failedStops = new Map<string, string>();
 
 	constructor(ports: BotOwedWorkPorts) {
@@ -538,7 +538,7 @@ export class BotOwedWork {
 				} else {
 					// A stop waiting is applied whether or not the bot's next open is armed: it does not wait for the backoff.
 					if (!this.ports.heldElsewhere(agentId) && botInboxStopWaiting(agentDir, agentId))
-						this.applyStop(agentId, true);
+						this.applyOwnerStop(agentId, true);
 					if (
 						!this.openRetries.pending(agentId) &&
 						(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
@@ -641,7 +641,7 @@ export class BotOwedWork {
 			notResumed(storeFailure(agentId, error, undefined));
 			return;
 		}
-		this.applyStop(agentId, swept);
+		this.applyOwnerStop(agentId, swept);
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
 		// A stop the owner wrote while another process hosted it (`requestBotStop`) holds back the work it stopped: its
@@ -713,9 +713,11 @@ export class BotOwedWork {
 	/**
 	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
 	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told;
-	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change.
+	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change. The owner's stop of a bot this
+	 * process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot takes it instead.
 	 */
-	private applyStop(agentId: string, swept: boolean): void {
+	applyOwnerStop(agentId: string, swept = false): void {
+		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return;
 		const agentDir = this.ports.agentDir();
 		const stops = botInboxStopNames(agentDir, agentId).join("\n");
 		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return;

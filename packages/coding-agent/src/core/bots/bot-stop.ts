@@ -7,20 +7,22 @@
  *
  * What it ends: every open plan is closed and every unended worker attempt cancelled, the bot's parent agents included
  * (`OWNER_STOPPED_REASON`, whose ends wake no one), and every job the session placed on another machine is ended, first,
- * so nothing goes on spending; then the bot's active goal is paused (the owner resumes it) and its usage-limit wait is
- * declined (`declineUsageWaitForOwner`). A managed lane is left to the extension that runs it, and the owner is told.
+ * so nothing goes on spending; then the bot's goal is paused when it runs or the system would resume it on its own
+ * (`holdPersistedGoalForOwnerStop`; the owner resumes it) and its usage-limit wait is declined
+ * (`declineUsageWaitForOwner`). A managed lane is left to the extension that runs it, and the owner is told.
  *
  * Order: a stop ends the work there is when it is made. An inbox message whose `at` is at or before the stop's (sent before
  * it, or in the same millisecond, which the stop is read to cover) is refused with the owner-stopped reason; one after it is
  * the owner's next words and waits for the session.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
+import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import { stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
-import { type PersistedGoalStateHost, pausePersistedGoal } from "../goals/goal-lifecycle.ts";
+import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
@@ -56,7 +58,7 @@ export interface HostedBotStopSession {
 
 /**
  * The stop applied to a hosted bot's live session (its foreground turn already stopped by the host): its whole fleet
- * cancelled (`cancelOwnFleet`), then its goal paused and its usage wait declined. What it left unended, by why.
+ * cancelled (`cancelOwnFleet`), then its goal held and its usage wait declined. What it left unended, by why.
  */
 export function applyOwnerStopToSession(
 	session: HostedBotStopSession,
@@ -64,7 +66,7 @@ export function applyOwnerStopToSession(
 	now: number,
 ): WorkerStopOutcome {
 	const outcome = session.fleet.cancelOwnFleet(stop.reasonCode);
-	pausePersistedGoal(session.goal, new Date(now).toISOString());
+	holdPersistedGoalForOwnerStop(session.goal, new Date(now).toISOString());
 	declineUsageWaitForOwner(session.transcript, now);
 	return outcome;
 }
@@ -124,8 +126,13 @@ function stopClosedSession(
 ): WorkerStopOutcome {
 	const roots = botSessionStorageRoots(agentDir, botHomeOf(agentDir, agentId).orchestrationHome, saved.id);
 	const { outcome } = cancelOwedWorkerWork(roots.orchestrationHome, agentDir, saved.id, stop.reasonCode);
+	// A session file not written yet holds no goal and no usage wait; one that holds another session is refused.
+	if (!existsSync(saved.file) || statSync(saved.file).size === 0) return outcome;
+	const header = readSessionHeader(saved.file);
+	if (header?.id !== saved.id)
+		throw new Error(`the session file ${saved.file} does not hold the bot's session ${saved.id}`);
 	const transcript = SessionManager.open(saved.file, roots);
-	pausePersistedGoal(closedGoalHost(transcript), new Date(now).toISOString());
+	holdPersistedGoalForOwnerStop(closedGoalHost(transcript), new Date(now).toISOString());
 	declineUsageWaitForOwner(transcript, now);
 	return outcome;
 }
@@ -175,6 +182,7 @@ function cancelBundleWorkers(
 		(attempt) => {
 			runtime.cancelAttempt(attempt.attemptId, reasonCode);
 			cancelled++;
+			return false;
 		},
 		reasonCode,
 	);

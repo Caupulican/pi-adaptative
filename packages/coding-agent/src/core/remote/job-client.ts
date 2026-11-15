@@ -278,13 +278,24 @@ function endPlacedRecord(
  */
 export function endPlacedJobsOfSession(agentDir: string, sessionId: string, cancel: JobCancelReason): number {
 	const store = new JobStore(agentDir);
+	const placed = store.placedScan();
 	let ended = 0;
-	for (const record of [...store.placedScan().valid.values()])
+	for (const record of [...placed.valid.values()])
 		if (
 			record.ownerSession === sessionId &&
 			endPlacedRecord(agentDir, store, record.executorId, record.jobId, endingOfCancel(cancel), cancel)
 		)
 			ended += 1;
+	// Only the session's own client matches such a record, through its lane: a closed session's stop cannot name it.
+	if (placed.unreadable.length > 0)
+		harnessLog.warn(
+			"placement",
+			"placed job records this build cannot read are not ended by a closed session's stop",
+			{
+				sessionId,
+				unreadable: placed.unreadable.length,
+			},
+		);
 	return ended;
 }
 

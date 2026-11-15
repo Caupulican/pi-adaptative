@@ -452,8 +452,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 	/**
 	 * Cancels a scope: its prepared dispatches are released (returning their allocations), and its queued and running lanes
 	 * are cancelled through the controller's durable cancel. A plan scope names its lanes from the plan's own projection.
+	 * Returns the lane ids handed to the remote backend, which end once their jobs' ends come back.
 	 */
-	cancel(scope: FleetScope, reasonCode: string): void {
+	cancel(scope: FleetScope, reasonCode: string): readonly string[] {
 		if (scope.kind === "plan") this.forgetPlanVersions(scope.planId);
 		const inScope = (lane: { objectiveId: string; subtreeId: string }): boolean =>
 			scope.kind === "all" ||
@@ -481,17 +482,20 @@ export class SessionFleetScheduler implements FleetScheduler {
 									.map((lane) => lane.laneId),
 							];
 		// A remote job's id is cancelled through its backend only, with or without local lanes; the local lanes take the rest.
-		const localIds = laneIds.filter((id) => !this.remote?.cancel(id, reasonCode));
-		if (localIds.length === 0) return;
+		const handed: string[] = [];
+		const localIds: string[] = [];
+		for (const id of laneIds) (this.remote?.cancel(id, reasonCode) ? handed : localIds).push(id);
+		if (localIds.length === 0) return handed;
 		if (!local) {
 			harnessLog.warn("fleet", "a lane cancel found no local lanes to end it", {
 				lanes: localIds.length,
 				reasonCode,
 			});
-			return;
+			return handed;
 		}
 		harnessLog.info("fleet", "a fleet scope is cancelled", { scope: scope.kind, lanes: localIds.length, reasonCode });
 		local.cancelLanes(localIds, reasonCode);
+		return handed;
 	}
 
 	stop(): void {

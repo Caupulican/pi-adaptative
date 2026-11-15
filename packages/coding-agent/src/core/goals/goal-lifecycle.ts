@@ -292,6 +292,23 @@ export function pausePersistedGoal(host: PersistedGoalStateHost, now = new Date(
 	return persistResult(host, current, pauseGoal(current, now));
 }
 
+/**
+ * The owner's stop of a bot's work, applied to its goal: a goal running, or stopped by the system (a guard, a provider
+ * failure, a usage limit) and so resumed by the system on its own, is paused, and resumes only when the owner resumes it.
+ * A goal the owner or its agent already holds, or one that ended, is left as it is; undefined then.
+ */
+export function holdPersistedGoalForOwnerStop(
+	host: PersistedGoalStateHost,
+	now = new Date().toISOString(),
+): GoalActionResult | undefined {
+	const current = host.getGoalStateSnapshot();
+	if (!current) return undefined;
+	const systemResumes =
+		isGoalExecutionActive(current.status) || isSystemStoppedGoal(current) || current.status === "usage_limited";
+	if (!systemResumes) return undefined;
+	return persistResult(host, current, { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) });
+}
+
 export function resumePersistedGoal(host: PersistedGoalStateHost, now = new Date().toISOString()): GoalActionResult {
 	const current = host.getGoalStateSnapshot();
 	return persistResult(host, current, resumeGoal(current, now));

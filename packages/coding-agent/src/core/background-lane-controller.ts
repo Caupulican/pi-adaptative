@@ -1345,7 +1345,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return stopSessionWorkers(
 			this._getWorkerLifecycle().ledger.runtime,
 			this._planExecutor,
-			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, reasonCode),
+			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, reasonCode).length > 0,
 			reasonCode,
 		);
 	}
