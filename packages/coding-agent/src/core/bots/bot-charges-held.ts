@@ -28,8 +28,17 @@ import { SPAWNED_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
-/** How many times a session file that changes while it is read is read again before the read-back fails. */
+/**
+ * How many times a session file that changes while it is read is read again before the read-back fails (and is tried
+ * again later): skipping it would under-read how far the roots hold the charges, and charge its ranges again.
+ */
 const MAX_FILE_READS = 3;
+
+/**
+ * How much coarser than the header's milliseconds a file system may keep modification times (two seconds on FAT): a file
+ * written in the bot session's first moments is still read.
+ */
+const MTIME_GRANULARITY_MS = 2_000;
 
 /** A live root session of the process: its file, and its entries (the ones not written to its file yet included). */
 export interface BotChargeLiveRoot {
@@ -153,7 +162,7 @@ export async function botChargesHeld(
 					throw error;
 				},
 			);
-			if (changed === undefined || changed < since) continue;
+			if (changed === undefined || changed < since - MTIME_GRANULARITY_MS) continue;
 			await readFileCharges(file, sessionId, (entry) => {
 				const data = chargeOf(entry, sessionId);
 				if (data) held(data);

@@ -119,6 +119,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its state could not be published for other sessions (${reason}).`,
 	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its turn's spend could not be recorded (${reason}).`,
+	botChargeMarkNotKept: (agentId: string, reason: string) =>
+		`Bot ${agentId}: how far the main session holds its spend could not be marked in its transcript (${reason}); if its spend record is lost, that is read back from the main session's files alone.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its turn outcome could not be recorded (${reason}).`,
 	/** What the bot's session told the owner could not be kept in its chat; the words follow. */

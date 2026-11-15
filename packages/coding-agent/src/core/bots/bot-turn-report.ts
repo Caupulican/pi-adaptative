@@ -108,6 +108,11 @@ export interface BotTurnAccountingPorts {
 	 * with the next charge).
 	 */
 	chargeNotRecorded(reason: string): void;
+	/**
+	 * How far the root holds the session's charges could not be marked in its transcript (`BotChargeMark`): the owner is
+	 * told why, once until a mark is kept again.
+	 */
+	markNotKept(reason: string): void;
 	/** Records a turn's last words as the bot's outcome: its roster summary and unread mark. */
 	outcome(summary: string): void;
 }
@@ -154,6 +159,8 @@ export class BotTurnAccounting {
 	private watching: { readonly root: string; readonly stop: () => void } | undefined;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */
 	private notRecordedTold = false;
+	/** A mark was not kept and the owner was told; told again only after a mark is kept. */
+	private markNotKeptTold = false;
 	private closed = false;
 
 	constructor(
@@ -353,18 +360,34 @@ export class BotTurnAccounting {
 		this.unwatch();
 		this.watching = {
 			root,
-			stop: this.ports.chargesPersisted((written, reportIds) => this.written(written, reportIds)),
+			// Taken up once the root's write has returned: the ledger and the bot's transcript are never written inside it.
+			stop: this.ports.chargesPersisted((written, reportIds) =>
+				queueMicrotask(() => this.written(written, reportIds)),
+			),
 		};
 	}
 
-	/** The root `rootSessionId` wrote the charges `reportIds`: the awaited ones among them are settled. */
+	/**
+	 * The root `rootSessionId` wrote its file, holding the charges `reportIds`: the awaited ones among them are settled. A
+	 * root that writes its file holds no charge unwritten any more (its first write takes every entry it held), so an
+	 * awaited charge the write did not hold is one it lost (a reopen of its file drops what it never wrote): while that
+	 * root still answers, it is delivered again, in order, through the root's report-id index.
+	 */
 	private written(rootSessionId: string, reportIds: readonly string[]): void {
 		if (this.closed) return;
 		const ids = new Set(reportIds);
-		const held = (this.ledger.charge?.pending ?? []).filter(
-			({ report }) => ids.has(report.reportId) && this.awaiting.get(report.reportId) === rootSessionId,
+		const awaited = (this.ledger.charge?.pending ?? []).filter(
+			({ report }) => this.awaiting.get(report.reportId) === rootSessionId,
 		);
+		const held = awaited.filter(({ report }) => ids.has(report.reportId));
 		if (held.length > 0) this.settle(held);
+		if (rootSessionId !== this.ports.rootSessionId()) return;
+		for (const charge of awaited) {
+			if (held.includes(charge)) continue;
+			const persisted = this.deliver(charge);
+			if (persisted === undefined) break;
+			if (persisted) this.settle([charge]);
+		}
 	}
 
 	private unwatch(): void {
@@ -397,6 +420,18 @@ export class BotTurnAccounting {
 		}
 		state.pending = state.pending.filter((charge) => !held.includes(charge));
 		this.ledger.write();
-		if (settled && !this.closed) this.mark.advance(settled);
+		if (settled && !this.closed) this.keepMark(settled);
+	}
+
+	/** Marks `through` in the bot's transcript; a failure is told once until a mark is kept (the ledger stands as written). */
+	private keepMark(through: Usage): void {
+		try {
+			this.mark.advance(through);
+			this.markNotKeptTold = false;
+		} catch (error) {
+			if (this.markNotKeptTold) return;
+			this.markNotKeptTold = true;
+			this.ports.markNotKept(error instanceof Error ? error.message : String(error));
+		}
 	}
 }

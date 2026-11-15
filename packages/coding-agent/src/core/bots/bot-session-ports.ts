@@ -165,7 +165,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				},
 			};
 		},
-		// The bot charges the session's file now holds, as each write lands; an observer never throws (none is retried).
+		// Each write of the session's file as it lands, with the bot charges it holds; an observer never throws (none is retried).
 		chargesPersisted: (listener) =>
 			deps.getSessionManager().onEntriesPersisted((event) => {
 				const session = deps.getSessionManager();
@@ -179,7 +179,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 						? [entry.data.reportId]
 						: [];
 				});
-				if (reportIds.length > 0) listener(event.sessionId, reportIds);
+				listener(event.sessionId, reportIds);
 			}),
 	};
 }

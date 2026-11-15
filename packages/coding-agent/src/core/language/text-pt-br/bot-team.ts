@@ -110,6 +110,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o estado dele não pôde ser publicado para as outras sessões (${reason}).`,
 	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o gasto do turno não pôde ser registrado (${reason}).`,
+	botChargeMarkNotKept: (agentId: string, reason: string) =>
+		`Bot ${agentId}: até onde a sessão principal guarda o gasto dele não pôde ser marcado na transcrição dele (${reason}); se o registro de gasto se perder, isso é relido só dos arquivos da sessão principal.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o resultado do turno não pôde ser registrado (${reason}).`,
 	botNoticeNotRecorded: (agentId: string, text: string, reason: string) =>

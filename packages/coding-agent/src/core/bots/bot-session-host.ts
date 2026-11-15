@@ -737,6 +737,8 @@ export class BotSessionHost {
 					rootSessionId: () => entry.sender.hostSessionId(),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
+					markNotKept: (reason) =>
+						entry.sender.warn(interfaceText().botTeam.botChargeMarkNotKept(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),
 				}),
 				idleTimer: undefined,

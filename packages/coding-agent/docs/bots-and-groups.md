@@ -66,8 +66,8 @@ only the main sessions' files changed since the bot's session began are read bac
 read is read again, one that is no session file holds none), and a live main session's charges count once its file
 holds them, the ones it holds unwritten being delivered again. Once a main session's file holds the bot's charges up to
 a range end, that end is marked in the bot's transcript (`bot-charge-mark-v1`), so a range is not charged again after
-session retention removed the files that held it. A charge a main session holds unwritten is settled when its write
-lands, and it counts in the daily brake on the day its range was fixed, whichever file holds it. Ranges reach the main
+session retention removed the files that held it (a mark that cannot be written is told once). A charge a main session
+holds unwritten is settled when its write lands, and it counts in the daily brake on the day its range was fixed, whichever file holds it. Ranges reach the main
 session in order. A spend record that cannot be read is left in place and read again,
 counting in memory meanwhile; one that does not read is set aside as `spend.json.unreadable-<time>`, keeping what of it
 reads. You are told once either way. A turn's spend counts, with its model calls, the
