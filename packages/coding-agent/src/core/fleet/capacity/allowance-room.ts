@@ -8,7 +8,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "../../channels/channel-policy.ts";
 import type {
 	SubscriptionAllowance,
-	SubscriptionAllowanceReader,
+	SubscriptionAllowancePort,
 } from "../../provider-admission/subscription-allowance.ts";
 import type { RoomTerm } from "../fleet-types.ts";
 
@@ -23,14 +23,14 @@ export interface FleetAllowancePort {
 	subscribe(onChange: (accountKey: string) => void): () => void;
 }
 
-/** The production port over a session's subscription reader, at the owner-channel quota line. */
-export function subscriptionAllowancePort(reader: () => SubscriptionAllowanceReader): FleetAllowancePort {
+/** The fleet's port over the session's subscription allowance, at the owner-channel quota line. */
+export function subscriptionAllowancePort(reader: () => SubscriptionAllowancePort): FleetAllowancePort {
 	return {
 		read: (model) => ({
-			accountKey: reader().accountKey(model),
+			accountKey: reader().accountKey?.(model) ?? model.provider,
 			allowance: reader().read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model),
 		}),
-		subscribe: (onChange) => reader().subscribe(onChange),
+		subscribe: (onChange) => reader().subscribe?.(onChange) ?? (() => {}),
 	};
 }
 

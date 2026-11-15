@@ -189,10 +189,6 @@ import {
 } from "./proactivity/proactivity-controller.ts";
 import { observeReviewGauge } from "./proof/review-gauge.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
-import {
-	createSessionAllowanceReader,
-	type SubscriptionAllowanceReader,
-} from "./provider-admission/subscription-allowance.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
 import { finishedPlacedJobReferences } from "./remote/job-store.ts";
 import { withLinkPolicy } from "./remote/link-policy.ts";
@@ -315,7 +311,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
-		this._allowance = createSessionAllowanceReader(deps);
 		this.channels = new SessionChannels({
 			getAgentDir: () => deps.getAgentDir(),
 			getSessionManager: () => deps.getSessionManager(),
@@ -339,7 +334,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			store: () => this.getBotTeamStore(),
 			warn: (message) => this._safeWarn(message),
 			workerController: () => this._getWorkerController(),
-			allowance: () => this._allowance,
+			allowance: () => deps.subscriptionAllowance,
 		});
 		this._botRoster = new BotRoster({
 			store: () => this.getBotTeamStore(),
@@ -530,8 +525,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().probeWorkerReadiness();
 	}
 
-	/** The usage each subscription account reports, read on the account of the model asked about. */
-	private readonly _allowance: SubscriptionAllowanceReader;
 	private readonly _terminalRouting = new TerminalRouting();
 
 	/** Claims a durable terminal for a structured owner (plan executor, leader controller); see `terminal-routing.ts`. */
@@ -556,7 +549,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				createBotMessageDirectory: (sender, attempt) =>
 					this._botLifecycle.createBotMessageDirectory(sender, attempt),
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
-				fleetAllowance: subscriptionAllowancePort(() => this._allowance),
+				fleetAllowance: subscriptionAllowancePort(() => this.deps.subscriptionAllowance),
 				taskWatches: this._routineAssembly.taskWatches(() => this._routines.current),
 			},
 			this._getWorkerNotificationCoordinator(),
@@ -2160,7 +2153,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	private subscriptionExhaustedFor(aliases: readonly string[]): boolean {
 		const registry = this.deps.getModelRegistry();
-		const reader = this._allowance;
+		const reader = this.deps.subscriptionAllowance;
 		return aliases.some((alias) => {
 			const bot = this.getBotTeamStore().getBot(alias);
 			const model = bot ? registry.find(bot.provider, bot.modelId) : undefined;

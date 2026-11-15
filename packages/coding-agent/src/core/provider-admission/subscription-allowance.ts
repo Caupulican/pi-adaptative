@@ -69,6 +69,10 @@ function exhausted(usedPercent: number, reason: string, windows: readonly UsageW
 /** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
 export interface SubscriptionAllowancePort {
 	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance;
+	/** The usage account a model's requests count against; a port that does not name one counts them against the provider id. */
+	accountKey?(model: Model<Api>): string;
+	/** Hears the key of an account whose reading changed; a port without it never says a reading changed before it is read again. */
+	subscribe?(listener: (accountKey: string) => void): () => void;
 }
 
 /**
@@ -230,19 +234,6 @@ export function createSubscriptionAllowanceReader(
 		monitor: new AccountUsageMonitor({ now }),
 		currentAccountKey: (provider) => resolveProviderAccountKey(deps.getRegistry().authStorage, provider),
 		now,
-	});
-}
-
-/** A session's own reader, wired to its `provider-admission` clock. */
-export function createSessionAllowanceReader(deps: {
-	getModelRegistry(): ReturnType<SubscriptionAllowanceReaderDeps["getRegistry"]>;
-	getModel(): Model<Api> | undefined;
-	getTimers(): Pick<TimerSource, "port">;
-}): SubscriptionAllowanceReader {
-	return createSubscriptionAllowanceReader({
-		getRegistry: () => deps.getModelRegistry(),
-		getModel: () => deps.getModel(),
-		now: () => deps.getTimers().port("provider-admission").now(),
 	});
 }
 

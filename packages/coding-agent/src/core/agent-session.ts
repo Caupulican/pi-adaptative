@@ -1234,6 +1234,7 @@ export class AgentSession {
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
+			subscriptionAllowance: this._subscriptionAllowance,
 			getCredentialExposureBoundary: () => this._runtimeBuilder.credentialExposureBoundary,
 			getSessionConfinement: () => this._runtimeBuilder.sessionConfinement,
 			// Workers pick only models that can take work: quota left and offered to the owner's account.
@@ -1276,9 +1277,7 @@ export class AgentSession {
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
 			notifyWorkerTerminalHandoff: (records) => {
-				for (const record of records) {
-					this.reportOutboxWorkerTerminal(record);
-				}
+				for (const record of records) this.reportOutboxWorkerTerminal(record);
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
 			routineScope: () => this._caps.routineScope,

@@ -19,6 +19,7 @@ import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import type { ProactivityControllerDeps } from "./proactivity/proactivity-controller.ts";
+import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import type { LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import type { ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
@@ -49,6 +50,11 @@ export interface BackgroundLaneControllerDeps
 		read: () => HarnessNoticeObservation | undefined,
 		onLost?: () => void,
 	): boolean;
+	/**
+	 * The session's subscription allowance: the one reading the cost guard and the owner channel take, which the fleet's
+	 * admission, a bot's model refusal and its spend check read too, so the session has one usage monitor per account.
+	 */
+	readonly subscriptionAllowance: SubscriptionAllowancePort;
 	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
 	getSessionManager(): SessionManager;
 	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
