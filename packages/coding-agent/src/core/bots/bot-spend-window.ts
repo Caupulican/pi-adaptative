@@ -335,7 +335,8 @@ export class BotSpendWindows {
 					this.windowOfDelivered(attemptIds, snapshot, depth) ??
 					this.windowOfServed(servedInput(details), snapshot, depth);
 				windowId = delivered?.windowId;
-				if (attemptIds.length > 0 && !delivered?.settled) settled = false;
+				// A window found is as settled as its answer; none found is unsettled while attempts it names are not placed yet.
+				if (delivered ? !delivered.settled : attemptIds.length > 0) settled = false;
 			}
 			id = entry.parentId;
 		}
