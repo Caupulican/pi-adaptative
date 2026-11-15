@@ -13,6 +13,7 @@ import {
 } from "../../../../src/core/collaboration/knowledge-delivery.ts";
 import { deriveWorkerLaunchProfile } from "../../../../src/core/collaboration/launch-profile.ts";
 import { collaborationPaneEvidence, collaborationPrompt } from "../../../../src/core/collaboration/turn-runner.ts";
+import { SPAWNED_USAGE_CUSTOM_TYPE } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
@@ -21,6 +22,16 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmContinuousSettings } from "./shared.ts";
+
+/** What the native helper reports its turn spent: a measured claim the host charges as received. */
+const TURN_USAGE = {
+	input: 40,
+	output: 8,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 48,
+	cost: { input: 0.0004, output: 0.0002, cacheRead: 0, cacheWrite: 0, total: 0.0006 },
+} as const;
 
 /** An in-process IPC channel with the parent and helper halves the helper process and its parent use. */
 function knowledgeChannelPair(): { parent: KnowledgeChannelPort; helper: KnowledgeChannelPort } {
@@ -181,7 +192,7 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 						// A native CLI's stopped pane: the echoed prompt, a re-rendered copy of the block, then its own output.
 						const pane = `${prompt}\n${block ?? ""}\n${evidence}`;
 						const paneEvidence = collaborationPaneEvidence(pane, agent.turnId, block);
-						const finished = helper.finishTurn(job.id, agent.id, agent.turnId, "done", paneEvidence);
+						const finished = helper.finishTurn(job.id, agent.id, agent.turnId, "done", paneEvidence, TURN_USAGE);
 						readJobFile();
 						claims.push({ release, record, evidence: paneEvidence, finished });
 					},
@@ -375,6 +386,21 @@ export async function runJourney1KnowledgeManagedLeg(world: HarnessWorld): Promi
 		await withDeadline(world.trace, `${label} parent response settled`, session.waitForForegroundIdle());
 		const delivered = parentContext();
 		expect(delivered.composed, "the parent receives the lane's terminal").toContain(`- ${laneId}: succeeded`);
+		// The lane's usage claim rides on its terminal report: the host charges it once, under the attempt's report id.
+		const laneCharges = manager.getEntries().flatMap((entry) => {
+			if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) return [];
+			const report = entry.data as { reportId?: string; label?: string; usage?: { totalTokens?: number } };
+			return report.reportId === `managed-worker:${attempt?.attemptId}` || report.reportId?.startsWith(`${laneId}:`)
+				? [{ reportId: report.reportId, label: report.label, totalTokens: report.usage?.totalTokens }]
+				: [];
+		});
+		expect(laneCharges, "the lane's usage claim is charged once, with its attempt's terminal").toEqual([
+			{
+				reportId: `managed-worker:${attempt?.attemptId}`,
+				label: "managed-worker",
+				totalTokens: TURN_USAGE.totalTokens,
+			},
+		]);
 		expect(delivered.views, "the parent's request carries one view of its own knowledge").toHaveLength(1);
 		expect(delivered.views[0], "that view is the owner's own, which lists an ungranted record").toContain(
 			ungranted.text,

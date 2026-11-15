@@ -301,14 +301,8 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		const coordinator = new CollaborationCoordinator({
 			store,
 			backend,
-			report: (event) => {
-				pi.reportManagedLane(event);
-				if (event.phase === "terminal" && event.usage)
-					pi.reportSpawnedUsage(event.usage, {
-						label: "collaboration-worker-advisory",
-						reportId: `${event.laneId}:${event.dispatchSequence}`,
-					});
-			},
+			// A terminal's usage claim travels on the lane's report: the host charges it once, with the attempt's terminal.
+			report: (event) => pi.reportManagedLane(event),
 			launchTurn: (job, agent, answer, knowledge, signal) =>
 				(options.launchTurn ?? launchCollaborationTurnProcess)(store, job, agent, answer, knowledge, signal),
 		});
