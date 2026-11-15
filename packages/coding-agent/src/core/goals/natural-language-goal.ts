@@ -10,7 +10,7 @@ export interface ExplicitGoalStartAuthority {
 }
 
 /** A pt-BR infinitive: an -ar, -er or -ir verb, or pôr and its compounds (compor, propor, repor). */
-const PT_BR_INFINITIVE = String.raw`(?:[a-zà-ú]+(?:ar|er|ir)|[a-zà-ú]+p[ôo]r|pôr)`;
+const PT_BR_INFINITIVE = "(?:[a-zà-ú]+(?:ar|er|ir)|[a-zà-ú]+p[ôo]r|pôr)";
 /** pt-BR articles, determiners, pronouns and prepositions that open a verb's object and are not English words. */
 const PT_BR_OBJECT_OPENERS =
 	"o|os|uma|umas|uns|de|da|dos|das|em|na|nos|nas|num|numa|com|para|pra|por|pelo|pela|pelos|pelas|que|todo|toda|todos|todas|cada|este|esta|estes|estas|esse|essa|esses|essas|isso|isto|aquele|aquela|aquilo|meu|minha|meus|minhas|nosso|nossa|nossos|nossas|seu|sua|seus|suas";
