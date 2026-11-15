@@ -5,6 +5,7 @@ import { harnessLog } from "../kernel/harness-log.ts";
 import { orchestrationSessionDeletionsDir, sessionKeyOfDeletionFile } from "../kernel/session/session-bundle-paths.ts";
 import {
 	BOTS_DIR_NAME,
+	capabilityArtifactsDir,
 	type OrchestrationHome,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
@@ -30,6 +31,8 @@ import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
 	hasPendingSessionBundleRetention,
+	markSessionBundleRemoving,
+	releaseSessionBundleRetention,
 	type SessionBundleDeletionReservation,
 	settleSessionBundleDeletion,
 	withSessionBundleRetention,
@@ -54,9 +57,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * A bundle is removed only when every gate holds:
  * - no live or resumable process-matrix entry (and not this process's own session) names its session;
  * - it is not a bot home's current session (its pointer's, `bot-session-pointer.ts`) nor the session a live bot host
- *   holds (`host.lock` held by a process not proven dead, its session read from `host-state.json`); one of those that
- *   an earlier run already reserved for retention is resumed rather than kept, since no lease is admitted to a reserved
- *   bundle (its bot could not open it again) until the removal settles;
+ *   holds (`host.lock` held by a process not proven dead, its session read from `host-state.json`); one of those whose
+ *   removal an earlier run had begun is resumed rather than kept, since no lease is admitted to a reserved bundle (its
+ *   bot could not open it again) until the removal settles, while a held session's tombstone that never reached removal
+ *   (`releaseSessionBundleRetention`) is released, its bundle whole;
  * - its newest file is older than {@link SESSION_BUNDLE_QUIET_FLOOR_MS}, which also protects sessions whose
  *   transcript lives outside `<agentDir>/sessions` and the bot homes or has not been written yet;
  * - its parent session transcript (under `<agentDir>/sessions`, or a bot's own under `bots/<id>/sessions`) is
@@ -85,6 +89,11 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * (`settleGoneSessionRoutines`). It needs the owner's session files listed, so an owner listing that fails or exceeds its
  * bound skips it; work whose origin session file lies in a bot home whose files did not list, or where a live host may
  * hold a session no id names, is left.
+ *
+ * Each removal is reserved in its home's tombstone and marked `removing` there just before anything is removed: a
+ * deferral before that releases the tombstone (the bundle is whole), and a resumed removal that had begun skips the
+ * gates its bundle already passed and finishes, its bundle's side files (fleet queue, capability artifacts) included,
+ * also when the bundle itself is already gone.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first resumes,
  * in every home and ahead of the removal budget, the reservations earlier runs left; then it scans every home's bundles
@@ -292,9 +301,14 @@ function indexSessionFiles(
 	const ownerFailure = listSessionFiles(
 		() =>
 			existsSync(ownerRoot)
-				? readdirSync(ownerRoot, { withFileTypes: true }).flatMap((entry) =>
-						entry.isDirectory() ? [join(ownerRoot, entry.name)] : [],
-					)
+				? readdirSync(ownerRoot, { withFileTypes: true }).flatMap((entry) => {
+						// A symlinked directory holds session files as a directory does; a link that names none holds none.
+						const dir = join(ownerRoot, entry.name);
+						return entry.isDirectory() ||
+							(entry.isSymbolicLink() && statSync(dir, { throwIfNoEntry: false })?.isDirectory())
+							? [dir]
+							: [];
+					})
 				: [],
 		files,
 	);
@@ -594,24 +608,42 @@ function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
 }
 
 /**
- * The bundles of `sweep` an earlier run reserved for retention and left unsettled, by its tombstones: no lease is admitted
- * to them (their session cannot open) until their removal settles, so each run resumes them first.
+ * The bundles of `sweep` whose retention an earlier run left pending, by its tombstones (`hasPendingSessionBundleRetention`):
+ * no lease is admitted to them (their session cannot open) until their removal settles, so each run resumes them
+ * first, those whose bundle is already gone included, so their removal settles. A tombstone that does not read is
+ * reported and stands; the others are still resumed.
  */
-async function retentionReservedNames(sweep: HomeSweep): Promise<string[]> {
+async function retentionReservedNames(sweep: HomeSweep, report: (message: string) => void): Promise<string[]> {
 	const deletions = orchestrationSessionDeletionsDir(sweep.home);
 	if (!existsSync(deletions)) return [];
-	const present = new Set(sweep.names);
-	return (await readdir(deletions))
-		.flatMap((file) => {
-			const name = sessionKeyOfDeletionFile(file);
-			const sessionId =
-				name !== undefined && present.has(name) ? recoverParentSessionId(sweep.home, name) : undefined;
-			return name !== undefined && sessionId !== undefined && hasPendingSessionBundleRetention(sweep.home, sessionId)
-				? [name]
-				: [];
-		})
-		.sort();
+	const names: string[] = [];
+	for (const file of await readdir(deletions)) {
+		const name = sessionKeyOfDeletionFile(file);
+		const sessionId = name === undefined ? undefined : recoverParentSessionId(sweep.home, name);
+		if (name === undefined || sessionId === undefined) continue;
+		try {
+			if (hasPendingSessionBundleRetention(sweep.home, sessionId)) names.push(name);
+		} catch (error) {
+			report(
+				`session bundle ${sweep.labelOf(name)} retained: its deletion tombstone does not read (${describe(error)})`,
+			);
+		}
+	}
+	return names.sort();
 }
+
+/**
+ * The session's files outside its bundle that name only what the bundle held, removed under the bundle's reservation
+ * once the bundle is gone: its fleet queue files (they order and stop attempts the bundle's ledger held) and its
+ * capability artifacts.
+ */
+function removeSessionSideFiles(home: OrchestrationHome, sessionId: string): void {
+	for (const path of sessionFleetQueueMetadataPaths(home, sessionId)) rmSync(path, { force: true });
+	rmSync(capabilityArtifactsDir(home, sessionId), { recursive: true, force: true });
+}
+
+/** The walk of a bundle already gone: nothing to measure, nothing newer than any age. */
+const GONE_BUNDLE_WALK: BundleWalk = { bytes: 0, newestMtimeMs: 0, complete: true };
 
 /**
  * Sweeps one bundle of one orchestration home through every gate; the run's removal and byte budget is shared by every
@@ -627,7 +659,11 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 	const label = labelOf(name);
 	try {
 		const parentSessionId = recoverParentSessionId(home, name);
-		if (!parentSessionId || processHeld.has(parentSessionId) || historyHeld.has(parentSessionId)) return;
+		if (!parentSessionId) return;
+		const held = processHeld.has(parentSessionId) || historyHeld.has(parentSessionId);
+		// A held session's retention that never began removing is released: its bundle is whole, and the session opens.
+		if (held || protectedIds.has(parentSessionId)) releaseSessionBundleRetention(home, parentSessionId);
+		if (held) return;
 		const resumingDeletion = hasPendingSessionBundleRetention(home, parentSessionId);
 		if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) return;
 		// Its session's files may be in a home whose files were not listed, which would hold it.
@@ -640,7 +676,8 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 		)
 			return;
 		const bundleDir = join(root, name);
-		const walk = walkBundle(bundleDir);
+		// A resumed retention whose bundle is already gone settles under its reservation below.
+		const walk = resumingDeletion && !existsSync(bundleDir) ? GONE_BUNDLE_WALK : walkBundle(bundleDir);
 		if (!walk.complete) return;
 		const quietMs = now - walk.newestMtimeMs;
 		if (!resumingDeletion && quietMs <= SESSION_BUNDLE_QUIET_FLOOR_MS) return;
@@ -651,56 +688,66 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 		if (!reservation) return;
 		let outcome: "removed" | "deferred" | "retained" = "retained";
 		try {
-			// Refuse before any expiry writes. Unknown evidence is also a deferral: a fresh
-			// tombstone must not prevent the session from resuming to deliver its receipts.
+			// A deferral before anything of the bundle is removed releases the tombstone: the bundle is whole.
 			outcome = "deferred";
-			const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
-				const state = readTaskRuntimeProjection(
-					new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
-				);
-				return Object.values(state.attempts).some(
-					(attempt) =>
-						Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
-						workerReceiptPublicationPending(state, attempt),
-				);
-			});
-			if (pendingReceipts) {
-				report(`session bundle ${label} retained: worker receipts await parent delivery`);
+			if (!existsSync(bundleDir)) {
+				// Gone before this reservation: a removal that had begun finishes with the side files; a bundle gone any
+				// other way (moved to another home, or deleted) is released and nothing else is touched.
+				if (reservation.phase === "removing") {
+					removeSessionSideFiles(home, parentSessionId);
+					outcome = "removed";
+				}
 				return;
 			}
-			outcome = "retained";
-			if (bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
-				// Obligations older than the retention age can never be answered: settle them, then re-check.
-				// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
-				// is refused untouched, because settling part of it would only postpone its removal.
-				if (!everyOpenObligationExpires(agentDir, home, parentSessionId, bundleDir, now)) {
-					outcome = "deferred";
+			// A removal that had begun passed every gate before it began, and what is left of its bundle proves nothing.
+			if (reservation.phase === "reserved") {
+				// Unknown evidence is also a deferral: the tombstone must not keep the session from resuming to deliver
+				// its receipts.
+				const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
+					const state = readTaskRuntimeProjection(
+						new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
+					);
+					return Object.values(state.attempts).some(
+						(attempt) =>
+							Object.keys(attempt.usageReceipts ?? {}).length > 0 ||
+							workerReceiptPublicationPending(state, attempt),
+					);
+				});
+				if (pendingReceipts) {
+					report(`session bundle ${label} retained: worker receipts await parent delivery`);
 					return;
 				}
-				const settled = settleExpiredObligations(
-					agentDir,
-					home,
-					parentSessionId,
-					label,
-					bundleDir,
-					now,
-					report,
-					reservation,
-				);
-				result.expiredObligations += settled;
-				if (settled > 0) run.obligationLedgers.add(obligationLedgerFile(home));
-				if (settled === 0 || bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
-					return;
+				if (bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
+					// Obligations older than the retention age can never be answered: settle them, then re-check.
+					// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
+					// is refused untouched, because settling part of it would only postpone its removal.
+					if (!everyOpenObligationExpires(agentDir, home, parentSessionId, bundleDir, now)) return;
+					// Settling writes the mailboxes: from here a refusal keeps the tombstone, so the next run resumes
+					// the expiry past the age those writes refreshed.
+					outcome = "retained";
+					const settled = settleExpiredObligations(
+						agentDir,
+						home,
+						parentSessionId,
+						label,
+						bundleDir,
+						now,
+						report,
+						reservation,
+					);
+					result.expiredObligations += settled;
+					if (settled > 0) run.obligationLedgers.add(obligationLedgerFile(home));
+					if (settled === 0 || bundleOwesMailboxWork(home, parentSessionId, bundleDir)) return;
 				}
 			}
+			outcome = "retained";
+			markSessionBundleRemoving(home, reservation);
 			await rm(bundleDir, { recursive: true, force: true });
 			if (existsSync(bundleDir)) {
 				report(`session bundle ${label} was only partly removed; it stays reserved for the next startup`);
 				return;
 			}
-			// The session's fleet queue metadata orders and stops attempts its bundle's ledger held: with the ledger gone
-			// it names nothing, so it goes under the same reservation.
-			for (const path of sessionFleetQueueMetadataPaths(home, parentSessionId)) rmSync(path, { force: true });
+			removeSessionSideFiles(home, parentSessionId);
 			outcome = "removed";
 		} finally {
 			settleSessionBundleDeletion(home, reservation, outcome);
@@ -819,7 +866,7 @@ export async function sweepSessionBundles(
 		// session cannot open. They share the inspection bound with the rest.
 		const resumed = new Map<HomeSweep, ReadonlySet<string>>();
 		for (const sweep of homes) {
-			const names = await retentionReservedNames(sweep);
+			const names = await retentionReservedNames(sweep, report);
 			resumed.set(sweep, new Set(names));
 			for (const name of names) {
 				if (result.inspected >= MAX_BUNDLES_INSPECTED) break;
