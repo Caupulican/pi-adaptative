@@ -1,15 +1,15 @@
 /**
  * Moves a bot session's orchestration state an earlier build kept in the owner's home (`<agentDir>/state/orchestration`)
  * into the bot's (`bots/<id>/orchestration`), the first time the bot's host loads it after the change: its bundle
- * directory, its lifetime leases and its fleet queue file, each by one rename, never a copy. One rename of one directory
- * cannot carry them: the homes keep a session's pieces in separate trees (the bundle under `sessions/`, the tombstone
- * and leases under `deletions/`, the fleet queue under the state directory's `fleet/queue/`), and moving those trees
- * would move the owner's own paths.
+ * directory, its lifetime leases and its fleet queue files (the session's and its away runs'), each by one rename,
+ * never a copy. One rename of one directory cannot carry them: the homes keep a session's pieces in separate trees (the
+ * bundle under `sessions/`, the tombstone and leases under `deletions/`, the fleet queue files under the state
+ * directory's `fleet/queue/`), and moving those trees would move the owner's own paths.
  *
  * Each load moves what the owner's home still has of the session, so a move a crash cut short is finished by the next.
  * A piece the bot's home already has is not written over: a lease registry whose holders are all dead records nothing
- * and is removed; of two fleet queue files the newer is kept (the bot's when it is not older, else the owner's replaces
- * it, finishing the move); a bundle in both homes keeps the rest where it is, and the host tells the owner. A session
+ * and is removed; of two copies of a fleet queue file the newer is kept (the bot's when it is not older, else the
+ * owner's replaces it, finishing the move); a bundle in both homes keeps the rest where it is, and the host tells the owner. A session
  * whose deletion either home reserved (a tombstone stands: a permanent deletion, or an expiry retiring its bundle) is
  * not moved at all: the deletion protocol owns it until it settles, and a tombstone never moves. The move runs under the
  * bot's `host.lock` and under the bundle locks of both homes (the tombstone locks every lease acquisition, release and
@@ -85,17 +85,22 @@ export class BotBundleSplitError extends AggregateError {
 	}
 }
 
-/** The indexes of the bundle, the lease registry and the fleet queue file among {@link sessionStatePieces}. */
+/**
+ * The indexes of the bundle, the lease registry and the fleet queue files among {@link sessionStatePieces}: the
+ * session's, and its away runs' (`<id>.away.json`, beside it with the same sanitised stem).
+ */
 const BUNDLE = 0;
 const LEASES = 1;
-const FLEET_QUEUE = 2;
+const FLEET_QUEUES: readonly number[] = [2, 3];
 
 /** The pieces of one session's orchestration state in `home` that move, in the order they move. */
 function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
+	const fleetQueue = fleetQueueMetadataPath(home, sessionId);
 	return [
 		orchestrationSessionDir(home, sessionId),
 		`${orchestrationSessionDeletionFile(home, sessionId)}.leases.json`,
-		fleetQueueMetadataPath(home, sessionId),
+		fleetQueue,
+		fleetQueue.replace(/\.json$/, ".away.json"),
 	];
 }
 
@@ -152,7 +157,7 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			const dropped = inBoth.filter(
 				(index) =>
 					index === LEASES ||
-					(index === FLEET_QUEUE &&
+					(FLEET_QUEUES.includes(index) &&
 						statSync(to[index] as string).mtimeMs >= statSync(from[index] as string).mtimeMs),
 			);
 			for (const index of dropped) rmSync(from[index] as string);
