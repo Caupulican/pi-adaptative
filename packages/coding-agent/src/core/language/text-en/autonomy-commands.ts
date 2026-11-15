@@ -296,7 +296,9 @@ export const AUTONOMY_COMMANDS = {
 		needsYou: (count: number) => `${count} need${count === 1 ? "s" : ""} you`,
 		heldCount: (count: number) => `${count} held`,
 		heading: (title: string) => `Plan: ${title}`,
-		unsupportedHeading: (title: string) => `Plan: ${title}; kept, not run by this version.`,
+		/** A plan from a newer build (`isPlanFromNewerBuild`), whose record keeps only its id. */
+		unsupportedHeading: (planId: string) =>
+			`Plan ${planId} is from a newer pi version; it is kept, not run by this version.`,
 		/** A plan an older build compacted the session over (`isPlanLostToOlderBuild`): the `/plan` line and its notice. */
 		lostHeading: (planId: string) =>
 			`Plan ${planId} was lost when an older pi build compacted this session; it will not run.`,

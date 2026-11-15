@@ -262,7 +262,8 @@ export function planView(
 		return {
 			planId,
 			version: record.version,
-			title: lost ? planId : "a plan from a newer version of the harness",
+			// The record keeps no title: the plan is named by its id, and its words by the status (`plan-panel.ts`).
+			title: planId,
 			status: lost ? "lost" : "unsupported",
 			unjudged: false,
 			rootOwned: [],

@@ -136,7 +136,8 @@ export function planCountWords(counts: PlanCounts): string[] {
 export function planSectionHeading(view: PlanView): string {
 	const words = interfaceText().autonomyCommands.plan;
 	const title = clip(view.title, PLAN_PANEL_LIMITS.titleChars);
-	if (view.status === "unsupported" || view.status === "lost") return words.heading(title);
+	if (view.status === "unsupported" || view.status === "lost")
+		return [words.heading(title), words.status[view.status]].join(" · ");
 	const tail = view.status === "active" ? planCountWords(view.counts) : [words.status[view.status]];
 	return [words.heading(title), ...tail].join(" · ");
 }
@@ -248,7 +249,7 @@ function inspectOpenPlan(view: PlanView, options: PlanInspectionOptions): string
 
 function inspectClosedPlan(view: PlanView): string {
 	const words = interfaceText().autonomyCommands.plan;
-	if (view.status === "unsupported") return words.unsupportedHeading(view.title);
+	if (view.status === "unsupported") return words.unsupportedHeading(view.planId);
 	if (view.status === "lost") return words.lostHeading(view.planId);
 	const reason = view.closedReason ? words.closedReason(clip(view.closedReason, PLAN_PANEL_LIMITS.detailChars)) : "";
 	return words.closed(

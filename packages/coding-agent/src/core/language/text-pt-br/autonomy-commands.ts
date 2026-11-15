@@ -301,7 +301,8 @@ export const AUTONOMY_COMMANDS = {
 		needsYou: (count: number) => `${count} ${count === 1 ? "precisa" : "precisam"} de você`,
 		heldCount: (count: number) => `${count} retidas`,
 		heading: (title: string) => `Plano: ${title}`,
-		unsupportedHeading: (title: string) => `Plano: ${title}; mantido, não executado por esta versão.`,
+		unsupportedHeading: (planId: string) =>
+			`O plano ${planId} é de uma versão mais nova do pi; ele é mantido, não executado por esta versão.`,
 		lostHeading: (planId: string) =>
 			`O plano ${planId} foi perdido quando uma versão anterior do pi compactou esta sessão; ele não será executado.`,
 		statusLine: (title: string, parts: string) => `Plano "${title}": ${parts}.`,
