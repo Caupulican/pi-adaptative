@@ -1,7 +1,7 @@
 /**
  * Why a bot's work did not go through, in the owner's words, for the sentences that name the cause of a failure its host
  * met on its own (an open of its session for owed work, a message that waits for it, a release it owes). An error thrown
- * in the owner's words ({@link BotOwnerError}) keeps them; the kernel and store failures the owner can act on or wait
+ * in the owner's words (`BotOwnerError`) keeps them; the kernel and store failures the owner can act on or wait
  * out are worded here; any other is said in one generic sentence, and its own text goes to the harness log.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -14,14 +14,7 @@ import {
 import { RoutineRevisionChangedError } from "../delegation/routine-revision.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { BotBundleSplitError } from "./bot-bundle-move.ts";
-
-/** An error whose message is the owner's words (`interfaceText`), told to them as it is. */
-export class BotOwnerError extends Error {
-	constructor(message: string, options?: ErrorOptions) {
-		super(message, options);
-		this.name = "BotOwnerError";
-	}
-}
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 /** A lock another process kept past the wait: proper-lockfile's `ELOCKED`, or the kernel lock's deadline. */
 export function isLockBusy(error: unknown): boolean {

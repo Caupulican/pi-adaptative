@@ -11,9 +11,10 @@ import type {
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { BotOwnerError, botFailureText } from "./bot-failure-words.ts";
+import { botFailureText } from "./bot-failure-words.ts";
 import { readRemoteBotHost } from "./bot-host-state.ts";
 import { enqueueBotInbox, takeBotInboxMessage } from "./bot-inbox.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 /** Another host holds the bot's lock: a message goes to the bot's inbox for it instead (`sendToBotHost`). */
 export class BotSessionHeldError extends BotOwnerError {

@@ -58,7 +58,7 @@ import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
-import { BotOwnerError, botFailureText } from "./bot-failure-words.ts";
+import { botFailureText } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
@@ -75,6 +75,7 @@ import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
@@ -543,11 +544,11 @@ export class BotSessionHost {
 		// A record that left the session path (a leader's, a leader, a profile only a worker's run holds) runs here no more:
 		// the session is released once its work settles, and its messages go to a worker.
 		if (defined === "worker") {
-			queueMicrotask(() => this.applyRecordChange(agentId, true));
+			queueMicrotask(() => this.applyRecordChange(agentId));
 			throw new BotOwnerError(words.botRunsAsWorker(agentId));
 		}
 		if (defined.key !== built.key) {
-			queueMicrotask(() => this.applyRecordChange(agentId, false));
+			queueMicrotask(() => this.applyRecordChange(agentId));
 			throw new BotOwnerError(words.botSessionOutdated(agentId));
 		}
 		// The session never leaves its model (`pinnedModel`); a run on any other is refused, never moved.
@@ -866,7 +867,7 @@ export class BotSessionHost {
 	private recheckIfIdle(entry: BotSessionEntry): boolean {
 		if (!entry.recheckWhenIdle || this.isBusy(entry) || this.entries.get(entry.agentId) !== entry) return false;
 		entry.recheckWhenIdle = false;
-		this.applyRecordChange(entry.agentId, false);
+		this.applyRecordChange(entry.agentId);
 		return true;
 	}
 
@@ -1030,17 +1031,20 @@ export class BotSessionHost {
 
 	/**
 	 * {@link recordChanged} for a change the host noticed itself (a run refused on an outdated or off-path definition, a
-	 * change that came while the session worked), from a microtask or a settle with no caller to throw to: a failure of a
-	 * bot that left the session path (`leftPath`) leaves its release owed, run again after a backoff; any other is told
-	 * once until a change applies, and applies at the bot's next change or message.
+	 * change that came while the session worked), from a microtask or a settle with no caller to throw to. A failure for a
+	 * bot not proven on the session path (it left it, or its record did not read) leaves its release owed, run again after
+	 * a backoff that forgets it once the bot reads as on the path; any other is told once until a change applies, and
+	 * applies at the bot's next change or message.
 	 */
-	private applyRecordChange(agentId: string, leftPath: boolean): void {
+	private applyRecordChange(agentId: string): void {
+		let onPath = false;
 		try {
 			const record = this.ports.store().getBot(agentId);
+			onPath = record !== undefined && !record.retired && this.runsAsSession(record);
 			if (record) this.recordChanged(record);
 			this.toldChangeNotApplied.delete(agentId);
 		} catch (error) {
-			if (leftPath) {
+			if (!onPath) {
 				this.oweRelease(agentId, error);
 				return;
 			}

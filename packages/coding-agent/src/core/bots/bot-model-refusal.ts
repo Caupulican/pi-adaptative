@@ -5,7 +5,7 @@
  */
 import { interfaceText } from "../language/interface-text.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
-import { BotOwnerError } from "./bot-failure-words.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 /**
  * Which rule refuses the bot's model: the host reports it unusable (its own cause), the subscription rule holds it to a

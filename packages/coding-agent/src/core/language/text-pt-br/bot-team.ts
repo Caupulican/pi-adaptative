@@ -173,7 +173,7 @@ export const BOT_TEAM = {
 	botSessionStateKeptForWorkers: (agentId: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, onde os workers dele registraram as conversas; ele continua usando-o lá.`,
 	botSessionStateStillHeld: (agentId: string, pids: string) =>
-		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, que o processo ${pids} ainda mantém sem impedir o bot (o hospedeiro de uma execução ausente, ou um processo que parou de renovar sua posse); o bot roda a sessão dele lá.`,
+		`Bot ${agentId}: o estado de orquestração da sessão dele fica na casa da sessão principal, que o processo ${pids} ainda mantém sem impedir o bot (o hospedeiro de uma execução ausente); o bot roda a sessão dele lá.`,
 	botSessionStateNotMoved: (agentId: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele, que fica em outro dispositivo; ele continua usando-o na casa da sessão principal.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

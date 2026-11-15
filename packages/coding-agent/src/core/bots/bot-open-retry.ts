@@ -14,7 +14,7 @@ import { SessionHeldError } from "../../kernel/session/session-bundle-lifecycle.
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
-import { BotOwnerError } from "./bot-failure-words.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 export const BOT_OPEN_RETRY_FIRST_MS = 2_000;
 export const BOT_OPEN_RETRY_MAX_MS = 5 * 60 * 1000;

@@ -15,8 +15,8 @@ import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/
 import { interfaceText } from "../language/interface-text.ts";
 import { resolveSessionHome } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { BotOwnerError } from "./bot-failure-words.ts";
 import type { BotHome } from "./bot-home.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 /** The most a pointer file holds: a version, a session id and a file name, with room to spare. */
 const MAX_POINTER_BYTES = 4096;

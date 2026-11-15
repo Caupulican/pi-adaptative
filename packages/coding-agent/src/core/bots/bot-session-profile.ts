@@ -41,8 +41,8 @@ import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { requiredEnvelopeCapabilities, toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { allToolNames } from "../tools/tool-definition-factory.ts";
-import { BotOwnerError } from "./bot-failure-words.ts";
 import { botProfileOf } from "./bot-home.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 export interface BotSessionDefinition {
 	/** What defines the session: an idle session whose key changed is rebuilt. */

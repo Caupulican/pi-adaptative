@@ -201,7 +201,7 @@ export const BOT_TEAM = {
 	botSessionStateKeptForWorkers: (agentId: string) =>
 		`Bot ${agentId}: its session's orchestration state stays in the main session's home, where its workers recorded their conversations; it keeps using it there.`,
 	botSessionStateStillHeld: (agentId: string, pids: string) =>
-		`Bot ${agentId}: its session's orchestration state stays in the main session's home, which process ${pids} still holds without keeping the bot out (an away run's host, or a process that stopped renewing its hold); the bot runs its session there.`,
+		`Bot ${agentId}: its session's orchestration state stays in the main session's home, which process ${pids} still holds without keeping the bot out (an away run's host); the bot runs its session there.`,
 	botSessionStateNotMoved: (agentId: string) =>
 		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own, which lies on another device; it keeps using it in the main session's home.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

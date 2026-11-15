@@ -19,7 +19,6 @@ import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { BotOwnerError } from "./bot-failure-words.ts";
 import {
 	type BotHomeRecord,
 	homeRecordNames,
@@ -27,6 +26,7 @@ import {
 	parseHomeRecordHead,
 	readHomeRecords,
 } from "./bot-home-records.ts";
+import { BotOwnerError } from "./bot-owner-error.ts";
 
 /** Most messages waiting at once: a host that does not take them is not given an unbounded queue. */
 export const MAX_BOT_INBOX_MESSAGES = 32;
