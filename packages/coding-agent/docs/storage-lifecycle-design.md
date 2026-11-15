@@ -22,7 +22,8 @@ runtime copies cheap, and it does not by itself fix a stall.
 - [`agent-paths.ts`](../src/core/agent-paths.ts), `orchestrationSessionDir` and
   `sessionRootMailboxFile`, derive separate control-plane bundles from parent-session identity.
 - [`orchestration/event-store.ts`](../src/core/orchestration/event-store.ts), `OrchestrationEventStore`,
-  uses a session cursor file lock, event files, bounded tails, and projection snapshots.
+  uses a session cursor file lock, event files, bounded tails, and projection snapshots. Beside a plan
+  from a newer build, compaction waits for the widest tail (`compaction-deferral.ts`), 1024 events or 16 MiB.
 - [`process-matrix/store.ts`](../src/core/process-matrix/store.ts), `entryPath`, stores one JSON entry
   per process identity. It is not a shared lane SQLite database.
 - [`worktree-sync/store.ts`](../src/core/worktree-sync/store.ts), `syncStorePaths`, locates repository

@@ -13,6 +13,7 @@ import {
 } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { type FaultableFs, nodeFs } from "../util/faultable-fs.ts";
+import { type CompactionWhen, compactionTailLimits, WIDEST_TAIL } from "./compaction-deferral.ts";
 import {
 	type AppendOrchestrationEventInput,
 	isOrchestrationEvent,
@@ -37,8 +38,6 @@ const SNAPSHOT_FILE_PATTERN = /^(\d{16})\.json$/;
 const DEFAULT_MAX_TAIL_EVENTS = 256;
 const DEFAULT_MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_IDEMPOTENCY_EVENTS = 512;
-const MAX_CONFIGURED_TAIL_EVENTS = 1_024;
-const MAX_CONFIGURED_TAIL_BYTES = 16 * 1024 * 1024;
 const MAX_CONFIGURED_IDEMPOTENCY_EVENTS = 1_024;
 const MAX_EVENT_DIRECTORY_ENTRIES = 2_048;
 const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
@@ -483,13 +482,13 @@ export class OrchestrationEventStore {
 		this.maxTailEvents = positiveSafeInteger(
 			options.maxTailEvents,
 			DEFAULT_MAX_TAIL_EVENTS,
-			MAX_CONFIGURED_TAIL_EVENTS,
+			WIDEST_TAIL.events,
 			"maxTailEvents",
 		);
 		this.maxTailBytes = positiveSafeInteger(
 			options.maxTailBytes,
 			DEFAULT_MAX_TAIL_BYTES,
-			MAX_CONFIGURED_TAIL_BYTES,
+			WIDEST_TAIL.bytes,
 			"maxTailBytes",
 		);
 		this.maxIdempotencyEvents = positiveSafeInteger(
@@ -724,38 +723,39 @@ export class OrchestrationEventStore {
 	}
 
 	/**
-	 * Replace a large replay prefix with one verified current-state snapshot and a bounded tail.
-	 * `lockOptions` bounds the wait for the store lock, as in `append`.
+	 * Replace a large replay prefix with one verified current-state snapshot and a bounded tail, once the tail reaches the
+	 * bound `when` names (`compaction-deferral.ts`). `lockOptions` bounds the wait for the store lock, as in `append`.
 	 */
 	compactIfNeeded(
 		throughOrdinal: number,
 		projection: () => JsonObject,
-		lockOptions?: Readonly<AtomicFileLockOptions>,
-		force = false,
+		lockOptions: Readonly<AtomicFileLockOptions> | undefined,
+		when: CompactionWhen,
 	): boolean {
+		const limit = compactionTailLimits(when, { events: this.maxTailEvents, bytes: this.maxTailBytes });
 		if (this.transactionActive)
 			throw new OrchestrationEventStoreError("Cannot compact inside an active orchestration transaction.");
 		const baselineBeforeLock = this.readBaselineUnlocked();
 		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
 		const cachedIndexes = this.synchronizedIndexes;
 		if (
-			!force &&
+			when !== "forced" &&
 			cachedIndexes?.baselineOrdinal === baselineOrdinalBeforeLock &&
 			cachedIndexes.baselineDigest === baselineBeforeLock?.digest &&
 			cachedIndexes.lastOrdinal === throughOrdinal &&
-			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
-			cachedIndexes.tailBytes < this.maxTailBytes
+			throughOrdinal - baselineOrdinalBeforeLock < limit.events &&
+			cachedIndexes.tailBytes < limit.bytes
 		) {
 			return false;
 		}
 		const cursorBeforeLock = this.readCursorUnlocked();
 		if (
-			!force &&
+			when !== "forced" &&
 			!cachedIndexes &&
 			cursorBeforeLock?.lastOrdinal === throughOrdinal &&
 			cursorBeforeLock.tailBytes !== undefined &&
-			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
-			cursorBeforeLock.tailBytes < this.maxTailBytes
+			throughOrdinal - baselineOrdinalBeforeLock < limit.events &&
+			cursorBeforeLock.tailBytes < limit.bytes
 		) {
 			return false;
 		}
@@ -780,7 +780,7 @@ export class OrchestrationEventStore {
 						const tailNames = this.eventFileNamesUnlocked().filter(
 							(name) => Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0) > baselineOrdinal,
 						);
-						if (!force && tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes)
+						if (when !== "forced" && tailNames.length < limit.events && cursor.tailBytes < limit.bytes)
 							return false;
 
 						// Snapshot events first, then the tail in ordinal order, so a retirement in the tail applies last.

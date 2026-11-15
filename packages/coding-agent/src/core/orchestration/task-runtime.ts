@@ -56,7 +56,7 @@ import {
 import type { OrchestrationEventStore } from "./event-store.ts";
 import { assertNotificationCapacity } from "./notification-eviction.ts";
 import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
-import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
+import { assertRetentionPruneAllowed, compactionWhen } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
 import {
 	approvalFromPayload,
@@ -1602,9 +1602,9 @@ export class DurableTaskRuntime {
 	}
 
 	private compactCurrentProjection(lockOptions?: Readonly<AtomicFileLockOptions>, force = false): void {
-		if (this.state.lastOrdinal > 0) {
-			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions, force);
-		}
+		if (this.state.lastOrdinal === 0) return;
+		const when = compactionWhen(this.state, force);
+		this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions, when);
 	}
 
 	private transactHostEvents<T>(operation: (transaction: HostEventRuntimeTransaction) => T): T {
