@@ -30,9 +30,10 @@ import { sessionFleetQueueMetadataPaths } from "./fleet/fleet-queue-store.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
-	hasPendingSessionBundleRetention,
 	markSessionBundleRemoving,
+	pendingSessionBundleRetention,
 	releaseSessionBundleRetention,
+	type SessionBundleDeletionPhase,
 	type SessionBundleDeletionReservation,
 	settleSessionBundleDeletion,
 	withSessionBundleRetention,
@@ -91,9 +92,11 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * hold a session no id names, is left.
  *
  * Each removal is reserved in its home's tombstone and marked `removing` there just before anything is removed: a
- * deferral before that releases the tombstone (the bundle is whole), and a resumed removal that had begun skips the
- * gates its bundle already passed and finishes, its bundle's side files (fleet queue, capability artifacts) included,
- * also when the bundle itself is already gone.
+ * deferral before that releases the tombstone (the bundle is whole), a held session's tombstone that never reached it
+ * is released, and a resumed removal marked begun skips the gates its bundle already passed and finishes, its bundle's
+ * side files (fleet queue, capability artifacts) included, also when the bundle itself is already gone. A tombstone an
+ * earlier build wrote does not record how far its removal went: it is resumed through the gates and never released
+ * with its bundle standing. In a home whose holds are unknown only a removal that may have begun is resumed.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first resumes,
  * in every home and ahead of the removal budget, the reservations earlier runs left; then it scans every home's bundles
@@ -607,24 +610,42 @@ function botHomeUnknownText(name: string, unknown: BotHomeUnknown): string {
 	}
 }
 
+/** Whether a session is held this run: by a process, by a bot's history or as a protected (current or bot-held) session. */
+function isHeld(run: SweepRun, sessionId: string): boolean {
+	return run.processHeld.has(sessionId) || run.historyHeld.has(sessionId) || run.protectedIds.has(sessionId);
+}
+
 /**
- * The bundles of `sweep` whose retention an earlier run left pending, by its tombstones (`hasPendingSessionBundleRetention`):
- * no lease is admitted to them (their session cannot open) until their removal settles, so each run resumes them
- * first, those whose bundle is already gone included, so their removal settles. A tombstone that does not read is
- * reported and stands; the others are still resumed.
+ * Whether a pending retention of `phase` (`pendingSessionBundleRetention`) is resumed in `sweep`: in a home whose holds
+ * are unknown, only a removal that may have begun, since a `reserved` one's bundle is whole and may be held.
  */
-async function retentionReservedNames(sweep: HomeSweep, report: (message: string) => void): Promise<string[]> {
+function resumes(sweep: HomeSweep, phase: SessionBundleDeletionPhase | undefined): boolean {
+	return phase !== undefined && (!sweep.resumeOnly || phase !== "reserved");
+}
+
+/**
+ * The bundles of `sweep` whose retention an earlier run left pending, by its tombstones, resumed first: no lease is
+ * admitted to them (their session cannot open) until their removal settles; those whose bundle is already gone
+ * included, so their removal settles. A held session's tombstone that never reached removal is released here, ahead of
+ * the budget (`releaseSessionBundleRetention`): its bundle is whole and its session opens again. A tombstone that does
+ * not read is reported and stands; the others are still read.
+ */
+async function resumableTombstones(run: SweepRun, sweep: HomeSweep): Promise<string[]> {
 	const deletions = orchestrationSessionDeletionsDir(sweep.home);
 	if (!existsSync(deletions)) return [];
 	const names: string[] = [];
+	let read = 0;
 	for (const file of await readdir(deletions)) {
 		const name = sessionKeyOfDeletionFile(file);
 		const sessionId = name === undefined ? undefined : recoverParentSessionId(sweep.home, name);
 		if (name === undefined || sessionId === undefined) continue;
+		// Every tombstone is read, the permanent ones too: yield now and then.
+		if (++read % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
 		try {
-			if (hasPendingSessionBundleRetention(sweep.home, sessionId)) names.push(name);
+			if (isHeld(run, sessionId) && releaseSessionBundleRetention(sweep.home, sessionId)) continue;
+			if (resumes(sweep, pendingSessionBundleRetention(sweep.home, sessionId))) names.push(name);
 		} catch (error) {
-			report(
+			run.report(
 				`session bundle ${sweep.labelOf(name)} retained: its deletion tombstone does not read (${describe(error)})`,
 			);
 		}
@@ -659,12 +680,8 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 	const label = labelOf(name);
 	try {
 		const parentSessionId = recoverParentSessionId(home, name);
-		if (!parentSessionId) return;
-		const held = processHeld.has(parentSessionId) || historyHeld.has(parentSessionId);
-		// A held session's retention that never began removing is released: its bundle is whole, and the session opens.
-		if (held || protectedIds.has(parentSessionId)) releaseSessionBundleRetention(home, parentSessionId);
-		if (held) return;
-		const resumingDeletion = hasPendingSessionBundleRetention(home, parentSessionId);
+		if (!parentSessionId || processHeld.has(parentSessionId) || historyHeld.has(parentSessionId)) return;
+		const resumingDeletion = resumes(sweep, pendingSessionBundleRetention(home, parentSessionId));
 		if (!resumingDeletion && (resumeOnly || protectedIds.has(parentSessionId))) return;
 		// Its session's files may be in a home whose files were not listed, which would hold it.
 		if (!resumingDeletion && unfiledHeld && !transcripts.has(parentSessionId)) return;
@@ -691,16 +708,17 @@ async function sweepBundle(run: SweepRun, sweep: HomeSweep, name: string): Promi
 			// A deferral before anything of the bundle is removed releases the tombstone: the bundle is whole.
 			outcome = "deferred";
 			if (!existsSync(bundleDir)) {
-				// Gone before this reservation: a removal that had begun finishes with the side files; a bundle gone any
-				// other way (moved to another home, or deleted) is released and nothing else is touched.
-				if (reservation.phase === "removing") {
+				// Gone before this reservation: a removal that may have begun finishes with the side files; a bundle gone
+				// any other way (moved to another home, or deleted) is released and nothing else is touched.
+				if (reservation.phase !== "reserved") {
 					removeSessionSideFiles(home, parentSessionId);
 					outcome = "removed";
 				}
 				return;
 			}
-			// A removal that had begun passed every gate before it began, and what is left of its bundle proves nothing.
-			if (reservation.phase === "reserved") {
+			// A removal this build marked begun passed every gate before it began, and what is left of its bundle proves
+			// nothing; a tombstone an earlier build left (`unrecorded`) goes through the gates again.
+			if (reservation.phase !== "removing") {
 				// Unknown evidence is also a deferral: the tombstone must not keep the session from resuming to deliver
 				// its receipts.
 				const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
@@ -866,7 +884,7 @@ export async function sweepSessionBundles(
 		// session cannot open. They share the inspection bound with the rest.
 		const resumed = new Map<HomeSweep, ReadonlySet<string>>();
 		for (const sweep of homes) {
-			const names = await retentionReservedNames(sweep, report);
+			const names = await resumableTombstones(run, sweep);
 			resumed.set(sweep, new Set(names));
 			for (const name of names) {
 				if (result.inspected >= MAX_BUNDLES_INSPECTED) break;

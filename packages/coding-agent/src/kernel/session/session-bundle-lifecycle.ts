@@ -33,15 +33,17 @@ export type SessionBundleDeletionPolicy = "retention" | "permanent";
 /**
  * How far a tombstone's deletion went: `reserved` while nothing of the bundle was removed (its remover only inspected it,
  * or settled what it owed), `removing` once its remover may have begun removing it ({@link markSessionBundleRemoving},
- * written just before the first removal). Only a `reserved` retention tombstone may be released with its bundle whole;
- * a `removing` one stands until the removal finishes. A permanent tombstone stands whatever its phase.
+ * written just before the first removal), `unrecorded` for a tombstone an earlier build wrote, which did not record
+ * it. Only a `reserved` retention tombstone may be released with its bundle whole; the others stand until the removal
+ * finishes. Only a `removing` one proves its bundle passed the expiry's gates. A permanent tombstone stands whatever its
+ * phase.
  */
-export type SessionBundleDeletionPhase = "reserved" | "removing";
+export type SessionBundleDeletionPhase = "reserved" | "removing" | "unrecorded";
 
 export interface SessionBundleDeletionReservation {
 	readonly parentSessionId: string;
 	readonly token: string;
-	/** The tombstone's phase when this reservation took it: `removing` when an earlier remover had begun removing. */
+	/** The tombstone's phase when this reservation took it: `reserved` unless an earlier remover may have begun removing. */
 	readonly phase: SessionBundleDeletionPhase;
 }
 
@@ -54,8 +56,7 @@ interface DeletionOperation {
 
 /**
  * Schema 4 records the tombstone's {@link SessionBundleDeletionPhase}. Schema 3 (the remover as a {@link ProcessOwner},
- * with a `fresh` flag) and schema 2 (`host` + `pid`) are still read, as `removing`: whether their remover had begun
- * removing is not recorded.
+ * with a `fresh` flag) and schema 2 (`host` + `pid`) are still read, as `unrecorded`, and are rewritten so.
  */
 const MARKER_SCHEMA_VERSION = 4;
 
@@ -563,13 +564,12 @@ function readMarker(file: string, parentSessionId: string): DeletionMarker | und
 		(value.schemaVersion !== 2 && value.schemaVersion !== 3 && !current) ||
 		value.parentSessionId !== parentSessionId ||
 		(value.policy !== "retention" && value.policy !== "permanent") ||
-		(current && value.phase !== "reserved" && value.phase !== "removing") ||
+		(current && value.phase !== "reserved" && value.phase !== "removing" && value.phase !== "unrecorded") ||
 		Object.keys(value).some((key) => !keys.includes(key))
 	) {
 		throw new Error("Session bundle deletion marker requires inspection; its ownership or policy is unknown.");
 	}
-	// An earlier schema does not record whether its remover had begun removing: it is read as having begun.
-	const phase: SessionBundleDeletionPhase = current ? (value.phase as SessionBundleDeletionPhase) : "removing";
+	const phase: SessionBundleDeletionPhase = current ? (value.phase as SessionBundleDeletionPhase) : "unrecorded";
 	const marker = { schemaVersion: MARKER_SCHEMA_VERSION, parentSessionId, policy: value.policy, phase } as const;
 	const recorded = value.operation;
 	if (recorded === undefined) return marker;
@@ -616,19 +616,25 @@ export function sessionBundleDeletionPolicy(
 }
 
 /**
- * A retention tombstone an expiry resumes before every other gate: one an earlier expiry settled without finishing (it
- * already passed age admission, and its own partial writes do not restart that age), or one whose remover had begun
- * removing. A `reserved` tombstone whose remover never settled it is not resumed: the bundle is whole, and its expiry
- * starts over through every gate.
+ * A retention tombstone an expiry resumes past the age gates: one an earlier expiry settled without finishing (it
+ * already passed age admission, and its own partial writes do not restart that age), or one whose remover may have
+ * begun removing. A `reserved` tombstone whose remover never settled it is not resumed: the bundle is whole, and its
+ * expiry starts over through every gate.
  */
 function isPendingRetention(marker: DeletionMarker | undefined): boolean {
-	return marker?.policy === "retention" && (marker.operation === undefined || marker.phase === "removing");
+	return marker?.policy === "retention" && (marker.operation === undefined || marker.phase !== "reserved");
 }
 
-/** Whether the session's tombstone in `home` is a retention an expiry resumes ({@link isPendingRetention}); read unlocked. */
-export function hasPendingSessionBundleRetention(home: OrchestrationHome, parentSessionId: string): boolean {
-	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
-	return isPendingRetention(readMarker(tombstone, parentSessionId));
+/**
+ * The phase of the session's tombstone in `home` when it is a retention an expiry resumes ({@link isPendingRetention});
+ * undefined otherwise. Read unlocked: the reservation confirms it under the lock.
+ */
+export function pendingSessionBundleRetention(
+	home: OrchestrationHome,
+	parentSessionId: string,
+): SessionBundleDeletionPhase | undefined {
+	const marker = readMarker(orchestrationSessionDeletionFile(home, parentSessionId), parentSessionId);
+	return isPendingRetention(marker) ? marker?.phase : undefined;
 }
 
 /**

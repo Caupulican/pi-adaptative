@@ -394,6 +394,9 @@ export function lessonCandidatesFile(agentDir: string): string {
  * synthesized capabilities stay inside its home.
  */
 export function capabilityArtifactsDir(home: OrchestrationHome, sessionId: string): string {
+	// One directory per session: an id that is not one plain path segment would name the root or a directory above it.
+	if (sessionId === "." || sessionId === ".." || /[\\/]/.test(sessionId))
+		throw new Error(`Session id ${JSON.stringify(sessionId)} does not name a capability artifact directory.`);
 	return join(home.stateDir, "runtime", "capabilities", sessionId);
 }
 
