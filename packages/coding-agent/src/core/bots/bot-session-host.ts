@@ -1028,7 +1028,7 @@ export class BotSessionHost {
 	 * turn or input in flight, or at least one worker lane in flight), else by this process while no process hosts it, else by the
 	 * process hosting it, which `elsewhere` names for the owner. A bot that runs as no session of its own is not written to.
 	 * A stop that could not be written is told to the owner; one not written or not taken still ends the turn and the bot's
-	 * own work this host runs (`endUnrecordedStopWork`), and one not written applies whole, held in memory.
+	 * own work this host runs (`endUnrecordedStopWork`), and one not written applies whole, held in memory, here or unhosted.
 	 */
 	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);
@@ -1059,12 +1059,13 @@ export class BotSessionHost {
 			this.takeInbox(agentId);
 			return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
 		}
-		if (!written) return { stopped: false };
-		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
+		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it. One not
+		// written is applied here held in memory, the messages it covers refused, while no process hosts the bot.
+		if (!written) this.owed.applyOwnerStop(agentId, false, stop);
 		this.owed.openIfOwed(agentId);
 		this.changed(agentId);
 		const host = this.view.hostOf(agentId);
-		return remoteHostActive(host)
+		return written && remoteHostActive(host)
 			? {
 					stopped: false,
 					elsewhere: interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId),

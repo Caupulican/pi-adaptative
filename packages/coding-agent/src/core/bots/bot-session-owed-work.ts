@@ -38,7 +38,7 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { applyUnhostedBotStop, readClosedBotSession } from "./bot-stop.ts";
+import { applyUnhostedBotStop, type OwnerStop, readClosedBotSession } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -905,13 +905,14 @@ export class BotOwedWork {
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open, and true is returned then. The owner's
 	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and calls this; a host holding the bot
-	 * takes it instead.
+	 * takes it instead. A stop that could not be written is handed in as `memory` and applied with the ones waiting, the
+	 * messages sent before it refused; it is held nowhere else, so a host holding the bot never learns of it.
 	 */
-	applyOwnerStop(agentId: string, swept = false): boolean {
+	applyOwnerStop(agentId: string, swept = false, memory?: OwnerStop): boolean {
 		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return false;
 		const agentDir = this.ports.agentDir();
 		const stops = botInboxStopNames(agentDir, agentId).join("\n");
-		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
+		if ((stops === "" && !memory) || (swept && this.failedStops.get(agentId) === stops)) return false;
 		try {
 			// A saved session that is a symbolic link is left, and the rest of the stop applies: it is taken all the same.
 			const session = readClosedBotSession(() => this.ports.savedSessionOf(agentId));
@@ -920,7 +921,7 @@ export class BotOwedWork {
 				now: () => this.ports.admissionTimers().now(),
 			};
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote.
-			if (applyUnhostedBotStop(agentDir, agentId, session, ports) === "applied") {
+			if (applyUnhostedBotStop(agentDir, agentId, session, ports, memory) === "applied") {
 				this.forgetOwedTimes(agentId);
 				this.armUsageWait(agentId, this.usageResumeAt(agentId, "saved" in session ? session.saved : undefined));
 			}
