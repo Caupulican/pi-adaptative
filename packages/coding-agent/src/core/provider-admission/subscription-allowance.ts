@@ -69,10 +69,10 @@ function exhausted(usedPercent: number, reason: string, windows: readonly UsageW
 /** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
 export interface SubscriptionAllowancePort {
 	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance;
-	/** The usage account a model's requests count against; a port that does not name one counts them against the provider id. */
-	accountKey?(model: Model<Api>): string;
-	/** Hears the key of an account whose reading changed; a port without it never says a reading changed before it is read again. */
-	subscribe?(listener: (accountKey: string) => void): () => void;
+	/** The usage account a model's requests count against: the key `subscribe` names and the fleet waits on. */
+	accountKey(model: Model<Api>): string;
+	/** Hears the key of an account whose reading changed, so a wait on that account (the fleet's allowance term) is asked again. */
+	subscribe(listener: (accountKey: string) => void): () => void;
 }
 
 /**

@@ -1347,6 +1347,8 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
 	const warningsBefore = world.warnings.length;
 	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
+	/** The scripted reading's listeners: told when the leg turns the reading exhausted, as a reader tells a new reading. */
+	const allowanceListeners = new Set<(accountKey: string) => void>();
 	let allowance:
 		| { readonly kind: "room"; readonly usedPercent: number }
 		| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string } = {
@@ -1377,7 +1379,14 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 			agentDir,
 			sessionManager: manager,
 			systemOneEnabled: false,
-			subscriptionAllowance: { read: () => allowance },
+			subscriptionAllowance: {
+				read: () => allowance,
+				accountKey: (model) => model.provider,
+				subscribe: (listener) => {
+					allowanceListeners.add(listener);
+					return () => allowanceListeners.delete(listener);
+				},
+			},
 			settings: {
 				memorySystem: "okf",
 				autoLearn: { enabled: false },
@@ -1463,6 +1472,7 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 
 		// Exhausted usage: the same $0.06 turn is stopped before its tool call, naming the subscription.
 		allowance = { kind: "exhausted", usedPercent: 96, reason: "a usage window is at 96%" };
+		for (const listener of [...allowanceListeners]) listener(session.model?.provider ?? "");
 		const exhaustedWords = "list what my notes hold";
 		const exhaustedReached = createBarrier();
 		world.provider.enqueue(

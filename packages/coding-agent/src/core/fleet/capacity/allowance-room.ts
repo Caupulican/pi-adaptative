@@ -27,10 +27,10 @@ export interface FleetAllowancePort {
 export function subscriptionAllowancePort(reader: () => SubscriptionAllowancePort): FleetAllowancePort {
 	return {
 		read: (model) => ({
-			accountKey: reader().accountKey?.(model) ?? model.provider,
+			accountKey: reader().accountKey(model),
 			allowance: reader().read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model),
 		}),
-		subscribe: (onChange) => reader().subscribe?.(onChange) ?? (() => {}),
+		subscribe: (onChange) => reader().subscribe(onChange),
 	};
 }
 
