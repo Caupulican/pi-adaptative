@@ -232,6 +232,11 @@ export class BotTurnAccounting {
 		this.unwatch();
 	}
 
+	/** When the running turn began (ms since the epoch); undefined between turns. */
+	get turnStartedAt(): number | undefined {
+		return this.startedAt;
+	}
+
 	/** A turn began. */
 	started(): void {
 		this.startedAt = Date.now();

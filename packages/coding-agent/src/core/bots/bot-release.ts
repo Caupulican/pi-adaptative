@@ -139,11 +139,12 @@ export class BotRelease {
 				ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, left.failed.length, left.managed.length));
 		};
 		let fleetEnded = !loaded;
+		// A release ends all the bot's work there is now, for the owner's reason.
+		const all = { reasonCode: OWNER_STOPPED_REASON, at: Date.now() };
 		try {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
 			const session = loaded ? ports.loaded(agentId)?.session : undefined;
-			if (session)
-				warnLeft(this.endWork(agentId, () => endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON)));
+			if (session) warnLeft(this.endWork(agentId, () => endLoadedBotWork(agentDir, agentId, session, all)));
 			fleetEnded = true;
 			const store = ports.store();
 			const nowMs = ports.timers().now();
@@ -155,9 +156,7 @@ export class BotRelease {
 			if (waiting.length > 0) ports.changed(agentId);
 			if (!loaded)
 				warnLeft(
-					this.endWork(agentId, () =>
-						endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), OWNER_STOPPED_REASON),
-					),
+					this.endWork(agentId, () => endClosedBotWork(agentDir, agentId, ports.closedSessionOf(agentId), all)),
 				);
 			this.owed.delete(agentId);
 			this.retries.forget(agentId);

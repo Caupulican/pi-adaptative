@@ -131,7 +131,7 @@ import { WorkerConversationStore } from "./delegation/worker-conversation-store.
 import { WorkerDelegationController } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
-import { cancelTrackedLanes, stopSessionWorkers, type WorkerStopOutcome } from "./delegation/worker-fleet-stop.ts";
+import { cancelTrackedLanes, stopSessionWorkers, type WorkerFleetStop } from "./delegation/worker-fleet-stop.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
@@ -1335,15 +1335,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._agentControl().cancelWorkerAgent(agentId, reasonCode, scope);
 	}
 
-	/** The owner's stop (`stopSessionWorkers`): plans closed, unended worker lanes cancelled; what it left unended, by why. */
-	cancelOwnFleet(reasonCode: string): WorkerStopOutcome {
+	/** A stop of the work made by `stop.at` (`stopSessionWorkers`): its plans closed, its lanes cancelled; what it left. */
+	cancelOwnFleet(stop: WorkerFleetStop): ReturnType<typeof stopSessionWorkers> {
 		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [] };
 		const fleet = () => this._getWorkerController().getFleet();
 		return stopSessionWorkers(
 			this._getWorkerLifecycle().ledger.runtime,
 			this._planExecutor,
-			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, reasonCode).length > 0,
-			reasonCode,
+			(attempt) => fleet().cancel({ kind: "lane", laneId: attempt.taskId }, stop.reasonCode).length > 0,
+			stop,
 		);
 	}
 

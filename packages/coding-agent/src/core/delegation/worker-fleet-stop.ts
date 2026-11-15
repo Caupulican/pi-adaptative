@@ -9,6 +9,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { LaneRecord, LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import type { AttemptRuntimeState, DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { isPlanFromNewerBuild } from "../plan/plan-graph.ts";
 import {
 	isManagedWorkerAttempt,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
@@ -53,32 +54,58 @@ export interface WorkerStopOutcome {
 	readonly failed: readonly AttemptRuntimeState[];
 }
 
-/** The plan executor's close of every open plan; its running steps stop for `reasonCode`. */
+/** The plan executor's close of the open plans `planIds` names; their running steps stop for `reasonCode`. */
 export interface OpenPlansStop {
-	cancelOpenPlans(reason: string, reasonCode: string): void;
+	cancelPlans(planIds: readonly string[], reason: string, reasonCode: string): void;
 }
 
 /**
- * The owner's stop of a session's workers: every open plan closed as cancelled (through `plans`, the session's plan
- * executor, which also releases the plan's prepared dispatches and placed jobs; else in the store, for a session that runs
- * none), then every unended worker attempt cancelled through `cancel` (true when the remote backend took the cancel),
- * both for `reasonCode`. Plans close first, so no
- * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why.
+ * A stop of a session's workers: its reason code, and when it was made (`at`, ms since the epoch): it ends the work made
+ * at or before then (an owner's stop taken late leaves what the bot started since for the owner's next words), and a
+ * release, made now, ends all of it.
+ */
+export interface WorkerFleetStop {
+	readonly reasonCode: string;
+	readonly at: number;
+}
+
+/**
+ * Whether the stop reaches `attempt`: its task (whose retries and requeues are new attempts of the same work) was made at
+ * or before the stop.
+ */
+function reaches(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState, stop: WorkerFleetStop): boolean {
+	const task = snapshot.tasks[attempt.taskId];
+	return task !== undefined && Date.parse(task.task.createdAt) <= stop.at;
+}
+
+/**
+ * The owner's stop of a session's workers, of the work made at or before `stop.at`: every open plan made by then closed
+ * as cancelled (through `plans`, the session's plan executor, which also releases the plan's prepared dispatches and
+ * placed jobs; else in the store, for a session that runs none; a plan a newer build wrote carries no time and is
+ * closed), then every unended worker attempt of a task made by then cancelled through `cancel` (true when the remote
+ * backend took the cancel), both for `stop.reasonCode`. Plans close first, so no step is dispatched again for a lane
+ * this stop ends. Returns what the stop reached and left unended, by why.
  */
 export function stopSessionWorkers(
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "closePlan">,
 	plans: OpenPlansStop | undefined,
 	cancel: (attempt: AttemptRuntimeState) => boolean,
-	reasonCode: string,
+	stop: WorkerFleetStop,
 ): WorkerStopOutcome {
-	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode);
+	const planIds = Object.entries(runtime.getSnapshot().plans)
+		.filter(([, plan]) => !plan.closed)
+		.filter(([, { record }]) => isPlanFromNewerBuild(record) || Date.parse(record.createdAt) <= stop.at)
+		.map(([planId]) => planId);
+	if (plans) plans.cancelPlans(planIds, OWNER_STOPPED_PLAN_REASON, stop.reasonCode);
 	else
-		for (const [planId, plan] of Object.entries(runtime.getSnapshot().plans))
-			if (!plan.closed) runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
+		for (const planId of planIds)
+			runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
 	const handed = new Set<string>();
-	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot()))
-		if (cancel(attempt)) handed.add(attempt.attemptId);
-	const unended = unendedSelectedAttempts(runtime.getSnapshot());
+	const before = runtime.getSnapshot();
+	for (const attempt of unendedWorkerAttempts(before))
+		if (reaches(before, attempt, stop) && cancel(attempt)) handed.add(attempt.attemptId);
+	const after = runtime.getSnapshot();
+	const unended = unendedSelectedAttempts(after).filter((attempt) => reaches(after, attempt, stop));
 	const own = unended.filter((attempt) => !isManagedWorkerAttempt(attempt));
 	return {
 		remote: own.filter((attempt) => handed.has(attempt.attemptId)),
