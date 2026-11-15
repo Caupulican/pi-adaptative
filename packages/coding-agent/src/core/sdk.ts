@@ -28,7 +28,13 @@ import {
 	RealWorkerDispatcher,
 } from "./adaptive/index.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
-import { capabilityArtifactsDir, configFile, ownerOrchestrationHome, steeringCertificatesFile } from "./agent-paths.ts";
+import {
+	capabilityArtifactsDir,
+	configFile,
+	type OrchestrationHome,
+	ownerOrchestrationHome,
+	steeringCertificatesFile,
+} from "./agent-paths.ts";
 import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -110,18 +116,6 @@ import { createSessionWorkEvidenceJournal, readGoalWorkDiff } from "./system-one
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { readWorkRepositoryRoot } from "./system-one/work-diff.ts";
 import { time } from "./timings.ts";
-import {
-	createBashTool,
-	createCodingTools,
-	createEditTool,
-	createFindTool,
-	createGrepTool,
-	createLsTool,
-	createReadOnlyTools,
-	createReadTool,
-	createWriteTool,
-	withFileMutationQueue,
-} from "./tools/index.ts";
 import type { BashOperations } from "./tools/schemas/bash.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
@@ -237,6 +231,8 @@ export interface CreateAgentSessionOptions
 	systemOneFetch?: typeof fetch;
 	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
 	systemOneEvidenceDir?: string;
+	/** Where the session's bundle, lease and workers' state live; default: the owner's. A bot's is `botOrchestrationHome`. */
+	orchestrationHome?: OrchestrationHome;
 	/**
 	 * The System One of the session hosting this one (a bot's host), followed in place of the options above: its on/off
 	 * decides the controller (not this session's settings at this moment) and is read with its provider at each use.
@@ -345,7 +341,7 @@ export {
 	createReadTool,
 	createWriteTool,
 	withFileMutationQueue,
-};
+} from "./tools/index.ts";
 
 /**
  * Create an AgentSession with the specified options.
@@ -405,9 +401,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const sessionManager =
 		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
 
+	const orchestrationHome = options.orchestrationHome ?? ownerOrchestrationHome(agentDir);
 	// An AgentSession never opens a session the bot daemon hosts (`SessionHostedError`); the daemon's own hold is `channel-host`.
 	const bundleLease = sessionManager.isPersisted()
-		? acquireSessionBundleLease(ownerOrchestrationHome(agentDir), sessionManager.getSessionId(), {
+		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
 				role: options.bundleLeaseRole ?? "session",
 				refuseHosted: true,
 			})
@@ -858,6 +855,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				ownerNoticeLine: options.ownerNoticeLine,
 				workerRunCostBound: options.workerRunCostBound,
 				sessionManager,
+				orchestrationHome,
 				bundleLease,
 				settingsManager,
 				cwd,
@@ -933,7 +931,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
 				const orchestrationClock = timers.port("orchestration");
 				const orchestrationStore = new OrchestrationEventStore({
-					orchestrationHome: ownerOrchestrationHome(agentDir),
+					orchestrationHome,
 					sessionId: sessionManager.getSessionId(),
 					now: () => new Date(orchestrationClock.now()).toISOString(),
 					sleepSync: (delayMs) => timers.sleepSync(delayMs),

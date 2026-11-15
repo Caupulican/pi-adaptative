@@ -588,13 +588,13 @@ export class WorkerDelegationController {
 		this.notifications = notifications;
 		this.lifecycle = lifecycle;
 		this.laneIsolation = laneIsolation;
-		this.projectDirectory = new WorkerProjectDirectory(this.deps.getAgentDir(), this.conversations);
+		this.projectDirectory = new WorkerProjectDirectory(this.conversationRoots(), this.conversations);
 		this.contextForks = new WorkerContextForkStore({
 			orchestrationHome: this.deps.getOrchestrationHome(),
 			parentSessionId: this.deps.getSessionId(),
 		});
 		this.fleet = new SessionFleetScheduler({
-			agentDir: this.deps.getAgentDir(),
+			...this.conversationRoots(),
 			sessionId: this.deps.fleetQueueKey ?? this.deps.getSessionId(),
 			timers: this.deps.getTimers().port("fleet"),
 			settings: () => this.deps.getSettingsManager().getFleetSettings(),

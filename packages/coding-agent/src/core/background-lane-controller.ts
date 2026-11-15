@@ -498,7 +498,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (this._transcriptWrites) return this._transcriptWrites;
 		const deps: ForegroundTranscriptWriteDeps = {
 			getSessionManager: () => this.deps.getSessionManager(),
-			getAgentDir: () => this.deps.getAgentDir(),
 			saveWorkerClaimSnapshot: (claim, request, options) =>
 				this.deps.saveWorkerClaimSnapshot(claim, request, options),
 			warn: (message) => this._safeWarn(message),
@@ -625,7 +624,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			warn: (message) => this._safeWarn(message),
 		});
 		this._workerReceipts = new WorkerReceiptDelivery({
-			agentDir: this.deps.getAgentDir(),
 			runtime: lifecycle.ledger.runtime,
 			getSessionManager: () => this.deps.getSessionManager(),
 			subscribe: (listener) => store.subscribe(listener),

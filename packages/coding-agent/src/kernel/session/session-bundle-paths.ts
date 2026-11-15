@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { stateFile } from "../storage/paths.ts";
+import { stateDir, stateFile } from "../storage/paths.ts";
 import { requireBoundedTrimmedText } from "../utils/bounded-value.ts";
 
 const orchestrationHomeBrand: unique symbol = Symbol("orchestration-home");
@@ -13,21 +13,48 @@ const orchestrationHomeBrand: unique symbol = Symbol("orchestration-home");
  */
 export interface OrchestrationHome {
 	readonly root: string;
+	/**
+	 * Where the per-session state its sessions keep outside their bundles lives (the fleet's queue metadata): the owner's
+	 * `<agentDir>/state`, and a bot's home orchestration directory itself.
+	 */
+	readonly stateDir: string;
 	readonly [orchestrationHomeBrand]: true;
 }
 
-function orchestrationHomeAt(root: string): OrchestrationHome {
-	return Object.freeze({ root, [orchestrationHomeBrand]: true as const });
+function orchestrationHomeAt(root: string, stateDir: string): OrchestrationHome {
+	return Object.freeze({ root, stateDir, [orchestrationHomeBrand]: true as const });
 }
 
 /** `<agentDir>/state/orchestration` -- the owner's orchestration home. */
 export function ownerOrchestrationHome(agentDir: string): OrchestrationHome {
-	return orchestrationHomeAt(stateFile(agentDir, "orchestration"));
+	return orchestrationHomeAt(stateFile(agentDir, "orchestration"), stateDir(agentDir));
 }
 
-/** The same home with an absolute root, for state compared or recorded across working directories. */
+/** `<botHomeDir>/orchestration` -- the orchestration home of the bot whose home is `botHomeDir` (core/bots/bot-home.ts). */
+export function botHomeOrchestrationHome(botHomeDir: string): OrchestrationHome {
+	const root = join(botHomeDir, "orchestration");
+	return orchestrationHomeAt(root, root);
+}
+
+/** The same home with absolute paths, for state compared or recorded across working directories. */
 export function resolvedOrchestrationHome(home: OrchestrationHome): OrchestrationHome {
-	return orchestrationHomeAt(resolve(home.root));
+	return orchestrationHomeAt(resolve(home.root), resolve(home.stateDir));
+}
+
+/** Whether two homes are one directory, however their paths were spelled. */
+export function sameOrchestrationHome(a: OrchestrationHome, b: OrchestrationHome): boolean {
+	return resolve(a.root) === resolve(b.root);
+}
+
+/** Where a session's durable state lives: the agent directory and the orchestration home that holds its bundle. */
+export interface SessionStorageRoots {
+	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
+}
+
+/** The roots of a session of the owner's home. */
+export function ownerSessionStorageRoots(agentDir: string): SessionStorageRoots {
+	return { agentDir, orchestrationHome: ownerOrchestrationHome(agentDir) };
 }
 
 function orchestrationSessionKey(parentSessionId: string): string {

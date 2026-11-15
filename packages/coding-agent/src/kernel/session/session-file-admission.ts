@@ -10,7 +10,12 @@ import {
 import { readOptionalBoundedTextFileSync, sameFileVersion } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import { hasCurrentSessionBundleAdmission, withSessionBundleAdmission } from "./session-bundle-lifecycle.ts";
-import { type OrchestrationHome, orchestrationSessionsDir, ownerOrchestrationHome } from "./session-bundle-paths.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionsDir,
+	type SessionStorageRoots,
+	sameOrchestrationHome,
+} from "./session-bundle-paths.ts";
 import { readSessionHeaderResult } from "./session-header.ts";
 import type { ReadonlySessionManager } from "./session-manager.ts";
 import { assertSpecialistContextClaim, type SpecialistContextClaim } from "./specialist-context-ownership.ts";
@@ -33,7 +38,7 @@ interface FileOwner {
 }
 
 interface WorkerContinuation {
-	agentDir: string;
+	roots: SessionStorageRoots;
 	file: string;
 	sessionId: string;
 	parentSessionId: string;
@@ -127,11 +132,11 @@ function assertCanonicalWritePath(file: string): void {
 	}
 }
 
-function fileOwner(agentDir: string, file: string, sessionId: string): FileOwner {
-	assertCanonicalWritePath(resolve(agentDir));
+/** The file's owner in the writer's home: a worker transcript of a bundle there, else the writing session itself. */
+function fileOwner(roots: SessionStorageRoots, file: string, sessionId: string): FileOwner {
+	assertCanonicalWritePath(resolve(roots.agentDir));
 	assertCanonicalWritePath(file);
-	// Every session that writes through this boundary is rooted in the owner's orchestration home.
-	const home = ownerOrchestrationHome(agentDir);
+	const home = roots.orchestrationHome;
 	const inside = relative(resolve(orchestrationSessionsDir(home)), file);
 	const isWorker =
 		inside !== "" &&
@@ -165,7 +170,7 @@ function assertExistingHeader(file: string, sessionId: string): void {
 
 /** Claim authority exists only inside the exact transcript lock and is never stored on a shared parsed core. */
 export function withWorkerTranscriptContinuation<T>(
-	agentDir: string,
+	roots: SessionStorageRoots,
 	session: ReadonlySessionManager,
 	claim: SpecialistContextClaim,
 	operation: () => T,
@@ -176,7 +181,7 @@ export function withWorkerTranscriptContinuation<T>(
 	const lock = currentSynchronousFileLockScope(file);
 	if (!lock || continuations.has(file))
 		throw new Error("Worker continuation requires its own active transcript lock.");
-	const owner = fileOwner(agentDir, file, session.getSessionId());
+	const owner = fileOwner(roots, file, session.getSessionId());
 	const project = owner.metadata?.projectContext;
 	if (!project) throw new Error("Worker continuation requires an enrolled project claim.");
 	assertSpecialistContextClaim(project.ownership, claim);
@@ -190,7 +195,7 @@ export function withWorkerTranscriptContinuation<T>(
 		throw new Error("Worker continuation enrollment does not match its claim.");
 	}
 	const scope: WorkerContinuation = {
-		agentDir,
+		roots,
 		file,
 		sessionId: session.getSessionId(),
 		parentSessionId: owner.parentSessionId,
@@ -208,9 +213,12 @@ export function withWorkerTranscriptContinuation<T>(
 	}
 }
 
-/** Mandatory physical mutation boundary: admission precedes directory creation and transcript locking. */
+/**
+ * Mandatory physical mutation boundary: admission precedes directory creation and transcript locking. `roots` name the
+ * writing session's home, the one whose bundle admits the file's mutations.
+ */
 export function withSessionFileMutation<T>(
-	agentDir: string,
+	roots: SessionStorageRoots,
 	filePath: string,
 	sessionId: string,
 	kind: SessionFileMutationKind,
@@ -221,7 +229,8 @@ export function withSessionFileMutation<T>(
 	const scope = continuations.get(file);
 	if (scope) {
 		if (
-			scope.agentDir !== agentDir ||
+			scope.roots.agentDir !== roots.agentDir ||
+			!sameOrchestrationHome(scope.roots.orchestrationHome, roots.orchestrationHome) ||
 			scope.sessionId !== sessionId ||
 			currentSynchronousFileLockScope(file) !== scope.lock ||
 			(scope.enrolling
@@ -229,7 +238,7 @@ export function withSessionFileMutation<T>(
 				: kind !== "append")
 		)
 			throw new Error("Worker continuation cannot authorize this mutation.");
-		const owner = fileOwner(agentDir, file, sessionId);
+		const owner = fileOwner(roots, file, sessionId);
 		if (
 			owner.parentSessionId !== scope.parentSessionId ||
 			owner.metadata?.projectContext?.specializationKey !== scope.specializationKey
@@ -251,7 +260,7 @@ export function withSessionFileMutation<T>(
 			}
 		}
 	}
-	const owner = fileOwner(agentDir, file, sessionId);
+	const owner = fileOwner(roots, file, sessionId);
 	if (owner.metadata?.projectContext)
 		throw new Error("Enrolled worker mutation requires the calling owner's exact claim.");
 	if (currentSynchronousFileLockScope(file) && !hasCurrentSessionBundleAdmission(owner.home, owner.parentSessionId)) {
@@ -263,7 +272,7 @@ export function withSessionFileMutation<T>(
 			file,
 			() => {
 				reconcilePublicationCleanup(file);
-				const current = fileOwner(agentDir, file, sessionId);
+				const current = fileOwner(roots, file, sessionId);
 				if (current.parentSessionId !== owner.parentSessionId || current.metadata?.projectContext)
 					throw new Error("Session file owner changed before mutation.");
 				if (current.metadata && kind !== "create") {

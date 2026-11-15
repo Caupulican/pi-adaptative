@@ -1,11 +1,12 @@
 /**
- * A bot's home, `<agentDir>/bots/<id>/`: `profile.json` (what defines the bot) and `sessions/` (its own root session
- * files). Its memory blackboard is the store's (`memory/bots/<id>.md`), whichever path the bot runs on. The store record (`state/bots/store.json`) stays the index and the source of truth: the profile is
+ * A bot's home, `<agentDir>/bots/<id>/`: `profile.json` (what defines the bot), `sessions/` (its own root session
+ * files) and `orchestration/` (the orchestration home of its sessions: their bundles, leases and specialists). Its memory blackboard is the store's (`memory/bots/<id>.md`), whichever path the bot runs on. The store record (`state/bots/store.json`) stays the index and the source of truth: the profile is
  * written from it, whole and atomically, the first time the bot runs as a session and again whenever the record's
  * defining fields changed. This module is the profile's one writer, and it writes only when the content differs, so a
  * store save that touches the record's summary or read marks never rewrites the file.
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { botHomeOrchestrationHome, type OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { botHomeDir, botProfileFile, botSessionsDir } from "../agent-paths.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -47,14 +48,23 @@ export interface BotHome {
 	readonly dir: string;
 	readonly profileFile: string;
 	readonly sessionsDir: string;
+	/** `<home>/orchestration` -- where the bundles and leases of the bot's sessions and their workers live. */
+	readonly orchestrationHome: OrchestrationHome;
 }
 
 export function botHomeOf(agentDir: string, botId: string): BotHome {
+	const dir = botHomeDir(agentDir, botId);
 	return {
-		dir: botHomeDir(agentDir, botId),
+		dir,
 		profileFile: botProfileFile(agentDir, botId),
 		sessionsDir: botSessionsDir(agentDir, botId),
+		orchestrationHome: botHomeOrchestrationHome(dir),
 	};
+}
+
+/** `<agentDir>/bots/<id>/orchestration` -- the orchestration home of the bot's sessions. */
+export function botOrchestrationHome(agentDir: string, botId: string): OrchestrationHome {
+	return botHomeOf(agentDir, botId).orchestrationHome;
 }
 
 /** The text the profile file holds: the same profile always gives the same text, so a rewrite is detectable by comparison. */

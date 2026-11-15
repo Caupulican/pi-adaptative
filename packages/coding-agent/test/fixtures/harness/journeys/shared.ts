@@ -296,7 +296,7 @@ export function ownedFilesManifest(
 			take(worker.sessionFile);
 			take(`${worker.sessionFile}.worker.json`);
 			if (worker.specializationKey !== undefined) {
-				take(workerProjectSpecializationFile(world.agentDir, worker.specializationKey));
+				take(workerProjectSpecializationFile(ownerOrchestrationHome(world.agentDir), worker.specializationKey));
 			}
 			if (worker.birth !== undefined) {
 				take(

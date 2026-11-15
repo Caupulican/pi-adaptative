@@ -9,7 +9,6 @@ import { ReceiptDeliveryLoop } from "./receipt-delivery-loop.ts";
 import { WorkerReceiptParentLedger } from "./worker-receipt-parent-ledger.ts";
 
 interface WorkerReceiptDeliveryDeps {
-	readonly agentDir: string;
 	readonly runtime: Pick<DurableTaskRuntime, "getSnapshot" | "acknowledgeWorkerReceipts">;
 	getSessionManager(): SessionManager;
 	subscribe(listener: (event: OrchestrationEvent) => void): () => void;
@@ -61,14 +60,9 @@ export class WorkerReceiptDelivery {
 				this.signal();
 			});
 			try {
-				const acknowledgement = this.parentLedger.publish(
-					this.deps.agentDir,
-					this.deps.getSessionManager(),
-					candidate,
-					() => {
-						if (changed || !this.loop.active) throw new Error("Worker receipt admission changed.");
-					},
-				);
+				const acknowledgement = this.parentLedger.publish(this.deps.getSessionManager(), candidate, () => {
+					if (changed || !this.loop.active) throw new Error("Worker receipt admission changed.");
+				});
 				if (!acknowledgement || !this.loop.active) continue;
 				this.deps.runtime.acknowledgeWorkerReceipts(attempt.attemptId, acknowledgement);
 				this.reported.delete(attempt.attemptId);

@@ -88,6 +88,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-bundle-lifecycle.ts` | (no header comment) |
 | `kernel/session/session-bundle-paths.ts` | (no header comment) |
 | `kernel/session/session-context-builder.ts` | Model-facing session context: compaction-aware selection of retained entries, the context messages and their delivered metadata, and the branch views built from them. |
+| `kernel/session/session-default-dirs.ts` | The default session directories of a working directory under `<agentDir>/sessions`: the current encoding of the directory's path, then the legacy one when it differs. |
 | `kernel/session/session-entries.ts` | (no header comment) |
 | `kernel/session/session-entry-evidence-index.ts` | (no header comment) |
 | `kernel/session/session-entry-limits.ts` | Maximum entries visited by a single bounded session traversal. |
@@ -150,7 +151,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-116 kernel modules, 57 with a header comment.
+117 kernel modules, 58 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

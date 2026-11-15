@@ -181,7 +181,6 @@ export class WorkerReceiptParentLedger {
 
 	/** Parent lock is released before the caller acknowledges the orchestration result. */
 	publish(
-		agentDir: string,
 		session: SessionManager,
 		candidate: WorkerReceiptCandidate,
 		assertCurrent: () => void,
@@ -292,7 +291,13 @@ export class WorkerReceiptParentLedger {
 		};
 		try {
 			return origin.sessionFile
-				? withSessionFileMutation(agentDir, origin.sessionFile, origin.sessionId, "append", publish)
+				? withSessionFileMutation(
+						session.getStorageRoots(),
+						origin.sessionFile,
+						origin.sessionId,
+						"append",
+						publish,
+					)
 				: publish();
 		} catch (error) {
 			this.cached = undefined;

@@ -26,6 +26,7 @@ import {
 	sessionLifecycleToolIdentityKey,
 } from "../../kernel/session/lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
+import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import {
 	withSessionFileMutation,
 	withWorkerTranscriptContinuation,
@@ -189,10 +190,7 @@ export interface OpenWorkerConversationOptions extends WorkerConversationRoots {
 }
 
 /** Where a worker conversation's files live: the agent directory and the owning session's orchestration home. */
-export interface WorkerConversationRoots {
-	readonly agentDir: string;
-	readonly orchestrationHome: OrchestrationHome;
-}
+export type WorkerConversationRoots = SessionStorageRoots;
 
 /** Open options for a registered agent's own transcript: its resume context, checked against its logical identity. */
 export function agentConversation(
@@ -927,8 +925,7 @@ function scanWorkerControlTranscript(
 export class WorkerConversation {
 	private readonly core: WorkerConversationCore;
 	private readonly resumeContext: AgentResumeContext;
-	private readonly agentDir?: string;
-	private readonly orchestrationHome?: OrchestrationHome;
+	private readonly roots?: SessionStorageRoots;
 	private readonly metadataFile?: string;
 	private readonly projectClaim?: SpecialistContextClaim;
 
@@ -947,8 +944,7 @@ export class WorkerConversation {
 			activeTranscriptCursors: 0,
 		};
 		this.resumeContext = cloneResumeContext(resumeContext);
-		this.agentDir = metadata?.agentDir;
-		this.orchestrationHome = metadata?.orchestrationHome;
+		this.roots = metadata && { agentDir: metadata.agentDir, orchestrationHome: metadata.orchestrationHome };
 		this.metadataFile = metadata?.file;
 		this.projectClaim = projectClaim ? structuredClone(projectClaim) : undefined;
 	}
@@ -1518,9 +1514,9 @@ export class WorkerConversation {
 
 	/** The transcript lock and runtime lock jointly fence physical append, receipt recovery and rebind. */
 	withHostEventControl<T>(parentSessionId: string, operation: () => T): T {
-		if (!this.orchestrationHome)
+		if (!this.roots)
 			throw new WorkerConversationOwnershipError("Host event control requires a durable worker conversation.");
-		return withSessionBundleAdmission(this.orchestrationHome, parentSessionId, () =>
+		return withSessionBundleAdmission(this.roots.orchestrationHome, parentSessionId, () =>
 			this.withCanonicalSessionLock(() => operation()),
 		);
 	}
@@ -1540,12 +1536,12 @@ export class WorkerConversation {
 			createHash("sha256").update(message.content).digest("hex") !== binding.contentDigest ||
 			this.resumeContext.sessionId !== binding.execution.sessionId ||
 			this.resumeContext.sessionFile !== binding.execution.sessionFile ||
-			!this.orchestrationHome
+			!this.roots
 		)
 			throw new TypeError("Host event does not belong to this exact worker transcript.");
 		if (mode === "consume" && !isDeepStrictEqual(this.projectClaim, binding.execution.contextClaim))
 			throw new WorkerConversationOwnershipError("Host event specialist context claim changed.");
-		const orchestrationHome = this.orchestrationHome;
+		const { orchestrationHome } = this.roots;
 		const transcriptReceipt = (entryId: string): HostEventTranscriptReceipt => ({
 			sessionId: binding.execution.sessionId,
 			sessionFile: binding.execution.sessionFile,
@@ -1801,7 +1797,7 @@ export class WorkerConversation {
 	): SessionManager {
 		const sessionFile = this.resumeContext.sessionFile!;
 		const sessionDir = this.resumeContext.sessionDir ?? dirname(sessionFile);
-		const sessionManager = SessionManager.openCanonical(sessionFile, this.agentDir!, sessionDir);
+		const sessionManager = SessionManager.openCanonical(sessionFile, this.roots!, sessionDir);
 		if (
 			sessionManager.getSessionId() !== this.resumeContext.sessionId ||
 			sessionManager.getCwd() !== resolve(this.resumeContext.cwd) ||
@@ -1910,10 +1906,8 @@ export class WorkerConversation {
 	): Result {
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) return operation(this.sessionManager);
-		const { agentDir, orchestrationHome } = this;
-		if (!agentDir || !orchestrationHome) {
-			throw new Error("Worker conversation cannot lock a persisted transcript without its agent directory.");
-		}
+		const { roots } = this;
+		if (!roots) throw new Error("Worker conversation cannot lock a persisted transcript without its storage roots.");
 		const run = () => {
 			const borrowedScope = currentSynchronousFileLockScope(sessionFile);
 			return withFileLockSync(
@@ -1934,7 +1928,7 @@ export class WorkerConversation {
 						throw new Error("Worker conversation changed identity while acquiring its transcript lock.");
 					}
 					return intent === "mutation" && this.projectClaim
-						? withWorkerTranscriptContinuation(agentDir, sessionManager, this.projectClaim, () =>
+						? withWorkerTranscriptContinuation(roots, sessionManager, this.projectClaim, () =>
 								operation(sessionManager),
 							)
 						: operation(sessionManager);
@@ -1945,7 +1939,7 @@ export class WorkerConversation {
 		if (intent === "mutation" && !this.projectClaim) {
 			const parent = readWorkerConversationMetadata(this.metadataFile!).metadata.parentSessionId;
 			if (!parent) throw new Error("Worker mutation requires its birth parent identity.");
-			return withSessionBundleAdmission(orchestrationHome, parent, run);
+			return withSessionBundleAdmission(roots.orchestrationHome, parent, run);
 		}
 		return run();
 	}
@@ -2334,7 +2328,7 @@ export class WorkerConversationStore {
 							options.expectedLogicalAgentId,
 							birthParent,
 						);
-						const session = SessionManager.openCanonical(sessionFile, options.agentDir, dirname(sessionFile));
+						const session = SessionManager.openCanonical(sessionFile, options, dirname(sessionFile));
 						const enrollment = projectEnrollmentKey(session);
 						if (enrollment !== metadata.projectContext?.specializationKey)
 							throw new Error("Worker project enrollment changed.");
@@ -2370,7 +2364,7 @@ export class WorkerConversationStore {
 						});
 						if (!enrollment)
 							withWorkerTranscriptContinuation(
-								options.agentDir,
+								options,
 								session,
 								ownership.claim,
 								() =>
@@ -2572,7 +2566,7 @@ export class WorkerConversationStore {
 				usageAccountingVersion: 1,
 			});
 		}
-		withSessionFileMutation(options.agentDir, sessionFile, resumeContext.sessionId, "create", () =>
+		withSessionFileMutation(options, sessionFile, resumeContext.sessionId, "create", () =>
 			writeFileAtomicSync(sessionFile, `${JSON.stringify(header)}\n`),
 		);
 		const conversation = this.recoverBirthContextLocked(options, resumeContext);
@@ -2796,7 +2790,7 @@ export class WorkerConversationStore {
 					reference,
 				);
 				const verificationManager = sessionRevisionChanged
-					? SessionManager.openCanonical(sessionFile, cached.agentDir, sessionDir)
+					? SessionManager.openCanonical(sessionFile, cached, sessionDir)
 					: cached.core.sessionManager;
 				const recoveredBirthSuffix = verifyWorkerBirthContextPrefix(
 					verificationManager,
@@ -2855,7 +2849,7 @@ export class WorkerConversationStore {
 		}
 
 		const scannedHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
-		const sessionManager = SessionManager.openCanonical(sessionFile, options.agentDir, sessionDir);
+		const sessionManager = SessionManager.openCanonical(sessionFile, options, sessionDir);
 		const openedHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
 		assertWorkerSessionHeadContent(
 			scannedHead,

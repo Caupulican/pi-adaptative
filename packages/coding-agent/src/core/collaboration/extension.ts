@@ -5,7 +5,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir, getBundledResourcesDir } from "../../config.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { ownerOrchestrationHome, readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import {
@@ -18,6 +18,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { knowledgeGrantReferencesSchema } from "../memory/knowledge-grant.ts";
 import type { KnowledgeHandoffProjection } from "../memory/knowledge-projection.ts";
 import { orchestrationThinkingLevelSchema } from "../orchestration/thinking-level-schema.ts";
+import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { isComplexShellCommand, parseCommandPrefixes } from "../tools/shell-command-parser.ts";
@@ -282,7 +283,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			options.stateDirectory === undefined
 				? {
 						sessionServers: (sessionId) =>
-							readSessionLeaseHolders(ownerOrchestrationHome(getAgentDir()), sessionId),
+							readSessionLeaseHolders(orchestrationHomeOfSession(getAgentDir(), sessionId), sessionId),
 					}
 				: {},
 		);

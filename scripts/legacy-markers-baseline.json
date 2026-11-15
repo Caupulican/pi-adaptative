@@ -56,8 +56,8 @@
     "packages/coding-agent/src/core/tools/goal.ts#createGoalLifecycleToolDefinitions",
     "packages/coding-agent/src/core/turn-origin.ts#ownerOriginKind",
     "packages/coding-agent/src/kernel/reliability/retry.ts#RetryPolicy",
+    "packages/coding-agent/src/kernel/session/session-default-dirs.ts#getDefaultSessionDirCandidates",
     "packages/coding-agent/src/kernel/session/session-entry-evidence-index.ts#sessionEvidenceParentId",
-    "packages/coding-agent/src/kernel/session/session-manager.ts#getDefaultSessionDirCandidates",
     "packages/coding-agent/src/kernel/session/worker-project-enrollment.ts#projectEnrollmentKey"
   ]
 }

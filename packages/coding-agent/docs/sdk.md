@@ -730,6 +730,8 @@ Harness notices (a lost watch, System One without an engine, a held outward acti
 
 A host that bounds the spend of each run of the session's workers passes `workerRunCostBound` to `createAgentSession` (`ParentExecutionPolicy.runCostBound`): it is asked for each attempt as it starts and answers with a `RunCostBound`, whose `includes` names the attempts of the same run (their spend seeds it); they share its dollar budgets, checked before each provider request on top of the attempt's own budgets: `maxCostUsd` over the run's whole spend, and `maxMeteredCostUsd` over its metered spend, which only its metered attempts are held to (either may be left out). Its required `unpriced` decides an attempt on a model that declares no price, whose requests cannot be priced: `refused` refuses them, `unbounded` holds it to no dollar run bound (as the main session's workers on such a model run). A bot's host answers `unbounded`, with the request the attempt serves and that request's remaining ceilings; absent, a worker is held to its own budgets only.
 
+A host whose session keeps its orchestration state outside the owner's passes `orchestrationHome` to `createAgentSession` (`OrchestrationHome`): the session's bundle and its lease, its workers' transcripts, the project specialists they build and its fleet queue live there, and a reference by id to a session another home holds is not followed. Pi's bot host passes the bot's (`<agentDir>/bots/<id>/orchestration`); absent, the session uses the owner's (`ownerOrchestrationHome(agentDir)`, `<agentDir>/state/orchestration`, with its fleet queue under `<agentDir>/state/fleet/queue`).
+
 ### Session Management
 
 Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.

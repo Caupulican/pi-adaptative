@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, unlinkSync } from "node:fs";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -290,6 +290,16 @@ export function readSessionLeaseHolders(home: OrchestrationHome, parentSessionId
 		standing: judgeOwner(holder.owner),
 		self: holder.processInstanceId === PROCESS_INSTANCE_ID,
 	}));
+}
+
+/** Whether `home` holds the session: its bundle, its deletion tombstone or its lifetime leases are there. */
+export function orchestrationHomeHoldsSession(home: OrchestrationHome, parentSessionId: string): boolean {
+	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
+	return (
+		existsSync(orchestrationSessionDir(home, parentSessionId)) ||
+		existsSync(tombstone) ||
+		existsSync(`${tombstone}.leases.json`)
+	);
 }
 
 /** The channel host holding the session that is not proven dead, if any; read-only like {@link readSessionLeaseHolders}. */

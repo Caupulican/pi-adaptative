@@ -33,7 +33,6 @@ export type ForegroundTranscriptWrites = Pick<
 export interface ForegroundTranscriptWriteDeps
 	extends Pick<ParentWritePort, "saveWorkerClaimSnapshot" | "notifyParentSession"> {
 	getSessionManager(): SessionManager;
-	getAgentDir(): string;
 	/** The session's project-chat report of a taken terminal handoff; it may throw. */
 	reportWorkerTerminal?(handoff: Readonly<WorkerTerminalHandoff>): void;
 	warn(message: string): void;
@@ -152,7 +151,7 @@ export function createForegroundTranscriptWrites(deps: ForegroundTranscriptWrite
 				return "refused";
 			}
 			try {
-				return withSessionFileMutation(deps.getAgentDir(), file, session.getSessionId(), "append", () => {
+				return withSessionFileMutation(session.getStorageRoots(), file, session.getSessionId(), "append", () => {
 					if (!landedEntry(session.getEntries(), write, admitted.handoff)) apply(write, admitted.handoff);
 					session.flushBufferedEntries();
 					const landed = landedEntry(session.getEntries(), write, admitted.handoff);

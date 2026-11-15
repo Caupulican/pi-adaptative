@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { ownerOrchestrationHome, withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
+import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type AccountingEvidenceGroup,
@@ -263,8 +264,8 @@ export async function reconcileSessionAccounting(
 	if (previous && (previous.sessionId !== header.id || !matchesBytes(previous.source, raw, true)))
 		throw new FileSnapshotChangedError("Parent accounting source changed before reconciliation.");
 	const entries = loaded.filter((entry): entry is SessionEntry => entry.type !== "session");
-	// Historical accounting reads the owner's sessions: their bundles live in the owner's orchestration home.
-	const home = ownerOrchestrationHome(agentDir);
+	// Historical accounting reads the session's evidence in the orchestration home that holds it.
+	const home = orchestrationHomeOfSession(agentDir, header.id);
 	const reports = entries.flatMap((entry) =>
 		entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE
 			? [entry.data as SemanticUsageReport]

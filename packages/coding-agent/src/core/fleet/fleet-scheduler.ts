@@ -19,6 +19,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
+import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import { type Placement, placementCapacityKey } from "../placement/placement-types.ts";
@@ -97,8 +98,8 @@ export interface FleetLocalPort {
 	attemptModel?(attemptId: string): Model<Api> | undefined;
 }
 
-export interface SessionFleetSchedulerDeps {
-	readonly agentDir: string;
+/** The machine's local claims live under `agentDir`; the session's queue metadata under its `orchestrationHome`. */
+export interface SessionFleetSchedulerDeps extends SessionStorageRoots {
 	readonly sessionId: string;
 	readonly timers: TimerPort;
 	settings(): ResolvedFleetSettings;
@@ -183,7 +184,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	constructor(deps: SessionFleetSchedulerDeps) {
 		this.deps = deps;
-		this.store = new FleetQueueStore(fleetQueueMetadataPath(deps.agentDir, deps.sessionId));
+		this.store = new FleetQueueStore(fleetQueueMetadataPath(deps.orchestrationHome, deps.sessionId));
 		this.baseline = deps.readMachine ? machineBaseline(deps.readMachine()) : processMachineBaseline();
 		this.unregisterMachine = registerMachine(this.observer, deps.sessionId);
 		this.claims = new FleetLocalClaims({

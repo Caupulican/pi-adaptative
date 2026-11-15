@@ -272,7 +272,12 @@ export function botHomeDir(agentDir: string, botId: string): string {
 
 /** `<agentDir>/bots/<id>/profile.json` -- what defines the bot, written from its store record. */
 export function botProfileFile(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "profile.json");
+	return botHomeProfileFile(botHomeDir(agentDir, botId));
+}
+
+/** `<home>/profile.json` -- the profile of the bot whose home is `homeDir`; a home without one is no bot's. */
+export function botHomeProfileFile(homeDir: string): string {
+	return join(homeDir, "profile.json");
 }
 
 /** `<agentDir>/bots/<id>/sessions` -- the bot's own root session files. */
@@ -478,10 +483,13 @@ export function decisionLedgerFile(agentDir: string): string {
 	return stateFile(agentDir, "decision-ledger.sqlite");
 }
 
-/** Bounded discovery for one effective native specialization; transcript metadata owns execution. */
-export function workerProjectSpecializationFile(agentDir: string, specializationKey: string): string {
+/**
+ * `<home>/project-specialists/<key>.json` -- bounded discovery for one effective native specialization, per orchestration
+ * home: a specialist is claimed only by sessions of the home it was built in. Transcript metadata owns execution.
+ */
+export function workerProjectSpecializationFile(home: OrchestrationHome, specializationKey: string): string {
 	if (!/^[a-f0-9]{64}$/.test(specializationKey)) throw new TypeError("Invalid worker specialization digest.");
-	return stateFile(agentDir, "orchestration", "project-specialists", `${specializationKey}.json`);
+	return join(home.root, "project-specialists", `${specializationKey}.json`);
 }
 
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */

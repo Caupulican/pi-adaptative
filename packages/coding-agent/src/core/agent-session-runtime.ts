@@ -24,10 +24,10 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import {
 	ownerOrchestrationHome,
-	refuseHostedSession,
 	SessionBundleLeaseReleaseError,
 	withSessionBundleLeases,
 } from "./orchestration/session-bundle-lifecycle.ts";
+import { refuseHostedSessionInItsHome } from "./orchestration-homes.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "./session-switch-failures.ts";
@@ -332,7 +332,7 @@ function refuseHostedSessionFile(agentDir: string, path: string): void {
 	const header = readSessionHeaderResult(resolvePath(path));
 	if (!header.ok) return;
 	try {
-		refuseHostedSession(ownerOrchestrationHome(agentDir), header.header.id);
+		refuseHostedSessionInItsHome(agentDir, header.header.id);
 	} catch (error) {
 		throw new SessionReplacementRuntimeError("admission", error, true);
 	}

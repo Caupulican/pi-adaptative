@@ -21,7 +21,7 @@ import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import type { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { readAgentIdentity } from "./agent-identity.ts";
-import { continuousChatSpendFile, ownerOrchestrationHome, resourceDir, stateFile } from "./agent-paths.ts";
+import { continuousChatSpendFile, resourceDir, stateFile } from "./agent-paths.ts";
 import {
 	type AgentSessionAgentHookPorts,
 	installSessionRequestHooks,
@@ -719,7 +719,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this._caps = config.capabilities;
 		const agentDir = config.agentDir ?? getAgentDir();
-		const orchestrationHome = ownerOrchestrationHome(agentDir);
+		const { orchestrationHome } = config;
 		const bundleLease = claimSessionBundleLease(
 			config.bundleLease,
 			orchestrationHome,

@@ -2,14 +2,15 @@
  * The fleet's restart metadata: per queued node its flow, base priority, first enqueue time, last wait reason and reopen
  * time, plus whether the session's fleet was stopped. The orchestration ledger stays the owner of which attempts exist
  * and are queued; this file carries only what the ledger does not (ordering and the stop), so a restart re-enqueues the
- * ledger's queued attempts with their aging intact and keeps a stopped fleet stopped. One file per session at
- * `<agentDir>/state/fleet/queue/<sessionId>.json`, bounded, written atomically and at most once per microtask; an
+ * ledger's queued attempts with their aging intact and keeps a stopped fleet stopped. One file per session under its
+ * orchestration home's state directory, `<stateDir>/fleet/queue/<sessionId>.json` (the owner's `<agentDir>/state`), bounded, written atomically and at most once per microtask; an
  * empty, running fleet removes it. Entries no recovered attempt claims are dropped by the first write.
  */
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { FleetPriority } from "./fleet-types.ts";
 
@@ -32,8 +33,8 @@ export interface FleetQueueMetadata {
 	readonly entries: readonly FleetQueueMetadataEntry[];
 }
 
-export function fleetQueueMetadataPath(agentDir: string, sessionId: string): string {
-	return join(agentDir, "state", "fleet", "queue", `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+export function fleetQueueMetadataPath(home: OrchestrationHome, sessionId: string): string {
+	return join(home.stateDir, "fleet", "queue", `${sessionId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 
 export class FleetQueueStore {

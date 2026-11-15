@@ -64,11 +64,8 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
-import {
-	ownerOrchestrationHome,
-	refuseHostedSession,
-	SessionHostedError,
-} from "./core/orchestration/session-bundle-lifecycle.ts";
+import { SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
+import { refuseHostedSessionInItsHome } from "./core/orchestration-homes.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
@@ -780,8 +777,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	// A session the bot daemon hosts is refused with its one message before `--name` or the session writes to it.
 	try {
-		if (sessionManager.isPersisted())
-			refuseHostedSession(ownerOrchestrationHome(agentDir), sessionManager.getSessionId());
+		if (sessionManager.isPersisted()) refuseHostedSessionInItsHome(agentDir, sessionManager.getSessionId());
 	} catch (error) {
 		if (error instanceof SessionHostedError) refuseInvocation(error.message);
 		throw error;

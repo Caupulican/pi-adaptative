@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import {
 	type OrchestrationHome,
 	orchestrationSessionDeletionFile,
-	ownerOrchestrationHome,
 	workerProjectSpecializationFile,
 } from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
@@ -12,6 +12,7 @@ import type {
 	SpecialistContextOwner,
 	SpecialistContextOwnership,
 } from "../orchestration/specialist-context-ownership.ts";
+import { followedOrchestrationHome } from "../orchestration-homes.ts";
 import {
 	currentSynchronousFileLockScope,
 	type SynchronousFileLockScope,
@@ -50,6 +51,8 @@ export type WorkerProjectAdmission =
 /**
  * Discovery and allocation only. Lock order: specialization, birth bundle, transcript. The
  * transcript store owns claim transfer; this index never caches busy/idle state or expires owners.
+ * One directory per orchestration home: a specialist built under one parent's ceiling and spend window is claimable
+ * only from a session of that home, and an entry naming a session another home holds is neither settled nor claimed.
  */
 export class WorkerProjectDirectory {
 	private readonly agentDir: string;
@@ -57,12 +60,24 @@ export class WorkerProjectDirectory {
 	private readonly conversations: WorkerConversationStore;
 	private preparationScope?: { allocation: WorkerProjectAllocation; lock: SynchronousFileLockScope };
 
-	constructor(agentDir: string, conversations: WorkerConversationStore) {
-		this.agentDir = agentDir;
-		// The directory is shared by every session under agentDir and enrolls the owner's sessions: the bundles its
-		// references name live in the owner's orchestration home.
-		this.orchestrationHome = ownerOrchestrationHome(agentDir);
+	/** `roots` name the session's home: the directory is shared by every session of that home and by no other. */
+	constructor(roots: SessionStorageRoots, conversations: WorkerConversationStore) {
+		this.agentDir = roots.agentDir;
+		this.orchestrationHome = roots.orchestrationHome;
 		this.conversations = conversations;
+	}
+
+	/** Whether the session is held by this directory's home; one another home holds is never followed. */
+	private follows(sessionId: string): boolean {
+		return followedOrchestrationHome(this.agentDir, this.orchestrationHome, sessionId) !== undefined;
+	}
+
+	/** Whether every session the entry names (its allocating owner, its birth parent) is held by this home. */
+	private followsEntry(entry: DirectoryEntry): boolean {
+		return (
+			this.follows(entry.allocatedBy.parentSessionId) &&
+			(!entry.reference || this.follows(entry.reference.parentSessionId))
+		);
 	}
 
 	admit(input: {
@@ -71,12 +86,13 @@ export class WorkerProjectDirectory {
 		independent: boolean;
 		isCompatible(reference: WorkerProjectContextReference, ownership: SpecialistContextOwnership): boolean;
 	}): WorkerProjectAdmission {
-		const file = workerProjectSpecializationFile(this.agentDir, input.specializationKey);
+		const file = workerProjectSpecializationFile(this.orchestrationHome, input.specializationKey);
 		return withFileLockSync(file, () => {
 			const entries = this.read(file);
 			if (!input.independent) {
 				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.orchestrationHome, this.conversations);
 				for (const entry of [...entries]) {
+					if (!this.followsEntry(entry)) continue;
 					try {
 						const allocation = {
 							specializationKey: input.specializationKey,
@@ -100,6 +116,7 @@ export class WorkerProjectDirectory {
 				const idle: WorkerProjectContextReference[] = [];
 				let busy = false;
 				for (const entry of entries) {
+					if (!this.followsEntry(entry)) continue;
 					if (entry.phase === "allocating") {
 						busy = true;
 						continue;
@@ -114,7 +131,12 @@ export class WorkerProjectDirectory {
 							reference,
 							input.specializationKey,
 						);
-						if (ownership.state === "retired" || !input.isCompatible(reference, ownership)) continue;
+						if (
+							ownership.state === "retired" ||
+							!this.follows(ownership.claim.parentSessionId) ||
+							!input.isCompatible(reference, ownership)
+						)
+							continue;
 						if (ownership.state === "idle") idle.push(reference);
 						else busy = true;
 					} catch {
@@ -155,7 +177,7 @@ export class WorkerProjectDirectory {
 		return this.withAllocation(allocation, (entry) => {
 			if (entry.reference || entry.phase !== "allocating")
 				throw new Error("Worker allocation is no longer preparing.");
-			const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
+			const file = workerProjectSpecializationFile(this.orchestrationHome, allocation.specializationKey);
 			const lock = currentSynchronousFileLockScope(file);
 			if (!lock) throw new Error("Worker preparation lock is missing.");
 			this.preparationScope = { allocation: structuredClone(allocation), lock };
@@ -281,7 +303,7 @@ export class WorkerProjectDirectory {
 		operation: (entry: DirectoryEntry, save: (next: DirectoryEntry | undefined) => void) => T,
 		borrowedScope?: SynchronousFileLockScope,
 	): T {
-		const file = workerProjectSpecializationFile(this.agentDir, allocation.specializationKey);
+		const file = workerProjectSpecializationFile(this.orchestrationHome, allocation.specializationKey);
 		return withFileLockSync(
 			file,
 			() => {

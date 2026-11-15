@@ -20,13 +20,14 @@
 
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { ownerOrchestrationHome, readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { configFile } from "../agent-paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { AwayParentWriteRefusal } from "../delegation/away-parent-writes.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { ResolvedRoutineAwaySettings } from "../settings/settings-schema.ts";
 import { alarmAt, type TimerSource, type WallAlarm } from "../util/timer-port.ts";
@@ -730,9 +731,10 @@ export class AwayRoutineSupervisor {
 		// Every away-host hold of this process is this supervisor's, including one whose host is still opening (its lease
 		// is taken before the open yields). A session open in this same process holds the parent in the session role.
 		try {
-			return readSessionLeaseHolders(ownerOrchestrationHome(this.deps.agentDir), parentSessionId).some(
-				(holder) => !(holder.self && holder.role === "away-host") && holder.standing !== "dead",
-			);
+			return readSessionLeaseHolders(
+				orchestrationHomeOfSession(this.deps.agentDir, parentSessionId),
+				parentSessionId,
+			).some((holder) => !(holder.self && holder.role === "away-host") && holder.standing !== "dead");
 		} catch {
 			return "unknown";
 		}
