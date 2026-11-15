@@ -38,8 +38,8 @@ function parsePointer(value: unknown): BotSessionPointer | undefined {
 }
 
 /**
- * The bot's session as its home records it. A pointer that does not parse, or whose file holds another session, does
- * not count; a pointer that cannot be read for any reason but its absence is thrown, since what it records is unknown.
+ * The bot's session as its home records it. A pointer that cannot be read (for any reason but its absence), does not
+ * parse, or whose file holds another session does not count.
  */
 export function botSessionChoice(home: BotHome): BotSessionChoice {
 	const chosen = (unreadable?: string): BotSessionChoice => ({
@@ -47,17 +47,11 @@ export function botSessionChoice(home: BotHome): BotSessionChoice {
 		newest: findMostRecentSessionInDirs([home.sessionsDir]) ?? undefined,
 		...(unreadable === undefined ? {} : { unreadable }),
 	});
-	let text: string;
-	try {
-		text = readFileSync(home.pointerFile, "utf8");
-	} catch (error) {
-		if (isMissingFileError(error)) return chosen();
-		throw error;
-	}
 	let pointer: BotSessionPointer | undefined;
 	try {
-		pointer = parsePointer(JSON.parse(text));
+		pointer = parsePointer(JSON.parse(readFileSync(home.pointerFile, "utf8")));
 	} catch (error) {
+		if (isMissingFileError(error)) return chosen();
 		return chosen(error instanceof Error ? error.message : String(error));
 	}
 	if (!pointer) return chosen("not a session pointer");

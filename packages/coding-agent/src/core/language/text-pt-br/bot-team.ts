@@ -129,7 +129,7 @@ export const BOT_TEAM = {
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: o registro de gasto dele não foi lido por inteiro (${reason}) e foi separado como ${file}; os pedidos cujo gasto não foi lido contam a partir de agora, e as cobranças à sessão principal continuam ${chargesKept ? "do registro dele" : "do que a sessão principal registrou delas"}.`,
 	botSessionPointerSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: o registro de qual sessão ele continua não foi lido (${reason}) e foi separado como ${file}; ele continua o arquivo de sessão mais recente, registrado de novo.`,
+		`Bot ${agentId}: o registro de qual sessão ele continua não foi lido (${reason}) e foi separado como ${file}; ele continua o arquivo de sessão mais recente, ou uma sessão nova quando não há nenhum, registrado de novo.`,
 	botSessionNotMoved: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele (${reason}); ele continua usando-o onde está.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

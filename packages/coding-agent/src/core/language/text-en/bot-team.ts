@@ -148,7 +148,7 @@ export const BOT_TEAM = {
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from ${chargesKept ? "its record" : "what the main session has recorded of them"}.`,
 	botSessionPointerSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: the record of which session it continues did not read (${reason}) and was set aside as ${file}; it continues its newest session file, recorded anew.`,
+		`Bot ${agentId}: the record of which session it continues did not read (${reason}) and was set aside as ${file}; it continues its newest session file, or a new session when it has none, recorded anew.`,
 	botSessionNotMoved: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own (${reason}); it keeps using it where it is.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

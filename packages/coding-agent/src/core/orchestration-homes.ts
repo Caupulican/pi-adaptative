@@ -1,7 +1,8 @@
 /**
  * The orchestration homes of an agent directory (the owner's, then one per bot home that has an orchestration directory)
- * and which of them holds a session. A session file's home is decided by where the file lies: one in a bot's
- * `sessions/` is that bot's, any other the owner's, so opening a file never enumerates the bot homes. A reference to
+ * and which of them holds a session. A session file's home is decided by where the file lies: one outside a bot's
+ * `sessions/` is the owner's, and one in it its bot's unless only the owner's home holds its session (state an earlier
+ * build kept there), so opening a file never enumerates the bot homes. A reference to
  * another session by id (its lease, its parent context, a specialist it built) is read in the home that holds that
  * session, and a session follows one only when that home is its own: a root or away controller never takes an attempt
  * from a bot's home, and a bot's controller never one from the owner's or another bot's.
@@ -101,7 +102,8 @@ export function sessionStorageRootsOfFile(agentDir: string, file: string): Sessi
  * The storage roots of bot session `sessionId`, whose bot's home is `botHome`: the bot's, unless only the owner's home
  * holds the session (its bundle, tombstone or leases), as a bot session's state an earlier build kept there does until its
  * host moves it (`moveBotSessionBundle`), and as one whose move failed across devices keeps it. Every opener of a bot
- * session, its host and another process alike, asks this, so all take its lease in the same home.
+ * session, its host and another process alike, asks this, so all resolve its lease to the same home (an opener that
+ * resolved it just before its host moved the state leases where it resolved: see `bot-bundle-move.ts`).
  */
 export function botSessionStorageRoots(
 	agentDir: string,

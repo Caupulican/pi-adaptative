@@ -22,8 +22,8 @@ import { sessionStorageRootsOfDir, sessionStorageRootsOfFile } from "./orchestra
  * SessionManager itself is config-agnostic: its constructor and statics take the storage roots and sessions
  * directory explicitly (the kernel-promotion seam). These thin wrappers are the single visible, host-owned place
  * that closes over the app's config-resolved `getAgentDir()` / `getSessionsDir()` and delegates to the explicit
- * kernel API. A session's roots follow where its file lies (`sessionStorageRootsOfDir`): one in a bot's
- * `sessions/` is that bot's, any other the owner's. Call sites that already hold their own roots (e.g. the SDK, the
+ * kernel API. A session's roots follow where its file lies (`sessionStorageRootsOfDir`/`OfFile`): one in a bot's
+ * `sessions/` is that bot's (unless only the owner's home holds its session), any other the owner's. Call sites that already hold their own roots (e.g. the SDK, the
  * session runtime) should call `SessionManager` directly with them instead of these.
  */
 
