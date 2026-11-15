@@ -4,9 +4,9 @@
  * plan is stays verbatim in the carry file beside the snapshot (`orchestration/snapshot-carry-file.ts`): per plan, its
  * base (the plans-map entry of the snapshot a compaction replaces, or the base the carry of that snapshot already kept)
  * and every `plan.*` event of it since, in journal order. When the session is read, each carried plan is rebuilt over the
- * snapshot's identity from that base and those events (`projectionWithCarriedPlans`): a build that decodes the plan reads
- * it whole, and one that does not reads its identity again, so each compaction carries it on until a build that knows it
- * opens the session.
+ * snapshot's identity from that base and those events (`projectionWithCarriedPlans`) when the build decodes the plan's
+ * latest record; a build that does not keeps the snapshot's identity without replaying anything, and each compaction carries
+ * the plan on until a build that knows it opens the session.
  */
 
 import type { JsonObject } from "../autonomy/contracts.ts";
@@ -14,8 +14,8 @@ import { isOrchestrationEvent, type OrchestrationEvent, toJsonObject } from "../
 import type { CompactionBasis, CompactionFold } from "../orchestration/snapshot-carry-file.ts";
 import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
 import { DurableTaskRuntimeError, type TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { planRuntimeStateFromValue } from "./plan-codec.ts";
-import { isPlanCarried, isPlanFromNewerBuild, type PlanRuntimeState } from "./plan-graph.ts";
+import { planRecordFromValue, planRuntimeStateFromValue } from "./plan-codec.ts";
+import { isPlanCarried, isPlanFromNewerBuild, type PlanRuntimeState, type StoredPlanRecord } from "./plan-graph.ts";
 import { isPlanEventType, reducePlanEvent } from "./plan-reducer.ts";
 
 /** One carried plan: the entry it is rebuilt from (none when its `plan.recorded` is among the events) and its events. */
@@ -73,10 +73,21 @@ function foldWithCarriedPlans(state: TaskRuntimeProjection, basis: CompactionBas
 	return Object.keys(plans).length === 0 ? { projection } : { projection, carried: toJsonObject({ plans }) };
 }
 
+/** The latest record of a carried plan: that of its last `plan.recorded`, else its base's; routed by version first. */
+function latestRecordOf(carry: CarriedPlan, label: string): StoredPlanRecord | undefined {
+	for (let index = carry.events.length - 1; index >= 0; index--) {
+		const event = carry.events[index] as OrchestrationEvent;
+		if (event.type === "plan.recorded") return planRecordFromValue(event.payload.record, `${label}.events[${index}]`);
+	}
+	return carry.base && planRecordFromValue(carry.base.record, `${label}.base.record`);
+}
+
 /**
- * The projection a snapshot and its carry hold: each carried plan the snapshot keeps by its identity is rebuilt from its
- * base and events, through the same decoder and reducer the journal is read with. A plan the snapshot no longer has, or
- * holds whole, is read as the snapshot holds it.
+ * The projection a snapshot and its carry hold: each carried plan the snapshot keeps by its identity, and whose latest
+ * record this build decodes, is rebuilt from its base and events through the same decoder and reducer the journal is read
+ * with. One whose latest record this build does not decode stays the snapshot's identity (the snapshot already holds what
+ * this build reads of it, its closing included). A plan the snapshot no longer has, or holds whole, is read as the snapshot
+ * holds it.
  */
 export function projectionWithCarriedPlans(
 	state: TaskRuntimeProjection,
@@ -87,6 +98,8 @@ export function projectionWithCarriedPlans(
 	for (const [planId, carry] of Object.entries(carriedPlansFromValue(carried))) {
 		const identity = plans[planId];
 		if (!identity || !isPlanFromNewerBuild(identity.record)) continue;
+		const latest = latestRecordOf(carry, `${LABEL}.plans.${planId}`);
+		if (!latest || isPlanFromNewerBuild(latest)) continue;
 		delete plans[planId];
 		if (carry.base) plans[planId] = planRuntimeStateFromValue(carry.base, `${LABEL}.plans.${planId}.base`);
 		for (const event of carry.events) reducePlanEvent(plans, state.tasks, event);

@@ -55,7 +55,9 @@ function activePlan(plans: Record<string, PlanRuntimeState>, planId: string, eve
 	const plan = plans[planId];
 	if (!plan) return refuse(`${event.type} names unknown plan '${planId}'.`);
 	if (event.aggregateId !== planId) refuse(`${event.type} aggregate does not match plan '${planId}'.`);
-	if (isPlanFromNewerBuild(plan.record)) return undefined;
+	// A plan kept by its identity is routed before its events are decoded (routeKeptPlanEvent), so it never reaches here.
+	if (isPlanFromNewerBuild(plan.record))
+		refuse(`${event.type} reached plan '${planId}', which this build keeps by its identity.`);
 	if (plan.closed) refuse(`${event.type} arrived after plan '${planId}' closed.`);
 	return { plan, record: plan.record };
 }
@@ -199,7 +201,6 @@ export function reducePlanEvent(
 		case "plan.node_released": {
 			const payload = planNodeReleasedFromValue(event.payload, event.type);
 			const found = activePlan(plans, payload.planId, event);
-			if (!found) return;
 			const { runtime } = nodeOf(found.plan, found.record, payload.nodeId, event.type);
 			if (runtime.since !== payload.version)
 				refuse(`Step '${payload.nodeId}' is released for a version it does not run.`);
@@ -215,7 +216,6 @@ export function reducePlanEvent(
 		case "plan.node_settled": {
 			const payload = planNodeSettledFromValue(event.payload, event.type);
 			const found = activePlan(plans, payload.planId, event);
-			if (!found) return;
 			const { runtime } = nodeOf(found.plan, found.record, payload.nodeId, event.type);
 			const outcome = runtime.release ? tasks[currentTaskOf({ tasks }, runtime.release.taskId)]?.outcome : undefined;
 			if (!outcome)
@@ -238,7 +238,6 @@ export function reducePlanEvent(
 		case "plan.node_held": {
 			const payload = planNodeHeldFromValue(event.payload, event.type);
 			const found = activePlan(plans, payload.planId, event);
-			if (!found) return;
 			const { runtime } = nodeOf(found.plan, found.record, payload.nodeId, event.type);
 			const { reason, detail, generation } = payload;
 			plans[payload.planId] = withNode(found.plan, payload.nodeId, {
@@ -250,7 +249,6 @@ export function reducePlanEvent(
 		case "plan.join_settled": {
 			const payload = planJoinSettledFromValue(event.payload, event.type);
 			const found = activePlan(plans, payload.planId, event);
-			if (!found) return;
 			const { spec, runtime } = nodeOf(found.plan, found.record, payload.nodeId, event.type);
 			if (spec.kind === "work") refuse(`Step '${payload.nodeId}' is not a join.`);
 			plans[payload.planId] = withNode(found.plan, payload.nodeId, {
@@ -267,9 +265,7 @@ export function reducePlanEvent(
 		}
 		case "plan.closed": {
 			const payload = planClosedFromValue(event.payload, event.type);
-			const found = activePlan(plans, payload.planId, event);
-			const plan = found?.plan ?? plans[payload.planId];
-			if (!plan) return;
+			const { plan } = activePlan(plans, payload.planId, event);
 			plans[payload.planId] = {
 				...plan,
 				closed: { status: payload.status, reason: payload.reason, closedAt: at },
