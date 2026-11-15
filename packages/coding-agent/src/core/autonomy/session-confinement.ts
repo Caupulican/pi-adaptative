@@ -34,8 +34,8 @@ export interface SessionConfinement {
 	readonly commandEnvironment?: (base: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
 	/** How its commands meet an owner credential: `deny` refuses one that reaches it, `mock` runs it and masks its output. */
 	readonly credentialExposure: CredentialExposureMode;
-	/** The environment one of its own commands runs in, built on the shell's `base` for a command in `cwd`, as its shell's is. */
-	readonly shellEnvironment: (base: NodeJS.ProcessEnv, cwd: string) => NodeJS.ProcessEnv;
+	/** The environment one of its own commands in `cwd` runs in, its identity variables included, as its shell spawns one. */
+	readonly shellEnvironment: (cwd: string) => NodeJS.ProcessEnv;
 }
 
 /** What the session holds that its confinement reads: its credential boundary and its own commands' environment. */
@@ -43,7 +43,7 @@ export interface SessionConfinementSources {
 	readonly boundary: CredentialExposureBoundary;
 	readonly commands: Pick<
 		SessionCommandEnvironment,
-		"watchedCommandEnvironment" | "credentialExposure" | "shellEnvironment"
+		"watchedCommandEnvironment" | "credentialExposure" | "spawnEnvironment"
 	>;
 }
 
@@ -71,7 +71,7 @@ export function buildSessionConfinement(
 		...(envelopes.writeRoots ? { writeRoots: envelopes.writeRoots } : {}),
 		deniedPaths,
 		credentialExposure: commands.credentialExposure,
-		shellEnvironment: (base, cwd) => commands.shellEnvironment(base, cwd),
+		shellEnvironment: (cwd) => commands.spawnEnvironment(cwd),
 		...(commands.watchedCommandEnvironment ? { commandEnvironment: commands.watchedCommandEnvironment } : {}),
 	};
 }

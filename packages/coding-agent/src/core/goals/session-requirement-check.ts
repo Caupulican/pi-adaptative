@@ -3,12 +3,12 @@
  * is admitted, run and masked as the session's own shell commands are, never wider. It must pass the requirement line (it
  * only observes, a test run included) and, in a session confined to a read-only shell (a read-only bot's), that line too.
  * The session's credential guard meets it as it meets the shell's command: a session whose commands keep owner credentials
- * out (`deny`) refuses a check that reaches one, and any other runs it and masks the output it keeps (the goal's evidence,
- * the results the goal tool shows) with the mask its shell's output gets. The check runs in the environment the session's
- * shell commands get (`SessionCommandEnvironment.shellEnvironment`). The same admission holds when a check is attached.
+ * out (`deny`) refuses a check that reaches one, and any other runs it and masks the output it keeps (the goal's evidence)
+ * with the mask its shell's output gets. The check runs in the environment the session's shell spawns its commands with
+ * (`SessionCommandEnvironment.spawnEnvironment`: the session's identity variables, its spawn hook's environment). The same
+ * admission holds when a check is attached.
  */
 
-import { getShellEnv } from "../../utils/shell.ts";
 import type { SessionConfinement } from "../autonomy/session-confinement.ts";
 import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import {
@@ -98,7 +98,7 @@ export async function runSessionRequirementCheck(
 		cwd,
 		...(signal ? { signal } : {}),
 		admit: (candidate) => sessionRequirementCheckViolation(candidate, session, cwd) ?? exposure.refusal,
-		env: confinement.shellEnvironment(getShellEnv(), cwd),
+		env: confinement.shellEnvironment(cwd),
 	});
 	// The kept output is the tail of the run's output, so it is masked as a fragment of it.
 	return { ...result, output: createOutputRedactor(boundary, exposure.mock.fragment, sensitiveValues)(result.output) };

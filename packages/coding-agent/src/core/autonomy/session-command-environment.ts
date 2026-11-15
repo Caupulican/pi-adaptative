@@ -9,10 +9,11 @@
  * credential manager's environment for their working directory, and never the vault session.
  */
 
+import type { ShellSessionContext } from "../../utils/shell.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { CredentialExposureMode } from "../secrets/credential-exposure-guard.ts";
 import { isWorkerSession } from "../session-role.ts";
-import type { BashSpawnHook } from "../tools/bash.ts";
+import { type BashSpawnHook, resolveSpawnContext } from "../tools/bash.ts";
 import { laneRunsOffline } from "./lane-shell-scope.ts";
 import { createWorkerRunEnvironment, listReapedProcesses } from "./worker-run-environment.ts";
 import type { SessionPrivatePathScope } from "./worker-session-private-scope.ts";
@@ -25,11 +26,14 @@ export interface SessionCommandEnvironment {
 	 * own session sees masked values.
 	 */
 	readonly credentialExposure: CredentialExposureMode;
+	/** The session's identity its shell commands carry (`PI_SESSION_ID`, `PI_MODEL`, ...), read fresh for each command. */
+	readonly sessionContext: () => ShellSessionContext;
 	/**
-	 * The environment one of the session's own commands runs in, built on the shell's `base` for a command in `cwd`: what
-	 * the spawn hook gives a shell command, and what a requirement check the harness runs for the session gets.
+	 * The environment a command of the session's own in `cwd` runs in, built as its shell spawns one (`resolveSpawnContext`:
+	 * the shell's environment with the session's identity, then `spawnHook`): what a requirement check the harness runs for
+	 * the session gets.
 	 */
-	shellEnvironment(base: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv;
+	spawnEnvironment(cwd: string): NodeJS.ProcessEnv;
 	readonly spawnHook: BashSpawnHook;
 	readonly python: {
 		readonly environment: (cwd: string) => NodeJS.ProcessEnv;
@@ -54,12 +58,14 @@ export interface SessionCommandEnvironment {
 
 /**
  * `label` names the run's processes and the commits they make (the session's shell key); `credentialEnvironment` is the
- * credential manager's environment for a working directory, added only where credentials are not denied.
+ * credential manager's environment for a working directory, added only where credentials are not denied; `sessionContext`
+ * is the session's live shell identity (`buildShellSessionContext`).
  */
 export function createSessionCommandEnvironment(
 	scope: SessionPrivatePathScope | undefined,
 	label: string,
 	credentialEnvironment: (cwd: string) => Record<string, string> | undefined,
+	sessionContext: () => ShellSessionContext,
 ): SessionCommandEnvironment {
 	const workerProcess = isWorkerSession();
 	const credentialExposure: CredentialExposureMode = workerProcess ? "deny" : (scope?.credentialExposure ?? "mock");
@@ -85,10 +91,12 @@ export function createSessionCommandEnvironment(
 		delete env[VAULT_SESSION_VARIABLE];
 		return env;
 	};
+	const spawnHook: BashSpawnHook = (context) => ({ ...context, env: shellEnvironment(context.env, context.cwd) });
 	return {
 		credentialExposure,
-		shellEnvironment,
-		spawnHook: (context) => ({ ...context, env: shellEnvironment(context.env, context.cwd) }),
+		sessionContext,
+		spawnEnvironment: (cwd) => resolveSpawnContext("", cwd, spawnHook, sessionContext).env,
+		spawnHook,
 		python: {
 			environment: (cwd) => ({ ...added(cwd), ...run?.attributionEnvironment }),
 			omitEnvironmentVariables: [...new Set([VAULT_SESSION_VARIABLE, ...(run?.omittedEnvironmentVariables ?? [])])],

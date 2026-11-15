@@ -759,8 +759,11 @@ export class RuntimeBuilder {
 				disposeShellExecutionSession(sessionKey);
 			},
 		});
-		this._commandEnvironment = createSessionCommandEnvironment(privatePathScope, deps.getShellSessionKey(), (cwd) =>
-			this._credentialManager.getEnvironmentForCwd(cwd),
+		this._commandEnvironment = createSessionCommandEnvironment(
+			privatePathScope,
+			deps.getShellSessionKey(),
+			(cwd) => this._credentialManager.getEnvironmentForCwd(cwd),
+			() => buildShellSessionContext(deps),
 		);
 		this._credentialExposureBoundary = {
 			redactSensitiveText: (text, additionalValues) =>
@@ -1550,12 +1553,7 @@ export class RuntimeBuilder {
 				platform: process.platform,
 				windowsShellPythonEngine: windowsShell.pythonEngine,
 				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
-				getShellSessionContext: () =>
-					buildShellSessionContext({
-						getAgent: () => this.deps.getAgent(),
-						getSessionManager: () => this.deps.getSessionManager(),
-						getSettingsManager: () => this.deps.getSettingsManager(),
-					}),
+				getShellSessionContext: this._commandEnvironment.sessionContext,
 				spawnHook: this._commandEnvironment.spawnHook,
 			},
 			python: {

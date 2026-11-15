@@ -404,7 +404,7 @@ function lastPrintedLine(output: string): string | undefined {
 	return lines.length > 0 ? lines[lines.length - 1].trim() : undefined;
 }
 
-function resolveSpawnContext(
+export function resolveSpawnContext(
 	command: string,
 	cwd: string,
 	spawnHook?: BashSpawnHook,
