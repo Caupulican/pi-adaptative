@@ -124,6 +124,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
+	botStopNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e não é tentada de novo, então envie-a outra vez.`,
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada pedida pelo dono não pôde ser aplicada e continua aguardando; o trabalho que ela para fica retido até ser aplicada (${reason}).`,
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>

@@ -1021,7 +1021,7 @@ export class BotSessionHost {
 			requestBotStop(this.ports.agentDir(), { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() });
 		} catch (error) {
 			written = false;
-			this.ports.warn(interfaceText().botTeam.botStopNotApplied(agentId, errorText(error)));
+			this.ports.warn(interfaceText().botTeam.botStopNotRecorded(agentId, errorText(error)));
 		}
 		if (entry) {
 			const working = this.isBusy(entry);

@@ -132,7 +132,10 @@ export const BOT_TEAM = {
 	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
 	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
-	/** The owner's stop of a bot no process hosts could not be applied; it waits, and the work it stops stays held. */
+	/** The owner's stop could not be written to the bot's home: no process takes it, and it is not tried again. */
+	botStopNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
+	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,
 	/** The owner's stop of a closed bot found its saved session's file holding another session, and left the file. */
