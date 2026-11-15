@@ -54,6 +54,7 @@ import {
 	UNPRICED_BUDGET_REMEDY,
 } from "./leader-delegation.ts";
 import {
+	assertMayAsk,
 	type DelegationCloseReason,
 	type DelegationRecord,
 	earliestDeadlineMs,
@@ -327,12 +328,14 @@ export class LeaderController {
 
 	/**
 	 * A leader's question in the middle of its goal: delivered now, the goal stays open, and the answer (`bot` action ask from
-	 * the orchestrator, or `bot_message` send from the parent leader of a nested goal) is the leader's next turn. A question that
+	 * the orchestrator, or `bot_message` send from the parent leader of a nested goal) is the leader's next turn. The question
+	 * is recorded once it landed, and the goal is not settled before a leader turn that started after it. A question that
 	 * did not land is refused, so the leader knows to ask again.
 	 */
 	async askRoot(leader: string, question: string): Promise<BotAskRootResult> {
 		const record = this.currentFor(leader);
 		if (record?.state !== "running") throw new Error(`${leader} has no goal running to ask about.`);
+		assertMayAsk(record);
 		const askId = `${record.objectiveId}:ask:${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 		const deliveryId = `leader-ask:${askId}`;
 		const notice = { title: record.title, leader, leaderName: this.displayName(leader), askId, question };
@@ -344,6 +347,7 @@ export class LeaderController {
 				!(await this.sendToParent(parent, leaderAskNotice({ ...notice, to: "parent_leader" }), deliveryId, leader))
 			)
 				throw new Error("The leader that handed this goal on did not receive the question yet; ask again.");
+			this.ledger.recordAsk(record.objectiveId, askId);
 			return { askId };
 		}
 		const delivered = await this.deliverOnce(deliveryId, {
@@ -353,6 +357,7 @@ export class LeaderController {
 			details: { objectiveId: record.objectiveId, leader, askId },
 		});
 		if (!delivered) throw new Error("The orchestrator did not receive the question yet; ask again.");
+		this.ledger.recordAsk(record.objectiveId, askId);
 		return { askId };
 	}
 
@@ -472,6 +477,9 @@ export class LeaderController {
 				continue;
 			// A message filed under this goal still waiting in a bot's mailbox is the goal's unfinished work; an owner's chat is not.
 			if (this.deps.hasPendingDelegatedMessage(record.objectiveId)) continue;
+			// A question the leader asked in the middle of its goal waits for its answer: a leader turn that started after it.
+			const lastAsk = record.askedAt.at(-1);
+			if (lastAsk !== undefined && last.createdAt <= lastAsk) continue;
 			const lastOutcome = sameOutcomeAttempt(snapshot.tasks[last.taskId]?.outcome, last.attemptId);
 			if (
 				lastOutcome &&

@@ -36,8 +36,20 @@ const OUTCOME_EVIDENCE = "delegation-outcome";
 /** Written on a nested delegation once its Outcome reached the parent leader; a restart reads it instead of resending. */
 const DELIVERED_TO_PARENT_EVIDENCE = "delegation-outcome-delivered";
 const UPDATE_EVIDENCE_PREFIX = "delegation-update-";
+/** One per question the leader put in the middle of its goal (`ask_root`); a build that predates it ignores the entry. */
+const ASK_EVIDENCE_PREFIX = "delegation-ask-";
 /** The most updates one delegation keeps; a leader needing more is better given a new goal. */
 export const MAX_DELEGATION_UPDATES = 32;
+/** The most mid-goal questions one delegation keeps; past it the leader asks in its report. */
+const MAX_DELEGATION_ASKS = 32;
+
+/** Throws when a delegation has no room for another mid-goal question; checked before the question is delivered. */
+export function assertMayAsk(record: Pick<DelegationRecord, "askedAt">): void {
+	if (record.askedAt.length >= MAX_DELEGATION_ASKS)
+		throw new Error(
+			`This goal already asked ${MAX_DELEGATION_ASKS} questions; end your turn with the question in your report instead.`,
+		);
+}
 export const MAX_DELEGATION_UPDATE_CHARS = 2000;
 
 /** Why a delegation closed; the Outcome says how it ended, this says who or what ended it. */
@@ -79,6 +91,8 @@ export interface DelegationRecord {
 	 */
 	readonly filedByObjective: boolean;
 	readonly updates: readonly string[];
+	/** When each mid-goal question (`ask_root`) reached its addressee, oldest first: the goal waits for a later leader turn. */
+	readonly askedAt: readonly string[];
 	readonly outcome?: Outcome;
 	/** Whether a nested delegation's Outcome reached its parent leader (always false for a delegation with no parent). */
 	readonly outcomeDeliveredToParent: boolean;
@@ -209,6 +223,10 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 		const updates = state.evidence
 			.filter((entry) => entry.evidenceId.startsWith(UPDATE_EVIDENCE_PREFIX))
 			.map((entry) => (typeof entry.metadata?.text === "string" ? entry.metadata.text : entry.summary));
+		const askedAt = state.evidence
+			.filter((entry) => entry.evidenceId.startsWith(ASK_EVIDENCE_PREFIX))
+			.map((entry) => entry.createdAt)
+			.sort();
 		const status = state.objective.status;
 		const closedObjective = status === "completed" || status === "cancelled";
 		const closeReason = closeReasonFrom(closing?.metadata?.closeReason);
@@ -228,6 +246,7 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 			...(typeof dispatch?.dispatchedAt === "string" ? { dispatchedAt: dispatch.dispatchedAt } : {}),
 			filedByObjective: dispatch?.filing === DISPATCH_FILING_BY_OBJECTIVE,
 			updates,
+			askedAt,
 			...(outcome ? { outcome } : {}),
 			outcomeDeliveredToParent: evidence.has(DELIVERED_TO_PARENT_EVIDENCE),
 			...(closeReason ? { closeReason } : {}),
@@ -392,6 +411,24 @@ export class LeaderDelegationLedger {
 			trusted: true,
 			createdAt: new Date(this.now()).toISOString(),
 			metadata: { text: bounded },
+		});
+	}
+
+	/**
+	 * Records that a question the leader asked in the middle of its goal reached the orchestrator (or the parent leader of a
+	 * nested goal): until a later turn of the leader's starts, the answer's, the goal is not settled.
+	 */
+	recordAsk(objectiveId: string, askId: string): void {
+		const record = this.require(objectiveId);
+		assertMayAsk(record);
+		this.runtime().recordObjectiveEvidence(objectiveId, {
+			evidenceId: `${ASK_EVIDENCE_PREFIX}${record.askedAt.length + 1}`,
+			kind: "observation",
+			summary: "The leader asked a question in the middle of its goal.",
+			artifactIds: [],
+			trusted: true,
+			createdAt: new Date(this.now()).toISOString(),
+			metadata: { askId },
 		});
 	}
 
