@@ -11,13 +11,8 @@
 
 import type { SessionConfinement } from "../autonomy/session-confinement.ts";
 import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
-import {
-	assessCredentialCall,
-	type CredentialCallExposure,
-	type CredentialExposureBoundary,
-	createOutputRedactor,
-	credentialToolBlockReason,
-} from "../secrets/credential-exposure-guard.ts";
+import { assessCommandOutputExposure } from "../secrets/command-output-exposure.ts";
+import { type CredentialExposureBoundary, credentialToolBlockReason } from "../secrets/credential-exposure-guard.ts";
 import type { RequirementCheck } from "./goal-state.ts";
 import { type RequirementCheckResult, requirementCheckViolation, runRequirementCheck } from "./requirement-checks.ts";
 
@@ -62,44 +57,54 @@ export function sessionRequirementCheckViolation(
 		: undefined;
 }
 
-/** Run one of the session's requirement checks in `cwd`: admitted, run and its kept output masked as its shell commands are. */
+/**
+ * Run one of the session's requirement checks in `cwd`: admitted, run and its kept output masked as its shell commands are.
+ * A check that cannot be prepared (its admission, credential assessment, environment or mask) is a failed check, so a caller
+ * that does not await the result (the host check after a worker attempt) never meets a rejection.
+ */
 export async function runSessionRequirementCheck(
 	check: RequirementCheck,
 	session: RequirementCheckSession,
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<RequirementCheckResult> {
-	const boundary = session.credentialExposureBoundary;
 	const confinement = session.sessionConfinement;
-	let sensitiveValues: readonly string[];
-	let exposure: CredentialCallExposure;
+	let refusal: string | undefined;
+	let env: NodeJS.ProcessEnv;
+	let mask: (output: string) => string;
 	try {
-		sensitiveValues = (await boundary.getSensitiveValues?.()) ?? [];
-		// The check's own run is cancelled by `signal`; the assessment is not, so a cancelled check ends as a failed check.
-		exposure = await assessCredentialCall(
-			"bash",
-			{ command: check.command },
+		const exposure = await assessCommandOutputExposure(
+			check.command,
 			cwd,
-			boundary,
+			session.credentialExposureBoundary,
 			confinement.credentialExposure,
-			{ harnessTool: false },
+			signal,
 		);
+		refusal = sessionRequirementCheckViolation(check, session, cwd) ?? exposure.refusal;
+		env = confinement.shellEnvironment(cwd);
+		mask = exposure.mask;
 	} catch (error) {
-		// A check the guard could not assess is not run: it is a failed check, as one that cannot start is.
-		const message = error instanceof Error ? error.message : String(error);
 		return {
 			passed: false,
 			exitCode: null,
 			output: "",
-			reason: `The check's credential assessment failed: ${message}.`,
+			reason: `The check could not be prepared: ${messageOf(error)}.`,
 		};
 	}
-	const result = await runRequirementCheck(check, {
-		cwd,
-		...(signal ? { signal } : {}),
-		admit: (candidate) => sessionRequirementCheckViolation(candidate, session, cwd) ?? exposure.refusal,
-		env: confinement.shellEnvironment(cwd),
-	});
-	// The kept output is the tail of the run's output, so it is masked as a fragment of it.
-	return { ...result, output: createOutputRedactor(boundary, exposure.mock.fragment, sensitiveValues)(result.output) };
+	const result = await runRequirementCheck(check, { cwd, ...(signal ? { signal } : {}), admit: () => refusal, env });
+	try {
+		// The kept output is the tail of the run's output, so the mask meets it as a fragment of it.
+		return { ...result, output: mask(result.output) };
+	} catch (error) {
+		// Output that cannot be masked is not kept.
+		return {
+			...result,
+			output: "",
+			reason: `${result.reason} Its output could not be masked (${messageOf(error)}), so none is kept.`,
+		};
+	}
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
