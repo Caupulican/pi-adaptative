@@ -47,6 +47,7 @@ import {
 	type PlanRuntimeState,
 	planCriticalPath,
 	planNodeEdges,
+	planReleasedTaskIds,
 } from "./plan-graph.ts";
 import { planNodeOfTask, planTaskChain } from "./plan-reducer.ts";
 import { voteChecksOf } from "./plan-revision.ts";
@@ -218,10 +219,7 @@ const OPEN_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", 
  * (a step being stopped) is left for a later pass, and one already retired asks for nothing.
  */
 function workersToRetire(projection: ReconcileProjection, plan: PlanRuntimeState, planId: string): PlanAction[] {
-	const released = [
-		...Object.values(plan.nodes).flatMap((runtime) => (runtime.release ? [runtime.release.taskId] : [])),
-		...plan.retired.map((entry) => entry.taskId),
-	];
+	const released = planReleasedTaskIds(plan);
 	const open = new Set<string>();
 	const workers = new Set<string>();
 	for (const origin of released) {

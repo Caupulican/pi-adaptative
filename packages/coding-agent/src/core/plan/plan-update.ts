@@ -25,6 +25,13 @@ import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import type { JoinResult } from "./joins.ts";
 import { joinReadsAsReport } from "./joins.ts";
+import {
+	isPlanFromNewerBuild,
+	type PlanRecord,
+	type PlanRuntimeState,
+	planNodeOrigin,
+	planReleasedTaskIds,
+} from "./plan-graph.ts";
 import { planTaskChain } from "./plan-reducer.ts";
 import type { PlanNodeView, PlanView } from "./plan-view.ts";
 
@@ -141,14 +148,8 @@ export type PlanUpdateLedger = Pick<TaskRuntimeProjection, "plans" | "tasks" | "
  * origin (an admitted steer or follow-up, `conversationTurnOrigin`). An update repeats its steps' outcomes, gaps, conflicts
  * and held details, so it carries what any of them carries.
  */
-function planReachedByThirdParty(ledger: PlanUpdateLedger, planId: string): boolean {
-	const plan = ledger.plans[planId];
-	if (!plan) throw new Error(`A plan update names plan ${planId}, which the delegation ledger does not hold.`);
-	const released = [
-		...Object.values(plan.nodes).flatMap((runtime) => (runtime.release ? [runtime.release.taskId] : [])),
-		...plan.retired.map((entry) => entry.taskId),
-	];
-	return released.some((origin) =>
+function planReachedByThirdParty(ledger: PlanUpdateLedger, plan: PlanRuntimeState): boolean {
+	return planReleasedTaskIds(plan).some((origin) =>
 		[...planTaskChain(ledger, origin)].some((taskId) =>
 			(ledger.tasks[taskId]?.attemptIds ?? []).some((attemptId) => {
 				const attempt = ledger.attempts[attemptId];
@@ -159,9 +160,29 @@ function planReachedByThirdParty(ledger: PlanUpdateLedger, planId: string): bool
 }
 
 /**
+ * The input an update serves (the transcript leaf of the input the plan was stated for, as its steps' receipt origins
+ * name it): its step's, for an update about a step the plan still states, else the newest version's the record keeps.
+ * Undefined for a record an earlier build wrote (before origins were kept), as for its steps.
+ */
+function servedInput(record: PlanRecord, nodeId: string | undefined): PlanUpdateServed | undefined {
+	const node = nodeId === undefined ? undefined : record.nodes.find((entry) => entry.id === nodeId);
+	const origin = node
+		? planNodeOrigin(record, node)
+		: [...(record.origins ?? [])].sort((a, b) => b.version - a.version)[0]?.origin;
+	return origin ? { sessionId: origin.sessionId, leafId: origin.leafId } : undefined;
+}
+
+/** The input a plan update serves, kept in its details (`details.served`): a bot's spend windows read it. */
+export interface PlanUpdateServed {
+	readonly sessionId: string;
+	readonly leafId: string;
+}
+
+/**
  * The plan-update parent input; `origin` is the receipt origin the root transcript records the input under, and `ledger`
  * the delegation ledger the view was read from. An update about a plan a third party's words reached says so
- * (`details.thirdParty: true`), so the turn it opens is read as third-party (`entryTurnOrigin`).
+ * (`details.thirdParty: true`), so the turn it opens is read as third-party (`entryTurnOrigin`), and every update names
+ * the input it serves (`details.served`).
  */
 export function planUpdateDelivery(
 	view: PlanView,
@@ -169,6 +190,9 @@ export function planUpdateDelivery(
 	origin: ParentInputDelivery["origin"],
 	ledger: PlanUpdateLedger,
 ): ParentInputDelivery {
+	const plan = ledger.plans[view.planId];
+	if (!plan) throw new Error(`A plan update names plan ${view.planId}, which the delegation ledger does not hold.`);
+	const served = isPlanFromNewerBuild(plan.record) ? undefined : servedInput(plan.record, input.nodeId);
 	const result = input.result;
 	// The plain step a plan finished on, read only when no combined result exists.
 	const step = result ? undefined : input.stepOutcome;
@@ -253,7 +277,8 @@ export function planUpdateDelivery(
 			kind: input.kind,
 			...(input.nodeId ? { nodeId: input.nodeId } : {}),
 			...(proofSheet ? { [PROOF_SHEET_DETAILS_KEY]: proofSheet } : {}),
-			...(planReachedByThirdParty(ledger, view.planId) ? { thirdParty: true } : {}),
+			...(planReachedByThirdParty(ledger, plan) ? { thirdParty: true } : {}),
+			...(served ? { served } : {}),
 		},
 	};
 	return {

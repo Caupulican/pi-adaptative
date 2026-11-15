@@ -376,6 +376,14 @@ export interface PlanRuntimeState {
 	readonly closed?: PlanClosure;
 }
 
+/** Every task a plan released: for its current steps and for the ones a revision replaced (each a chain's first task). */
+export function planReleasedTaskIds(plan: Pick<PlanRuntimeState, "nodes" | "retired">): string[] {
+	return [
+		...Object.values(plan.nodes).flatMap((runtime) => (runtime.release ? [runtime.release.taskId] : [])),
+		...plan.retired.map((entry) => entry.taskId),
+	];
+}
+
 export type PlanNodeState =
 	| "planned"
 	| "ready"

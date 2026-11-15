@@ -8,7 +8,8 @@
  * Which window an entry of the transcript belongs to is read from the transcript itself, walking back from the entry to
  * the input that opened its window. A turn a worker's handoff opened belongs to the window of the attempt that woke it,
  * and an attempt belongs to the window of the transcript leaf it was dispatched from (its receipt origin, which its
- * retries, its verifier and the children it starts carry; a plan step's is the leaf of the plan call that stated it). An entry that is no outside input (a continuation, a host
+ * retries, its verifier and the children it starts carry; a plan step's is the leaf of the plan call that stated it). A
+ * plan update belongs to the window of the input its plan serves (`details.served`, the leaf its steps' origins name). An entry that is no outside input (a continuation, a host
  * steer, a notice) belongs to the window before it; the transcript's first entry opens one when nothing later did.
  *
  * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`): a reopened session resumes a window's
@@ -83,6 +84,15 @@ function deliveredAttemptIds(raw: unknown): string[] {
 	return details.records.flatMap((record) =>
 		isPlainRecord(record) && typeof record.attemptId === "string" ? [record.attemptId] : [],
 	);
+}
+
+/** The input a worker result serves when it delivers no attempt: a plan update's `details.served`, a parent input's unwrapped. */
+function servedInput(raw: unknown): { readonly sessionId: string; readonly leafId: string } | undefined {
+	const details = isPlainRecord(raw) && "parentInput" in raw ? raw.originalDetails : raw;
+	const served = isPlainRecord(details) ? details.served : undefined;
+	if (!isPlainRecord(served) || typeof served.sessionId !== "string" || typeof served.leafId !== "string")
+		return undefined;
+	return { sessionId: served.sessionId, leafId: served.leafId };
 }
 
 /** What the windows read of the bot's session. */
@@ -204,7 +214,7 @@ export class BotSpendWindows {
 	/**
 	 * The spend of the window a run opening with `opening` serves, read before the transcript holds those messages: the
 	 * newest of them that places one decides (an outside input opens a fresh window, which holds nothing yet; a worker's
-	 * handoff belongs to the window of the attempts it delivers); when none does (a continuation, a host steer, a handoff
+	 * handoff belongs to the window of the attempts it delivers, a plan update to that of the input it serves); when none does (a continuation, a host steer, a handoff
 	 * whose attempts serve no window here), the window the transcript is in now. Nothing is counted and no window opened.
 	 * Undefined while nothing places one (an empty transcript).
 	 */
@@ -216,7 +226,10 @@ export class BotSpendWindows {
 			const kind = turnOriginOf(message)?.k;
 			if (kind !== undefined && OPENING_KINDS.has(kind)) return { usd: 0, meteredUsd: 0 };
 			if (kind === "worker-result" && message.role === "custom")
-				windowId = this.windowOfDelivered(deliveredAttemptIds(message.details), snapshot, 0)?.windowId;
+				windowId = (
+					this.windowOfDelivered(deliveredAttemptIds(message.details), snapshot, 0) ??
+					this.windowOfServed(servedInput(message.details), snapshot, 0)
+				)?.windowId;
 		}
 		const leafId = this.transcript.getLeafId();
 		windowId ??= leafId === null ? undefined : this.windowOfEntry(leafId, snapshot)?.windowId;
@@ -279,7 +292,8 @@ export class BotSpendWindows {
 
 	/**
 	 * The window an entry belongs to: walking back from it to the input that opened its window. A worker's handoff
-	 * belongs to the window of the first attempt it delivers that serves one; a handoff whose attempts serve none, and
+	 * belongs to the window of the first attempt it delivers that serves one (a plan update, which delivers none, to the
+	 * window of the input it serves); a handoff whose attempts serve none, and
 	 * every entry that is no outside input, belong to the window before it. The earliest entry the walk reaches (the
 	 * transcript's first) opens the window nothing later opened. Undefined only for an entry the transcript does not hold.
 	 * A settled answer is remembered for every entry the walk passed; an unsettled one (a handoff whose attempts the
@@ -315,8 +329,11 @@ export class BotSpendWindows {
 			const kind = entryTurnOrigin(entry)?.k;
 			if (kind !== undefined && OPENING_KINDS.has(kind)) windowId = this.windowIdOf(entry.id);
 			else if (kind === "worker-result" && depth < 8) {
-				const attemptIds = deliveredAttemptIds(entryDetails(entry));
-				const delivered = this.windowOfDelivered(attemptIds, snapshot, depth);
+				const details = entryDetails(entry);
+				const attemptIds = deliveredAttemptIds(details);
+				const delivered =
+					this.windowOfDelivered(attemptIds, snapshot, depth) ??
+					this.windowOfServed(servedInput(details), snapshot, depth);
 				windowId = delivered?.windowId;
 				if (attemptIds.length > 0 && !delivered?.settled) settled = false;
 			}
@@ -345,6 +362,16 @@ export class BotSpendWindows {
 			if (found !== undefined) return found;
 		}
 		return undefined;
+	}
+
+	/** The window of the input a plan update serves, when that input is in this session's transcript. */
+	private windowOfServed(
+		served: { readonly sessionId: string; readonly leafId: string } | undefined,
+		snapshot: TaskRuntimeProjection | undefined,
+		depth: number,
+	): EntryWindow | undefined {
+		if (!served || served.sessionId !== this.transcript.getSessionId()) return undefined;
+		return this.windowOfEntry(served.leafId, snapshot, depth + 1);
 	}
 
 	/** Remembers `windowId` for each walked entry: settled, or unsettled at the projection's `attempts` count. */

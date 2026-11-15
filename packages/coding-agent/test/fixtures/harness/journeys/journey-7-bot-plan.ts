@@ -4,11 +4,13 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
+import { PLAN_UPDATE_CUSTOM_TYPE } from "../../../../src/core/plan/plan-update.ts";
 import { createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { planCallSteps, planStepOf, planUpdateStep, reportStep, writeAuthorityIn } from "./journey-5-shared.ts";
 import {
 	BOT_DELEGATION_JUDGMENTS,
+	botSessionFilesText,
 	botSessionIds,
 	createChargedRoot,
 	createOwnerBot,
@@ -58,6 +60,31 @@ const BOT_PLAN_JUDGMENTS = {
 /** The planner's own requests: its soul opens its system prompt, and its task carries no plan step's header. */
 function isPlanner(request: ScriptedRequest): boolean {
 	return (request.context.systemPrompt ?? "").includes(PLANNER_SOUL) && planStepOf(request) === undefined;
+}
+
+/** A saved line of the bot's session file, as far as a plan update's parent input is read. */
+interface SavedLine {
+	readonly type?: string;
+	readonly customType?: string;
+	readonly details?: { readonly originalDetails?: Record<string, unknown> };
+	readonly message?: SavedLine & { readonly role?: string };
+}
+
+/** The details of every plan update the bot's session saved, its parent input's wrapper opened. */
+function savedPlanUpdates(world: HarnessWorld): Record<string, unknown>[] {
+	return botSessionFilesText(world, PLANNER)
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.flatMap((text) => {
+			const line = JSON.parse(text) as SavedLine;
+			const custom =
+				line.type === "custom_message"
+					? line
+					: line.type === "message" && line.message?.role === "custom"
+						? line.message
+						: undefined;
+			return custom?.customType === PLAN_UPDATE_CUSTOM_TYPE ? [custom.details?.originalDetails ?? {}] : [];
+		});
 }
 
 /** The planner's `plan start` with the steps given. */
@@ -222,5 +249,25 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		],
 		join: "succeeded",
 		closed: "settled",
+	});
+	// Each update of the plan names the input its steps serve, the leaf the plan call stated them at, so the bot's spend
+	// window of the owner's question holds the turn the update opens; no third party's words reached its workers.
+	const sizeTask = plan?.nodes[SIZE_STEP]?.release?.taskId;
+	const sizeAttempt = sizeTask === undefined ? undefined : projection.tasks[sizeTask]?.attemptIds.at(-1);
+	const stated = sizeAttempt === undefined ? undefined : projection.attempts[sizeAttempt]?.dispatch.receiptOrigin;
+	const updates = savedPlanUpdates(world);
+	expect(
+		{
+			stated: stated?.sessionId === botSessionId,
+			updates: updates.length > 0,
+			served: updates.map((details) => details.served),
+			thirdParty: updates.map((details) => details.thirdParty),
+		},
+		"every update of the bot's plan serves the input its steps were stated for, and none carries a third party's words",
+	).toEqual({
+		stated: true,
+		updates: true,
+		served: updates.map(() => ({ sessionId: stated?.sessionId, leafId: stated?.leafId })),
+		thirdParty: updates.map(() => undefined),
 	});
 }

@@ -44,6 +44,7 @@
 
 ### Fixed
 
+- A bot's plan update now counts in the bot's spend window of the input its plan serves: the update named no input, so the turn it opened (and the workers that turn started) counted against whatever window the bot's transcript was in when it arrived, which after a newer message to the bot is that message's window and its bound. Each plan update records the input its steps were stated for (`details.served`), and the bot's spend windows read it as they read a worker result's attempts.
 - A plan update about a plan one of whose workers took in a third party's words (a steer or follow-up admitted from a third-party run) now carries that taint, so the root's turn it opens runs under the third-party gate, as a background worker's completion already did; before, the update read as an extension message whatever its steps' reports held. Plan updates now read as worker results (the autonomy status names them so).
 
 ## [0.104.65] - 2026-11-15

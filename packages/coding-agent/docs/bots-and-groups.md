@@ -50,7 +50,7 @@ commands are judged one by one, as a read-only worker's are (nothing that edits 
 reaches the network unless its profile grants `network.http`, in every execution mode). Its spend is bounded per request:
 each outside input it serves (your message, a message its inbox took, a watch's wake) opens a spend window, and the turns
 serving it, the handoff turns its workers' results open and those workers' runs (a plan's steps included, however much
-later each is released) share its dollar ceilings, each when set:
+later each is released, and the turns its plan's updates open) share its dollar ceilings, each when set:
 `workerDelegation.maxUsd`, the main session's own ceiling and a profile's `maxCostUsd` on all of the window's spend, and
 the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models. A
 turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes a ceiling that
