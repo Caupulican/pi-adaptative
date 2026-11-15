@@ -55,7 +55,7 @@ import { isLocalOrManagedRouterModel } from "../model-router/tool-escalation.ts"
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
-import { followedOrchestrationHome } from "../orchestration-homes.ts";
+import { followedOrchestrationHome, sessionHomeNow } from "../orchestration-homes.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
@@ -188,6 +188,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 
 	const hold: SessionBundleLease = acquireSessionBundleLease(orchestrationHome, parentSessionId, {
 		role: "away-host",
+		homeNow: () => sessionHomeNow(roots, sessionFile, parentSessionId),
 	});
 	const holdToken = sessionBundleLeaseToken(hold);
 	let ephemeral: AgentSession | undefined;

@@ -181,8 +181,6 @@ export interface AgentSessionConfig {
 	bundleLease?: SessionBundleLease;
 	settingsManager: SettingsManager;
 	cwd: string;
-	/** User-level agent state directory for generated runtime artifacts. */
-	agentDir?: string;
 	/** Models available to the interactive model-cycle action. */
 	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 	/**

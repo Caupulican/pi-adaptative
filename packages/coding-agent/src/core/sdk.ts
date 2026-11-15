@@ -82,6 +82,7 @@ import {
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
+import { managerSessionHomeNow } from "./orchestration-homes.ts";
 import { currentProviderLane } from "./provider-admission/lane-context.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
 import { getAttributionHeaders } from "./provider-attribution-headers.ts";
@@ -407,6 +408,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
 				role: options.bundleLeaseRole ?? "session",
 				refuseHosted: true,
+				homeNow: managerSessionHomeNow(sessionManager),
 			})
 		: undefined;
 	let bundleTransferred = false;
@@ -858,7 +860,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				bundleLease,
 				settingsManager,
 				cwd,
-				agentDir,
 				scopedModels: orchestrationModel
 					? [{ model: orchestrationModel.model, thinkingLevel: orchestrationModel.binding.thinkingLevel }]
 					: options.scopedModels,

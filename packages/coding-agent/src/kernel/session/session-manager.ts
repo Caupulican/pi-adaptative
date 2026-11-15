@@ -297,7 +297,7 @@ export class SessionManager {
 	private sessionDir: string;
 	private cwd: string;
 	/**
-	 * Where the session's durable state lives: its agent config dir (e.g. ~/.pi/agent), which gives the default
+	 * Where the session's durable state lives: its agent config dir (e.g. ~/.pi/agent, kept absolute), which gives the default
 	 * session-dir candidates of usesDefaultSessionDir(), and the orchestration home whose bundle admits every write of its
 	 * file and holds the session's own state. Injected explicitly by the caller (SessionManager never resolves them from
 	 * app config) and carried by an in-memory session too: its session's orchestration state lives there, though the
@@ -374,7 +374,7 @@ export class SessionManager {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		// A copy: the caller's object (an options bag, a record that names this manager) is never held.
-		this.roots = Object.freeze({ agentDir: roots.agentDir, orchestrationHome: roots.orchestrationHome });
+		this.roots = Object.freeze({ agentDir: resolvePath(roots.agentDir), orchestrationHome: roots.orchestrationHome });
 		this.persist = persist;
 		this.readOnly = readOnly;
 		this.canonicalOnly = canonicalOnly;

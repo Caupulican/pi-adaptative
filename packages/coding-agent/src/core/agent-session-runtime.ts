@@ -22,7 +22,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import { SessionBundleLeaseReleaseError, withSessionBundleLeases } from "./orchestration/session-bundle-lifecycle.ts";
-import { sessionStorageRootsOfFile } from "./orchestration-homes.ts";
+import { managerSessionHomeNow, sessionStorageRootsOfFile } from "./orchestration-homes.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import {
@@ -666,7 +666,11 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		const previous = this.snapshot();
 		const held = [previous.sessionManager, prepared.sessionManager]
 			.filter((manager) => manager.isPersisted())
-			.map((manager) => ({ home: manager.getStorageRoots().orchestrationHome, sessionId: manager.getSessionId() }));
+			.map((manager) => ({
+				home: manager.getStorageRoots().orchestrationHome,
+				sessionId: manager.getSessionId(),
+				homeNow: managerSessionHomeNow(manager),
+			}));
 		let entered = false;
 		let completed = false;
 		try {

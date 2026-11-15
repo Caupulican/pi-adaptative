@@ -9,7 +9,7 @@
  */
 import { type Dirent, existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { orchestrationHomeHoldsSession } from "../kernel/session/session-bundle-lifecycle.ts";
+import { orchestrationHomeHoldsSession, type SessionHomeNow } from "../kernel/session/session-bundle-lifecycle.ts";
 import {
 	botHomeOrchestrationHome,
 	type OrchestrationHome,
@@ -19,6 +19,7 @@ import {
 	sameOrchestrationHome,
 } from "../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../kernel/storage/atomic-file.ts";
 import { botHomeSessionsDir, botsDir } from "./agent-paths.ts";
 
@@ -99,11 +100,33 @@ export function sessionStorageRootsOfFile(agentDir: string, file: string): Sessi
 }
 
 /**
+ * The home the session of `sessionFile`, opened in `roots`, belongs in now, derived again as its open derived it: a
+ * bot's session file by {@link botSessionStorageRoots}, any other in `roots` (an owner's or a worker's session never
+ * moves, so nothing is read). A lease is taken only while this still names the home it is taken in.
+ */
+export function sessionHomeNow(roots: SessionStorageRoots, sessionFile: string, sessionId: string): OrchestrationHome {
+	const byDir = sessionStorageRootsOfDir(roots.agentDir, dirname(resolve(sessionFile)));
+	if (sameOrchestrationHome(byDir.orchestrationHome, ownerOrchestrationHome(roots.agentDir)))
+		return roots.orchestrationHome;
+	return botSessionStorageRoots(roots.agentDir, byDir.orchestrationHome, sessionId).orchestrationHome;
+}
+
+/** {@link sessionHomeNow} of a persisted session's manager, for its lease (`acquireSessionBundleLease`'s `homeNow`). */
+export function managerSessionHomeNow(
+	manager: Pick<SessionManager, "getStorageRoots" | "getSessionFile" | "getSessionId">,
+): SessionHomeNow {
+	const file = manager.getSessionFile();
+	if (file === undefined) throw new Error(`Session ${manager.getSessionId()} has no file to lease.`);
+	return () => sessionHomeNow(manager.getStorageRoots(), file, manager.getSessionId());
+}
+
+/**
  * The storage roots of bot session `sessionId`, whose bot's home is `botHome`: the bot's, unless only the owner's home
  * holds the session (its bundle, tombstone or leases), as a bot session's state an earlier build kept there does until its
  * host moves it (`moveBotSessionBundle`), and as one whose move failed across devices keeps it. Every opener of a bot
- * session, its host and another process alike, asks this, so all resolve its lease to the same home (an opener that
- * resolved it just before its host moved the state leases where it resolved: see `bot-bundle-move.ts`).
+ * session, its host and another process alike, asks this, and asks it again under the lease's lock (`sessionHomeNow`),
+ * so all take its lease in the same home: an opener that chose the owner's just before the host moved the state is
+ * refused (`SessionHomeChangedError`) and opens it again.
  */
 export function botSessionStorageRoots(
 	agentDir: string,

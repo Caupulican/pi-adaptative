@@ -350,12 +350,15 @@ export {
 	ownerSessionStorageRoots,
 	type SessionBundleLease,
 	SessionHeldError,
+	SessionHomeChangedError,
+	type SessionHomeNow,
 	SessionHostedError,
 	type SessionLeaseRole,
 	type SessionStorageRoots,
 } from "./core/orchestration/session-bundle-lifecycle.ts";
 export * from "./core/orchestration/task-runtime.ts";
 export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";
+export { managerSessionHomeNow } from "./core/orchestration-homes.ts";
 export type {
 	PackageManager,
 	ProgressCallback,

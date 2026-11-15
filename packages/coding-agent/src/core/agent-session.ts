@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type { Api, AssistantMessage, ImageContent, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
-import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
+import { VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import type { Agent } from "../kernel/agent.ts";
 import type { CompactionResult, CompactionSettings } from "../kernel/compaction/compaction.ts";
 import { messageRevision } from "../kernel/message-revision.ts";
@@ -718,8 +718,8 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this._caps = config.capabilities;
-		const agentDir = config.agentDir ?? getAgentDir();
-		const { orchestrationHome } = config.sessionManager.getStorageRoots();
+		// One source for the session's directories: its manager's storage roots.
+		const { agentDir, orchestrationHome } = config.sessionManager.getStorageRoots();
 		const bundleLease = claimSessionBundleLease(
 			config.bundleLease,
 			orchestrationHome,

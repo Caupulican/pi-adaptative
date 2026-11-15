@@ -17,6 +17,7 @@ import {
 	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	resolvedOrchestrationHome,
+	sameOrchestrationHome,
 } from "./session-bundle-paths.ts";
 
 /** Every operation here addresses a bundle inside an orchestration home; callers name the home they mean. */
@@ -89,6 +90,26 @@ export class SessionHeldError extends Error {
 		);
 		this.name = "SessionHeldError";
 		this.holders = holders;
+	}
+}
+
+/**
+ * A lease was refused because the session no longer belongs in the home it was opened in: its orchestration state moved
+ * (a bot session's, out of the owner's home into its bot's) after the opener chose the home and before it took the
+ * lease's lock. Nothing was written; the session is opened again, which finds it in its home now.
+ */
+export class SessionHomeChangedError extends Error {
+	readonly sessionId: string;
+	readonly home: OrchestrationHome;
+	readonly current: OrchestrationHome;
+	constructor(sessionId: string, home: OrchestrationHome, current: OrchestrationHome) {
+		super(
+			`Session ${sessionId} moved from ${home.root} to ${current.root} while it was being opened; open it again.`,
+		);
+		this.name = "SessionHomeChangedError";
+		this.sessionId = sessionId;
+		this.home = home;
+		this.current = current;
 	}
 }
 
@@ -342,11 +363,21 @@ function releaseBundleLease(state: BundleLeaseState): void {
 	});
 }
 
+/**
+ * Where a session belongs now, asked under its tombstone lock: the opener's own derivation of its home, run again. A
+ * lease is taken only in the home it still names, so no session holds leases in two homes.
+ */
+export type SessionHomeNow = () => OrchestrationHome;
+
 export function acquireSessionBundleLease(
 	home: OrchestrationHome,
 	parentSessionId: string,
-	/** `refuseHosted`: a `session` hold is refused while a channel host holds the session (the AgentSession open path). */
-	options: { role?: SessionLeaseRole; refuseHosted?: boolean } = {},
+	/**
+	 * `refuseHosted`: a `session` hold is refused while a channel host holds the session (the AgentSession open path).
+	 * `homeNow`: the session's home derived again under the lock; another than `home` refuses the lease
+	 * ({@link SessionHomeChangedError}).
+	 */
+	options: { role?: SessionLeaseRole; refuseHosted?: boolean; homeNow: SessionHomeNow },
 ): SessionBundleLease {
 	const resolvedHome = resolvedOrchestrationHome(home);
 	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
@@ -358,6 +389,9 @@ export function acquireSessionBundleLease(
 		role: options.role ?? "session",
 	};
 	withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
+		const current = options.homeNow();
+		if (!sameOrchestrationHome(current, resolvedHome))
+			throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
 		const holders = liveHolders(file, parentSessionId);
 		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
 	});
@@ -413,8 +447,12 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 
 /** Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. */
 export async function withSessionBundleLeases<T>(
-	/** Each session in the home its manager's roots name; one held twice is leased once. */
-	sessions: readonly { readonly home: OrchestrationHome; readonly sessionId: string }[],
+	/** Each session in the home its manager's roots name, with that home derived again (`homeNow`); one held twice is leased once. */
+	sessions: readonly {
+		readonly home: OrchestrationHome;
+		readonly sessionId: string;
+		readonly homeNow: SessionHomeNow;
+	}[],
 	operation: () => Promise<T>,
 ): Promise<T> {
 	const leases: SessionBundleLease[] = [];
@@ -423,11 +461,11 @@ export async function withSessionBundleLeases<T>(
 	let result: T | undefined;
 	try {
 		const held = new Set<string>();
-		for (const { home, sessionId } of sessions) {
+		for (const { home, sessionId, homeNow } of sessions) {
 			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), sessionId);
 			if (held.has(key)) continue;
 			held.add(key);
-			leases.push(acquireSessionBundleLease(home, sessionId));
+			leases.push(acquireSessionBundleLease(home, sessionId, { homeNow }));
 		}
 		result = await operation();
 	} catch (error) {

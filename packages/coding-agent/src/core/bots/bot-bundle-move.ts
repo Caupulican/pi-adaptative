@@ -1,12 +1,12 @@
 /**
  * Moves a bot session's orchestration state an earlier build kept in the owner's home (`<agentDir>/state/orchestration`)
  * into the bot's (`bots/<id>/orchestration`), the first time the bot's host loads it after the change: its bundle
- * directory, its deletion tombstone, its lifetime leases and its fleet queue file, each by one rename, never a copy and
- * never over a file the bot's home already has.
+ * directory, its deletion tombstone, its lifetime leases and its fleet queue file, each by one rename, never a copy.
  *
- * Each load moves what the owner's home still has of the session, so a move a crash cut short is finished by the next:
- * a piece the bot's home already has is not written over and keeps the rest where it is (told), except a lease registry
- * whose holders are all dead, which records nothing and is removed. The move runs under the bot's `host.lock` and under the bundle locks of both homes (the tombstone locks every lease
+ * Each load moves what the owner's home still has of the session, so a move a crash cut short is finished by the next.
+ * A piece the bot's home already has is not written over: a lease registry whose holders are all dead records nothing
+ * and is removed; of two fleet queue files the newer is kept (the bot's when it is not older, else the owner's replaces
+ * it, finishing the move); a bundle or tombstone in both homes keeps the rest where it is, and the host tells the owner. The move runs under the bot's `host.lock` and under the bundle locks of both homes (the tombstone locks every lease
  * acquisition, release and deletion reservation takes), the owner's first. In that order, and with these locks, no lease
  * is held in the owner's home while the pieces move: the move starts only when every holder its lease registry records
  * is proven dead, no acquisition can add one before the locks are released, and this host takes its own lease only
@@ -15,11 +15,11 @@
  *
  * A rename that fails puts back what moved before it. Across devices (`EXDEV`) the state is kept where it was: the
  * session is then opened in the owner's home, which still holds it (`botSessionStorageRoots`), and the host tells the
- * owner once; any other failure is thrown to the load. The order holds while the locks are held: an opener in another
- * process that resolved the session's roots before the move and acquires its lease after it still leases in the owner's
- * home (the lease acquisition does not resolve the roots again under its lock).
+ * owner once; any other failure is thrown to the load. An opener in another process that chose the
+ * owner's home before the move and takes its lease after it is refused (`SessionHomeChangedError`): a lease derives the
+ * session's home again under its tombstone lock (`sessionHomeNow`), so no session holds leases in two homes.
  */
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { readSessionLeaseHolders, withSessionBundleInspection } from "../../kernel/session/session-bundle-lifecycle.ts";
 import {
@@ -41,8 +41,9 @@ export type BotBundleMove =
 	| { readonly kind: "held" }
 	| { readonly kind: "kept"; readonly reason: string };
 
-/** The index of the lease registry among {@link sessionStatePieces}. */
+/** The indexes of the lease registry and the fleet queue file among {@link sessionStatePieces}. */
 const LEASES = 2;
+const FLEET_QUEUE = 3;
 
 /** The pieces of one session's orchestration state in `home`, in the order they move. */
 function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
@@ -74,15 +75,20 @@ export function moveBotSessionBundle(agentDir: string, botHome: OrchestrationHom
 			if (pieces.length === 0) return { kind: "none" };
 			const leases = readSessionLeaseHolders(owner, sessionId);
 			if (leases.some((holder) => holder.standing !== "dead")) return { kind: "held" };
-			// A registry of dead holders only records nothing: the bot's own replaces it rather than being written over.
-			const deadLeases = pieces.find((index) => index === LEASES && existsSync(to[index] as string));
-			const taken = pieces.find((index) => index !== LEASES && existsSync(to[index] as string));
+			const inBoth = pieces.filter((index) => existsSync(to[index] as string));
+			const taken = inBoth.find((index) => index !== LEASES && index !== FLEET_QUEUE);
 			if (taken !== undefined) return { kind: "kept", reason: `the bot's home already has ${to[taken]}` };
-			if (deadLeases !== undefined) rmSync(from[deadLeases] as string);
+			// What the bot's home already has wins where the owner's records nothing newer: a registry of dead holders only,
+			// or a fleet queue file older than the bot's. A newer owner's fleet queue file replaces the bot's below.
+			const dropped = inBoth.filter(
+				(index) =>
+					index === LEASES || statSync(to[index] as string).mtimeMs >= statSync(from[index] as string).mtimeMs,
+			);
+			for (const index of dropped) rmSync(from[index] as string);
 			const moved: number[] = [];
 			try {
 				for (const index of pieces) {
-					if (index === deadLeases) continue;
+					if (dropped.includes(index)) continue;
 					const target = to[index] as string;
 					mkdirSync(dirname(target), { recursive: true });
 					renameSync(from[index] as string, target);
