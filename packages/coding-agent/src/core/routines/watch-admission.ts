@@ -3,8 +3,8 @@
  * condition saved earlier is never evaluated with more authority than the session has now:
  * - a path (a file, a folder or a glob pattern) is observed through its metadata, which needs no read authority; its
  *   content is digested only where the session's read scope and the credential policy allow reading it;
- * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection,
- *   edge classification against the session's edge grants, and the read-only line of a session whose shell edits
+ * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection
+ *   where the commands keep owner credentials out, a worker's watch always, edge classification against the session's edge grants, and the read-only line of a session whose shell edits
  *   nothing), non-interactively: whatever would ask the owner is refused, since a watch cannot ask. Before each run the
  *   session's credential guard meets it as the shell's meets the command (`commandExposure`), and the excerpt it keeps is
  *   masked as the shell's output is. It runs with a bounded environment, closed further as the session's own commands are
@@ -319,7 +319,11 @@ export class WatchAdmission {
 			if (outcome.outcome !== "allow")
 				return outcome.message ?? "The session's capability envelope does not allow shell commands.";
 		}
-		const credential = credentialToolBlockReason("bash", args, cwd, this.boundary(scope));
+		// As the shell meets the command: refused where the commands keep credentials out, else run and its excerpt masked.
+		const credential =
+			this.credentialExposure(worker) === "deny"
+				? credentialToolBlockReason("bash", args, cwd, this.boundary(scope))
+				: undefined;
 		if (credential) return credential;
 		const sessionShell = this.host.getSessionConfinement().readOnlyShell;
 		const sessionViolation =
