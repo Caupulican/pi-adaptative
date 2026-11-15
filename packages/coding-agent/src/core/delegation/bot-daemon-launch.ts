@@ -1,6 +1,6 @@
 /**
  * Claims the detached bot daemon's lease and launches the daemon process: shared by a session's start
- * (`BackgroundLaneController.startPersistentBotDaemon`) and the user service's start on Windows (`bot-daemon.ts`).
+ * (`BotDaemonKeeper.start`) and the user service's start on Windows (`bot-daemon.ts`).
  *
  * The daemon is pi's own `--bot-daemon` command run through the stable self-launch target, so it outlives its starter
  * and that starter's runtime generation. Earlier-generation daemons are retired first (the store is sealed against

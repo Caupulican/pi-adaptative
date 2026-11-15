@@ -18,7 +18,6 @@ import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
-import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
@@ -38,32 +37,21 @@ import {
 import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
 import { BotRoster } from "./bots/bot-roster.ts";
 import { attachBotSessions } from "./bots/bot-session-ports.ts";
-import {
-	type AwayChannelStatus,
-	awayChannels,
-	awayChannelsKey,
-	readAwayChannelCharges,
-	readAwayChannelStatus,
-} from "./channels/away-channels.ts";
+import { type AwayChannelStatus, readAwayChannelCharges, readAwayChannelStatus } from "./channels/away-channels.ts";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
 import { botToolListEntry, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
-import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
-import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./delegation/bot-daemon-stop.ts";
+import { BotDaemonKeeper } from "./delegation/bot-daemon-keeper.ts";
+import type { BotDaemonLaunchResult } from "./delegation/bot-daemon-launch.ts";
+import type { BotDaemonStopResult } from "./delegation/bot-daemon-stop.ts";
 import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
 import { displayNameFor } from "./delegation/bot-naming.ts";
 import { BotOperatorDispatch } from "./delegation/bot-operator-dispatch.ts";
 import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
 import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
-import {
-	DAEMON_STALE_MS,
-	daemonRecheckAt,
-	isOlderDaemonBuild,
-	OWN_DAEMON_BUILD,
-} from "./delegation/bot-team-routine-helpers.ts";
 import { subscribeBotTeamUpdates } from "./delegation/bot-team-updates.ts";
 import {
 	createForegroundTranscriptWrites,
@@ -200,13 +188,11 @@ import { RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
 import { routineGithubInterests, routineHostEventFeed } from "./routines/routine-scheduler-controller.ts";
 import type { RoutineToolFields, RoutineToolView } from "./routines/routine-tool.ts";
 import { SessionRoutines } from "./routines/session-routines.ts";
-import { getSessionRole } from "./session-role.ts";
 import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
-import { alarmAt, type WallAlarm } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
@@ -251,18 +237,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _botTeamStore: PersistentBotTeamStore | undefined;
 	private readonly _routines: SessionRoutines;
 	private _channelsHostedByDaemon = false;
-	/** The routine revision the daemon was last ensured for: a save moves it, the store's other writes do not. */
-	private _daemonRevision: number | undefined;
-	/** The last reason the daemon could not be started by itself, reported once until it changes. */
-	private _daemonStartFailure: string | undefined;
-	/** The lease token of the daemon this runtime last launched: one it never replaces for its build. */
-	private _launchedDaemonToken: string | undefined;
-	/** The one alarm that re-ensures the daemon when the lease this session last saw would no longer be held. */
-	private _daemonRecheck: WallAlarm | undefined;
-	/** Consecutive ensures that could not bring the daemon up: the backoff of the next re-ensure. */
-	private _daemonEnsureFailures = 0;
-	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
-	private _awayChannelsKey: string | undefined;
+	/** The root session's keeping of the detached bot daemon: its start, lease re-ensure and the owner's start and stop. */
+	private readonly _daemonKeeper: BotDaemonKeeper;
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
 	private _awayService: AwayService | undefined;
 	private readonly botBindings = new BotRuntimeBindings(
@@ -404,6 +380,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				this.sendOperatorMessageToBot(agentId, message, options),
 			sendOperatorMessageToTeam: (teamId, message) => this.sendOperatorMessageToTeam(teamId, message),
 			resolveLaneModel: (configuredPattern) => this.resolveLaneModel(configuredPattern),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._daemonKeeper = new BotDaemonKeeper({
+			builtStore: () => this._botTeamStore,
+			store: () => this.getBotTeamStore(),
+			settings: () => deps.getSettingsManager(),
+			clock: () => deps.getTimers().port("routines"),
+			cwd: () => deps.getCwd(),
+			isDisposed: () => deps.isDisposed(),
+			keepsDaemon: () => this._routines.scope() === "session",
+			channelsHostedByDaemon: () => this._channelsHostedByDaemon,
+			ownsHostDuties: () => deps.standing.ownsHostDuties,
+			awayService: () => this.getAwayService(),
 			warn: (message) => this._safeWarn(message),
 		});
 		this._routines = new SessionRoutines({
@@ -1050,7 +1039,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const unsubscribeAwayChannelSettings = this._unsubscribeAwayChannelSettings;
 		this._unsubscribeAwayChannelSettings = undefined;
 		this._runTeardownStep("unsubscribe away channel settings", () => unsubscribeAwayChannelSettings?.());
-		this._runTeardownStep("stop the daemon lease re-ensure", () => this._armDaemonRecheck(undefined));
+		this._runTeardownStep("stop the daemon lease re-ensure", () => this._daemonKeeper.stopRecheck());
 		this._runTeardownStep("dispose bot and team store", () => this._botTeamStore?.dispose());
 		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
@@ -1470,8 +1459,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				// A leader's row names it by its display name: a rename or a retirement changes the rows, not the delegation.
 				this._leaderRows = undefined;
 				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
-				if (this._routines.isStarted && this._botTeamStore?.getRoutineRevision() !== this._daemonRevision)
-					this._ensureBotDaemon();
+				if (this._routines.isStarted && this._daemonKeeper.routinesChanged()) this._daemonKeeper.ensure();
 				// A routine run away commits its occurrence after recording its parent writes; this store's change is the
 				// cross-process signal, so an open parent lands those writes now, before its scheduler (subscribed after
 				// this listener) delivers the run's result.
@@ -1595,93 +1583,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	startPersistentRoutines(): void {
 		// The daemon and the channels served away are the root session's; a bot's own session runs its watches only.
 		if (this._routines.start() !== "session") return;
-		this._ensureBotDaemon();
+		this._daemonKeeper.ensure();
 		this._unsubscribeAwayChannelSettings ??= this.deps.getSettingsManager().subscribeChanges(() => {
-			if (awayChannelsKey(this.deps.getSettingsManager()) !== this._awayChannelsKey) this._ensureBotDaemon();
-		});
-	}
-
-	/**
-	 * Brings the detached daemon up by itself, with no command: at session start and on every routine save, while an
-	 * enabled routine or a channel served away (`channels.<name>.awayCwd`) exists and no daemon holds the lease, or the
-	 * one holding it is of an older build (an upgrade replaces it; one of the same or a newer build is left alone). The
-	 * claim is idempotent across sessions and processes, so only one start launches. A worker process never starts one.
-	 * A reason the daemon cannot start is reported once. The same points apply `routines.away.autostart` (see
-	 * `away-service.ts`), for the same work.
-	 *
-	 * Every ensure that finds away work arms one alarm at the instant the lease it saw (or its fresh claim) stops being
-	 * held; the alarm runs this again (without the always-on reconcile), so a daemon that died mid-session is relaunched
-	 * by that expiry instead of waiting for a save or settings change. A failed ensure backs off on the same alarm.
-	 */
-	private _ensureBotDaemon(fromAlarm = false): void {
-		const store = this._botTeamStore;
-		if (!store || this.deps.isDisposed() || getSessionRole() === "worker" || this._channelsHostedByDaemon) return;
-		if (this._routines.scope() !== "session") return;
-		this._daemonRevision = store.getRoutineRevision();
-		const clock = this.deps.getTimers().port("routines");
-		let failure: string | undefined;
-		// Enabled routines and channels served away: either keeps the daemon, and the always-on service, wanted.
-		let awayWork = 0;
-		// When the lease this ensure leaves behind stops being held; absent when nothing is read.
-		let leaseHeldUntil: number | undefined;
-		try {
-			const status = store.getDaemonStatus(clock.now());
-			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
-			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
-			this._awayChannelsKey = awayChannelsKey(this.deps.getSettingsManager());
-			awayWork = status.activeRoutines + awayChannels(this.deps.getSettingsManager()).length;
-			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
-			// older than this session, and a relaunch would run the same build again.
-			const ownLaunch =
-				this._launchedDaemonToken !== undefined && store.daemonLeaseBelongsTo(this._launchedDaemonToken);
-			const replace = status.running && !ownLaunch && isOlderDaemonBuild(status.build, OWN_DAEMON_BUILD);
-			// A current always-on install is restarted through its manager, so the new build runs supervised; when that
-			// fails (reported once), or without one, the daemon is launched detached.
-			const fallback = (reason: string) => {
-				this._safeWarn(`${reason} The daemon is started detached instead.`);
-				const started = this.startPersistentBotDaemon();
-				if (!started.started && !started.held) this._safeWarn(started.detail);
-			};
-			if (awayWork > 0 && (!status.running || (replace && !this.getAwayService().replaceDaemon(fallback)))) {
-				const started = this.startPersistentBotDaemon();
-				if (!started.started && !started.held) failure = started.detail;
-				// A claimed lease is held from its claim until its daemon's first renewal is due.
-				else leaseHeldUntil = clock.now() + DAEMON_STALE_MS;
-			}
-		} catch (error) {
-			failure = `Detached bot daemon could not be started: ${error instanceof Error ? error.message : String(error)}`;
-		}
-		if (failure !== undefined && failure !== this._daemonStartFailure) this._safeWarn(failure);
-		this._daemonStartFailure = failure;
-		this._armDaemonRecheck(
-			awayWork > 0 ? this._nextDaemonCheckAt(clock.now(), failure !== undefined, leaseHeldUntil) : undefined,
-		);
-		if (fromAlarm) return;
-		try {
-			if (this.deps.standing.ownsHostDuties) this.getAwayService().reconcile(awayWork);
-		} catch (error) {
-			this._safeWarn(
-				`Always-on routines could not be checked: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-
-	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */
-	private _nextDaemonCheckAt(nowMs: number, failed: boolean, leaseHeldUntil: number | undefined): number {
-		this._daemonEnsureFailures = failed ? this._daemonEnsureFailures + 1 : 0;
-		return daemonRecheckAt(nowMs, failed, this._daemonEnsureFailures, leaseHeldUntil);
-	}
-
-	private _armDaemonRecheck(atMs: number | undefined): void {
-		this._daemonRecheck?.stop();
-		this._daemonRecheck = undefined;
-		if (atMs === undefined || this.deps.isDisposed()) return;
-		this._daemonRecheck = alarmAt(this.deps.getTimers().port("routines"), atMs, () => {
-			this._daemonRecheck = undefined;
-			harnessLog.info("bots", "the bot daemon lease expiry re-ensured the daemon", {
-				failures: this._daemonEnsureFailures,
-			});
-			this._ensureBotDaemon(true);
+			if (this._daemonKeeper.awayChannelsChanged()) this._daemonKeeper.ensure();
 		});
 	}
 
@@ -1793,14 +1697,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * previous daemon that ended on an error is reported once, by the start that replaces it.
 	 */
 	startPersistentBotDaemon(): BotDaemonLaunchResult {
-		const launch = launchDetachedBotDaemon({
-			store: this.getBotTeamStore(),
-			clock: this.deps.getTimers().port("routines"),
-			cwd: this.deps.getCwd(),
-			warn: (message) => this._safeWarn(message),
-		});
-		if (launch.token !== undefined) this._launchedDaemonToken = launch.token;
-		return launch;
+		return this._daemonKeeper.start();
 	}
 
 	/**
@@ -1808,7 +1705,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * daemons are retired as on start, signalling only an identity proven on this host (see `bot-daemon-stop.ts`).
 	 */
 	stopPersistentBotDaemon(): BotDaemonStopResult {
-		return stopDetachedBotDaemon(this.getBotTeamStore(), this.deps.getTimers().port("routines"));
+		return this._daemonKeeper.stop();
 	}
 
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
