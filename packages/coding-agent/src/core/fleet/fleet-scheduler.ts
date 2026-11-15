@@ -465,23 +465,31 @@ export class SessionFleetScheduler implements FleetScheduler {
 		// A plan's placed jobs are found by their placement key, so a job whose lane the plan no longer names is stopped too.
 		if (scope.kind === "plan") this.remote?.cancelPlan(scope.planId, reasonCode);
 		const local = this.local;
-		if (!local) return;
 		const queued = this.queue;
 		const laneIds =
 			scope.kind === "lane"
 				? [scope.laneId]
-				: scope.kind === "plan"
-					? [...local.laneIdsOfPlan(scope.planId)]
-					: [
-							...(queued?.matching(inScope) ?? []),
-							...local
-								.runningLanes()
-								.filter(inScope)
-								.map((lane) => lane.laneId),
-						];
-		// A remote job's id is cancelled through its backend only; the local lanes take the rest.
+				: !local
+					? []
+					: scope.kind === "plan"
+						? [...local.laneIdsOfPlan(scope.planId)]
+						: [
+								...(queued?.matching(inScope) ?? []),
+								...local
+									.runningLanes()
+									.filter(inScope)
+									.map((lane) => lane.laneId),
+							];
+		// A remote job's id is cancelled through its backend only, with or without local lanes; the local lanes take the rest.
 		const localIds = laneIds.filter((id) => !this.remote?.cancel(id, reasonCode));
 		if (localIds.length === 0) return;
+		if (!local) {
+			harnessLog.warn("fleet", "a lane cancel found no local lanes to end it", {
+				lanes: localIds.length,
+				reasonCode,
+			});
+			return;
+		}
 		harnessLog.info("fleet", "a fleet scope is cancelled", { scope: scope.kind, lanes: localIds.length, reasonCode });
 		local.cancelLanes(localIds, reasonCode);
 	}

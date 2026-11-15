@@ -9,6 +9,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { LaneRecord, LaneTracker } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import type { AttemptRuntimeState, DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { REMOTE_LANE_PREFIX } from "../remote/abandoned-placements.ts";
 import {
 	isManagedWorkerAttempt,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
@@ -33,12 +34,24 @@ export function isOwnerStoppedEnd<T extends Pick<LaneRecord, "status" | "reasonC
  * the host never starts or resumes, and its owner ends it.
  */
 export function unendedWorkerAttempts(snapshot: TaskRuntimeProjection): AttemptRuntimeState[] {
+	return unendedSelectedAttempts(snapshot).filter((attempt) => !isManagedWorkerAttempt(attempt));
+}
+
+function unendedSelectedAttempts(snapshot: TaskRuntimeProjection): AttemptRuntimeState[] {
 	return Object.keys(snapshot.tasks).flatMap((taskId) => {
 		const attempt = selectedWorkerAttempt(snapshot, taskId);
-		return attempt && !isManagedWorkerAttempt(attempt) && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)
-			? [attempt]
-			: [];
+		return attempt && NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status) ? [attempt] : [];
 	});
+}
+
+/** What the owner's stop left unended, by why. */
+export interface WorkerStopOutcome {
+	/** Placed jobs' lanes, handed to the remote backend: each ends when its job's end comes back from the executor. */
+	readonly remote: readonly AttemptRuntimeState[];
+	/** Managed lanes' attempts, left to the extension that runs each: the host neither runs nor cancels them. */
+	readonly managed: readonly AttemptRuntimeState[];
+	/** Local lanes a cancel did not end. */
+	readonly failed: readonly AttemptRuntimeState[];
 }
 
 /** The plan executor's close of every open plan; its running steps stop for `reasonCode`. */
@@ -50,20 +63,27 @@ export interface OpenPlansStop {
  * The owner's stop of a session's workers: every open plan closed as cancelled (through `plans`, the session's plan
  * executor, which also releases the plan's prepared dispatches and placed jobs; else in the store, for a session that runs
  * none), then every unended worker attempt cancelled through `cancel`, both for `reasonCode`. Plans close first, so no
- * step is dispatched again for a lane this stop ends. Returns the attempts still unended after it (a cancel that failed).
+ * step is dispatched again for a lane this stop ends. Returns what is still unended after it, by why.
  */
 export function stopSessionWorkers(
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "closePlan">,
 	plans: OpenPlansStop | undefined,
 	cancel: (attempt: AttemptRuntimeState) => void,
 	reasonCode: string,
-): readonly AttemptRuntimeState[] {
+): WorkerStopOutcome {
 	if (plans) plans.cancelOpenPlans(OWNER_STOPPED_PLAN_REASON, reasonCode);
 	else
 		for (const [planId, plan] of Object.entries(runtime.getSnapshot().plans))
 			if (!plan.closed) runtime.closePlan({ planId, status: "cancelled", reason: OWNER_STOPPED_PLAN_REASON });
 	for (const attempt of unendedWorkerAttempts(runtime.getSnapshot())) cancel(attempt);
-	return unendedWorkerAttempts(runtime.getSnapshot());
+	const unended = unendedSelectedAttempts(runtime.getSnapshot());
+	const managed = unended.filter(isManagedWorkerAttempt);
+	const own = unended.filter((attempt) => !isManagedWorkerAttempt(attempt));
+	return {
+		remote: own.filter((attempt) => attempt.taskId.startsWith(REMOTE_LANE_PREFIX)),
+		managed,
+		failed: own.filter((attempt) => !attempt.taskId.startsWith(REMOTE_LANE_PREFIX)),
+	};
 }
 
 /**

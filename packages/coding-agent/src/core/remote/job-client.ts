@@ -242,6 +242,52 @@ function offerWrite(prepared: Extract<PreparedOffer, { readonly kind: "offer" }>
 	};
 }
 
+/**
+ * Ends the placed job `jobId` on `machineId` in its record, unless it already ended, applied or was refused: the executor
+ * is told from the record, by the process following it. True when this call ended it.
+ */
+function endPlacedRecord(
+	agentDir: string,
+	store: JobStore,
+	machineId: string,
+	jobId: string,
+	ending: PlacerEnding,
+	cancel: JobCancelReason,
+): boolean {
+	let ended = false;
+	store.updatePlaced(machineId, jobId, (current) => {
+		if (
+			current.appliedAt !== undefined ||
+			current.ending ||
+			current.state === "refused" ||
+			current.state === "terminal"
+		)
+			return undefined;
+		ended = true;
+		return { ...current, state: "ended", ending, cancel };
+	});
+	if (ended) journalJob(agentDir, { side: "placer", jobId, peer: machineId, event: "ended", code: ending });
+	return ended;
+}
+
+/**
+ * Ends every job session `sessionId` placed whose record reads, with no client of that session running (the session is
+ * closed): the owner's stop of a closed bot's placed jobs. The session's lanes end from these records when it opens again,
+ * and the executor is told by the process that follows the placed jobs. A record this build cannot read names no session
+ * and is left. Returns how many jobs it ended.
+ */
+export function endPlacedJobsOfSession(agentDir: string, sessionId: string, cancel: JobCancelReason): number {
+	const store = new JobStore(agentDir);
+	let ended = 0;
+	for (const record of [...store.placedScan().valid.values()])
+		if (
+			record.ownerSession === sessionId &&
+			endPlacedRecord(agentDir, store, record.executorId, record.jobId, endingOfCancel(cancel), cancel)
+		)
+			ended += 1;
+	return ended;
+}
+
 export class RemoteJobClient {
 	private readonly agentDir: string;
 	private readonly selfId: () => string;
@@ -779,22 +825,8 @@ export class RemoteJobClient {
 	}
 
 	private end(machineId: string, jobId: string, ending: PlacerEnding, cancel: JobCancelReason): boolean {
-		let ended = false;
-		this.store.updatePlaced(machineId, jobId, (current) => {
-			if (
-				current.appliedAt !== undefined ||
-				current.ending ||
-				current.state === "refused" ||
-				current.state === "terminal"
-			)
-				return undefined;
-			ended = true;
-			return { ...current, state: "ended", ending, cancel };
-		});
-		if (ended) {
-			journalJob(this.agentDir, { side: "placer", jobId, peer: machineId, event: "ended", code: ending });
-			this.reconcile();
-		}
+		const ended = endPlacedRecord(this.agentDir, this.store, machineId, jobId, ending, cancel);
+		if (ended) this.reconcile();
 		return ended;
 	}
 

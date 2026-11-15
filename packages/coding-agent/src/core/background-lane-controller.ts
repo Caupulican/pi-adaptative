@@ -131,7 +131,7 @@ import { WorkerConversationStore } from "./delegation/worker-conversation-store.
 import { WorkerDelegationController } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
-import { cancelTrackedLanes, stopSessionWorkers } from "./delegation/worker-fleet-stop.ts";
+import { cancelTrackedLanes, stopSessionWorkers, type WorkerStopOutcome } from "./delegation/worker-fleet-stop.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
@@ -170,7 +170,7 @@ import type {
 	TaskProfileCreateResult,
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import { isOrchestrationThinkingLevel } from "./orchestration/thinking-level-guard.ts";
 import { ownerSteerWake } from "./pending-input-queue-controller.ts";
@@ -1337,10 +1337,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * The owner's stop (`stopSessionWorkers`): every open plan closed, then every unended worker lane cancelled through the
-	 * fleet for `reasonCode`, bound or not. Returns the attempts a failed cancel left unended; none for a session with no workers.
+	 * fleet for `reasonCode`, bound or not. Returns what it left unended, by why; nothing for a session with no workers.
 	 */
-	cancelOwnFleet(reasonCode: string): readonly AttemptRuntimeState[] {
-		if (!this._hasWorkerState()) return [];
+	cancelOwnFleet(reasonCode: string): WorkerStopOutcome {
+		if (!this._hasWorkerState()) return { remote: [], managed: [], failed: [] };
 		const fleet = () => this._getWorkerController().getFleet();
 		return stopSessionWorkers(
 			this._getWorkerLifecycle().ledger.runtime,

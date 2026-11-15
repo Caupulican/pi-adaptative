@@ -29,6 +29,8 @@ import { OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "../
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
+import { endPlacedJobsOfSession } from "../remote/job-client.ts";
+import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
@@ -88,10 +90,22 @@ export function owesWorkerExecution(home: OrchestrationHome, sessionId: string, 
  * The owner's stop of the workers of bot session `sessionId` while no process hosts it, written to its bundle in `home`
  * alone (`stopSessionWorkers`): every open plan closed and every unended worker attempt cancelled for `reasonCode`, so
  * nothing opens the session for them. Their ends are recorded delivered by the session's next open, when its outbox is
- * replayed (`owner_stopped` wakes no one). The caller holds the bot's host lock, so no process runs what it cancels.
- * Returns how many attempts it cancelled.
+ * replayed (`owner_stopped` wakes no one). Then every job the session placed on another machine is ended in its record in
+ * `agentDir` (`endPlacedJobsOfSession`), so its executor stops and stops spending; the bundle's cancel comes first, so
+ * no open dispatches a lane again for a job this ends. The caller holds the bot's host lock, so no process runs what it
+ * cancels. Returns how many attempts it cancelled and placed jobs it ended.
  */
-export function cancelOwedWorkerWork(home: OrchestrationHome, sessionId: string, reasonCode: string): number {
+export function cancelOwedWorkerWork(
+	home: OrchestrationHome,
+	agentDir: string,
+	sessionId: string,
+	reasonCode: string,
+): { readonly cancelled: number; readonly placedEnded: number } {
+	const cancelled = cancelBundleWorkers(home, sessionId, reasonCode);
+	return { cancelled, placedEnded: endPlacedJobsOfSession(agentDir, sessionId, jobCancelReasonOf(reasonCode)) };
+}
+
+function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonCode: string): number {
 	if (!existsSync(orchestrationEventStoreDir(home, sessionId))) return 0;
 	const runtime = new DurableTaskRuntime({
 		store: new OrchestrationEventStore({ orchestrationHome: home, sessionId }),

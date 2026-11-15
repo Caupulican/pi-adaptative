@@ -66,7 +66,7 @@ const REMOTE_TASK_ID = /^remote-([A-Za-z0-9_-]{1,64})(?::turn:\d+)?$/;
  * names it, and `owner` for the owner's stop. A reason it does not name ends the job as `superseded`, and the rename is
  * logged rather than silent.
  */
-function jobCancelReasonOf(reasonCode: string): JobCancelReason {
+export function jobCancelReasonOf(reasonCode: string): JobCancelReason {
 	if (isOneOf(JOB_CANCEL_REASONS, reasonCode)) return reasonCode;
 	if (reasonCode === OWNER_STOPPED_REASON) return "owner";
 	harnessLog.warn("placement", "a placed job was cancelled for a reason the job protocol does not name", {
