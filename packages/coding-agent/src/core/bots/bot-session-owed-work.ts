@@ -304,11 +304,18 @@ export class BotOwedWork {
 		if (ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId)) return;
 		const record = ports.store().getBot(agentId);
 		if (!record || record.retired || !ports.runsAsSession(record)) return;
-		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox.
-		const saved = ports.savedSessionOf(agentId);
-		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const notResumed = (error: unknown) =>
 			this.tellWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
+		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox. A
+		// home that does not read is asked again at the next change.
+		let saved: SavedBotSession | undefined;
+		try {
+			saved = ports.savedSessionOf(agentId);
+		} catch (error) {
+			notResumed(error);
+			return;
+		}
+		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
 		let unrun = "";
 		try {

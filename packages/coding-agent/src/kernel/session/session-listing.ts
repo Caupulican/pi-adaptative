@@ -4,6 +4,8 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Message, TextContent } from "@caupulican/pi-ai/types";
+import { isMissingFileError } from "../storage/atomic-file.ts";
+import { BoundedReadError } from "../storage/bounded-file.ts";
 import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { isSessionLifecycleEntry } from "./lifecycle-ledger.ts";
@@ -73,6 +75,40 @@ export function findMostRecentSessionInDirs(
 		}
 	}
 	return mostRecent?.path ?? null;
+}
+
+/**
+ * The newest session file in `dir` by modification time, with its header (auto-learn sessions and those `skip` names
+ * left out), for a caller that must tell a directory that holds none from one it could not read: a missing directory
+ * holds none, and a file removed while it is read, one that is not a regular file and one whose first line is not a
+ * session header are passed over, while any other failure to read the directory, a header or a file's time is thrown.
+ */
+export function newestSessionFileIn(
+	dir: string,
+	skip?: (sessionId: string) => boolean,
+): { path: string; header: SessionHeader } | undefined {
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch (error) {
+		if (isMissingFileError(error)) return undefined;
+		throw error;
+	}
+	let newest: { path: string; header: SessionHeader; mtimeMs: number } | undefined;
+	for (const name of names.filter((entry) => entry.endsWith(".jsonl"))) {
+		const path = join(dir, name);
+		const read = readSessionHeaderResult(path);
+		if (!read.ok) {
+			const passed = read.reason !== "unreadable" || isMissingFileError(read.cause);
+			if (passed || (read.cause instanceof BoundedReadError && read.cause.reason === "not_regular")) continue;
+			throw read.cause;
+		}
+		if (isAutoLearnSessionId(read.header.id) || skip?.(read.header.id)) continue;
+		const stat = statSync(path, { throwIfNoEntry: false });
+		if (stat && (!newest || stat.mtimeMs > newest.mtimeMs))
+			newest = { path, header: read.header, mtimeMs: stat.mtimeMs };
+	}
+	return newest && { path: newest.path, header: newest.header };
 }
 
 function isMessageWithContent(message: AgentMessage): message is Message {

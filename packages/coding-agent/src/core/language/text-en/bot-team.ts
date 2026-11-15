@@ -5,7 +5,18 @@
  * each language places them itself.
  */
 
+import type { BotPointerSetAsideReason } from "../../bots/bot-session-pointer.ts";
 import type { ChannelServedBy } from "../../channels/away-channels.ts";
+
+/** Why a bot's session pointer did not count, as the sentence that tells it was set aside says it. */
+const POINTER_SET_ASIDE: {
+	readonly [K in BotPointerSetAsideReason["kind"]]: (reason: Extract<BotPointerSetAsideReason, { kind: K }>) => string;
+} = {
+	"not-a-pointer": () => "is not a session record",
+	"not-a-session": (reason) => `names ${reason.file}, which does not hold a session`,
+	"other-session": (reason) => `names ${reason.file}, which holds session ${reason.holds}, not ${reason.sessionId}`,
+	deleted: (reason) => `names session ${reason.sessionId}, which was deleted`,
+};
 
 export const BOT_TEAM = {
 	remoteUnavailable: "Remote machines are not available in this session.",
@@ -147,8 +158,10 @@ export const BOT_TEAM = {
 	/** The ledger did not parse in full and was set aside; its charge watermark was kept (`chargesKept`) or is recovered from the main session. */
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from ${chargesKept ? "its record" : "what the main session has recorded of them"}.`,
-	botSessionPointerSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: the record of which session it continues did not read (${reason}) and was set aside as ${file}; it continues its newest session file, or a new session when it has none, recorded anew.`,
+	botSessionPointerSetAside: (agentId: string, file: string, reason: BotPointerSetAsideReason) =>
+		`Bot ${agentId}: the record of which session it continues ${POINTER_SET_ASIDE[reason.kind](reason as never)} and was set aside as ${file}; it continues its newest session file, or a new session when it has none, recorded anew.`,
+	botWatchesNotCounted: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its saved session did not read (${reason}); its watches are not counted until it reads.`,
 	botSessionNotMoved: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session's orchestration state could not be moved from the main session's home into its own (${reason}); it keeps using it where it is.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

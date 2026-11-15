@@ -12,6 +12,7 @@ import { botSessionStorageRoots, sessionStorageRootsOfFile } from "../orchestrat
 import { moveBotSessionBundle } from "./bot-bundle-move.ts";
 import type { BotHome } from "./bot-home.ts";
 import {
+	type BotPointerSetAsideReason,
 	type BotSessionPointer,
 	botSessionChoice,
 	settleBotSessionPointer,
@@ -21,7 +22,7 @@ import {
 /** What the host tells the owner about its bot's home while it opens the session. */
 export interface BotSessionOpenNotices {
 	/** The pointer did not count and was set aside as `file`. */
-	pointerSetAside(file: string, reason: string): void;
+	pointerSetAside(file: string, reason: BotPointerSetAsideReason): void;
 	/** The session's state could not be moved out of the owner's home; it is used there. */
 	notMoved(reason: string): void;
 }
@@ -54,7 +55,7 @@ export function openHostedBotSession(
 	cwd: string,
 	notices: BotSessionOpenNotices,
 ): { sessionManager: SessionManager; continued: boolean } {
-	const pointer = settleBotSessionPointer(home, (file, reason) => notices.pointerSetAside(file, reason));
+	const pointer = settleBotSessionPointer(agentDir, home, (file, reason) => notices.pointerSetAside(file, reason));
 	if (!pointer) {
 		const sessionManager = createInHome(agentDir, home, cwd);
 		const file = sessionManager.getSessionFile();
@@ -74,8 +75,9 @@ export function openHostedBotSession(
  * pointer, the move and a pointer that does not count are its host's.
  */
 export function continueBotSession(agentDir: string, home: BotHome, cwd: string): SessionManager {
-	const choice = botSessionChoice(home);
+	const choice = botSessionChoice(agentDir, home);
 	if (choice.kind === "recorded") return openRecorded(agentDir, home, choice.pointer, choice.path, cwd);
 	if (choice.newest === undefined) return createInHome(agentDir, home, cwd);
-	return SessionManager.open(choice.newest, sessionStorageRootsOfFile(agentDir, choice.newest), home.sessionsDir, cwd);
+	const { path } = choice.newest;
+	return SessionManager.open(path, sessionStorageRootsOfFile(agentDir, path), home.sessionsDir, cwd);
 }

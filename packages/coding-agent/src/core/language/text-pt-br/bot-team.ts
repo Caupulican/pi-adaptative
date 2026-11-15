@@ -5,8 +5,19 @@
  * posiciona do seu jeito.
  */
 
+import type { BotPointerSetAsideReason } from "../../bots/bot-session-pointer.ts";
 import type { ChannelServedBy } from "../../channels/away-channels.ts";
 import type { InterfaceText } from "../interface-text.ts";
+
+/** Por que o ponteiro de sessão de um bot não contou, como a frase que diz que ele foi separado o diz. */
+const POINTER_SET_ASIDE: {
+	readonly [K in BotPointerSetAsideReason["kind"]]: (reason: Extract<BotPointerSetAsideReason, { kind: K }>) => string;
+} = {
+	"not-a-pointer": () => "não é um registro de sessão",
+	"not-a-session": (reason) => `aponta ${reason.file}, que não guarda uma sessão`,
+	"other-session": (reason) => `aponta ${reason.file}, que guarda a sessão ${reason.holds}, não ${reason.sessionId}`,
+	deleted: (reason) => `aponta a sessão ${reason.sessionId}, que foi apagada`,
+};
 
 /** Quem atende um canal agora, pelo identificador que o registro do canal guarda. */
 const CHANNEL_HOLDER: Readonly<Record<ChannelServedBy, string>> = {
@@ -128,8 +139,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o registro de gasto dele ${setAsideError === undefined ? `não pôde ser lido (${reason})` : `não é legível (${reason}) e não pôde ser separado (${setAsideError})`}; ele fica como está e é tentado de novo no próximo gasto. Até lá, o gasto dos pedidos conta a partir de agora e o gasto é cobrado à sessão principal quando ele ${setAsideError === undefined ? "for lido" : "for separado"}.`,
 	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
 		`Bot ${agentId}: o registro de gasto dele não foi lido por inteiro (${reason}) e foi separado como ${file}; os pedidos cujo gasto não foi lido contam a partir de agora, e as cobranças à sessão principal continuam ${chargesKept ? "do registro dele" : "do que a sessão principal registrou delas"}.`,
-	botSessionPointerSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: o registro de qual sessão ele continua não foi lido (${reason}) e foi separado como ${file}; ele continua o arquivo de sessão mais recente, ou uma sessão nova quando não há nenhum, registrado de novo.`,
+	botSessionPointerSetAside: (agentId: string, file: string, reason: BotPointerSetAsideReason) =>
+		`Bot ${agentId}: o registro de qual sessão ele continua ${POINTER_SET_ASIDE[reason.kind](reason as never)} e foi separado como ${file}; ele continua o arquivo de sessão mais recente, ou uma sessão nova quando não há nenhum, registrado de novo.`,
+	botWatchesNotCounted: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a sessão salva dele não foi lida (${reason}); as esperas dele não são contadas até ela ser lida.`,
 	botSessionNotMoved: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele não pôde ser movido da casa da sessão principal para a dele (${reason}); ele continua usando-o onde está.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>

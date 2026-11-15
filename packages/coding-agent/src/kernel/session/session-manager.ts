@@ -20,6 +20,7 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import { ownerInputIdOf } from "../owner-input-stamp.ts";
+import { isMissingFileError } from "../storage/atomic-file.ts";
 import { sameFileVersion } from "../storage/bounded-file.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
@@ -124,7 +125,7 @@ import {
 	type SessionEntryFileLocation,
 } from "./session-file-reading.ts";
 import { appendToExistingSessionFile, withSessionFileLock, writeSessionFile } from "./session-file-writing.ts";
-import type { SessionHeader } from "./session-header.ts";
+import { readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
 import { assistantToolIdentityKey, createSessionId, generateId, pendingIdSpace } from "./session-id-generation.ts";
 import { assertValidSessionId } from "./session-identity.ts";
 import {
@@ -3255,7 +3256,8 @@ export class SessionManager {
 
 	/**
 	 * Open the session file at `path`, or start session `id` in it when it is missing or empty: the file of a session
-	 * whose owner recorded its id (a bot's pointer). A file that holds another session is refused.
+	 * whose owner recorded its id (a bot's pointer). A file that holds another session, or anything but a session, is
+	 * refused by its header before the open could repair or migrate it; a file that cannot be read throws.
 	 */
 	static openOrStart(
 		path: string,
@@ -3265,6 +3267,13 @@ export class SessionManager {
 		cwd: string,
 	): SessionManager {
 		assertValidSessionId(id);
+		const read = readSessionHeaderResult(resolvePath(path));
+		if (!read.ok && read.reason === "unreadable" && !isMissingFileError(read.cause)) throw read.cause;
+		const empty = !read.ok && read.reason === "not_a_header" && statSync(resolvePath(path)).size === 0;
+		if (read.ok && read.header.id !== id)
+			throw new Error(`Session file ${path} holds session ${read.header.id}, not ${id}.`);
+		if (!read.ok && read.reason !== "unreadable" && !empty)
+			throw new Error(`Session file ${path} does not hold a session, so session ${id} is not started in it.`);
 		const manager = SessionManager._open(path, roots, sessionDir, cwd, false, false, { id });
 		if (manager.getSessionId() !== id) throw new Error(`Session file ${path} holds another session than ${id}.`);
 		return manager;

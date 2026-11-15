@@ -873,7 +873,14 @@ export class BotSessionHost {
 	 * saved last, which another process may be hosting. The bot is announced again when the first of them expires.
 	 */
 	liveWatches(agentId: string): number {
-		const sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
+		let sessionId: string | undefined;
+		try {
+			sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
+		} catch (error) {
+			// The roster draws what reads: a home whose session does not read now counts no watches, and says why.
+			this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(agentId, errorText(error)));
+			return 0;
+		}
 		if (sessionId === undefined) return 0;
 		const live = liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now());
 		if (live.firstExpiresAt !== undefined) this.watchExpiry.note(agentId, live.firstExpiresAt);

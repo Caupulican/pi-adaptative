@@ -544,9 +544,21 @@ function canRecoverOperation(operation: DeletionOperation): boolean {
 	return judgeOwner(operation.owner) === "dead";
 }
 
+/**
+ * The deletion policy the session's tombstone in `home` records, read without the lock (the marker is replaced whole):
+ * `permanent` from the moment the session's deletion is reserved, kept after its removal settles; `retention` while
+ * an expiry retires its bundle; undefined when no deletion was ever reserved there. A marker that does not read throws.
+ */
+export function sessionBundleDeletionPolicy(
+	home: OrchestrationHome,
+	parentSessionId: string,
+): SessionBundleDeletionPolicy | undefined {
+	return readMarker(orchestrationSessionDeletionFile(home, parentSessionId), parentSessionId)?.policy;
+}
+
 /** A retained cleanup already passed age admission; its own partial writes do not restart that age. */
 export function hasPendingSessionBundleRetention(home: OrchestrationHome, parentSessionId: string): boolean {
-	return readMarker(orchestrationSessionDeletionFile(home, parentSessionId), parentSessionId)?.policy === "retention";
+	return sessionBundleDeletionPolicy(home, parentSessionId) === "retention";
 }
 
 export type SessionBundleLockOptions = Pick<

@@ -6,8 +6,10 @@
  */
 import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
-import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
+import { getSessionHeaderCwd } from "../../kernel/session/session-file-reading.ts";
+import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
+import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName } from "../agent-paths.ts";
@@ -27,24 +29,24 @@ const REMOTE_LIVENESS_MS = 5 * 1000;
 export type SavedBotSession = { readonly id: string; readonly file: string; readonly cwd?: string };
 
 /** The file of the session the bot's home keeps its conversation in (`botSessionChoice`), if it has one. */
-function savedSessionFile(agentDir: string, agentId: string): { id?: string; file: string } | undefined {
-	const choice = botSessionChoice(botHomeOf(agentDir, agentId));
+function savedSessionFile(agentDir: string, agentId: string): { id: string; file: string } | undefined {
+	const choice = botSessionChoice(agentDir, botHomeOf(agentDir, agentId));
 	if (choice.kind === "recorded") return { id: choice.pointer.sessionId, file: choice.path };
-	return choice.newest === undefined ? undefined : { file: choice.newest };
+	return choice.newest === undefined ? undefined : { id: choice.newest.sessionId, file: choice.newest.path };
 }
 
 /**
  * The bot's own session as its home holds it: the one its pointer records (the one its next session continues), else
- * the one its host's first load would choose, with the directory it works in; undefined while it has none. Another
- * process reads the bot's watches by its id, since they target it.
+ * the one its host's first load would choose, with the directory it works in (none while its file wrote nothing);
+ * undefined while it has none. Another process reads the bot's watches by its id, since they target it. A file that
+ * cannot be read is thrown, as {@link botSessionChoice} throws.
  */
 export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
 	const saved = savedSessionFile(agentDir, agentId);
 	if (!saved) return undefined;
-	const header = readSessionHeader(saved.file);
-	if (saved.id !== undefined)
-		return { id: saved.id, file: saved.file, cwd: header ? getSessionHeaderCwd(header) : undefined };
-	return header ? { id: header.id, file: saved.file, cwd: getSessionHeaderCwd(header) } : undefined;
+	const header = readSessionHeaderResult(saved.file);
+	if (!header.ok && header.reason === "unreadable" && !isMissingFileError(header.cause)) throw header.cause;
+	return { ...saved, cwd: header.ok ? getSessionHeaderCwd(header.header) : undefined };
 }
 
 /** A change of which session the home keeps (its pointer) or of a session file. */
