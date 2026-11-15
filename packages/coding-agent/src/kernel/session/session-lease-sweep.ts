@@ -12,8 +12,14 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../harness-log.ts";
+import { judgeOwner } from "../reliability/owner-identity.ts";
 import { isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
-import { liveHolders, readLeaseRegistry } from "./session-bundle-lifecycle.ts";
+import {
+	liveHolders,
+	readLeaseRegistry,
+	type SessionLeaseHolderRef,
+	sessionLeaseHolderRef,
+} from "./session-bundle-lifecycle.ts";
 import {
 	type OrchestrationHome,
 	orchestrationSessionDeletionFile,
@@ -22,8 +28,15 @@ import {
 
 const LEASE_REGISTRY_SUFFIX = ".leases.json";
 
-/** Prunes the holders proven dead of every lease registry in `home`; `logName` names the home in the harness log. */
-export async function sweepSessionLeaseRegistries(home: OrchestrationHome, logName: string): Promise<void> {
+/**
+ * Prunes the holders proven dead of every lease registry in `home`; `logName` names the home in the harness log. Returns,
+ * by session, the holders on another machine that still hold it, as read under the lock.
+ */
+export async function sweepSessionLeaseRegistries(
+	home: OrchestrationHome,
+	logName: string,
+): Promise<Map<string, SessionLeaseHolderRef[]>> {
+	const heldElsewhere = new Map<string, SessionLeaseHolderRef[]>();
 	const dir = orchestrationSessionDeletionsDir(home);
 	let names: string[];
 	try {
@@ -35,7 +48,7 @@ export async function sweepSessionLeaseRegistries(home: OrchestrationHome, logNa
 				home: logName,
 				detail: describe(error),
 			});
-		return;
+		return heldElsewhere;
 	}
 	for (const [index, name] of names.entries()) {
 		// The pruning is synchronous: yield now and then.
@@ -53,7 +66,11 @@ export async function sweepSessionLeaseRegistries(home: OrchestrationHome, logNa
 					});
 					return;
 				}
-				liveHolders(file, registry.parentSessionId);
+				const elsewhere = liveHolders(file, registry.parentSessionId).flatMap((holder) => {
+					const standing = judgeOwner(holder.owner);
+					return standing === "foreign" ? [sessionLeaseHolderRef(holder, standing)] : [];
+				});
+				if (elsewhere.length > 0) heldElsewhere.set(registry.parentSessionId, elsewhere);
 			});
 		} catch (error) {
 			harnessLog.warn("sessions", "a lease registry was not swept; it is left", {
@@ -63,6 +80,7 @@ export async function sweepSessionLeaseRegistries(home: OrchestrationHome, logNa
 			});
 		}
 	}
+	return heldElsewhere;
 }
 
 function describe(error: unknown): string {

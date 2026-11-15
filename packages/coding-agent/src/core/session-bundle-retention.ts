@@ -39,11 +39,10 @@ import {
 	inspectSessionBundleRetention,
 	markSessionBundleRemoving,
 	pendingSessionBundleRetention,
-	readSessionLeaseHolders,
 	type SessionBundleDeletionPhase,
 	type SessionBundleDeletionReservation,
+	type SessionLeaseHolderRef,
 	sessionBundleRetentionsInFlight,
-	sessionLeaseHolderRef,
 	settleSessionBundleDeletion,
 	withSessionBundleRetention,
 } from "./orchestration/session-bundle-lifecycle.ts";
@@ -636,6 +635,8 @@ interface SweepRun {
 	 */
 	readonly historyUnknown: boolean;
 	readonly transcripts: ReadonlyMap<string, readonly string[]>;
+	/** By home root, then session: the holders on another machine the start's lease sweep found holding the session. */
+	readonly heldElsewhere: ReadonlyMap<string, ReadonlyMap<string, readonly SessionLeaseHolderRef[]>>;
 	readonly result: SessionBundleRetentionResult;
 	/** The obligation ledgers this sweep recorded expiries in, one per home that settled any. */
 	readonly obligationLedgers: Set<string>;
@@ -762,7 +763,7 @@ async function sweepBundle(
 		// The tombstone excludes new worker contexts for this session while the checks and removal run.
 		const reservation = reserveWorkerBundleDeletion(agentDir, home, parentSessionId, "retention", resumingDeletion);
 		if (!reservation) {
-			reportKeptElsewhere(home, parentSessionId, label, report);
+			reportKeptElsewhere(run.heldElsewhere.get(home.root)?.get(parentSessionId) ?? [], label, report);
 			return;
 		}
 		// A deferral before anything of the bundle is touched releases a `reserved` tombstone (the bundle is whole) and
@@ -886,16 +887,13 @@ function sweepBotHostLock(homeDir: string): void {
  * there can prove it gone (the start sweep there, `sweepSessionLeaseRegistries`), so the owner is told where.
  */
 function reportKeptElsewhere(
-	home: OrchestrationHome,
-	parentSessionId: string,
+	holders: readonly SessionLeaseHolderRef[],
 	label: string,
 	report: (message: string) => void,
 ): void {
 	const words = interfaceText().sessions.retention;
 	const places = new Map<string, ReturnType<typeof holderPlace>>();
-	for (const holder of readSessionLeaseHolders(home, parentSessionId)) {
-		if (holder.standing !== "foreign") continue;
-		const { elsewhere } = sessionLeaseHolderRef(holder, holder.standing);
+	for (const { elsewhere } of holders) {
 		if (!elsewhere) continue;
 		const place = holderPlace(elsewhere);
 		places.set(place.at, place);
@@ -1047,9 +1045,10 @@ export async function sweepSessionBundles(
 		// The bot homes are read once per run: their sessions, which homes exist and which session files they hold.
 		const bots = readBotSessionHolds(agentDir);
 		// Every home's holds of processes proven gone here first, whatever its bundles: lease holders, and a bot's host lock.
-		await sweepSessionLeaseRegistries(owner, owner.root);
+		const heldElsewhere = new Map([[owner.root, await sweepSessionLeaseRegistries(owner, owner.root)]]);
 		for (const hold of bots.homes) {
-			await sweepSessionLeaseRegistries(hold.home.orchestrationHome, hold.home.dir);
+			const home = hold.home.orchestrationHome;
+			heldElsewhere.set(home.root, await sweepSessionLeaseRegistries(home, hold.home.dir));
 			sweepBotHostLock(hold.home.dir);
 		}
 		const index = indexSessionFiles(agentDir, bots, reportHome);
@@ -1112,6 +1111,7 @@ export async function sweepSessionBundles(
 			historyHeld: history.sessionIds,
 			historyUnknown: history.unreadable.length > 0 || history.unresolvedHomes,
 			transcripts,
+			heldElsewhere,
 			result,
 			obligationLedgers,
 			report,
