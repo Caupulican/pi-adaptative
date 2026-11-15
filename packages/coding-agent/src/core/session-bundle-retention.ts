@@ -107,8 +107,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * build wrote, or one whose remover settled what the bundle owed, does not record how far its removal went
  * (`unrecorded`): it is resumed through the gates; refused by one only the open session settles (receipts awaiting
  * delivery, a younger or project-bound obligation), or held by a process or a bot's history, it is released, told
- * naming the session, and it stays only while its bundle does not read. Opening its session releases it as well
- * (`session-bundle-lifecycle.ts`, admission mode `open`).
+ * naming the session, and it stays only while its bundle does not read. Opening its session releases it as well, and a
+ * removal that began and stopped too (`session-bundle-lifecycle.ts`, admission mode `open`).
  *
 * Work per run is bounded by the constants below; the remainder is left for the next startup. Each run first takes the
  * retentions earlier runs left in flight, from each home's in-flight index (permanent tombstones are never read):
@@ -775,8 +775,9 @@ async function sweepBundle(
 			}
 			overRemains = reservation.phase === "unrecorded";
 			if (held) {
-				// The session is the open one's: its tombstone goes, unless its removal began meanwhile or its bundle does
-				// not read (evidence that does not read throws: a deferral, which keeps an `unrecorded` tombstone).
+				// The session is the open one's: its tombstone goes, unless its removal began meanwhile (the session's next
+				// open releases that one) or its bundle does not read (evidence that does not read throws: a deferral, which
+				// keeps an `unrecorded` tombstone).
 				if (reservation.phase === "removing") return;
 				receiptsAwaitDelivery(home, parentSessionId, reservation);
 				if (

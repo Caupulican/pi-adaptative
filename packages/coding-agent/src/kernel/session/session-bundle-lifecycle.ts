@@ -57,10 +57,11 @@ export type SessionBundleDeletionPolicy = "retention" | "permanent";
  * `.whole` sibling holding that operation's token; else `unrecorded` (an earlier build's, whose `fresh` marker proves
  * nothing since that build removed without `.removing`, or one whose remover settled what the bundle owed): how far it
  * went is not known. Only a `reserved`
- * retention tombstone may be released with its bundle whole whatever refused it; an `unrecorded` one only when its
- * expiry was refused by something the open session settles ({@link settleSessionBundleDeletion} `released`), a
- * `removing` one never. Only a `removing` one proves its bundle passed the expiry's gates. A permanent tombstone
- * stands whatever its phase.
+ * retention tombstone may be released with its bundle whole whatever refused it; by its expiry, an `unrecorded` one only
+ * when that expiry was refused by something the open session settles ({@link settleSessionBundleDeletion} `released`),
+ * a `removing` one never. The AgentSession open releases an `unrecorded` or `removing` one no live remover holds over
+ * whatever is left of the bundle. Only a `removing` one proves its bundle passed the expiry's gates. A permanent
+ * tombstone stands whatever its phase.
  */
 export type SessionBundleDeletionPhase = "reserved" | "removing" | "unrecorded";
 
@@ -762,11 +763,14 @@ function isReleasableRetention(home: OrchestrationHome, marker: DeletionMarker):
 	);
 }
 
-/** Whether a tombstone is a retention no live remover holds whose removal may have begun before this build recorded it. */
+/**
+ * Whether a tombstone is a retention no live remover holds whose removal may have begun: one whose removal began
+ * (`removing`) or one that does not record how far it went (`unrecorded`).
+ */
 function isInterruptedRetention(home: OrchestrationHome, marker: DeletionMarker, parentSessionId: string): boolean {
 	return (
 		marker.policy === "retention" &&
-		tombstonePhase(home, parentSessionId, marker) === "unrecorded" &&
+		tombstonePhase(home, parentSessionId, marker) !== "reserved" &&
 		(!marker.operation || canRecoverOperation(marker.operation))
 	);
 }
@@ -898,9 +902,10 @@ export function withSessionBundleMaintenance<T>(
 /**
  * How a session's bundle is admitted over its tombstone: `maintenance` never past one; `write` past a retention that
  * never began removing (`reserved`) or whose bundle is gone, when no live remover holds it; `open` (the AgentSession
- * open) past an `unrecorded` one no live remover holds as well, released once the open's own write succeeded: the
- * owner's open wins over an interrupted cleanup, every file left of the bundle is a whole file, and a reader takes a
- * missing one as absent; the release is recorded in the bundle before the tombstone goes, for the owner to be told once. A retention whose removal this build began (`removing`) is never admitted past.
+ * open) past any other retention no live remover holds as well (`unrecorded`, or `removing`: its removal began and
+ * stopped), released once the open's own write succeeded: the owner's open wins over an interrupted cleanup, every
+ * file left of the bundle is a whole file, and a reader takes a missing one as absent; the release is recorded in the
+ * bundle before the tombstone goes, for the owner to be told once.
  */
 type BundleAdmissionMode = "maintenance" | "write" | "open";
 
