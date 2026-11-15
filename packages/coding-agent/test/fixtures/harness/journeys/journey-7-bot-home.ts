@@ -611,6 +611,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<strin
 	} finally {
 		stuck.clear();
 	}
+	// The pass the stop started ends after its failed take settles: until then a drain only asks it to read again, which a
+	// pass that ended on a failed take does not, so the retry is fired once that pass is gone.
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	// The take's retry is the alarm the failed takes armed on the host's clock, within the backoff's longest step.
 	const retryDue = world.timers
 		.armedSnapshot("bot-sessions")
