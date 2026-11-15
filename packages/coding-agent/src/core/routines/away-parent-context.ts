@@ -190,7 +190,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		return current.reader;
 	};
 
-	const hold: SessionBundleLease = acquireSessionBundleLease(orchestrationHome, parentSessionId, {
+	const hold: SessionBundleLease = await acquireSessionBundleLease(orchestrationHome, parentSessionId, {
 		role: "away-host",
 		homeNow: () => sessionHomeNow(roots, sessionFile, parentSessionId),
 	});

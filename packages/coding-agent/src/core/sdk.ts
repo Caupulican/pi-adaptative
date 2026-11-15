@@ -405,7 +405,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const { orchestrationHome } = sessionManager.getStorageRoots();
 	// An AgentSession never opens a session a channel or bot host holds (`SessionHostedError`); theirs is that host's own.
 	const bundleLease = sessionManager.isPersisted()
-		? acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
+		? await acquireSessionBundleLease(orchestrationHome, sessionManager.getSessionId(), {
 				role: options.bundleLeaseRole ?? "session",
 				refuseHosted: true,
 				homeNow: managerSessionHomeNow(sessionManager),

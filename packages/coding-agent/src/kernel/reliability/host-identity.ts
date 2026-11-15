@@ -10,7 +10,8 @@
  * - macOS: `IOPlatformUUID` from `ioreg` (spawned without a shell, bounded, once per process).
  * - Windows: `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` via `reg.exe` (same bounded pattern).
  * Linux reads a file synchronously. macOS and Windows need a process spawn, which must never block startup: they are
- * read asynchronously by `warmHostIdentity()` (started once by the process-matrix runtime), and `readHostIdentity()`
+ * read asynchronously by `warmHostIdentity()` (started by the process-matrix runtime, and awaited before every session
+ * lifetime lease is taken, so a lease records and judges holders by machine), and `readHostIdentity()`
  * reports the machine id only once that read has finished. A record written before then carries only the hostname.
  * When none is readable the process records no machine id, and only the hostname identifies it.
  */

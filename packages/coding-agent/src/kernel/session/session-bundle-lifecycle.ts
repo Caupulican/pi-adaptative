@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, unlinkSync } from "node:fs";
-import { isRecordedOnHost, readHostIdentity } from "../reliability/host-identity.ts";
+import { warmHostIdentity } from "../reliability/host-identity.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -20,6 +20,12 @@ import {
 	resolvedOrchestrationHome,
 	sameOrchestrationHome,
 } from "./session-bundle-paths.ts";
+import {
+	forgetLeaseLiveness,
+	holdLeaseLiveness,
+	leaseLivenessExpired,
+	releaseLeaseLiveness,
+} from "./session-lease-liveness.ts";
 
 /** Every operation here addresses a bundle inside an orchestration home; callers name the home they mean. */
 export {
@@ -267,11 +273,16 @@ function writeHolders(file: string, parentSessionId: string, holders: BundleHold
 	writeFileAtomicSync(file, text);
 }
 
-/** Prunes only holders PROVEN gone; an `alive`, `foreign` or `unknown` holder keeps serving the session. */
-function liveHolders(file: string, parentSessionId: string): BundleHolder[] {
+/**
+ * Prunes only holders PROVEN gone, with their liveness proofs; an `alive`, `foreign` or `unknown` holder keeps
+ * serving the session.
+ */
+function liveHolders(home: OrchestrationHome, file: string, parentSessionId: string): BundleHolder[] {
 	const holders = readHolders(file, parentSessionId);
 	const live = holders.filter((holder) => judgeOwner(holder.owner) !== "dead");
-	if (live.length !== holders.length) writeHolders(file, parentSessionId, live);
+	if (live.length === holders.length) return live;
+	writeHolders(file, parentSessionId, live);
+	for (const holder of holders) if (!live.includes(holder)) forgetLeaseLiveness(home, holder.processInstanceId);
 	return live;
 }
 
@@ -283,24 +294,39 @@ const holderRef = (holder: {
 	role: holder.role,
 });
 
+/** A recorded holder as the admission of a bot's host judges it. */
+type JudgedHolder = Pick<BundleHolder, "owner" | "processInstanceId" | "role">;
+
 /**
- * Whether `holder` keeps a bot's host out of the bot's session: a live holder, or one on this host whose liveness cannot
- * be judged. A holder recorded on another host, or on a host this process cannot place, can never be proven dead here, so
- * it would latch the bot's session for good: it does not keep the bot's host out (it still holds the session, as every
- * holder not proven dead does).
+ * Whether `holder` of a session in `home` keeps a bot's host out of it: a live holder, and one this process cannot prove
+ * dead (on another host, on a host this process cannot place, or one whose pid it cannot probe) until its liveness proof
+ * is stale (`session-lease-liveness.ts`): a holder that renews it serves the session, one that stopped is gone, and none
+ * latches the bot's session for good. A holder proven dead does not.
  */
-export function keepsBotHostOut(holder: { readonly owner: ProcessOwner }): boolean {
+function keepsBotHostOut(home: OrchestrationHome, holder: JudgedHolder): boolean {
 	const standing = judgeOwner(holder.owner);
-	return standing === "alive" || (standing === "unknown" && isRecordedOnHost(holder.owner, readHostIdentity()));
+	if (standing === "alive") return true;
+	return standing !== "dead" && !leaseLivenessExpired(home, holder.processInstanceId);
+}
+
+/**
+ * The holders among `holders` (of a session in `home`) a bot's host is refused for, as its admission counts them: a
+ * session or another channel or bot host that keeps it out ({@link keepsBotHostOut}); an away host never does.
+ */
+export function botHostBlockers<T extends JudgedHolder>(home: OrchestrationHome, holders: readonly T[]): T[] {
+	return holders.filter(
+		(holder) => (holder.role === "session" || isExclusiveHostRole(holder.role)) && keepsBotHostOut(home, holder),
+	);
 }
 
 /**
  * The admission of one holder over the holders not proven dead (alive, foreign or unknown all hold): a channel or bot
  * host is refused while a session or another such host holds the session (for a bot's host, one that keeps it out:
- * {@link keepsBotHostOut}), a session asking `refuseHosted` while such a host does; every other admission is bounded by
+ * {@link botHostBlockers}), a session asking `refuseHosted` while such a host does; every other admission is bounded by
  * capacity alone.
  */
 function admitHolder(
+	home: OrchestrationHome,
 	parentSessionId: string,
 	holders: readonly BundleHolder[],
 	holder: BundleHolder,
@@ -308,11 +334,10 @@ function admitHolder(
 ): BundleHolder[] {
 	if (holders.length >= MAX_BUNDLE_HOLDERS) throw new Error("Session bundle lifetime lease capacity reached.");
 	if (isExclusiveHostRole(holder.role)) {
-		const open = holders.filter(
-			(entry) =>
-				(entry.role === "session" || isExclusiveHostRole(entry.role)) &&
-				(holder.role !== "bot-host" || keepsBotHostOut(entry)),
-		);
+		const open =
+			holder.role === "bot-host"
+				? botHostBlockers(home, holders)
+				: holders.filter((entry) => entry.role === "session" || isExclusiveHostRole(entry.role));
 		if (open.length > 0) throw new SessionHeldError(parentSessionId, open.map(holderRef), holder.role);
 	}
 	const host = refuseHosted && holder.role === "session" && holders.find((entry) => isExclusiveHostRole(entry.role));
@@ -397,6 +422,7 @@ function releaseBundleLease(state: BundleLeaseState): void {
 				holders.filter((entry) => entry.token !== state.holder.token),
 			);
 		state.status = "released";
+		releaseLeaseLiveness(state.home, PROCESS_INSTANCE_ID);
 	});
 }
 
@@ -406,7 +432,12 @@ function releaseBundleLease(state: BundleLeaseState): void {
  */
 export type SessionHomeNow = () => OrchestrationHome;
 
-export function acquireSessionBundleLease(
+/**
+ * Takes a lifetime lease on a persisted session. This process's host identity is read first (`warmHostIdentity`: the
+ * machine id macOS and Windows read asynchronously), so the holder it records, and every holder its admission judges, is
+ * placed by its machine.
+ */
+export async function acquireSessionBundleLease(
 	home: OrchestrationHome,
 	parentSessionId: string,
 	/**
@@ -415,7 +446,8 @@ export function acquireSessionBundleLease(
 	 * ({@link SessionHomeChangedError}).
 	 */
 	options: { role?: SessionLeaseRole; refuseHosted?: boolean; homeNow: SessionHomeNow },
-): SessionBundleLease {
+): Promise<SessionBundleLease> {
+	await warmHostIdentity();
 	const resolvedHome = resolvedOrchestrationHome(home);
 	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
 	const file = `${tombstone}.leases.json`;
@@ -429,8 +461,16 @@ export function acquireSessionBundleLease(
 		const current = options.homeNow();
 		if (!sameOrchestrationHome(current, resolvedHome))
 			throw new SessionHomeChangedError(parentSessionId, resolvedHome, current);
-		const holders = liveHolders(file, parentSessionId);
-		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
+		const holders = liveHolders(resolvedHome, file, parentSessionId);
+		const admitted = admitHolder(resolvedHome, parentSessionId, holders, holder, options.refuseHosted === true);
+		// The holder's liveness proof is there before the registry names it.
+		holdLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
+		try {
+			writeHolders(file, parentSessionId, admitted);
+		} catch (error) {
+			releaseLeaseLiveness(resolvedHome, PROCESS_INSTANCE_ID);
+			throw error;
+		}
 	});
 	const state: BundleLeaseState = { home: resolvedHome, parentSessionId, holder, claimed: false, status: "held" };
 	const lease: SessionBundleLease = Object.freeze({
@@ -506,7 +546,7 @@ export async function withSessionBundleLeases<T>(
 			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), sessionId);
 			if (held.has(key)) continue;
 			held.add(key);
-			leases.push(acquireSessionBundleLease(home, sessionId, { refuseHosted: true, homeNow }));
+			leases.push(await acquireSessionBundleLease(home, sessionId, { refuseHosted: true, homeNow }));
 		}
 		result = await operation();
 	} catch (error) {
@@ -736,7 +776,7 @@ export function reserveSessionBundleDeletion(
 		const fresh = marker === undefined;
 		if (marker?.policy === "permanent" && policy === "retention") return undefined;
 		if (marker?.operation && !canRecoverOperation(marker.operation)) return undefined;
-		if (liveHolders(`${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
+		if (liveHolders(home, `${tombstone}.leases.json`, parentSessionId).length > 0) return undefined;
 		if (!canDelete(marker?.policy)) return undefined;
 		const token = randomUUID();
 		const next: DeletionMarker = {
