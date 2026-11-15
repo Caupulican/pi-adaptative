@@ -6,6 +6,7 @@
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
+import { interfaceText } from "../language/interface-text.ts";
 
 /** The fields every inbox message and notice opens with: version 1, its id, the bot it is for, its words and time. */
 export interface BotHomeRecordHead {
@@ -84,6 +85,29 @@ export function readHomeRecords<T>(
 		unreadable(file, reason, setAside);
 	}
 	return records;
+}
+
+/** The kinds of record of a bot's home the owner is told about when one does not read. */
+export type BotHomeRecordKind = keyof ReturnType<typeof interfaceText>["botTeam"]["homeRecordKinds"];
+
+/**
+ * The `unreadable` reporter of {@link readHomeRecords} for bot `agentId`'s records of `kind`: tells the owner, through
+ * `warn`, that one was set aside, or that it could not be and stays where it is.
+ */
+export function tellUnreadableHomeRecord(
+	agentId: string,
+	kind: BotHomeRecordKind,
+	warn: (message: string) => void,
+): (file: string, reason: string, setAside: boolean) => void {
+	return (file, reason, setAside) => {
+		const words = interfaceText().botTeam;
+		const record = words.homeRecordKinds[kind];
+		warn(
+			setAside
+				? words.botHomeRecordSetAside(agentId, record, file, reason)
+				: words.botHomeRecordNotSetAside(agentId, record, file, reason),
+		);
+	};
 }
 
 /** Deletes all but the newest `keep` of the records `pattern` names in `dir`. */

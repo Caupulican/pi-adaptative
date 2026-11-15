@@ -130,7 +130,7 @@ function parseStop(value: unknown, agentId: string): BotInboxStop | undefined {
 export function readBotInbox(
 	agentDir: string,
 	agentId: string,
-	unreadable: (file: string, reason: string) => void,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotInboxItem[] {
 	return readHomeRecords(botInboxDir(agentDir, agentId), WAITING, (value) => parseMessage(value, agentId), unreadable);
 }
@@ -139,7 +139,7 @@ export function readBotInbox(
 export function readBotInboxRefusals(
 	agentDir: string,
 	agentId: string,
-	unreadable: (file: string, reason: string) => void,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotInboxItem<BotInboxRefusal>[] {
 	return readHomeRecords(botInboxDir(agentDir, agentId), REFUSED, (value) => parseRefusal(value, agentId), unreadable);
 }

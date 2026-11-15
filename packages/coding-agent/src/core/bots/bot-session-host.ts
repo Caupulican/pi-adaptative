@@ -63,6 +63,7 @@ import { errorText } from "./bot-error-text.ts";
 import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
+import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
@@ -412,8 +413,7 @@ export class BotSessionHost {
 		readonly refused: readonly BotInboxItem<BotInboxRefusal>[];
 	} {
 		const agentDir = this.ports.agentDir();
-		const unreadable = (file: string, reason: string) =>
-			this.ports.warn(interfaceText().botTeam.botInboxUnreadable(agentId, file, reason));
+		const unreadable = tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => this.ports.warn(message));
 		return {
 			waiting: readBotInbox(agentDir, agentId, unreadable),
 			refused: readBotInboxRefusals(agentDir, agentId, unreadable),
@@ -422,9 +422,8 @@ export class BotSessionHost {
 
 	/** What the bot's own session told the owner, oldest first (the newest few): every session's chat shows it. */
 	readNotices(agentId: string): readonly BotNotice[] {
-		return readBotNotices(this.ports.agentDir(), agentId, (file, reason) =>
-			this.ports.warn(interfaceText().botTeam.botNoticeUnreadable(agentId, file, reason)),
-		).map(({ message }) => message);
+		const unreadable = tellUnreadableHomeRecord(agentId, "notice", (message) => this.ports.warn(message));
+		return readBotNotices(this.ports.agentDir(), agentId, unreadable).map(({ message }) => message);
 	}
 
 	/** Tells the owner what the bot's own session raised for them, in the bot's chat (see `keepBotNotice`); true when kept. */

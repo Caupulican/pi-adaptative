@@ -128,9 +128,17 @@ export const BOT_TEAM = {
 	/** The bot's inbox holds as many messages as it takes: its host is not taking them. */
 	botInboxFull: (agentId: string, max: number) =>
 		`Bot ${agentId}: ${max} messages already wait for the session hosting it; send again once it has taken them.`,
-	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
-	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
+	/** The words naming the one-file records of a bot's home in the sentences about one that did not read. */
+	homeRecordKinds: {
+		inboxMessage: "an inbox message",
+		notice: "a notice in its chat",
+	},
+	/** A record of the bot's home (`record`, its words) did not read; it was set aside beside itself. */
+	botHomeRecordSetAside: (agentId: string, record: string, file: string, reason: string) =>
+		`Bot ${agentId}: ${record} could not be read (${reason}) and was set aside as ${file}.unreadable.`,
+	/** A record of the bot's home (`record`, its words) did not read and could not be set aside: it stays, read again each time. */
+	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string) =>
+		`Bot ${agentId}: ${record} could not be read (${reason}) nor set aside (${file}); it stays in place and is read, and told, again at every read.`,
 	/**
 	 * The owner's stop could not be written to the bot's home: only this running process holds it (quitting it drops the
 	 * stop), and applies it only while the bot's work stands where it was when the stop was made.
@@ -278,8 +286,6 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its spend record could not be written (${reason}); it is written again with its next spend, and its spend is charged once it is.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the record of the notices its session already told could not be read or written (${reason}); one may be told again.`,
-	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: a notice in its chat could not be read and was set aside as ${file}.unreadable (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>
 		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,

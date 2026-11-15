@@ -16,7 +16,13 @@ import type { OwnerNoticeLine } from "../harness-notice.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { errorText } from "./bot-error-text.ts";
-import { type BotHomeRecord, keepNewestHomeRecords, parseHomeRecordHead, readHomeRecords } from "./bot-home-records.ts";
+import {
+	type BotHomeRecord,
+	keepNewestHomeRecords,
+	parseHomeRecordHead,
+	readHomeRecords,
+	tellUnreadableHomeRecord,
+} from "./bot-home-records.ts";
 
 /** Notices kept, the newest: what the chat shows of what the bot's session told the owner. */
 const MAX_NOTICES_KEPT = 16;
@@ -57,7 +63,7 @@ function parseNotice(value: unknown, agentId: string): BotNotice | undefined {
 export function readBotNotices(
 	agentDir: string,
 	agentId: string,
-	unreadable: (file: string, reason: string) => void,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotHomeRecord<BotNotice>[] {
 	return readHomeRecords(botNoticesDir(agentDir, agentId), NOTICE, (value) => parseNotice(value, agentId), unreadable);
 }
@@ -121,9 +127,7 @@ function readBotNoticeDeliveries(
 	} catch (error) {
 		warn(interfaceText().botTeam.botNoticeDeliveriesNotKept(agentId, errorText(error)));
 	}
-	const unreadable = (file: string, reason: string) =>
-		warn(interfaceText().botTeam.botNoticeUnreadable(agentId, file, reason));
-	for (const { message } of readBotNotices(agentDir, agentId, unreadable))
+	for (const { message } of readBotNotices(agentDir, agentId, tellUnreadableHomeRecord(agentId, "notice", warn)))
 		if (message.deliveryId) ids.add(message.deliveryId);
 	return ids;
 }

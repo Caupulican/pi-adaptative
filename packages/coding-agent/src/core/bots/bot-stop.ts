@@ -38,6 +38,7 @@ import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } fro
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeOwnSessionIds } from "./bot-home.ts";
+import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import {
 	type BotInboxStop,
 	readBotInbox,
@@ -200,9 +201,7 @@ export function endUnrecordedStopWork(
 			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
 		}
 		try {
-			refuseMessagesBeforeStop(agentDir, agentId, stop.at, ports, (file, reason) =>
-				ports.warn(interfaceText().botTeam.botInboxUnreadable(agentId, file, reason)),
-			);
+			refuseMessagesBeforeStop(agentDir, agentId, stop.at, ports);
 		} catch (error) {
 			ports.warn(interfaceText().botTeam.botStopMessagesNotRefused(agentId, botFailureText(agentId, error)));
 		}
@@ -214,14 +213,9 @@ export function endUnrecordedStopWork(
  * Refuses the messages waiting for bot `agentId` that were sent at or before the owner's stop made at `at`: the stop
  * covers them, whether it is taken from its record or held in memory. A failure throws, with the rest left waiting.
  */
-function refuseMessagesBeforeStop(
-	agentDir: string,
-	agentId: string,
-	at: number,
-	ports: BotStopPorts,
-	unreadable: (file: string, reason: string) => void,
-): void {
+function refuseMessagesBeforeStop(agentDir: string, agentId: string, at: number, ports: BotStopPorts): void {
 	const reason = interfaceText().botTeam.botTurnAbortReasons.ownerStopped;
+	const unreadable = tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => ports.warn(message));
 	for (const item of readBotInbox(agentDir, agentId, unreadable))
 		if (item.message.at <= at) refuseBotInboxMessage(agentDir, item, reason, ports.now());
 }
@@ -742,13 +736,12 @@ function takeStops(
 				: words.botInboxStopNotSetAside(agentId, file, reason),
 		);
 	});
-	const unreadable = (file: string, reason: string) => ports.warn(words.botInboxUnreadable(agentId, file, reason));
 	const recorded = stops.at(-1)?.message;
 	const newest = memory && (!recorded || memory.at > recorded.at) ? memory : recorded;
 	if (!newest) return { left };
 	const told: string[] = [];
 	const outcome = ownWork(newest, (message) => told.push(message));
-	refuseMessagesBeforeStop(agentDir, agentId, newest.at, ports, unreadable);
+	refuseMessagesBeforeStop(agentDir, agentId, newest.at, ports);
 	for (const stop of stops) takeBotInboxStop(stop);
 	for (const message of told) ports.warn(message);
 	if (outcome.failed.length > 0 || outcome.managed.length > 0)

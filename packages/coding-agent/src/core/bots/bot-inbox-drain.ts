@@ -9,6 +9,7 @@
 import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
+import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import {
 	type BotInboxMessage,
 	botInboxStopWaiting,
@@ -85,8 +86,10 @@ export class BotInboxDrain {
 		const agentDir = this.ports.agentDir();
 		const words = interfaceText().botTeam;
 		if (botInboxStopWaiting(agentDir, agentId) && !this.ports.takeStops(agentId)) return false;
-		const items = readBotInbox(agentDir, agentId, (file, reason) =>
-			this.ports.warn(words.botInboxUnreadable(agentId, file, reason)),
+		const items = readBotInbox(
+			agentDir,
+			agentId,
+			tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => this.ports.warn(message)),
 		);
 		for (const item of items) {
 			if (this.stopped) return false;

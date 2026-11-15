@@ -122,8 +122,14 @@ export const BOT_TEAM = {
 		`este processo não tem permissão para ler os arquivos da sessão do bot ${agentId}; o hospedeiro dele tenta de novo por um minuto, depois quando uma mensagem ou uma mudança do bot pedir`,
 	botInboxFull: (agentId: string, max: number) =>
 		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
-	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
+	homeRecordKinds: {
+		inboxMessage: "uma mensagem da caixa de entrada",
+		notice: "um aviso do chat dele",
+	},
+	botHomeRecordSetAside: (agentId: string, record: string, file: string, reason: string) =>
+		`Bot ${agentId}: não foi possível ler ${record} (${reason}); o arquivo foi separado como ${file}.unreadable.`,
+	botHomeRecordNotSetAside: (agentId: string, record: string, file: string, reason: string) =>
+		`Bot ${agentId}: não foi possível ler ${record} (${reason}) nem separar o arquivo ${file}; ele continua no lugar e é lido, e avisado, de novo a cada leitura.`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); só este processo em execução a mantém, então ela não chega a nenhum outro processo, é descartada se este processo for encerrado e só é aplicada aqui enquanto o trabalho do bot não mudar desde a parada.`,
 	botStopNotRecordedHere: (agentId: string, reason: string) =>
@@ -231,8 +237,6 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o registro de gasto dele não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto, e o gasto é cobrado quando for.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o registro dos avisos que a sessão dele já deu não pôde ser lido ou gravado (${reason}); algum pode ser dado de novo.`,
-	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: um aviso do chat dele não pôde ser lido e foi separado como ${file}.unreadable (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) =>
 		`Histórico dos bots: um arquivo de sessão não pôde ser lido (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>
