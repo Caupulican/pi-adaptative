@@ -17,7 +17,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fsPromises, realpathSync } from "node:fs";
+import { promises as fsPromises, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
@@ -210,6 +210,24 @@ function parseLane(value: unknown): LaneRegistration | undefined {
 
 export async function readLane(paths: SyncStorePaths, laneKey: string): Promise<LaneRegistration | undefined> {
 	return parseLane(await readJsonFile<unknown>(laneFile(paths, laneKey)));
+}
+
+/**
+ * {@link readLane} read synchronously, for a caller that cannot wait (a worker's plan is built synchronously): a missing,
+ * unreadable or corrupt record is absent, as every reader here treats it.
+ */
+export function readLaneSync(paths: SyncStorePaths, laneKey: string): LaneRegistration | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(laneFile(paths, laneKey), "utf-8");
+	} catch {
+		return undefined;
+	}
+	try {
+		return parseLane(JSON.parse(raw));
+	} catch {
+		return undefined;
+	}
 }
 
 export async function writeLane(

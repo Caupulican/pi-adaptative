@@ -40,6 +40,8 @@ export interface WorkerParentCeiling {
 	readonly deniedPaths: readonly string[];
 	/** The capabilities it holds: its envelope's, else those its held tools need (with the network its commands reach). */
 	readonly capabilities: readonly HarnessCapability[];
+	/** Why the worker's lane placement is not known, in English, when it is not: the worker is then held to no root. */
+	readonly unplaced?: string;
 }
 
 /** The ceiling a directing session holds over its workers; "unbounded" where it lends the owner's reach. */
@@ -156,22 +158,27 @@ export function workerCeilingOf(
 export interface WorkerLanePlacement {
 	/**
 	 * The mover of the paths of a session at `sessionCwd` to their copy in the lane `directory` lies in; undefined when
-	 * `directory` is in no lane, "unplaced" when the lane's placement is not known.
+	 * `directory` is in no lane, `unplaced` with the cause when the lane's placement is not known.
 	 */
-	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | "unplaced" | undefined;
+	laneOf(
+		directory: string,
+		sessionCwd: string,
+	): ((entry: string) => string) | { readonly unplaced: string } | undefined;
 }
 
 /**
  * The ceiling as a worker in a worktree lane is held to it: its roots moved into the lane by `move`, and its denied paths
  * denied both where they are and at their copy in the lane (the worker may still read the checkout the lane came from).
  * Roots and denied paths that name the shared checkout, not the lane's copies, would leave those copies open: a lane whose
- * placement is unknown ("unplaced") holds the worker to nothing (no read root, no write root).
+ * placement is unknown (`unplaced`) holds the worker to nothing (no read root, no write root), and the ceiling keeps the
+ * cause for its note (`describeCeilingHolds`).
  */
 function ceilingInLane(
 	ceiling: WorkerParentCeiling,
-	move: ((entry: string) => string) | "unplaced",
+	move: ((entry: string) => string) | { readonly unplaced: string },
 ): WorkerParentCeiling {
-	if (move === "unplaced") return { ...ceiling, readOnly: true, writeRoots: [], readRoots: [] };
+	if (typeof move !== "function")
+		return { ...ceiling, readOnly: true, writeRoots: [], readRoots: [], unplaced: move.unplaced };
 	return {
 		...ceiling,
 		...(ceiling.readRoots ? { readRoots: ceiling.readRoots.map(move) } : {}),
@@ -202,16 +209,23 @@ export function describeCeilingHolds(input: {
 }): string[] {
 	const { ceiling, writeScopes } = input;
 	const kept = new Set(writeScopes);
-	const writes = !input.writeRequested
-		? undefined
-		: ceiling.readOnly
-			? "the starting session changes no files, so this worker is read-only"
-			: writeScopes.length === 0
-				? `its workspace and write paths lie outside the starting session's write roots (${(ceiling.writeRoots ?? []).join(", ")}), so this worker is read-only`
-				: input.requestedWriteScopes.some((scope) => !kept.has(scope))
-					? `its writes are narrowed to the starting session's write roots: ${writeScopes.join(", ")}`
-					: undefined;
+	// A worker whose lane is not placed is held to no root at all, whatever it asked for: the cause is the note.
+	const placement =
+		ceiling.unplaced === undefined
+			? undefined
+			: `this worker's lane could not be placed (${ceiling.unplaced}), so it is held to no read or write root`;
+	const writes =
+		placement !== undefined || !input.writeRequested
+			? undefined
+			: ceiling.readOnly
+				? "the starting session changes no files, so this worker is read-only"
+				: writeScopes.length === 0
+					? `its workspace and write paths lie outside the starting session's write roots (${(ceiling.writeRoots ?? []).join(", ")}), so this worker is read-only`
+					: input.requestedWriteScopes.some((scope) => !kept.has(scope))
+						? `its writes are narrowed to the starting session's write roots: ${writeScopes.join(", ")}`
+						: undefined;
 	return [
+		...(placement ? [placement] : []),
 		...(writes ? [writes] : []),
 		...(input.shellLineWithheld.length > 0
 			? [

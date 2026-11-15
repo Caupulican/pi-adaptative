@@ -258,14 +258,19 @@ export function checkPathScope(scope: PathScope, targetPath: string): PathScopeD
 	};
 }
 
-/** Nearest enclosing repository of `cwd`: its root plus the worktree git dir and the shared common git dir. */
-export function findRepositoryGitPaths(cwd: string): { root: string; gitDirs: string[] } | undefined {
+/**
+ * Nearest enclosing repository of `cwd`: its root plus the worktree git dir and the shared common git dir (`gitDirs`),
+ * and that common dir by name (`commonDir`) when the layout reads.
+ */
+export function findRepositoryGitPaths(
+	cwd: string,
+): { root: string; gitDirs: string[]; commonDir?: string } | undefined {
 	let dir = path.resolve(cwd);
 	while (true) {
 		const marker = path.join(dir, ".git");
 		if (fs.existsSync(marker)) {
 			try {
-				if (fs.statSync(marker).isDirectory()) return { root: dir, gitDirs: [marker] };
+				if (fs.statSync(marker).isDirectory()) return { root: dir, gitDirs: [marker], commonDir: marker };
 				const pointer = fs.readFileSync(marker, "utf8").match(/^gitdir:\s*(.+?)\s*$/im)?.[1];
 				if (!pointer) return { root: dir, gitDirs: [] };
 				const gitDir = path.resolve(dir, pointer);
@@ -273,7 +278,7 @@ export function findRepositoryGitPaths(cwd: string): { root: string; gitDirs: st
 				const commonDir = fs.existsSync(commonFile)
 					? path.resolve(gitDir, fs.readFileSync(commonFile, "utf8").trim())
 					: gitDir;
-				return { root: dir, gitDirs: [...new Set([gitDir, commonDir])] };
+				return { root: dir, gitDirs: [...new Set([gitDir, commonDir])], commonDir };
 			} catch {
 				return { root: dir, gitDirs: [] };
 			}

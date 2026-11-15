@@ -57,6 +57,7 @@ import {
 	isUnderLaneRoot,
 	laneWorktreeOf,
 	nativeRealPath,
+	readLaneSource,
 	releaseWorkerLane,
 	repositoryKeyAt,
 	type WorkerLaneCreation,
@@ -158,8 +159,9 @@ export class WorkerLaneIsolation {
 	private readonly deps: WorkerLaneIsolationDeps;
 	/**
 	 * The checkout each lane placed in this process moves the session's paths from, by the lane's real root read while
-	 * the lane exists (`sourceKey`): what `laneOf` places a parent's ceiling by, from the resolution that placed the worker
-	 * (`placementAt`). A placement that resolves no checkout removes the entry, and so does the lane's discard or release.
+	 * the lane exists (`sourceKey`): the resolution that placed the worker (`placementAt`), which `laneOf` places a parent's
+	 * ceiling by before it reads the lane's registration. A placement that resolves no checkout removes the entry, and so
+	 * does the lane's discard or release.
 	 */
 	private readonly laneSources = new Map<string, { readonly laneRoot: string; readonly checkout: string }>();
 
@@ -349,20 +351,24 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * The mover of the session's paths into the lane `directory` lies in, which places a worker's parent ceiling: from the
-	 * checkout `placementAt` resolved when it placed the worker (`relocatedInto`, a path keeps its
-	 * place relative to the checkout's top); none to make for a session working in that lane itself. Synchronous, no git.
-	 * Undefined when `directory` is in no lane; "unplaced" when this process has not resolved the lane's checkout (a worker
-	 * admitted again after a restart before its lane was read).
+	 * The mover of the session's paths into the lane `directory` lies in, which places a worker's parent ceiling
+	 * (`relocatedInto`, a path keeps its place relative to the checkout's top); none to make for a session working in that
+	 * lane itself. Synchronous, no git. The checkout is the one `placementAt` resolved when this process placed the worker,
+	 * else the lane's registration read now (`readLaneSource`): a worker resumed after a restart, whose plan is built before
+	 * anything in this process placed its lane, is held by the same placement. Undefined when `directory` is in no lane;
+	 * `unplaced` with the cause when no checkout is known.
 	 */
-	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | "unplaced" | undefined {
+	laneOf(
+		directory: string,
+		sessionCwd: string,
+	): ((entry: string) => string) | { readonly unplaced: string } | undefined {
 		const engine = this.deps.engineDeps(directory);
 		const laneRoot = engine && laneWorktreeOf(engine, directory);
 		if (!engine || !laneRoot) return undefined;
 		if (placedWithin(laneRoot, sessionCwd)) return (entry) => entry;
 		const key = this.sourceKey(engine, directory);
-		const source = key ? this.laneSources.get(key) : undefined;
-		return source ? (entry) => relocatedInto(source.checkout, source.laneRoot, entry) : "unplaced";
+		const source = (key ? this.laneSources.get(key) : undefined) ?? readLaneSource(laneRoot);
+		return "unplaced" in source ? source : (entry) => relocatedInto(source.checkout, source.laneRoot, entry);
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */

@@ -19,7 +19,7 @@
 
 import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { findRepositoryGitPaths, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { LaneFacts, LaneRegistration } from "./codes.ts";
 import {
 	bindLaneWorker,
@@ -30,7 +30,7 @@ import {
 	resolveRepoContext,
 	type WorktreeSyncEngineDeps,
 } from "./git-engine.ts";
-import { listLanes } from "./store.ts";
+import { listLanes, readLaneSync, syncStorePaths } from "./store.ts";
 
 /** Directories whose presence in the checkout means the project's dependencies are installed in-tree. */
 const INSTALLED_DEPENDENCY_DIRECTORIES = ["node_modules", ".venv", "venv"] as const;
@@ -202,6 +202,29 @@ export async function findLaneCheckout(
 	const sameRepository =
 		!("code" in session) && canonical(session.gitCommonDir) === canonical(found.context.gitCommonDir);
 	return { lane: found.lane, checkout: sameRepository ? session.topLevel : found.context.hubPath };
+}
+
+/** The lane a session's paths move into and the checkout they move from, or why that is not known (`unplaced`). */
+export type LaneSourceRead = { readonly laneRoot: string; readonly checkout: string } | { readonly unplaced: string };
+
+/**
+ * The checkout the lane at `laneRoot` (a lane worktree's root, `laneWorktreeOf`) was made from, read synchronously from its
+ * registration (`sourceCheckout`), with the registration's own worktree path: what `findLaneCheckout` reads, without git.
+ * The registration is found through the worktree's `.git` pointer to the repository's common dir and the lane key the
+ * layout names it by. `unplaced` says, in English, why no checkout is known: the git layout or the registration does not
+ * read, the registration is not the active lane at `laneRoot`, or it was written before the checkout was recorded.
+ */
+export function readLaneSource(laneRoot: string): LaneSourceRead {
+	const commonDir = findRepositoryGitPaths(laneRoot)?.commonDir;
+	if (!commonDir) return { unplaced: "the lane's git directory does not read" };
+	const lane = readLaneSync(syncStorePaths(commonDir), basename(laneRoot));
+	if (!lane) return { unplaced: "the lane's registration is missing or does not read" };
+	if (lane.status !== "active") return { unplaced: `the lane's registration is ${lane.status}` };
+	if (canonical(lane.worktreePath) !== canonical(laneRoot))
+		return { unplaced: "the lane's registration names another worktree" };
+	if (!lane.sourceCheckout)
+		return { unplaced: "the lane's registration was written before the checkout it was made from was recorded" };
+	return { laneRoot: lane.worktreePath, checkout: lane.sourceCheckout };
 }
 
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */
