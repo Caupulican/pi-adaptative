@@ -16,6 +16,8 @@ import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolve
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
+import { usageScope } from "../session-analytics.ts";
+import { botChargesHeld } from "./bot-charges-held.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
@@ -137,6 +139,16 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				reportId: report.reportId,
 				provider: report.provider,
 				model: report.model,
+				through: report.through,
 			}),
+		// Read where its charges are delivered: the session files of every project (or the custom session directory) and
+		// the live session's entries, the unwritten ones included.
+		chargesHeld: (sessionId) => {
+			const session = deps.getSessionManager();
+			return botChargesHeld(
+				{ scope: usageScope(session), root: session.usesDefaultSessionDir(), entries: session.getEntries() },
+				sessionId,
+			);
+		},
 	};
 }

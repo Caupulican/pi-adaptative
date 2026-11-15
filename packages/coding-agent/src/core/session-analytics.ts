@@ -90,7 +90,7 @@ export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
  * The sessions cross-session totals cover: every project's default directory under this session's own agent dir (the
  * parent of its default session dir, which may differ from the process-global agent dir), or only a custom session dir.
  */
-function usageScope(sessionManager: SessionManager): string {
+export function usageScope(sessionManager: SessionManager): string {
 	const sessionDir = sessionManager.getSessionDir();
 	return sessionManager.usesDefaultSessionDir() ? dirname(sessionDir) : sessionDir;
 }
@@ -407,12 +407,12 @@ export class SessionAnalytics {
 	}
 
 	/**
-	 * Whether the session's historical accounting (the usage its transcript no longer holds in full) is loading: until it
-	 * lands, `getCumulativeUsage` may read less than the session spent.
+	 * The cumulative usage the session's ledger holds (`getCumulativeUsage` without the paid System One usage not recorded
+	 * yet): what a charge of the session's spend reads, so it covers recorded usage only. Until the historical accounting
+	 * has loaded, or when its load failed, it may read less than the session spent.
 	 */
-	isAccountingHistoryLoading(): boolean {
-		this.getAccountingEntries();
-		return this.accountingHistory.loading();
+	getDurableCumulativeUsage(): Usage {
+		return aggregateCumulativeUsageFromSessionEntries(this.getAccountingEntries());
 	}
 
 	/**
@@ -437,6 +437,7 @@ export class SessionAnalytics {
 			model?: string;
 			goalId?: string;
 			usageComponents?: readonly UsageComponent[];
+			through?: Usage;
 		},
 	): string | undefined {
 		const reportId = opts?.reportId;
@@ -451,6 +452,7 @@ export class SessionAnalytics {
 			provider: opts?.provider,
 			model: opts?.model,
 			goalId: opts?.goalId,
+			through: opts?.through,
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);

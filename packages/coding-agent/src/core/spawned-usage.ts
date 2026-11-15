@@ -13,6 +13,8 @@ export interface SpawnedUsageReporter {
 			model?: string;
 			goalId?: string;
 			usageComponents?: readonly UsageComponent[];
+			/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
+			through?: Usage;
 		},
 	): string | undefined;
 }

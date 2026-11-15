@@ -4707,8 +4707,8 @@ export class AgentSession {
 		return this._analytics.getCumulativeUsage();
 	}
 
-	isAccountingHistoryLoading(): boolean {
-		return this._analytics.isAccountingHistoryLoading();
+	getDurableCumulativeUsage(): Usage {
+		return this._analytics.getDurableCumulativeUsage();
 	}
 
 	addSpawnedUsage(

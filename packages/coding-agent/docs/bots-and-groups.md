@@ -57,7 +57,13 @@ session's workers on it run. The windows are kept in the bot's spend ledger, `bo
 in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is. What the bot's session spends is added
 to the main session's cost at each turn's end and each time a worker's usage reaches it, from a watermark kept in the same
 ledger: each charge's range is written there before it is reported and kept until the main session's file holds it, so a
-reopen or a crash charges no range twice and loses none; a session with no watermark yet (a new bot, a new session file) starts one at what it has spent once its historical accounting has loaded. A turn's spend counts, with its model calls, the
+reopen or a crash charges no range twice and loses none. The watermark only moves forward, field by field, over the usage the
+bot's session has recorded, so a reading short of it (its history still loading, or failed to load) charges nothing
+twice. A session with no watermark (a new bot, a new session file, a lost record) starts at how far the main session
+holds its charges: each charge names the end of its range, and the main session's files and unwritten entries are read
+back for it; ranges reach the main session in order. A spend record that cannot be read is left in place and read again,
+counting in memory meanwhile; one that does not read is set aside as `spend.json.unreadable-<time>`, keeping what of it
+reads. You are told once either way. A turn's spend counts, with its model calls, the
 compactions that serve it: one while it runs or between its runs, and one just before its first run in the same
 submission (the threshold check before your message's run). A compaction after a turn's last run counts toward no turn's
 bound; it is charged with the session's next charge. The bot compacts its own context with `self_compact` as the main session

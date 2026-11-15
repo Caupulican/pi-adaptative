@@ -58,11 +58,6 @@ export class SessionAccountingHistory {
 		return Boolean(this.state?.projection?.groups.length);
 	}
 
-	/** A load of the history is scheduled or running: what the session's accounting reads may still grow when it lands. */
-	loading(): boolean {
-		return Boolean(this.state?.scheduled || this.state?.loading);
-	}
-
 	status(): "pending" | "unavailable" | undefined {
 		return this.state?.loading || this.state?.deferred ? "pending" : this.state?.failed ? "unavailable" : undefined;
 	}
@@ -152,6 +147,7 @@ export class SessionAccountingHistory {
 		const file = state.file;
 		const revision = state.revision;
 		let updated = false;
+		let failure: { readonly error: unknown } | undefined;
 		const load = (async () => {
 			const projection =
 				(!state.loaded ? await readAccountingProjection(file) : undefined) ??
@@ -179,12 +175,14 @@ export class SessionAccountingHistory {
 						state.needsRefresh = true;
 					}
 					updated = true;
-				} else this.deps.onError(error);
+				} else failure = { error };
 			})
 			.finally(() => {
+				// Told only once the load is over: a reader the failure wakes finds the history settled, not loading.
 				state.loading = false;
 				if (this.isCurrent(state) && state.needsRefresh) this.schedule(state);
 				if (this.isCurrent(state) && updated) this.deps.onUpdated();
+				if (failure && this.isCurrent(state)) this.deps.onError(failure.error);
 			});
 		this.loads.add(load);
 		void load.finally(() => this.loads.delete(load));

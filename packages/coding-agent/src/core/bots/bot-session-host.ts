@@ -143,6 +143,8 @@ export interface BotSender {
 	 * root's file holds it.
 	 */
 	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
+	/** How far the root session holds the charges of bot session `sessionId` (`botChargesHeld`). */
+	chargesHeld(sessionId: string): Promise<Usage>;
 }
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
@@ -736,6 +738,7 @@ export class BotSessionHost {
 				recheckWhenIdle: false,
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
+					chargesHeld: (sessionId) => entry.sender.chargesHeld(sessionId),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),
@@ -888,6 +891,7 @@ export class BotSessionHost {
 				// A turn still open ends here: its spend, then its answer, once, whether or not its end reached the subscription
 				// first (a run end that announced a retry that never began leaves it open).
 				() => entry.turns.ended(),
+				() => entry.turns.close(),
 				() => entry.unsubscribe(),
 				() => entry.session.disposeAndWait(),
 				() => entry.releaseSettings(),

@@ -4,20 +4,24 @@
  * advance in the same write: whatever the windows counted and the charges covered when a write lands is what a reopen
  * reads, with nothing between two files to disagree.
  *
- * The charge watermark reads the bot session's cumulative usage (`AgentSession.getCumulativeUsage`: every usage entry of
- * its transcript, spawned usage included), which a compaction does not shrink: it only appends. It names the session it
+ * The charge watermark reads the bot session's recorded cumulative usage (`AgentSession.getDurableCumulativeUsage`: every
+ * usage entry of its transcript, spawned usage included), which a compaction does not shrink: it only appends. It names the session it
  * reads, so a bot that opens another session file starts that one's watermark and still holds the charges it fixed for
  * the first: a charge's range, report id and usage are written here before it is reported, and stay until the root's
  * file holds it.
  *
- * A record that does not read is set aside (`.unreadable`) and the owner told; the windows then start empty and the
- * charges from what the session has spent once its accounting history has loaded (`BotTurnAccounting`).
+ * A record that cannot be read (the file system refused it) stays in place and is read again with each write: nothing is
+ * written over it, its windows count in memory meanwhile and are merged with the file's once it reads, and no charge is
+ * fixed until then. A record that does not read is set aside (`spend.json.unreadable-<time>`) and what of it reads is
+ * kept: windows that did not read start empty, and a charge watermark that did not read is recovered from the charges the
+ * main session holds (`BotTurnAccounting`). One that cannot be set aside is held as one that cannot be read. The owner
+ * is told once.
  */
 
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { readFileSync, renameSync } from "node:fs";
 import type { Usage } from "@caupulican/pi-ai";
 import { isUsage } from "../cost/session-usage.ts";
-import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 /** One window as it is kept (`BotSpendWindows`). */
@@ -47,6 +51,8 @@ export interface BotChargeReport {
 	readonly sessionId: string;
 	readonly provider: string;
 	readonly model: string;
+	/** The bot session's cumulative usage the charge's range ends at: how far the root holds its charges. */
+	readonly through: Usage;
 }
 
 export interface BotCharge {
@@ -64,12 +70,26 @@ export interface BotChargeState {
 	pending: BotCharge[];
 }
 
-/** What the ledger tells the owner. */
+/** What the ledger reads of its host and tells the owner (the record that does not read is told once). */
 export interface BotSpendLedgerPorts {
-	/** The record could not be read, in the owner's words. */
-	notRead(reason: string): void;
-	/** The record could not be written, in the owner's words. */
+	/** The host's clock (ms since the epoch): a record set aside is named by it. */
+	now(): number;
+	/**
+	 * The record could not be read (`reason`), or did not read and could not be set aside (`setAsideError`): it stays in
+	 * place and is read again.
+	 */
+	held(reason: string, setAsideError?: string): void;
+	/** The record did not read (`reason`) and was set aside as `file`; `chargesKept`: its charge watermark read. */
+	setAside(file: string, reason: string, chargesKept: boolean): void;
+	/** The record could not be written. */
 	notWritten(reason: string): void;
+}
+
+/** What of a record reads: its windows and charge watermark that read, and what did not (`problems`). */
+interface ReadRecord {
+	readonly windows: readonly SpendWindowRecord[];
+	readonly charge: BotChargeState | undefined;
+	readonly problems: readonly string[];
 }
 
 function errorText(error: unknown): string {
@@ -89,16 +109,17 @@ function parseWindow(value: unknown): SpendWindowRecord | undefined {
 
 function parseCharge(value: unknown): BotCharge | undefined {
 	if (!isPlainRecord(value) || !isUsage(value.usage) || !isPlainRecord(value.report)) return undefined;
-	const { agentId, reportId, sessionId, provider, model } = value.report;
+	const { agentId, reportId, sessionId, provider, model, through } = value.report;
 	if (
 		typeof agentId !== "string" ||
 		typeof reportId !== "string" ||
 		typeof sessionId !== "string" ||
 		typeof provider !== "string" ||
-		typeof model !== "string"
+		typeof model !== "string" ||
+		!isUsage(through)
 	)
 		return undefined;
-	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model } };
+	return { usage: value.usage, report: { agentId, reportId, sessionId, provider, model, through } };
 }
 
 function parseChargeState(value: unknown): BotChargeState | undefined {
@@ -107,6 +128,25 @@ function parseChargeState(value: unknown): BotChargeState | undefined {
 	const pending = value.pending.map(parseCharge);
 	if (!pending.every((charge): charge is BotCharge => charge !== undefined)) return undefined;
 	return { sessionId: value.sessionId, through: value.through, pending };
+}
+
+/** What of the record `text` reads (see `ReadRecord`). */
+function readRecord(text: string): ReadRecord {
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch (error) {
+		return { windows: [], charge: undefined, problems: [errorText(error)] };
+	}
+	if (!isPlainRecord(value) || value.v !== 1 || !Array.isArray(value.windows))
+		return { windows: [], charge: undefined, problems: ["not a bot spend record"] };
+	const problems: string[] = [];
+	const windows = value.windows.flatMap((item) => parseWindow(item) ?? []);
+	const unread = value.windows.length - windows.length;
+	if (unread > 0) problems.push(`${unread} of its spend windows did not read`);
+	const charge = value.charge === undefined ? undefined : parseChargeState(value.charge);
+	if (value.charge !== undefined && !charge) problems.push("its charge watermark did not read");
+	return { windows, charge, problems };
 }
 
 /** The bot's spend ledger (see the module comment): its one reader and writer. */
@@ -121,15 +161,24 @@ export class BotSpendLedger {
 	private dirty = false;
 	/** A write failed and the owner was told; told again only after a write succeeds. */
 	private writeFailed = false;
+	/** The file is in place and was not read: nothing is written over it, and it is read again (`readable`). */
+	private held = false;
+	/** The owner was told the record did not read. */
+	private toldNotRead = false;
 
 	constructor(file: string, ports: BotSpendLedgerPorts) {
 		this.file = file;
 		this.ports = ports;
-		try {
-			this.read();
-		} catch (error) {
-			ports.notRead(errorText(error));
-		}
+		this.read();
+	}
+
+	/**
+	 * Whether the ledger holds what its file holds (none, when there is no file): a held record is read again first. While
+	 * it is not, the windows count in memory and no charge is fixed.
+	 */
+	readable(): boolean {
+		if (this.held) this.read();
+		return !this.held;
 	}
 
 	/** A change to write with the next write. */
@@ -147,6 +196,10 @@ export class BotSpendLedger {
 	 * stay to be written with the next.
 	 */
 	write(): boolean {
+		if (!this.readable()) {
+			this.dirty = true;
+			return false;
+		}
 		try {
 			writeFileAtomicSync(
 				this.file,
@@ -165,28 +218,65 @@ export class BotSpendLedger {
 	}
 
 	/**
-	 * Reads the record. One that does not read is set aside (renamed `.unreadable`) and thrown, so it is reported once and
-	 * the next write starts a new one; a file that cannot be read is thrown and kept.
+	 * Reads the record (see the module comment): one that cannot be read, or that does not read and cannot be set aside, is
+	 * held; what reads is merged with the windows counted meanwhile.
 	 */
 	private read(): void {
-		if (!existsSync(this.file)) return;
-		const text = readFileSync(this.file, "utf8");
+		let text: string;
 		try {
-			const value: unknown = JSON.parse(text);
-			if (!isPlainRecord(value) || value.v !== 1 || !Array.isArray(value.windows))
-				throw new Error("not a bot spend record");
-			const charge = value.charge === undefined ? undefined : parseChargeState(value.charge);
-			if (value.charge !== undefined && !charge) throw new Error("its charge watermark does not read");
-			const windows = value.windows.map((item) => {
-				const window = parseWindow(item);
-				if (!window) throw new Error("a spend window does not read");
-				return window;
-			});
-			this.charge = charge;
-			for (const window of windows) this.windows.set(window.id, window);
+			text = readFileSync(this.file, "utf8");
 		} catch (error) {
-			renameSync(this.file, `${this.file}.unreadable`);
-			throw new Error(`${this.file} was set aside as ${this.file}.unreadable: ${errorText(error)}`);
+			if (isMissingFileError(error)) {
+				this.held = false;
+				return;
+			}
+			this.held = true;
+			this.tell(() => this.ports.held(errorText(error)));
+			return;
 		}
+		const record = readRecord(text);
+		if (record.problems.length > 0) {
+			const reason = record.problems.join("; ");
+			const aside = `${this.file}.unreadable-${this.ports.now()}`;
+			try {
+				renameSync(this.file, aside);
+			} catch (error) {
+				this.held = true;
+				this.tell(() => this.ports.held(reason, errorText(error)));
+				return;
+			}
+			this.tell(() => this.ports.setAside(aside, reason, record.charge !== undefined));
+			this.dirty = true;
+		}
+		this.held = false;
+		this.merge(record);
+	}
+
+	/**
+	 * Takes what the record read: its charge watermark (none is fixed while the record is held, so there is none in memory
+	 * to keep), and its windows, each merged with the one counted in memory meanwhile under the same id.
+	 */
+	private merge(record: ReadRecord): void {
+		if (record.charge) this.charge = record.charge;
+		for (const window of record.windows) {
+			const counted = this.windows.get(window.id);
+			if (!counted) {
+				this.windows.set(window.id, window);
+				continue;
+			}
+			counted.foregroundUsd += window.foregroundUsd;
+			counted.meteredForegroundUsd += window.meteredForegroundUsd;
+			for (const attemptId of window.attemptIds)
+				if (!counted.attemptIds.includes(attemptId)) counted.attemptIds.push(attemptId);
+			counted.updatedAt = Math.max(counted.updatedAt, window.updatedAt);
+			this.dirty = true;
+		}
+	}
+
+	/** Tells the owner the record did not read, once. */
+	private tell(notice: () => void): void {
+		if (this.toldNotRead) return;
+		this.toldNotRead = true;
+		notice();
 	}
 }

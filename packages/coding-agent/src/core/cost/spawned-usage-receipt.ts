@@ -18,6 +18,8 @@ export interface SpawnedUsageReceiptOptions {
 	reportId: string;
 	label?: string;
 	sourceSessionId?: string;
+	/** The source session's cumulative usage the charged range ends at (`SpawnedUsageReport.through`). */
+	through?: Usage;
 	/** Originating worker binding; cumulative usage may also include other models. */
 	provider?: string;
 	model?: string;
@@ -35,6 +37,7 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		(data.model === undefined || data.model === options.model) &&
 		(data.goalId === undefined || data.goalId === options.goalId) &&
 		isDeepStrictEqual(data.usageComponents, options.usageComponents) &&
+		isDeepStrictEqual(data.through, options.through) &&
 		isDeepStrictEqual(data.usage, usage)
 	);
 }

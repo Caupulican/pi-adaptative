@@ -91,7 +91,19 @@ export class BotSessionSpend {
 		this.ports = ports;
 		const words = () => interfaceText().botTeam;
 		this.ledger = new BotSpendLedger(botSpendLedgerFile(agentDir, agentId), {
-			notRead: (reason) => ports.warn(words().botSpendLedgerNotRead(agentId, reason)),
+			now: () => ports.now(),
+			held: (reason, setAsideError) =>
+				ports.warn(
+					setAsideError === undefined
+						? words().botSpendLedgerHeld(agentId, reason)
+						: words().botSpendLedgerNotSetAside(agentId, reason, setAsideError),
+				),
+			setAside: (file, reason, chargesKept) =>
+				ports.warn(
+					chargesKept
+						? words().botSpendLedgerSetAside(agentId, file, reason)
+						: words().botSpendLedgerSetAsideChargesRecovered(agentId, file, reason),
+				),
 			notWritten: (reason) => ports.warn(words().botSpendLedgerNotWritten(agentId, reason)),
 		});
 		this.windows = new BotSpendWindows(this.ledger, transcript, {

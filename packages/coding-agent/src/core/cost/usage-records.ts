@@ -36,6 +36,12 @@ export interface SpawnedUsageReport {
 	origin?: AccountingOrigin;
 	costBasis?: "response";
 	sourceSessionId?: string;
+	/**
+	 * The source session's cumulative usage the report's range ends at, for a source that charges ranges of its cumulative
+	 * usage (a bot's session, `BotTurnAccounting`): how far the parent holds its charges, read back when the source's own
+	 * record of them is lost.
+	 */
+	through?: Usage;
 	/** Stable idempotency identity for retry-safe ingestion. */
 	reportId?: string;
 }
