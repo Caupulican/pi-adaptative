@@ -14,7 +14,7 @@
 		"packages/coding-agent/src/core/memory-controller.ts": 3610,
 		"packages/coding-agent/src/modes/interactive/components/settings-selector.ts": 3349,
 		"packages/coding-agent/src/core/model-router/read-only-shell-policy.ts": 3357,
-		"packages/coding-agent/src/core/tools/delegate.ts": 3305,
+		"packages/coding-agent/src/core/tools/delegate.ts": 3304,
 		"packages/coding-agent/src/core/routines/routine-intake-timing.ts": 3291,
 		"packages/coding-agent/src/core/delegation/worker-agent-control-coordinator.ts": 2084,
 		"packages/coding-agent/src/core/routines/routine-contract.ts": 3085,

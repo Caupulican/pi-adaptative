@@ -66,7 +66,7 @@ import {
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
 } from "../orchestration/contracts.ts";
-import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
+import { WORKER_ORCHESTRATION_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import { hasRolePins, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
@@ -141,8 +141,7 @@ export const DELEGATE_ACTIONS = [
 
 export type DelegateAction = (typeof DELEGATE_ACTIONS)[number];
 
-const LEAF_ORCHESTRATION_TOOL_NAMES = ORCHESTRATION_PROFILE_TOOL_NAMES.filter((name) => name !== "delegate");
-const ORCHESTRATION_TOOL_NAME_PATTERN = `^(?:${LEAF_ORCHESTRATION_TOOL_NAMES.join("|")})$`;
+const ORCHESTRATION_TOOL_NAME_PATTERN = `^(?:${WORKER_ORCHESTRATION_TOOL_NAMES.join("|")})$`;
 
 function createDelegateSchema(actions: readonly DelegateAction[]) {
 	const actionDescription = [

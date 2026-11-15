@@ -4,6 +4,7 @@ import { BOT_MESSAGE_TOOL_NAME } from "../delegation/bot-message-contract.ts";
 import { WORKER_MEMORY_BROKER_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
+import { BOT_DIRECTOR_TOOL_NAMES } from "../tools/delegate-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
@@ -28,7 +29,21 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"skill_audit",
 	SYSTEM_ONE_TOOL_NAME,
 ] as const;
-export const ORCHESTRATION_PROFILE_TOOL_NAMES = [...CLASSIFIED_LANE_TOOL_NAMES, "delegate", "task_directory"] as const;
+/**
+ * The tools a profile may name. The director tools (`delegate`, `assign`) are held only by a session whose standing
+ * directs workers (a bot made from the profile); a worker of the profile never holds them: its grant drops every tool that
+ * needs `workflow.delegate` (`worker-authority-resolver.ts`) and the worker floor forbids them (`WORKER_FORBIDDEN_TOOLS`).
+ */
+export const ORCHESTRATION_PROFILE_TOOL_NAMES = [
+	...CLASSIFIED_LANE_TOOL_NAMES,
+	...BOT_DIRECTOR_TOOL_NAMES,
+	"task_directory",
+] as const;
+
+/** The tools a worker's start may name: a profile's, less the ones that start workers. */
+export const WORKER_ORCHESTRATION_TOOL_NAMES: readonly string[] = ORCHESTRATION_PROFILE_TOOL_NAMES.filter(
+	(name) => !BOT_DIRECTOR_TOOL_NAMES.includes(name),
+);
 
 /**
  * Manifest-only lane catalogue. It contains no tool factories, so policy compilation can omit
