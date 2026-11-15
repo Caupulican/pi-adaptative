@@ -195,6 +195,11 @@ export class RoutineRuntimeAssembly {
 				if (!routines) throw new Error("Routines are unavailable in this session.");
 				return routines.session.armForWorker(worker, input, signal);
 			},
+			cancel: async (worker, routineId, signal) => {
+				const routines = runtime();
+				if (!routines) throw new Error("Routines are unavailable in this session.");
+				await routines.session.cancelForWorker(worker, routineId, signal);
+			},
 		};
 	}
 

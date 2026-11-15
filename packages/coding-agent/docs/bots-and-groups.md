@@ -158,7 +158,8 @@ process.
 
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
-whatever armed them (the bot can change or delete none). A command or page is first admitted as the call its own shell or
+whatever armed them (the bot changes none, and cancels one its own session armed with `task_watch`'s `cancel` action once it
+no longer waits on it, which frees that slot). A command or page is first admitted as the call its own shell or
 fetch tool would make, by its own gate (System One's operation judgment included), so a bot without that tool arms
 nothing, and a read-only bot's command is held to its read-only shell at arming and at every check. The bot's own session
 samples its watches and wakes it with the event (a running turn is steered, an idle bot starts a turn); no other session
@@ -209,9 +210,11 @@ work of its worker tasks and the jobs its sessions placed on other machines (a s
 symbolic link is skipped, and you are told once for that stop, however often its take is tried again). Your words sent after it never start a turn before it is applied: while a
 stop waits unapplied they wait in the bot's inbox behind it, and you are told so. It reaches the bot
 wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which, or that it could not be read),
-or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end
-with it): they are standing work you asked for, so one that fires after the stop wakes the bot into a new turn, and
-they end when they fire, at their end time or when the bot is retired. A stop that cannot be written to the bot's home
+or applied in place when no process does. It also ends the watches the bot's session armed by the time of the stop (a
+stopped worker's watches end with it) and settles the results of its watches that fired by then and that it had not read
+yet, recorded by a note in its conversation, and you are told how many of each it ended; a watch the bot arms after the
+stop is kept and wakes it as usual. A watch's wake its conversation had already taken before the stop is not withdrawn:
+it still runs when the bot next opens or is next sent words. A stop that cannot be written to the bot's home
 is not recorded: you are told it is held only by this running process (quitting it drops the stop), reaches no other
 process and is applied here only while the bot's work is unchanged (for a bot this process hosts, that it applies only
 to the bot's work in this process), and to send it again once it is dropped. A session started after every other one

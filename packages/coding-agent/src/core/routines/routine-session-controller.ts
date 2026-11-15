@@ -271,8 +271,8 @@ export class RoutineSessionController implements RoutineToolPort {
 	 * Arms a watch for the session's own wait with its `task_watch` tool (a bot's own session, which holds no `routine`
 	 * tool): the routine tool's arming of a watch, its check admitted by the session's gate as a sub-call of `toolCallId`,
 	 * under the bounds of a watch armed without the owner's words whoever opened the run (one-shot, an end time within a
-	 * day), and in a slot of the session's count whatever armed the others, since nothing in the session changes or
-	 * deletes a watch once armed.
+	 * day), and in a slot of the session's count whatever armed the others, since nothing in the session changes a watch
+	 * once armed; it only cancels one it armed itself (`cancelForSession`), which frees that slot.
 	 */
 	async armForSession(input: RoutineToolInput, toolCallId: string, signal?: AbortSignal): Promise<RoutineToolView> {
 		this.check(signal);
@@ -324,6 +324,38 @@ export class RoutineSessionController implements RoutineToolPort {
 				worker,
 			},
 		);
+	}
+
+	/**
+	 * Cancels a watch the session armed for its own wait with its `task_watch` tool (a bot's own session): one of its own
+	 * session's watches that no worker armed. A worker's watch is the worker's own (`cancelForWorker`).
+	 */
+	async cancelForSession(routineId: string, signal?: AbortSignal): Promise<void> {
+		this.cancelWatch(routineId, (armedBy) => armedBy?.kind !== "worker", signal);
+	}
+
+	/** Cancels a watch worker runtime `worker` armed for its own wait; one any other runtime or the session armed is absent to it. */
+	async cancelForWorker(worker: WorkerWatchAuthority, routineId: string, signal?: AbortSignal): Promise<void> {
+		this.cancelWatch(
+			routineId,
+			(armedBy) => armedBy?.kind === "worker" && armedBy.runtimeId === worker.runtimeId,
+			signal,
+		);
+	}
+
+	/** Deletes the session's watch `routineId` when `armedByCaller` says its caller armed it; absent to the caller otherwise. */
+	private cancelWatch(
+		routineId: string,
+		armedByCaller: (armedBy: RoutineArmAuthority | undefined) => boolean,
+		signal?: AbortSignal,
+	): void {
+		this.check(signal);
+		const routine = this.deps.store.getRoutine(routineId);
+		if (!routine || !this.owns(routine) || !isWatchSchedule(routine.schedule) || !armedByCaller(routine.armedBy))
+			throw new Error(`No watch "${routineId}" you armed is waiting.`);
+		if (!this.deps.store.deleteRoutine(routineId, routine.revision, this.deps.now()))
+			throw new Error("Watch changed before it was cancelled.");
+		harnessLog.info("routines", "a watch was cancelled by its armer", { routineId });
 	}
 
 	async setEnabled(

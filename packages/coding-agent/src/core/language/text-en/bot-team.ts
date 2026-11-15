@@ -207,6 +207,17 @@ export const BOT_TEAM = {
 	/** The owner's stop of a closed bot found its saved session's file holding another session, and left the file. */
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
 		`Bot ${agentId}: the owner's stop ended its workers and the jobs it placed on other machines, but left its goal and its usage-limit wait as they were: ${file} does not hold its session ${sessionId}.`,
+	/** The watches the owner's stop ended, armed before it, and the results they fired before it that the bot had not taken. */
+	botStopWatchesEnded: (agentId: string, watches: number, results: number) =>
+		`Bot ${agentId}: the owner's stop ended ${[
+			watches > 0 ? `${watches} ${watches === 1 ? "watch" : "watches"} it had armed` : "",
+			results > 0 ? `${results} watch ${results === 1 ? "result" : "results"} it had not read yet` : "",
+		]
+			.filter((part) => part !== "")
+			.join(" and ")}; a watch it arms after the stop is kept.`,
+	/** The watches of a bot whose stop was held in memory could not be ended. */
+	botStopWatchesNotEnded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the owner's stop could not end the watches it had armed (${reason}).`,
 	/** What the owner's stop of a bot did not end. */
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
 		`Bot ${agentId}: the owner's stop did not end ${[

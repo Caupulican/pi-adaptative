@@ -170,6 +170,19 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a parada do dono foi registrada e o processo que hospeda o bot a toma, ou este enquanto nenhum o hospeda; não foi possível ler qual processo o hospeda (${reason}).`,
 	botStopSessionFileForeign: (agentId: string, file: string, sessionId: string) =>
 		`Bot ${agentId}: a parada do dono encerrou os workers dele e os jobs que ele colocou em outras máquinas, mas deixou o objetivo e a espera pelo limite de uso como estavam: ${file} não contém a sessão ${sessionId}.`,
+	botStopWatchesEnded: (agentId: string, watches: number, results: number) =>
+		`Bot ${agentId}: a parada do dono encerrou ${[
+			watches > 0
+				? `${watches} ${watches === 1 ? "espera que ele tinha armado" : "esperas que ele tinha armado"}`
+				: "",
+			results > 0
+				? `${results} ${results === 1 ? "resultado de espera que ele ainda não tinha lido" : "resultados de espera que ele ainda não tinha lido"}`
+				: "",
+		]
+			.filter((part) => part !== "")
+			.join(" e ")}; uma espera que ele armar depois da parada é mantida.`,
+	botStopWatchesNotEnded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a parada do dono não conseguiu encerrar as esperas que ele tinha armado (${reason}).`,
 	botStopLeftLanes: (agentId: string, failed: number, managed: number) =>
 		`Bot ${agentId}: a parada do dono não encerrou ${[
 			failed > 0

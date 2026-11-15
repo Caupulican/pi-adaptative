@@ -9,7 +9,9 @@
  * unended worker attempt cancelled, the bot's parent agents included (`OWNER_STOPPED_REASON`, whose ends wake no one), then
  * the bot's goal is paused when it runs or the system would resume it on its own and the owner has not set it going since
  * the stop was made (`holdPersistedGoalForOwnerStop`; the owner resumes it), and the usage-limit wait of every usage stop
- * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop). The stop is then taken, and every job a
+ * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop), and what the bot's session armed or was
+ * fired for before the stop is ended: its watches armed until then are deleted and the results fired for it until then that
+ * it has not taken are settled without a turn (`endWatchesBeforeStop`). The stop is then taken, and every job a
  * session of the bot's home placed on another machine is ended, so nothing goes on spending; a failure there is told to the
  * owner and does not keep the stop. A managed lane is left to the extension that runs it, and the owner is told.
  *
@@ -24,6 +26,7 @@ import { readSessionHeaderResult } from "../../kernel/session/session-header.ts"
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
+import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { OWNER_STOPPED_REASON, stopSessionWorkers, type WorkerStopOutcome } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
@@ -34,6 +37,7 @@ import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
+import { MAX_ROUTINE_OCCURRENCES } from "../routines/routine-contract.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
@@ -58,13 +62,80 @@ import { botSessionOnDisk, type SavedBotSession } from "./bot-remote-view.ts";
 import { BotSessionLinkError } from "./bot-session-pointer.ts";
 
 /**
- * What applying a stop needs besides the bot's files: the owner's notices, the provider admission clock's time, and what
- * the owner was told of the work a stop or a release left behind a symbolic link, kept for the process (`LinkedSessionNotices`).
+ * What applying a stop needs besides the bot's files: the owner's notices, the provider admission clock's time, what
+ * the owner was told of the work a stop or a release left behind a symbolic link, kept for the process (`LinkedSessionNotices`),
+ * and the store of the bot's watches.
  */
 export interface BotStopPorts {
 	warn(message: string): void;
 	now(): number;
 	readonly links: LinkedSessionNotices;
+	watches(): BotWatchStore;
+}
+
+/** The store's watches of a bot's session and the results they fired, as the owner's stop ends them. */
+export type BotWatchStore = Pick<
+	PersistentBotTeamStore,
+	"reload" | "listRoutines" | "deleteRoutine" | "listPendingRoutineDeliveries" | "acknowledgeRoutineDelivery"
+>;
+
+/**
+ * The transcript note of the fired results the owner's stop settled without a turn (`endWatchesBeforeStop`): the store
+ * marks each one acknowledged by this entry, as a delivery marks a result by the input that carried it.
+ */
+export const BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE = "bot_stop_watch_results";
+
+/** A bot session's transcript as the stop notes in it the results it settled. */
+type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDurableForSession">;
+
+/**
+ * What bot `agentId`'s session `sessionId` armed or was fired for before the owner's stop made at `stop.at`, ended by it:
+ * every watch the session holds that was armed at or before then is deleted (`deleteRoutine`, which also cancels its runs
+ * not yet dispatched), and every result fired for the session at or before then that it has not taken is settled without a
+ * turn, marked acknowledged by a note in its `transcript` that names them; none is settled while the session has no
+ * transcript of its own to note them in. A watch armed after the stop, and a result fired after it, are the bot's later
+ * work and stay. What it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and
+ * is tried again, which finds them ended, has told them once. A failure throws.
+ */
+function endWatchesBeforeStop(
+	agentId: string,
+	sessionId: string,
+	transcript: StopNoteTranscript | undefined,
+	stop: OwnerStop,
+	ports: Pick<BotStopPorts, "warn" | "now" | "watches">,
+): void {
+	const store = ports.watches();
+	const now = ports.now();
+	let [ended, settled] = [0, 0];
+	try {
+		store.reload(true);
+		for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
+			if (Date.parse(watch.createdAt) <= stop.at && store.deleteRoutine(watch.routineId, watch.revision, now))
+				ended++;
+		const fired = store
+			.listPendingRoutineDeliveries(sessionId, 2 * MAX_ROUTINE_OCCURRENCES)
+			.filter(({ occurrence }) => occurrence.createdAt <= stop.at);
+		if (!transcript || fired.length === 0) return;
+		const note = transcript.appendCustomEntry(BOT_STOP_WATCH_RESULTS_CUSTOM_TYPE, {
+			version: 1,
+			stoppedAt: stop.at,
+			occurrenceIds: fired.map(({ occurrence }) => occurrence.occurrenceId),
+		});
+		if (!transcript.isEntryDurableForSession(note))
+			throw new Error("the note of the watch results the stop settles was not saved");
+		for (const { occurrence, result } of fired) {
+			store.acknowledgeRoutineDelivery({
+				occurrenceId: occurrence.occurrenceId,
+				recipient: result.recipient,
+				resultDigest: result.digest,
+				deliveryMarker: note,
+				nowMs: Math.max(now, occurrence.updatedAt),
+			});
+			settled++;
+		}
+	} finally {
+		if (ended + settled > 0) ports.warn(interfaceText().botTeam.botStopWatchesEnded(agentId, ended, settled));
+	}
 }
 
 /** What ending the jobs a bot's home placed tells the owner through: its notices, and what they were told of its links. */
@@ -230,6 +301,11 @@ export function endUnrecordedStopWork(
 			ports.warn(interfaceText().botTeam.botStopGoalNotHeld(agentId, botFailureText(agentId, error)));
 		}
 		try {
+			endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, stop, ports);
+		} catch (error) {
+			ports.warn(interfaceText().botTeam.botStopWatchesNotEnded(agentId, botFailureText(agentId, error)));
+		}
+		try {
 			refuseMessagesBeforeStop(agentDir, agentId, stop.at, ports);
 		} catch (error) {
 			ports.warn(interfaceText().botTeam.botStopMessagesNotRefused(agentId, botFailureText(agentId, error)));
@@ -295,7 +371,8 @@ function applyBotStopUnderLock(
 		agentDir,
 		agentId,
 		(stop, warn) => {
-			if ("saved" in session) return stopClosedSession(agentDir, agentId, saved, stop, { ...ports, warn });
+			if ("saved" in session)
+				return stopClosedSession(agentDir, agentId, saved, stop, { ...ports, warn }, ports.warn);
 			// Nothing is ended through the link: the rest of the stop applies, and the owner is told what it left.
 			warn(interfaceText().botTeam.botStopLinkedSessionLeft(agentId, session.linked));
 			return NOTHING_LEFT;
@@ -331,7 +408,7 @@ export interface LoadedBotSession {
 		AgentSession,
 		"sessionId" | "getGoalStateSnapshot" | "saveGoalStateSnapshot" | "backgroundLanes"
 	>;
-	readonly sessionManager: UsageWakeLog & UsageWakeWriter;
+	readonly sessionManager: UsageWakeLog & UsageWakeWriter & StopNoteTranscript;
 }
 
 /** A loaded bot session as the owner's stop reaches it: its goal, the transcript it writes and its fleet. */
@@ -381,6 +458,7 @@ export function stopLoadedBot(
 			(taken) => {
 				stopTurn();
 				outcome = applyOwnerStopToSession(live, taken, ports.now());
+				endWatchesBeforeStop(agentId, loaded.session.sessionId, loaded.sessionManager, taken, ports);
 				return outcome;
 			},
 			ports,
@@ -601,7 +679,8 @@ function tellUnreadDrop(agentId: string, unread: unknown, warn: (message: string
 
 /**
  * The stop applied to a closed bot's own work, its host lock held: its saved session's transcript read first, then its
- * bundle's workers ended, then the transcript written.
+ * bundle's workers ended, then the transcript written, then its watches and the results they fired ended
+ * ({@link endWatchesBeforeStop}, told through `tell` as they end).
  */
 function stopClosedSession(
 	agentDir: string,
@@ -609,6 +688,7 @@ function stopClosedSession(
 	saved: SavedBotSession | undefined,
 	stop: OwnerStop,
 	ports: BotStopPorts,
+	tell: (message: string) => void,
 ): WorkerStopOutcome {
 	const bundle = closedBundle(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
@@ -619,6 +699,7 @@ function stopClosedSession(
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
 		declineUsageWaitForOwner(transcript, stop.at, now);
 	}
+	if (saved) endWatchesBeforeStop(agentId, saved.id, transcript, stop, { ...ports, warn: tell });
 	return outcome;
 }
 

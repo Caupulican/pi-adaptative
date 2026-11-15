@@ -401,6 +401,7 @@ export class BotSessionHost {
 			warn: (message) => this.ports.warn(message),
 			now: () => this.ports.timers().port("provider-admission").now(),
 			links: this.keeps.links,
+			watches: () => this.ports.store(),
 		};
 	}
 

@@ -435,6 +435,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 					id: "j4-watch-worker-arm",
 					name: "task_watch",
 					arguments: {
+						action: "arm",
 						routineId: "worker-wait",
 						prompt: workerPlan,
 						condition: { type: "file", path: workerFlag, on: "created" },
@@ -579,6 +580,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 						id: "j4-watch-cmd-arm",
 						name: "task_watch",
 						arguments: {
+							action: "arm",
 							routineId: "build-wait",
 							prompt: commandPlan,
 							condition: {

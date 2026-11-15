@@ -102,7 +102,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["delegate", DELEGATE_POLICY],
 	// An admitted worker may inspect or narrow its own task's subscriptions; it gains no new authority.
 	[TASK_EVENTS_TOOL_NAME, policy([], "control-plane")],
-	// A worker's own wait: one-shot, bounded, on a condition its tools could check; it reads and changes no other routine.
+	// A worker's own wait: one-shot, bounded, on a condition its tools could check; it cancels only a watch it armed and
+	// reads and changes no other routine.
 	[TASK_WATCH_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	["model_fitness", policy([["research.execute"]], "control-plane")],
 	["task_steps", policy([["workflow.plan", "memory.mutate"]], "control-plane")],

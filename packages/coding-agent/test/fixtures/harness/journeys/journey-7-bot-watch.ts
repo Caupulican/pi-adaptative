@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import {
@@ -27,6 +28,14 @@ const WATCH_PLAN = "Tell the owner the deploy flag is up.";
 const WRITE_WATCH_ID = "touch-flag";
 const WATCHER_ARMED = "I will tell you when deploy.flag appears.";
 const WATCHER_WOKEN = "The deploy flag is up.";
+const STOPPER = "release-watcher";
+const STOPPER_SOUL = "You wait on the release file for the owner and answer in one short sentence.";
+const STOPPER_REQUEST = "Tell me when release.flag appears.";
+const STOPPER_REARM_REQUEST = "Wait on release.flag again, then drop that wait.";
+const STOPPED_WATCH_ID = "release-flag";
+const LATER_WATCH_ID = "release-flag-again";
+const STOPPER_ARMED = "I will tell you when release.flag appears.";
+const STOPPER_CANCELLED = "I no longer wait on release.flag.";
 
 /**
  * Leg: a bot waits on its own work. The owner asks a read-only bot to say when a file appears; in its own session the bot
@@ -38,6 +47,7 @@ const WATCHER_WOKEN = "The deploy flag is up.";
 export async function runJourney7BotWatchPhase(world: HarnessWorld): Promise<void> {
 	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
 	try {
+		await stopEndsOwnWatches(world, session);
 		await runLeg(world, session);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the owner's session disposes cleanly").toBeUndefined();
@@ -48,6 +58,172 @@ export async function runJourney7BotWatchPhase(world: HarnessWorld): Promise<voi
 /** The bot's live watches as the roster shows them (the operator bar's ring); 0 when it holds none. */
 function rosterWatches(session: AgentSession, agentId: string): number {
 	return session.listPersistentBots().find((bot) => bot.agentId === agentId)?.watchCount ?? 0;
+}
+
+/**
+ * Waits until the roster's count of the bot's watches is `count`: it follows the store through the home watch, so it is
+ * polled, and the poll ends with the wait, whether the count reached `count` or the deadline passed.
+ */
+async function untilRosterWatches(
+	world: HarnessWorld,
+	session: AgentSession,
+	agentId: string,
+	count: number,
+	label: string,
+): Promise<void> {
+	let ended = false;
+	try {
+		await withDeadline(
+			world.trace,
+			label,
+			(async () => {
+				while (!ended && rosterWatches(session, agentId) !== count)
+					await new Promise<void>((resolve) => setImmediate(resolve));
+			})(),
+		);
+	} finally {
+		ended = true;
+	}
+}
+
+/** Whether the store holds the watch `routineId`, read again from its file. */
+function storeHolds(session: AgentSession, routineId: string): boolean {
+	const store = session.getBotTeamStore();
+	store.reload(true);
+	return store.getRoutine(routineId) !== undefined;
+}
+
+/**
+ * Leg: the owner's stop ends the watches a bot armed before it, and a bot cancels a watch it armed. The bot arms a watch on
+ * a file that never appears; the owner stops it, and the stop deletes that watch, the owner told how many it ended. Then the
+ * owner's next words have the bot arm another watch, which the stop made before it leaves, and cancel it with
+ * `task_watch`'s `cancel` action; the roster's count follows each.
+ */
+async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const { trace } = world;
+	createOwnerBot(session, STOPPER, MODEL_ID.watcher, STOPPER_SOUL);
+	const flag = projectPath("release.flag");
+	const expiresAt = world.timers.port("routines").now() + 3_600_000;
+	const armWatch = (id: string, routineId: string) => ({
+		type: "toolCall" as const,
+		id,
+		name: "task_watch",
+		arguments: {
+			action: "arm",
+			routineId,
+			prompt: "Tell the owner the release file is up.",
+			condition: { type: "file", path: flag, on: "created" },
+			expiresAt,
+		},
+	});
+	const seen = { armed: [] as Array<[boolean, string]>, rearmed: [] as Array<[boolean, string]>, laterHeld: false };
+	const results = (request: Parameters<typeof latestBatchResults>[0]) =>
+		latestBatchResults(request)
+			.filter((result) => result.toolName === "task_watch")
+			.map((result): [boolean, string] => [result.isError, resultText(result.text)]);
+	enqueueBot(
+		world,
+		TRACK.watchStopper,
+		MODEL_ID.watcher,
+		STOPPER_SOUL,
+		{
+			name: "j7-stopper-arm",
+			reply: { content: [armWatch("j7-stopper-watch", STOPPED_WATCH_ID)], stopReason: "toolUse" },
+		},
+		{
+			name: "j7-stopper-armed",
+			check: (request) => {
+				seen.armed = results(request);
+			},
+			reply: { content: [{ type: "text", text: STOPPER_ARMED }] },
+		},
+		{
+			name: "j7-stopper-rearm",
+			reply: { content: [armWatch("j7-stopper-again", LATER_WATCH_ID)], stopReason: "toolUse" },
+		},
+		{
+			name: "j7-stopper-cancel",
+			check: (request) => {
+				seen.rearmed = results(request);
+				seen.laterHeld = storeHolds(session, LATER_WATCH_ID);
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-stopper-drop",
+						name: "task_watch",
+						arguments: { action: "cancel", routineId: LATER_WATCH_ID },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-stopper-cancelled",
+			check: (request) => {
+				seen.rearmed.push(...results(request));
+			},
+			reply: { content: [{ type: "text", text: STOPPER_CANCELLED }] },
+		},
+	);
+	// Each owner message starts a turn that calls a tool: its words are judged as an owner request that calls a tool is in
+	// a bot's own session, the owner-policy questions alone.
+	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-watch-stop", BOT_SESSION_JUDGMENTS);
+
+	const first = await session.sendOperatorMessageToBot(STOPPER, STOPPER_REQUEST);
+	await withDeadline(
+		trace,
+		"J7 bot watch stop: the bot armed its watch",
+		world.provider.whenReached(reached(TRACK.watchStopper, "j7-stopper-armed")),
+	);
+	await waitForBotRosterState(world, session, STOPPER, "idle");
+	await untilRosterWatches(world, session, STOPPER, 1, "J7 bot watch stop: the roster shows the armed watch");
+
+	const stopMark = world.warnings.length;
+	session.stopPersistentBot(STOPPER);
+	const stopWarnings = world.warnings.splice(stopMark);
+	await untilRosterWatches(world, session, STOPPER, 0, "J7 bot watch stop: the stopped bot's watch left the roster");
+	expect(
+		{
+			sent: first.mode,
+			armed: seen.armed,
+			warnings: stopWarnings,
+			held: storeHolds(session, STOPPED_WATCH_ID),
+		},
+		"the owner's stop ends the watch the bot armed before it, and the owner is told how many it ended",
+	).toEqual({
+		sent: "started",
+		armed: [[false, JSON.stringify({ routineId: STOPPED_WATCH_ID, revision: 1, armed: true })]],
+		warnings: [interfaceText().botTeam.botStopWatchesEnded(STOPPER, 1, 0)],
+		held: false,
+	});
+
+	const second = await session.sendOperatorMessageToBot(STOPPER, STOPPER_REARM_REQUEST);
+	await withDeadline(
+		trace,
+		"J7 bot watch stop: the bot cancelled the watch it armed after the stop",
+		world.provider.whenReached(reached(TRACK.watchStopper, "j7-stopper-cancelled")),
+	);
+	await waitForBotRosterState(world, session, STOPPER, "idle");
+	await untilRosterWatches(world, session, STOPPER, 0, "J7 bot watch stop: the cancelled watch left the roster");
+	expect(
+		{
+			sent: second.mode,
+			results: seen.rearmed,
+			laterHeld: seen.laterHeld,
+			held: storeHolds(session, LATER_WATCH_ID),
+		},
+		"a watch armed after the owner's stop stays until the bot cancels it with task_watch's cancel action",
+	).toEqual({
+		sent: "started",
+		results: [
+			[false, JSON.stringify({ routineId: LATER_WATCH_ID, revision: 1, armed: true })],
+			[false, JSON.stringify({ routineId: LATER_WATCH_ID, cancelled: true })],
+		],
+		laterHeld: true,
+		held: false,
+	});
 }
 
 /** A tool result as the model read it: the refusal's diagnostic, or the tool's own fenced output. */
@@ -90,6 +266,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 						id: "j7-watcher-write",
 						name: "task_watch",
 						arguments: {
+							action: "arm",
 							routineId: WRITE_WATCH_ID,
 							prompt: "Say the flag file was written.",
 							condition: { type: "command", command: "touch deploy.flag" },
@@ -101,6 +278,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 						id: "j7-watcher-flag",
 						name: "task_watch",
 						arguments: {
+							action: "arm",
 							routineId: WATCH_ID,
 							prompt: WATCH_PLAN,
 							condition: { type: "file", path: flag, on: "created" },
@@ -141,28 +319,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	// file watch makes no call, so nothing else is asked.
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-watch", BOT_SESSION_JUDGMENTS);
 
-	// The roster's count follows the store through the home watch: it is polled, and the poll ends with the wait, whether the
-	// count reached `count` or the deadline passed.
-	const untilRosterWatches = async (count: number, label: string): Promise<void> => {
-		let ended = false;
-		try {
-			await withDeadline(
-				trace,
-				label,
-				(async () => {
-					while (!ended && rosterWatches(session, WATCHER) !== count)
-						await new Promise<void>((resolve) => setImmediate(resolve));
-				})(),
-			);
-		} finally {
-			ended = true;
-		}
-	};
-
 	const sent = await session.sendOperatorMessageToBot(WATCHER, WATCH_REQUEST);
 	await withDeadline(trace, "J7 bot watch: the bot armed its watches", armed.promise);
 	await waitForBotRosterState(world, session, WATCHER, "idle");
-	await untilRosterWatches(1, "J7 bot watch: the roster shows the armed watch");
+	await untilRosterWatches(world, session, WATCHER, 1, "J7 bot watch: the roster shows the armed watch");
 	const [refused, accepted] = seen.results;
 	expect(
 		{
@@ -203,7 +363,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		world.provider.whenReached(reached(TRACK.watcher, "j7-watcher-woken")),
 	);
 	await waitForBotRosterState(world, session, WATCHER, "idle");
-	await untilRosterWatches(0, "J7 bot watch: the spent watch left the roster");
+	await untilRosterWatches(world, session, WATCHER, 0, "J7 bot watch: the spent watch left the roster");
 	expect(
 		{
 			runs: occurrences().map((run) => [run.phase, run.result?.outcome, run.result?.delivery]),

@@ -115,6 +115,7 @@ export const TRACK = {
 	reader: "j7-reader",
 	held: "j7-held",
 	watcher: "j7-watcher",
+	watchStopper: "j7-watch-stopper",
 	teamOne: "j7-team-one",
 	teamTwo: "j7-team-two",
 	leader: "j7-leader",

@@ -1,5 +1,6 @@
 /**
- * The one routine action a runtime that holds no `routine` tool keeps: arm a watch for its own wait. Two hold it.
+ * The routine actions a runtime that holds no `routine` tool keeps: arm a watch for its own wait, and cancel one it armed.
+ * Two hold them.
  *
  * A worker runtime: the tool is installed by the worker's executor with the runtime's admitted identity and its lane's
  * scope, so neither comes from an argument. A command or page is checked first as the call the worker's own tools would
@@ -11,9 +12,11 @@
  * check is admitted by the session's own gate as a sub-call of this call.
  *
  * Either way the watch is one-shot with an end time within a day, inside the session's bound, and every later check runs
- * under the same authority again. When it fires or runs out, the armer is woken with the event; nothing is polled. The tool
- * lists, reads, changes and deletes nothing, so it stays on the worker floor.
+ * under the same authority again. When it fires or runs out, the armer is woken with the event; nothing is polled. A watch
+ * the armer no longer waits on is cancelled by it (`cancel`): a worker cancels only a watch its own runtime armed, a bot's
+ * session only one it armed itself. The tool lists, reads and changes nothing else, so it stays on the worker floor.
  */
+import { StringEnum } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import {
 	type AgentTool,
@@ -40,6 +43,8 @@ export interface TaskWatchPort {
 	/** Whether the session holds a routine runtime to arm into; a session without one offers its workers no watch tool. */
 	available(): boolean;
 	arm(worker: WorkerWatchAuthority, input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView>;
+	/** Cancels a watch the worker's runtime armed; one another runtime or the session armed is absent to it. */
+	cancel(worker: WorkerWatchAuthority, routineId: string, signal?: AbortSignal): Promise<void>;
 }
 
 /** The worker the tool arms for: its runtime id, its lane's scope and its own gate, which judges the call a check would make. */
@@ -58,23 +63,33 @@ export interface TaskWatchCaller {
 /** What arms a watch for a session's own wait: the session's routine owner, which admits the check through the session's gate. */
 export interface SessionTaskWatchArmer {
 	armForSession(input: RoutineToolInput, toolCallId: string, signal?: AbortSignal): Promise<RoutineToolView>;
+	/** Cancels a watch the session armed for its own wait; a worker's watch is absent to it. */
+	cancelForSession(routineId: string, signal?: AbortSignal): Promise<void>;
 }
 
 const parameters = Type.Object(
 	{
+		action: StringEnum(["arm", "cancel"] as const, {
+			description:
+				"arm: wait on a condition (prompt, condition and expiresAt). cancel: stop a watch you armed (routineId only).",
+		}),
 		routineId: routineAuthoringSchema.properties.routineId,
-		prompt: Type.String({
-			minLength: 1,
-			maxLength: MAX_ROUTINE_PROMPT_CHARS,
-			description:
-				"Your own plan for when it fires: what you will check or do next. You read it again with the event.",
-		}),
-		condition: watchConditionSchema,
-		expiresAt: Type.Integer({
-			minimum: 1,
-			description:
-				"UTC epoch ms after now and at most 24 hours ahead; if the condition has not become true by then you are woken with what it last saw.",
-		}),
+		prompt: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_ROUTINE_PROMPT_CHARS,
+				description:
+					"arm: your own plan for when it fires: what you will check or do next. You read it again with the event.",
+			}),
+		),
+		condition: Type.Optional(watchConditionSchema),
+		expiresAt: Type.Optional(
+			Type.Integer({
+				minimum: 1,
+				description:
+					"arm: UTC epoch ms after now and at most 24 hours ahead; if the condition has not become true by then you are woken with what it last saw.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -83,10 +98,18 @@ type TaskWatchArgs = Static<typeof parameters>;
 
 /** The description, with how the armer is woken: a worker is steered or continued, a session is steered or starts a turn. */
 function description(woken: string): string {
-	return `Wait on a file, a harness-managed process, a process id, a port, a command or a page without polling: the host checks the condition in code at no model cost and wakes you with the event when it becomes true (once; a condition that already holds when armed is the starting state), or when expiresAt passes without it. A command runs in your working directory and is admitted as your own shell call would be (a page as your own fetch call), at arming and at every check; its output comes back fenced as untrusted data. Arm it, then end your turn or do other work: you are woken, ${woken}. Do not sleep or loop on the condition.`;
+	return `Wait on a file, a harness-managed process, a process id, a port, a command or a page without polling: the host checks the condition in code at no model cost and wakes you with the event when it becomes true (once; a condition that already holds when armed is the starting state), or when expiresAt passes without it. A command runs in your working directory and is admitted as your own shell call would be (a page as your own fetch call), at arming and at every check; its output comes back fenced as untrusted data. Arm it, then end your turn or do other work: you are woken, ${woken}. Do not sleep or loop on the condition. Cancel a watch you armed once you no longer wait on it.`;
 }
 
-/** The watch the call asks for, as the routine owner takes it: a one-shot event watch ending at `expiresAt`. */
+/** The condition of an arm call: what an arm needs, all of it; a cancel names only the watch. */
+function armCondition(input: TaskWatchArgs): unknown {
+	if (input.action !== "arm") throw new Error("Only an arm call watches a condition.");
+	if (input.prompt === undefined || input.condition === undefined || input.expiresAt === undefined)
+		throw new Error("An arm call needs prompt, condition and expiresAt.");
+	return input.condition;
+}
+
+/** The watch an arm call asks for, as the routine owner takes it: a one-shot event watch ending at `expiresAt`. */
 function watchInput(input: TaskWatchArgs): RoutineToolInput {
 	return parseRoutineToolInput({
 		routineId: input.routineId,
@@ -94,11 +117,33 @@ function watchInput(input: TaskWatchArgs): RoutineToolInput {
 		schedule: {
 			kind: "event",
 			source: "watch",
-			condition: input.condition,
+			condition: armCondition(input),
 			stopAfterFirstRun: true,
 			expiresAt: input.expiresAt,
 		},
 	});
+}
+
+/** Runs one cancel and shapes its outcome: the watch cancelled, or why it was not as an operation outcome. */
+async function cancelled(
+	input: TaskWatchArgs,
+	cancel: () => Promise<void>,
+): Promise<AgentToolResult<unknown> & { isError?: boolean }> {
+	try {
+		if (input.prompt !== undefined || input.condition !== undefined || input.expiresAt !== undefined)
+			throw new Error("A cancel call names only routineId.");
+		await cancel();
+		const details = { routineId: input.routineId, cancelled: true };
+		return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+	} catch (error) {
+		const diagnostic = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
+		return {
+			content: [{ type: "text", text: `Watch was not cancelled: ${diagnostic ?? "unavailable"}.` }],
+			details: undefined,
+			isError: true,
+			errorKind: "operation_outcome",
+		};
+	}
 }
 
 /** Runs one arming and shapes its outcome: the armed watch, or why it was not armed as an operation outcome. */
@@ -134,9 +179,12 @@ export function createTaskWatchTool(options: {
 		execute: async (_toolCallId, args, signal) => {
 			signal?.throwIfAborted();
 			const input = args as TaskWatchArgs;
+			const worker = { runtimeId: caller.runtimeId, scope: caller.scope };
+			if (input.action === "cancel")
+				return cancelled(input, () => options.port.cancel(worker, input.routineId, signal));
 			return armed(async () => {
 				// A command or page is first the call this worker's own tools would make: its own gate admits it or the arm stops.
-				const call = watchCheckCall(parseWatchCondition(input.condition));
+				const call = watchCheckCall(parseWatchCondition(armCondition(input)));
 				const purpose = {
 					kind: "watch_check",
 					watchId: input.routineId,
@@ -144,7 +192,7 @@ export function createTaskWatchTool(options: {
 				} as const;
 				const refused = call && (await caller.admitCall(call.toolName, call.args, signal, purpose));
 				if (refused?.block) throw watchCheckRefusal(input.routineId, refused);
-				return options.port.arm({ runtimeId: caller.runtimeId, scope: caller.scope }, watchInput(input), signal);
+				return options.port.arm(worker, watchInput(input), signal);
 			});
 		},
 	};
@@ -161,10 +209,16 @@ export function createSessionTaskWatchTool(getArmer: () => SessionTaskWatchArmer
 		neverDefer: true,
 		description: description("steered while your turn runs, or in a new turn once it has ended"),
 		parameters,
-		// One arming at a time, so the session's watch count each arming reads is the one its write finds.
+		// One arming or cancel at a time, so the session's watch count each arming reads is the one its write finds.
 		executionMode: "sequential",
 		async execute(toolCallId, input, signal) {
 			signal?.throwIfAborted();
+			if (input.action === "cancel")
+				return cancelled(input, async () => {
+					const armer = getArmer();
+					if (!armer) throw new Error("Watches are unavailable in this session");
+					await armer.cancelForSession(input.routineId, signal);
+				});
 			return armed(async () => {
 				const armer = getArmer();
 				if (!armer) throw new Error("Watches are unavailable in this session");
