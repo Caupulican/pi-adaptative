@@ -2155,6 +2155,7 @@ async function prepareToolCall(
 		const hostFilled = hostFilledArguments(tool.sessionIdentity, modelArguments, validatedArgs);
 		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);
 		if (binding) tool = binding.tool;
+		const form = toolCallForm(tool, validatedArgs);
 		if (
 			previousSuccessfulResult &&
 			previousSuccessfulResult.operationKey === getToolExecutionKey(toolCall.name, validatedArgs) &&
@@ -2252,7 +2253,7 @@ async function prepareToolCall(
 			toolCall,
 			tool,
 			args: validatedArgs,
-			form: toolCallForm(tool, validatedArgs),
+			form,
 			hostFilled,
 			validationEvent,
 		};
@@ -2447,8 +2448,7 @@ async function executeAndFinalizePreparedToolCall(
 	emit: AgentEventSink,
 	onExecutionOwnership: () => void,
 ): Promise<FinalizedToolCallOutcome> {
-	// A call can start as a background task up front (the model asked, or the tool moved it), its body held until the
-	// handoff is decided; otherwise only the operator's clock or a manual host request moves it, while the host can.
+	// Where a call runs, and when the body may start, is decided at its handoff (see toolCallHandoff).
 	const callForm = toolCallHandoff(prepared.form, config);
 	const executionAbort = callForm.canHandOff ? createLinkedToolAbort(foregroundSignal) : undefined;
 	const executionSignal = executionAbort?.signal ?? foregroundSignal;
