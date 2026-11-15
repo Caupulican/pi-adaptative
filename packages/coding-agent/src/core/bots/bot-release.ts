@@ -28,7 +28,10 @@ export interface BotReleasePorts {
 	/** Whether the host stopped: no release runs again after it. */
 	stopped(): boolean;
 	warn(message: string): void;
-	/** The bot's session this process has loaded, with whether it works now; undefined when none is loaded here. */
+	/**
+	 * The bot's session this process has loaded, with whether its work holds it loaded (`busy`: the idleness its idle close
+	 * reads, so a release waits on what a close waits on); undefined when none is loaded here.
+	 */
 	loaded(
 		agentId: string,
 	): { readonly session: Pick<AgentSession, "sessionId" | "backgroundLanes">; readonly busy: boolean } | undefined;

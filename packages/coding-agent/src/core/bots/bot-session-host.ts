@@ -324,7 +324,7 @@ export class BotSessionHost {
 			warn: (message) => ports.warn(message),
 			loaded: (agentId) => {
 				const entry = this.entries.get(agentId);
-				return entry && { session: entry.session, busy: this.isBusy(entry) };
+				return entry && { session: entry.session, busy: this.holdsLoaded(entry) };
 			},
 			settling: (agentId) => this.loading.get(agentId) ?? this.closing.get(agentId),
 			// Read through a link: a release only reads, so a linked pointer or session file never keeps the bot.
@@ -843,9 +843,12 @@ export class BotSessionHost {
 		this.recheckIfIdle(entry);
 	}
 
-	/** Applies a record change, or a refusal off the session path, that came while the session worked, once it is idle. */
+	/**
+	 * Applies a record change, or a refusal off the session path, that came while the session worked, once it is idle: by
+	 * the idleness its idle close reads ({@link holdsLoaded}), so a change never waits on work that does not hold it open.
+	 */
 	private recheckIfIdle(entry: BotSessionEntry): boolean {
-		if (!entry.recheckWhenIdle || this.isBusy(entry) || this.entries.get(entry.agentId) !== entry) return false;
+		if (!entry.recheckWhenIdle || this.holdsLoaded(entry) || this.entries.get(entry.agentId) !== entry) return false;
 		entry.recheckWhenIdle = false;
 		this.applyRecordChange(entry.agentId);
 		return true;
@@ -853,7 +856,8 @@ export class BotSessionHost {
 
 	/**
 	 * Whether the session's work keeps it loaded past its idle bound: a turn or input, a worker running, or a worker retry
-	 * due within the bound. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it.
+	 * due within the bound. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it. The one
+	 * idleness every change of the loaded session waits on: its idle close, a record change, a refusal's retake, a release.
 	 */
 	private holdsLoaded(entry: BotSessionEntry): boolean {
 		const state = entry.session.getSessionWorkState();
@@ -973,6 +977,11 @@ export class BotSessionHost {
 		).finally(() => {
 			this.changed(agentId);
 			if (this.closing.get(agentId) === closing) this.closing.delete(agentId);
+			// A change that waited for the session to be idle applies now it closed (a release among them, owed nothing below).
+			if (entry.recheckWhenIdle && !this.stopped) {
+				entry.recheckWhenIdle = false;
+				this.applyRecordChange(agentId);
+			}
 			// Its bundle's writes done: what it could not deliver, its usage wait and its workers' next time are owed here now.
 			this.owed.closed(agentId);
 		});
@@ -1036,7 +1045,7 @@ export class BotSessionHost {
 		const entry = this.entries.get(record.agentId);
 		if (!entry && !this.hasHome(record.agentId)) return;
 		ensureBotHome(this.ports.agentDir(), record);
-		if (entry && this.isBusy(entry)) {
+		if (entry && this.holdsLoaded(entry)) {
 			entry.recheckWhenIdle = true;
 			return;
 		}
@@ -1084,7 +1093,7 @@ export class BotSessionHost {
 	private retakeRefused(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (!entry) this.owed.openIfOwed(agentId);
-		else if (!this.isBusy(entry))
+		else if (!this.holdsLoaded(entry))
 			void this.close(agentId).then(
 				() => this.owed.openIfOwed(agentId),
 				(error: unknown) =>
