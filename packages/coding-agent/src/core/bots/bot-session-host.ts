@@ -13,14 +13,14 @@
  * storage. It is a child session (no memory writes, no channels, and of the routines only the watches it arms itself)
  * that runs System One as the main session does (on or off, provider, transport), keeping its System One evidence in its
  * home; it is a session of its own, so its edge grants are its own conversation's plus the settings', never another
- * session's. Its tools are the read tools, System One's tool and a
- * shell, plus the file tools and python when the record grants `canWrite`; a read-only bot's shell runs only commands the
- * read-only shell line admits. A bot made from a worker profile runs on the contract its profile compiles to, again at
+ * session's. Its tools are the read tools, System One's tool, a shell, `self_compact` and `task_watch` for its own waits,
+ * plus the file tools and python when the record grants `canWrite`, and the director tools (`delegate`, `assign`,
+ * `plan`) that direct workers of its own (a profile bot's only when its profile names one); a read-only bot's shell
+ * runs only commands the read-only shell line admits. A bot made from a worker profile runs on the contract its profile compiles to, again at
  * every run, by the resolution a fresh worker of it takes and none of a worker run's admission gates (`bot-session-profile.ts`): the resolved model, the plan's tools, read and write roots and read-only grant,
  * a capability ceiling held by the session's tool gate, the profile's soul and resources; a profile that needs what only
  * a worker's run has keeps it a worker (`runsAsSession`). Its spend per request it serves, its workers' included,
- * is held to the worker, session and profile ceilings, and charged to the main session's cost view (`bot-session-spend.ts`). Subagents, routines of
- * its own and goals belong to a later phase.
+ * is held to the worker, session and profile ceilings, and charged to the main session's cost view (`bot-session-spend.ts`). Its goals, a usage limit's kept reset and its queued workers resume when its session loads.
  *
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
  * that hosts the bot, rather than appending to the same file. Every process still sees the bot: its conversation is read

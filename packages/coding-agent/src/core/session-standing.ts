@@ -56,8 +56,8 @@ export interface SessionCapabilities {
 	readonly managesBots: boolean;
 	/**
 	 * Directs workers: the delegation gate, director prompt, delegation and plan rules, plan tool and executor, retention.
-	 * A bot directs its own workers with the tools its session holds (`delegate`, `assign`; no `plan`), so its plan
-	 * surfaces stay off, and is never hosted in a worker process (`resolveSessionStanding`).
+	 * A bot directs its own workers with the director tools its session holds (`delegate`, `assign` and `plan`, one unit),
+	 * its plan executor included, and is never hosted in a worker process (`resolveSessionStanding`).
 	 */
 	readonly directsWorkers: boolean;
 	/** Runs the proactive lanes: proactive review and the research lane. */
