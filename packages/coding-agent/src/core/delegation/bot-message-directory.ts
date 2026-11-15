@@ -76,6 +76,7 @@ export function createSessionScopedBotMessageDirectory(
 	const manager = host.getSessionManager();
 	const assertCurrent = senderFence(host, sender, attemptId);
 	return {
+		sessionRootOnly: true,
 		assertCurrent,
 		leaderIds: () => [],
 		ownLeader: () => undefined,
@@ -293,8 +294,9 @@ export interface BotMessageBrokerPorts {
  * through the coordinator, and each leader-only move present only where the directory offers it.
  */
 export function createBotMessageBroker(directory: BotMessageDirectory, ports: BotMessageBrokerPorts): BotMessageBroker {
-	const { createBot, askRoot, startOwnedBot, lead, sendToSubLeader } = directory;
+	const { createBot, askRoot, startOwnedBot, lead, sendToSubLeader, sessionRootOnly } = directory;
 	return {
+		...(sessionRootOnly ? { sessionRootOnly } : {}),
 		list: (teamId) => directory.list(teamId),
 		send: (target, message, expectReply, invocationId, teamId) => {
 			const runtime = directory.resolve(target, teamId);

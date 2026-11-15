@@ -126,8 +126,9 @@ the project's `.pi`, and a read-only bot's words say it and its workers change n
 since a bot lends its workers no memory. Its workers are held to the bot's own reach: they write, read, run commands and
 reach the network no wider than the bot (a read-only bot's workers are read-only). Their conversations lie in the bot's
 home (`orchestration/`), their spend counts in the bot's spend window and reaches the main session with the bot's, and a
-worker's end opens the bot's next turn, as a worker's handoff opens the main session's. They answer only the bot:
-`bot_message` lists no bot or group for them. `/bot stop` stops the bot's turn and every worker it started, and says the
+worker's end opens the bot's next turn, as a worker's handoff opens the main session's. They answer only the bot: a
+bot's own workers hold no `bot_message` (the bot holds no messaging to lend), and a profile bot's workers that hold it
+are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every worker it started, and says the
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
 taken still ends the turn and the workers of the bot this process hosts. A worker the owner stopped opens no turn of the bot. A
 profile bot holds both `delegate` and `assign` when its profile's tools name either, since `assign` runs `delegate`; a

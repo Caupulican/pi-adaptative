@@ -28,6 +28,8 @@ export interface BotMessagePeer {
 
 /** Parent-owned alias resolution, fenced to the sender's exact execution and branch. */
 export interface BotMessageDirectory {
+	/** Set where the sender reaches no bot or group and only replies to its own session root. */
+	readonly sessionRootOnly?: true;
 	assertCurrent(): void;
 	list(teamId?: string): {
 		groups: { teamId: string; name: string }[];
@@ -57,6 +59,8 @@ export interface BotMessageDirectory {
 
 /** No lifecycle controls or caller-selected sender identities cross this port. */
 export interface BotMessageBroker {
+	/** Set where the sender only replies to its own session root: the tool offers `reply` alone. */
+	readonly sessionRootOnly?: true;
 	list(teamId?: string): ReturnType<BotMessageDirectory["list"]>;
 	send(
 		agentId: string,
