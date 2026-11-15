@@ -179,8 +179,10 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
 	// It arms its own waits as a worker's host does, and compacts its own context, outside the granted surface. The worker
 	// ceiling the plan was compiled under forbids the director tools, so they come from the profile itself: a profile that
-	// names them directs its own workers, held to its own ceiling.
-	const director = BOT_DIRECTOR_TOOL_NAMES.filter((name) => mapToolNamesForPlatform(profile.toolNames).includes(name));
+	// names either directs its own workers, held to its own ceiling. They are one unit (`assign` runs `delegate`, and the
+	// director role, the delegation gate and worker control key on `delegate`), so naming one holds both.
+	const named = mapToolNamesForPlatform(profile.toolNames);
+	const director = BOT_DIRECTOR_TOOL_NAMES.some((name) => named.includes(name)) ? BOT_DIRECTOR_TOOL_NAMES : [];
 	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, ...director];
 	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
 	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too

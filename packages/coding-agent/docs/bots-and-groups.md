@@ -129,7 +129,8 @@ home (`orchestration/`), their spend counts in the bot's spend window and reache
 worker's end opens the bot's next turn, as a worker's handoff opens the main session's. They answer only the bot:
 `bot_message` lists no bot or group for them. `/bot stop` stops the bot's turn and every worker it started, and says the
 bot was stopped whenever a turn, input or a worker was in flight; a worker the owner stopped opens no turn of the bot. A
-profile bot holds `delegate` and `assign` when its profile's tools name them; a worker of any profile holds neither.
+profile bot holds both `delegate` and `assign` when its profile's tools name either, since `assign` runs `delegate`; a
+worker of any profile holds neither.
 The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session, with the bot's
 home in place of the agent directory. A bot is never hosted in a worker process.
 
