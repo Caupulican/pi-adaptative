@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { BOT_TOOL_NAME, type BotToolPort, botCreationRequestFrom } from "../delegation/bot-creation.ts";
+import { BotUnreachableError } from "../delegation/bot-unreachable.ts";
 import { LEAD_LIMITS, leadRequestFrom, refuseLeadFieldsOutsideLead } from "../delegation/leader-delegation.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
@@ -122,7 +123,14 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 					agentId: input.agentId,
 					chars: input.message.length,
 				});
-				await port.ask(input.agentId, input.message);
+				await port.ask(input.agentId, input.message).catch((error: unknown) => {
+					// The orchestrator makes bots, so an ask that reached none names its next step: make the bot, or find it.
+					if (error instanceof BotUnreachableError)
+						throw new Error(
+							`${error.message} Create it with bot create, or find the bot you mean with bot list.`,
+						);
+					throw error;
+				});
 				const sent = { sent: true, agentId: input.agentId };
 				return { content: [{ type: "text", text: JSON.stringify(sent) }], details: sent };
 			}

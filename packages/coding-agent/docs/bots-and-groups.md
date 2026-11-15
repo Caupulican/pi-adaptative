@@ -265,6 +265,10 @@ Bots are created on the fly, for whatever purpose you have:
   `agentId`, a `soul` (the bot's standing instructions), an optional `model` and `canWrite`. With `forLeader` (a leader's
   id) the bot is that leader's own: the store names the leader as its creator, and the leader's message starts it under the
   leader's goal.
+- Your own message to a bot (`/bot msg`, its roster chat, `@bot`) makes the bot it names when none has that id, on the
+  default model. No other message makes a bot: the orchestrator's `bot ask`, a leader's brief, a group's message and a
+  routine's run to an id no bot has are refused before anything starts, and the orchestrator is told to create the bot or
+  find the one it means with `bot list`.
 
 No other bot creates bots, a leader included. A **leader** that needs a bot of its own asks the orchestrator in the middle
 of its goal (`bot_message` `action ask_root`, naming the bot's purpose); the goal stays open until the orchestrator's answer

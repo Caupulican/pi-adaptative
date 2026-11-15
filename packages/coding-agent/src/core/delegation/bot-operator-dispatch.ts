@@ -174,7 +174,9 @@ export class BotOperatorDispatch {
 				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
 			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
 		}
-		if (isOwnerDirect(context, options)) {
+		// Only the owner's own word makes a bot it names; any other send to an id no bot has is refused (`bot-unreachable.ts`).
+		const ownerDirect = isOwnerDirect(context, options);
+		if (ownerDirect) {
 			// The owner's word to a bot with a session of its own never needs the worker runtime.
 			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
 			// The one predicate the bot's host opens and keeps its session by: never a leader's, nor one only a worker holds.
@@ -200,8 +202,11 @@ export class BotOperatorDispatch {
 		} catch {
 			liveAgents = [];
 		}
-		let bot = store.ensureBotForDispatch(normId, () =>
-			this.host.resolveModelSpec(liveAgents.find((agent) => agent.agentId === runtime)?.modelRef),
+		let bot = store.ensureBotForDispatch(
+			normId,
+			ownerDirect
+				? () => this.host.resolveModelSpec(liveAgents.find((agent) => agent.agentId === runtime)?.modelRef)
+				: undefined,
 		);
 
 		const requestedMode = options?.mode ?? "follow_up";

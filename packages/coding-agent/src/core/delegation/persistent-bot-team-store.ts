@@ -88,6 +88,7 @@ import {
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
+import { BotUnreachableError } from "./bot-unreachable.ts";
 import {
 	BOT_OR_TEAM_ID_REGEX,
 	parseBotRecord,
@@ -310,6 +311,12 @@ export function teamIncarnation(team: PersistentTeamRecord): string {
  * read as "made by the bot named root".
  */
 export const RESERVED_BOT_CREATOR_IDS: ReadonlySet<string> = new Set(["root", "owner"]);
+
+/** A group's member ids as saved: each trimmed and normalized, blanks dropped, each id once. */
+function normalizedMemberIds(ids: readonly string[]): string[] {
+	const trimmed = ids.map((id) => id.trim()).filter((id) => id.length > 0);
+	return Array.from(new Set(trimmed.map((id) => normalizeBotOrTeamId(id, "memberAgentId"))));
+}
 
 export function normalizeBotOrTeamId(raw: string, label = "identifier"): string {
 	const trimmed = raw.trim();
@@ -983,15 +990,20 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	/** Select creation defaults only after the shared record has been reloaded under its lock. */
+	/**
+	 * Stamps a send on its bot under the lock, after the reload. `create` (the owner's own word; read only then) makes the
+	 * bot a send names; without it, a send to an id no bot has is refused and writes nothing.
+	 */
 	ensureBotForDispatch(
 		agentId: string,
-		defaults: () => Pick<UpsertPersistentBotInput, "provider" | "modelId" | "thinkingLevel">,
+		create: (() => Pick<UpsertPersistentBotInput, "provider" | "modelId" | "thinkingLevel">) | undefined,
 	): PersistentBotRecord {
 		return this.mutate(() => {
 			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
+			const defaults = this.bots.has(normalizedId) ? {} : create?.();
+			if (defaults === undefined) throw new BotUnreachableError(normalizedId);
 			return this.writeBot({
-				...(this.bots.has(normalizedId) ? {} : defaults()),
+				...defaults,
 				agentId: normalizedId,
 				lastMessageAt: Date.now(),
 			});
@@ -1115,14 +1127,7 @@ export class PersistentBotTeamStore {
 			const now = nowIso ?? new Date().toISOString();
 			const existing = this.teams.get(teamId);
 
-			const memberSet = new Set<string>();
-			for (const id of input.memberAgentIds) {
-				const trimmed = id.trim();
-				if (trimmed) {
-					memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
-				}
-			}
-			const memberAgentIds = Array.from(memberSet);
+			const memberAgentIds = normalizedMemberIds(input.memberAgentIds);
 
 			const record: PersistentTeamRecord = {
 				teamId,
@@ -1159,18 +1164,10 @@ export class PersistentBotTeamStore {
 				throw new Error(`Team not found: "${teamId}".`);
 			}
 
-			const memberSet = new Set<string>();
-			for (const id of memberAgentIds) {
-				const trimmed = id.trim();
-				if (trimmed) {
-					memberSet.add(normalizeBotOrTeamId(trimmed, "memberAgentId"));
-				}
-			}
-
 			const now = nowIso ?? new Date().toISOString();
 			const updated: PersistentTeamRecord = {
 				...existing,
-				memberAgentIds: Array.from(memberSet),
+				memberAgentIds: normalizedMemberIds(memberAgentIds),
 				updatedAt: now,
 				memoryFilePath: this.getTeamMemoryFilePath(normalizedId),
 			};
