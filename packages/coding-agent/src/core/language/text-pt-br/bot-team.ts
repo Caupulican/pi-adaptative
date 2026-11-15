@@ -231,7 +231,8 @@ export const BOT_TEAM = {
 	botSessionNotClosed: "A sessão do bot não fechou corretamente.",
 	botSessionsNotClosed: "As sessões dos bots não fecharam corretamente.",
 	botReleaseOwed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: as esperas e mensagens aguardando da sessão dele ainda não foram todas descartadas (${reason}); o hospedeiro dele tenta de novo até que sejam.`,
+		`Bot ${agentId}: os workers, as esperas e as mensagens aguardando da sessão dele ainda não foram todos encerrados (${reason}); o hospedeiro dele tenta de novo até que sejam.`,
+	botReleaseHeldBy: (pid: number) => `o processo ${pid} mantém a sessão dele`,
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou) mas não pôde ser aberta, então o trabalho aguarda até que seja (${reason}).`,
 	botOwedWorkNoRoot: (agentId: string, directories: string) =>

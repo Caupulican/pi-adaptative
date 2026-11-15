@@ -263,10 +263,12 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,
 	/** A bot's release (it was retired or left the session path) failed; its host runs it again until it is done. */
 	botReleaseOwed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its session's watches and waiting messages were not all dropped yet (${reason}); its host tries again until they are.`,
+		`Bot ${agentId}: its session's workers, watches and waiting messages were not all ended yet (${reason}); its host tries again until they are.`,
 	/** A change of the bot the host noticed itself (a refused run, an idle session) was not applied. */
 	botRecordChangeNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a change of its definition was not applied to its session yet (${reason}); it applies at its next change or message.`,
+	/** Why a closed bot's work is not ended yet: process `pid` holds its host lock (it hosts the bot, or opens or closes it). */
+	botReleaseHeldBy: (pid: number) => `process ${pid} holds its session`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",

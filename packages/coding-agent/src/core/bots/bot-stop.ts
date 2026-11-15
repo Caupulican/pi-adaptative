@@ -202,25 +202,58 @@ function stopClosedSession(
 	stop: BotInboxStop,
 	ports: BotStopPorts,
 ): WorkerStopOutcome {
-	const home = botHomeOf(agentDir, agentId);
-	// The saved session's state, in the home its id resolves to now (the bot's, or the owner's it was left in).
-	const bundle = saved && {
-		home: botSessionStorageRoots(agentDir, home.orchestrationHome, saved.id).orchestrationHome,
-		sessionId: saved.id,
-	};
+	const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
 	const transcript = saved && bundle && closedTranscript(agentDir, agentId, bundle.home, saved, ports);
-	const { outcome } = cancelOwedWorkerWork(
-		agentDir,
-		bundle,
-		new Set([...botHomeSessionIds(home.sessionsDir, "follow"), ...(saved ? [saved.id] : [])]),
-		stop.reasonCode,
-	);
+	const { outcome } = cancelOwedWorkerWork(agentDir, bundle, placedBy, stop.reasonCode);
 	if (transcript) {
 		const now = ports.now();
 		holdPersistedGoalForOwnerStop(closedGoalHost(transcript), stop.at, new Date(now).toISOString());
 		declineUsageWaitForOwner(transcript, stop.at, now);
 	}
 	return outcome;
+}
+
+/**
+ * Where a closed bot's work is: its saved session's bundle, in the home its id resolves to now (the bot's, or the owner's
+ * it was left in), and every session its home holds, whose placed jobs are the bot's.
+ */
+function closedSessionWork(
+	agentDir: string,
+	agentId: string,
+	saved: SavedBotSession | undefined,
+): { readonly bundle: { home: OrchestrationHome; sessionId: string } | undefined; readonly placedBy: Set<string> } {
+	const home = botHomeOf(agentDir, agentId);
+	const bundle = saved && {
+		home: botSessionStorageRoots(agentDir, home.orchestrationHome, saved.id).orchestrationHome,
+		sessionId: saved.id,
+	};
+	return {
+		bundle,
+		placedBy: new Set([...botHomeSessionIds(home.sessionsDir, "follow"), ...(saved ? [saved.id] : [])]),
+	};
+}
+
+/**
+ * The work bot `agentId`'s closed session `saved` left, ended for `reasonCode` as a stop of it while no process hosts it
+ * ends it ({@link cancelOwedWorkerWork}), under its host lock: its bundle's queued and recovered attempts and the jobs its
+ * home's sessions placed. For a release of the bot (retired, or off the session path) with no session of it loaded here,
+ * so nothing a later open of it would resume is left. What it left unended. A lock held (by the host of the bot, or by
+ * this process opening or closing it) throws the owner's words: the release stays owed and runs again.
+ */
+export function endClosedBotWork(
+	agentDir: string,
+	agentId: string,
+	saved: SavedBotSession | undefined,
+	reasonCode: string,
+): WorkerStopOutcome {
+	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
+	if (!taken.held) throw new Error(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
+	try {
+		const { bundle, placedBy } = closedSessionWork(agentDir, agentId, saved);
+		return cancelOwedWorkerWork(agentDir, bundle, placedBy, reasonCode).outcome;
+	} finally {
+		taken.lock.release();
+	}
 }
 
 /**

@@ -93,7 +93,7 @@ import { type BotSessionDefinition, botMayRunAsSession, profileBotSession } from
 import { BotSessionSpend } from "./bot-session-spend.ts";
 import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
-import { applyBotStopUnderLock, type BotStopPorts, stopLoadedBot } from "./bot-stop.ts";
+import { applyBotStopUnderLock, type BotStopPorts, endClosedBotWork, stopLoadedBot } from "./bot-stop.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -1113,8 +1113,8 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * The change step of a release: the watches and the inbox are read again now, so a watch armed or changed and a
-	 * message sent since the preparation go too, each watch dropped at the revision read. A failure (a revision that
+	 * The change step of a release: its workers end first, a closed session's under its host lock (`endClosedBotWork`); the
+	 * watches and the inbox are read again now, so a watch armed or changed and a message sent since the preparation go too, each watch dropped at the revision read. A failure (a revision that
 	 * changed again, a read) leaves the release owed: it runs whole again after a backoff ({@link releaseOwed}).
 	 */
 	private finishRelease(agentId: string, sessionId: string | undefined, loaded: boolean): void {
@@ -1124,7 +1124,7 @@ export class BotSessionHost {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
 			const left = loaded
 				? this.entries.get(agentId)?.session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON)
-				: undefined;
+				: endClosedBotWork(this.ports.agentDir(), agentId, this.view.savedSessionOf(agentId), OWNER_STOPPED_REASON);
 			if (left && left.failed.length + left.managed.length > 0)
 				this.ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, left.failed.length, left.managed.length));
 			fleetEnded = true;
