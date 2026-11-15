@@ -126,6 +126,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono não pôde ser registrada (${reason}); ela não chega a nenhum outro processo e não é tentada de novo, então envie-a outra vez.`,
+	botStopLinkedSessionLeft: (agentId: string, path: string) =>
+		`Bot ${agentId}: a parada do dono foi aplicada, mas os workers, o objetivo e a espera pelo limite de uso da sessão salva dele foram deixados: ${path} é um link simbólico, e nenhum trabalho é encerrado por meio de um.`,
 	botPlacedJobsNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o trabalho próprio dele foi encerrado, mas os jobs que as sessões da casa dele colocaram em outras máquinas não puderam ser encerrados (${reason}).`,
 	botLinkedSessionsJobsLeft: (agentId: string, paths: readonly string[]) =>

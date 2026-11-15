@@ -135,6 +135,9 @@ export const BOT_TEAM = {
 	/** The owner's stop could not be written to the bot's home: no process takes it, and it is not tried again. */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
+	/** The owner's stop of a closed bot left its saved session's work: its pointer or session file is a symbolic link. */
+	botStopLinkedSessionLeft: (agentId: string, path: string) =>
+		`Bot ${agentId}: the owner's stop was taken, but its saved session's workers, goal and usage-limit wait were left: ${path} is a symbolic link, and work is never ended through one.`,
 	/** A stop or a release ended the bot's own work, and the jobs its home's sessions placed could not be ended. */
 	botPlacedJobsNotEnded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its own work was ended, but the jobs its home's sessions placed on other machines could not be ended (${reason}).`,

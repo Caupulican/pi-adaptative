@@ -687,7 +687,7 @@ export class BotSessionHost {
 		let storeWithin: string | undefined;
 		try {
 			// The owner's stop waiting for it is applied to its closed session under the lock first: nothing it stopped resumes.
-			applyBotStopUnderLock(agentDir, agentId, this.view.savedSessionOf(agentId), this.stopPorts());
+			applyBotStopUnderLock(agentDir, agentId, { saved: this.view.savedSessionOf(agentId) }, this.stopPorts());
 			// The session the bot's home records, whatever directory it worked in: a bot keeps one conversation.
 			const { sessionManager, continued } = openHostedBotSession(agentDir, home, cwd, {
 				pointerSetAside: (file, reason) => this.ports.warn(words.botSessionPointerSetAside(agentId, file, reason)),

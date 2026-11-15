@@ -47,6 +47,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
+import { BotSessionLinkError } from "./bot-session-pointer.ts";
 
 /** What applying a stop needs besides the bot's files: the owner's notices, and the provider admission clock's time. */
 export interface BotStopPorts {
@@ -159,20 +160,20 @@ export function endLoadedBotWork(
  * ended (`cancelBundleWorkers`), its goal paused and its usage wait declined in its transcript, the messages the stop
  * covers refused and the stops deleted, then the jobs every session of its home placed ended, all in one synchronous run
  * that releases the lock at its end. A bot with no saved session has only its home's placed jobs, its messages and its stops to
- * take. `held` when another process holds the lock (its host takes the stop), `none` when no stop waits. A failure
+ * take; one whose saved session is a symbolic link ({@link ClosedBotSession}) has its session's work left, the owner told. `held` when another process holds the lock (its host takes the stop), `none` when no stop waits. A failure
  * throws, the lock released and the stop left waiting.
  */
 export function applyUnhostedBotStop(
 	agentDir: string,
 	agentId: string,
-	saved: SavedBotSession | undefined,
+	session: ClosedBotSession,
 	ports: BotStopPorts,
 ): "applied" | "held" | "none" {
 	if (!botInboxStopWaiting(agentDir, agentId)) return "none";
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) return "held";
 	try {
-		return applyBotStopUnderLock(agentDir, agentId, saved, ports) ? "applied" : "none";
+		return applyBotStopUnderLock(agentDir, agentId, session, ports) ? "applied" : "none";
 	} finally {
 		taken.lock.release();
 	}
@@ -187,17 +188,39 @@ export function applyUnhostedBotStop(
 export function applyBotStopUnderLock(
 	agentDir: string,
 	agentId: string,
-	saved: SavedBotSession | undefined,
+	session: ClosedBotSession,
 	ports: BotStopPorts,
 ): BotInboxStop | undefined {
+	const saved = "saved" in session ? session.saved : undefined;
 	return takeStops(
 		agentDir,
 		agentId,
-		(stop, warn) => stopClosedSession(agentDir, agentId, saved, stop, { warn, now: ports.now }),
+		(stop, warn) => {
+			if ("saved" in session) return stopClosedSession(agentDir, agentId, saved, stop, { warn, now: ports.now });
+			// Nothing is ended through the link: the rest of the stop applies, and the owner is told what it left.
+			warn(interfaceText().botTeam.botStopLinkedSessionLeft(agentId, session.linked));
+			return NOTHING_LEFT;
+		},
 		(stop) =>
 			endHomePlacedJobs(agentDir, agentId, (ids) => (saved ? [...ids, saved.id] : ids), stop.reasonCode, ports.warn),
 		ports,
 	);
+}
+
+/**
+ * A closed bot's saved session as its stop reads it: the session (none when the bot has none), or the path of the symbolic
+ * link its pointer or session file is, through which no work is ended.
+ */
+export type ClosedBotSession = { readonly saved: SavedBotSession | undefined } | { readonly linked: string };
+
+/** A closed bot's saved session read through `read`, a writer's read that refuses a link ({@link ClosedBotSession}). */
+export function readClosedBotSession(read: () => SavedBotSession | undefined): ClosedBotSession {
+	try {
+		return { saved: read() };
+	} catch (error) {
+		if (error instanceof BotSessionLinkError) return { linked: error.path };
+		throw error;
+	}
 }
 
 /** A bot's session loaded in this process, and the transcript it writes, as the owner's stop reaches them. */

@@ -38,7 +38,7 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import { applyUnhostedBotStop } from "./bot-stop.ts";
+import { applyUnhostedBotStop, readClosedBotSession } from "./bot-stop.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -828,15 +828,16 @@ export class BotOwedWork {
 		const stops = botInboxStopNames(agentDir, agentId).join("\n");
 		if (stops === "" || (swept && this.failedStops.get(agentId) === stops)) return false;
 		try {
-			const saved = this.ports.savedSessionOf(agentId);
+			// A saved session that is a symbolic link is left, and the rest of the stop applies: it is taken all the same.
+			const session = readClosedBotSession(() => this.ports.savedSessionOf(agentId));
 			const ports = {
 				warn: (message: string) => this.ports.warn(message),
 				now: () => this.ports.admissionTimers().now(),
 			};
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote.
-			if (applyUnhostedBotStop(agentDir, agentId, saved, ports) === "applied") {
+			if (applyUnhostedBotStop(agentDir, agentId, session, ports) === "applied") {
 				this.forgetOwedTimes(agentId);
-				this.armUsageWait(agentId, this.usageResumeAt(agentId, saved));
+				this.armUsageWait(agentId, this.usageResumeAt(agentId, "saved" in session ? session.saved : undefined));
 			}
 			this.failedStops.delete(agentId);
 			return false;
