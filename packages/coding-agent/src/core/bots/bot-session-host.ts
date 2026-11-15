@@ -807,6 +807,8 @@ export class BotSessionHost {
 				settle: () => this.settle(entry),
 			});
 			session.startBackgroundInputs();
+			// A stop written since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
+			stopLoadedBot(agentDir, agentId, { session, transcript: sessionManager }, undefined, this.stopPorts());
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
 			session.backgroundLanes.drainQueuedWorkerDelegations();
