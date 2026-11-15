@@ -72,9 +72,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * - `reserveWorkerBundleDeletion` (fail-closed: live claim, busy or enrolled
  *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
  * - no durable usage or accepted-worker receipt is waiting for parent delivery;
- * - no bot's history references a run of its session (`historyReferencedSessionIds`): a bot's chat reads its earlier
- *   worker conversations from the bundle. A bot index that exists but does not read skips the whole run (reported),
- *   since the sessions it holds are unknown.
+ * - no bot's history references a run of its session (`historyReferencedSessionIds`, over every home the run's one
+ *   listing of `bots/` found, a symlinked one included): a bot's chat reads its earlier worker conversations from the
+ *   bundle. A bot index that exists but does not read, or a home whose link does not resolve, skips the whole run
+ *   (reported), since the sessions it holds are unknown.
  *
  * An obligation older than {@link SESSION_BUNDLE_MAX_AGE_MS} can never be answered, because the session that
  * owed it is long gone. Before a bundle is refused for one, it is settled as failed with
@@ -1007,7 +1008,7 @@ export async function sweepSessionBundles(
 			if (hold.kind === "undetermined") reportHome(botHomeUnknownText(botName, hold.unknown));
 			homes.push(sweep);
 		}
-		const history = historyReferencedSessionIds(agentDir);
+		const history = historyReferencedSessionIds(bots);
 		const run: SweepRun = {
 			agentDir,
 			now,
@@ -1024,7 +1025,8 @@ export async function sweepSessionBundles(
 		const seen = new Set<string>();
 		const gated = await resumeRetentionsInFlight(run, homes, seen);
 		for (const sweep of homes) if (sweep.unreadable > 0) reportHome(sweep.unreadableText(sweep.unreadable));
-		if (history.unreadable.length > 0) {
+		// A home whose link does not resolve was told as its failed cleanup when the session files were listed.
+		if (history.unreadable.length > 0 || history.unresolvedHomes) {
 			for (const agentId of history.unreadable)
 				reportHome(text.botTeam.botHistoryIndexUnreadable(boundedName(agentId)));
 			return result;

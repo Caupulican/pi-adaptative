@@ -17,7 +17,7 @@
  * orchestration home (`ownerOrchestrationHome`).
  */
 
-import { createReadStream, type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, type Dirent, existsSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -34,7 +34,7 @@ import {
 } from "../../kernel/session/worker-transcript-reference.ts";
 import { sessionsDir as rootSessionsDir } from "../../kernel/storage/paths.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botHistoryFile, botHistoryScanFile, botsDir } from "../agent-paths.ts";
+import { botHistoryFile, botHistoryScanFile } from "../agent-paths.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE, directBindingAlias, isBotId } from "../delegation/bot-runtime-bindings.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -42,6 +42,7 @@ import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { ensureBotHome } from "./bot-home.ts";
 import { readTranscriptMessages } from "./bot-remote-view.ts";
+import type { BotSessionHolds } from "./bot-session-holds.ts";
 
 /** Runs one bot's index keeps, the newest. */
 export const MAX_HISTORY_RUNS = 200;
@@ -146,29 +147,34 @@ function readHistoryAt(file: string, agentId: string): HistoryIndex {
 	}
 }
 
-/** The sessions bots' histories hold, and the bots whose index could not be read (whose holds are unknown). */
+/** The sessions bots' histories hold, and the homes whose history could not be read (whose holds are unknown). */
 export interface HistoryReferences {
 	readonly sessionIds: Set<string>;
+	/** The bots whose index exists but does not read. */
 	readonly unreadable: readonly string[];
+	/**
+	 * Some home's index could not be looked for: its symbolic link under `bots/` does not resolve
+	 * (`BotSessionHolds.unresolvedHomes`, told to the owner as that home's failed cleanup).
+	 */
+	readonly unresolvedHomes: boolean;
 }
 
 /**
  * The root sessions whose orchestration bundles hold a run some bot's history references: retention keeps those bundles,
- * since a bot's chat reads its earlier conversations from them (only the newest runs stay indexed, so the hold ends). A
- * bot whose index exists but does not read is named in `unreadable`: what it holds is unknown, so retention must not run.
+ * since a bot's chat reads its earlier conversations from them (only the newest runs stay indexed, so the hold ends). The
+ * homes are the ones the sweep's one listing of `bots/` found (`readBotSessionHolds`, a symbolic link to a bot
+ * directory included). A bot whose index exists but does not read is named in `unreadable`, and a home whose link does
+ * not resolve sets `unresolvedHomes`: what they hold is unknown, so retention must not run.
  */
-export function historyReferencedSessionIds(agentDir: string): HistoryReferences {
+export function historyReferencedSessionIds(bots: BotSessionHolds): HistoryReferences {
 	const sessionIds = new Set<string>();
 	const unreadable: string[] = [];
-	const dir = botsDir(agentDir);
-	if (!existsSync(dir)) return { sessionIds, unreadable };
-	for (const home of readdirSync(dir, { withFileTypes: true })) {
-		if (!home.isDirectory()) continue;
-		const index = readHistoryAt(join(dir, home.name, "history.json"), home.name);
-		if (index.state === "unreadable") unreadable.push(home.name);
+	for (const { name, home } of bots.homes) {
+		const index = readHistoryAt(join(home.dir, "history.json"), name);
+		if (index.state === "unreadable") unreadable.push(name);
 		else if (index.state === "read") for (const run of index.history.runs) sessionIds.add(run.parentSessionId);
 	}
-	return { sessionIds, unreadable };
+	return { sessionIds, unreadable, unresolvedHomes: bots.unresolvedHomes.length > 0 };
 }
 
 /** The one scan of the root session files has run for this agent directory (see the module comment). */

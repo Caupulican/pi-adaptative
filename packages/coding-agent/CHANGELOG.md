@@ -21,6 +21,7 @@
 ### Fixed
 
 - A plan an older build lost is read as lost instead of as a plan from a newer build: a build before 0.104.65 read every plan this line writes as one from a newer build and, compacting the session, kept only its identity (`{v, planId, version, unsupported: true}`), so the plan's nodes and the events past the snapshot were gone, the plan blocked the session's orchestration retention for good and `/plan` listed it as "a plan from a newer version of the harness". It now reads as lost: it never runs, it no longer holds retention, the rest of the session stays readable, `/plan` names it and its status (English and pt-BR), and you are told once per plan and session, in English and pt-BR.
+- The startup cleanup of old session directories reads the history index of a bot whose directory under `bots/` is a symbolic link: it skipped every such home, so a directory holding an earlier conversation that bot's chat shows could be removed; a link that does not resolve now stops that cleanup, as an index that cannot be read does, since what the home holds is unknown.
 
 ## [0.104.65] - 2026-11-15
 
