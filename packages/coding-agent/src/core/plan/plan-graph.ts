@@ -312,6 +312,14 @@ export function isPlanLostToOlderBuild(record: StoredPlanRecord | undefined): re
 	return isPlanFromNewerBuild(record) && (PLAN_DECODABLE_VERSIONS as readonly number[]).includes(record.v);
 }
 
+/**
+ * A plan a newer build wrote and this build keeps by its identity: not lost, since its record and its events are carried
+ * verbatim beside each snapshot this build writes (`plan-carry.ts`).
+ */
+export function isPlanCarried(record: StoredPlanRecord | undefined): record is PlanFromNewerBuild {
+	return isPlanFromNewerBuild(record) && !isPlanLostToOlderBuild(record);
+}
+
 /** The binding of a node's spec version to the orchestration task that runs it. */
 export interface PlanNodeRelease {
 	readonly version: number;

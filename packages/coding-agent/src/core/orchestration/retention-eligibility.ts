@@ -12,11 +12,10 @@
  * judge a prune before it is appended (`assertRetentionPruneAllowed`). retention.ts states which is which.
  */
 
-import { isPlanFromNewerBuild, isPlanLostToOlderBuild, type PlanRuntimeState } from "../plan/plan-graph.ts";
+import { isPlanCarried, isPlanFromNewerBuild, type PlanRuntimeState } from "../plan/plan-graph.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder, latestAgentAttemptsByDurableOrder } from "./attempt-ordering.ts";
-import type { CompactionWhen } from "./compaction-deferral.ts";
 import type { AgentPrunedTurns } from "./contracts.ts";
 import { APPROVAL_NOTIFICATION_PREFIX, isUnboundDeliveredNotification } from "./notification-eviction.ts";
 import { MAX_RETENTION_PRUNE_RECORDS, type RetentionPrunedPayload, retentionArchiveId } from "./retention-event.ts";
@@ -141,22 +140,10 @@ function latestIso(values: readonly string[]): string {
 
 /**
  * A plan a newer build wrote hides what its records name, so nothing is released beside it. A plan lost to an older
- * build's compaction hides nothing any build will read: its record is gone, and it is never run. Compaction is deferred
- * beside such a plan too (`compaction-deferral.ts`).
+ * build's compaction hides nothing any build will read: its record is gone, and it is never run.
  */
-export function hasOpaquePlan(state: TaskRuntimeProjection): boolean {
-	return Object.values(state.plans).some(
-		(plan) => isPlanFromNewerBuild(plan.record) && !isPlanLostToOlderBuild(plan.record),
-	);
-}
-
-/**
- * When the session's journal may be folded into a snapshot (`compaction-deferral.ts`): `forced` for a committed prune,
- * else deferred while a plan from a newer build would be written back as its identity alone.
- */
-export function compactionWhen(state: TaskRuntimeProjection, force: boolean): CompactionWhen {
-	if (force) return "forced";
-	return hasOpaquePlan(state) ? "deferred" : "due";
+function hasOpaquePlan(state: TaskRuntimeProjection): boolean {
+	return Object.values(state.plans).some((plan) => isPlanCarried(plan.record));
 }
 
 function unitOf(

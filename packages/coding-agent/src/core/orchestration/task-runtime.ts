@@ -7,6 +7,7 @@ import { taskOutcomeId } from "../delegation/worker-outcome-codec.ts";
 import type { Outcome, StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
 import { HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
+import { carriedPlansFold } from "../plan/plan-carry.ts";
 import type {
 	PlanClosedPayload,
 	PlanJoinSettledPayload,
@@ -56,7 +57,7 @@ import {
 import type { OrchestrationEventStore } from "./event-store.ts";
 import { assertNotificationCapacity } from "./notification-eviction.ts";
 import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
-import { assertRetentionPruneAllowed, compactionWhen } from "./retention-eligibility.ts";
+import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
 import {
 	approvalFromPayload,
@@ -1602,9 +1603,8 @@ export class DurableTaskRuntime {
 	}
 
 	private compactCurrentProjection(lockOptions?: Readonly<AtomicFileLockOptions>, force = false): void {
-		if (this.state.lastOrdinal === 0) return;
-		const when = compactionWhen(this.state, force);
-		this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions, when);
+		if (this.state.lastOrdinal > 0)
+			this.store.compactIfNeeded(this.state.lastOrdinal, carriedPlansFold(this.state), lockOptions, force);
 	}
 
 	private transactHostEvents<T>(operation: (transaction: HostEventRuntimeTransaction) => T): T {

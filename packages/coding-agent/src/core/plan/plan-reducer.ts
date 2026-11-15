@@ -14,6 +14,7 @@ import {
 import { currentTaskOf, successorOf } from "../orchestration/task-successor.ts";
 import {
 	planClosedFromValue,
+	planClosureOf,
 	planJoinSettledFromValue,
 	planNodeHeldFromValue,
 	planNodeReleasedFromValue,
@@ -166,6 +167,21 @@ function recordPlan(plans: Record<string, PlanRuntimeState>, event: Orchestratio
 }
 
 /**
+ * An event of a plan this build keeps by its identity (a plan from a newer build, or one an older build lost), routed by
+ * its aggregate before any payload is decoded: the payload may be of a shape only the newer build knows. None is applied
+ * but a closing this build reads; a carried plan's events are kept verbatim by the compaction (`plan-carry.ts`).
+ */
+function routeKeptPlanEvent(plans: Record<string, PlanRuntimeState>, event: OrchestrationEvent): boolean {
+	const kept = plans[event.aggregateId];
+	if (event.type === "plan.recorded" || !kept || !isPlanFromNewerBuild(kept.record)) return false;
+	if (event.type !== "plan.closed") return true;
+	const { status, reason } = event.payload;
+	const closed = planClosureOf({ status, reason, closedAt: event.occurredAt });
+	if (closed) plans[event.aggregateId] = { ...kept, closed };
+	return true;
+}
+
+/**
  * Applies one `plan.*` event to the (already copied and tracked) plans map. `tasks` is read to bind a release and a
  * settlement to the exact task and outcome they name.
  */
@@ -174,6 +190,7 @@ export function reducePlanEvent(
 	tasks: Readonly<Record<string, TaskRuntimeState>>,
 	event: OrchestrationEvent,
 ): void {
+	if (routeKeptPlanEvent(plans, event)) return;
 	const at = event.occurredAt;
 	switch (event.type) {
 		case "plan.recorded":

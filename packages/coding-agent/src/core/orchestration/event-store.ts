@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, type Stats, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -13,7 +13,6 @@ import {
 } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { type FaultableFs, nodeFs } from "../util/faultable-fs.ts";
-import { type CompactionWhen, compactionTailLimits, WIDEST_TAIL } from "./compaction-deferral.ts";
 import {
 	type AppendOrchestrationEventInput,
 	isOrchestrationEvent,
@@ -30,19 +29,38 @@ import {
 	OrchestrationEventStoreError,
 	OrchestrationSnapshotRequiredError,
 } from "./event-store-errors.ts";
+import {
+	type EventCursor,
+	hasExactFields,
+	MAX_CURSOR_BYTES,
+	parseCursor,
+	readIfChanged,
+	type SignedRead,
+	serializeBounded,
+	serializeCompactBounded,
+} from "./event-store-files.ts";
 import { boundedIdempotencyEvents, indexIdempotentEvent } from "./event-store-idempotency.ts";
 import { withSessionBundleAdmission, withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
+import {
+	type CompactionBasis,
+	type CompactionFold,
+	carriedFileName,
+	isCarriedFileName,
+	readCarriedFile,
+	serializeCarriedFile,
+} from "./snapshot-carry-file.ts";
 
 const EVENT_FILE_PATTERN = /^(\d{16})\.json$/;
 const SNAPSHOT_FILE_PATTERN = /^(\d{16})\.json$/;
 const DEFAULT_MAX_TAIL_EVENTS = 256;
 const DEFAULT_MAX_TAIL_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_IDEMPOTENCY_EVENTS = 512;
+const MAX_CONFIGURED_TAIL_EVENTS = 1_024;
+const MAX_CONFIGURED_TAIL_BYTES = 16 * 1024 * 1024;
 const MAX_CONFIGURED_IDEMPOTENCY_EVENTS = 1_024;
 const MAX_EVENT_DIRECTORY_ENTRIES = 2_048;
 const MAX_IDEMPOTENCY_DIRECTORY_ENTRIES = 2_048;
 const MAX_SNAPSHOT_DIRECTORY_ENTRIES = 8;
-const MAX_CURSOR_BYTES = 64 * 1024;
 const MAX_BASELINE_BYTES = 64 * 1024;
 const ORCHESTRATION_ACTORS = ["human", "kernel", "runtime", "policy", "router", "worker"] as const;
 const APPEND_INPUT_FIELDS = [
@@ -77,12 +95,6 @@ const SNAPSHOT_FIELDS = [
 	"digest",
 ] as const;
 const BASELINE_FIELDS = ["version", "throughOrdinal", "digest", "snapshotFile"] as const;
-
-interface EventCursor {
-	version: 1;
-	lastOrdinal: number;
-	tailBytes?: number;
-}
 
 interface SynchronizedIndexes {
 	baselineOrdinal: number;
@@ -165,114 +177,6 @@ export interface OrchestrationEventTransaction {
 	): OrchestrationEvent;
 }
 
-/** What one lstat tells about a small state file; a change in any of it means re-read and re-parse. */
-interface FileSignature {
-	size: number;
-	mtimeMs: number;
-	ctimeMs: number;
-	ino: number;
-}
-
-interface SignedRead<T> {
-	signature: FileSignature;
-	value: T;
-}
-
-function fileSignature(stats: Stats): FileSignature {
-	return { size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs, ino: stats.ino };
-}
-
-function sameFileSignature(left: FileSignature, right: FileSignature): boolean {
-	return (
-		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs &&
-		left.ino === right.ino
-	);
-}
-
-/**
- * Re-read a small state file only when its signature changed. The bounded, version-stable read
- * behind `parse` costs five system calls; one lstat answers the common case that nothing changed,
- * which on Windows was the difference between a poll and a stall. The store invalidates the cached
- * read after its own writes, so a rewrite that lands inside one timestamp tick is only ever missed
- * for a foreign writer, and only until the next tick. A missing file yields undefined.
- */
-function readIfChanged<T>(
-	filePath: string,
-	cached: SignedRead<T> | undefined,
-	parse: () => T,
-): SignedRead<T> | undefined {
-	let stats: Stats;
-	try {
-		stats = lstatSync(filePath);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-		throw error;
-	}
-	const signature = fileSignature(stats);
-	if (cached && sameFileSignature(cached.signature, signature)) return cached;
-	return { signature, value: parse() };
-}
-
-function parseCursor(filePath: string): EventCursor | undefined {
-	let content: string;
-	try {
-		content = readBoundedTextFileSync(filePath, MAX_CURSOR_BYTES, "Orchestration cursor");
-	} catch (error) {
-		throw new OrchestrationEventStoreError(
-			`Failed to read orchestration cursor: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	try {
-		const parsed: unknown = JSON.parse(content);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-		const record = parsed as Record<string, unknown>;
-		if (record.version !== 1 || !Number.isSafeInteger(record.lastOrdinal) || Number(record.lastOrdinal) < 0) {
-			return undefined;
-		}
-		if (record.tailBytes !== undefined && (!Number.isSafeInteger(record.tailBytes) || Number(record.tailBytes) < 0)) {
-			return undefined;
-		}
-		return {
-			version: 1,
-			lastOrdinal: Number(record.lastOrdinal),
-			...(record.tailBytes !== undefined ? { tailBytes: Number(record.tailBytes) } : {}),
-		};
-	} catch {
-		return undefined;
-	}
-}
-
-function serialize(value: unknown): string {
-	return `${JSON.stringify(value, null, "\t")}\n`;
-}
-
-function serializeCompact(value: unknown): string {
-	return `${JSON.stringify(value)}\n`;
-}
-
-function serializeBounded(
-	value: unknown,
-	maxBytes: number,
-	label: string,
-	oversizedMessage = `${label} exceeds its byte limit.`,
-): string {
-	const serialized = serialize(value);
-	if (Buffer.byteLength(serialized, "utf-8") > maxBytes) {
-		throw new OrchestrationEventStoreError(oversizedMessage);
-	}
-	return serialized;
-}
-
-function serializeCompactBounded(value: unknown, maxBytes: number, label: string): string {
-	const serialized = serializeCompact(value);
-	if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
-		throw new OrchestrationEventStoreError(`${label} exceeds its byte limit.`);
-	}
-	return serialized;
-}
-
 function isCanonicalIdentifier(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
@@ -312,11 +216,6 @@ function canonicalJsonObject(value: unknown, label: string): JsonObject {
 			`${label} must be a finite JSON object: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
-}
-
-function hasExactFields(record: Record<string, unknown>, fields: readonly string[]): boolean {
-	const actualFields = Object.keys(record);
-	return actualFields.length === fields.length && fields.every((field) => Object.hasOwn(record, field));
 }
 
 function normalizeAppendInput(input: AppendOrchestrationEventInput): AppendOrchestrationEventInput {
@@ -482,13 +381,13 @@ export class OrchestrationEventStore {
 		this.maxTailEvents = positiveSafeInteger(
 			options.maxTailEvents,
 			DEFAULT_MAX_TAIL_EVENTS,
-			WIDEST_TAIL.events,
+			MAX_CONFIGURED_TAIL_EVENTS,
 			"maxTailEvents",
 		);
 		this.maxTailBytes = positiveSafeInteger(
 			options.maxTailBytes,
 			DEFAULT_MAX_TAIL_BYTES,
-			WIDEST_TAIL.bytes,
+			MAX_CONFIGURED_TAIL_BYTES,
 			"maxTailBytes",
 		);
 		this.maxIdempotencyEvents = positiveSafeInteger(
@@ -715,47 +614,48 @@ export class OrchestrationEventStore {
 		return Math.max(baselineOrdinal, last === undefined ? 0 : Number(EVENT_FILE_PATTERN.exec(last)?.[1] ?? 0));
 	}
 
-	readProjectionSnapshot(): { throughOrdinal: number; projection: JsonObject } | undefined {
+	/** The published snapshot, with the carry bound to it (`snapshot-carry-file.ts`) when one is. */
+	readProjectionSnapshot(): { throughOrdinal: number; projection: JsonObject; carried?: JsonObject } | undefined {
 		const snapshot = this.readProjectionSnapshotUnlocked();
-		return snapshot
-			? { throughOrdinal: snapshot.throughOrdinal, projection: structuredClone(snapshot.projection) }
-			: undefined;
+		if (!snapshot) return undefined;
+		const carried = readCarriedFile(this.snapshotsDir, snapshot.throughOrdinal, snapshot.digest);
+		return { throughOrdinal: snapshot.throughOrdinal, projection: structuredClone(snapshot.projection), carried };
 	}
 
 	/**
-	 * Replace a large replay prefix with one verified current-state snapshot and a bounded tail, once the tail reaches the
-	 * bound `when` names (`compaction-deferral.ts`). `lockOptions` bounds the wait for the store lock, as in `append`.
+	 * Replace a large replay prefix with one verified current-state snapshot and a bounded tail. `fold` makes the snapshot
+	 * from what it replaces, and names what the snapshot cannot hold, kept verbatim beside it (`snapshot-carry-file.ts`).
+	 * `lockOptions` bounds the wait for the store lock, as in `append`.
 	 */
 	compactIfNeeded(
 		throughOrdinal: number,
-		projection: () => JsonObject,
-		lockOptions: Readonly<AtomicFileLockOptions> | undefined,
-		when: CompactionWhen,
+		fold: (basis: CompactionBasis) => CompactionFold,
+		lockOptions?: Readonly<AtomicFileLockOptions>,
+		force = false,
 	): boolean {
-		const limit = compactionTailLimits(when, { events: this.maxTailEvents, bytes: this.maxTailBytes });
 		if (this.transactionActive)
 			throw new OrchestrationEventStoreError("Cannot compact inside an active orchestration transaction.");
 		const baselineBeforeLock = this.readBaselineUnlocked();
 		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
 		const cachedIndexes = this.synchronizedIndexes;
 		if (
-			when !== "forced" &&
+			!force &&
 			cachedIndexes?.baselineOrdinal === baselineOrdinalBeforeLock &&
 			cachedIndexes.baselineDigest === baselineBeforeLock?.digest &&
 			cachedIndexes.lastOrdinal === throughOrdinal &&
-			throughOrdinal - baselineOrdinalBeforeLock < limit.events &&
-			cachedIndexes.tailBytes < limit.bytes
+			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
+			cachedIndexes.tailBytes < this.maxTailBytes
 		) {
 			return false;
 		}
 		const cursorBeforeLock = this.readCursorUnlocked();
 		if (
-			when !== "forced" &&
+			!force &&
 			!cachedIndexes &&
 			cursorBeforeLock?.lastOrdinal === throughOrdinal &&
 			cursorBeforeLock.tailBytes !== undefined &&
-			throughOrdinal - baselineOrdinalBeforeLock < limit.events &&
-			cursorBeforeLock.tailBytes < limit.bytes
+			throughOrdinal - baselineOrdinalBeforeLock < this.maxTailEvents &&
+			cursorBeforeLock.tailBytes < this.maxTailBytes
 		) {
 			return false;
 		}
@@ -780,23 +680,32 @@ export class OrchestrationEventStore {
 						const tailNames = this.eventFileNamesUnlocked().filter(
 							(name) => Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0) > baselineOrdinal,
 						);
-						if (when !== "forced" && tailNames.length < limit.events && cursor.tailBytes < limit.bytes)
+						if (!force && tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes)
 							return false;
 
 						// Snapshot events first, then the tail in ordinal order, so a retirement in the tail applies last.
 						const retainedByKey = new Map<string, OrchestrationEvent>();
-						for (const event of this.readProjectionSnapshotUnlocked()?.idempotencyEvents ?? []) {
-							indexIdempotentEvent(retainedByKey, event);
-						}
-						for (const name of tailNames) {
-							const event = this.readEventFileUnlocked(name);
-							if (event.ordinal <= throughOrdinal) indexIdempotentEvent(retainedByKey, event);
-						}
+						const prior = this.readProjectionSnapshotUnlocked();
+						for (const event of prior?.idempotencyEvents ?? []) indexIdempotentEvent(retainedByKey, event);
+						const tail = tailNames
+							.map((name) => this.readEventFileUnlocked(name))
+							.filter((event) => event.ordinal <= throughOrdinal);
+						for (const event of tail) indexIdempotentEvent(retainedByKey, event);
 						const idempotencyEvents = boundedIdempotencyEvents(
 							[...retainedByKey.values()],
 							this.maxIdempotencyEvents,
 						);
-						const canonicalProjection = canonicalJsonObject(projection(), "Orchestration projection snapshot");
+						const folded = fold({
+							prior: prior && {
+								projection: prior.projection,
+								carried: readCarriedFile(this.snapshotsDir, prior.throughOrdinal, prior.digest),
+							},
+							tail,
+						});
+						const canonicalProjection = canonicalJsonObject(
+							folded.projection,
+							"Orchestration projection snapshot",
+						);
 						const content: ProjectionSnapshotContent = {
 							version: 1,
 							schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -822,6 +731,13 @@ export class OrchestrationEventStore {
 							MAX_CURSOR_BYTES,
 							"Orchestration cursor",
 						);
+						// The carry is written before the baseline that binds it, as the snapshot is (`snapshot-carry-file.ts`).
+						const carriedFile = folded.carried && carriedFileName(throughOrdinal);
+						if (carriedFile) {
+							const carried = canonicalJsonObject(folded.carried, "Orchestration carried snapshot file");
+							const serializedCarried = serializeCarriedFile(throughOrdinal, digest, carried);
+							writeFileAtomicSync(join(this.snapshotsDir, carriedFile), serializedCarried, { fs: this.fs });
+						}
 						writeFileAtomicSync(join(this.snapshotsDir, snapshotFile), serializedSnapshot, { fs: this.fs });
 						writeFileAtomicSync(this.baselinePath, serializedBaseline, { fs: this.fs });
 						this.baselineRead = undefined;
@@ -834,7 +750,8 @@ export class OrchestrationEventStore {
 							if (ordinal <= throughOrdinal) this.unlinkManagedFile(join(this.eventsDir, name));
 						}
 						for (const name of this.snapshotFileNamesUnlocked()) {
-							if (name !== snapshotFile) this.unlinkManagedFile(join(this.snapshotsDir, name));
+							if (name !== snapshotFile && name !== carriedFile)
+								this.unlinkManagedFile(join(this.snapshotsDir, name));
 						}
 						writeFileAtomicSync(this.cursorPath, serializedCursor, { fs: this.fs });
 						this.cursorRead = undefined;
@@ -926,7 +843,7 @@ export class OrchestrationEventStore {
 				MAX_SNAPSHOT_DIRECTORY_ENTRIES,
 				"Orchestration snapshots directory",
 			)
-				.filter((candidate) => SNAPSHOT_FILE_PATTERN.test(candidate))
+				.filter((candidate) => SNAPSHOT_FILE_PATTERN.test(candidate) || isCarriedFileName(candidate))
 				.sort();
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];

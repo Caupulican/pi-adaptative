@@ -29,6 +29,7 @@ import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-or
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
 import { PROOF_STAKES_LEVELS, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import {
+	isPlanFromNewerBuild,
 	PLAN_CLOSE_STATUSES,
 	PLAN_DECODABLE_VERSIONS,
 	PLAN_HOLD_REASONS,
@@ -550,6 +551,21 @@ export function planClosedFromValue(value: unknown, label: string): PlanClosedPa
 	};
 }
 
+/**
+ * A plan's closing in this build's shape, undefined for any other: a plan a newer build wrote may close with a status
+ * this build does not know, and that plan is then read as open here.
+ */
+export function planClosureOf(value: unknown): PlanClosure | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const { status, reason, closedAt, ...rest } = value as Record<string, unknown>;
+	const closure = PLAN_CLOSE_STATUSES.find((allowed) => allowed === status);
+	if (closure === undefined || Object.keys(rest).length > 0) return undefined;
+	if (typeof reason !== "string" || reason.length === 0 || reason.length > PLAN_LIMITS.reasonChars) return undefined;
+	if (typeof closedAt !== "string" || closedAt.length === 0 || closedAt.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH)
+		return undefined;
+	return { status: closure, reason, closedAt };
+}
+
 function releaseFromValue(value: unknown, label: string): PlanNodeRelease {
 	const input = exactRecord(value, label, ["version", "taskId", "placement", "exit", "releasedAt"]);
 	return {
@@ -616,21 +632,24 @@ function retiredFromValue(value: unknown, label: string): PlanRetiredTask {
 
 /** Decodes one entry of the projection's `plans` map from a snapshot. */
 export function planRuntimeStateFromValue(value: unknown, label: string): PlanRuntimeState {
-	const input = exactRecord(value, label, ["record", "nodes", "retired", "closed"]);
+	const input = record(value, label);
+	const stored = planRecordFromValue(input.record, `${label}.record`);
+	// A whole entry a newer build wrote: its steps are of a shape this build may not decode, so only its identity is
+	// read, with its closing when this build reads that; the entry itself is carried verbatim (`plan-carry.ts`).
+	if (isPlanFromNewerBuild(stored) && record(input.record, `${label}.record`).unsupported !== true) {
+		const closed = planClosureOf(input.closed);
+		return { record: stored, nodes: {}, retired: [], ...(closed ? { closed } : {}) };
+	}
+	exactRecord(input, label, ["record", "nodes", "retired", "closed"]);
 	const nodes = record(input.nodes, `${label}.nodes`);
 	if (Object.keys(nodes).length > PLAN_LIMITS.nodes)
 		fail(`${label}.nodes`, `holds more than ${PLAN_LIMITS.nodes} steps`);
-	let closed: PlanClosure | undefined;
-	if (input.closed !== undefined) {
-		const raw = exactRecord(input.closed, `${label}.closed`, ["status", "reason", "closedAt"]);
-		closed = {
-			status: oneOf(raw.status, PLAN_CLOSE_STATUSES, `${label}.closed.status`),
-			reason: text(raw.reason, PLAN_LIMITS.reasonChars, `${label}.closed.reason`),
-			closedAt: id(raw.closedAt, `${label}.closed.closedAt`),
-		};
-	}
+	const closed =
+		input.closed === undefined
+			? undefined
+			: (planClosureOf(input.closed) ?? fail(`${label}.closed`, "is not a closing"));
 	return {
-		record: planRecordFromValue(input.record, `${label}.record`),
+		record: stored,
 		nodes: Object.fromEntries(
 			Object.entries(nodes).map(([key, entry]) => [
 				nodeId(key, `${label}.nodes key`),
