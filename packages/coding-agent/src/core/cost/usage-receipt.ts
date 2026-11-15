@@ -73,16 +73,17 @@ export function usageOfReceipt(receipt: UsageReceipt): Usage {
 
 /**
  * Records `report` in the session once: a report id the session already holds a receipt for (a terminal applied again after a
- * failure) records nothing more.
+ * failure) records nothing more. True when this call recorded it, so the caller tells the session its usage grew.
  */
 export function recordUsageReceipt(
 	session: Pick<SessionManager, "getEntries" | "appendCustomEntry">,
 	report: UsageReceiptReport,
-): void {
-	if (session.getEntries().some((entry) => usageReceiptOf(entry)?.reportId === report.reportId)) return;
+): boolean {
+	if (session.getEntries().some((entry) => usageReceiptOf(entry)?.reportId === report.reportId)) return false;
 	session.appendCustomEntry(USAGE_RECEIPT_CUSTOM_TYPE, {
 		reportId: report.reportId,
 		label: report.label,
 		...validUsageReceipt(report),
 	});
+	return true;
 }

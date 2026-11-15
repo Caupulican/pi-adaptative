@@ -1,6 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import type { AgentSessionEvent } from "../agent-session-contracts.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest } from "../autonomy/contracts.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
@@ -117,6 +118,11 @@ export interface ManagedLaneControllerDeps {
 	 * owner's follow-up document and its path is returned; with the owner in the loop, undefined.
 	 */
 	recordUnsettledForOwner?(items: readonly string[]): string | undefined;
+	/**
+	 * The session's event stream. A usage receipt written raises `usage_updated`, as a spawned usage report does
+	 * (`SessionAnalytics.addSpawnedUsage`): the views redraw and a bot's host charges what its session spent at once.
+	 */
+	emit?(event: AgentSessionEvent): void;
 	/** Optional only for minimal host embeddings; normal AgentSession integration always supplies this. */
 	addSpawnedUsage?(
 		usage: Usage,
@@ -451,13 +457,7 @@ export class ManagedLaneController {
 			if (usage && usageReportId) {
 				this.deps.addSpawnedUsage?.(usage, { label: "managed-worker", reportId: usageReportId });
 			}
-			if (receipt && usageReportId) {
-				recordUsageReceipt(this.deps.getSessionManager(), {
-					reportId: usageReportId,
-					label: "managed-worker",
-					...receipt,
-				});
-			}
+			if (receipt && usageReportId) this.chargeReceipt(usageReportId, receipt);
 			if (!this.hasPersistedClaimForAttempt(claim)) this.deps.saveWorkerClaimSnapshot(claim);
 			const terminal = finalizeWorkerClaim(this.lifecycle, {
 				handle,
@@ -502,6 +502,13 @@ export class ManagedLaneController {
 			}
 		}
 		return record;
+	}
+
+	/** Records a terminal's usage receipt once under its report id, and tells the session its usage grew when this recorded it. */
+	private chargeReceipt(reportId: string, receipt: UsageReceipt): void {
+		const session = this.deps.getSessionManager();
+		if (recordUsageReceipt(session, { reportId, label: "managed-worker", ...receipt }))
+			this.deps.emit?.({ type: "usage_updated" });
 	}
 
 	/**
