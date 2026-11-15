@@ -9,6 +9,7 @@
 
 import type {
 	BotDeliveryOptions,
+	BotDeliveryOrigin,
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
@@ -56,8 +57,9 @@ export function queueInBotInbox(
 	from: { readonly sessionId: string; readonly cwd: string },
 	modelRef: string,
 	behindStop: boolean,
+	origin: BotDeliveryOrigin,
 ): BotOperatorMessageDispatchResult {
-	const item = enqueueOwnerWords(agentDir, agentId, message, mode, from);
+	const item = enqueueWords(agentDir, agentId, message, mode, from, origin);
 	return {
 		agentId,
 		mode: "queued",
@@ -67,13 +69,14 @@ export function queueInBotInbox(
 	};
 }
 
-/** Writes the owner's words, sent from `from` in this process, to the bot's inbox. */
-function enqueueOwnerWords(
+/** Writes the words, sent from `from` in this process, to the bot's inbox: the owner's, or a mail record under their origin. */
+function enqueueWords(
 	agentDir: string,
 	agentId: string,
 	message: string,
 	mode: BotOperatorMessageOptions["mode"],
 	from: { readonly sessionId: string; readonly cwd: string },
+	origin: BotDeliveryOrigin,
 ): ReturnType<typeof enqueueBotInbox> {
 	return enqueueBotInbox(agentDir, {
 		agentId,
@@ -82,6 +85,7 @@ function enqueueOwnerWords(
 		from: { pid: process.pid, sessionId: from.sessionId, cwd: from.cwd },
 		// The clock a stop of the bot is dated on, which decides whether these words came before it.
 		at: OWNER_STOP_CLOCK.now(),
+		...(origin !== "owner" ? { origin } : {}),
 	});
 }
 
@@ -92,11 +96,12 @@ export async function sendToBotHost(
 	message: string,
 	{ mode, showsWaits = false }: BotDeliveryOptions,
 	from: { readonly sessionId: string; readonly cwd: string },
+	origin: BotDeliveryOrigin,
 ): Promise<BotOperatorMessageDispatchResult> {
 	const { agentDir, holder } = ports;
 	const record = ports.store().getBot(agentId);
 	const modelRef = record ? `${record.provider}/${record.modelId}` : "";
-	const item = enqueueOwnerWords(agentDir, agentId, message, mode, from);
+	const item = enqueueWords(agentDir, agentId, message, mode, from, origin);
 	ports.changed(agentId);
 	let host = readRemoteBotHost(agentDir, agentId, holder);
 	let waitsFor: string | undefined;

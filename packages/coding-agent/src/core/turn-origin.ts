@@ -20,8 +20,9 @@ import {
 } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
-import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
+import type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import {
+	isRecordedDeliveryOrigin,
 	MAX_TURN_ORIGIN_REF_CHARS,
 	MAX_TURN_ORIGIN_SHOWN_CHARS,
 	parseTurnOriginRecord,
@@ -128,11 +129,14 @@ export type TurnAuthority = "owner" | "remote-owner" | "third-party";
 /**
  * The origin of a third party's words an extension delivers: a peer agent on the chat mesh, or another channel. A
  * channel that cannot name a record (one restored from a record written before the boundary checked it) is unreadable,
- * and an unreadable origin is third-party like any other.
+ * and an unreadable origin is third-party like any other. An origin the host minted for words it delivers itself
+ * (`hostMintedOrigin`) names the record it was minted with.
  */
 export function channelTurnOrigin(
 	origin: Pick<SendUserMessageOrigin, "channel" | "verified" | "ref"> & Partial<Pick<SendUserMessageOrigin, "text">>,
 ): TurnOriginRecord {
+	const minted = MINTED_ORIGINS.get(origin);
+	if (minted) return minted;
 	return (
 		parseTurnOriginRecord({
 			v: 1,
@@ -146,6 +150,85 @@ export function channelTurnOrigin(
 				: {}),
 		}) ?? UNREADABLE_TURN_ORIGIN
 	);
+}
+
+/** The records the host minted, by the origin object it handed to the session; a copy of one is a channel's third party. */
+const MINTED_ORIGINS = new WeakMap<object, TurnOriginRecord>();
+
+/**
+ * The message origin the host gives a session with words whose origin it records itself (an agent's mail, a routine's
+ * prompt to a bot): the session stamps the turn with `record`, which must name the channel the words arrive on, and shows
+ * the owner `record.shown`. Only the host holds the object it returns, and nothing else can mint one; a copy of it (a
+ * queued input restored after a restart) reads as the channel's third party, so a lost mint never gains authority.
+ */
+export function recordedMessageOrigin(record: TurnOriginRecord): SendUserMessageOrigin {
+	const parsed = parseTurnOriginRecord(record);
+	if (!parsed || !isRecordedDeliveryOrigin(parsed)) throw new TypeError("A recorded turn origin is invalid.");
+	const minted: SendUserMessageOrigin = {
+		channel: parsed.channel,
+		sender: parsed.from ?? parsed.channel,
+		verified: parsed.verified === true,
+		text: parsed.shown ?? "",
+		...(parsed.ref !== undefined ? { ref: parsed.ref } : {}),
+	};
+	MINTED_ORIGINS.set(minted, parsed);
+	return minted;
+}
+
+/**
+ * The kinds of input from outside a session's own work, words or a wake: each opens a bot's spend window
+ * (`bot-spend-window.ts`), and a mail a session sends counts its chain from the last of them it was given.
+ */
+const OUTSIDE_INPUT_KINDS: ReadonlySet<TurnOriginKind> = new Set<TurnOriginKind>([
+	"owner-typed",
+	"owner-channel",
+	"inbound-channel",
+	"peer-agent",
+	"routine",
+	"host-event",
+	"proactive-review",
+	"agent-mail",
+]);
+
+export function isOutsideInputKind(kind: TurnOriginKind): boolean {
+	return OUTSIDE_INPUT_KINDS.has(kind);
+}
+
+/** The channel an agent's mail arrives on. */
+export const AGENT_MAIL_CHANNEL = "bot-mail";
+
+/** One agent's mail as its turn records it: who sent it, its place in its chain, its id and the words the owner reads. */
+export interface AgentMailOrigin {
+	readonly from: string;
+	readonly hop: number;
+	readonly ref: string;
+	readonly shown: string;
+	/** A third party's words reached the turn that wrote it: the mail is that third party's too. */
+	readonly thirdParty: boolean;
+}
+
+/**
+ * The record a mail's turn is stamped with: `agent-mail` (the owner's automation, never the owner's words), or, for mail a
+ * third party's words reached, an `inbound-channel` record that keeps its sender and its place in the chain.
+ */
+export function agentMailTurnOrigin(mail: AgentMailOrigin): TurnOriginRecord {
+	const record = parseTurnOriginRecord({
+		v: 1,
+		k: mail.thirdParty ? "inbound-channel" : "agent-mail",
+		channel: AGENT_MAIL_CHANNEL,
+		...(mail.thirdParty ? { verified: true as const, thirdParty: true as const } : {}),
+		ref: mail.ref,
+		...(mail.shown.trim().length > 0 ? { shown: mail.shown.slice(0, MAX_TURN_ORIGIN_SHOWN_CHARS) } : {}),
+		from: mail.from,
+		hop: mail.hop,
+	});
+	if (!record) throw new TypeError("A mail's turn origin is invalid.");
+	return record;
+}
+
+/** Whether an input's origin carries a third party's words: every origin but one the host minted for its own mail. */
+export function isThirdPartyWords(origin: SendUserMessageOrigin | undefined): boolean {
+	return origin !== undefined && channelTurnOrigin(origin).thirdParty === true;
 }
 
 /**
@@ -490,6 +573,11 @@ export function turnAuthorityCovers(caller: TurnAuthority, armed: TurnAuthority)
  */
 export function isDecisiveOrigin(origin: TurnOriginRecord): boolean {
 	return origin.thirdParty === true || origin.k === "owner-typed" || origin.k === "owner-channel";
+}
+
+/** Whether an entry of `branch` carries a turn origin with reference `ref`: the words it names were given already. */
+export function branchHoldsTurnRef(branch: readonly SessionEntry[], ref: string): boolean {
+	return branch.some((entry) => entryTurnOrigin(entry)?.ref === ref);
 }
 
 /** The latest entry of `branch` (root to leaf) whose origin decides a run's authority, with that origin. */

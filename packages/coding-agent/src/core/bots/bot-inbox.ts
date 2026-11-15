@@ -4,7 +4,9 @@
  * oldest first, and deletes it once the session accepted it. A message the session refuses is kept beside the queue as a
  * refused record with its reason (the newest few), so every session's chat with the bot shows what happened to it.
  *
- * Files: `<at>-<id>.json` waiting, `<at>-<id>.refused.json` refused, `<at>-<id>.stop.json` the owner's stop of the bot's
+ * Files: `<at>-<id>.json` waiting, `<at>-<id>.refused.json` refused, `<at>-<id>.mail.json` and `<at>-<id>.mail.refused.json`
+ * the same for words whose origin the sending host recorded (an agent's mail, a routine's prompt: `origin`), which the
+ * bot's session takes under that origin and never as the owner's words, `<at>-<id>.stop.json` the owner's stop of the bot's
  * work, `<at>-<id>.scoped.stop.json` a stop recorded after it was made (the process that made it could not record it then),
  * which ends only the work there was when it was made, `<name>.unreadable` a file that did not read as a record, set aside
  * so it neither blocks the queue nor is lost.
@@ -24,6 +26,11 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import {
+	isRecordedDeliveryOrigin,
+	parseTurnOriginRecord,
+	type TurnOriginRecord,
+} from "../../kernel/turn-origin-stamp.ts";
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
@@ -49,6 +56,9 @@ const WAITING = /^\d{15}-[0-9a-f-]{36}\.json$/;
 const REFUSED = /^\d{15}-[0-9a-f-]{36}\.refused\.json$/;
 const STOP = /^\d{15}-[0-9a-f-]{36}\.stop\.json$/;
 const SCOPED_STOP = /^\d{15}-[0-9a-f-]{36}\.scoped\.stop\.json$/;
+/** Words under a recorded origin: a suffix of their own, so a build that knows no such origin never gives them as the owner's. */
+const MAIL_WAITING = /^\d{15}-[0-9a-f-]{36}\.mail\.json$/;
+const MAIL_REFUSED = /^\d{15}-[0-9a-f-]{36}\.mail\.refused\.json$/;
 /** Either kind of stop. */
 const ANY_STOP = /^\d{15}-[0-9a-f-]{36}\.(?:scoped\.)?stop\.json$/;
 
@@ -70,6 +80,8 @@ export interface BotInboxMessage {
 	readonly mode?: BotInboxMode;
 	readonly at: number;
 	readonly from: BotInboxSender;
+	/** The origin the sending host recorded for the words (a `.mail.json` record); absent for the owner's words. */
+	readonly origin?: TurnOriginRecord;
 }
 
 export interface BotInboxRefusal extends BotInboxMessage {
@@ -106,18 +118,29 @@ function parseSender(value: unknown): BotInboxSender | undefined {
 	};
 }
 
-function parseMessage(value: unknown, agentId: string): BotInboxMessage | undefined {
+/**
+ * A record's words: the owner's in a plain record, under a recorded origin in a mail record. A mail record's origin must
+ * be one the host records (`isRecordedDeliveryOrigin`): no file in the inbox names the owner's words as its origin.
+ */
+function parseMessage(value: unknown, agentId: string, mail: boolean): BotInboxMessage | undefined {
 	const parsed = parseHomeRecordHead(value, agentId);
 	if (!parsed) return undefined;
 	const { mode } = parsed.record;
 	if (mode !== undefined && mode !== "follow_up" && mode !== "queue" && mode !== "start") return undefined;
 	const from = parseSender(parsed.record.from);
 	if (!from) return undefined;
-	return { ...parsed.head, from, ...(mode !== undefined ? { mode: mode as BotInboxMode } : {}) };
+	const origin = mail ? parseTurnOriginRecord(parsed.record.origin) : undefined;
+	if (mail && (!origin || !isRecordedDeliveryOrigin(origin))) return undefined;
+	return {
+		...parsed.head,
+		from,
+		...(mode !== undefined ? { mode: mode as BotInboxMode } : {}),
+		...(origin ? { origin } : {}),
+	};
 }
 
-function parseRefusal(value: unknown, agentId: string): BotInboxRefusal | undefined {
-	const message = parseMessage(value, agentId);
+function parseRefusal(value: unknown, agentId: string, mail: boolean): BotInboxRefusal | undefined {
+	const message = parseMessage(value, agentId, mail);
 	if (!message || !isPlainRecord(value) || typeof value.refusedAt !== "number" || typeof value.reason !== "string")
 		return undefined;
 	return { ...message, refusedAt: value.refusedAt, reason: value.reason };
@@ -148,27 +171,40 @@ function parseScope(value: unknown): FleetStopScope | undefined {
 	return { kind: "scoped", attempts: value.attempts, plans: value.plans };
 }
 
-/** The messages waiting for the bot's session, oldest first. */
+/** The messages waiting for the bot's session, the owner's words and mail together, oldest first. */
 export function readBotInbox(
 	agentDir: string,
 	agentId: string,
 	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotInboxItem[] {
-	return readHomeRecords(botInboxDir(agentDir, agentId), WAITING, (value) => parseMessage(value, agentId), unreadable);
+	const dir = botInboxDir(agentDir, agentId);
+	return [
+		...readHomeRecords(dir, WAITING, (value) => parseMessage(value, agentId, false), unreadable),
+		...readHomeRecords(dir, MAIL_WAITING, (value) => parseMessage(value, agentId, true), unreadable),
+	].sort((a, b) => a.message.at - b.message.at);
 }
 
-/** The messages the bot's session refused, oldest first (the newest {@link MAX_REFUSED_KEPT}). */
+/** The messages the bot's session refused, oldest first (the newest {@link MAX_REFUSED_KEPT} of each kind). */
 export function readBotInboxRefusals(
 	agentDir: string,
 	agentId: string,
 	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotInboxItem<BotInboxRefusal>[] {
-	return readHomeRecords(botInboxDir(agentDir, agentId), REFUSED, (value) => parseRefusal(value, agentId), unreadable);
+	const dir = botInboxDir(agentDir, agentId);
+	return [
+		...readHomeRecords(dir, REFUSED, (value) => parseRefusal(value, agentId, false), unreadable),
+		...readHomeRecords(dir, MAIL_REFUSED, (value) => parseRefusal(value, agentId, true), unreadable),
+	].sort((a, b) => a.message.at - b.message.at);
+}
+
+/** The file names of the messages waiting (both kinds); read from the names alone. */
+function waitingNames(dir: string): string[] {
+	return [...homeRecordNames(dir, WAITING), ...homeRecordNames(dir, MAIL_WAITING)];
 }
 
 /** Whether a message waits for the bot's session; read from the names alone. */
 export function botInboxWaiting(agentDir: string, agentId: string): boolean {
-	return homeRecordNames(botInboxDir(agentDir, agentId), WAITING).length > 0;
+	return waitingNames(botInboxDir(agentDir, agentId)).length > 0;
 }
 
 /**
@@ -239,16 +275,29 @@ export function takeBotInboxStop(item: BotHomeRecord<BotInboxStop>): void {
 	rmSync(item.file, { force: true });
 }
 
+/** The bot's inbox holds as many messages as it takes: the words were not written. */
+export class BotInboxFullError extends BotOwnerError {
+	override readonly name = "BotInboxFullError";
+}
+
 /**
- * Writes the owner's message for the process hosting the bot's session. Refused in the owner's words when the queue is
- * full (by count or by bytes).
+ * Writes the owner's message, or words under a recorded `origin` (a mail record), for the process hosting the bot's
+ * session. Refused in the owner's words (`BotInboxFullError`) when the queue is full (by count or by bytes, both kinds
+ * counted).
  */
 export function enqueueBotInbox(
 	agentDir: string,
-	input: { agentId: string; text: string; mode?: BotInboxMode; from: BotInboxSender; at: number },
+	input: {
+		agentId: string;
+		text: string;
+		mode?: BotInboxMode;
+		from: BotInboxSender;
+		at: number;
+		origin?: TurnOriginRecord;
+	},
 ): BotInboxItem {
 	const dir = botInboxDir(agentDir, input.agentId);
-	const waiting = homeRecordNames(dir, WAITING).map((name) => join(dir, name));
+	const waiting = waitingNames(dir).map((name) => join(dir, name));
 	const message: BotInboxMessage = {
 		version: 1,
 		id: randomUUID(),
@@ -257,12 +306,16 @@ export function enqueueBotInbox(
 		at: input.at,
 		from: input.from,
 		...(input.mode !== undefined ? { mode: input.mode } : {}),
+		...(input.origin !== undefined ? { origin: input.origin } : {}),
 	};
+	if (input.origin !== undefined && !isRecordedDeliveryOrigin(input.origin))
+		throw new TypeError("An inbox record's origin must be one the host records.");
 	const text = `${JSON.stringify(message)}\n`;
 	const bytes = waiting.reduce((sum, file) => sum + (statSync(file, { throwIfNoEntry: false })?.size ?? 0), 0);
 	if (waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
-		throw new BotOwnerError(interfaceText().botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
-	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}.json`);
+		throw new BotInboxFullError(interfaceText().botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
+	const suffix = input.origin === undefined ? ".json" : ".mail.json";
+	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}${suffix}`);
 	writeFileAtomicSync(file, text, { mode: 0o600 });
 	return { file, message };
 }
@@ -277,5 +330,6 @@ export function refuseBotInboxMessage(agentDir: string, item: BotInboxItem, reas
 	const refusal: BotInboxRefusal = { ...item.message, refusedAt, reason };
 	writeFileAtomicSync(item.file.replace(/\.json$/, ".refused.json"), `${JSON.stringify(refusal)}\n`, { mode: 0o600 });
 	rmSync(item.file, { force: true });
-	keepNewestHomeRecords(botInboxDir(agentDir, item.message.agentId), REFUSED, MAX_REFUSED_KEPT);
+	const kind = item.message.origin === undefined ? REFUSED : MAIL_REFUSED;
+	keepNewestHomeRecords(botInboxDir(agentDir, item.message.agentId), kind, MAX_REFUSED_KEPT);
 }

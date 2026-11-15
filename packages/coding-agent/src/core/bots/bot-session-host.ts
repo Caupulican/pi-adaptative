@@ -41,6 +41,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
 	BotDeliveryOptions,
+	BotDeliveryOrigin,
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
@@ -53,6 +54,7 @@ import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
+import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/timer-port.ts";
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
@@ -182,7 +184,12 @@ export interface BotSender {
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
 export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun" | "runsAsSession"> {
-	deliver(agentId: string, message: string, options: BotDeliveryOptions): Promise<BotOperatorMessageDispatchResult>;
+	deliver(
+		agentId: string,
+		message: string,
+		options: BotDeliveryOptions,
+		origin: BotDeliveryOrigin,
+	): Promise<BotOperatorMessageDispatchResult>;
 }
 
 export class BotSessionHost {
@@ -305,7 +312,7 @@ export class BotSessionHost {
 			give: async (agentId, message) => {
 				const entry = this.entries.get(agentId);
 				if (!entry || this.stopped) return false;
-				await this.give(entry, message.text, message.mode);
+				await this.give(entry, message.text, message.mode, message.origin ?? "owner");
 				return true;
 			},
 			takeStops: (agentId) => this.takeStops(agentId),
@@ -537,14 +544,16 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Gives the owner's words to the bot's own session, building it first when it is not loaded. An idle session starts a
-	 * turn ("started" on a new conversation, "followed_up" on a continued one); a running one takes the words as a steer, or
-	 * behind the turn when `mode` is `queue`. Returns once the session accepted the words, not when the turn ends.
+	 * Gives words to the bot's own session, building it first when it is not loaded: the owner's, or words under the origin
+	 * the sender recorded (`origin`: an agent's mail, a routine's prompt). An idle session starts a turn ("started" on a new
+	 * conversation, "followed_up" on a continued one); a running one takes the words as a steer, or behind the turn when
+	 * `mode` is `queue`. Returns once the session accepted the words, not when the turn ends.
 	 */
 	async deliver(
 		agentId: string,
 		message: string,
 		{ mode, showsWaits }: BotDeliveryOptions,
+		origin: BotDeliveryOrigin,
 		sender: BotSender = this.ports.sender(),
 	): Promise<BotOperatorMessageDispatchResult> {
 		let entry: BotSessionEntry;
@@ -568,6 +577,7 @@ export class BotSessionHost {
 				message,
 				{ mode, showsWaits },
 				{ sessionId: sender.hostSessionId(), cwd: sender.cwd() },
+				origin,
 			);
 		}
 		entry.sender = sender;
@@ -576,9 +586,9 @@ export class BotSessionHost {
 		const behindStop = botInboxStopWaiting(agentDir, agentId) && !this.takeStops(agentId);
 		// Words its inbox holds (left behind a stop since taken) go first, and these follow them in order.
 		if (!behindStop && botInboxWaiting(agentDir, agentId)) await this.inbox.drain(agentId);
-		if (!behindStop && !botInboxWaiting(agentDir, agentId)) return this.give(entry, message, mode);
+		if (!behindStop && !botInboxWaiting(agentDir, agentId)) return this.give(entry, message, mode, origin);
 		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
-		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop);
+		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop, origin);
 		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
 		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
@@ -587,14 +597,20 @@ export class BotSessionHost {
 
 	/**
 	 * Gives the words to the bot's loaded session: an idle one starts a turn, a running one takes them as a steer, or behind
-	 * the turn when `mode` is `queue`. Returns once the session accepted them; throws its refusal.
+	 * the turn when `mode` is `queue`. The owner's words are given as written; words under a recorded origin as no
+	 * owner's (`recordedMessageOrigin`), and not again once its transcript holds their reference (an inbox record given
+	 * twice, a reply sent again). Returns once the session accepted them; throws its refusal.
 	 */
 	private async give(
 		entry: BotSessionEntry,
 		message: string,
 		mode: BotOperatorMessageOptions["mode"],
+		origin: BotDeliveryOrigin,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId } = entry;
+		const recorded = origin === "owner" ? undefined : origin;
+		if (recorded?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), recorded.ref))
+			return { agentId, mode: "queued", messageId: recorded.ref, modelRef: entry.modelRef };
 		// A turn the owner's stop aborted ends first: the words start the next turn, never steer the one dying.
 		await entry.turnEnding;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
@@ -624,6 +640,7 @@ export class BotSessionHost {
 				expandPromptTemplates: false,
 				processSlashCommands: false,
 				streamingBehavior: queued ? "followUp" : "steer",
+				...(recorded ? { source: "extension" as const, origin: recordedMessageOrigin(recorded) } : {}),
 				preflightResult: (success, ended) => accept(success, ended?.reason),
 			})
 			.then(

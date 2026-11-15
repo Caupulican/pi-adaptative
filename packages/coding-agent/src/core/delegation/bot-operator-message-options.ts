@@ -1,5 +1,7 @@
 /** The options one operator-to-bot message carries: its turn kind, who asked, the delegation it is filed under and its replay identity. */
 
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+
 /** How the orchestrator's or a leader's words reach a bot: the kind of turn, who asked, and the delegation it is filed under. */
 export interface BotOperatorMessageOptions {
 	mode?: "follow_up" | "queue" | "start";
@@ -30,6 +32,13 @@ export interface BotOperatorMessageOptions {
 
 /** What the bot's own session host reads of a send: the kind of turn, and whether the sender shows why it waits. */
 export type BotDeliveryOptions = Pick<BotOperatorMessageOptions, "mode" | "showsWaits">;
+
+/**
+ * Whose words a bot's own session is given: the owner's (`owner`), or words whose origin the host records itself (an
+ * agent's mail, a routine's prompt): the turn is stamped with that record (`recordedMessageOrigin`) and the words never
+ * count as the owner's.
+ */
+export type BotDeliveryOrigin = "owner" | TurnOriginRecord;
 
 /** What one operator-to-bot message became: the turn kind it took, and where it went. */
 export interface BotOperatorMessageDispatchResult {

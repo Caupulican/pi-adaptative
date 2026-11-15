@@ -21,13 +21,12 @@
 
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import type { TurnOriginKind } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { ACTIVE_ATTEMPT_STATUSES } from "../delegation/delegation-spend.ts";
 import type { RunCostBound } from "../delegation/parent-execution-context.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import { entryTurnOrigin, turnOriginOf } from "../turn-origin.ts";
+import { entryTurnOrigin, isOutsideInputKind, turnOriginOf } from "../turn-origin.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
@@ -56,17 +55,6 @@ interface EntryWindow {
 function attemptCount(snapshot: TaskRuntimeProjection | undefined): number {
 	return snapshot ? Object.keys(snapshot.attempts).length : -1;
 }
-
-/** The inputs that open a window: words or a wake from outside the session's own work. */
-const OPENING_KINDS: ReadonlySet<TurnOriginKind> = new Set<TurnOriginKind>([
-	"owner-typed",
-	"owner-channel",
-	"inbound-channel",
-	"peer-agent",
-	"routine",
-	"host-event",
-	"proactive-review",
-]);
 
 /** The details of a custom message an entry holds; undefined for any other entry. */
 function entryDetails(entry: SessionEntry): unknown {
@@ -224,7 +212,7 @@ export class BotSpendWindows {
 		for (let index = opening.length - 1; index >= 0 && windowId === undefined; index--) {
 			const message = opening[index];
 			const kind = turnOriginOf(message)?.k;
-			if (kind !== undefined && OPENING_KINDS.has(kind)) return { usd: 0, meteredUsd: 0 };
+			if (kind !== undefined && isOutsideInputKind(kind)) return { usd: 0, meteredUsd: 0 };
 			if (kind === "worker-result" && message.role === "custom")
 				windowId = (
 					this.windowOfDelivered(deliveredAttemptIds(message.details), snapshot, 0) ??
@@ -329,7 +317,7 @@ export class BotSpendWindows {
 			walked.add(id);
 			last = entry;
 			const kind = entryTurnOrigin(entry)?.k;
-			if (kind !== undefined && OPENING_KINDS.has(kind)) windowId = this.windowIdOf(entry.id);
+			if (kind !== undefined && isOutsideInputKind(kind)) windowId = this.windowIdOf(entry.id);
 			else if (kind === "worker-result" && depth < 8) {
 				const details = entryDetails(entry);
 				const attemptIds = deliveredAttemptIds(details);

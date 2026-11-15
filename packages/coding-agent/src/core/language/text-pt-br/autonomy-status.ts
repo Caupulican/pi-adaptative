@@ -145,6 +145,7 @@ const TURN_ORIGIN: Readonly<Record<TurnOriginKind, string>> = {
 	"goal-continuation": "continuação de objetivo",
 	"proactive-review": "revisão proativa",
 	harness: "harness",
+	"agent-mail": "correio de agente",
 };
 
 /**

@@ -4,7 +4,10 @@
  * an unstamped message from the identity it already carries). A stamp is written only where no such identity exists: a
  * user message an extension delivers on behalf of a third party, or one the channels core delivers for an owner channel
  * (the owner's own listed identity on a platform chat). An `owner-channel` record that is missing its verification, its
- * channel or its reference does not parse, so it reads as unreadable, which is third-party.
+ * channel or its reference does not parse, so it reads as unreadable, which is third-party. An `agent-mail` record (one
+ * agent's mail to another, minted only by the bot host) names its sender and its place in the chain of mails (`from`,
+ * `hop`) and never a third party: mail a third party's words reached is recorded as an `inbound-channel` record that
+ * carries the same two fields. A build that does not know the kind reads its record as unreadable, which is third-party.
  *
  * It follows the worker-control design: a non-enumerable stamp on the message object that never reaches a serialized
  * message or a provider request; the session manager writes it on the message's entry (`SessionMessageEntry.turnOrigin`)
@@ -24,7 +27,8 @@ export type TurnOriginKind =
 	| "worker-result"
 	| "goal-continuation"
 	| "proactive-review"
-	| "harness";
+	| "harness"
+	| "agent-mail";
 
 export interface TurnOriginRecord {
 	readonly v: 1;
@@ -45,11 +49,18 @@ export interface TurnOriginRecord {
 	 * the framed text.
 	 */
 	readonly shown?: string;
+	/** Mail only: who sent it, as the host addresses its sender (`bot:<id>`, `root:<session id>`, `group:<id>:<incarnation>`). */
+	readonly from?: string;
+	/** Mail only: its place in its chain of mails, from 1 (the first mail after words from outside the agents) to `MAX_TURN_ORIGIN_HOP`. */
+	readonly hop?: number;
 }
 
 export const MAX_TURN_ORIGIN_CHANNEL_CHARS = 128;
 export const MAX_TURN_ORIGIN_REF_CHARS = 128;
 export const MAX_TURN_ORIGIN_SHOWN_CHARS = 4000;
+export const MAX_TURN_ORIGIN_FROM_CHARS = 320;
+/** The longest chain of mails one agent's words may start: a mail past it is never sent. */
+export const MAX_TURN_ORIGIN_HOP = 8;
 const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"owner-typed",
 	"extension-message",
@@ -62,6 +73,7 @@ const TURN_ORIGIN_KINDS: ReadonlySet<unknown> = new Set<TurnOriginKind>([
 	"goal-continuation",
 	"proactive-review",
 	"harness",
+	"agent-mail",
 ]);
 /** The extension chat mesh is a third party's channel and can never be an owner channel. */
 const PEER_CHAT_CHANNEL = "pi-chat";
@@ -97,6 +109,20 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 	)
 		return undefined;
 	if (
+		record.from !== undefined &&
+		(typeof record.from !== "string" || record.from.length === 0 || record.from.length > MAX_TURN_ORIGIN_FROM_CHARS)
+	)
+		return undefined;
+	if (
+		record.hop !== undefined &&
+		(!Number.isInteger(record.hop) || (record.hop as number) < 1 || (record.hop as number) > MAX_TURN_ORIGIN_HOP)
+	)
+		return undefined;
+	// A sender and a place in a chain come together, only on mail: an agent's own (never a third party's) or one a third party's words reached.
+	if ((record.from === undefined) !== (record.hop === undefined)) return undefined;
+	if (record.k === "agent-mail" && (record.from === undefined || record.thirdParty !== undefined)) return undefined;
+	if (record.from !== undefined && record.k !== "agent-mail" && record.thirdParty !== true) return undefined;
+	if (
 		record.k === "owner-channel" &&
 		(record.verified !== true ||
 			record.thirdParty !== undefined ||
@@ -113,7 +139,21 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 		...(record.thirdParty === true ? { thirdParty: true as const } : {}),
 		...(record.ref !== undefined ? { ref: record.ref as string } : {}),
 		...(record.shown !== undefined ? { shown: record.shown as string } : {}),
+		...(record.from !== undefined ? { from: record.from as string, hop: record.hop as number } : {}),
 	};
+}
+
+/**
+ * Whether `record` is one a host records for words it delivers itself (an agent's mail, a routine's prompt to a bot): it
+ * names their channel and is never the owner's words, so a record a file holds can never lend them the owner's authority.
+ */
+export function isRecordedDeliveryOrigin(
+	record: TurnOriginRecord,
+): record is TurnOriginRecord & { readonly channel: string } {
+	return (
+		record.channel !== undefined &&
+		(record.k === "agent-mail" || record.k === "routine" || record.thirdParty === true)
+	);
 }
 
 /** Stamps `message` with its origin. A message carries one origin, once. */

@@ -33,7 +33,7 @@ import {
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff, RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
-import { channelTurnOrigin, ownerChannelTurnOrigin, type TurnAuthority } from "./turn-origin.ts";
+import { channelTurnOrigin, isThirdPartyWords, ownerChannelTurnOrigin, type TurnAuthority } from "./turn-origin.ts";
 import { type SteerDecision, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
 export { createSteerAwareWait, ownerSteerWake } from "./pending-steer-wait.ts";
@@ -133,11 +133,11 @@ const AUTHORITY_RANK: Readonly<Record<TurnAuthority, number>> = { "third-party":
 
 /**
  * The authority an entry decides for the run that takes it (`RunTurnOrigin`): a third party's words, the owner's words from
- * an owner channel, or the owner's typed words. An extension's own message (no origin) decides nothing: `undefined`.
+ * an owner channel, or the owner's typed words. An extension's own message or an agent's mail decides nothing.
  * Owner-channel words registered without their verified origin are unreadable, so they decide a third party's.
  */
 function entryAuthority(entry: PendingEntry): TurnAuthority | undefined {
-	if (entry.origin) return "third-party";
+	if (entry.origin) return isThirdPartyWords(entry.origin) ? "third-party" : undefined;
 	if (entry.ownerChannel) return "remote-owner";
 	if (isOwnerChannelInputId(entry.inputId)) return "third-party";
 	return isOwnerSpokenInputId(entry.inputId) ? "owner" : undefined;
@@ -1127,7 +1127,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 		const waits = (entry: PendingEntry): boolean => {
 			const approval = entry.ownerChannel !== undefined && !isOwnerSpokenInputId(entry.inputId);
 			if (approval && live && authority !== "remote-owner") return true;
-			if (!ranked) return entry.origin !== undefined && live && authority !== "third-party";
+			if (!ranked) return isThirdPartyWords(entry.origin) && live && authority !== "third-party";
 			const decides = entryAuthority(entry);
 			return decides !== undefined && AUTHORITY_RANK[decides] < runRank;
 		};
