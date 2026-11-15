@@ -33,6 +33,7 @@ import { endPlacedJobsOfSession } from "../remote/job-client.ts";
 import { jobCancelReasonOf } from "../remote/remote-jobs.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
+import { latestUsageWake } from "../usage-wake-record.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf } from "./bot-home.ts";
@@ -136,7 +137,12 @@ export interface SavedUsageResumeRules extends RestoredUsageRules {
  */
 export function savedUsageResumeAt(file: string, agentDir: string, rules: SavedUsageResumeRules): number | undefined {
 	const stop = readSessionSnapshot(file, agentDir, (view) =>
-		restoredUsageStop(view.buildSessionContext().messages.at(-1), getLatestGoalStateSnapshot(view), rules),
+		restoredUsageStop(
+			view.buildSessionContext().messages.at(-1),
+			getLatestGoalStateSnapshot(view),
+			latestUsageWake(view),
+			rules,
+		),
 	);
 	if (!stop) return undefined;
 	const until = rules.modelExhaustion(stop.resume.ref)?.until;

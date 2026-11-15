@@ -433,7 +433,10 @@ export const NOTICES = {
 			`The subscription's usage is used up; this session continues on its own when the usage resets (${at}).`,
 		sessionContinuesNow: () =>
 			"The subscription's usage that stopped this session has reset; the session continues now.",
-		sessionResumeFailed: (error: string) => `The session could not continue after the usage reset: ${error}`,
+		sessionResumeFailed: (error: string, retryAt: string) =>
+			`The session could not continue after the usage reset: ${error}. It tries again at ${retryAt}.`,
+		sessionWakeNotRecorded: (error: string) =>
+			`The session could not record how its wait for the usage reset ended: ${error}`,
 		codexResetsAvailable: (count: number) =>
 			`OpenAI Codex usage limit reached. ${count === 1 ? "1 usage reset is" : `${count} usage resets are`} available: open /usage and press x to redeem one.`,
 		codexResetCheckFailed: (error: string) =>

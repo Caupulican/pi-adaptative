@@ -379,7 +379,10 @@ export const NOTICES = {
 		sessionWaits: (at: string) =>
 			`O uso da assinatura acabou; esta sessão continua sozinha quando o uso for renovado (${at}).`,
 		sessionContinuesNow: () => "O uso da assinatura que parou esta sessão foi renovado; a sessão continua agora.",
-		sessionResumeFailed: (error: string) => `A sessão não conseguiu continuar depois da renovação do uso: ${error}`,
+		sessionResumeFailed: (error: string, retryAt: string) =>
+			`A sessão não conseguiu continuar depois da renovação do uso: ${error}. Tenta de novo às ${retryAt}.`,
+		sessionWakeNotRecorded: (error: string) =>
+			`A sessão não conseguiu registrar como terminou a espera pela renovação do uso: ${error}`,
 		codexResetsAvailable: (count: number) =>
 			`Limite de uso do OpenAI Codex atingido. ${count === 1 ? "1 renovação de uso está disponível" : `${count} renovações de uso estão disponíveis`}: abra /usage e pressione x para resgatar uma.`,
 		codexResetCheckFailed: (error: string) =>

@@ -1108,7 +1108,7 @@ export class AgentSession {
 			modelRegistry: config.modelRegistry,
 			inRunRetryMaxMs: () => this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 			modelExhaustion: (ref) => this._foregroundRecovery.modelExhaustion(ref),
-			lastMessage: () => this.agent.state.messages.at(-1),
+			transcript: { agent: this.agent, sessionManager: this.sessionManager },
 			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
 			isDisposed: () => this._disposed,
 			resumeUsageLimitedGoal: () => this._goals.resumeUsageLimitedGoal(),

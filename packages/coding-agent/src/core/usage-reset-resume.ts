@@ -17,6 +17,10 @@
  * refusal waits for the reset that refusal stated, counted from when it arrived; the owner is told when it continues, or
  * that it continues now. Its notices are held until the session has a listener. A Codex usage limit also says whether
  * the account holds a usage reset to redeem (`/usage`); a redeemed reset ends the wait at once.
+ *
+ * How each wait ended is recorded in the transcript (`usage-wake-record.ts`): resumed, failed, or declined by the owner's
+ * stop. A stop a record answers is not waited out again, here or by a host reading the closed session; a continuation that
+ * threw is tried again after a delay that grows with each failure in a row, up to a bound, never given up.
  */
 
 import { type Api, type AssistantMessage, listOpenAICodexRateLimitResetCredits, type Model } from "@caupulican/pi-ai";
@@ -25,7 +29,22 @@ import type { AgentMessage } from "../kernel/types.ts";
 import type { GoalState, GoalStopModel } from "./goals/goal-state.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { usageResetWaitMs } from "./provider-admission/usage-reset.ts";
+import {
+	latestUsageWake,
+	recordUsageWake,
+	type UsageWakeLog,
+	type UsageWakeRecord,
+	type UsageWakeWriter,
+	usageStopContinuesAt,
+	usageWakeRetryDelayMs,
+} from "./usage-wake-record.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "./util/timer-port.ts";
+
+/** The session's transcript: its messages, and the entries the wait's records are read from and written to. */
+export interface UsageTranscript {
+	readonly agent: { readonly state: { readonly messages: readonly AgentMessage[] } };
+	readonly sessionManager: UsageWakeLog & UsageWakeWriter;
+}
 
 export interface UsageResetResumeDeps {
 	/** False in a worker process's session, whose attempt ladder waits out its usage reset. */
@@ -44,8 +63,7 @@ export interface UsageResetResumeDeps {
 	inRunRetryMaxMs(): number;
 	/** The quota exhaustion recorded for a model ref and its reset, when one holds. */
 	modelExhaustion(ref: string): { readonly until: number | undefined } | undefined;
-	/** The last message of the session's transcript. */
-	lastMessage(): AgentMessage | undefined;
+	readonly transcript: UsageTranscript;
 	waitForIdle(): Promise<void>;
 	isDisposed(): boolean;
 	/** Resume the session's goal when a usage or rate limit stopped it; whether one was resumed (its continuation follows). */
@@ -67,6 +85,8 @@ interface PendingResume {
 	readonly provider: string;
 	/** The refusal that stopped the turn; absent for a goal's wait restored from its record, which resumes the goal only. */
 	readonly refusal?: AssistantMessage;
+	/** When the stop was made: a wake record at or after it answers it. */
+	readonly stopAt: number;
 	readonly at: number;
 	readonly alarm: WallAlarm;
 }
@@ -118,7 +138,17 @@ export class UsageResetResume {
 
 	/** The wait a kept stop calls for ({@link restoredUsageStop}); none in a worker process's session. */
 	private restoredStop(goal: GoalState | undefined): RestoredUsageStop | undefined {
-		return this.deps.enabled ? restoredUsageStop(this.deps.lastMessage(), goal, this.deps) : undefined;
+		if (!this.deps.enabled) return undefined;
+		return restoredUsageStop(
+			this.lastMessage(),
+			goal,
+			latestUsageWake(this.deps.transcript.sessionManager),
+			this.deps,
+		);
+	}
+
+	private lastMessage(): AgentMessage | undefined {
+		return this.deps.transcript.agent.state.messages.at(-1);
 	}
 
 	/** The owner redeemed a usage reset for `provider`: a wait on it ends now, and a later limit is offered again. */
@@ -142,8 +172,9 @@ export class UsageResetResume {
 	private async settle(stop: number, refusal: AssistantMessage, at: number): Promise<void> {
 		await this.deps.waitForIdle();
 		if (stop !== this.stops || this.deps.isDisposed()) return;
-		if (!isSameRefusal(this.deps.lastMessage(), refusal)) return;
-		this.arm({ ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal }, at);
+		if (!isSameRefusal(this.lastMessage(), refusal)) return;
+		const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
+		this.arm({ ...resume, stopAt: refusal.timestamp }, at);
 		this.deps.warn(interfaceText().notices.usageReset.sessionWaits(new Date(at).toISOString()));
 	}
 
@@ -153,9 +184,14 @@ export class UsageResetResume {
 	 */
 	private arm(resume: Omit<PendingResume, "at" | "alarm">, at: number): void {
 		this.pending?.alarm.stop();
-		const { ref, provider, refusal } = resume;
-		const alarm = alarmAt(this.deps.clock, at, () => void this.wake());
-		this.pending = { ref, provider, ...(refusal ? { refusal } : {}), at, alarm };
+		const { ref, provider, refusal, stopAt } = resume;
+		const alarm = alarmAt(this.deps.clock, at, () => {
+			this.wake().catch((error: unknown) => {
+				const detail = error instanceof Error ? error.message : String(error);
+				this.deps.warn(interfaceText().notices.usageReset.sessionWakeNotRecorded(detail));
+			});
+		});
+		this.pending = { ref, provider, ...(refusal ? { refusal } : {}), stopAt, at, alarm };
 	}
 
 	private async wake(): Promise<void> {
@@ -170,14 +206,32 @@ export class UsageResetResume {
 		await this.deps.waitForIdle();
 		// A newer refusal re-armed the wait, or the session closed, while the foreground finished.
 		if (this.pending || this.deps.isDisposed()) return;
-		if (this.deps.resumeUsageLimitedGoal()) return;
-		if (!pending.refusal || !isSameRefusal(this.deps.lastMessage(), pending.refusal)) return;
+		const transcript = this.deps.transcript.sessionManager;
+		const prior = latestUsageWake(transcript);
+		// The owner's stop declined this wait after it was armed (a failed try of the same stop is retried).
+		if (usageStopContinuesAt(pending.stopAt, pending.at, prior) === undefined) return;
+		if (this.deps.resumeUsageLimitedGoal()) {
+			recordUsageWake(transcript, "resumed", this.deps.clock.now(), 0);
+			return;
+		}
+		if (!pending.refusal || !isSameRefusal(this.lastMessage(), pending.refusal)) return;
+		let failure: { readonly error: unknown } | undefined;
 		try {
 			await this.deps.continueTurn();
 		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			this.deps.warn(interfaceText().notices.usageReset.sessionResumeFailed(detail));
+			failure = { error };
 		}
+		const now = this.deps.clock.now();
+		if (!failure) {
+			recordUsageWake(transcript, "resumed", now, 0);
+			return;
+		}
+		const failures = prior?.outcome === "failed" && pending.stopAt <= prior.at ? prior.failures + 1 : 1;
+		const retryAt = now + usageWakeRetryDelayMs(failures);
+		this.arm(pending, retryAt);
+		const detail = failure.error instanceof Error ? failure.error.message : String(failure.error);
+		this.deps.warn(interfaceText().notices.usageReset.sessionResumeFailed(detail, new Date(retryAt).toISOString()));
+		recordUsageWake(transcript, "failed", now, failures);
 	}
 
 	/**
@@ -221,9 +275,17 @@ export interface RestoredUsageRules {
 	inRunRetryMaxMs(): number;
 }
 
-/** A kept stop's wait: what continues at its end (the model's ref, its provider and the refusal the turn stopped on), and when. */
+/**
+ * A kept stop's wait: what continues at its end (the model's ref, its provider, the refusal the turn stopped on and when the
+ * stop was made), and when.
+ */
 export interface RestoredUsageStop {
-	readonly resume: { readonly ref: string; readonly provider: string; readonly refusal?: AssistantMessage };
+	readonly resume: {
+		readonly ref: string;
+		readonly provider: string;
+		readonly refusal?: AssistantMessage;
+		readonly stopAt: number;
+	};
 	readonly at: number;
 }
 
@@ -232,8 +294,22 @@ export interface RestoredUsageStop {
  * classified against the model whose refusal it recorded (a stop recorded without one is read from the transcript
  * instead), else the refusal `lastMessage`, the transcript's last message, is. The same rule as a live stop's
  * ({@link usageResetWait}); undefined when it calls for none. A reset the provider admission recorded later is not folded in.
+ * `wake`, the session's latest wake record, answers a stop made at or before it: resumed or declined, it calls for no
+ * wait; failed, for the next try (`usageStopContinuesAt`).
  */
 export function restoredUsageStop(
+	lastMessage: AgentMessage | undefined,
+	goal: GoalState | undefined,
+	wake: UsageWakeRecord | undefined,
+	rules: RestoredUsageRules,
+): RestoredUsageStop | undefined {
+	const kept = keptUsageStop(lastMessage, goal, rules);
+	if (!kept) return undefined;
+	const at = usageStopContinuesAt(kept.resume.stopAt, kept.at, wake);
+	return at === undefined ? undefined : { resume: kept.resume, at };
+}
+
+function keptUsageStop(
 	lastMessage: AgentMessage | undefined,
 	goal: GoalState | undefined,
 	rules: RestoredUsageRules,
@@ -247,7 +323,10 @@ export function restoredUsageStop(
 			rules,
 		);
 		if (resetMs !== undefined)
-			return { resume: { ref: `${model.provider}/${model.id}`, provider: model.provider }, at: stop.at + resetMs };
+			return {
+				resume: { ref: `${model.provider}/${model.id}`, provider: model.provider, stopAt: stop.at },
+				at: stop.at + resetMs,
+			};
 	}
 	const refusal = lastMessage;
 	if (refusal?.role !== "assistant" || refusal.stopReason !== "error" || !refusal.errorMessage) return undefined;
@@ -259,7 +338,12 @@ export function restoredUsageStop(
 		rules,
 	);
 	if (resetMs === undefined) return undefined;
-	const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
+	const resume = {
+		ref: `${refusal.provider}/${refusal.model}`,
+		provider: refusal.provider,
+		refusal,
+		stopAt: refusal.timestamp,
+	};
 	return { resume, at: refusal.timestamp + resetMs };
 }
 
