@@ -98,7 +98,7 @@ const LEASES = 1;
 const FLEET_QUEUES: readonly number[] = [2, 3];
 
 /** The pieces of one session's orchestration state in `home` that move, in the order they move. */
-function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
+export function sessionStatePieces(home: OrchestrationHome, sessionId: string): string[] {
 	const fleetQueue = fleetQueueMetadataPath(home, sessionId);
 	return [
 		orchestrationSessionDir(home, sessionId),

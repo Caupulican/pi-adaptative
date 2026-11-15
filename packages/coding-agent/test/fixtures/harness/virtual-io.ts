@@ -56,6 +56,7 @@ export type IoFaultKind =
 	| "append"
 	| "unlink"
 	| "link"
+	| "symlink"
 	| "rm"
 	| "rename"
 	| "watch.close"
@@ -127,6 +128,7 @@ const FAULT_SYSCALL: Readonly<Record<IoFaultKind, string | undefined>> = {
 	append: "write",
 	unlink: "unlink",
 	link: "link",
+	symlink: "symlink",
 	rm: "rm",
 	rename: "rename",
 	"watch.close": undefined,
@@ -1023,6 +1025,38 @@ export class VirtualFileSystem {
 		this.fault({ kind: "link", path: from, destination: to }, "after");
 	}
 
+	/** A symbolic link is a node of its own holding the path it names, read back as written and resolved from its directory. */
+	symlinkSync(target: unknown, created: unknown): void {
+		const to = this.path(created, "symlink");
+		const destination = String(target);
+		this.fault({ kind: "symlink", path: to, destination }, "before");
+		if (!this.nodes.has(dirname(to))) throw this.failure("symlink", "ENOENT", to, "symlink", destination);
+		if (this.nodes.has(to)) throw this.failure("symlink", "EEXIST", to, "symlink", destination);
+		const stamp = this.stamp();
+		this.nodes.set(to, {
+			kind: "symlink",
+			data: Buffer.alloc(0),
+			target: destination,
+			modified: stamp,
+			changed: stamp,
+			identity: this.nextIdentity++,
+		});
+		this.touchDirectory(dirname(to));
+		this.log({ kind: "symlink", path: to, destination });
+		this.note("change", to);
+		this.fault({ kind: "symlink", path: to, destination }, "after");
+	}
+
+	/** The path a symbolic link names, as it was written; EINVAL for any other node. */
+	readlinkSync(value: unknown): string {
+		const path = this.path(value, "readlink");
+		const node = this.nodes.get(path);
+		if (!node) throw this.failure("readlink", "ENOENT", path, "readlink");
+		if (node.kind !== "symlink") throw this.failure("readlink", "EINVAL", path, "readlink");
+		this.log({ kind: "readlink", path });
+		return node.target ?? "";
+	}
+
 	copyFileSync(source: unknown, destination: unknown, flags = 0): void {
 		const from = this.realpathSync(source, "copyfile", "copy");
 		const to = this.path(destination, "copyfile");
@@ -1286,6 +1320,8 @@ export class VirtualFileSystem {
 			renameSync: (from: unknown, to: unknown) => this.renameSync(from, to),
 			copyFileSync: (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
 			linkSync: (existing: unknown, created: unknown) => this.linkSync(existing, created),
+			symlinkSync: (target: unknown, created: unknown) => this.symlinkSync(target, created),
+			readlinkSync: (path: unknown) => this.readlinkSync(path),
 			truncateSync: (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
 			ftruncateSync: (fd: unknown, length = 0) => this.truncateSync(fd, Number(length)),
 			chmodSync: (path: unknown, mode: unknown) => {

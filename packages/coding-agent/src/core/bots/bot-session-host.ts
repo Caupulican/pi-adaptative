@@ -522,7 +522,7 @@ export class BotSessionHost {
 					store: () => this.ports.store(),
 					changed: (changedId) => this.changed(changedId),
 					open: (openedId) => this.open(openedId, sender),
-					openLater: (openedId, openError) => this.owed.openLater(openedId, openError),
+					owed: this.owed,
 				},
 				agentId,
 				message,

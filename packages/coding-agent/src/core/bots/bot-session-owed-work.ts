@@ -410,6 +410,17 @@ export class BotOwedWork {
 	}
 
 	/**
+	 * Why a message the owner sent waits for the bot's session, which failed to open with `error` and opens later
+	 * ({@link openLater}): the send tells the owner this (`waitsFor`), so it counts as told, and an open asked again for
+	 * the same cause tells nothing more.
+	 */
+	toldWaits(agentId: string, error: unknown): string {
+		const reason = botFailureText(agentId, error);
+		this.told.set(agentId, this.waitsText(agentId, reason));
+		return reason;
+	}
+
+	/**
 	 * A run of the bot's session, built on `key`, was refused at its start with `error` while `manager` held wakes: they
 	 * do not open the session again until the definition or the cause changes.
 	 */
@@ -756,7 +767,7 @@ export class BotOwedWork {
 		const notResumed = (error: unknown): boolean => {
 			const failure = botOpenFailure(error);
 			if (failure !== undefined && !retrying) retrying = this.openRetries.arm(agentId, cappedFailure(failure));
-			this.tellWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, botFailureText(agentId, error)));
+			this.tellWaits(agentId, this.waitsText(agentId, botFailureText(agentId, error)));
 			return failure !== undefined && retrying;
 		};
 		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox. A
@@ -871,6 +882,11 @@ export class BotOwedWork {
 			this.tellWaits(agentId, interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, failure)));
 			return later;
 		}
+	}
+
+	/** What the owner is told the bot's owed work waits on when its session did not open for `reason`. */
+	private waitsText(agentId: string, reason: string): string {
+		return interfaceText().botTeam.botWatchesNotResumed(agentId, reason);
 	}
 
 	/** The owner is told once what the bot's owed work waits on: every attach and every other host's change asks again. */

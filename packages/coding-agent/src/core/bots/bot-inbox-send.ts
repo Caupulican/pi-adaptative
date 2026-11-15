@@ -3,7 +3,8 @@
  * takes and answers in the bot's chat. A host that let the bot go between the refused lock and the write would leave it
  * to no one, so the bot is then opened here, which takes the inbox first (this message included); a refusal of that open
  * takes the message back and is the send's own, unless the host opens the session again later (`openLater`: a cause that
- * passes on its own, not past its cap): the message then waits, and the owner is told why (`waitsFor`).
+ * passes on its own, not past its cap): the message then waits, and the owner is told why (`waitsFor`, `toldWaits`)
+ * unless another host took the bot meanwhile.
  */
 
 import type {
@@ -12,10 +13,10 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { botFailureText } from "./bot-failure-words.ts";
 import { readRemoteBotHost } from "./bot-host-state.ts";
 import { enqueueBotInbox, takeBotInboxMessage } from "./bot-inbox.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
+import type { BotOwedWork } from "./bot-session-owed-work.ts";
 
 /** Another host holds the bot's lock: a message goes to the bot's inbox for it instead (`sendToBotHost`). */
 export class BotSessionHeldError extends BotOwnerError {
@@ -32,8 +33,11 @@ export interface BotInboxSendPorts {
 	changed(agentId: string): void;
 	/** Opens the bot's session here; throws `BotSessionHeldError` while another host holds it. */
 	open(agentId: string): Promise<unknown>;
-	/** The open failed with `error`: whether the host opens it again after a backoff (`BotOwedWork.openLater`). */
-	openLater(agentId: string, error: unknown): boolean;
+	/**
+	 * The host's owed work: whether a failed open is asked again after a backoff (`openLater`), and why the message waits
+	 * when it is, which counts as told (`toldWaits`).
+	 */
+	readonly owed: Pick<BotOwedWork, "openLater" | "toldWaits">;
 }
 
 /**
@@ -98,15 +102,17 @@ export async function sendToBotHost(
 			await ports.open(agentId);
 			return { agentId, mode: "queued", messageId: item.message.id, modelRef };
 		} catch (error) {
-			// A session that opens later keeps the words waiting, and the owner is told why; any other failure takes them back.
-			if (ports.openLater(agentId, error))
-				waitsFor = interfaceText().botTeam.botWordsWaitForOpen(agentId, botFailureText(agentId, error));
-			else if (!(error instanceof BotSessionHeldError)) {
+			// A session that opens later keeps the words waiting, and the owner is told why unless another host took the bot
+			// meanwhile; any other failure takes them back.
+			const later = ports.owed.openLater(agentId, error);
+			if (!later && !(error instanceof BotSessionHeldError)) {
 				takeBotInboxMessage(item);
 				ports.changed(agentId);
 				throw error;
 			}
 			host = readRemoteBotHost(agentDir, agentId, holder);
+			if (later && !host)
+				waitsFor = interfaceText().botTeam.botWordsWaitForOpen(agentId, ports.owed.toldWaits(agentId, error));
 		}
 	}
 	return {
