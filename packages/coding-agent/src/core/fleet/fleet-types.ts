@@ -305,7 +305,6 @@ export function dispatchTurnOrigin(
 	return dispatch.escalation?.pinned.turnOrigin ?? dispatch.turnOrigin;
 }
 
-/** DRR cost of one dispatch of a class: a heavy node spends eight probes' worth of its flow's quantum. */
 /**
  * The fleet subtree a worker lane is charged to: its parent agent's id, or the session root subtree "" when it has no
  * parent. The one derivation the queue's lane flow and a plan step's demand both read, so a prepared dispatch and its
