@@ -24,6 +24,11 @@ import {
 	type OrchestrationEvent,
 	toJsonObject,
 } from "./contracts.ts";
+import {
+	OrchestrationConcurrencyError,
+	OrchestrationEventStoreError,
+	OrchestrationSnapshotRequiredError,
+} from "./event-store-errors.ts";
 import { boundedIdempotencyEvents, indexIdempotentEvent } from "./event-store-idempotency.ts";
 import { withSessionBundleAdmission, withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
 
@@ -159,30 +164,6 @@ export interface OrchestrationEventTransaction {
 		input: AppendOrchestrationEventInput,
 		options?: Omit<AppendOrchestrationEventOptions, "lockOptions">,
 	): OrchestrationEvent;
-}
-
-export class OrchestrationEventStoreError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "OrchestrationEventStoreError";
-	}
-}
-
-export class OrchestrationConcurrencyError extends OrchestrationEventStoreError {
-	constructor(expected: number, actual: number) {
-		super(`Orchestration event cursor changed: expected ${expected}, actual ${actual}.`);
-		this.name = "OrchestrationConcurrencyError";
-	}
-}
-
-export class OrchestrationSnapshotRequiredError extends OrchestrationEventStoreError {
-	readonly throughOrdinal: number;
-
-	constructor(throughOrdinal: number) {
-		super(`Orchestration projection snapshot through ordinal ${throughOrdinal} is required.`);
-		this.name = "OrchestrationSnapshotRequiredError";
-		this.throughOrdinal = throughOrdinal;
-	}
 }
 
 /** What one lstat tells about a small state file; a change in any of it means re-read and re-parse. */
@@ -720,6 +701,19 @@ export class OrchestrationEventStore {
 			events.push(structuredClone(event));
 		}
 		return events;
+	}
+
+	/**
+	 * The ordinal of the last committed event (the published snapshot's when no event follows it, 0 for none), read from
+	 * the baseline and the event files' names without reading an event: what `readTaskRuntimeProjection` would end on.
+	 * Throws as {@link readAfter} does on a tail that is not contiguous after the baseline or a cursor ahead of it.
+	 */
+	lastCommittedOrdinal(): number {
+		const baselineOrdinal = this.readBaselineUnlocked()?.throughOrdinal ?? 0;
+		const names = this.eventFileNamesUnlocked();
+		this.assertReadableTailUnlocked(names, baselineOrdinal);
+		const last = names.at(-1);
+		return Math.max(baselineOrdinal, last === undefined ? 0 : Number(EVENT_FILE_PATTERN.exec(last)?.[1] ?? 0));
 	}
 
 	readProjectionSnapshot(): { throughOrdinal: number; projection: JsonObject } | undefined {

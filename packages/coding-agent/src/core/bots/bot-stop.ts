@@ -30,7 +30,6 @@ import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/se
 import { interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
-import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { takeProcessLock } from "../remote/host-lock.ts";
 import { endPlacedJobsOfSessions } from "../remote/job-client.ts";
@@ -380,7 +379,10 @@ interface BotWorkMark {
 	readonly head: number;
 }
 
-/** Where bot `agentId`'s closed session `session`, as its home on disk holds it, stands now ({@link BotWorkMark}). */
+/**
+ * Where bot `agentId`'s closed session `session`, as its home on disk holds it, stands now ({@link BotWorkMark}): its
+ * bundle's last event read from the store's file names (`lastCommittedOrdinal`), without replaying the bundle.
+ */
 function workMarkOf(agentDir: string, agentId: string, session: ClosedBotSession): BotWorkMark {
 	if ("linked" in session) return { session: undefined, linked: session.linked, head: 0 };
 	const bundle = closedBundle(agentDir, agentId, session.saved);
@@ -391,7 +393,7 @@ function workMarkOf(agentDir: string, agentId: string, session: ClosedBotSession
 	return {
 		session: session.saved?.id,
 		linked: undefined,
-		head: store ? readTaskRuntimeProjection(store).lastOrdinal : 0,
+		head: store ? store.lastCommittedOrdinal() : 0,
 	};
 }
 

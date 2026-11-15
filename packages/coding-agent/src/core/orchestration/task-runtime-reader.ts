@@ -1,5 +1,6 @@
 import type { OrchestrationEvent } from "./contracts.ts";
-import { type OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "./event-store.ts";
+import type { OrchestrationEventStore } from "./event-store.ts";
+import { OrchestrationSnapshotRequiredError } from "./event-store-errors.ts";
 import { projectionFromSnapshot } from "./task-runtime-codecs.ts";
 import { projectOrchestrationEvents, reduceOrchestrationEvent } from "./task-runtime-reducer.ts";
 import { DurableTaskRuntimeError, type TaskRuntimeProjection } from "./task-runtime-state.ts";

@@ -25,7 +25,8 @@ import {
 import type { GoalState } from "../goals/goal-state.ts";
 import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { OrchestrationEventStore, OrchestrationSnapshotRequiredError } from "../orchestration/event-store.ts";
+import { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import { OrchestrationSnapshotRequiredError } from "../orchestration/event-store-errors.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
