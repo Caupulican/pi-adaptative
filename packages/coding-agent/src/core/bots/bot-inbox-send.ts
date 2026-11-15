@@ -3,11 +3,12 @@
  * takes and answers in the bot's chat. A host that let the bot go between the refused lock and the write would leave it
  * to no one, so the bot is then opened here, which takes the inbox first (this message included); a refusal of that open
  * takes the message back and is the send's own, unless the host opens the session again later (`openLater`: a cause that
- * passes on its own, not past its cap): the message then waits, and the owner is told why (`waitsFor`, `toldWaits`)
- * unless another host took the bot meanwhile.
+ * passes on its own, not past its cap): the message then waits, and unless another host took the bot meanwhile the owner
+ * is told why, by the sender when it shows the result's `waitsFor` (`showsWaits`), else by the host (`sentWaits`).
  */
 
 import type {
+	BotDeliveryOptions,
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
@@ -35,9 +36,9 @@ export interface BotInboxSendPorts {
 	open(agentId: string): Promise<unknown>;
 	/**
 	 * The host's owed work: whether a failed open is asked again after a backoff (`openLater`), and why the message waits
-	 * when it is, which counts as told (`toldWaits`).
+	 * when it is, told to the owner by the sender or the host (`sentWaits`).
 	 */
-	readonly owed: Pick<BotOwedWork, "openLater" | "toldWaits">;
+	readonly owed: Pick<BotOwedWork, "openLater" | "sentWaits">;
 }
 
 /**
@@ -87,7 +88,7 @@ export async function sendToBotHost(
 	ports: BotInboxSendPorts,
 	agentId: string,
 	message: string,
-	mode: BotOperatorMessageOptions["mode"],
+	{ mode, showsWaits = false }: BotDeliveryOptions,
 	from: { readonly sessionId: string; readonly cwd: string },
 ): Promise<BotOperatorMessageDispatchResult> {
 	const { agentDir, holder } = ports;
@@ -112,7 +113,10 @@ export async function sendToBotHost(
 			}
 			host = readRemoteBotHost(agentDir, agentId, holder);
 			if (later && !host)
-				waitsFor = interfaceText().botTeam.botWordsWaitForOpen(agentId, ports.owed.toldWaits(agentId, error));
+				waitsFor = interfaceText().botTeam.botWordsWaitForOpen(
+					agentId,
+					ports.owed.sentWaits(agentId, error, showsWaits),
+				);
 		}
 	}
 	return {

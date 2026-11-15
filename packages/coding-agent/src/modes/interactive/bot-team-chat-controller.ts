@@ -29,7 +29,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { describeBotDaemonStatusLines } from "./bot-daemon-status.ts";
 import { currentActivity, TargetChatViewRegistry } from "./bot-team-chat-target-view.ts";
-import { formatBotList, formatRoutineList, formatTeamList, formatTeamSend } from "./bot-team-lines.ts";
+import { formatBotList, formatBotSend, formatRoutineList, formatTeamList, formatTeamSend } from "./bot-team-lines.ts";
 import { chatRoutine, routineScheduleLabel } from "./chat-routines.ts";
 import { formatActiveChatTargetBadge } from "./chat-target-badge.ts";
 import { botStateGlyph, REMOTE_MARK } from "./components/bot-state-mark.ts";
@@ -37,21 +37,6 @@ import { teamSpeakerTone } from "./components/custom-message.ts";
 import type { ReplyBylineTracker } from "./components/reply-byline.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { runRemoteCommand } from "./remote-commands.ts";
-
-/** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
-function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult): string {
-	const text = interfaceText().chat;
-	if (result.modelRef === "link/remote") return text.sentRemote(agentId);
-	if (result.deliveredTo) return text.sentToHost(agentId, result.deliveredTo.pid, result.deliveredTo.sessionId);
-	if (result.waitsFor !== undefined) return result.waitsFor;
-	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
-		started: text.sentStarted,
-		followed_up: text.sentFollowedUp,
-		steered: text.sentSteered,
-		queued: text.sentQueued,
-	};
-	return text.sentToBot(agentId, how[result.mode], result.modelRef);
-}
 
 export interface BotTeamChatSessionPort {
 	listPersistentBots(defaultModelRef?: string, teamId?: string): PersistentBotView[];
@@ -66,7 +51,7 @@ export interface BotTeamChatSessionPort {
 	sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: { mode?: "follow_up" | "queue" | "start"; answerInSession?: boolean },
+		options?: { mode?: "follow_up" | "queue" | "start"; answerInSession?: boolean; showsWaits?: boolean },
 	): Promise<BotOperatorMessageDispatchResult>;
 	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[];
@@ -698,12 +683,14 @@ export class BotTeamChatController {
 		try {
 			const result = await this.host.getSessionPort().sendOperatorMessageToBot(agentId, body, {
 				answerInSession: this.isRootChatActive(),
+				// Only the status line below shows why the message waits: an open chat's send leaves that to the bot's host.
+				showsWaits: !options.refreshOnly,
 			});
 			if (options.refreshOnly || !this.isRootChatActive()) {
 				await this.refreshActiveChatView();
 			}
 			if (!options.refreshOnly) {
-				this.host.showStatus(sentToBotText(agentId, result));
+				this.host.showStatus(formatBotSend(agentId, result));
 			}
 		} catch (error) {
 			this.host.showError(errorMessage(error));
@@ -872,11 +859,12 @@ export class BotTeamChatController {
 		const result = await port.sendOperatorMessageToBot(agentId, body, {
 			...(mode ? { mode } : {}),
 			answerInSession: this.isRootChatActive(),
+			showsWaits: true,
 		});
 		if (!this.isRootChatActive()) {
 			await this.refreshActiveChatView();
 		}
-		this.host.showStatus(sentToBotText(agentId, result));
+		this.host.showStatus(formatBotSend(agentId, result));
 	}
 
 	private ensureTeamMembersExist(memberAgentIds: readonly string[], port: BotTeamChatSessionPort): void {

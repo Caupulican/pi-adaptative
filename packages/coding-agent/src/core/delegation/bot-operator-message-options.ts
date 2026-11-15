@@ -21,7 +21,15 @@ export interface BotOperatorMessageOptions {
 	idempotencyKey?: string;
 	/** The alias of the leader whose words these are (a nested goal's outcome or question, a parent's update); absent for the orchestrator. */
 	fromLeader?: string;
+	/**
+	 * The sender shows the owner why the message waits (the result's `waitsFor`): that counts as telling them. Without it
+	 * the bot's host tells the owner itself.
+	 */
+	showsWaits?: boolean;
 }
+
+/** What the bot's own session host reads of a send: the kind of turn, and whether the sender shows why it waits. */
+export type BotDeliveryOptions = Pick<BotOperatorMessageOptions, "mode" | "showsWaits">;
 
 /** What one operator-to-bot message became: the turn kind it took, and where it went. */
 export interface BotOperatorMessageDispatchResult {

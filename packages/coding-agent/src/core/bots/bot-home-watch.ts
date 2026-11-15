@@ -16,7 +16,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 
 /** How long changes gather before one notice carries them: a turn being written changes its file many times a second. */
-const COALESCE_MS = 100;
+export const BOT_HOME_COALESCE_MS = 100;
 
 /** A file that changed in a bot's home: the home's directory name and the path inside it, `/`-separated. */
 export interface BotHomeChange {
@@ -93,7 +93,7 @@ export function watchBotHomes(
 	const note = (home: string, file: string) => {
 		if (closed || !isObservedHomeFile(file)) return;
 		pending.set(`${home}/${file}`, { home, file });
-		flushTimer ??= timers.setTimeout(flush, COALESCE_MS);
+		flushTimer ??= timers.setTimeout(flush, BOT_HOME_COALESCE_MS);
 	};
 	/** A watch on one directory; an error is the whole watch's, unless the directory itself is gone (`gone`). */
 	const watchDir = (path: string, onName: (name: string) => void, gone: () => void): FSWatcher => {

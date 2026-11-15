@@ -39,10 +39,10 @@ import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
+	BotDeliveryOptions,
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
@@ -51,7 +51,7 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
+import type { HostLock } from "../remote/host-lock.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -63,7 +63,7 @@ import { errorText } from "./bot-error-text.ts";
 import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
-import { BotHostStateWriter, type BotSessionState } from "./bot-host-state.ts";
+import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
 	type BotInboxRefusal,
@@ -170,11 +170,7 @@ export interface BotSender {
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
 export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun" | "runsAsSession"> {
-	deliver(
-		agentId: string,
-		message: string,
-		mode: BotOperatorMessageOptions["mode"],
-	): Promise<BotOperatorMessageDispatchResult>;
+	deliver(agentId: string, message: string, options: BotDeliveryOptions): Promise<BotOperatorMessageDispatchResult>;
 }
 
 interface BotSessionEntry {
@@ -290,7 +286,7 @@ export class BotSessionHost {
 			warn: (message) => ports.warn(message),
 			stopped: () => this.stopped,
 			hostedHere: (agentId) => this.entries.has(agentId),
-			heldElsewhere: (agentId, opening) => this.view.heldElsewhere(agentId, opening),
+			heldElsewhere: (agentId) => this.view.heldElsewhere(agentId),
 			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
 			waiting: (agentId) => this.readInbox(agentId).waiting,
 			runsAsSession: (record) => this.runsAsSession(record),
@@ -504,7 +500,7 @@ export class BotSessionHost {
 	async deliver(
 		agentId: string,
 		message: string,
-		mode: BotOperatorMessageOptions["mode"],
+		{ mode, showsWaits }: BotDeliveryOptions,
 		sender: BotSender = this.ports.sender(),
 	): Promise<BotOperatorMessageDispatchResult> {
 		let entry: BotSessionEntry;
@@ -526,7 +522,7 @@ export class BotSessionHost {
 				},
 				agentId,
 				message,
-				mode,
+				{ mode, showsWaits },
 				{ sessionId: sender.hostSessionId(), cwd: sender.cwd() },
 			);
 		}
@@ -539,6 +535,8 @@ export class BotSessionHost {
 		if (!behindStop && !botInboxWaiting(agentDir, agentId)) return this.give(entry, message, mode);
 		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
 		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop);
+		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
+		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
 		return result;
 	}
@@ -688,9 +686,9 @@ export class BotSessionHost {
 		const { model, cwd } = definition;
 		// A model refused now builds no session and takes no lock.
 		this.admission.admit(agentId, model, definition, sender);
-		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
+		const taken = this.view.takeLock(agentId);
 		if (!taken.held) {
-			const sessionId = this.view.keptOutBy(agentId, taken.token)?.hostSessionId;
+			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
 			throw new BotSessionHeldError(words.botSessionHeld(agentId, taken.owner.pid, sessionId));
 		}
 		const { lock } = taken;

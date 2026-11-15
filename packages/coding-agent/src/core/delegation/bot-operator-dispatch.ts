@@ -183,7 +183,7 @@ export class BotOperatorDispatch {
 				if (wasRetired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
 				assertCurrentBranch();
 				try {
-					const delivered = await this.host.botSessions.deliver(normId, message, options?.mode);
+					const delivered = await this.host.botSessions.deliver(normId, message, options ?? {});
 					this.host.invalidateBotViews();
 					return delivered;
 				} catch (error) {

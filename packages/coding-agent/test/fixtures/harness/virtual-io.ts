@@ -697,15 +697,24 @@ export class VirtualFileSystem {
 	}
 
 	realpathSync(value: unknown, syscall = "realpath", kind = "realpath"): string {
-		let path = this.path(value, syscall);
-		const seen = new Set<string>();
-		while (this.nodes.get(path)?.kind === "symlink") {
-			if (seen.has(path)) throw this.failure(kind, "ELOOP", path, syscall);
-			seen.add(path);
-			path = resolve(dirname(path), this.nodes.get(path)?.target ?? "");
-		}
+		const path = this.followLinks(this.path(value, syscall), kind, syscall);
 		if (!this.nodes.has(path)) throw this.failure(kind, "ENOENT", path, syscall);
 		return path;
+	}
+
+	/**
+	 * `path` with each symbolic link it ends in followed to the path that link names, which may not exist: a write or an
+	 * open through a link reaches that file, creating it when missing, as Node's does. ELOOP for a cycle.
+	 */
+	private followLinks(path: string, kind: string, syscall: string): string {
+		let current = path;
+		const seen = new Set<string>();
+		while (this.nodes.get(current)?.kind === "symlink") {
+			if (seen.has(current)) throw this.failure(kind, "ELOOP", current, syscall);
+			seen.add(current);
+			current = resolve(dirname(current), this.nodes.get(current)?.target ?? "");
+		}
+		return current;
 	}
 
 	readFileSync(value: unknown, options?: unknown): Buffer | string {
@@ -724,13 +733,15 @@ export class VirtualFileSystem {
 			this.writeDescriptor(value, bytes(data));
 			return;
 		}
-		const path = this.path(value);
+		const named = this.path(value);
 		const flag = (options as { flag?: string } | undefined)?.flag;
-		if (flag?.includes("x") && this.nodes.has(path)) throw this.failure("write", "EEXIST", path, "open");
+		// An exclusive create fails on any entry at the path, a link included, without following it.
+		if (flag?.includes("x") && this.nodes.has(named)) throw this.failure("write", "EEXIST", named, "open");
 		if (flag?.startsWith("a")) {
 			this.appendFileSync(value, data);
 			return;
 		}
+		const path = this.followLinks(named, "write", "open");
 		this.fault({ kind: "write", path }, "before", bytes(data));
 		if (!this.nodes.has(dirname(path))) throw this.failure("write", "ENOENT", dirname(path), "open");
 		if (this.nodes.get(path)?.kind === "directory") throw this.failure("write", "EISDIR", path, "open");
@@ -752,7 +763,7 @@ export class VirtualFileSystem {
 	}
 
 	appendFileSync(value: unknown, data: unknown): void {
-		const path = this.path(value);
+		const path = this.followLinks(this.path(value), "append", "open");
 		this.fault({ kind: "append", path }, "before", bytes(data));
 		const previous = this.nodes.get(path);
 		if (previous && previous.kind !== "file") throw this.failure("append", "EISDIR", path, "open");
@@ -850,8 +861,10 @@ export class VirtualFileSystem {
 		if (!node) throw this.failure("stat", "ENOENT", path, syscall);
 		this.fault({ kind: "stat", path }, "before");
 		const changed = node.changed ?? node.modified;
+		// Only `lstat` reaches a link: it reports a link's own type and the length of the path the link holds, as Node does.
+		const linked = node.kind === "symlink" ? Buffer.byteLength(node.target ?? "") : undefined;
 		const snapshot = {
-			size: node.data.length,
+			size: linked ?? node.data.length,
 			mtimeMs: node.modified,
 			ctimeMs: changed,
 			birthtimeMs: 1000,
@@ -860,7 +873,7 @@ export class VirtualFileSystem {
 			ctime: new Date(changed),
 			birthtime: new Date(1000),
 			atime: new Date(node.modified),
-			mode: node.kind === "directory" ? 0o40755 : 0o100000 | (node.mode ?? 0o644),
+			mode: node.kind === "directory" ? 0o40755 : linked !== undefined ? 0o120777 : 0o100000 | (node.mode ?? 0o644),
 			dev: 1,
 			ino: node.identity,
 			nlink: [...this.nodes.values()].filter((linked) => linked === node).length,
@@ -1067,11 +1080,13 @@ export class VirtualFileSystem {
 	}
 
 	openSync(value: unknown, flags: unknown, creationMode?: unknown): number {
-		const path = this.path(value);
+		const named = this.path(value);
 		const mode = decodeOpenFlags(flags);
 		const creation = typeof creationMode === "number" ? { mode: creationMode } : undefined;
-		this.fault({ kind: "open", path, flags: typeof flags === "string" ? flags : String(flags) }, "before");
-		if (mode.exclusive && this.nodes.has(path)) throw this.failure("open", "EEXIST", path, "open");
+		this.fault({ kind: "open", path: named, flags: typeof flags === "string" ? flags : String(flags) }, "before");
+		// An exclusive create fails on any entry at the path, a link included; any other open reaches what a link names.
+		if (mode.exclusive && this.nodes.has(named)) throw this.failure("open", "EEXIST", named, "open");
+		const path = this.followLinks(named, "open", "open");
 		if (mode.truncate && (mode.create || this.nodes.has(path))) this.writeFileSync(path, "", creation);
 		else if (mode.create && !this.nodes.has(path)) this.writeFileSync(path, "", creation);
 		else if (!this.nodes.has(path)) throw this.failure("open", "ENOENT", path, "open");

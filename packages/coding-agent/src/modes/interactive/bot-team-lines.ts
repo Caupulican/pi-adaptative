@@ -1,10 +1,11 @@
 /**
  * The lines the `/bot` and `/team` commands draw from a list or a result: one bot, team or scheduled routine per line
- * of `/bot list`, `/team list` and `/bot schedule list`, and what a group send reports. They are in the words of the
- * active language, and they live here rather than in the controller so a line of text can grow without the command
- * handling that surrounds it growing with it.
+ * of `/bot list`, `/team list` and `/bot schedule list`, and what a send to a bot or a group reports. They are in the
+ * words of the active language, and they live here rather than in the controller so a line of text can grow without the
+ * command handling that surrounds it growing with it.
  */
 
+import type { BotOperatorMessageDispatchResult } from "../../core/delegation/bot-operator-message-options.ts";
 import type { PersistentBotView, PersistentTeamRecord } from "../../core/delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
@@ -26,6 +27,21 @@ export function formatBotList(bots: readonly PersistentBotView[]): string {
 			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}${watching}`;
 		})
 		.join("\n");
+}
+
+/** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
+export function formatBotSend(agentId: string, result: BotOperatorMessageDispatchResult): string {
+	const text = interfaceText().chat;
+	if (result.modelRef === "link/remote") return text.sentRemote(agentId);
+	if (result.deliveredTo) return text.sentToHost(agentId, result.deliveredTo.pid, result.deliveredTo.sessionId);
+	if (result.waitsFor !== undefined) return result.waitsFor;
+	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
+		started: text.sentStarted,
+		followed_up: text.sentFollowedUp,
+		steered: text.sentSteered,
+		queued: text.sentQueued,
+	};
+	return text.sentToBot(agentId, how[result.mode], result.modelRef);
 }
 
 /**

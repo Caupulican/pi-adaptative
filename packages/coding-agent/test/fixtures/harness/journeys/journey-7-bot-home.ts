@@ -16,6 +16,7 @@ import { botHostLockFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionStatePieces } from "../../../../src/core/bots/bot-bundle-move.ts";
 import { type BotHome, botHomeOf } from "../../../../src/core/bots/bot-home.ts";
+import { BOT_HOME_COALESCE_MS } from "../../../../src/core/bots/bot-home-watch.ts";
 import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
 import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
 import { continueBotSession } from "../../../../src/core/bots/bot-session-open.ts";
@@ -395,7 +396,18 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 				.armedSnapshot("provider-admission")
 				.filter((alarm) => !armedBefore.has(alarm.handle))
 				.map((alarm) => Math.ceil(alarm.remainingMs / BOT_OPEN_RETRY_FIRST_MS));
-		const sent = await session.sendOperatorMessageToBot(KEEPER, FIFTH_QUESTION);
+		/**
+		 * Hands the bot-home watch's gathered notices to the host now instead of after its real window, then lets an open
+		 * they ask for run to its end before the next turn (its steps are synchronous file calls and promise continuations):
+		 * had the host read its own take and release of the bot's lock as another host's, that open would have armed one
+		 * more attempt by then.
+		 */
+		const deliverHomeNotices = async () => {
+			world.timers.advance("bot-home-watch", BOT_HOME_COALESCE_MS);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		};
+		// The owner's `/bot msg` shows why the message waits (the chat's status line), so the host tells nothing more.
+		const sent = await session.sendOperatorMessageToBot(KEEPER, FIFTH_QUESTION, { showsWaits: true });
 		const waiting = readBotInbox(world.agentDir, KEEPER, (file, reason) => {
 			throw new Error(`the bot's inbox holds an unreadable message ${file}: ${reason}`);
 		});
@@ -426,6 +438,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		// send's own attempt, finds the session held and arms the next within the second. Its own take and release of the
 		// bot's lock on each attempt ask nothing more (the home watch tells them from another host's, so no attempt of its
 		// own doubles the backoff), and the owner, told by the send, is told nothing more.
+		await deliverHomeNotices();
 		expect(
 			retrySteps(),
 			"the send's attempt armed the host's one retry, due within the backoff's first step",
@@ -435,6 +448,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		world.timers.advance("provider-admission", BOT_OPEN_RETRY_FIRST_MS);
 		await withDeadline(trace, "J7 bot home: the host asked again for the held session", asked);
 		await withDeadline(trace, "J7 bot home: the host armed its next attempt", rearmed);
+		await deliverHomeNotices();
 		expect(
 			retrySteps(),
 			"the held session's retry armed the host's one next attempt, due within the backoff's second step",

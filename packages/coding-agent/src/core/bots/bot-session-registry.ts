@@ -197,7 +197,7 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 	return {
 		host,
 		delivery: {
-			deliver: (agentId, message, mode) => host.deliver(agentId, message, mode, sender),
+			deliver: (agentId, message, options) => host.deliver(agentId, message, options, sender),
 			noteHistoryRun: (agentId, parentSessionId, runtime) => host.noteHistoryRun(agentId, parentSessionId, runtime),
 			runsAsSession: (record) => host.runsAsSession(record, sender),
 		},

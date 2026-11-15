@@ -316,11 +316,8 @@ export interface BotOwedWorkPorts {
 	stopped(): boolean;
 	/** Whether the host runs the bot's session itself. */
 	hostedHere(agentId: string): boolean;
-	/**
-	 * Whether another host holds the bot's lock now; the host takes the bot up again when that hold changes. `opening`:
-	 * asked before this host opens the bot itself.
-	 */
-	heldElsewhere(agentId: string, opening?: boolean): boolean;
+	/** Whether another host holds the bot's lock now; the host takes the bot up again when that hold changes. */
+	heldElsewhere(agentId: string): boolean;
 	/** The bot's own session as its home saved it last. */
 	savedSessionOf(agentId: string): SavedBotSession | undefined;
 	/** The messages waiting in the bot's inbox, oldest first. */
@@ -414,12 +411,14 @@ export class BotOwedWork {
 
 	/**
 	 * Why a message the owner sent waits for the bot's session, which failed to open with `error` and opens later
-	 * ({@link openLater}): the send tells the owner this (`waitsFor`), so it counts as told, and an open asked again for
-	 * the same cause tells nothing more.
+	 * ({@link openLater}). A sender that shows it (`shown`: the send's `waitsFor`) has told the owner, so it counts as
+	 * told; else the owner is told here. Either way an open asked again for the same cause tells nothing more.
 	 */
-	toldWaits(agentId: string, error: unknown): string {
+	sentWaits(agentId: string, error: unknown, shown: boolean): string {
 		const reason = botFailureText(agentId, error);
-		this.told.set(agentId, this.waitsText(agentId, reason));
+		const text = this.waitsText(agentId, reason);
+		if (shown) this.told.set(agentId, text);
+		else this.tellWaits(agentId, text);
 		return reason;
 	}
 
@@ -756,7 +755,7 @@ export class BotOwedWork {
 		// Nothing of it is this host's to open: no attempt stays armed for it.
 		if (
 			ports.hostedHere(agentId) ||
-			ports.heldElsewhere(agentId, true) ||
+			ports.heldElsewhere(agentId) ||
 			!record ||
 			record.retired ||
 			!ports.runsAsSession(record)

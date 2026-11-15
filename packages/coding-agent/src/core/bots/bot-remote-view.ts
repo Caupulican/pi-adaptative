@@ -2,7 +2,9 @@
  * What a bot session host reads of the bots it does not run: the host that runs one elsewhere (another process, or
  * another host in this one) and the state it publishes, the bot's saved session, and the conversation its home holds.
  * The watch over the bot homes (`watchBotHomes`) keeps these fresh and tells the host when a bot changed; while no watch
- * runs, each read goes to disk. The host that runs a bot answers for it from memory and never asks here.
+ * runs, each read goes to disk. The host that runs a bot answers for it from memory and never asks here. The host takes a
+ * bot's lock here too: the hold each take finds is what the view judges a later change of the lock against, so a host's
+ * own take and release of a lock never reads as another host's.
  */
 import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
@@ -12,10 +14,11 @@ import { type ReadonlySessionManager, SessionManager } from "../../kernel/sessio
 import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botHomeName } from "../agent-paths.ts";
+import { botHomeName, botHostLockFile } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { sessionStorageRootsOfFile } from "../orchestration-homes.ts";
+import { type HostLockResult, takeProcessLock } from "../remote/host-lock.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
@@ -143,6 +146,8 @@ export class BotRemoteView {
 	watch(): void {
 		if (this.homeWatch || this.homeWatchFailed || this.stopped) return;
 		const failed = (reason: string) => {
+			// A failure after the watch started ends it here (one the watch met has ended it already).
+			this.homeWatch?.();
 			this.homeWatch = undefined;
 			this.homeWatchFailed = true;
 			this.remote.clear();
@@ -151,6 +156,13 @@ export class BotRemoteView {
 			this.ports.warn(interfaceText().botTeam.botHomesNotWatched(reason));
 		};
 		try {
+			// Each bot's hold before the watch starts: a change between this read and the start reaches no batch.
+			const before = new Map(
+				this.ports
+					.store()
+					.listBots({ includeRetired: true })
+					.map((bot) => [bot.agentId, this.otherHold(bot.agentId)]),
+			);
 			this.homeWatch = watchBotHomes(
 				this.ports.agentDir(),
 				this.ports.timers().port("bot-home-watch"),
@@ -190,10 +202,20 @@ export class BotRemoteView {
 				},
 				(error) => failed(error.message),
 			);
-			// Each bot's hold as the watch starts, read once it runs: a change after this read comes in a batch judged
-			// against it, and a change before it is in it.
-			for (const bot of this.ports.store().listBots({ includeRetired: true }))
-				this.holds.set(bot.agentId, this.otherHold(bot.agentId));
+			// Read again once the watch runs: a later change comes in a batch judged against this read, and a change since the
+			// read before (or since a hold this host already judges against, from a refused take or a hold found elsewhere) is
+			// taken up here.
+			const moved: string[] = [];
+			for (const [agentId, read] of before) {
+				const hold = this.otherHold(agentId);
+				const judged = this.holds.has(agentId) ? this.holds.get(agentId) : read;
+				if (hold === judged) this.holds.set(agentId, hold);
+				else {
+					this.tookUp(agentId, hold);
+					moved.push(agentId);
+				}
+			}
+			if (moved.length > 0) this.ports.changed(moved);
 		} catch (error) {
 			failed(error instanceof Error ? error.message : String(error));
 		}
@@ -222,24 +244,23 @@ export class BotRemoteView {
 
 	/**
 	 * Whether another host holds the bot's lock now. A host that finds it held leaves the bot to that hold and takes the
-	 * bot up again when the hold changes, so the hold read here is the one a later change is judged against. `opening`:
-	 * the host opens the bot itself when no other holds it, so no other hold is left to judge against (one it held before,
-	 * of a host since gone, is not); a read after a failed open leaves the hold it judges against as it was, so a release
-	 * not yet read still takes the bot up.
+	 * bot up again when the hold changes, so the hold read here is the one a later change is judged against.
 	 */
-	heldElsewhere(agentId: string, opening = false): boolean {
+	heldElsewhere(agentId: string): boolean {
 		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-		if (host !== undefined || opening) this.holds.set(agentId, host?.lockToken);
+		if (host !== undefined) this.holds.set(agentId, host.lockToken);
 		return host !== undefined;
 	}
 
 	/**
-	 * The host that kept this host out of the bot's lock: its hold (`token`, as the refused take read it) is the one a later
-	 * change is judged against, so its release takes the bot up even when its take and release reach the watch together.
+	 * Takes the bot's lock for this host. The hold the take finds is the one a later change is judged against: none once
+	 * this host holds the lock (so a hold of a host since gone is not compared with this host's own release), or the hold
+	 * that kept this host out, so its release takes the bot up even when its take and release reach the watch together.
 	 */
-	keptOutBy(agentId: string, token: string): RemoteBotHost | undefined {
-		this.holds.set(agentId, token);
-		return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
+	takeLock(agentId: string): HostLockResult {
+		const taken = takeProcessLock(botHostLockFile(this.ports.agentDir(), agentId), this.holder);
+		this.holds.set(agentId, taken.held ? undefined : taken.token);
+		return taken;
 	}
 
 	/** The token of another host's hold on the bot's lock now; undefined when none holds it or the hold is this host's. */
