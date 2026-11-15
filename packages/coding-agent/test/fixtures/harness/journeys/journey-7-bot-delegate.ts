@@ -24,6 +24,7 @@ import {
 	BOT_DELEGATION_JUDGMENTS,
 	botCharges,
 	botNoticeTexts,
+	botSemanticSpend,
 	botSessionIds,
 	createChargedRoot,
 	createOwnerBot,
@@ -65,6 +66,8 @@ const SECOND_STARTED = "Another worker is counting the idle connections.";
 /** What the product tells the owner of a stop that ended the bot's work (text-en/bot-team.ts `botStopped`), whole. */
 const STOPPED = `Stopped ${DELEGATOR} (halt).`;
 const HANDOFF = "Background worker terminal handoff:";
+/** The usage each scripted System One answer reports (`ScriptedSystemOneTransport`), as a receipt records it: input/output. */
+const SYSTEM_ONE_ANSWER_TOKENS = "10/5";
 
 /** The worker's priced reply: the dollars split between input and output, binary-exact so the sums stay exact. */
 function priced(input: number, output: number, usd: number): Usage {
@@ -253,11 +256,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 		});
 		const charged = () =>
 			botCharges(rootFile, botSessionId).reduce((total, report) => total + report.usage.cost.total, 0);
+		// The bot's whole spend: its worker's, and its own System One judgments' (none with System One off).
+		const spent = () => WORKER_USAGE.cost.total + botSemanticSpend(world, DELEGATOR).usd;
 		await withDeadline(
 			trace,
 			"J7 bot delegate: the worker's spend reached the main session as the bot's charge",
-			world.io.waitForMutation(() => charged() >= WORKER_USAGE.cost.total),
+			world.io.waitForMutation(
+				() => charged() >= spent() && (!world.systemOne.enabled || botSemanticSpend(world, DELEGATOR).receipts > 0),
+			),
 		);
+		const judged = botSemanticSpend(world, DELEGATOR);
 		expect(
 			{
 				sent: sent.mode,
@@ -270,9 +278,11 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 				botSessionInOwnerHome: world.io.existsSync(
 					orchestrationSessionDir(ownerOrchestrationHome(world.agentDir), botSessionId),
 				),
+				judgedBySystemOne: judged.receipts > 0,
+				judgedAtScriptedUsage: judged.tokens.every((tokens) => tokens === SYSTEM_ONE_ANSWER_TOKENS),
 				charged: charged(),
 			},
-			"a bot's own session holds the director tools, plan among them, starts a worker whose conversation lies in the bot's home, answers on the worker's handoff, and the worker's spend is charged to the main session as the bot's",
+			"a bot's own session holds the director tools, plan among them, starts a worker whose conversation lies in the bot's home, answers on the worker's handoff, and the worker's spend is charged to the main session as the bot's, with the bot's own System One judgments",
 		).toEqual({
 			sent: "started",
 			otherSessions: 0,
@@ -282,7 +292,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			holdsPlan: true,
 			workerTranscriptInBotHome: true,
 			botSessionInOwnerHome: false,
-			charged: expect.closeTo(WORKER_USAGE.cost.total, 10),
+			judgedBySystemOne: world.systemOne.enabled,
+			judgedAtScriptedUsage: true,
+			charged: expect.closeTo(WORKER_USAGE.cost.total + judged.usd, 10),
 		});
 
 		// Step 5: the owner's stop while a second worker runs cancels it, and its end opens no turn of the bot.
@@ -475,21 +487,39 @@ async function runWorkerBoundStep(world: HarnessWorld, session: AgentSession, ro
 	await waitForBotRosterState(world, session, BOUNDED_DELEGATOR, "idle");
 	const [botSessionId] = botSessionIds(world, BOUNDED_DELEGATOR);
 	if (botSessionId === undefined) throw new Error("the bounded bot opened no session file");
-	const spent = BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total;
+	// The bot's whole spend: its worker's, its priced answer's, and its own System One judgments' (none with System One off).
+	const spent = () =>
+		BOUNDED_WORKER_USAGE.cost.total +
+		BOUNDED_ANSWER_USAGE.cost.total +
+		botSemanticSpend(world, BOUNDED_DELEGATOR).usd;
 	const charged = () =>
 		botCharges(rootFile, botSessionId).reduce((total, report) => total + report.usage.cost.total, 0);
 	await withDeadline(
 		trace,
 		"J7 bot delegate: the bounded request's spend reached the main session as the bot's charge",
-		world.io.waitForMutation(() => charged() >= spent),
+		world.io.waitForMutation(
+			() =>
+				charged() >= spent() &&
+				(!world.systemOne.enabled || botSemanticSpend(world, BOUNDED_DELEGATOR).receipts > 0),
+		),
 	);
+	const judged = botSemanticSpend(world, BOUNDED_DELEGATOR);
 	expect(
 		{
 			sent: sent.mode,
 			stopped: botNoticeTexts(world, BOUNDED_DELEGATOR).some((text) => text.includes(OVER_BOUND)),
 			botRequests: requestsOf(world, BOUNDED_SOUL),
+			judgedBySystemOne: judged.receipts > 0,
+			judgedAtScriptedUsage: judged.tokens.every((tokens) => tokens === SYSTEM_ONE_ANSWER_TOKENS),
 			charged: charged(),
 		},
-		"a bot's request is held to the main session's worker bound with its worker's spend: the answer that passes it stops the turn with the product's sentence, the bot asks nothing more, and the whole spend is charged once",
-	).toEqual({ sent: "started", stopped: true, botRequests: 3, charged: expect.closeTo(spent, 10) });
+		"a bot's request is held to the main session's worker bound with its worker's spend: the answer that passes it stops the turn with the product's sentence, the bot asks nothing more, and the whole spend, its System One judgments included, is charged once",
+	).toEqual({
+		sent: "started",
+		stopped: true,
+		botRequests: 3,
+		judgedBySystemOne: world.systemOne.enabled,
+		judgedAtScriptedUsage: true,
+		charged: expect.closeTo(BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total + judged.usd, 10),
+	});
 }

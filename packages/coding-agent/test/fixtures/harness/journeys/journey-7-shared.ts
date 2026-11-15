@@ -8,6 +8,8 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { readBotNotices } from "../../../../src/core/bots/bot-notices.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticAccountingReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
 } from "../../../../src/core/cost/usage-records.ts";
@@ -441,6 +443,30 @@ export function fileLines(text: string): FileLine[] {
 		.split("\n")
 		.filter((line) => line.trim().length > 0)
 		.map((line) => JSON.parse(line) as FileLine);
+}
+
+/**
+ * The System One spend a bot's own session files record: their semantic usage entries, each receipt once by its report id,
+ * as the session's cumulative usage counts them (`aggregateCumulativeUsageFromSessionEntries`). It is part of what the
+ * bot spent, so the main session is charged it with the bot's model and worker spend; with System One off a bot's session
+ * records none. `tokens` lists each receipt's input and output tokens, the scripted transport answer's usage.
+ */
+export function botSemanticSpend(
+	world: HarnessWorld,
+	agentId: string,
+): { readonly receipts: number; readonly usd: number; readonly tokens: readonly string[] } {
+	const seen = new Set<string>();
+	const tokens: string[] = [];
+	let usd = 0;
+	for (const line of fileLines(botSessionFilesText(world, agentId))) {
+		if (line.type !== "custom" || line.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) continue;
+		const report = line.data as SemanticAccountingReport | undefined;
+		if (!report?.reportId || !report.usage || seen.has(report.reportId)) continue;
+		seen.add(report.reportId);
+		tokens.push(`${report.usage.input}/${report.usage.output}`);
+		usd += report.usage.cost.total;
+	}
+	return { receipts: seen.size, usd, tokens };
 }
 
 /** The bot's charges the root's session file holds: the custom spawned-usage entries labelled as a bot session's, of its session. */
