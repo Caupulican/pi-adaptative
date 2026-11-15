@@ -15,8 +15,10 @@
 import { existsSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
+import type { SessionConfinement } from "./autonomy/session-confinement.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
+import { sessionChangesFiles } from "./delegation/worker-parent-ceiling.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { icmGuidance } from "./memory/providers/icm.ts";
@@ -78,9 +80,12 @@ export interface SystemPromptBuilderDeps {
 	 * session that has not wired a `ToolSelectionController` into this builder simply renders no
 	 * hint block, same as an empty list. The evidence moves with every observed tool call, so the
 	 * builder freezes the hints at its first build (and again when the model changes): a rebuild
-	 * mid-session must not move bytes of the single cached system prompt block (see system-prompt.ts).
+	 * mid-session must not move bytes of the single cached system prompt block (see system-prompt.ts). The controller
+	 * gates them itself (kill switch, evidence thresholds), so a session passes them through always.
 	 */
 	getToolSelectionHints?(): readonly ToolSelectionHint[];
+	/** Where the session's writes stay (`SessionConfinement`): with its tools, whether it changes files (`sessionChangesFiles`). */
+	getSessionConfinement(): SessionConfinement;
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
@@ -435,12 +440,21 @@ export class SystemPromptBuilder {
 			date: this._promptDate,
 			...(this.isIcmMode() ? { omitDate: true } : {}),
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
-			// The root carries the owner's reach (agent definitions, approvals); a bot directs inside its own scope.
+			// The root carries the owner's reach (agent definitions, approvals); a bot directs inside its own scope. Whether it
+			// writes is read from the tools this prompt lists, by the rule its workers' ceiling reads.
 			...(modelCapability.class === "full" &&
 			this.deps.standing.directsWorkers &&
 			validToolNames.includes("delegate") &&
 			this.deps.getSettingsManager().getWorkerDelegationSettings().enabled
-				? { directorRole: { root: this.deps.standing.lendsOwnerReach } }
+				? {
+						directorRole: {
+							root: this.deps.standing.lendsOwnerReach,
+							writes: sessionChangesFiles({
+								getSessionConfinement: () => this.deps.getSessionConfinement(),
+								getForegroundToolNames: () => validToolNames,
+							}),
+						},
+					}
 				: {}),
 			agentName: identity?.name,
 			principles:

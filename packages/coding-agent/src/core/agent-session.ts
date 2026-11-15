@@ -1062,8 +1062,8 @@ export class AgentSession {
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			standing: this._caps,
-			// Self-gated by kill switch and evidence thresholds inside getActiveHints(): a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
+			getSessionConfinement: () => this._runtimeBuilder.sessionConfinement,
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
 			getAgentIdentity: () => config.agentIdentity ?? readAgentIdentity(this._agentDir),
 			promptClock: config.timers.port("system-prompt"),

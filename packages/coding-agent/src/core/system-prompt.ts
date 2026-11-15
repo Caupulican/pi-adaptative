@@ -2,6 +2,7 @@
  * System prompt construction and project context loading
  */
 
+import { CONFIG_DIR_NAME } from "../config.ts";
 import { TOOL_FAILURE_RETRY_MODEL_RULE } from "../kernel/index.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
@@ -328,7 +329,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// The plan lines are told only where the tool is active, like the lookup rule.
 	const directorRole =
 		fullPrompt && options.directorRole !== undefined
-			? `\n\n${directorRolePrompt({ plan: activeTools.includes(PLAN_TOOL_NAME), root: options.directorRole.root })}`
+			? `\n\n${directorRolePrompt({ ...options.directorRole, plan: activeTools.includes(PLAN_TOOL_NAME), configDir: CONFIG_DIR_NAME })}`
 			: "";
 	// The host rejects calls to tools that are not active, so only the constrained classes are told.
 	const toolSurfaceRule = fullPrompt

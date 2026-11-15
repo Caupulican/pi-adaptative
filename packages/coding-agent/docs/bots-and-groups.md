@@ -121,8 +121,8 @@ orchestrator as a worker's terminal does.
 
 A bot directs workers of its own with `delegate` and its one-call form `assign`, the tools the main session directs its
 workers with; it holds no `plan`. Its system prompt carries the director role in a bot's words (its own work is
-integration, verification, security and every answer in its conversation; it writes instruction files only inside its
-write scope), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
+integration, verification, security and every answer in its conversation; a writing bot writes instruction files only in
+the project's `.pi`, and a read-only bot's words say it and its workers change no files), and the `delegation` rule reaches it as it reaches the main session, without the line on worker memory,
 since a bot lends its workers no memory. Its workers are held to the bot's own reach: they write, read, run commands and
 reach the network no wider than the bot (a read-only bot's workers are read-only). Their conversations lie in the bot's
 home (`orchestration/`), their spend counts in the bot's spend window and reaches the main session with the bot's, and a
@@ -132,8 +132,9 @@ bot was stopped when it ended a turn or input in flight, or the workers in fligh
 taken still ends the turn and the workers of the bot this process hosts. A worker the owner stopped opens no turn of the bot. A
 profile bot holds both `delegate` and `assign` when its profile's tools name either, since `assign` runs `delegate`; a
 worker of any profile holds neither.
-The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session, with the bot's
-home in place of the agent directory. A bot is never hosted in a worker process.
+The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session; the one
+orchestration directory a bot can write is the project's `.pi` in its working directory, since its home `bots/<id>` is
+private to its path scope. A bot is never hosted in a worker process.
 
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time

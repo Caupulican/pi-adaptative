@@ -124,6 +124,27 @@ function heldCapabilities(toolNames: readonly string[], network: boolean): Harne
 	return [...held];
 }
 
+/**
+ * The roots a session writes in: none when it holds no tool that changes files, else its confinement's (undefined when its
+ * writes are not confined).
+ */
+function sessionWriteRoots(
+	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
+): readonly string[] | undefined {
+	const confinement = source.getSessionConfinement();
+	const shellReadOnly = confinement.readOnlyShell !== undefined;
+	return source.getForegroundToolNames().some((name) => toolChangesFiles(name, shellReadOnly))
+		? confinement.writeRoots
+		: [];
+}
+
+/** Whether the session changes files: the rule its workers' ceiling is read-only by, also its director role's wording. */
+export function sessionChangesFiles(
+	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
+): boolean {
+	return sessionWriteRoots(source)?.length !== 0;
+}
+
 /** The ceiling of a session that holds its workers to its own reach, from its confinement, held tools and envelope. */
 export function sessionWorkerCeiling(source: WorkerCeilingSource): WorkerParentCeiling {
 	const confinement = source.getSessionConfinement();
@@ -131,7 +152,7 @@ export function sessionWorkerCeiling(source: WorkerCeilingSource): WorkerParentC
 	const toolNames = source.getForegroundToolNames();
 	const shellReadOnly = readOnlyShell !== undefined;
 	// A session that changes no file lends no write root; one that does lends the roots it writes in itself.
-	const writeRoots = toolNames.some((name) => toolChangesFiles(name, shellReadOnly)) ? confinement.writeRoots : [];
+	const writeRoots = sessionWriteRoots(source);
 	// The session's own tool-stream directory is read by it alone; a worker's reads are its own.
 	const exempt = new Set(readScope?.exemptReadPaths ?? []);
 	return {

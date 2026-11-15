@@ -120,26 +120,29 @@ function commsGlossaryPrompt(plan: boolean): string {
 /** The words of the director role that differ between the root and a bot (`directorRolePrompt`). */
 interface DirectorWords {
 	readonly role: string;
-	/** What the director writes itself, after reading, searching, planning and reviewing. */
-	readonly writes: string;
+	/** What the director writes itself, when it writes, after reading, searching, planning and reviewing. */
+	readonly writes: (configDir: string) => string;
 	/** What the director owns at the end. */
 	readonly owns: string;
 }
 
 /**
  * The root writes agent definitions and instruction files and answers to the owner, approvals included. A bot's writes
- * are confined away from the harness resources agent definitions live in, and it holds no approval (it never asks the
- * owner live), so it owns the answers of its own conversation.
+ * are confined to its working directory and away from the harness's private roots (its own home among them), so its
+ * instruction files go in the project's config directory (`configDir`, `.pi`), the one orchestration directory the
+ * delegation gate lets it write; it holds no approval (it never asks the owner live), so it owns the answers of its own
+ * conversation.
  */
 const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
 	root: {
 		role: "ROLE: root, the director of a team of workers",
-		writes: "writing agent definitions and instruction files are yours",
+		writes: () => "writing agent definitions and instruction files are yours",
 		owns: "integration, verification, security, approvals and every message to the owner",
 	},
 	bot: {
 		role: "ROLE: director of a team of workers",
-		writes: "writing instruction files inside your write scope are yours",
+		writes: (configDir) =>
+			`writing instruction files in the ${configDir} directory of your working directory are yours`,
 		owns: "integration, verification, security and every answer in this conversation",
 	},
 };
@@ -148,10 +151,25 @@ const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
  * The director's role in every prompt of a session that can delegate (full class, worker delegation on, `delegate`
  * active): the root's, or a bot's (`root: false`). It states how the session directs; the work-lifecycle rule hook
  * carries only the delegation detail this does not. `plan`: the `plan` tool is active, so the role says when to use
- * it and the glossary carries its codes.
+ * it and the glossary carries its codes. `writes`: the session changes files (`sessionChangesFiles`, the rule its
+ * workers' ceiling reads); one that does not writes no instruction file, and its workers change no file either unless it
+ * lends them the owner's reach (`root`).
  */
-export function directorRolePrompt(options: { readonly plan: boolean; readonly root: boolean }): string {
+export function directorRolePrompt(options: {
+	readonly plan: boolean;
+	readonly root: boolean;
+	readonly writes: boolean;
+	/** The project config directory's name (`CONFIG_DIR_NAME`), where a bot's instruction files go. */
+	readonly configDir: string;
+}): string {
 	const words = DIRECTOR_WORDS[options.root ? "root" : "bot"];
+	const workersWrite = options.root || options.writes;
+	const yours = options.writes
+		? `Reading, searching, planning, reviewing, and ${words.writes(options.configDir)}`
+		: "Reading, searching, planning and reviewing are yours, and you change no files";
+	const theirs = workersWrite
+		? "Building, testing, changing project files and running programs are the workers'"
+		: "Investigating, reading and running read-only commands are the workers', who change no files either";
 	return [
 		words.role,
 		"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
@@ -160,8 +178,8 @@ export function directorRolePrompt(options: { readonly plan: boolean; readonly r
 					"- For work with several parts, call plan once with every step, its files and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.",
 				]
 			: []),
-		`- You orchestrate; you do not execute. Reading, searching, planning, reviewing, and ${words.writes}. Building, testing, changing project files and running programs are the workers': start or reuse a suitable worker, and never duplicate running work.`,
-		"- Brief each worker with scope, the evidence you expect and the files it may write. For a long brief, write the instructions to a file and tell the worker to read and follow it.",
+		`- You orchestrate; you do not execute. ${yours}. ${theirs}: start or reuse a suitable worker, and never duplicate running work.`,
+		`- Brief each worker with scope, the evidence you expect${workersWrite ? " and the files it may write" : ""}.${options.writes ? " For a long brief, write the instructions to a file and tell the worker to read and follow it." : ""}`,
 		"- Keep working while workers run; wait only at a true dependency.",
 		"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 		`- You own ${words.owns}.`,
