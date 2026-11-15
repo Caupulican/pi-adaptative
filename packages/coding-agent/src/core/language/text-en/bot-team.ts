@@ -119,9 +119,16 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its state could not be published for other sessions (${reason}).`,
 	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its turn's spend could not be recorded (${reason}).`,
-	/** The main session's files or directories a read-back of the bot's charges could not read, each with why. */
-	botChargeFilesUnread: (agentId: string, unread: readonly { readonly path: string; readonly reason: string }[]) =>
-		`Bot ${agentId}: ${unread.map(({ path, reason }) => `${path} (${reason})`).join("; ")} could not be read back for its spend charges, so what ${unread.length === 1 ? "it holds is" : "they hold is"} charged to the main session again.`,
+	/**
+	 * The main session's files or directories a read-back of the bot's charges could not read: `named` each with why, and
+	 * `more` others.
+	 */
+	botChargeFilesUnread: (
+		agentId: string,
+		named: readonly { readonly path: string; readonly reason: string }[],
+		more: number,
+	) =>
+		`Bot ${agentId}: ${named.map(({ path, reason }) => `${path} (${reason})`).join("; ")}${more > 0 ? ` and ${more} more` : ""} could not be read back for its spend charges, so what ${named.length + more === 1 ? "it holds is" : "they hold is"} charged to the main session again.`,
 	botChargeMarkNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: how far the main session holds its spend could not be marked in its transcript (${reason}); if its spend record is lost, that is read back from the main session's files alone.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>

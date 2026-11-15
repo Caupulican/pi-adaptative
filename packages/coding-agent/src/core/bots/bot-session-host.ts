@@ -756,8 +756,8 @@ export class BotSessionHost {
 					rootSessionId: () => entry.sender.hostSessionId(),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
-					chargesUnread: (unread) =>
-						entry.sender.warn(interfaceText().botTeam.botChargeFilesUnread(agentId, unread)),
+					chargesUnread: (named, more) =>
+						entry.sender.warn(interfaceText().botTeam.botChargeFilesUnread(agentId, named, more)),
 					markNotKept: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botChargeMarkNotKept(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),

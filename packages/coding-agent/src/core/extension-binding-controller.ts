@@ -144,6 +144,27 @@ export function compileEffectiveResourceProfileSnapshot(
 	return snapshot;
 }
 
+/** The fields an extension's usage report is declared to carry (`ExtensionAPI.reportSpawnedUsage`). */
+type ExtensionUsageReport = { label?: string; sourceSessionId?: string; reportId?: string };
+const EXTENSION_USAGE_REPORT_FIELDS: ReadonlySet<string> = new Set(["label", "sourceSessionId", "reportId"]);
+
+/**
+ * An extension's usage report as recorded: exactly its declared fields. Any other field (a charged range's `from` or
+ * `through`, its instance or date, a model or components) and the label `bot-session` are refused, naming them: a bot
+ * session's charged ranges are the bot host's alone, so an extension's report cannot mask or reshape a bot's charges.
+ */
+function extensionUsageReport(opts: ExtensionUsageReport | undefined): ExtensionUsageReport {
+	for (const [field, value] of Object.entries(opts ?? {}))
+		if (value !== undefined && !EXTENSION_USAGE_REPORT_FIELDS.has(field))
+			throw new Error(`reportSpawnedUsage: an extension's report cannot carry "${field}".`);
+	const { label, sourceSessionId, reportId } = opts ?? {};
+	if (label === BOT_SESSION_USAGE_LABEL)
+		throw new Error(
+			`reportSpawnedUsage: the label "${BOT_SESSION_USAGE_LABEL}" is reserved for bot session charges.`,
+		);
+	return { label, sourceSessionId, reportId };
+}
+
 export class ExtensionBindingController {
 	private readonly deps: ExtensionBindingControllerDeps;
 	private extensionAbortHandler?: () => void;
@@ -376,14 +397,7 @@ export class ExtensionBindingController {
 					this.deps.registerContextMemoryProvider(provider, assertResourceMutation);
 				},
 				reportSpawnedUsage: (usage, opts) => {
-					// Only the fields an extension's report is declared to carry: a bot session's charged range (`from`,
-					// `through`, label `bot-session`) is the bot host's alone, so an extension's report cannot mask a bot's charges.
-					const { label, sourceSessionId, reportId } = opts ?? {};
-					if (label === BOT_SESSION_USAGE_LABEL)
-						throw new Error(
-							`reportSpawnedUsage: the label "${BOT_SESSION_USAGE_LABEL}" is reserved for bot session charges.`,
-						);
-					this.deps.addSpawnedUsage(usage, { label, sourceSessionId, reportId });
+					this.deps.addSpawnedUsage(usage, extensionUsageReport(opts));
 				},
 				reportManagedLane: (event) => {
 					this.deps.recordManagedLane(event);

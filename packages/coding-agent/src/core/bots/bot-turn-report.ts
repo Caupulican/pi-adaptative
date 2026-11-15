@@ -16,6 +16,9 @@ import { BotChargeMark } from "./bot-charge-mark.ts";
 import type { BotChargesHeld, BotChargeUnread } from "./bot-charges-held.ts";
 import type { BotCharge, BotChargeReport, BotChargeState, BotSpendLedger } from "./bot-spend-ledger.ts";
 
+/** How many unreadable root files one notice names; the rest are counted. */
+const UNREAD_NAMED = 3;
+
 /** How long after a failed read-back of a watermark the next one may start. */
 const RECOVERY_RETRY_MS = 60_000;
 
@@ -111,10 +114,11 @@ export interface BotTurnAccountingPorts {
 	 */
 	chargeNotRecorded(reason: string): void;
 	/**
-	 * A read-back read the roots' files or directories `unread` as holding none of the session's charges (they could not be
-	 * read): the owner is told which, once per session load; the ranges they hold are charged again.
+	 * A read-back read roots' files or directories as holding none of the session's charges (they could not be read): the
+	 * owner is told of each once per session load, the first ones by name (`named`) and the rest counted (`more`); the
+	 * ranges they hold are charged again.
 	 */
-	chargesUnread(unread: readonly BotChargeUnread[]): void;
+	chargesUnread(named: readonly BotChargeUnread[], more: number): void;
 	/**
 	 * How far the root holds the session's charges could not be marked in its transcript (`BotChargeMark`): the owner is
 	 * told why, once until a mark is kept again.
@@ -170,8 +174,8 @@ export class BotTurnAccounting {
 	private unmarked: { readonly sessionId: string; readonly through: Usage } | undefined;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */
 	private notRecordedTold = false;
-	/** The owner was told of root files a read-back could not read. */
-	private unreadTold = false;
+	/** The root files and directories a read-back could not read that the owner was told of: each is told once. */
+	private readonly unreadTold = new Set<string>();
 	/** A mark was not kept and the owner was told; told again only after a mark is kept. */
 	private markNotKeptTold = false;
 	private closed = false;
@@ -293,10 +297,10 @@ export class BotTurnAccounting {
 				(held) => {
 					this.recovering = undefined;
 					if (this.closed) return;
-					if (held.unread.length > 0 && !this.unreadTold) {
-						this.unreadTold = true;
-						this.ports.chargesUnread(held.unread);
-					}
+					const newly = held.unread.filter(({ path }) => !this.unreadTold.has(path));
+					for (const { path } of newly) this.unreadTold.add(path);
+					if (newly.length > 0)
+						this.ports.chargesUnread(newly.slice(0, UNREAD_NAMED), Math.max(0, newly.length - UNREAD_NAMED));
 					if (this.session.sessionId !== sessionId || !this.ledger.readable()) return;
 					if (this.adopt(sessionId, held)) this.charge();
 				},
