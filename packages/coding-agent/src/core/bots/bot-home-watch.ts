@@ -4,8 +4,9 @@
  * dependable on every platform and runtime): one on the bots directory, which sees homes come and go, and one on each home
  * and on its `sessions/`, `inbox/` and `notices/` directories, added when they appear. A directory is watched rather than a file because an atomic
  * replace changes the file's inode, so a watch on one file would lose it. The watches are not persistent, coalesce the
- * changes of a short window into one notice, and end together on the first error (the caller falls back to reading the
- * disk each time). A change names the home directory and the file inside it; the caller maps a home directory to its bot
+ * changes of a short window into one notice, and end together on the first error, a throw while one takes a change
+ * included (the caller falls back to reading the disk each time); a directory removed while it is added, or one whose
+ * watch reports its own removal, is dropped alone. A change names the home directory and the file inside it; the caller maps a home directory to its bot
  * (`botHomeName` is not always the id).
  */
 
@@ -43,6 +44,11 @@ function isObservedHomeFile(file: string): boolean {
 		file.startsWith("sessions/") ||
 		((file.startsWith("inbox/") || file.startsWith("notices/")) && file.endsWith(".json"))
 	);
+}
+
+/** A throw as the error the watch ends with. */
+function asError(thrown: unknown): Error {
+	return thrown instanceof Error ? thrown : new Error(String(thrown));
 }
 
 function isDirectory(path: string): boolean {
@@ -95,13 +101,45 @@ export function watchBotHomes(
 		pending.set(`${home}/${file}`, { home, file });
 		flushTimer ??= timers.setTimeout(flush, BOT_HOME_COALESCE_MS);
 	};
-	/** A watch on one directory; an error is the whole watch's, unless the directory itself is gone (`gone`). */
+	/**
+	 * A watch on one directory. An error it meets, or a throw while it takes a change (`onName`: a stat, a listing or a
+	 * watch of what appeared), is the whole watch's (`fail`), unless the directory itself is gone (`gone`); a stat of it
+	 * that throws is the whole watch's too. Its listeners run in the file system's event, which nothing above catches.
+	 */
 	const watchDir = (path: string, onName: (name: string) => void, gone: () => void): FSWatcher => {
+		const met = (error: unknown) => {
+			let there: boolean;
+			try {
+				there = isDirectory(path);
+			} catch (statError) {
+				fail(asError(statError));
+				return;
+			}
+			if (there) fail(asError(error));
+			else gone();
+		};
 		const watcher = watch(path, { persistent: false }, (_event, filename) => {
-			if (!closed && filename !== null) onName(filename.toString());
+			if (closed || filename === null) return;
+			try {
+				onName(filename.toString());
+			} catch (error) {
+				met(error);
+			}
 		});
-		watcher.on("error", (error) => (isDirectory(path) ? fail(error) : gone()));
+		watcher.on("error", met);
 		return watcher;
+	};
+	/**
+	 * Adds what watches the directory `path` (`add`): a throw while it is gone (removed between its stat and its watch or
+	 * listing) is its `gone`, its parent's watch reporting the removal; any other throw is the caller's.
+	 */
+	const whileThere = (path: string, add: () => void, gone: () => void) => {
+		try {
+			add();
+		} catch (error) {
+			if (isDirectory(path)) throw error;
+			gone();
+		}
 	};
 	const dropHome = (home: string) => {
 		const watchers = homes.get(home);
@@ -114,18 +152,21 @@ export function watchBotHomes(
 		const watchers = homes.get(home);
 		const path = join(dir, home, subdir);
 		if (!watchers || watchers.subdirs.has(subdir) || !isDirectory(path)) return;
-		watchers.subdirs.set(
-			subdir,
-			watchDir(
-				path,
-				(name) => note(home, `${subdir}/${name}`),
-				() => {
-					watchers.subdirs.get(subdir)?.close();
-					watchers.subdirs.delete(subdir);
-				},
-			),
+		const forget = () => {
+			watchers.subdirs.get(subdir)?.close();
+			watchers.subdirs.delete(subdir);
+		};
+		whileThere(
+			path,
+			() => {
+				watchers.subdirs.set(
+					subdir,
+					watchDir(path, (name) => note(home, `${subdir}/${name}`), forget),
+				);
+				if (announce) for (const name of readdirSync(path)) note(home, `${subdir}/${name}`);
+			},
+			forget,
 		);
-		if (announce) for (const name of readdirSync(path)) note(home, `${subdir}/${name}`);
 	};
 	/**
 	 * Watches a home that appeared. `announce` reports what it already holds: a home made while the watch runs can be
@@ -134,19 +175,25 @@ export function watchBotHomes(
 	const addHome = (home: string, announce: boolean) => {
 		const path = join(dir, home);
 		if (closed || homes.has(home) || !isDirectory(path)) return;
-		homes.set(home, {
-			home: watchDir(
-				path,
-				(name) => {
-					if ((WATCHED_SUBDIRS as readonly string[]).includes(name)) watchSubdir(home, name, true);
-					note(home, name);
-				},
-				() => dropHome(home),
-			),
-			subdirs: new Map(),
-		});
-		if (announce) for (const name of readdirSync(path)) note(home, name);
-		for (const subdir of WATCHED_SUBDIRS) watchSubdir(home, subdir, announce);
+		whileThere(
+			path,
+			() => {
+				homes.set(home, {
+					home: watchDir(
+						path,
+						(name) => {
+							if ((WATCHED_SUBDIRS as readonly string[]).includes(name)) watchSubdir(home, name, true);
+							note(home, name);
+						},
+						() => dropHome(home),
+					),
+					subdirs: new Map(),
+				});
+				if (announce) for (const name of readdirSync(path)) note(home, name);
+				for (const subdir of WATCHED_SUBDIRS) watchSubdir(home, subdir, announce);
+			},
+			() => dropHome(home),
+		);
 	};
 
 	try {

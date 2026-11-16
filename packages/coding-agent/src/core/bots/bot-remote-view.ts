@@ -33,6 +33,15 @@ import { type BotSessionLinks, botSessionChoice } from "./bot-session-pointer.ts
 /** How often the hosts a view holds are judged alive again: a host that was killed publishes nothing. */
 const REMOTE_LIVENESS_MS = 5 * 1000;
 
+/**
+ * The hold of a bot whose host files did not read when the view last read them: whatever hold reads next differs from it,
+ * so a release read next (no hold) still counts as another host's change.
+ */
+const UNREAD_HOLD = Symbol("unread hold");
+
+/** The hold the view judges a bot's next change against: another host's token, none, or one that did not read. */
+type JudgedHold = string | undefined | typeof UNREAD_HOLD;
+
 /** The bot's own session as its home saved it: its id, its file and the directory it worked in. */
 export type SavedBotSession = { readonly id: string; readonly file: string; readonly cwd?: string };
 
@@ -117,9 +126,9 @@ export interface BotRemoteViewPorts {
 	inboxChanged(agentId: string): void;
 	/**
 	 * The bot's home did not read in one of the view's own callbacks (a home change, a liveness recheck): the owner is told
-	 * once per cause, and the bot's next change, recheck or minute's sweep reads it again.
+	 * once per cause, with when it is read again (`again`: its next change or the minute's sweep, the next recheck).
 	 */
-	readFailed(agentId: string, error: unknown): void;
+	readFailed(agentId: string, error: unknown, again: string): void;
 }
 
 export class BotRemoteView {
@@ -129,12 +138,13 @@ export class BotRemoteView {
 	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
 	private readonly remote = new Map<string, RemoteBotHost | undefined>();
 	/**
-	 * The token of the hold another host had on each bot's lock as this host last took it up (undefined: none): a change
-	 * of a host file is another host's change only when the hold differs from it. The lock's notices name no writer, and
+	 * The token of the hold another host had on each bot's lock as this host last took it up (undefined: none;
+	 * `UNREAD_HOLD`: its host files did not read): a change of a host file is another host's change only when the hold
+	 * differs from it. The lock's notices name no writer, and
 	 * this host writes the same files when it takes and gives back a bot's lock (a load that fails), so the hold itself,
 	 * not the notice, tells another host's change from this host's own.
 	 */
-	private readonly holds = new Map<string, string | undefined>();
+	private readonly holds = new Map<string, JudgedHold>();
 	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
 	private readonly saved = new Map<string, SavedBotSession | undefined>();
 	/** The conversation of the one bot whose chat was read last, with the file state it was read at. */
@@ -214,7 +224,8 @@ export class BotRemoteView {
 						// The host's own bot sessions announce themselves; a change it wrote is not news.
 						if (this.ports.runsLocally(agentId) && (hostFile || isSessionChange(file))) continue;
 						if (hostFile) {
-							// Its host files do not read: the host it had and the hold judged stand, and the batch's other bots are read.
+							// Its host files do not read: the host it had stands, its hold is judged unread (`readHold`), and the batch's
+							// other bots are read.
 							const hold = this.readHold(agentId);
 							if (!hold.read) {
 								changed.add(agentId);
@@ -299,7 +310,8 @@ export class BotRemoteView {
 
 	/**
 	 * {@link otherHold} for the view's own reads (its watch's start and changes): a bot whose host files do not read is told
-	 * once per cause (`readFailed`) and read again at its next change or the minute's sweep.
+	 * once per cause (`readFailed`) and read again at its next change or the minute's sweep; its hold is judged unread
+	 * (`UNREAD_HOLD`), so the next that reads, a release included, counts as a change.
 	 */
 	private readHold(
 		agentId: string,
@@ -307,7 +319,8 @@ export class BotRemoteView {
 		try {
 			return { read: true, token: this.otherHold(agentId) };
 		} catch (error) {
-			this.ports.readFailed(agentId, error);
+			this.holds.set(agentId, UNREAD_HOLD);
+			this.ports.readFailed(agentId, error, interfaceText().botTeam.botReadAgain.nextChangeOrMinute);
 			return { read: false };
 		}
 	}
@@ -400,7 +413,11 @@ export class BotRemoteView {
 						now = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 					} catch (error) {
 						// Its home does not read: the gone host stays held here, so the next recheck reads the home again.
-						this.ports.readFailed(agentId, error);
+						this.ports.readFailed(
+							agentId,
+							error,
+							interfaceText().botTeam.botReadAgain.recheck(REMOTE_LIVENESS_MS / 1000),
+						);
 						continue;
 					}
 					this.remote.set(agentId, now);

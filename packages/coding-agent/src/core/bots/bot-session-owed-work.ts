@@ -323,9 +323,16 @@ export class BotOwedWork {
 	 */
 	closed(agentId: string): void {
 		const { ports } = this;
-		const record = ports.store().getBot(agentId);
-		// A host that stopped, or a bot released (retired, or off the session path), is owed nothing here.
-		if (ports.stopped() || !record || record.retired || !ports.runsAsSession(record)) return;
+		// A host that stopped is owed nothing here.
+		if (ports.stopped()) return;
+		// Nor is a bot released (retired, or off the session path). One whose record does not read is told once per cause
+		// and read as owed all the same: the close it follows is done, and its open reads the record again.
+		try {
+			const record = ports.store().getBot(agentId);
+			if (!record || record.retired || !ports.runsAsSession(record)) return;
+		} catch (error) {
+			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
+		}
 		const saved = this.savedRead(agentId);
 		const read = saved?.id === undefined ? undefined : this.workerFacts(agentId, saved.id);
 		if (read?.kind === "facts") this.offered.set(agentId, new Set(read.facts.deliveryItems));
@@ -360,7 +367,7 @@ export class BotOwedWork {
 		try {
 			this.armOwedAt(agentId, this.usageResumeAt(agentId, saved));
 		} catch (error) {
-			this.tellAskFailed(agentId, error);
+			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
 		}
 	}
 
@@ -372,7 +379,7 @@ export class BotOwedWork {
 		try {
 			this.openIfOwed(agentId);
 		} catch (error) {
-			this.tellAskFailed(agentId, error);
+			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
 		}
 	}
 
@@ -569,22 +576,23 @@ export class BotOwedWork {
 				try {
 					if (this.sweepBot(agentDir, agentId)) this.sweepTold.delete(agentId);
 				} catch (error) {
-					this.tellAskFailed(agentId, error);
+					this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
 				}
 		});
 	}
 
 	/**
-	 * The bot's inbox, owed work or home did not read (`error`), here or in a callback of its host: told once per cause until
-	 * its listing reads clean again.
+	 * The bot's inbox, owed work, home or host file did not read (`error`), here or in a callback of its host, which reads it
+	 * again as `again` says (`botReadAgain`): told once per cause, whichever reader met it first, until its listing reads
+	 * clean again.
 	 */
-	tellAskFailed(agentId: string, error: unknown): void {
-		const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
+	tellAskFailed(agentId: string, error: unknown, again: string): void {
+		const cause = botFailureText(agentId, error);
 		const told = this.sweepTold.get(agentId) ?? new Set<string>();
 		this.sweepTold.set(agentId, told);
-		if (told.has(message)) return;
-		this.ports.warn(message);
-		told.add(message);
+		if (told.has(cause)) return;
+		this.ports.warn(interfaceText().botTeam.botSweepFailed(agentId, cause, again));
+		told.add(cause);
 	}
 
 	/**
@@ -619,9 +627,12 @@ export class BotOwedWork {
 			}
 		} else this.unrecorded.recordLate(agentId, (line) => this.ports.warn(line));
 		const waiting = botInboxWaiting(agentDir, agentId);
+		// A bot whose files did not read where it was asked for (told, `tellAskFailed`) is asked again, whatever it is owed:
+		// the failed ask may have been for its watches or a wake its file holds, which this listing does not read.
+		const failed = this.sweepTold.has(agentId);
 		if (
 			!this.openRetries.pending(agentId) &&
-			(waiting || (!this.ports.heldElsewhere(agentId) && this.owedBeyondInbox(agentId)))
+			(waiting || (!this.ports.heldElsewhere(agentId) && (failed || this.owedBeyondInbox(agentId))))
 		)
 			this.openIfOwed(agentId, true);
 		return true;
@@ -703,7 +714,15 @@ export class BotOwedWork {
 			this.finishAsk(agentId, pass);
 			throw error;
 		}
-		if (opened) void opened.finally(() => this.finishAsk(agentId, pass));
+		// No caller waits on the open it started: a read that throws as it settles (the hold its failure reads, the pass
+		// gathered meanwhile) is told once per cause, as `ask` tells the reads before it, and the minute's sweep asks for the
+		// bot again (`sweepBot`).
+		if (opened)
+			void opened
+				.finally(() => this.finishAsk(agentId, pass))
+				.catch((error: unknown) =>
+					this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute),
+				);
 		else this.finishAsk(agentId, pass);
 	}
 
@@ -864,6 +883,8 @@ export class BotOwedWork {
 			this.failedOpens.delete(agentId);
 			if (error instanceof BotModelRefusedError) this.record(agentId, "open", key, error);
 			else this.forgetRefusal(agentId);
+			// Another process that opened it first is not a failure. A hold that does not read throws to the end of the chain
+			// (`openIfOwed`) with nothing recorded for this failure: no failed open or backoff holds back the sweep's next ask.
 			if (ports.heldElsewhere(agentId)) return;
 			const later = notResumed(error);
 			if (!(error instanceof BotModelRefusedError) && !later) this.failedOpens.set(agentId, { key, inbox });

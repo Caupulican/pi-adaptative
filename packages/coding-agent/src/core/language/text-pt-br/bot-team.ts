@@ -154,8 +154,14 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: uma parada do dono na caixa de entrada não pôde ser lida (${reason}) nem separada (${file}); ela não para nada, continua no lugar, não conta como esperando e é lida de novo com no máximo ${maxMinutes} minutos de intervalo; este aviso é dado só uma vez.`,
 	botStopOlderLeft: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a parada do dono foi registrada, mas as paradas anteriores que ela substitui não puderam ser listadas ou removidas (${reason}); elas são tomadas junto com ela.`,
-	botSweepFailed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: a caixa de entrada e o trabalho devido dele não puderam ser verificados (${reason}); eles são verificados de novo a cada minuto.`,
+	botSweepFailed: (agentId: string, reason: string, again: string) =>
+		`Bot ${agentId}: os arquivos dele não puderam ser lidos (${reason}); ${again}.`,
+	botReadAgain: {
+		everyMinute: "eles são lidos de novo a cada minuto",
+		nextChangeOrMinute: "eles são lidos de novo na próxima mudança dele e a cada minuto",
+		recheck: (seconds: number) => `eles são lidos de novo em ${seconds} segundos`,
+		idleBound: (minutes: number) => `a sessão dele continua carregada e eles são lidos de novo em ${minutes} minutos`,
+	},
 	botStopLinkedSessionLeft: (agentId: string, path: string) =>
 		`Bot ${agentId}: a parada do dono foi aplicada, mas os workers, o objetivo e a espera pelo limite de uso da sessão salva dele foram deixados: ${path} é um link simbólico, e nenhum trabalho é encerrado por meio de um.`,
 	botPlacedJobsNotEnded: (agentId: string, reason: string) =>

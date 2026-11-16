@@ -311,7 +311,7 @@ export class BotSessionHost {
 				hostChanged: (agentId) => this.owed.unhosted(agentId),
 				changed: (agentIds) => this.changedMany(agentIds),
 				inboxChanged: (agentId) => this.takeInbox(agentId),
-				readFailed: (agentId, error) => this.owed.tellAskFailed(agentId, error),
+				readFailed: (agentId, error, again) => this.owed.tellAskFailed(agentId, error, again),
 			},
 			this.holder,
 		);
@@ -876,7 +876,11 @@ export class BotSessionHost {
 				this.closeIfIdle(entry);
 			} catch (error) {
 				// A home record of the bot that does not read keeps it loaded: told once per cause, read again at the next bound.
-				this.owed.tellAskFailed(entry.agentId, error);
+				this.owed.tellAskFailed(
+					entry.agentId,
+					error,
+					interfaceText().botTeam.botReadAgain.idleBound(BOT_SESSION_IDLE_BOUND_MS / 60_000),
+				);
 				this.armIdle(entry);
 			}
 		}, BOT_SESSION_IDLE_BOUND_MS);

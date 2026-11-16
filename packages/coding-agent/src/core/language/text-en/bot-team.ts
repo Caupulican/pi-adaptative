@@ -186,9 +186,18 @@ export const BOT_TEAM = {
 	/** The owner's stop was written, but the older stops it replaces could not be listed or removed: they are taken with it. */
 	botStopOlderLeft: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop was recorded, but the older stops it replaces could not be listed or removed (${reason}); they are taken with it.`,
-	/** The periodic listing of the bots failed on this one; the others were listed. */
-	botSweepFailed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its inbox and owed work could not be checked (${reason}); they are checked again every minute.`,
+	/**
+	 * A bot's files (its inbox, owed work, home or host file) did not read where it is listed, asked for or hosted; the
+	 * other bots were read. `again`, one of {@link botReadAgain}, says when they are read next.
+	 */
+	botSweepFailed: (agentId: string, reason: string, again: string) =>
+		`Bot ${agentId}: its files could not be read (${reason}); ${again}.`,
+	botReadAgain: {
+		everyMinute: "they are read again every minute",
+		nextChangeOrMinute: "they are read again at its next change and every minute",
+		recheck: (seconds: number) => `they are read again in ${seconds} seconds`,
+		idleBound: (minutes: number) => `its session stays loaded and they are read again in ${minutes} minutes`,
+	},
 	/** The owner's stop of a closed bot left its saved session's work: its pointer or session file is a symbolic link. */
 	botStopLinkedSessionLeft: (agentId: string, path: string) =>
 		`Bot ${agentId}: the owner's stop was taken, but its saved session's workers, goal and usage-limit wait were left: ${path} is a symbolic link, and work is never ended through one.`,
