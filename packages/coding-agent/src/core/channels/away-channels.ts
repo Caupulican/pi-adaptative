@@ -7,10 +7,17 @@
 
 import { readdirSync } from "node:fs";
 import { channelsDir } from "../agent-paths.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { awayChannelTurnKey, awayMeteredReservations } from "../routines/away-metered-runs.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
+import {
+	awaySpendMicros,
+	type RoutineAwayCharge,
+	type RoutineAwayChargesRead,
+	type RoutineAwayChargesUnread,
+} from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { isMissingFileError } from "../util/atomic-file.ts";
 import {
 	type ChannelBatchRecord,
 	ChannelJournal,
@@ -93,30 +100,69 @@ function offerAwayCharges(pending: readonly ChannelPendingMessage[], maxUsdPerRu
 	return charges;
 }
 
+/** A failure's kind, told once each: a system error by its code (its message names the file it met), else its name. */
+export function failureCause(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return typeof code === "string" ? code : error instanceof Error ? error.name : "thrown";
+}
+
 /**
  * The charges of every channel journal of the agent directory, a channel no longer configured included: what a turn
- * spent in the last 24 hours counts against the day's bound whether or not its channel is still served away.
+ * spent in the last 24 hours counts against the day's bound whether or not its channel is still served away. None
+ * when the channels directory does not exist; a directory that does not list, or a journal that does not read or parse
+ * (`invalid`: which turns it held is unknown; its next update sets it aside), is `unread` with its path and cause.
  */
-export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, nowMs: number): RoutineAwayCharge[] {
+export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead {
+	const dir = channelsDir(agentDir);
 	let files: string[];
 	try {
-		files = readdirSync(channelsDir(agentDir));
-	} catch {
-		return [];
+		files = readdirSync(dir);
+	} catch (error) {
+		if (isMissingFileError(error)) return { charges: [] };
+		return { unread: { path: dir, cause: failureCause(error) } };
 	}
 	const charges: RoutineAwayCharge[] = [];
 	const reservedMetered = awayMeteredReservations(agentDir);
 	for (const file of files) {
 		const name = file.endsWith(".json") ? file.slice(0, -".json".length) : "";
 		if (!isValidChannelName(name)) continue;
-		const state = new ChannelJournal(agentDir, name).read().result;
+		const journal = new ChannelJournal(agentDir, name);
+		let read: ReturnType<ChannelJournal["read"]>;
+		try {
+			read = journal.read();
+		} catch (error) {
+			return { unread: { path: journal.path, cause: failureCause(error) } };
+		}
+		if (read.reset) return { unread: { path: journal.path, cause: "invalid" } };
+		const state = read.result;
 		for (const batch of state.batches) {
 			const charge = channelAwayCharge(name, batch, maxUsdPerRun, reservedMetered, nowMs);
 			if (charge) charges.push(charge);
 		}
 		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
-	return charges;
+	return { charges };
+}
+
+/**
+ * The daemon's one reader of its channel turns' charges, for every gate that decides on the away bound with them (the
+ * routine supervisor's claims, the channel hosts' turns and moves): a read that fails is told once per cause, until one
+ * reads again.
+ */
+export function awayChannelChargesReader(
+	agentDir: string,
+	tell: (message: string) => void,
+): (maxUsdPerRun: number, nowMs: number) => RoutineAwayChargesRead {
+	let told: RoutineAwayChargesUnread | undefined;
+	return (maxUsdPerRun, nowMs) => {
+		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs);
+		if (!("unread" in read)) told = undefined;
+		else if (told?.cause !== read.unread.cause) {
+			told = read.unread;
+			tell(interfaceText().sessions.awayMeteredRuns.chargesUnread(read.unread.path, read.unread.cause));
+		}
+		return read;
+	};
 }
 
 /** What a move of a session away to a metered model reserves first on the away bound, for one channel. */

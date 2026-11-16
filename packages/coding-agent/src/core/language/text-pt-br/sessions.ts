@@ -57,6 +57,8 @@ export const SESSIONS = {
 			`Uma execução ausente que passou para um modelo cobrado por uso não pôde ser reservada no limite de gasto ausente (${cause}): ${path}. As requisições cobradas dela são recusadas.`,
 		turnNotWritten: (channel: string, path: string, cause: string) =>
 			`Canal ${channel} ausente: um turno não pôde ser reservado no limite de gasto ausente para passar a um modelo cobrado por uso (${cause}): ${path}. Ele não passa para esse modelo.`,
+		chargesUnread: (path: string, cause: string) =>
+			`Os turnos de canal cobrados no limite de gasto ausente não puderam ser lidos (${cause}): ${path}. Até serem lidos, routines.away.maxUsdPerDay não tem espaço: nenhuma execução ou turno de canal ausente cobrado por uso começa. Eles são lidos de novo a cada passada; um diário que não é interpretável só é posto de lado quando o canal dele é atendido de novo.`,
 		turnsUnread: (channel: string, cause: string) =>
 			`Canal ${channel} ausente: os turnos que uma passagem a um modelo cobrado por uso reserva no limite de gasto ausente não puderam ser lidos (${cause}). A sessão dele não passa para um modelo cobrado por uso até eles serem lidos.`,
 	},

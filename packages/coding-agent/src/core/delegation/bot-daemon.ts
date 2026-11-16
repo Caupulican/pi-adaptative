@@ -35,7 +35,7 @@ import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/own
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
-import { readAwayChannelCharges } from "../channels/away-channels.ts";
+import { awayChannelChargesReader } from "../channels/away-channels.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
@@ -147,6 +147,8 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	store = routineStore;
 	// The away bounds are the owner's global settings; no project's settings reach a daemon serving every project.
 	const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
+	// One reader for the routine supervisor and the channel hosts, so a failed read is told once per cause.
+	const awayChannelCharges = awayChannelChargesReader(agentDir, report);
 	const supervisor = new AwayRoutineSupervisor({
 		store: routineStore,
 		agentDir,
@@ -158,8 +160,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
 		...(input.eventSources ? { eventSources: input.eventSources } : {}),
 		ciEvents: () => settings.getProactivitySettings().ciEvents,
-		otherAwayCharges: () =>
-			readAwayChannelCharges(agentDir, settings.getRoutineAwaySettings().maxUsdPerRun, clock.now()),
+		otherAwayCharges: () => awayChannelCharges(settings.getRoutineAwaySettings().maxUsdPerRun, clock.now()),
 	});
 	const channelProviders = input.channelProviders;
 	const channelHosts = channelProviders
@@ -170,6 +171,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				...(input.machineFacts ? { machineFacts: input.machineFacts } : {}),
 				providers: channelProviders,
 				routineOccurrences: () => routineStore.listRoutineOccurrences(),
+				awayChannelCharges,
 				report,
 				...(input.authStorage ? { authStorage: input.authStorage } : {}),
 				...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),

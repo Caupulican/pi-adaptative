@@ -58,7 +58,7 @@ import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admi
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { awayMeteredRunReserved, reserveAwayChannelTurns } from "../routines/away-metered-runs.ts";
 import { awayRunMetered } from "../routines/away-routine-admission.ts";
-import { routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
+import { type RoutineAwayChargesRead, routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
 import type { RoutineOccurrence } from "../routines/routine-contract.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
@@ -67,7 +67,7 @@ import {
 	type AwayChannel,
 	type AwaySubscriptionTurns,
 	awayChannels,
-	readAwayChannelCharges,
+	failureCause,
 	reserveAwayChannelOffers,
 	unreservedSubscriptionTurns,
 } from "./away-channels.ts";
@@ -93,12 +93,6 @@ function isWithin(parent: string, child: string): boolean {
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** A failure's kind, told once each: a system error by its code (its message names the file it met), else its name. */
-function errorCause(error: unknown): string {
-	const code = (error as NodeJS.ErrnoException | undefined)?.code;
-	return typeof code === "string" ? code : error instanceof Error ? error.name : "thrown";
 }
 
 /** Whether the channel can carry the owner's words: they run in the daemon's phone session, not the child session. */
@@ -133,6 +127,8 @@ export interface AwayChannelHostsInput {
 	readonly providers: AwayChannelProviderFactory;
 	/** The routine runs away charged on the same bound. */
 	routineOccurrences(): Iterable<RoutineOccurrence>;
+	/** The channel turns' charges on the same bound (`awayChannelChargesReader`, which tells a failed read once per cause). */
+	awayChannelCharges(maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead;
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
 	/** Diagnostics; this host reports each cause once until it clears. */
@@ -234,7 +230,7 @@ export class AwayChannelHosts {
 			{
 				maxUsdPerRun: away.maxUsdPerRun,
 				maxUsdPerDay: away.maxUsdPerDay,
-				otherCharges: readAwayChannelCharges(this.input.agentDir, away.maxUsdPerRun, nowMs),
+				otherCharges: this.input.awayChannelCharges(away.maxUsdPerRun, nowMs),
 				spendsMetered: (definition) =>
 					awayRunMetered(definition.executionSnapshot?.savedIntent, this.input.modelRegistry),
 				reservedMetered: awayMeteredRunReserved(this.input.agentDir),
@@ -243,9 +239,14 @@ export class AwayChannelHosts {
 		);
 	}
 
-	/** The away spend bound's reason to deliver no turn now. */
+	/** The away spend bound's reason to deliver no turn now: no room, or charges on it that do not read. */
 	private capReason(nowMs: number): Worded | undefined {
-		return this.awayRoom(nowMs).fits(0) ? undefined : (text) => text.notices.channels.cap.awaySpend;
+		const room = this.awayRoom(nowMs);
+		if (room.fits(0)) return undefined;
+		const { unread } = room;
+		return unread
+			? (text) => text.notices.channels.cap.awaySpendUnread(unread.cause)
+			: (text) => text.notices.channels.cap.awaySpend;
 	}
 
 	/**
@@ -261,20 +262,27 @@ export class AwayChannelHosts {
 			const unread = `unread:${name}:`;
 			// A journal that does not parse was set aside: which turns it held is unknown.
 			let cause = "invalid";
+			let held: { readonly turns: AwaySubscriptionTurns; readonly fits: boolean } | undefined;
 			try {
 				const turns = unreservedSubscriptionTurns(this.input.agentDir, name, sessionManager.getSessionId());
 				if (turns) {
 					const count = turns.keys.length + turns.offers.length;
-					const fits = count === 0 || this.awayRoom(nowMs).fits(count - 1);
-					for (const key of this.reported.keys()) if (key.startsWith(unread)) this.reported.delete(key);
-					return { turns, fits };
+					// A move that reserves no turn needs no room; one that does is held while the bound's charges do not read.
+					const room = count === 0 ? undefined : this.awayRoom(nowMs);
+					if (room?.unread) cause = room.unread.cause;
+					else {
+						for (const key of this.reported.keys()) if (key.startsWith(unread)) this.reported.delete(key);
+						return { turns, fits: room === undefined || room.fits(count - 1) };
+					}
+					// The turns read: a charged move (an explicit model choice) still reserves them.
+					held = { turns, fits: false };
 				}
 			} catch (error) {
-				cause = errorCause(error);
+				cause = failureCause(error);
 			}
 			if (!this.reported.has(unread + cause))
 				this.report(unread + cause, interfaceText().sessions.awayMeteredRuns.turnsUnread(name, cause));
-			return undefined;
+			return held;
 		};
 		return {
 			fits: () => read(this.now())?.fits === true,

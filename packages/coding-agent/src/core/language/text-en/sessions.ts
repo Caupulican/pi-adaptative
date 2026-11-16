@@ -45,6 +45,9 @@ export const SESSIONS = {
 		/** A channel turn away on a subscription could not be reserved before moving to a metered model, so it does not move. */
 		turnNotWritten: (channel: string, path: string, cause: string) =>
 			`Channel ${channel} away: a turn could not be reserved on the away spend bound to move to a metered model (${cause}): ${path}. It does not move to that model.`,
+		/** The channel turns' charges on the away bound did not read (`cause`: an error code, or `invalid`): the bound has no room until they read. */
+		chargesUnread: (path: string, cause: string) =>
+			`The channel turns charged on the away spend bound could not be read (${cause}): ${path}. Until they read, routines.away.maxUsdPerDay has no room: no metered run or channel turn away starts. They are read again at each pass; a journal that does not parse is set aside only when its channel is served again.`,
 		/** The turns a move to a metered model reserves, or the away bound's room, did not read: the session does not move. */
 		turnsUnread: (channel: string, cause: string) =>
 			`Channel ${channel} away: the turns a move to a metered model reserves on the away spend bound could not be read (${cause}). Its session does not move to a metered model until they read.`,

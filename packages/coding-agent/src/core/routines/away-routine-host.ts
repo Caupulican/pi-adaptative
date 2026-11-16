@@ -50,14 +50,14 @@ import {
 	awayRunRefusal,
 } from "./away-routine-admission.ts";
 import {
-	type RoutineAwayCharge,
+	type RoutineAwayChargesRead,
 	type RoutineAwayClaimGate,
 	routineAwayRunMetered,
+	routineAwaySpendRefusal,
 	routineAwaySpendRoom,
 } from "./routine-away-spend.ts";
 import {
 	ROUTINE_AWAY_HELD_REASON,
-	ROUTINE_AWAY_SPEND_REFUSAL,
 	RoutineAdmissionRefused,
 	type RoutineOccurrence,
 	routineAwayHeld,
@@ -92,8 +92,11 @@ export interface AwayRoutineSupervisorDeps {
 	readonly eventSources?: AwayEventSourceFactory;
 	/** The owner's global `proactivity.ciEvents`; off, no CI source is followed away. */
 	ciEvents?(): boolean;
-	/** The daemon's other charges on the same away spend bound: its channel turns while no session was open. */
-	otherAwayCharges?(): readonly RoutineAwayCharge[];
+	/**
+	 * The daemon's other charges on the same away spend bound: its channel turns while no session was open. While they do
+	 * not read the bound has no room; the reader tells why once per cause.
+	 */
+	otherAwayCharges?(): RoutineAwayChargesRead;
 }
 
 /** One closed parent held open away: its context and the routine scheduler that runs its routines on it. */
@@ -361,7 +364,8 @@ export class AwayRoutineSupervisor {
 		// Recomputed after every host's claim: one parent's admitted runs can leave no room for the next parent. A run
 		// that spends no metered dollars needs no room.
 		const spendGate = this.gate();
-		let room = routineAwaySpendRoom(occurrences, spendGate, nowMs).fits(0);
+		const spendRoom = routineAwaySpendRoom(occurrences, spendGate, nowMs);
+		let room = spendRoom.fits(0);
 		// A model price change can lift a refusal a parent's file stamp does not show.
 		const modelsStamp = fileStamp(configFile(this.deps.agentDir, "models.json"));
 		const parents = new Map<string, ParentWork>();
@@ -428,7 +432,7 @@ export class AwayRoutineSupervisor {
 				waitingForRoom = true;
 				entry.refusals.push({
 					routineId: routine.routineId,
-					reason: ROUTINE_AWAY_SPEND_REFUSAL,
+					reason: routineAwaySpendRefusal(spendRoom),
 					...(current ? { current } : {}),
 				});
 				continue;

@@ -6,6 +6,7 @@
 
 import {
 	type PersistentRoutineDefinition,
+	ROUTINE_AWAY_SPEND_REFUSAL,
 	ROUTINE_UNCERTAIN_RETENTION_MS,
 	type RoutineOccurrence,
 } from "./routine-contract.ts";
@@ -19,15 +20,27 @@ export interface RoutineAwayCharge {
 	readonly until?: number;
 }
 
+/** Why charges on the away spend bound did not read: the path the read met and its cause (a code such as `EACCES`, or `invalid`). */
+export interface RoutineAwayChargesUnread {
+	readonly path: string;
+	readonly cause: string;
+}
+
+/** Charges another record holds on the away spend bound, or why they did not read: spend the bound cannot see is no room. */
+export type RoutineAwayChargesRead =
+	| { readonly charges: readonly RoutineAwayCharge[] }
+	| { readonly unread: RoutineAwayChargesUnread };
+
 /** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
 export interface RoutineAwayClaimGate {
 	readonly maxUsdPerRun: number;
 	readonly maxUsdPerDay: number;
 	/**
 	 * What else the daemon spent away on the same bound: its channel turns while no session was open
-	 * (`away-channels.ts`). Read by the daemon just before the claim, in the one process that makes every away charge.
+	 * (`away-channels.ts`). Read by the daemon just before the claim, in the one process that makes every away charge;
+	 * while they do not read the bound has no room.
 	 */
-	readonly otherCharges?: readonly RoutineAwayCharge[];
+	readonly otherCharges?: RoutineAwayChargesRead;
 	/**
 	 * Whether a run of this definition spends metered (API) dollars (`awayRunMetered`); absent, or true: it does and is
 	 * charged its full per-run bound. A run that does not reserves nothing on the bound: its plan's usage windows hold it.
@@ -102,21 +115,36 @@ export function routineAwayCharged(item: RoutineOccurrence, nowMs: number): bool
 	return routineAwayCharge(item, { maxUsdPerRun: 0 }, nowMs) !== undefined;
 }
 
+/** The away spend bound's state as `routineAwaySpendRoom` reads it. */
+export interface RoutineAwaySpendRoom {
+	/** What the runs away and the other charges that read charge now; the whole charge only without `unread`. */
+	readonly chargedMicros: number;
+	readonly fits: (extraRuns: number) => boolean;
+	readonly exit?: number;
+	/** The gate's `otherCharges` did not read: nothing fits until they read again. */
+	readonly unread?: RoutineAwayChargesUnread;
+}
+
 /**
  * The away spend bound's state: whether one more metered run fits (`charged + maxUsdPerRun <= maxUsdPerDay`, exact in
  * micro-dollars) and, when it does not, the earliest instant a charge ends by time (undefined when every charge ends
  * only by a store change: a run finishing or returning to pending, or a channel turn away settling). The gate's
- * `otherCharges` count like runs.
+ * `otherCharges` count like runs; while they do not read (`unread`) nothing fits, and no time returns the room.
  */
 export function routineAwaySpendRoom(
 	occurrences: Iterable<RoutineOccurrence>,
 	gate: RoutineAwayClaimGate,
 	nowMs: number,
-): { readonly chargedMicros: number; readonly fits: (extraRuns: number) => boolean; readonly exit?: number } {
+): RoutineAwaySpendRoom {
 	let chargedMicros = 0;
 	let exit: number | undefined;
+	const other = gate.otherCharges;
 	const routineCharges = [...occurrences].map((item) => routineAwayCharge(item, gate, nowMs));
-	for (const charge of [...routineCharges, ...(gate.otherCharges ?? [])]) {
+	if (other && "unread" in other) {
+		for (const charge of routineCharges) chargedMicros += charge?.micros ?? 0;
+		return { chargedMicros, fits: () => false, unread: other.unread };
+	}
+	for (const charge of [...routineCharges, ...(other?.charges ?? [])]) {
 		if (!charge) continue;
 		chargedMicros += charge.micros;
 		if (charge.until !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, charge.until);
@@ -128,4 +156,12 @@ export function routineAwaySpendRoom(
 		fits: (extraRuns) => chargedMicros + (extraRuns + 1) * perRun <= perDay,
 		...(exit === undefined ? {} : { exit }),
 	};
+}
+
+/** Why a claim away refused a metered run under the bound: no room, or charges on it that do not read (`unread`). */
+export function routineAwaySpendRefusal(room: Pick<RoutineAwaySpendRoom, "unread">): string {
+	const { unread } = room;
+	return unread
+		? `the away spend bound (routines.away.maxUsdPerDay) cannot be read (${unread.cause}: ${unread.path}), so it has no room for another run; this run waits for its session to open.`
+		: ROUTINE_AWAY_SPEND_REFUSAL;
 }

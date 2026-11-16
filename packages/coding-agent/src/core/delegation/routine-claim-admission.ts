@@ -16,6 +16,7 @@ import {
 import {
 	type RoutineAwaySpendDefinition,
 	routineAwayRunMetered,
+	routineAwaySpendRefusal,
 	routineAwaySpendRoom,
 } from "../routines/routine-away-spend.ts";
 import {
@@ -27,7 +28,6 @@ import {
 	MAX_ROUTINE_SUMMARY_CHARS,
 	nextRoutineAt,
 	ROUTINE_AWAY_HELD_REASON,
-	ROUTINE_AWAY_SPEND_REFUSAL,
 	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineClaimResult,
 	type RoutineCursor,
@@ -462,6 +462,8 @@ export function claimDueRoutineOccurrences(
 	// run claims nothing and stays due for its parent.
 	const away = input.away;
 	const awayRoom = away ? routineAwaySpendRoom(state.occurrences.values(), away, input.nowMs) : undefined;
+	// Only a claim with a bound refuses a run under it: no room, or charges on it that do not read.
+	const awaySpendRefusal = routineAwaySpendRefusal(awayRoom ?? {});
 	let awayAdmitted = 0;
 	const awayRefused: string[] = [];
 	const awayHeld: string[] = [];
@@ -519,7 +521,7 @@ export function claimDueRoutineOccurrences(
 		}
 		// An away run reclaimed is already charged; any other one is admitted under the bound.
 		if (occurrence.executor !== "away" && !admitAway(occurrence.definition)) {
-			refuseAway(occurrence.routineId, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
+			refuseAway(occurrence.routineId, awaySpendRefusal, awayRefused);
 			continue;
 		}
 		// A queued run reads its routine's record as it stands now: its brief is fixed before its dispatch identity.
@@ -572,7 +574,7 @@ export function claimDueRoutineOccurrences(
 			const admitted = admitClockRoutine(state, id, stored, input, output, admitAway);
 			if (admitted.changed) changed = true;
 			if (admitted.journalFull) journalFull = true;
-			if (admitted.refused) refuseAway(id, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
+			if (admitted.refused) refuseAway(id, awaySpendRefusal, awayRefused);
 			if (admitted.held) refuseAway(id, ROUTINE_AWAY_HELD_REASON, awayHeld);
 			if (admitted.shareFull) journalShareFull.push(id);
 		} catch (error) {

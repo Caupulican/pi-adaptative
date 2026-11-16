@@ -40,7 +40,8 @@ import {
 import { proofSheetsAwaitingReview } from "../proof/review-gauge.ts";
 import type { AwayServiceInspection } from "../routines/away-service.ts";
 import {
-	type RoutineAwayCharge,
+	type RoutineAwayChargesRead,
+	type RoutineAwayChargesUnread,
 	type RoutineAwaySpendDefinition,
 	routineAwaySpendRoom,
 } from "../routines/routine-away-spend.ts";
@@ -188,8 +189,11 @@ export interface AwayDaemonStatusView {
 		readonly maxUsdPerDay: number;
 		readonly maxParentHosts: number;
 	};
-	/** Routine runs away and channel turns the daemon delivered while no session was open, on the same bound. */
-	readonly spentUsd: number;
+	/**
+	 * Routine runs away and channel turns the daemon delivered while no session was open, on the same bound; `unread`
+	 * while the channel turns' charges do not read, when the daemon admits no metered run or turn away.
+	 */
+	readonly spent: { readonly usd: number } | { readonly unread: RoutineAwayChargesUnread };
 	readonly hostedParents: StatusSection<number>;
 	/** The channels the global settings name an `awayCwd` for: who serves each now, and the drafts written away. */
 	readonly channels: BoundedList<AwayChannelStatus>;
@@ -457,8 +461,8 @@ export interface AutonomyStatusSources {
 	};
 	channelStates(): readonly ChannelStateView[];
 	channelJournals(): readonly ChannelJournalSummary[];
-	/** The channel turns the daemon delivered away, as charges on the away spend bound (journal reads). */
-	awayChannelCharges(maxUsdPerRun: number, nowMs: number): readonly RoutineAwayCharge[];
+	/** The channel turns the daemon delivered away, as charges on the away spend bound (journal reads), or why they did not read. */
+	awayChannelCharges(maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead;
 	/** Whether a run away of the definition spends metered dollars (`awayRunMetered`), so the bound charges it. */
 	awayRunMetered(definition: RoutineAwaySpendDefinition): boolean;
 	/** Whether a run away was reserved on the bound after its admission (`awayMeteredRunReserved`); absent: none was. */
@@ -675,7 +679,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 					maxUsdPerDay: away.maxUsdPerDay,
 					maxParentHosts: away.maxParentHosts,
 				},
-				spentUsd: spend.chargedMicros / 1_000_000,
+				spent: spend.unread ? { unread: spend.unread } : { usd: spend.chargedMicros / 1_000_000 },
 				hostedParents: unavailable("away_parents", "the away daemon does not record the parents it hosts"),
 				channels: bounded(sources.awayChannels()),
 				service,

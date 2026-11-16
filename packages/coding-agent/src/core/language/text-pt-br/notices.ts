@@ -298,6 +298,8 @@ export const NOTICES = {
 			drafts: (max: number) => `${max} rascunhos de resposta esperam pelo dono (channel_reply)`,
 			awaySpend:
 				"o limite de gasto fora (routines.away.maxUsdPerDay) não tem espaço para outro turno nas últimas 24 horas; as mensagens esperam por uma sessão aberta",
+			awaySpendUnread: (cause: string) =>
+				`os turnos de canal cobrados no limite de gasto fora (routines.away.maxUsdPerDay) não puderam ser lidos (${cause}), então ele não tem espaço; as mensagens esperam até eles serem lidos ou uma sessão abrir`,
 		},
 		senderHeld: (name: string, senderId: string) =>
 			`O canal ${name} reteve uma mensagem do remetente ${senderId}, que não está em channels.${name}.allowedSenders. Para deixá-lo iniciar turnos, adicione "${senderId}" a essa lista.`,

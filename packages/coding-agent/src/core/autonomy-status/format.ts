@@ -169,7 +169,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			}),
 			words.awayDaemon.settings({
 				enabled: value.settings.enabled,
-				spent: money(value.spentUsd),
+				spent: "unread" in value.spent ? { unread: value.spent.unread } : { amount: money(value.spent.usd) },
 				maxPerDay: money(value.settings.maxUsdPerDay),
 				maxPerRun: money(value.settings.maxUsdPerRun),
 				maxParentHosts: value.settings.maxParentHosts,

@@ -66,7 +66,8 @@ export interface AutonomyAwayState {
 /** The away settings the report states, with the two amounts already written the language's way. */
 export interface AutonomyAwaySettings {
 	readonly enabled: boolean;
-	readonly spent: string;
+	/** The day's spend as an amount, or the path and cause of the charges on the bound that did not read. */
+	readonly spent: { readonly amount: string } | { readonly unread: { readonly path: string; readonly cause: string } };
 	readonly maxPerDay: string;
 	readonly maxPerRun: string;
 	readonly maxParentHosts: number;
@@ -264,7 +265,7 @@ export const AUTONOMY_STATUS = {
 		state: (state: AutonomyAwayState) =>
 			`${state.running ? "running" : "not running"}${state.pid === undefined ? "" : ` (pid ${state.pid})`}${state.running ? `, ${state.build}` : ""}, heartbeat ${state.heartbeat}, ${state.activeRoutines} active, ${state.dueRoutines} due`,
 		settings: (settings: AutonomyAwaySettings) =>
-			`away ${settings.enabled ? "on" : "off"}: spent $${settings.spent} of $${settings.maxPerDay} (24 h), $${settings.maxPerRun} per run, ${settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
+			`away ${settings.enabled ? "on" : "off"}: spent ${"amount" in settings.spent ? `$${settings.spent.amount}` : `unread (${settings.spent.unread.cause}: ${settings.spent.unread.path}; no metered run or turn away is admitted until it reads)`} of $${settings.maxPerDay} (24 h), $${settings.maxPerRun} per run, ${settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
 		parentsHosted: (hosted: string) => `parents hosted: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `always-on service: ${unavailable}`,

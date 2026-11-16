@@ -320,7 +320,7 @@ export const AUTONOMY_STATUS = {
 		state: (state: AutonomyAwayState) =>
 			`${state.running ? "em execução" : "parado"}${state.pid === undefined ? "" : ` (pid ${state.pid})`}${state.running ? `, ${state.build}` : ""}, heartbeat ${state.heartbeat}, ${state.activeRoutines} ativas, ${state.dueRoutines} vencidas`,
 		settings: (settings: AutonomyAwaySettings) =>
-			`ausência ${settings.enabled ? "ligada" : "desligada"}: gasto $${settings.spent} de $${settings.maxPerDay} (24 h), $${settings.maxPerRun} por execução, até ${settings.maxParentHosts} ${settings.maxParentHosts === 1 ? "sessão pai" : "sessões pai"} (configurações desta sessão; o daemon lê as configurações globais)`,
+			`ausência ${settings.enabled ? "ligada" : "desligada"}: gasto ${"amount" in settings.spent ? `$${settings.spent.amount}` : `não lido (${settings.spent.unread.cause}: ${settings.spent.unread.path}; nenhuma execução ou turno cobrado por uso é admitido na ausência até ele ser lido)`} de $${settings.maxPerDay} (24 h), $${settings.maxPerRun} por execução, até ${settings.maxParentHosts} ${settings.maxParentHosts === 1 ? "sessão pai" : "sessões pai"} (configurações desta sessão; o daemon lê as configurações globais)`,
 		parentsHosted: (hosted: string) => `sessões pai hospedadas: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `serviço sempre ativo: ${unavailable}`,

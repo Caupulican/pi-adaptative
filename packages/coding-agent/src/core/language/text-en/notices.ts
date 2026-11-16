@@ -340,6 +340,8 @@ export const NOTICES = {
 			drafts: (max: number) => `${max} reply drafts wait for the owner (channel_reply)`,
 			awaySpend:
 				"the away spend bound (routines.away.maxUsdPerDay) has no room for another turn in the last 24 hours; messages wait for an open session",
+			awaySpendUnread: (cause: string) =>
+				`the channel turns charged on the away spend bound (routines.away.maxUsdPerDay) could not be read (${cause}), so it has no room; messages wait until they read or a session opens`,
 		},
 		senderHeld: (name: string, senderId: string) =>
 			`Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`,
