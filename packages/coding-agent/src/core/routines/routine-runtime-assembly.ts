@@ -406,6 +406,11 @@ export class RoutineRuntimeAssembly {
 				return receipt === "settled" ? "settled" : "delivered";
 			},
 			wakeWorker: (runtimeId, text, key) => wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key),
+			armingEntry: () => {
+				const current = this.deps.getSessionManager();
+				const leafId = current.getLeafId();
+				return leafId === null ? undefined : { sessionId: current.getSessionId(), leafId };
+			},
 			warnOwner: warn,
 			isDisposed: () => this.deps.isDisposed(),
 			warn,

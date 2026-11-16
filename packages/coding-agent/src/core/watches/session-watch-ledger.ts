@@ -47,9 +47,14 @@ const MAX_SET_ASIDE = 32;
 const MAX_ID_CHARS = 256;
 const MAX_REASON_CHARS = 512;
 
-/** Who armed a watch: the session itself, under the authority of the turn that armed it, or one of its worker runtimes. */
+/**
+ * Who armed a watch: the session itself, under the authority of the turn that armed it; the host on the session's behalf
+ * (`auto`: a push or a dispatched run the turn's own tool call made, under that turn's authority); or one of its worker
+ * runtimes.
+ */
 export type SessionWatchArmer =
 	| { readonly kind: "session"; readonly authority: TurnAuthority }
+	| { readonly kind: "auto"; readonly authority: TurnAuthority }
 	| { readonly kind: "worker"; readonly runtimeId: string; readonly scope: WorkerWatchScope };
 
 /** How a watch stands: still watching, or how it ended. */
@@ -98,7 +103,20 @@ export interface SessionWatchRecord {
 	readonly event?: WatchFiredEvent;
 	/** What the watch last saw when it reached its end time. */
 	readonly lastSeen?: WatchLastSeen;
+	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
+	readonly tellOwner?: true;
+	/**
+	 * The transcript entry the watch was armed from: its wakes carry it (`details.served`), so a bot's spend window that
+	 * armed the watch is the one its wake turns are charged to (`bot-spend-window.ts`).
+	 */
+	readonly served?: SessionWatchServed;
 	readonly wakes: readonly SessionWatchWake[];
+}
+
+/** The session and transcript entry a watch serves. */
+export interface SessionWatchServed {
+	readonly sessionId: string;
+	readonly leafId: string;
 }
 
 /** The ledger's path beside a session's transcript (`<stem>.jsonl` gives `<stem>.watches.json`). */
@@ -128,8 +146,12 @@ function watchIdOf(value: unknown): string {
 }
 
 function parseArmer(value: unknown): SessionWatchArmer {
-	if (isPlainRecord(value) && value.kind === "session" && hasOnlyKeys(value, ["kind", "authority"]))
-		return { kind: "session", authority: oneOf(value.authority, TURN_AUTHORITIES, "authority") };
+	if (
+		isPlainRecord(value) &&
+		(value.kind === "session" || value.kind === "auto") &&
+		hasOnlyKeys(value, ["kind", "authority"])
+	)
+		return { kind: value.kind, authority: oneOf(value.authority, TURN_AUTHORITIES, "authority") };
 	if (isPlainRecord(value) && value.kind === "worker" && hasOnlyKeys(value, ["kind", "runtimeId", "scope"]))
 		return {
 			kind: "worker",
@@ -137,6 +159,15 @@ function parseArmer(value: unknown): SessionWatchArmer {
 			scope: parseWorkerWatchScope(value.scope),
 		};
 	throw new TypeError("Watch armer is invalid.");
+}
+
+function parseServed(value: unknown): SessionWatchServed {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["sessionId", "leafId"]))
+		throw new TypeError("Watch entry is invalid.");
+	return {
+		sessionId: boundedRoutineText(value.sessionId, MAX_ID_CHARS, "served session"),
+		leafId: boundedRoutineText(value.leafId, MAX_ID_CHARS, "served entry"),
+	};
 }
 
 /** A watch's cursor, read as a routine watch's is (`parseRoutineCursor`). */
@@ -201,6 +232,8 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"endedAt",
 			"event",
 			"lastSeen",
+			"tellOwner",
+			"served",
 			"wakes",
 		]) ||
 		!Array.isArray(value.wakes) ||
@@ -213,6 +246,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 	const armedAt = instant(value.armedAt);
 	const expiresAt = instant(value.expiresAt);
 	if (expiresAt <= armedAt) throw new TypeError("Watch end time is invalid.");
+	if (value.tellOwner !== undefined && value.tellOwner !== true) throw new TypeError("Watch record is invalid.");
 	return {
 		watchId: watchIdOf(value.watchId),
 		incarnationId: boundedRoutineText(value.incarnationId, MAX_ID_CHARS, "incarnation"),
@@ -229,6 +263,8 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		...(endedAt === undefined ? {} : { endedAt }),
 		...(value.event === undefined ? {} : { event: parseWatchFiredEvent(value.event) }),
 		...(value.lastSeen === undefined ? {} : { lastSeen: oneOf(value.lastSeen, WATCH_LAST_SEEN, "last seen") }),
+		...(value.tellOwner === true ? { tellOwner: true as const } : {}),
+		...(value.served === undefined ? {} : { served: parseServed(value.served) }),
 		wakes: value.wakes.map(parseWake),
 	};
 }

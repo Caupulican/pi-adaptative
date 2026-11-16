@@ -30,11 +30,13 @@ import {
 	decideWatchObservation,
 	type RoutineWatchObservationInput,
 	type RoutineWatchOutcome,
+	type WatchLastSeen,
 	watchLastSeen,
 } from "../routines/routine-watch-edge.ts";
 import type { ObservedWatch, WatchFailing, WatchObservationStore } from "../routines/routine-watch-monitor.ts";
 import {
 	type WatchWakePlan,
+	watchCauseText,
 	watchFailingWakeText,
 	watchFiredWakeText,
 	watchTimedOutWakeText,
@@ -57,6 +59,7 @@ import {
 	type SessionWatchArmer,
 	type SessionWatchLedger,
 	type SessionWatchRecord,
+	type SessionWatchServed,
 	type SessionWatchStatus,
 	type SessionWatchWake,
 	type SessionWatchWakeKind,
@@ -85,6 +88,7 @@ export function callerHoldsWatch(record: SessionWatchRecord, caller: SessionWatc
 	if (caller.kind === "worker")
 		return record.armedBy.kind === "worker" && record.armedBy.runtimeId === caller.runtimeId;
 	if (record.armedBy.kind === "worker") return caller.authority === "owner" && caller.sessionOnly !== true;
+	// A watch the host armed for the session holds the authority of the turn whose call it followed, as the session's own.
 	return turnAuthorityCovers(caller.authority, record.armedBy.authority);
 }
 
@@ -96,6 +100,8 @@ export interface SessionWatchArmRequest {
 	readonly condition: WatchCondition;
 	readonly expiresAt: number;
 	readonly armedBy: SessionWatchArmer;
+	/** Tell the owner each result on the phone besides the armer's wake. */
+	readonly tellOwner?: boolean;
 	/**
 	 * The session's tool call that arms it: a command's or page's check is admitted by the session's gate as its sub-call.
 	 * A worker's arming has none, since the worker's own gate admitted the check before it asked.
@@ -114,7 +120,15 @@ export interface SessionWatchView {
 	readonly armedAt: string;
 	readonly expiresAt: string;
 	readonly endedAt?: string;
-	readonly armedBy: { readonly kind: "session" } | { readonly kind: "worker"; readonly runtimeId: string };
+	readonly armedBy:
+		| { readonly kind: "session" }
+		| { readonly kind: "auto" }
+		| { readonly kind: "worker"; readonly runtimeId: string };
+	readonly tellOwner?: true;
+	/** What the watch last observed of its condition: while it watches, and when it ended without firing. */
+	readonly lastObservation: WatchLastSeen;
+	/** What its firing saw, once it fired. */
+	readonly result?: { readonly cause: string; readonly observedAt: string };
 	/** Wakes the armer is still owed. */
 	readonly pendingWakes: number;
 }
@@ -144,6 +158,8 @@ export interface SessionWatchServiceDeps {
 		owed: () => boolean,
 	): Promise<"delivered" | "settled">;
 	wakeWorker(runtimeId: string, text: string, key: string): WorkerWake;
+	/** The session's transcript entry an arming happens at, which its wakes are charged to; undefined with none. */
+	armingEntry(): SessionWatchServed | undefined;
 	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
 	warnOwner(message: string): void;
 	isDisposed(): boolean;
@@ -155,7 +171,10 @@ function wakePlan(record: SessionWatchRecord): WatchWakePlan {
 	return {
 		watchId: record.watchId,
 		text: record.purpose === undefined ? record.onFire : `Purpose: ${record.purpose}\nOn fire: ${record.onFire}`,
-		trusted: record.armedBy.kind === "session" && record.armedBy.authority !== "third-party",
+		// The host's own plan of a watch it armed is its words; a third party's turn's plan is data.
+		trusted:
+			record.armedBy.kind === "auto" ||
+			(record.armedBy.kind === "session" && record.armedBy.authority !== "third-party"),
 	};
 }
 
@@ -192,6 +211,8 @@ export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWa
  * that carries the watched thing's words).
  */
 export function sessionWatchWakeDetails(record: SessionWatchRecord, wake: SessionWatchWake): Record<string, unknown> {
+	// The entry the watch was armed from: its wake turns are charged to that entry's spend window.
+	const served = record.served === undefined ? {} : { served: record.served };
 	if (wake.kind === "fired" && record.event)
 		return {
 			routineId: record.watchId,
@@ -200,9 +221,11 @@ export function sessionWatchWakeDetails(record: SessionWatchRecord, wake: Sessio
 			watch: watchFiredLine(record.event),
 			oneShotWatch: true,
 			...(record.event.excerpt === undefined ? {} : { thirdParty: true }),
+			...served,
 		};
-	if (wake.kind === "timed-out") return { routineId: record.watchId, expiresAt: record.expiresAt, oneShotWatch: true };
-	return { routineId: record.watchId, failing: true, oneShotWatch: true };
+	if (wake.kind === "timed-out")
+		return { routineId: record.watchId, expiresAt: record.expiresAt, oneShotWatch: true, ...served };
+	return { routineId: record.watchId, failing: true, oneShotWatch: true, ...served };
 }
 
 function deliveryId(sessionId: string, record: SessionWatchRecord, kind: SessionWatchWakeKind, at: number): string {
@@ -222,9 +245,14 @@ function view(record: SessionWatchRecord): SessionWatchView {
 		expiresAt: new Date(record.expiresAt).toISOString(),
 		...(record.endedAt === undefined ? {} : { endedAt: new Date(record.endedAt).toISOString() }),
 		armedBy:
-			record.armedBy.kind === "session"
-				? { kind: "session" }
-				: { kind: "worker", runtimeId: record.armedBy.runtimeId },
+			record.armedBy.kind === "worker"
+				? { kind: "worker", runtimeId: record.armedBy.runtimeId }
+				: { kind: record.armedBy.kind },
+		...(record.tellOwner ? { tellOwner: true as const } : {}),
+		lastObservation: record.lastSeen ?? watchLastSeen(record.cursor),
+		...(record.event === undefined
+			? {}
+			: { result: { cause: watchCauseText(record.event), observedAt: record.event.observedAt } }),
 		pendingWakes: record.wakes.filter((wake) => !wake.delivered).length,
 	};
 }
@@ -337,6 +365,8 @@ export class SessionWatchService implements WatchObservationStore {
 						},
 						signal,
 					);
+		// A worker's wakes go to its runtime and are charged to its own run, not to the session entry it was armed at.
+		const served = request.armedBy.kind === "worker" ? undefined : this.deps.armingEntry();
 		let record: SessionWatchRecord;
 		try {
 			// Built through the ledger's own codec, so no arming writes a record a reload would set aside.
@@ -350,6 +380,8 @@ export class SessionWatchService implements WatchObservationStore {
 				armedAt: OWNER_STOP_CLOCK.now(),
 				expiresAt: request.expiresAt,
 				armedBy: request.armedBy,
+				...(request.tellOwner === true ? { tellOwner: true } : {}),
+				...(served === undefined ? {} : { served }),
 				cursor: { kind: "watch", truth: null, fires: 0 },
 				status: "live",
 				wakes: [],
@@ -677,7 +709,7 @@ export class SessionWatchService implements WatchObservationStore {
 			this.deps.ledger
 				.get(record.watchId)
 				?.wakes.some((entry) => entry.deliveryId === wake.deliveryId && !entry.delivered) === true;
-		if (record.armedBy.kind === "session") return this.deps.deliverToSession(wake.deliveryId, text, details, owed);
+		if (record.armedBy.kind !== "worker") return this.deps.deliverToSession(wake.deliveryId, text, details, owed);
 		const { runtimeId } = record.armedBy;
 		const woken = this.deps.wakeWorker(
 			runtimeId,
