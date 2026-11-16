@@ -158,10 +158,13 @@ export function routineAwaySpendRoom(
 	};
 }
 
-/** Why a claim away refused a metered run under the bound: no room, or charges on it that do not read (`unread`). */
+/**
+ * Why a claim away refused a metered run under the bound: no room, or charges on it that do not read (`unread`, named by
+ * its cause alone: the routine store bounds a recorded reason, and a path has no bound).
+ */
 export function routineAwaySpendRefusal(room: Pick<RoutineAwaySpendRoom, "unread">): string {
 	const { unread } = room;
 	return unread
-		? `the away spend bound (routines.away.maxUsdPerDay) cannot be read (${unread.cause}: ${unread.path}), so it has no room for another run; this run waits for its session to open.`
+		? `the away spend bound (routines.away.maxUsdPerDay) cannot be read (${unread.cause}; the daemon's report names the file), so it has no room for another run; this run waits for its session to open.`
 		: ROUTINE_AWAY_SPEND_REFUSAL;
 }

@@ -250,8 +250,9 @@ export function reserveAwayChannelOffers(input: {
 /** What the channels core asks of the daemon's host while it serves a channel away (`SessionChannelsDeps.away`). */
 export interface AwayChannelServing {
 	/**
-	 * The away spend bound's reason to deliver no turn now, in each catalogue's words (`notices.channels.cap.awaySpend`);
-	 * none while the host spends unmetered (it holds metered turns alone).
+	 * The away spend bound's reason to deliver no turn now, in each catalogue's words (`notices.channels.cap.awaySpend`, or
+	 * `awaySpendUnread` while the bound's charges do not read); none while the host spends unmetered (it holds metered
+	 * turns alone).
 	 */
 	capReason(now: number): Worded | undefined;
 	/** Whether the host's turns spend metered (API) dollars (`isMeteredSpend`); absent: they do. */
