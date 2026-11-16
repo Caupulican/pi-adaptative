@@ -343,7 +343,11 @@ export class WatchAutoArm {
 						`The host could not arm a watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`,
 					]),
 		];
-		await this.deps.note(lines.join("\n"));
+		// The note lands at the session's next provider boundary, which may be the next run's; the arms of later calls never
+		// wait for it.
+		void this.deps.note(lines.join("\n")).catch((error: unknown) => {
+			if (!this.deps.disposed()) this.deps.failed(error);
+		});
 	}
 
 	/**
