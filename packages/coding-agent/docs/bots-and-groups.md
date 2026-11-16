@@ -641,7 +641,7 @@ the goal has a deadline or not. The metered spend of the bot's turn that answere
 included, as of the turn's end) counts against the goal's budget once the reply is handed on, as a bot's worker turn under
 the goal counted, and the session keeps that spend per goal for as long as the goal is in its store. A worker's mail,
 in a goal or not, is first in its chain unless a bot's reply started the worker's turn or the turn read it while it ran, in
-which case it is one hop past that reply (the session keeps each reply's hop until that turn ends), so a worker and a bot
+which case it is one hop past that reply (the session keeps each reply's hop while the worker's mailbox holds it unread and until the turn that read it ends), so a worker and a bot
 answering each other stop at the bound of 8 mails as bots mailing each other do. When this session's reply inbox does
 not read, it is set aside as `<file>.unreadable-<time>` and you are told once; a reply it held is lost, and a goal that
 waited for one stops waiting. A record of the workers' mail that does not read is set aside the same way, and one a

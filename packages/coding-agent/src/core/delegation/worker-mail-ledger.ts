@@ -388,7 +388,13 @@ export class WorkerMailLedger implements WorkerMailPort {
 		try {
 			text = path === undefined ? undefined : readFileSync(path, "utf8");
 		} catch (error) {
-			if (!isMissingFileError(error)) throw error;
+			// A file that is there but does not read (its permissions, a directory at its path) is left as it is and never
+			// overwritten, as one that cannot be set aside: this build's record is kept in memory, told once, and no worker
+			// turn that admits a message fails on it.
+			if (path !== undefined && !isMissingFileError(error)) {
+				this.deps.warn(interfaceText().botTeam.workerMailLedgerUnreadable(path, undefined, String(error)));
+				return { sessionId, writable: false, state: EMPTY };
+			}
 		}
 		if (path === undefined || text === undefined) return { sessionId, writable: true, state: EMPTY };
 		let value: unknown;
