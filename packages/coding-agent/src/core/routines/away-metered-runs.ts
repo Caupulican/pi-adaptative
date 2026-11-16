@@ -150,9 +150,10 @@ export interface AwayMeteredRunInput {
 }
 
 /**
- * Why the away day bound holds a run away's metered spend: it has no room for one more run (`full`; a run the store
- * does not hold has none, as nothing could charge it), or charges on it do not read (`unread`: the gate's
- * `otherCharges`), so whether it has room is unknown.
+ * Why the away day bound holds a run away's metered spend: it has no room for one more run (`full`), or charges on it do
+ * not read (`unread`: the gate's `otherCharges`), so whether it has room is unknown. A run the store does not hold is
+ * `full` too, as nothing could charge its spend; no worker reads that answer: the daemon asks only for a run it found
+ * in the same in-memory store state a moment before, in the same synchronous call (`awayRunKey`, away-parent-context.ts).
  */
 export type AwayMeteredRunHold = "full" | "unread";
 

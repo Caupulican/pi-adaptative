@@ -165,8 +165,9 @@ export function readAwayChannelCharges(
 /**
  * The daemon's one reader of its channel turns' charges, for every gate that decides on the away bound with them (the
  * routine supervisor's claims, the channel hosts' turns and moves): it sets aside a journal that does not parse, and
- * tells each reset that charges the bound's whole day allowance once, whoever set its journal aside (this reader or the
- * update of a session serving the channel); a read that fails is told once per cause, until one reads again.
+ * tells each reset that charges the bound's whole day allowance once while the daemon runs (the told set is held in
+ * memory: a restarted daemon tells it again), whoever set its journal aside (this reader or the update of a session
+ * serving the channel); a read that fails is told once per cause, until one reads again.
  */
 export function awayChannelChargesReader(
 	agentDir: string,

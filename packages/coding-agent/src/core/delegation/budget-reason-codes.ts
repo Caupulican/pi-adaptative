@@ -39,8 +39,18 @@ export const RUN_BUDGET_REFUSAL_REASONS = {
 export const AWAY_DAY_BUDGET_REFUSAL_REASONS = {
 	unpriced: "worker_run_model_unpriced",
 	exhausted: "worker_away_day_budget_exhausted",
+	noRoom: "The away day spend bound (routines.away.maxUsdPerDay) had no room to reserve this run's metered spend.",
+} as const satisfies BudgetRefusalReasons;
+
+/**
+ * The refusal codes of such an attempt whose reservation on the away day spend bound could not be written (the bound had
+ * room): its metered spend is not reserved, so it may not spend.
+ */
+export const AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS = {
+	unpriced: "worker_run_model_unpriced",
+	exhausted: "worker_away_day_budget_unwritten",
 	noRoom:
-		"The away day spend bound (routines.away.maxUsdPerDay) had no room to reserve this run's metered spend, or the reservation could not be written.",
+		"The away day spend bound (routines.away.maxUsdPerDay) had room, but this run's reservation on it could not be written (the daemon's report names the file and the cause), so its metered spend was not reserved.",
 } as const satisfies BudgetRefusalReasons;
 
 /**
@@ -82,6 +92,7 @@ export const BUDGET_EXHAUSTED_REASON_CODES: ReadonlySet<string> = new Set([
 	RUN_BUDGET_REFUSAL_REASONS.exhausted,
 	AWAY_DAY_BUDGET_REFUSAL_REASONS.exhausted,
 	AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS.exhausted,
+	AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS.exhausted,
 	DELEGATION_BUDGET_REFUSAL_REASONS.exhausted,
 	...GRANT_BUDGET_REASON_CODES,
 	CLAIM_COST_BUDGET_REASON_CODE,

@@ -174,6 +174,11 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				maxPerRun: money(value.settings.maxUsdPerRun),
 				maxParentHosts: value.settings.maxParentHosts,
 			}),
+			...("resetChargesUntil" in value.spent && value.spent.resetChargesUntil
+				? list(value.spent.resetChargesUntil, (until) =>
+						words.awayDaemon.resetCharge(money(value.settings.maxUsdPerDay), at(until)),
+					)
+				: []),
 			words.awayDaemon.parentsHosted(
 				value.hostedParents.status === "available"
 					? String(value.hostedParents.value)

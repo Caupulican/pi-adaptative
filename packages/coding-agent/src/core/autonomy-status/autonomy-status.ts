@@ -191,9 +191,13 @@ export interface AwayDaemonStatusView {
 	};
 	/**
 	 * Routine runs away and channel turns the daemon delivered while no session was open, on the same bound; `unread`
-	 * while the channel turns' charges do not read, when the daemon admits no metered run or turn away.
+	 * while the channel turns' charges do not read, when the daemon admits no metered run or turn away. `resetChargesUntil`:
+	 * of `usd`, the whole `maxUsdPerDay` each channel journal set aside within the last day charges (its turns are
+	 * unknown), by when that charge ends (`dayAllowanceUntil`), so a spend above the bound shows its cause.
 	 */
-	readonly spent: { readonly usd: number } | { readonly unread: RoutineAwayChargesUnread };
+	readonly spent:
+		| { readonly usd: number; readonly resetChargesUntil?: BoundedList<number> }
+		| { readonly unread: RoutineAwayChargesUnread };
 	readonly hostedParents: StatusSection<number>;
 	/** The channels the global settings name an `awayCwd` for: who serves each now, and the drafts written away. */
 	readonly channels: BoundedList<AwayChannelStatus>;
@@ -642,11 +646,13 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				: unavailable("service_routine_store", "the routine store is not loaded, so the service is not read");
 			const daemon = store.getDaemonStatus(nowMs);
 			const away = settings.getRoutineAwaySettings();
+			const otherCharges = sources.awayChannelCharges(away.maxUsdPerRun, nowMs);
+			const resetChargesUntil = "unread" in otherCharges ? [] : (otherCharges.dayAllowanceUntil ?? []);
 			const spend = routineAwaySpendRoom(
 				store.listRoutineOccurrences(),
 				{
 					...away,
-					otherCharges: sources.awayChannelCharges(away.maxUsdPerRun, nowMs),
+					otherCharges,
 					spendsMetered: (definition) => sources.awayRunMetered(definition),
 					...(sources.awayRunReserved ? { reservedMetered: sources.awayRunReserved } : {}),
 				},
@@ -679,7 +685,12 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 					maxUsdPerDay: away.maxUsdPerDay,
 					maxParentHosts: away.maxParentHosts,
 				},
-				spent: spend.unread ? { unread: spend.unread } : { usd: spend.chargedMicros / 1_000_000 },
+				spent: spend.unread
+					? { unread: spend.unread }
+					: {
+							usd: spend.chargedMicros / 1_000_000,
+							...(resetChargesUntil.length > 0 ? { resetChargesUntil: bounded(resetChargesUntil) } : {}),
+						},
 				hostedParents: unavailable("away_parents", "the away daemon does not record the parents it hosts"),
 				channels: bounded(sources.awayChannels()),
 				service,
