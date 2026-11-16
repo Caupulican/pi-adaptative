@@ -16,8 +16,10 @@ import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { OrchestrationSnapshotRequiredError } from "../orchestration/event-store-errors.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
+import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
+import { botHomeOf } from "./bot-home.ts";
 import { fileIdentity } from "./bot-home-records.ts";
 import { readSessionSnapshot } from "./bot-remote-view.ts";
 
@@ -33,6 +35,11 @@ export function unrunWakes(file: string, agentDir: string): readonly string[] {
 		for (const entry of view.getBranch()) index.apply(entry, (id) => view.getEntry(id));
 		return index.pendingInputs("turn").map((input) => input.metadata.deliveryId);
 	});
+}
+
+/** The orchestration home bot `agentId`'s session `sessionId` keeps its workers in (`botSessionStorageRoots`). */
+export function botSessionHome(agentDir: string, agentId: string, sessionId: string): OrchestrationHome {
+	return botSessionStorageRoots(agentDir, botHomeOf(agentDir, agentId).orchestrationHome, sessionId).orchestrationHome;
 }
 
 /** What the time a saved transcript continues reads beside the rule of a kept stop: the reset recorded for a model. */

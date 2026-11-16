@@ -1,6 +1,6 @@
 /**
  * The `/bot daemon status` report, as the lines the chat draws: the lease and its routine counts, what the last daemon
- * said when it ended, the refused routines, the recent reports, and the away service with the channels it serves. The
+ * said when it ended, the bots owed work no session hosts, the refused routines, the recent reports, and the away service with the channels it serves. The
  * command keeps the dispatch and the wording of a refused start or stop; this module only builds the status text.
  */
 
@@ -29,6 +29,13 @@ export function describeBotDaemonStatusLines(status: PersistentBotDaemonStatus, 
 		status.running
 			? `${words.daemonRunning(status.pid, describeDaemonBuild(status.build, OWN_DAEMON_BUILD, interfaceText().chat), counts)}${legacyNote}`
 			: `${words.daemonStopped(counts)}${endNote}${legacyNote}`,
+		...(status.botsOwed === undefined
+			? []
+			: [
+					"count" in status.botsOwed
+						? words.daemonBotsOwed(status.botsOwed.count, status.botsOwed.awayOn)
+						: words.daemonBotsOwedUnread(status.botsOwed.unread),
+				]),
 		...status.awayRefusals.map((refusal) => words.daemonRefused(refusal.routineId, refusal.reason)),
 		...status.reports.slice(-5).map((report) => `${new Date(report.at).toISOString()} ${report.message}`),
 	];

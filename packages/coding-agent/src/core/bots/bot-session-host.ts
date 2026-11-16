@@ -87,7 +87,7 @@ import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
 import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { botOpenFailure } from "./bot-open-retry.ts";
+import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
 import type { SavedUsageResumeRules } from "./bot-owed-ledgers.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRelease } from "./bot-release.ts";
@@ -151,6 +151,8 @@ export interface BotSessionHostPorts {
 	 * that work there to it, opening none for that directory and closing an idle one (`leaveIdleToRoots`). Absent: none is left.
 	 */
 	leavesTo?(cwd: string): boolean;
+	/** Bots let go, for the daemon (`botsOwed`): another host released them, or (`detaching`) the last root left. */
+	botsLetGo?(detaching: boolean): void;
 }
 
 /**
@@ -177,6 +179,8 @@ export interface BotSender {
 	hostKeepsFile(): boolean;
 	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
 	warn(message: string): void;
+	/** The environment a watched command of the bot's session starts from (`commandBase`); absent: its process's. */
+	watchCommandBase?(): NodeJS.ProcessEnv;
 	/**
 	 * Delivers a charge of the bot's spend to the root session's cost view, once per `reportId`: `persisted` once the
 	 * root's file holds it.
@@ -307,8 +311,11 @@ export class BotSessionHost {
 				timers: () => ports.timers(),
 				warn: (message) => ports.warn(message),
 				runsLocally: (agentId) => this.entries.has(agentId),
-				// A host that let a bot go leaves its watches and its inbox to no one until a process opens its session again.
-				hostChanged: (agentId) => this.owed.unhosted(agentId),
+				// A bot let go is opened by whichever process takes its work: this one, or the daemon a root keeps.
+				hostChanged: (agentId) => {
+					this.owed.unhosted(agentId);
+					ports.botsLetGo?.(false);
+				},
 				changed: (agentIds) => this.changedMany(agentIds),
 				inboxChanged: (agentId) => this.takeInbox(agentId),
 				readFailed: (agentId, error, again) => this.owed.tellAskFailed(agentId, error, again),
@@ -971,6 +978,11 @@ export class BotSessionHost {
 		this.owed.sweepInboxes();
 		this.releases.recoverOwed();
 		this.askOwed();
+	}
+
+	/** How many bots no process hosts are owed work the bot daemon takes up (`BotOwedWork.owedCount`). */
+	botsOwed(): number {
+		return this.owed.owedCount();
 	}
 
 	/** Asks every bot whether its session is owed work that no process takes (`BotOwedWork.unhosted`). */

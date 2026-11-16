@@ -88,6 +88,11 @@ export interface BackgroundLaneControllerDeps
 	 * bot's inbox holds the session's routine wakes until it is taken (`routine-runtime-assembly.ts`).
 	 */
 	readonly botAgentId: string | undefined;
+	/**
+	 * The environment the session's watched commands start from (`AgentSessionConfig.watchCommandBase`): a bot's session
+	 * the daemon hosts reads its directory's record. Absent, the process's own.
+	 */
+	readonly watchCommandBase?: () => NodeJS.ProcessEnv;
 	/** What the session's routine runtime holds (`routine-holder.ts`): undefined for a child session that holds none. */
 	routineScope(): RoutineScope | undefined;
 	/** The session standing's capabilities the lanes read (session-standing.ts). */

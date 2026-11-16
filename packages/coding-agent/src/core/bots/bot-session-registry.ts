@@ -9,8 +9,9 @@
  * a root attaches, so a root that replaces the one the bot loaded from (a new or resumed session) is followed from its
  * attach, and no root's detach leaves them stale; a root working in the bot's directory also hands it its project trust.
  * How far the roots hold a bot's charges is read from every attached root, since each may hold one it took while it
- * answered. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts no bots: it gets a host of
- * its own that no other session shares.
+ * answered. The last root to detach stops the host, then tells its own keeper of the bot daemon that every bot it hosted
+ * was let go (`botsLetGo`), as the attached root is told when another host lets one go. A child session (a bot's own
+ * session, a worker) hosts no bots: it gets a host of its own that no other session shares.
  */
 import { resolve } from "node:path";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
@@ -215,6 +216,7 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 		spendCeilings: () => root().spendCeilings(),
 		usageRules: () => root().usageRules(),
 		hostKind: () => root().hostKind(),
+		botsLetGo: (detaching) => root().botsLetGo?.(detaching),
 	};
 }
 
@@ -302,9 +304,12 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			try {
 				await stopping;
 			} finally {
+				// Its record goes first: the bots its host let go are then counted for the daemon (`botsLetGo`), as no root
+				// works where they do any more, while this root still answers the host's reads.
+				unrecord();
+				ports.botsLetGo?.(true);
 				roots.length = 0;
 				if (hosts.get(key) === attached) hosts.delete(key);
-				unrecord();
 				// A child's host keeps its own: the stops it still holds go to its process and agent directory's, recorded
 				// there again and at the quit of a runtime of that directory, not lost with the host.
 				if (!root) keepsFor(key, true).unrecorded.adopt(attached.keeps.unrecorded);

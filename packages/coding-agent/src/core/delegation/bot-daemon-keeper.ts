@@ -1,22 +1,27 @@
 /**
  * A root session's keeping of the detached bot daemon (`bot-daemon.ts`): brings it up by itself, with no command, while
- * there is away work for it and no daemon holds the lease (or the one holding it is of an older build: an upgrade
- * replaces it), re-ensures it when the lease it last saw would stop being held, with a backoff after a failed ensure,
- * reconciles the always-on install where the session owns the host duties, and starts or stops it on the owner's
- * command. A reason the daemon cannot start is reported once until it changes. Only a root session whose routine runtime
- * runs in the session scope keeps a daemon; a worker process and a session whose channels the daemon serves never do.
+ * there is away work for it (enabled routines, channels served away, and bots owed work no process hosts while away work
+ * is on) and no daemon holds the lease (or the one holding it is of an older build: an upgrade replaces it), re-ensures it
+ * when the lease it last saw would stop being held, with a backoff after a failed ensure, and when bots are let go (by
+ * another host, or every bot its process hosted at its detach), reconciles the always-on install where the session owns
+ * the host duties, records the environment its directory's watched commands start from for the daemon
+ * (`watch-command-base.ts`), reports its status, and starts or stops it on the owner's command. A reason the daemon
+ * cannot start is reported once until it changes. Only a root session whose routine runtime runs in the session scope
+ * keeps a daemon; a worker process and a session whose channels the daemon serves never do.
  */
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { awayChannels, awayChannelsKey } from "../channels/away-channels.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { AwayService } from "../routines/away-service.ts";
 import { getSessionRole } from "../session-role.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { recordWatchCommandBase } from "../watches/watch-command-base.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./bot-daemon-launch.ts";
 import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./bot-daemon-stop.ts";
 import { DAEMON_STALE_MS, daemonRecheckAt, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./bot-team-routine-helpers.ts";
-import type { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
+import type { PersistentBotDaemonStatus, PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
 /** What the keeper reads from its root session; every port is read when used, never at construction. */
 export interface BotDaemonKeeperPorts {
@@ -36,6 +41,11 @@ export interface BotDaemonKeeperPorts {
 	/** Whether the session's standing owns the host duties: only then is the always-on install reconciled. */
 	ownsHostDuties(): boolean;
 	awayService(): AwayService;
+	/**
+	 * How many bots no process hosts are owed work the daemon takes up (`BotSessionHost.botsOwed`), read from the host the
+	 * session attached to; throws when the bots do not list.
+	 */
+	botsOwed(): number;
 	warn(message: string): void;
 }
 
@@ -53,6 +63,10 @@ export class BotDaemonKeeper {
 	private ensureFailures = 0;
 	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
 	private channelsKey: string | undefined;
+	/** Whether the owner was told the bots' owed work waits for a session because away work is off: once, until none is owed. */
+	private awayOffTold = false;
+	/** An ensure is queued for the bots another host let go: one for the whole batch. */
+	private letGoQueued = false;
 
 	constructor(ports: BotDaemonKeeperPorts) {
 		this.ports = ports;
@@ -70,58 +84,27 @@ export class BotDaemonKeeper {
 
 	/**
 	 * Brings the detached daemon up by itself, with no command: at session start and on every routine save, while an
-	 * enabled routine or a channel served away (`channels.<name>.awayCwd`) exists and no daemon holds the lease, or the
+	 * enabled routine, a channel served away (`channels.<name>.awayCwd`) or, while away work is on, a bot owed work no
+	 * process hosts (`awayBots`) exists and no daemon holds the lease, or the
 	 * one holding it is of an older build (an upgrade replaces it; one of the same or a newer build is left alone). The
 	 * claim is idempotent across sessions and processes, so only one start launches. A worker process never starts one.
 	 * A reason the daemon cannot start is reported once. The same points apply `routines.away.autostart` (see
 	 * `away-service.ts`), for the same work.
 	 *
 	 * Every ensure that finds away work arms one alarm at the instant the lease it saw (or its fresh claim) stops being
-	 * held; the alarm runs this again (without the always-on reconcile), so a daemon that died mid-session is relaunched
-	 * by that expiry instead of waiting for a save or settings change. A failed ensure backs off on the same alarm.
+	 * held; the alarm runs this again (`recheck`: without the always-on reconcile), so a daemon that died mid-session is
+	 * relaunched by that expiry instead of waiting for a save or settings change, and so does a host letting bots go
+	 * (`botsLetGo`). A failed ensure backs off on the same alarm.
 	 */
-	ensure(fromAlarm = false): void {
+	ensure(recheck = false): void {
 		const { ports } = this;
-		const store = ports.builtStore();
-		if (!store || ports.isDisposed() || getSessionRole() === "worker" || ports.channelsHostedByDaemon()) return;
-		if (!ports.keepsDaemon()) return;
+		const store = ports.isDisposed() ? undefined : this.keptStore();
+		if (!store) return;
 		this.revision = store.getRoutineRevision();
 		const clock = ports.clock();
-		let failure: string | undefined;
-		// Enabled routines and channels served away: either keeps the daemon, and the always-on service, wanted.
-		let awayWork = 0;
-		// When the lease this ensure leaves behind stops being held; absent when nothing is read.
-		let leaseHeldUntil: number | undefined;
-		try {
-			const status = store.getDaemonStatus(clock.now());
-			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
-			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
-			this.channelsKey = awayChannelsKey(ports.settings());
-			awayWork = status.activeRoutines + awayChannels(ports.settings()).length;
-			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
-			// older than this session, and a relaunch would run the same build again.
-			const ownLaunch = this.launchedToken !== undefined && store.daemonLeaseBelongsTo(this.launchedToken);
-			const replace = status.running && !ownLaunch && isOlderDaemonBuild(status.build, OWN_DAEMON_BUILD);
-			// A current always-on install is restarted through its manager, so the new build runs supervised; when that
-			// fails (reported once), or without one, the daemon is launched detached.
-			const fallback = (reason: string) => {
-				ports.warn(`${reason} The daemon is started detached instead.`);
-				const started = this.start();
-				if (!started.started && !started.held) ports.warn(started.detail);
-			};
-			if (awayWork > 0 && (!status.running || (replace && !ports.awayService().replaceDaemon(fallback)))) {
-				const started = this.start();
-				if (!started.started && !started.held) failure = started.detail;
-				// A claimed lease is held from its claim until its daemon's first renewal is due.
-				else leaseHeldUntil = clock.now() + DAEMON_STALE_MS;
-			}
-		} catch (error) {
-			failure = `Detached bot daemon could not be started: ${error instanceof Error ? error.message : String(error)}`;
-		}
-		if (failure !== undefined && failure !== this.startFailure) ports.warn(failure);
-		this.startFailure = failure;
+		const { awayWork, failure, leaseHeldUntil } = this.bringUp(store, clock);
 		this.arm(awayWork > 0 ? this.nextCheckAt(clock.now(), failure !== undefined, leaseHeldUntil) : undefined);
-		if (fromAlarm) return;
+		if (recheck) return;
 		try {
 			if (ports.ownsHostDuties()) ports.awayService().reconcile(awayWork);
 		} catch (error) {
@@ -129,6 +112,57 @@ export class BotDaemonKeeper {
 				`Always-on routines could not be checked: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+	}
+
+	/**
+	 * The session started its routines: the environment a watched command starts from in its directory is recorded for the
+	 * daemon (`recordWatchCommandBase`; a record that could not be written is told), and the daemon ensured.
+	 */
+	sessionStarted(): void {
+		const store = this.ports.isDisposed() ? undefined : this.keptStore();
+		if (store) {
+			const failure = recordWatchCommandBase(store.getAgentDir(), this.ports.cwd());
+			if (failure !== undefined)
+				this.ports.warn(interfaceText().botTeam.watchBaseNotRecorded(this.ports.cwd(), failure));
+		}
+		this.ensure();
+	}
+
+	/**
+	 * Bots were let go. By another host, while this session runs: the daemon is ensured once for the whole batch, as a
+	 * re-ensure (no always-on reconcile). At this session's detach (`detaching`), its process's host stopped and let every
+	 * bot it hosted go: the daemon is brought up at once, with no re-ensure armed (the session is closing; a root that stays
+	 * keeps re-ensuring it). Never throws.
+	 */
+	botsLetGo(detaching: boolean): void {
+		if (detaching) {
+			const store = this.keptStore();
+			if (store) this.bringUp(store, this.ports.clock());
+			return;
+		}
+		if (this.letGoQueued) return;
+		this.letGoQueued = true;
+		queueMicrotask(() => {
+			this.letGoQueued = false;
+			this.ensure(true);
+		});
+	}
+
+	/**
+	 * The daemon's lease and routine counts, read again from disk, with the bots owed work no process hosts and whether the
+	 * daemon takes them up (away work on, `awayBots`), or why they could not be counted: the lease is shown either way.
+	 */
+	status(): PersistentBotDaemonStatus {
+		const store = this.ports.store();
+		store.reload();
+		const awayOn = this.ports.settings().getRoutineAwaySettings().enabled;
+		let botsOwed: PersistentBotDaemonStatus["botsOwed"];
+		try {
+			botsOwed = { awayOn, count: this.ports.botsOwed() };
+		} catch (error) {
+			botsOwed = { awayOn, unread: error instanceof Error ? error.message : String(error) };
+		}
+		return { ...store.getDaemonStatus(this.ports.clock().now()), botsOwed };
 	}
 
 	/** Ends the re-ensure alarm: the session is closing. */
@@ -157,6 +191,76 @@ export class BotDaemonKeeper {
 	 */
 	stop(): BotDaemonStopResult {
 		return stopDetachedBotDaemon(this.ports.store(), this.ports.clock());
+	}
+
+	/** The built bot store, where this session keeps the daemon: a root's, not a worker's, nor one the daemon serves. */
+	private keptStore(): PersistentBotTeamStore | undefined {
+		const { ports } = this;
+		const store = ports.builtStore();
+		if (!store || getSessionRole() === "worker" || ports.channelsHostedByDaemon() || !ports.keepsDaemon())
+			return undefined;
+		return store;
+	}
+
+	/**
+	 * Launches the daemon while there is away work and no daemon holds the lease, or the one holding it is of an older build
+	 * this runtime did not launch: the away work found, the reason it could not start (told once until it changes) and when
+	 * the lease left behind stops being held (absent when nothing is read).
+	 */
+	private bringUp(
+		store: PersistentBotTeamStore,
+		clock: TimerPort,
+	): { awayWork: number; failure: string | undefined; leaseHeldUntil: number | undefined } {
+		const { ports } = this;
+		let failure: string | undefined;
+		// Enabled routines, channels served away and bots owed work: any keeps the daemon, and the always-on service, wanted.
+		let awayWork = 0;
+		let leaseHeldUntil: number | undefined;
+		try {
+			const status = store.getDaemonStatus(clock.now());
+			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
+			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
+			this.channelsKey = awayChannelsKey(ports.settings());
+			awayWork = status.activeRoutines + awayChannels(ports.settings()).length + this.awayBots();
+			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
+			// older than this session, and a relaunch would run the same build again.
+			const ownLaunch = this.launchedToken !== undefined && store.daemonLeaseBelongsTo(this.launchedToken);
+			const replace = status.running && !ownLaunch && isOlderDaemonBuild(status.build, OWN_DAEMON_BUILD);
+			// A current always-on install is restarted through its manager, so the new build runs supervised; when that
+			// fails (reported once), or without one, the daemon is launched detached.
+			const fallback = (reason: string) => {
+				ports.warn(`${reason} The daemon is started detached instead.`);
+				const started = this.start();
+				if (!started.started && !started.held) ports.warn(started.detail);
+			};
+			if (awayWork > 0 && (!status.running || (replace && !ports.awayService().replaceDaemon(fallback)))) {
+				const started = this.start();
+				if (!started.started && !started.held) failure = started.detail;
+				// A claimed lease is held from its claim until its daemon's first renewal is due.
+				else leaseHeldUntil = clock.now() + DAEMON_STALE_MS;
+			}
+		} catch (error) {
+			failure = `Detached bot daemon could not be started: ${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (failure !== undefined && failure !== this.startFailure) ports.warn(failure);
+		this.startFailure = failure;
+		return { awayWork, failure, leaseHeldUntil };
+	}
+
+	/**
+	 * The bots owed work the daemon takes up (`botsOwed`), counted only while away work is on (`routines.away.enabled`):
+	 * with it off the daemon hosts no bot, none is counted, and the owner is told once, until none is owed, that their work
+	 * waits for a session opening where they work.
+	 */
+	private awayBots(): number {
+		const owed = this.ports.botsOwed();
+		if (this.ports.settings().getRoutineAwaySettings().enabled) {
+			this.awayOffTold = false;
+			return owed;
+		}
+		if (owed > 0 && !this.awayOffTold) this.ports.warn(interfaceText().botTeam.botsOwedAwayOff(owed));
+		this.awayOffTold = owed > 0;
+		return 0;
 	}
 
 	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */

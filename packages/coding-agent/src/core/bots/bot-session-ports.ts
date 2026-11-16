@@ -19,8 +19,11 @@ import { type BotModelFacts, botModelRefusal, sharedExhaustions } from "./bot-mo
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 
-/** What the lane controller hands over of its own: the bot store, its warnings and its worker profile resolution. */
-interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn"> {
+/**
+ * What the lane controller hands over of its own: the bot store, its warnings, its worker profile resolution and its
+ * keeping of the bot daemon, told when bots are let go.
+ */
+interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn" | "botsLetGo"> {
 	/** The lane controller's reading of the usage a model's subscription account reports. */
 	allowance(): SubscriptionAllowancePort;
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;

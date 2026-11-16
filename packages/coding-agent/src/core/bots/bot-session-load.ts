@@ -209,6 +209,8 @@ export class BotSessionLoader {
 				timers: this.ports.timers(),
 				host: {
 					workerRunCostBound: spend.workerRunCostBound,
+					// The bot daemon's watched commands start from the environment a root recorded where the bot works.
+					watchCommandBase: sender.watchCommandBase,
 					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
 					ownerNoticeLine: botNoticeLine(agentDir, agentId, {
 						keep: (text, deliveryId) => this.ports.notify(agentId, text, true, deliveryId),

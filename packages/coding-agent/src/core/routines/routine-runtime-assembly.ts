@@ -642,6 +642,7 @@ export class RoutineRuntimeAssembly {
 				workerRuntimeCarriesThirdPartyWords(this.host.workerLifecycle().getTaskRuntimeSnapshot(), runtimeId),
 			thirdPartyProtectedWrites: (cwd) =>
 				thirdPartyProtectedWritePaths(cwd, this.deps.getAgentDir(), this.deps.getSessionManager()),
+			commandBase: this.deps.watchCommandBase,
 		});
 		const routineTimers = this.deps.getTimers().port("routines");
 		const sampler = new WatchSampler({

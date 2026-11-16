@@ -19,6 +19,8 @@
  *   every run away), read again at each `refresh`.
  * - A bot works in the directory its session worked in (`senderIn`); a bot made from a profile has no root to resolve its
  *   profile here (`BotSender.compileProfile` is absent), so it waits for a root session.
+ * - A bot's watched command starts from the environment a root session recorded for its directory
+ *   (`watch-command-base.ts`), the daemon's own where none did.
  * - Warnings no bot's chat takes go to `report` (the daemon's lease record).
  */
 
@@ -37,6 +39,7 @@ import { awaySpendMicros, type RoutineAwayCharge, routineAwaySpendRoom } from ".
 import { SettingsManager } from "../settings-manager.ts";
 import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import { readWatchCommandBase, watchCommandEnvironment } from "../watches/watch-command-base.ts";
 import { botAwayChargesReach, recordBotAwayCharge } from "./bot-away-charges.ts";
 import { botChargesHeld } from "./bot-charges-held.ts";
 import { type BotModelFacts, botModelRefusal, sharedExhaustions } from "./bot-model-admission.ts";
@@ -146,6 +149,9 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 			// The ledger is a file: a charge it holds is held for good.
 			hostKeepsFile: () => true,
 			warn: (message) => input.report(message),
+			// A watched command starts from the environment the last root session working here recorded, never from the
+			// daemon's own (a service manager's); with none recorded, from the daemon's.
+			watchCommandBase: () => readWatchCommandBase(agentDir, cwd) ?? watchCommandEnvironment(),
 			reportUsage: (usage, report) => {
 				const model = modelRegistry.find(report.provider, report.model);
 				const setAside = recordBotAwayCharge(agentDir, {

@@ -337,8 +337,12 @@ export const BOT_TEAM = {
 		`O bot ${agentId} foi liberado, mas os workers da sessão salva dele e os jobs que essa sessão colocou em outras máquinas foram deixados: ${path} é um link simbólico, e nenhum trabalho é encerrado por meio de um.`,
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou) mas não pôde ser aberta, então o trabalho aguarda até que seja (${reason}).`,
-	botOwedWorkNoRoot: (agentId: string, directories: string) =>
-		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou), mas nenhuma sessão aberta trabalha em ${directories}, onde ele trabalha; o trabalho aguarda até uma sessão abrir ali.`,
+	botOwedWorkNoRoot: (agentId: string, directories: string, byDaemon: boolean) =>
+		`Bot ${agentId}: a sessão dele tem trabalho pendente (esperas, mensagens aguardando, os workers dele ou um turno que um limite de uso parou), mas nenhuma sessão aberta trabalha em ${directories}, onde ele trabalha; ${byDaemon ? "o daemon de ausência o assume enquanto o trabalho de ausência estiver ligado (routines.away.enabled), e senão ele aguarda até uma sessão abrir ali." : "o trabalho aguarda até uma sessão abrir ali."}`,
+	botsOwedAwayOff: (count: number) =>
+		`Bots: ${count} ${count === 1 ? "bot que nenhuma sessão hospeda tem" : "bots que nenhuma sessão hospeda têm"} trabalho pendente (esperas, mensagens aguardando, workers ou um turno que um limite de uso parou), mas o trabalho de ausência está desligado (routines.away.enabled), então o daemon de ausência não o assume; ele aguarda até uma sessão abrir onde cada bot trabalha.`,
+	watchBaseNotRecorded: (cwd: string, reason: string) =>
+		`Esperas: o ambiente de que um comando observado parte em ${cwd} não pôde ser registrado para o daemon de ausência (${reason}); a espera de comando de um bot que o daemon verifica ali parte do último registro, ou do próprio ambiente do daemon onde não houver nenhum.`,
 	botWatchesCancelled: (agentId: string, count: number) =>
 		`Bot ${agentId}: ${count} ${count === 1 ? "espera armada numa conversa anterior dele foi cancelada" : "esperas armadas numa conversa anterior dele foram canceladas"}; ele continua a conversa mais recente, e uma espera só é verificada pela conversa que a armou.`,
 	botChangeWhileRunning: (agentId: string) =>
@@ -417,6 +421,10 @@ export const BOT_TEAM = {
 	/** As duas contagens que a linha de status do daemon carrega, e as notas que vêm depois dela. */
 	daemonCounts: (active: number, due: number) =>
 		`${active} ${active === 1 ? "rotina ativa" : "rotinas ativas"}, ${due} ${due === 1 ? "vencida" : "vencidas"}`,
+	daemonBotsOwed: (count: number, awayOn: boolean) =>
+		`${count} ${count === 1 ? "bot que nenhuma sessão hospeda tem" : "bots que nenhuma sessão hospeda têm"} trabalho pendente${awayOn ? (count === 0 ? "." : "; o daemon o assume.") : count === 0 ? "." : "; o trabalho de ausência está desligado (routines.away.enabled), então ele aguarda uma sessão onde cada bot trabalha."}`,
+	daemonBotsOwedUnread: (reason: string) =>
+		`Os bots com trabalho pendente que nenhuma sessão hospeda não puderam ser contados (${reason}).`,
 	daemonRunning: (pid: number | undefined, build: string, counts: string) =>
 		`Daemon de ausência em execução (${pid === undefined ? "" : `pid ${pid}, `}${build}, ${counts}).`,
 	daemonStopped: (counts: string) => `Daemon de ausência parado (${counts}).`,

@@ -11,7 +11,8 @@
  * The daemon renews that lease while it is still its own and stops
  * as soon as it is not: released by `/bot daemon stop`, claimed by a later start after this daemon's lease went
  * stale, or taken over by the start of a newer build (an upgrade replaces the daemon of the build it upgraded from).
- * Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them.
+ * Ownership changes are observed through a watch on the lease directory, and the renewal tick rechecks them; a change the
+ * watch cannot read is reported once per cause and left to the tick.
  * Each renewal records the daemon's own process identity (pid, start time, host) and build; the pid the starter recorded at spawn
  * may be a launcher wrapper's and is display data only. Each tick also reseals the store if an older build rewrote it
  * in the shape an earlier inline-script daemon acts on (see `bot-daemon-legacy.ts`), reloads the owner's settings and
@@ -317,10 +318,22 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	};
 	// The renewal is this process's whole life, so it alone keeps the process alive; every other alarm is unreferenced.
 	const ticker = repeatEvery(clock, DAEMON_TICK_MS, tick, { keepAlive: true });
+	// A lease the watcher could not read is reported once per cause and left to the renewal tick, which renews or ends on it.
+	let leaseWatchTold: string | undefined;
 	try {
 		watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
-			if (filename !== null && filename.toString() !== basename(leaseFile)) return;
-			if (!stopping && !routineStore.daemonLeaseBelongsTo(token)) void stop();
+			if (stopping || (filename !== null && filename.toString() !== basename(leaseFile))) return;
+			let ours: boolean;
+			try {
+				ours = routineStore.daemonLeaseBelongsTo(token);
+			} catch (error) {
+				const told = `Lease: a change of the lease file was not read (${errorText(error)}); the renewal tick reads it.`;
+				if (told !== leaseWatchTold) report(told);
+				leaseWatchTold = told;
+				return;
+			}
+			leaseWatchTold = undefined;
+			if (!ours) void stop();
 		});
 		// A watch that fails later leaves the renewal tick, which observes a release within one interval.
 		watcher.on("error", () => {

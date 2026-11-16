@@ -158,7 +158,10 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface AgentSessionConfig {
 	agent: Agent;
-	/** Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr (see terminal-warnings). */
+	/**
+	 * Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr, one line per
+	 * warning (see terminal-warnings); a session created under an AgentSessionRuntime is drained by its runtime instead.
+	 */
 	onClosingWarnings?: (warnings: readonly string[]) => void;
 	/**
 	 * The host's admission of every run the session starts, whatever opened it (a prompt, a wake, a continuation): it
@@ -172,6 +175,11 @@ export interface AgentSessionConfig {
 	 * workers serving one request to that request's spend bound. Absent, a worker is held to its own budgets only.
 	 */
 	workerRunCostBound?: ParentExecutionPolicy["runCostBound"];
+	/**
+	 * The environment the session's watched commands start from (`watch-command-base.ts`): a bot's session the daemon hosts
+	 * reads the one a root session recorded for its directory. Absent, the process's own.
+	 */
+	watchCommandBase?: () => NodeJS.ProcessEnv;
 	/**
 	 * The session's transcript; its storage roots (`getStorageRoots()`) name where the session's orchestration state lives:
 	 * its bundle, its lease, its workers' transcripts and specialists.

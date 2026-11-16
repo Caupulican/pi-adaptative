@@ -59,6 +59,7 @@ import {
 	credentialToolBlockReason,
 	isProtectedCredentialPath,
 } from "../secrets/credential-exposure-guard.ts";
+import { watchCommandEnvironment } from "../watches/watch-command-base.ts";
 import { assertReachableAddress, type PublicWebPolicy } from "../web/public-web-client.ts";
 import { isWatchGlob, splitWatchPattern, type WatchCondition } from "./watch-contract.ts";
 import { type WorkerWatchAuthority, watchCheckCall } from "./worker-watch-scope.ts";
@@ -88,6 +89,11 @@ export interface WatchAdmissionHost {
 	workerCarriesThirdPartyWords?(runtimeId: string): boolean;
 	/** What a run carrying a third party's words may write only under a grant, or never, from `cwd`. */
 	thirdPartyProtectedWrites?(cwd: string): ProtectedWritePaths;
+	/**
+	 * The environment a watched command starts from before the session's or worker's own closing: the bot daemon's
+	 * session reads its directory's record (`watch-command-base.ts`). Absent, the process's own (`watchCommandEnvironment`).
+	 */
+	commandBase?(): NodeJS.ProcessEnv;
 }
 
 function statOrUndefined(path: string): Stats | undefined {
@@ -154,7 +160,7 @@ export class WatchAdmission {
 	 * commands are (a bot's session: worker role, run marker, scratch, offline and read-only variables).
 	 */
 	commandEnvironment(worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): NodeJS.ProcessEnv {
-		const env = watchCommandEnvironment();
+		const env = this.host.commandBase?.() ?? watchCommandEnvironment();
 		if (!worker) return this.host.getSessionConfinement().commandEnvironment?.(env) ?? env;
 		const { scope } = worker;
 		return {
@@ -388,25 +394,4 @@ export class WatchAdmission {
 			? `The worker that armed it carries words written by someone else, and no standing grant of the owner covers ${[...new Set(ungranted.map((operation) => operation.class))].join(", ")}.`
 			: undefined;
 	}
-}
-
-/** The few variables a watched command inherits: enough to find programs and format text, no credentials. */
-export function watchCommandEnvironment(): NodeJS.ProcessEnv {
-	const keep = [
-		"PATH",
-		"HOME",
-		"USER",
-		"LOGNAME",
-		"LANG",
-		"LC_ALL",
-		"TZ",
-		"TERM",
-		"SHELL",
-		"SYSTEMROOT",
-		"COMSPEC",
-		"PATHEXT",
-	];
-	const env: NodeJS.ProcessEnv = {};
-	for (const key of keep) if (process.env[key] !== undefined) env[key] = process.env[key];
-	return env;
 }

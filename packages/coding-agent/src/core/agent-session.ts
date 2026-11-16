@@ -39,6 +39,7 @@ import {
 	createSessionWorkerSupervision,
 	runToolkitHit,
 	type SessionAdaptiveRuntimeStack,
+	sessionHostLaneDeps,
 } from "./agent-session-composition.ts";
 import {
 	type EdgeGrantDetails,
@@ -1272,14 +1273,13 @@ export class AgentSession {
 				}),
 			}),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
-			runCostBound: config.workerRunCostBound,
+			...sessionHostLaneDeps(config),
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
 			notifyWorkerTerminalHandoff: (records) => {
 				for (const record of records) this.reportOutboxWorkerTerminal(record);
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
-			botAgentId: config.standing.kind === "bot" ? config.standing.agentId : undefined,
 			routineScope: () => this._caps.routineScope,
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,

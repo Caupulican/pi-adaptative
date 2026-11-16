@@ -38,10 +38,14 @@ export interface BotAgentSessionInput {
 	/** The main session's System One as it is now. */
 	systemOne(): SystemOneHostSource;
 	readonly timers: TimerSource;
-	/** What its host decides: each run's admission, its notices, its closing warnings and its workers' run bound. */
+	/**
+	 * What its host decides: each run's admission, its notices, its closing warnings, its workers' run bound and, in the
+	 * bot daemon, the environment its watched commands start from.
+	 */
 	readonly host: Required<
 		Pick<CreateAgentSessionOptions, "admitRun" | "ownerNoticeLine" | "onClosingWarnings" | "workerRunCostBound">
-	>;
+	> &
+		Pick<CreateAgentSessionOptions, "watchCommandBase">;
 }
 
 /** Builds the bot's own session (see the module comment). */

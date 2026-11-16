@@ -294,6 +294,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			warn: (message) => this._safeWarn(message),
 			workerController: () => this._getWorkerController(),
 			allowance: () => deps.subscriptionAllowance,
+			botsLetGo: (detaching) => this._daemonKeeper.botsLetGo(detaching),
 		});
 		this._botRoster = new BotRoster({
 			store: () => this.getBotTeamStore(),
@@ -396,6 +397,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			channelsHostedByDaemon: () => this._channelsHostedByDaemon,
 			ownsHostDuties: () => deps.standing.ownsHostDuties,
 			awayService: () => this.getAwayService(),
+			botsOwed: () => this._botHost.host.botsOwed(),
 			warn: (message) => this._safeWarn(message),
 		});
 		this._routines = new SessionRoutines({
@@ -1558,7 +1560,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	startPersistentRoutines(): void {
 		// The daemon and the channels served away are the root session's; a bot's own session runs its watches only.
 		if (this._routines.start() !== "session") return;
-		this._daemonKeeper.ensure();
+		this._daemonKeeper.sessionStarted();
 		this._unsubscribeAwayChannelSettings ??= this.deps.getSettingsManager().subscribeChanges(() => {
 			if (this._daemonKeeper.awayChannelsChanged()) this._daemonKeeper.ensure();
 		});
@@ -1609,9 +1611,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	getPersistentBotDaemonStatus(): PersistentBotDaemonStatus {
-		const store = this.getBotTeamStore();
-		store.reload();
-		return store.getDaemonStatus(this.deps.getTimers().port("routines").now());
+		return this._daemonKeeper.status();
 	}
 
 	/**

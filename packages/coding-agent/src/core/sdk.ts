@@ -118,10 +118,14 @@ import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 /**
  * `admitRun` refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices; `workerRunCostBound` bounds each run
- * of the session's workers (see `AgentSessionConfig`).
+ * of the session's workers; `watchCommandBase` is the environment its watched commands start from; `onClosingWarnings`
+ * receives the warnings it holds as it closes (see `AgentSessionConfig`).
  */
 export interface CreateAgentSessionOptions
-	extends Pick<AgentSessionConfig, "admitRun" | "ownerNoticeLine" | "workerRunCostBound"> {
+	extends Pick<
+		AgentSessionConfig,
+		"admitRun" | "ownerNoticeLine" | "workerRunCostBound" | "watchCommandBase" | "onClosingWarnings"
+	> {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: the session manager's (its storage roots), else ~/.pi/agent; never another. */
@@ -285,11 +289,6 @@ export interface CreateAgentSessionOptions
 	runtimeUpdateController?: RuntimeUpdateController;
 	/** Optional session objective prompt. */
 	prompt?: string;
-	/**
-	 * Receives the warnings the session still holds when `disposeAndWait()` closes it. Defaults to stderr, one line per warning.
-	 * A session created under an AgentSessionRuntime is drained by its runtime instead.
-	 */
-	onClosingWarnings?: (warnings: readonly string[]) => void;
 }
 
 /** Result from createAgentSession */
@@ -839,6 +838,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				admitRun: options.admitRun,
 				ownerNoticeLine: options.ownerNoticeLine,
 				workerRunCostBound: options.workerRunCostBound,
+				watchCommandBase: options.watchCommandBase,
 				sessionManager,
 				bundleLease,
 				settingsManager,

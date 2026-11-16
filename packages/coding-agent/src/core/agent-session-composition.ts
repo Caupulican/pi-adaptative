@@ -13,13 +13,14 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
-import type { AgentSessionEvent } from "./agent-session-contracts.ts";
+import type { AgentSessionConfig, AgentSessionEvent } from "./agent-session-contracts.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import type { ExecutionCharter } from "./autonomy/execution-charter.ts";
 import { formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { BackgroundLaneController } from "./background-lane-controller.ts";
+import type { BackgroundLaneControllerDeps } from "./background-lane-deps.ts";
 import type { BashExecutionController } from "./bash-execution-controller.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import type { SelfCompactionController } from "./compaction/self-compaction-controller.ts";
@@ -913,5 +914,19 @@ export function createGoalProofWrites(deps: {
 					recordHostRequirementCheckProof(deps, { attemptId, requirementId, result }),
 				),
 		},
+	};
+}
+
+/**
+ * What the lane controller takes of the session's host from its config: the bot whose own session this is (undefined for
+ * any other), its workers' run bound and the environment its watched commands start from.
+ */
+export function sessionHostLaneDeps(
+	config: AgentSessionConfig,
+): Pick<BackgroundLaneControllerDeps, "botAgentId" | "runCostBound" | "watchCommandBase"> {
+	return {
+		botAgentId: config.standing.kind === "bot" ? config.standing.agentId : undefined,
+		runCostBound: config.workerRunCostBound,
+		watchCommandBase: config.watchCommandBase,
 	};
 }

@@ -3,7 +3,9 @@
  * sample, a firing whose wake it has not taken, a wake it accepted and never ran (a turn refused at its start), its
  * workers' work (`owesWorkerExecutionAt`, and what they hold to deliver) and the turn a usage limit stopped
  * (`savedUsageResumeAt`); and the opening of the session of a bot owed work that no process hosts (`BotOwedWork`), at once
- * or when the work comes due, after the owner's stop waiting for it is applied (`applyUnhostedBotStop`). And the one rule
+ * or when the work comes due, after the owner's stop waiting for it is applied (`applyUnhostedBotStop`); and the count of
+ * the bots owed work the bot daemon takes up (`owedCount`), which a root keeping the daemon starts it by. What a closed
+ * bot's files hold is read through `bot-owed-ledgers.ts`. And the one rule
  * that keeps watches with the session that holds them: the watches the home's other sessions armed are cancelled when the
  * bot continues one session.
  */
@@ -15,7 +17,6 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import { nextWorkerDueAt, owesWorkerExecutionAt } from "../delegation/worker-owed-work.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import {
 	alarmAt,
@@ -27,13 +28,15 @@ import {
 } from "../util/timer-port.ts";
 import { readSessionWatchWork } from "../watches/session-watch-ledger.ts";
 import { botFailureCause, botFailureText, logBotsFailure } from "./bot-failure-words.ts";
-import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
+import { botHomeSessionIds } from "./bot-home.ts";
 import type { RemoteBotHost } from "./bot-host-state.ts";
 import { type BotInboxItem, botInboxStopNames, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import {
 	type BundleRead,
+	type BundleRead,
+	botSessionHome,
 	type SavedSessionFacts,
 	SavedSessionLedger,
 	type SavedUsageResumeRules,
@@ -42,6 +45,7 @@ import {
 	WorkerWorkLedger,
 } from "./bot-owed-ledgers.ts";
 import { remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
+import { readBotRootHostPlaces } from "./bot-root-hosts.ts";
 import type { BotSender } from "./bot-session-host.ts";
 import {
 	applyUnhostedBotStop,
@@ -71,11 +75,6 @@ export function owesWatchWork(
 		store.listPendingRoutineDeliveries(session.id, 1).length > 0 ||
 		(session.file !== undefined && readSessionWatchWork(session.file, nowMs).owed)
 	);
-}
-
-/** The orchestration home bot `agentId`'s session `sessionId` keeps its workers in (`botSessionStorageRoots`). */
-export function botSessionHome(agentDir: string, agentId: string, sessionId: string): OrchestrationHome {
-	return botSessionStorageRoots(agentDir, botHomeOf(agentDir, agentId).orchestrationHome, sessionId).orchestrationHome;
 }
 
 /**
@@ -165,6 +164,37 @@ export interface BotOwedWorkPorts {
 	usageRules(): SavedUsageResumeRules;
 	/** Whether the settings a session opened for `sender` reads continue a goal on their own (`goalAutoContinue`). */
 	goalAutoContinue(sender: BotSender): boolean;
+}
+
+/** A bot's saved session that ran in a directory. */
+type WorkedSession = SavedBotSession & { readonly cwd: string };
+
+/**
+ * What a bot no process hosts is owed ({@link BotOwedWork.owedTerms}): live watch work, its workers' execution or an item
+ * they hold to deliver it was not offered, and the next time they come due, a usage wait that ended, an unfinished goal
+ * its load takes up (`goal`, continued only where the settings it opens with continue a goal on their own), the wakes its
+ * file holds unrun, and the messages waiting in its inbox; `unread`: one of those reads failed (its watch ledger, its
+ * workers' bundle, its file's wakes), so what it is owed may be more than this says.
+ */
+interface OwedTerms {
+	readonly watching: boolean;
+	readonly workers: boolean;
+	readonly workersDueAt: number | undefined;
+	readonly usage: boolean;
+	readonly goal: boolean;
+	readonly unrun: string;
+	readonly unread: boolean;
+	readonly waiting: readonly BotInboxItem[];
+}
+
+/** Whether what the bot is owed opens its session now (an unfinished goal alone, where its settings continue goals). */
+function owesNow(owed: OwedTerms): boolean {
+	return owed.watching || owed.workers || owed.usage || owed.goal || owed.unrun !== "" || owed.waiting.length > 0;
+}
+
+/** Whether an unfinished goal is all the bot is owed: it opens only where the settings it opens with continue goals. */
+function owesOnlyGoal(owed: OwedTerms): boolean {
+	return owed.goal && !owed.watching && !owed.workers && !owed.usage && owed.unrun === "" && owed.waiting.length === 0;
 }
 
 /** One running ask to open a bot, and the asks gathered while it runs (see {@link BotOwedWork.openIfOwed}). */
@@ -742,6 +772,98 @@ export class BotOwedWork {
 		}
 	}
 
+	/**
+	 * How many bots no process hosts are owed work the bot daemon takes up (`bot-daemon-host.ts`): what an ask opens a
+	 * session for ({@link owedTerms}), now or at a time already known (its workers' next retry, the time its saved session
+	 * continues what a usage limit stopped). Not counted: a bot a host holds, this one included (loaded or opening here); one
+	 * working where a root session hosting bots works, this host's own while it runs (`senderIn`) or another process's
+	 * (`readBotRootHostPlaces`), which opens it there; one only a root opens (made from a profile, `botProfileNeedsRoot`). A bot whose files do not read counts by what read,
+	 * and the owner is told once per cause. It reads the host's records, not whether the host runs, so a root's detach reads
+	 * it after its host let its bots go (`BotSessionHostPorts.botsLetGo`).
+	 */
+	owedCount(): number {
+		const { ports } = this;
+		const places = readBotRootHostPlaces(ports.agentDir());
+		let count = 0;
+		for (const { agentId } of ports.store().listBots())
+			try {
+				if (this.owesDaemon(agentId, places)) count++;
+			} catch (error) {
+				this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
+			}
+		return count;
+	}
+
+	/** Whether the daemon takes the bot up for work it is owed ({@link owedCount}); `places`: where roots host bots. */
+	private owesDaemon(agentId: string, places: ReadonlySet<string>): boolean {
+		const { ports } = this;
+		if (ports.hostedHere(agentId) || this.asking.has(agentId) || ports.heldElsewhere(agentId)) return false;
+		const record = ports.store().getBot(agentId);
+		if (!record || record.retired || !ports.runsAsSession(record) || record.profileId !== undefined) return false;
+		const saved = ports.savedSessionOf(agentId);
+		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
+		const owed = this.owedTerms(agentId, worked, false, (error) =>
+			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute),
+		);
+		const later =
+			worked !== undefined &&
+			(owed.workersDueAt !== undefined || this.usageResumeAt(agentId, worked) !== undefined);
+		if (!owesNow(owed) && !later) return false;
+		// A root hosting bots opens those working where it works: one of this host's own while it runs, another's (`places`).
+		const cwds = [...(worked ? [worked.cwd] : []), ...owed.waiting.map((item) => item.message.from.cwd)];
+		return !cwds.some(
+			(cwd) => places.has(realPathIdentity(cwd)) || (!ports.stopped() && ports.senderIn(cwd) !== undefined),
+		);
+	}
+
+	/**
+	 * What a bot no process hosts is owed, as its store, home and files say now: what an ask opens its session for
+	 * ({@link askOpen}) and what the daemon's keeper counts ({@link owedCount}). `worked`: its saved session, when it ran in a
+	 * directory. `stopWaiting`: a stop the owner wrote waits for a host, holding back its workers and its usage wait. A read
+	 * that fails leaves the rest of what it is owed, and goes to `failed`.
+	 */
+	private owedTerms(
+		agentId: string,
+		worked: WorkedSession | undefined,
+		stopWaiting: boolean,
+		failed: (error: unknown) => void,
+	): OwedTerms {
+		const { ports } = this;
+		const nowMs = ports.timers().now();
+		// Any read that fails marks what it is owed unread: an attempt armed for that failure stays armed (`askOpen`).
+		let unread = false;
+		const fail = (error: unknown): void => {
+			unread = true;
+			failed(error);
+		};
+		let watching = false;
+		try {
+			watching = worked !== undefined && owesWatchWork(ports.store(), worked, nowMs);
+		} catch (error) {
+			// Its watch ledger did not read.
+			fail(error);
+		}
+		// Its workers' work, and the next time they come due.
+		const owed = worked && !stopWaiting ? this.workerOwed(agentId, worked.id, nowMs) : undefined;
+		if (owed && "unreadable" in owed) fail(owed.unreadable);
+		const workers = owed !== undefined && "owed" in owed && owed.owed;
+		// A usage wait that ended continues the saved session's turn: owed only by a session that ran.
+		const usage = worked !== undefined && !stopWaiting && this.usageDue.has(agentId);
+		// An unfinished goal its load takes up continues it, where the settings it opens with let a goal continue on its own
+		// (read once its root is known): owed only by a session that ran, and held back by the owner's stop as its workers are.
+		const goal = worked !== undefined && !stopWaiting && this.goalOwed(agentId, worked);
+		let unrun = "";
+		try {
+			// The file, only when nothing else owes.
+			if (worked && !watching && !workers && !usage) unrun = this.wakes.read(agentId, worked.file, ports.agentDir());
+		} catch (error) {
+			fail(storeFailure(agentId, error, undefined));
+		}
+		const waiting = !watching && botInboxWaiting(ports.agentDir(), agentId) ? ports.waiting(agentId) : [];
+		const workersDueAt = owed && "dueAt" in owed ? owed.dueAt : undefined;
+		return { watching, workers, workersDueAt, usage, goal, unrun, unread, waiting };
+	}
+
 	/** Reads the bot and opens its session when it is owed; the open it started, if any. */
 	private askOpen(agentId: string, swept: boolean): Promise<unknown> | undefined {
 		const { ports } = this;
@@ -794,13 +916,6 @@ export class BotOwedWork {
 			return;
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
-		let watching = false;
-		try {
-			watching = worked !== undefined && owesWatchWork(ports.store(), worked, ports.timers().now());
-		} catch (error) {
-			// Its watch ledger did not read: the rest it is owed is still asked, and the owner told why.
-			notResumed(error);
-		}
 		// Stops that did not list may hold back any of its work: it waits, and the owner is told why once (a held stop that
 		// failed to apply told it already).
 		if (stopNames === undefined) {
@@ -809,34 +924,17 @@ export class BotOwedWork {
 		}
 		// A stop the owner wrote while another process hosted it (`requestBotStop`) holds back the work it stopped: its
 		// workers and its usage wait open nothing until a host takes the stop (opened for anything else, it takes it first).
-		const stopWaiting = stop?.waits === true;
-		// Its workers' work, and the next time they come due armed; a bundle it cannot read leaves the rest it is owed.
-		const owed = worked && !stopWaiting ? this.workerOwed(agentId, worked.id, ports.timers().now()) : undefined;
-		if (owed && "unreadable" in owed) notResumed(owed.unreadable);
-		const workers = owed !== undefined && "owed" in owed && owed.owed;
-		this.armRetry(agentId, owed && "dueAt" in owed ? owed.dueAt : undefined);
-		// A usage wait that ended continues the saved session's turn: owed only by a session that ran.
-		const usage = worked !== undefined && !stopWaiting && this.usageDue.has(agentId);
-		// An unfinished goal its load takes up continues it, where the settings it opens with let a goal continue on its own
-		// (read once its root is known): owed only by a session that ran, and held back by the owner's stop as its workers are.
-		const goal = worked !== undefined && !stopWaiting && this.goalOwed(agentId, worked);
-		let unrun = "";
-		let unread = false;
-		try {
-			// The file, only when nothing else owes; a file it cannot read leaves the rest of what it is owed.
-			if (worked && !watching && !workers && !usage) unrun = this.wakes.read(agentId, worked.file, agentDir);
-		} catch (error) {
-			unread = true;
-			notResumed(storeFailure(agentId, error, undefined));
-		}
-		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? ports.waiting(agentId) : [];
-		// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this read is. With
-		// nothing told in this ask its waits cleared, and what was told of them is forgotten.
+		// A read that fails leaves the rest of what it is owed, and the owner is told why.
+		const owed = this.owedTerms(agentId, worked, stop?.waits === true, notResumed);
+		const { watching, workers, usage, goal, waiting } = owed;
+		this.armRetry(agentId, owed.workersDueAt);
+		// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this ask's reads is.
+		// With nothing told in this ask its waits cleared, and what was told of them is forgotten.
 		const owedNothing = (): void => {
-			if (!unread && !stopRetrying) this.openRetries.forget(agentId);
+			if (!owed.unread && !stopRetrying) this.openRetries.forget(agentId);
 			if (!toldNow) this.told.delete(agentId);
 		};
-		if (!watching && !workers && !usage && !goal && !unrun && waiting.length === 0) {
+		if (!owesNow(owed)) {
 			owedNothing();
 			return;
 		}
@@ -860,12 +958,13 @@ export class BotOwedWork {
 		}
 		if (!sender) {
 			const where = [...new Set(cwds)].join(", ");
-			this.tellWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
+			// The daemon takes up any but a bot made from a profile, which only a root compiles (`owesDaemon`).
+			const byDaemon = record.profileId === undefined;
+			this.tellWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where, byDaemon));
 			return;
 		}
 		// Refused on what defines it now, for a cause that still holds: not opened again until either changes.
-		const onlyGoal = goal && !watching && !workers && !usage && !unrun && waiting.length === 0;
-		if (onlyGoal && !ports.goalAutoContinue(sender)) {
+		if (owesOnlyGoal(owed) && !ports.goalAutoContinue(sender)) {
 			owedNothing();
 			return;
 		}

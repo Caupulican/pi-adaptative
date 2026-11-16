@@ -82,6 +82,12 @@ export interface PersistentBotDaemonStatus {
 	readonly lastTickAt?: number;
 	readonly activeRoutines: number;
 	readonly dueRoutines: number;
+	/**
+	 * The bots owed work no process hosts, which the daemon takes up while away work is on (`awayOn`), or why they could
+	 * not be counted (`unread`): read by the root session that keeps the daemon (`BotDaemonKeeper.status`), never from
+	 * the lease.
+	 */
+	readonly botsOwed?: { readonly awayOn: boolean } & ({ readonly count: number } | { readonly unread: string });
 	/** Enabled routines whose due run could not run away, with why; each runs when its session opens. */
 	readonly awayRefusals: readonly { readonly routineId: string; readonly reason: string; readonly at: number }[];
 	/** The latest daemon's own reports (refusals, open failures, diagnostics), oldest first and bounded. */

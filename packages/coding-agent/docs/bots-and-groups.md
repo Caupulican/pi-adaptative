@@ -312,6 +312,13 @@ again, so it never answers in two conversations at once. A bot's session has no 
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 
+While no session works where it does, a bot owed work (a message waiting in its inbox, its watches, its workers' results or a
+turn a usage limit stopped) is hosted by the detached bot daemon, which a root session brings up for it when its host lets the
+bot go and as the root closes. With `routines.away.enabled` off the daemon hosts no bot, and you are told once that the work
+waits for a session opening where the bot works; a bot made from a profile always waits for a root session. The daemon starts
+a bot's watched commands from the environment a root session last recorded for the bot's directory, its own where none did;
+see [Scheduled work](proactivity.md#scheduled-work).
+
 ## Bot names
 
 A bot has an id and a display name. The id is the stable handle (`trello-scout`: what you type after `@` and in `/bot msg`);

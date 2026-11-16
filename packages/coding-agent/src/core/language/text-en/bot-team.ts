@@ -423,9 +423,15 @@ export const BOT_TEAM = {
 	/** A bot's session is owed work (watches, waiting messages, its workers, a usage wait) and could not be opened (or read) to take it up. */
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session is owed work (watches, waiting messages, its workers or a turn a usage limit stopped) but could not be opened, so the work waits until it is (${reason}).`,
-	/** The bot's session is owed work, and no open root session works where it does. */
-	botOwedWorkNoRoot: (agentId: string, directories: string) =>
-		`Bot ${agentId}: its session is owed work (watches, waiting messages, its workers or a turn a usage limit stopped), but no open session works in ${directories}, where it works; the work waits until a session opens there.`,
+	/** The bot's session is owed work, and no open root session works where it does: the daemon takes it up (`byDaemon`), or it waits. */
+	botOwedWorkNoRoot: (agentId: string, directories: string, byDaemon: boolean) =>
+		`Bot ${agentId}: its session is owed work (watches, waiting messages, its workers or a turn a usage limit stopped), but no open session works in ${directories}, where it works; ${byDaemon ? "the bot daemon takes it up while away work is on (routines.away.enabled), and otherwise it waits until a session opens there." : "the work waits until a session opens there."}`,
+	/** Bots no session hosts are owed work, and away work is off: the daemon does not take it up. */
+	botsOwedAwayOff: (count: number) =>
+		`Bots: ${count} ${count === 1 ? "bot no session hosts is" : "bots no session hosts are"} owed work (watches, waiting messages, workers or a turn a usage limit stopped), but away work is off (routines.away.enabled), so the bot daemon does not take it up; it waits until a session opens where each bot works.`,
+	/** The environment a watched command starts from in a directory could not be recorded for the bot daemon. */
+	watchBaseNotRecorded: (cwd: string, reason: string) =>
+		`Watches: the environment a watched command starts from in ${cwd} could not be recorded for the bot daemon (${reason}); a bot's command watch the daemon samples there starts from the last record, or the daemon's own environment where there is none.`,
 	/** Watches an earlier conversation of the bot armed, cancelled when it continues another (a watch is checked only by its own). */
 	botWatchesCancelled: (agentId: string, count: number) =>
 		`Bot ${agentId}: ${count} ${count === 1 ? "watch" : "watches"} armed in an earlier conversation of its ${count === 1 ? "was" : "were"} cancelled; it continues its newest conversation, and a watch is checked only by the conversation that armed it.`,
@@ -503,6 +509,11 @@ export const BOT_TEAM = {
 	daemonStatusUnavailable: "Daemon status unavailable.",
 	/** The two counts the daemon's status line carries, and the notes that follow it. */
 	daemonCounts: (active: number, due: number) => `${active} active routines, ${due} due`,
+	/** The bots no session hosts that are owed work, as the root keeping the daemon counts them. */
+	daemonBotsOwed: (count: number, awayOn: boolean) =>
+		`${count} ${count === 1 ? "bot no session hosts is" : "bots no session hosts are"} owed work${awayOn ? (count === 0 ? "." : "; the daemon takes it up.") : count === 0 ? "." : "; away work is off (routines.away.enabled), so it waits for a session where each bot works."}`,
+	/** The bots owed work could not be counted: their store or the roots' records did not read. */
+	daemonBotsOwedUnread: (reason: string) => `The bots owed work no session hosts could not be counted (${reason}).`,
 	daemonRunning: (pid: number | undefined, build: string, counts: string) =>
 		`Detached bot daemon running (${pid === undefined ? "" : `pid ${pid}, `}${build}, ${counts}).`,
 	daemonStopped: (counts: string) => `Detached bot daemon stopped (${counts}).`,
