@@ -160,9 +160,13 @@ export class GithubWatchPoller {
 	}
 
 	private ciShas(): readonly string[] {
-		return this.deps.watches
-			.githubWatches(this.deps.timers.now())
-			.flatMap(({ source }) => (source.type === "ci" ? [source.sha] : []));
+		return (
+			this.deps.watches
+				.githubWatches(this.deps.timers.now())
+				.flatMap(({ source }) => (source.type === "ci" ? [source.sha] : []))
+				// The session's and a worker's watch may wait on one commit: the source collects it once.
+				.filter((sha, index, shas) => shas.indexOf(sha) === index)
+		);
 	}
 
 	/** One pass at a time; a request during a pass runs exactly one more. */

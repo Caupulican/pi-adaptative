@@ -6,15 +6,19 @@
  * release only while the host offers its reader of GitHub). A `gh workflow run` whose output names no run (older gh
  * prints none) is followed by listing that workflow's dispatched runs created since the call began, a few times over two
  * minutes, until GitHub lists one. A pushed tag whose release existed before the call arms nothing. Each is armed once per
- * subject (a subject the session already watches, whoever armed it, is left alone), for whoever made the call: the
- * session, under the authority of the turn the call ran in and charged to the entry it was made at (both read when the
- * call started), or a worker runtime, in its own slots, its wakes going to it. Each tells its result on the owner's phone
- * besides waking its armer. What was armed, what is still looked for and what was not armed (and why: nothing reads it,
- * it was there before the call, the slots are full) is told to the armer in one note per call.
+ * subject and recipient (a subject already watched by a watch that wakes the same recipient is left alone), for whoever
+ * made the call: the session, under the authority of the turn the call ran in and charged to the entry it was made at
+ * (both read when the call started), or a worker runtime, in its own slots and under ids of its own, its wakes going to
+ * it, so a worker is woken by its own watch though the session waits on the same subject. Each tells its result on the
+ * owner's phone besides waking its armer, the result told once however many watches wait on its subject. A call that
+ * began before an owner's stop arms nothing after the stop. What was armed, what is still looked for and what was not
+ * armed (and why: nothing reads it, it was there before the call, the slots are full, the owner stopped the work) is told
+ * to the armer in one note per call.
  *
  * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once; a read of
- * GitHub that waits for a run to be listed waits outside that order. A call handed off to the background is read when its
- * task reaches its terminal, from the task's output.
+ * GitHub that waits for a run to be listed waits outside that order. A session's call handed off to the background is read
+ * when its task reaches its terminal, from the task's output; a worker's lane hands no call off, and reads each call when
+ * its body ends, from its own result.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -97,7 +101,8 @@ export interface WatchAutoArmPort {
 	 */
 	github(): GithubWatchReader | undefined;
 	armingContext(): AutoArmContext;
-	armedOn(source: GithubWatchSource): SessionWatchView | undefined;
+	/** The watch on what `source` names that wakes `armer`'s recipient (the session, or that worker runtime), live or ended. */
+	armedOn(source: GithubWatchSource, armer: AutoArmContext["armer"]): SessionWatchView | undefined;
 	arm(request: AutoWatchRequest, context: AutoArmContext): Promise<SessionWatchView>;
 	/** The session's routines clock: a watch's end time is on it, and the host's waits for a dispatched run are timed on it. */
 	readonly timers: TimerPort;
@@ -315,10 +320,15 @@ function shortHash(text: string): string {
 	return createHash("sha256").update(text).digest("hex").slice(0, 12);
 }
 
-function watchIdOf(source: GithubWatchSource): string {
-	if (source.type === "ci") return `auto-ci-${source.sha.slice(0, 12)}`;
-	if (source.type === "github_run") return `auto-run-${source.runId}`;
-	return `auto-release-${shortHash(githubWatchSubject(source))}`;
+function watchIdOf(source: GithubWatchSource, armer: AutoArmContext["armer"]): string {
+	const subject =
+		source.type === "ci"
+			? `ci-${source.sha.slice(0, 12)}`
+			: source.type === "github_run"
+				? `run-${source.runId}`
+				: `release-${shortHash(githubWatchSubject(source))}`;
+	// A worker's wait on a subject is a record of its own beside the session's, so its id names the worker's runtime.
+	return armer.kind === "worker" ? `auto-w${shortHash(armer.runtimeId).slice(0, 8)}-${subject}` : `auto-${subject}`;
 }
 
 /** What a source waits on, in the words of the note the armer reads. */
@@ -365,6 +375,14 @@ export class WatchAutoArm {
 	 */
 	noteEnd(toolCallId: string, result: unknown): void {
 		if (!isBackgroundHandoff(result)) this.armAfter(toolCallId, resultText(result));
+	}
+
+	/**
+	 * A call's body ended with `result`, as a lane reports its calls (`LaneToolExecutionObserver.end`): a lane hands no call
+	 * off to the background, so its result is the call's own output and is read whatever it holds.
+	 */
+	noteFinished(toolCallId: string, result: unknown): void {
+		this.armAfter(toolCallId, resultText(result));
 	}
 
 	/** A call handed off to the background reached its terminal with `output`. */
@@ -417,8 +435,8 @@ export class WatchAutoArm {
 		const armed: string[] = [];
 		const missed: string[] = [];
 		for (const { source, deadlineMs } of planned) {
-			if (port.armedOn(source)) continue;
-			const watchId = watchIdOf(source);
+			if (port.armedOn(source, context.armer)) continue;
+			const watchId = watchIdOf(source, context.armer);
 			try {
 				await port.arm(
 					{
@@ -497,7 +515,7 @@ export class WatchAutoArm {
 			const run = [...runs]
 				.sort((a, b) => a.createdAt - b.createdAt || a.runId - b.runId)
 				.map((entry): GithubWatchSource => ({ type: "github_run", repo: entry.repo, runId: entry.runId }))
-				.find((source) => !port.armedOn(source));
+				.find((source) => !port.armedOn(source, context.armer));
 			if (!run) {
 				if (!last) this.followDispatch(call, dispatch, attempt + 1);
 				else

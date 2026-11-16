@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
@@ -604,7 +605,9 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		expect(await world.disposeSessionInBody(session), "the CI watch leg's session closes").toBeUndefined();
 		const told = watchPushes();
 		expect(told, "the owner's phone was told the watch's result exactly once").toHaveLength(1);
-		expect(told[0]?.k.startsWith(`push:watch:${watchId}:`), told[0]?.k).toBe(true);
+		// Keyed by what the result is of (the commit and the run attempt that ended), not by the watch that told it.
+		const resultKey = createHash("sha256").update(`ci:${sha}\n${CI_RUN_ID}:1`).digest("hex").slice(0, 16);
+		expect(told[0]?.k, "the result's key").toBe(`push:watch:github:${resultKey}`);
 		expect(told[0]?.c, "on the owner's chat").toBe(`telegram:${ownerChat}`);
 		expect(api.openPolls, "closing aborts the held poll").toBe(0);
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);

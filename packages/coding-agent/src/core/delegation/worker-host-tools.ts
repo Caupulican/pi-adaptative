@@ -19,6 +19,12 @@ import { WorkerCompletionProtocolError } from "./worker-provider-turn-protocol.t
 /** The names of the host-installed tools: a call to one is the host's own and skips the grant gate. */
 export const WORKER_HOST_TOOL_NAMES: ReadonlySet<string> = new Set([TASK_EVENTS_TOOL_NAME, TASK_WATCH_TOOL_NAME]);
 
+/** The host-installed tools, and the release of what the host follows for the attempt (its own calls), once it settled. */
+export interface WorkerHostTools {
+	readonly tools: AgentTool[];
+	readonly release: () => void;
+}
+
 export function createWorkerHostTools(
 	options: Pick<
 		WorkerAttemptExecutorOptions,
@@ -32,7 +38,7 @@ export function createWorkerHostTools(
 		| "toolSurface"
 	> & { readonly watches?: TaskWatchPort },
 	admissionClosed: () => boolean,
-): AgentTool[] {
+): WorkerHostTools {
 	const withEventControl = <T>(operation: () => T): T => {
 		options.signal?.throwIfAborted();
 		options.toolSurface.assertHealthy();
@@ -53,7 +59,7 @@ export function createWorkerHostTools(
 				withEventControl(() => options.agentControl.changeHostEventSubscriptions(input, scope)),
 		},
 	});
-	if (!options.watches?.available()) return [taskEvents];
+	if (!options.watches?.available()) return { tools: [taskEvents], release: () => {} };
 	const { toolSurface } = options;
 	const caller = {
 		runtimeId: options.agentId,
@@ -64,19 +70,22 @@ export function createWorkerHostTools(
 			return toolSurface.admitHostCall(toolName, args, signal, purpose);
 		},
 	};
-	followOwnCalls(options, options.watches);
-	return [taskEvents, createTaskWatchTool({ caller, port: options.watches })];
+	return {
+		tools: [taskEvents, createTaskWatchTool({ caller, port: options.watches })],
+		release: followOwnCalls(options, options.watches),
+	};
 }
 
 /**
  * Arms the worker's own waits on what its calls start outside it, as the session's are armed (`watch-auto-arm.ts`): a push
  * from its checkout arms a `ci` watch on what it pushed, a dispatched run or a release a `github_run` or `release` watch,
- * in the worker's own slots, each waking the worker. The worker is told what was armed, and what was not and why.
+ * in the worker's own slots, each waking the worker. The worker is told what was armed, and what was not and why. A call
+ * is read when its body ends, from its own result. Returns the end of the following, which the attempt calls once settled.
  */
 function followOwnCalls(
 	options: Pick<WorkerAttemptExecutorOptions, "agentId" | "cwd" | "signal" | "toolSurface">,
 	watches: TaskWatchPort,
-): void {
+): () => void {
 	const worker = { runtimeId: options.agentId, scope: options.toolSurface.shellFacts };
 	let notes = 0;
 	const note = (text: string) =>
@@ -95,8 +104,8 @@ function followOwnCalls(
 			),
 		disposed: () => options.signal?.aborted === true,
 	});
-	options.toolSurface.onToolExecution({
+	return options.toolSurface.onToolExecution({
 		start: (toolCallId, toolName, args) => auto.noteStart(toolCallId, toolName, args),
-		end: (toolCallId, result) => auto.noteEnd(toolCallId, result),
+		end: (toolCallId, result) => auto.noteFinished(toolCallId, result),
 	});
 }

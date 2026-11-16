@@ -659,12 +659,23 @@ export class SessionWatchService implements WatchObservationStore {
 		});
 	}
 
-	/** The watch of this session on the thing `source` names, live or ended, whoever armed it: one wait per subject. */
-	armedOn(source: GithubWatchSource): SessionWatchView | undefined {
+	/**
+	 * The watch on the thing `source` names, live or ended, that wakes whom `armer` would: a worker runtime its own, the
+	 * session one the session or the host armed for it. One wait per subject and recipient, so a worker's call is woken by
+	 * a watch of its own though the session already waits on the same subject, and the other way round.
+	 */
+	armedOn(source: GithubWatchSource, armer: SessionWatchArmer): SessionWatchView | undefined {
 		const subject = githubWatchSubject(source);
+		const wakesSame = (other: SessionWatchArmer) =>
+			armer.kind === "worker"
+				? other.kind === "worker" && other.runtimeId === armer.runtimeId
+				: other.kind !== "worker";
 		const record = this.deps.ledger
 			.list()
-			.find(({ condition }) => isGithubWatchSource(condition) && githubWatchSubject(condition) === subject);
+			.find(
+				({ condition, armedBy }) =>
+					wakesSame(armedBy) && isGithubWatchSource(condition) && githubWatchSubject(condition) === subject,
+			);
 		return record && view(record);
 	}
 

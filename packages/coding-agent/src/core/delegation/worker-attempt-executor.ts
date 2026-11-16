@@ -411,7 +411,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		physicalAdmissionClosed = true;
 		physicalDrain = (async () => {
 			while (physicalSettlements.size > 0) await Promise.allSettled([...physicalSettlements]);
-		})();
+		})().finally(hostTools.release);
 		return physicalDrain;
 	};
 	const waitForPhysicalSettlement = (): Promise<void> => {
@@ -1151,8 +1151,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											availableTokens ?? Number.POSITIVE_INFINITY,
 										),
 										tools: reportHandshake
-											? [...options.toolSurface.tools, submitReportTool, ...hostTools]
-											: [...options.toolSurface.tools, ...hostTools],
+											? [...options.toolSurface.tools, submitReportTool, ...hostTools.tools]
+											: [...options.toolSurface.tools, ...hostTools.tools],
 										requestPreflight: (request) => providerTurn.requestPreflight(request),
 										// One durable request_snapshot per accepted provider request, so the worker's
 										// request start and reasoning level survive in its own conversation.

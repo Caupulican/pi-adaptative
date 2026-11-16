@@ -309,7 +309,7 @@ export class RoutineRuntimeAssembly {
 			followsCi: () => this.host.githubWatches().followsCi,
 			github: () => this.host.githubWatches().current,
 			armingContext,
-			armedOn: (source) => sessionWatches.armedOn(source),
+			armedOn: (source, armer) => sessionWatches.armedOn(source, armer),
 			arm: (watch, { armer, served }) =>
 				sessionWatches.arm({
 					...watch,
