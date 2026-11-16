@@ -36,14 +36,13 @@ import { edgeRecordsOnBranch, sessionEdgeGrants, standingEdgeGrants } from "../a
 import { AuthStorage } from "../auth-storage.ts";
 import { ExhaustedProviderRegistry, expiryFromRetryAfter } from "../billing-failover-controller.ts";
 import { AwayParentWriteRefusal, createAwayParentWrites } from "../delegation/away-parent-writes.ts";
-import { replyTurnOver } from "../delegation/goal-mail.ts";
 import type { ParentExecutionSettingsSource } from "../delegation/parent-execution-context.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { createWorkerEdgePolicy } from "../delegation/worker-edge-policy.ts";
 import { selectedWorkerAttempt } from "../delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
-import { WorkerMailLedger } from "../delegation/worker-mail-ledger.ts";
+import { readGoalMailSpentUsd } from "../delegation/worker-mail-ledger.ts";
 import { WorkerNotificationCoordinator } from "../delegation/worker-notification-coordinator.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { awayFleetQueueKey, settleEarlierAwayFleetQueue } from "../fleet/fleet-queue-store.ts";
@@ -325,14 +324,6 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			store,
 			now: () => orchestrationClock.now(),
 		});
-		// The goals' mail the parent's workers sent, whose spend a goal's budget counts: read from the parent's own record.
-		const goalMail = new WorkerMailLedger({
-			sessionId: () => parentSessionId,
-			sessionFile: () => sessionFile,
-			now: () => orchestrationClock.now(),
-			warn: (message) => input.report(message),
-			replyTurnOver: (turn) => replyTurnOver(lifecycle.getTaskRuntimeSnapshot(), turn),
-		});
 		const writes = createAwayParentWrites({
 			getRuntime: () => lifecycle.ledger.runtime,
 			getAgentDir: () => agentDir,
@@ -443,7 +434,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getGoalStateSnapshot: () => undefined,
 				// The parent may open while this host still runs: each keeps its own fleet queue metadata.
 				fleetQueueKey: awayFleetQueueKey(parentSessionId),
-				goalMailSpentUsd: (objectiveId) => goalMail.goalSpentUsd(objectiveId),
+				// The parent's own record of its goals' mail, read as it is now: the parent may record more while this runs.
+				goalMailSpentUsd: (objectiveId) => readGoalMailSpentUsd(sessionFile, parentSessionId, objectiveId),
 			},
 			notifications,
 			lifecycle,

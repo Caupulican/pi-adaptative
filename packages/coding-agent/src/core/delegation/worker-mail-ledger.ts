@@ -170,6 +170,29 @@ function parseState(value: unknown, sessionId: string): WorkerMailState | undefi
 	};
 }
 
+/**
+ * A goal's mail spend as a session's ledger holds it now, for a process that does not host the session
+ * (`away-parent-context.ts`): read on each call, nothing set aside or written. A ledger that is missing, does not read or
+ * is newer counts none, as its own session does until it sets the file aside and tells the owner; a read that fails
+ * otherwise throws.
+ */
+export function readGoalMailSpentUsd(sessionFile: string, sessionId: string, objectiveId: string): number {
+	let text: string;
+	try {
+		text = readFileSync(workerMailLedgerPath(sessionFile), "utf8");
+	} catch (error) {
+		if (isMissingFileError(error)) return 0;
+		throw error;
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return 0;
+	}
+	return parseState(value, sessionId)?.goalSpentUsd[objectiveId] ?? 0;
+}
+
 /** The ended mails past the newest `MAX_ENDED_GOAL_MAILS` go, the oldest sent first; an open mail is always kept. */
 function boundedMails(mails: readonly GoalMail[]): readonly GoalMail[] {
 	let excess = mails.filter((mail) => mail.end).length - MAX_ENDED_GOAL_MAILS;
