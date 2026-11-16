@@ -558,6 +558,24 @@ read again after a restart is taken once. A reply not read in 30 days expires, a
 is told it did. Your chat shows the reply as `<bot> answered` (`<bot> respondeu`). An ask to a leader running a goal is
 that goal's input, and an ask to a bot that runs only as a worker or to a machine joined over the link is taken as before.
 
+### A worker messages a bot
+
+A worker of the orchestrator's session that holds `bot_message` (a leader, a bot a leader made, a bot whose profile needs a
+worker's run) reaches a bot that answers in a session of its own in that session, never through a worker for it. `list`
+shows such a bot available with its session's state (`idle`, `queued` or `running`), and `send` gives the words to its
+session as mail from that worker (`agent-mail` from `worker:<session id>:<worker>`, first in its chain, a third party's
+when a third party's words reached the worker's run) and returns at once with the mail's id; `expectReply` does not
+apply, since the answer always comes back. A send in a group's thread carries the group's room after the words, as a
+group's message does, and is recorded in the group's log. A send replayed after a restart is the same mail and runs once.
+Refusals reach the worker in English.
+
+When the bot's turn ends, its answer is written to the same reply inbox as an ask's, and the orchestrator's session hands
+it to the worker's mailbox once, as the bot's words and not the orchestrator's (a leader's under the goal it runs); when
+that worker has ended, the reply goes to the orchestrator's conversation instead, saying so. A leader's goal does not wait
+for such an answer: a goal whose leader ended its turn with nothing else open settles, and an answer that arrives after
+it starts a turn of the leader's own outside the goal. A bot that runs only as a worker is reached as before. A bot's
+chat shows such a mail as `The orchestrator's worker <worker> wrote` (`O worker <worker> do orquestrador escreveu`).
+
 ## History and lifecycle
 
 A new task does not require a new worker session. Automatic evidence gathering runs one question

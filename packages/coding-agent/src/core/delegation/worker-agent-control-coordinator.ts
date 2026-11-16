@@ -19,8 +19,7 @@ import {
 import { assertHostEventWorkerScope } from "../events/host-event-reducer.ts";
 import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import { agentBasisTurnOrigin, agentTurnBasis } from "../orchestration/agent-turn-basis.ts";
-import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
+import { agentThirdPartyOrigin } from "../orchestration/agent-turn-basis.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
@@ -1106,6 +1105,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(options.delegationObjectiveId !== undefined
 				? { delegationObjectiveId: options.delegationObjectiveId }
 				: {}),
+			...(options.agentWords !== undefined ? { agentWords: options.agentWords } : {}),
 		};
 	}
 
@@ -1749,26 +1749,13 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * The third party's words a sender carries as it writes: the root's run in progress, or the worker's own attempt
-	 * (`attemptId` when the caller names it, else its active or latest one). `undefined` when only the owner's words
-	 * reached the sender.
+	 * The third party's words a sender carries as it writes: the root's run in progress, or the worker's own turn
+	 * (`agentThirdPartyOrigin`). `undefined` when only the owner's words reached the sender.
 	 */
-	private senderTurnOrigin(senderAgentId: string | undefined, attemptId?: string): TurnOriginRecord | undefined {
-		let origin: TurnOriginRecord | undefined;
-		if (!senderAgentId || senderAgentId === this.sessionRootAddress) origin = this.options.getRunTurnOrigin?.();
-		else {
-			const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
-			const agent = snapshot.agents[senderAgentId];
-			const namedAttemptId = attemptId ?? agent?.activeAttemptId;
-			if (namedAttemptId !== undefined) {
-				const attempt = snapshot.attempts[namedAttemptId];
-				origin = attempt ? conversationTurnOrigin(snapshot, attempt) : undefined;
-			} else if (agent) {
-				// The latest turn, which retention may have released: the origin its binding carries stands in for it.
-				const turn = agentTurnBasis(snapshot, agent.agentId);
-				origin = turn ? agentBasisTurnOrigin(snapshot, agent.agentId, turn) : undefined;
-			}
-		}
+	senderTurnOrigin(senderAgentId: string | undefined, attemptId?: string): TurnOriginRecord | undefined {
+		if (senderAgentId && senderAgentId !== this.sessionRootAddress)
+			return agentThirdPartyOrigin(this.options.getLifecycle().getTaskRuntimeSnapshot(), senderAgentId, attemptId);
+		const origin = this.options.getRunTurnOrigin?.();
 		return origin?.thirdParty ? origin : undefined;
 	}
 
@@ -1953,7 +1940,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
 		const activeSender =
 			sender && sender !== this.sessionRootAddress ? snapshot.agents[sender]?.activeAttemptId : undefined;
-		const { delegationObjectiveId: requestedDelegation, receiptOrigin: hostOrigin, ...peerOptions } = options;
+		const {
+			delegationObjectiveId: requestedDelegation,
+			receiptOrigin: hostOrigin,
+			agentWords,
+			...peerOptions
+		} = options;
 		const receiptOrigin = replay
 			? undefined
 			: (admittedOrigin ??
@@ -1963,8 +1955,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 						? snapshot.attempts[activeSender]?.dispatch.receiptOrigin
 						: undefined
 					: this.options.captureReceiptOrigin?.()));
-		// The sender's third party's words travel with what it writes; a replay keeps the stored message's.
-		const turnOrigin = replay ? undefined : this.senderTurnOrigin(sender);
+		// The sender's third party's words travel with what it writes, another agent's words the session hands on carry
+		// their own; a replay keeps the stored message's.
+		const turnOrigin = replay ? undefined : agentWords ? agentWords.turnOrigin : this.senderTurnOrigin(sender);
 		// The delegation the words belong to: the root's host-only tag, else the delegation the sender's own turn is filed
 		// under, so a leader's bots' turns stay that delegation's. A replay keeps the stored message's.
 		const delegationObjectiveId = replay

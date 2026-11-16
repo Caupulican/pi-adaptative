@@ -16,6 +16,7 @@ export const CONVERSATION = {
 	onChannel: (channel: string) => `mensagem de ${channel}`,
 	mailReceived: (from: string, room?: string) => `${from} escreveu${room ? ` em ${room}` : ""}`,
 	orchestrator: "O orquestrador",
+	orchestratorWorker: (runtime: string) => `O worker ${runtime} do orquestrador`,
 	botAnswered: (agentId: string) => `${agentId} respondeu`,
 	botAnsweredNothing: (agentId: string) => `${agentId} terminou o turno sem resposta`,
 	botAnswerExpired: (agentId: string) => `A resposta de ${agentId} expirou antes de esta sessão lê-la`,

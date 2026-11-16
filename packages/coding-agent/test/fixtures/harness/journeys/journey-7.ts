@@ -1,7 +1,7 @@
 import "../builtin-install.ts";
 import { runJourney7BotDelegatePhase } from "./journey-7-bot-delegate.ts";
 import { runJourney7BotHomePhase } from "./journey-7-bot-home.ts";
-import { runJourney7BotMailPhase } from "./journey-7-bot-mail.ts";
+import { runJourney7BotMailPhase, runJourney7WorkerMailPhase } from "./journey-7-bot-mail.ts";
 import { runJourney7BotPlanPhase } from "./journey-7-bot-plan.ts";
 import { runJourney7BotSpendPhase } from "./journey-7-bot-spend.ts";
 import { runJourney7BotWatchPhase } from "./journey-7-bot-watch.ts";
@@ -15,7 +15,7 @@ import { runJourney7WorkerHeadroomPhase } from "./journey-7-worker-headroom.ts";
 import { runJourney } from "./shared.ts";
 
 /**
- * Bots and leaders: one world in which the root creates and asks a bot, the owner writes to a bot and to a group, a bot mails another bot and its answer comes back once, a bot's priced answers are charged to the main session once per range, a bot
+ * Bots and leaders: one world in which the root creates and asks a bot, the owner writes to a bot and to a group, a bot mails another bot and its answer comes back once, a worker's bot_message to a bot reaches that bot's own session and the answer comes back to the worker, a bot's priced answers are charged to the main session once per range, a bot
  * waits on its own work with a watch its own session holds, a bot directs workers of its own, a standing leader runs a subtree of its own, a bot that is not
  * a leader is refused a bot of its own, the leader depth limit holds, retirement and stopping keep their promises, and a bot's own session lives in its home. Each leg group runs its own root session and leaves nothing running.
  */
@@ -36,6 +36,7 @@ export async function runJourney7(): Promise<void> {
 			await runJourney7RootBotPhase(world);
 			await runJourney7OwnerMessagesPhase(world);
 			await runJourney7BotMailPhase(world);
+			await runJourney7WorkerMailPhase(world);
 			await runJourney7BotSpendPhase(world);
 			await runJourney7BotWatchPhase(world);
 			await runJourney7BotDelegatePhase(world);

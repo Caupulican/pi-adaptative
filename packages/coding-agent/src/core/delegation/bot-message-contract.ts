@@ -1,3 +1,4 @@
+import type { BotMailSent } from "../bots/bot-mail.ts";
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 import type { WorkerAgentControlPort, WorkerAgentReplyResult } from "./worker-agent-control.ts";
 
@@ -25,6 +26,17 @@ export interface BotMessagePeer {
 	leader?: true;
 }
 
+/** Where a send to a bot goes: its live worker runtime, or the session of a bot that answers in one of its own. */
+export type BotMessageTarget =
+	| { readonly kind: "worker"; readonly runtime: string }
+	| { readonly kind: "session"; readonly agentId: string };
+
+/** A send mailed to a bot's own session (`messageId`: the mail's id); the bot's answer comes back to the sender on its own. */
+export interface BotSessionMailSent extends BotMailSent {
+	readonly messageId: string;
+	readonly detail: string;
+}
+
 /** Parent-owned alias resolution, fenced to the sender's exact execution and branch. */
 export interface BotMessageDirectory {
 	/** Set where the sender reaches no bot or group and only replies to its own session root. */
@@ -36,7 +48,18 @@ export interface BotMessageDirectory {
 		peers: BotMessagePeer[];
 		total: number;
 	};
-	resolve(agentId: string, teamId?: string): string;
+	resolve(agentId: string, teamId?: string): BotMessageTarget;
+	/**
+	 * Mails the words to a bot that answers in a session of its own, as the sender's (`workerMail`): a third party's when
+	 * `thirdParty`, under the mail id its replay key derives.
+	 */
+	mailSession(
+		agentId: string,
+		message: string,
+		replayKey: string,
+		thirdParty: boolean,
+		teamId?: string,
+	): Promise<BotSessionMailSent>;
 	threadId(teamId?: string): string | undefined;
 	authorizeReply(threadId: string | undefined, sender: string | undefined, teamId?: string): void;
 	recordSent(messageId: string, target: string, message: string): void;
@@ -63,7 +86,7 @@ export interface BotMessageBroker {
 		expectReply: boolean,
 		invocationId: string,
 		teamId?: string,
-	): ReturnType<WorkerAgentControlPort["followUpWorkerAgent"]>;
+	): Promise<ReturnType<WorkerAgentControlPort["followUpWorkerAgent"]> | BotSessionMailSent>;
 	reply(messageId: string, message: string, teamId?: string): WorkerAgentReplyResult;
 	/** Present only for a leader: the orchestrator is asked now; its answer arrives as the leader's next turn. */
 	askRoot?(question: string): Promise<BotAskRootResult>;

@@ -362,7 +362,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			workerLifecycle: () => this._getWorkerLifecycle(),
 			workerController: () => this._getWorkerController(),
 		});
-		this._rootBots = new RootBots({
+		this._rootBots = new RootBots(deps, {
 			send: (agentId, message, options) => this.sendOperatorMessageToBot(agentId, message, options),
 			currentDelegation: (alias) => this.getLeaders().currentFor(alias),
 			tool: () => ({
@@ -370,12 +370,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				lead: (request) => this.getLeaders().delegate(request),
 				list: () => this.getBotTeamStore().listBots({ includeRetired: true }).map(botToolListEntry),
 			}),
-			agentDir: () => deps.getAgentDir(),
-			sessionId: () => deps.getSessionManager().getSessionId(),
-			timers: deps.getTimers().port("bot-replies"),
-			deliver: (input) => deps.deliverParentInput(input),
-			hasDelivered: (id) => deps.getSessionManager().getParentInput(id) !== undefined,
-			origin: () => captureWorkerReceiptOrigin(deps.getSessionManager()),
+			workers: () => this.listWorkerAgents(),
+			botOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
+			followUp: (runtime, message, options) => this.followUpSessionRootWorkerAgent(runtime, message, options),
 		});
 		this._attemptWaits = new WorkerAttemptWaits(deps, {
 			workerController: () => this._getWorkerController(),

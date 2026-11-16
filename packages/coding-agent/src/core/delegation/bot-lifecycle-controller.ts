@@ -45,7 +45,14 @@ export interface BotLifecycleHost {
 	/** The bots that run as sessions of their own: a stop reaches their running turn, a retirement or a change their session. */
 	readonly botSessions: Pick<
 		BotSessionHost,
-		"interrupt" | "isActive" | "noteHistoryRun" | "prepareRelease" | "recordChanged"
+		| "interrupt"
+		| "isActive"
+		| "noteHistoryRun"
+		| "prepareRelease"
+		| "recordChanged"
+		| "runsAsSession"
+		| "stateOf"
+		| "mailFromWorker"
 	>;
 	getBotTeamStore(): PersistentBotTeamStore;
 	/** Drops the cached bot roster: a bot changed under it. */
@@ -216,6 +223,7 @@ export class BotLifecycleController {
 			{
 				getSessionManager: () => this.deps.getSessionManager(),
 				isDisposed: () => this.deps.isDisposed(),
+				botSessions: this.host.botSessions,
 				botBindings: this.botBindings,
 				getBotTeamStore: () => this.host.getBotTeamStore(),
 				invalidateBotViews: () => {

@@ -4,7 +4,16 @@
  * words are sent on its behalf) and the host-only tags a model-facing tool never sets. `worker-agent-control.ts` re-exports
  * these types, so callers keep importing them from there.
  */
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+
+/**
+ * Host-only: the words are another agent's (a bot's reply to the worker's mail), written by the session but not its own,
+ * so the taint of the session's run does not travel with them; theirs does (`turnOrigin`, a third party's), or none.
+ */
+export interface AgentWords {
+	readonly turnOrigin?: TurnOriginRecord;
+}
 
 export interface WorkerAgentMessageOptions {
 	senderAgentId?: string;
@@ -19,6 +28,8 @@ export interface WorkerAgentMessageOptions {
 	 * is active (a leader's words, sent by the root session). Set only by the session-root path.
 	 */
 	receiptOrigin?: WorkerReceiptOrigin;
+	/** Host-only, from the session-root path (`SessionRootWorkerAgentMessageOptions.agentWords`). */
+	agentWords?: AgentWords;
 }
 
 export interface WorkerAgentBroadcastOptions {
@@ -44,6 +55,8 @@ export interface SessionRootWorkerAgentMessageOptions {
 	 * that leader as the sender, so a reply routes back to it. Absent, the orchestrator is the sender.
 	 */
 	fromLeader?: string;
+	/** Host-only: the words are another agent's, which the session hands on (`AgentWords`). */
+	agentWords?: AgentWords;
 }
 
 /** A send may not carry a reply reference: replies go through the dedicated inferred-destination reply control. */

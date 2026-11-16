@@ -2,8 +2,9 @@
  * The answers a bot's turn gives the mail it took (`bot-mail.ts`), sent back where each mail came from once the turn
  * ends: the last words the session said after a bot's mail, before the next outside input, are mailed back to that bot
  * as a reply one hop further on, its words after a group's message go to the group's log (as a member's answer to the
- * group, for that incarnation of it), and its words after the orchestrator's ask are written as a reply for the session
- * that asked (`root-bot-replies.ts`), which hears too of a turn that ended without any. A reply is not answered, and none
+ * group, for that incarnation of it), and its words after the orchestrator's ask or a worker's mail are written as a reply
+ * for the session that sent it (`root-bot-replies.ts`), which hears too of a turn that ended without any and hands a
+ * worker's reply to that worker. A reply is not answered, and none
  * goes past `MAX_BOT_MAIL_HOPS`.
  *
  * A reply's reference derives from the mail's alone (`reply:<mail id>`), so a reply sent again (the turn ran again after
@@ -59,7 +60,8 @@ function assistantText(message: AgentMessage): string {
 /**
  * The mail of the turn that began at `since` and what the session answered each: the turn's messages are those after the
  * last answer written before it began; a mail's answer is the last words said after it, before the next outside input.
- * A mail answered with no words has none, but the orchestrator's ask, whose session waits for its answer, still has one.
+ * A mail answered with no words has none, but the orchestrator's ask and a worker's mail, whose sender waits for the
+ * answer, still have one.
  */
 function botMailAnswers(messages: readonly AgentMessage[], since: number): BotMailAnswer[] {
 	let start = messages.length;
@@ -73,7 +75,7 @@ function botMailAnswers(messages: readonly AgentMessage[], since: number): BotMa
 	let last = "";
 	let failure: string | undefined;
 	const close = () => {
-		if (open && (last.length > 0 || open.from.kind === "root"))
+		if (open && (last.length > 0 || open.from.kind === "root" || open.from.kind === "worker"))
 			answers.push({ ...open, answer: last, ...(failure !== undefined ? { failure } : {}) });
 		open = undefined;
 		last = "";
@@ -96,7 +98,7 @@ function botMailAnswers(messages: readonly AgentMessage[], since: number): BotMa
 /** What sending a turn's answers reaches of the host. */
 export interface BotMailReplyHost {
 	store(): Pick<PersistentBotTeamStore, "recordBotTurnOutcome">;
-	/** Writes a reply for the orchestrator's session that asked (`sendRootBotReply`); throws when it cannot. */
+	/** Writes a reply for the session that asked or whose worker mailed (`sendRootBotReply`); throws when it cannot. */
 	replyToRoot(reply: RootBotReply): void;
 	deliver(
 		agentId: string,
@@ -141,12 +143,13 @@ export function sendBotMailAnswers(host: BotMailReplyHost, turn: BotMailTurn): v
 		const hop = origin.hop + 1;
 		if (ref === undefined || hop > MAX_BOT_MAIL_HOPS) continue;
 		const thirdParty = origin.thirdParty === true || runThirdParty;
-		if (from.kind === "root") {
+		if (from.kind === "root" || from.kind === "worker") {
 			try {
 				host.replyToRoot({
 					replyId: ref,
 					agentId,
 					rootSessionId: from.sessionId,
+					...(from.kind === "worker" ? { worker: from.runtime } : {}),
 					hop,
 					thirdParty,
 					answer,

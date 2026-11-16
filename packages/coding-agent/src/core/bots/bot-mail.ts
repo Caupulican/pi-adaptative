@@ -3,7 +3,8 @@
  * orchestrator's group messages reach each member's session the same way (`bot-operator-dispatch.ts`). The words open or
  * follow a turn of the receiver's own session (`BotSessionHost.deliver`), stamped with an `agent-mail` origin the host
  * mints (`agentMailTurnOrigin`): who sent it, as the host addresses the sender (`bot:<id>`, `group:<id>:<incarnation>`,
- * `root:<session>` for the orchestrator's ask, `rootAskMail`),
+ * `root:<session>` for the orchestrator's ask, `rootAskMail`, `worker:<session>:<runtime>` for a worker's `bot_message`
+ * send, `workerMail`),
  * never as the words name it, and its place in its chain. Mail is the owner's automation, never the owner's words: it
  * carries no owner evidence, starts no goal, and never makes a bot or brings a retired one back (only the owner's direct
  * word does, `isOwnerDirect`); mail a third party's words reached is a third party's mail (an `inbound-channel` record
@@ -12,17 +13,20 @@
  *
  * The receiver's answer comes back on its own (`bot-mail-replies.ts`): its last words after a bot's mail are mailed back
  * to that bot as a reply, its words after a group's message go to the group's log, and its words after the orchestrator's
- * ask are written as a reply for the session that asked (`root-bot-replies.ts`). Two bots answering each other
+ * ask or a worker's mail are written as a reply for the session that asked (`root-bot-replies.ts`), which hands a
+ * worker's to that worker. Two bots answering each other
  * cannot wake each other forever: a mail counts one more than the last outside input its sender's session was given
  * (`isOutsideInputKind`: none after the owner's words), a reply one more than the mail it answers, and no mail goes past
  * `MAX_BOT_MAIL_HOPS` (a reply then is not sent, and the receiver is told so with the mail). The orchestrator's ask, as a
  * group's message, opens a chain (hop 1): the reply wakes the orchestrator as a worker's result does, and its next ask is
- * its own turn's, bounded by its goal and its spend as its workers are, not a link of the chain.
+ * its own turn's, bounded by its goal and its spend as its workers are, not a link of the chain. A worker's mail opens one
+ * too: a worker keeps no chain, and its next mail is its own run's, bounded by that run's limits.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { MAX_TURN_ORIGIN_HOP, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import { BOT_MEMORY_BLOCK_SEPARATOR } from "../delegation/bot-chat-text.ts";
 import type {
 	BotDeliveryOptions,
 	BotDeliveryOrigin,
@@ -38,27 +42,37 @@ import type { BotSender } from "./bot-session-host.ts";
 export const MAX_BOT_MAIL_HOPS = MAX_TURN_ORIGIN_HOP;
 
 /**
- * Who sent a mail, as the host addresses the sender: a bot, a group's room in one incarnation of the group, or the
- * orchestrator's session that asked.
+ * Who sent a mail, as the host addresses the sender: a bot, a group's room in one incarnation of the group, the
+ * orchestrator's session that asked, or a worker of that session (its runtime) that sent with `bot_message`.
  */
 export type BotMailAddress =
 	| { readonly kind: "bot"; readonly agentId: string }
 	| { readonly kind: "group"; readonly teamId: string; readonly incarnation: string }
-	| { readonly kind: "root"; readonly sessionId: string };
+	| { readonly kind: "root"; readonly sessionId: string }
+	| { readonly kind: "worker"; readonly sessionId: string; readonly runtime: string };
 
 /** The address a mail's origin records (`TurnOriginRecord.from`). */
 export function botMailAddressText(address: BotMailAddress): string {
-	if (address.kind === "bot") return `bot:${address.agentId}`;
-	return address.kind === "group" ? `group:${address.teamId}:${address.incarnation}` : `root:${address.sessionId}`;
+	switch (address.kind) {
+		case "bot":
+			return `bot:${address.agentId}`;
+		case "group":
+			return `group:${address.teamId}:${address.incarnation}`;
+		case "root":
+			return `root:${address.sessionId}`;
+		case "worker":
+			return `worker:${address.sessionId}:${address.runtime}`;
+	}
 }
 
 /** The sender a mail's origin names; undefined for an address this build does not know. */
 export function parseBotMailAddress(from: string): BotMailAddress | undefined {
-	const [kind, id, incarnation, ...rest] = from.split(":");
+	const [kind, id, second, ...rest] = from.split(":");
 	if (rest.length > 0 || !id) return undefined;
-	if (kind === "bot" && incarnation === undefined) return { kind: "bot", agentId: id };
-	if (kind === "group" && incarnation) return { kind: "group", teamId: id, incarnation };
-	if (kind === "root" && incarnation === undefined) return { kind: "root", sessionId: id };
+	if (kind === "bot" && second === undefined) return { kind: "bot", agentId: id };
+	if (kind === "group" && second) return { kind: "group", teamId: id, incarnation: second };
+	if (kind === "root" && second === undefined) return { kind: "root", sessionId: id };
+	if (kind === "worker" && second) return { kind: "worker", sessionId: id, runtime: second };
 	return undefined;
 }
 
@@ -75,19 +89,41 @@ export const BOT_MAIL_REF_PREFIX = "mail:";
  */
 type BotMailAnswerRoute = "mailed" | "logged" | "returned" | "none" | "last";
 
-/** The words as the receiving session's model reads them: who sent them, their place in the chain and where the answer goes. */
-export function botMailPrompt(from: BotMailAddress, hop: number, text: string, reply: boolean): string {
+/** The sender as the receiving bot's model reads it; a worker by the bot it is, when it is one (`workerName`), else its runtime. */
+function senderText(from: BotMailAddress, workerName: string | undefined): string {
+	switch (from.kind) {
+		case "bot":
+			return `bot ${from.agentId}`;
+		case "group":
+			return `group ${from.teamId}`;
+		case "root":
+			return "the orchestrator";
+		case "worker":
+			return `the orchestrator's worker ${workerName ?? from.runtime}`;
+	}
+}
+
+/**
+ * The words as the receiving session's model reads them: who sent them, their place in the chain and where the answer goes.
+ * `workerName`: the bot a worker sender is, when it is one.
+ */
+export function botMailPrompt(
+	from: BotMailAddress,
+	hop: number,
+	text: string,
+	reply: boolean,
+	workerName?: string,
+): string {
 	const route: BotMailAnswerRoute = reply
 		? "none"
 		: from.kind === "group"
 			? "logged"
-			: from.kind === "root"
+			: from.kind === "root" || from.kind === "worker"
 				? "returned"
 				: hop >= MAX_BOT_MAIL_HOPS
 					? "last"
 					: "mailed";
-	const sender =
-		from.kind === "bot" ? `bot ${from.agentId}` : from.kind === "group" ? `group ${from.teamId}` : "the orchestrator";
+	const sender = senderText(from, workerName);
 	const head = reply
 		? `Reply from ${sender} to your mail (hop ${hop} of ${MAX_BOT_MAIL_HOPS}).`
 		: `Mail from ${sender} (hop ${hop} of ${MAX_BOT_MAIL_HOPS}).`;
@@ -99,7 +135,7 @@ export function botMailPrompt(from: BotMailAddress, hop: number, text: string, r
 	const answer = {
 		mailed: ` Your answer to it is mailed back to ${sender} on its own: do not send it with ${BOT_MAIL_TOOL_NAME}.`,
 		logged: " Your answer to it goes to the group's log on its own.",
-		returned: " Your answer to it goes back to the orchestrator on its own.",
+		returned: ` Your answer to it goes back to ${sender} on its own.`,
 		none: " Nothing you answer is mailed back.",
 		last: " It is the last mail its chain allows: your answer is not mailed back.",
 	}[route];
@@ -128,20 +164,59 @@ export function botMailChain(branch: readonly SessionEntry[]): { readonly hop: n
  * chain, and a third party's when a third party's words decide the asking run. The words are framed as `botMailPrompt`
  * frames a mail; the answer comes back as a reply for the asking session (`root-bot-replies.ts`).
  */
-export function rootAskMail(
-	sessionId: string,
-	branch: readonly SessionEntry[],
+export function rootAskMail(sessionId: string, branch: readonly SessionEntry[], text: string): ReturnedMail {
+	return returnedMail({ kind: "root", sessionId }, text, botMailChain(branch).thirdParty, randomUUID());
+}
+
+/** Mail whose answer is written back for the session that sent it, framed for the receiver, and the origin it runs under. */
+export interface ReturnedMail {
+	readonly prompt: string;
+	readonly origin: TurnOriginRecord;
+}
+
+/**
+ * A worker's `bot_message` send to a bot that answers in a session of its own, as mail from that worker of the session
+ * (`runtime`), named by the bot it is when it is one (`name`): the first of its chain, a third party's when a third
+ * party's words reached the worker's run, and under the mail id its send derives (`mailId`, `replayedMailId`), so a send
+ * replayed is the same mail. A worker in a group's thread carries the group's room after the words (`room`, as a group's
+ * mail does), not in the origin, which shows the words alone. The answer comes back as a reply the session hands to that
+ * worker (`root-bot-replies.ts`).
+ */
+export function workerMail(input: {
+	readonly sessionId: string;
+	readonly runtime: string;
+	readonly name?: string;
+	readonly text: string;
+	readonly thirdParty: boolean;
+	readonly mailId: string;
+	readonly room?: string;
+}): ReturnedMail {
+	const { sessionId, runtime, name, text, thirdParty, mailId, room } = input;
+	const mail = returnedMail({ kind: "worker", sessionId, runtime }, text, thirdParty, mailId, name);
+	return room ? { ...mail, prompt: `${mail.prompt}${BOT_MEMORY_BLOCK_SEPARATOR}${room}` } : mail;
+}
+
+/** The mail id a send derives from its replay key (one tool invocation's), shaped as a random one is. */
+export function replayedMailId(replayKey: string): string {
+	const hex = createHash("sha256").update(replayKey).digest("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function returnedMail(
+	address: BotMailAddress,
 	text: string,
-): { readonly prompt: string; readonly origin: TurnOriginRecord } {
-	const address: BotMailAddress = { kind: "root", sessionId };
+	thirdParty: boolean,
+	mailId: string,
+	workerName?: string,
+): ReturnedMail {
 	return {
-		prompt: botMailPrompt(address, 1, text, false),
+		prompt: botMailPrompt(address, 1, text, false, workerName),
 		origin: agentMailTurnOrigin({
 			from: botMailAddressText(address),
 			hop: 1,
-			ref: botMailRef(randomUUID()),
+			ref: botMailRef(mailId),
 			shown: text,
-			thirdParty: botMailChain(branch).thirdParty,
+			thirdParty,
 		}),
 	};
 }
@@ -260,14 +335,24 @@ export class BotMail {
 			shown: text,
 			thirdParty,
 		});
+		return this.deliver(to, { prompt: botMailPrompt(address, hop, text, false), origin }, sender);
+	}
+
+	/**
+	 * A worker of the orchestrator's session mails `to` (`workerMail`; `from`: the bot the worker is, else its runtime).
+	 * Refused, in words for the worker's model, when `to` takes no mail or its inbox is full, as a bot's mail is.
+	 */
+	async fromWorker(from: string, to: string, mail: ReturnedMail, sender: BotSender): Promise<BotMailSent> {
+		const refusal = botMailTargetRefusal(from, to, this.host.store().getBot(to), (record) =>
+			this.host.runsAsSession(record, sender),
+		);
+		if (refusal) throw new Error(refusal);
+		return this.deliver(to, mail, sender);
+	}
+
+	private async deliver(to: string, mail: ReturnedMail, sender: BotSender): Promise<BotMailSent> {
 		try {
-			const result = await this.host.deliver(
-				to,
-				botMailPrompt(address, hop, text, false),
-				{ mode: "queue" },
-				origin,
-				sender,
-			);
+			const result = await this.host.deliver(to, mail.prompt, { mode: "queue" }, mail.origin, sender);
 			return {
 				sent: true,
 				to,

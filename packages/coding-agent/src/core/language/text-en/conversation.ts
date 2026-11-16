@@ -17,6 +17,8 @@ export const CONVERSATION = {
 	mailReceived: (from: string, room?: string) => `${from} wrote${room ? ` in ${room}` : ""}`,
 	/** The sender of the orchestrator's ask, as a bot's chat shows it. */
 	orchestrator: "The orchestrator",
+	/** The sender of a worker's mail (its runtime), as a bot's chat shows it. */
+	orchestratorWorker: (runtime: string) => `The orchestrator's worker ${runtime}`,
 	/** A bot's reply to the orchestrator's ask, as the orchestrator's chat shows it: answered, ended without words, expired unread. */
 	botAnswered: (agentId: string) => `${agentId} answered`,
 	botAnsweredNothing: (agentId: string) => `${agentId} ended its turn without an answer`,

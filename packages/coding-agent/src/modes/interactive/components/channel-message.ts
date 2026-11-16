@@ -24,7 +24,9 @@ export class ChannelMessageComponent extends Container {
 				? text.mailReceived(plainLabel(mail.agentId))
 				: mail.kind === "group"
 					? text.mailReceived(text.you, plainLabel(mail.teamId))
-					: text.mailReceived(text.orchestrator)
+					: mail.kind === "worker"
+						? text.mailReceived(text.orchestratorWorker(plainLabel(mail.runtime)))
+						: text.mailReceived(text.orchestrator)
 			: channel === "link"
 				? text.fromAnotherMachine(REMOTE_MARK)
 				: text.onChannel(plainLabel(channel));

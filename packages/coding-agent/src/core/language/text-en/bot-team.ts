@@ -247,7 +247,7 @@ export const BOT_TEAM = {
 	botMailReplyNotSent: (agentId: string, to: string, reason: string) =>
 		`Bot ${agentId}: its answer to the mail from ${to} was not sent (${reason}).`,
 	botAskReplyNotSent: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its answer to the orchestrator's ask was not sent (${reason}).`,
+		`Bot ${agentId}: its answer to the orchestrator's session (its ask, or its worker's mail) was not sent (${reason}).`,
 	/** A message waiting in the bot's inbox, as the chat shows it. */
 	botInboxWaitingLine: (text: string) => `Waiting for the session hosting the bot: ${text}`,
 	/** A message the bot's session refused, as the chat shows it. */

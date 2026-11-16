@@ -6,18 +6,34 @@
  * the coordinator's ports; the coordinator's private members are reached through arrow functions in its own method, never
  * through a cast. `createBotMessageBroker` turns the directory into the broker the bot_message tool calls.
  *
+ * A bot that answers in a session of its own is reached there, never through a worker runtime: a send to it is mail from the
+ * sending worker (`workerMail`), whose answer the orchestrator's session hands back to that worker (`RootBots`).
+ *
  * A session that directs workers and manages no bots (a bot's own) gets `createSessionScopedBotMessageDirectory`: its
  * workers stay inside it, so they reach no bot and no group, and answer only their session root.
  */
 
 import type { SessionManager } from "../../kernel/node.ts";
-import type { BotMessageBroker, BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
+import { replayedMailId, workerMail } from "../bots/bot-mail.ts";
+import type { BotSessionHost } from "../bots/bot-session-host.ts";
+import { groupMailRoomBlock, readGroupRoom } from "./bot-group-room.ts";
+import type {
+	BotMessageBroker,
+	BotMessageDirectory,
+	BotOwnedStartOutcome,
+	BotSessionMailSent,
+} from "./bot-message-contract.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import type { LeaderController } from "./leader-controller.ts";
 import type { LeadRequest } from "./leader-delegation.ts";
 import type { DelegationRecord } from "./leader-delegation-ledger.ts";
 import { currentDelegationFor } from "./leader-view.ts";
-import { normalizeBotOrTeamId, type PersistentBotTeamStore, teamIncarnation } from "./persistent-bot-team-store.ts";
+import {
+	normalizeBotOrTeamId,
+	type PersistentBotRecord,
+	type PersistentBotTeamStore,
+	teamIncarnation,
+} from "./persistent-bot-team-store.ts";
 import { sessionRootAddress } from "./session-root-mailbox.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -26,6 +42,8 @@ import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coord
 export interface BotMessageDirectoryHost {
 	getSessionManager(): SessionManager;
 	isDisposed(): boolean;
+	/** The bots that answer in sessions of their own: a send to one is mail to its session. */
+	readonly botSessions: Pick<BotSessionHost, "runsAsSession" | "stateOf" | "mailFromWorker">;
 	readonly botBindings: Pick<BotRuntimeBindings, "generationContext" | "runtime">;
 	getBotTeamStore(): PersistentBotTeamStore;
 	invalidateBotViews(): void;
@@ -71,6 +89,10 @@ export function createSessionScopedBotMessageDirectory(
 ): BotMessageDirectory {
 	const manager = host.getSessionManager();
 	const assertCurrent = senderFence(host, sender, attemptId);
+	const reachesNoBot = (): never => {
+		assertCurrent();
+		throw new Error("This session's workers reach no bot or group: they answer only their session root.");
+	};
 	return {
 		sessionRootOnly: true,
 		assertCurrent,
@@ -79,10 +101,8 @@ export function createSessionScopedBotMessageDirectory(
 			assertCurrent();
 			return { groups: [], totalGroups: 0, peers: [], total: 0 };
 		},
-		resolve: () => {
-			assertCurrent();
-			throw new Error("This session's workers reach no bot or group: they answer only their session root.");
-		},
+		resolve: reachesNoBot,
+		mailSession: async () => reachesNoBot(),
 		threadId: () => {
 			assertCurrent();
 			return undefined;
@@ -138,6 +158,23 @@ export function createBotMessageDirectory(
 		requireGroup();
 	};
 	const senderRecord = sourceAlias ? store.getBot(sourceAlias) : undefined;
+	// The one predicate the bots' host keeps a session by; a machine joined over the link takes no mail.
+	const answersInSession = (bot: PersistentBotRecord) => bot.remote !== true && host.botSessions.runsAsSession(bot);
+	const recordSent = (messageId: string, target: string, message: string) => {
+		if (!context.teamId || !context.teamIncarnationId) return;
+		store.appendScopedTeamMessage(
+			{
+				messageId,
+				teamId: context.teamId,
+				sender: { kind: "bot", agentId: sourceAlias },
+				text: message,
+				timestamp: Date.now(),
+				targetAgentIds: [target],
+				deliveries: [{ agentId: target, outcome: "queued", messageId }],
+			},
+			context.teamIncarnationId,
+		);
+	};
 	const senderIsLeader = senderRecord?.leader === true && senderRecord.retired !== true;
 	// A leader hands a part of its goal on only while that goal runs and its envelope still allows a nested leader.
 	const ownGoal =
@@ -184,6 +221,13 @@ export function createBotMessageDirectory(
 							: !teams.some((team) => team.memberAgentIds.includes(bot.agentId))),
 				)
 				.map((bot) => {
+					if (!bot.retired && answersInSession(bot))
+						return {
+							agentId: bot.agentId,
+							displayName: bot.displayName,
+							state: host.botSessions.stateOf(bot.agentId) ?? "idle",
+							available: true,
+						};
 					const agent = agents.get(
 						host.botBindings.runtime(bot.agentId, context.teamId, context.teamIncarnationId),
 					);
@@ -216,12 +260,40 @@ export function createBotMessageDirectory(
 				throw new Error("Group messages require a conversation admitted to that group.");
 			const bot = store.getBot(alias);
 			if (!bot || bot.retired) throw new Error(`Bot ${alias} is missing or retired.`);
+			if (answersInSession(bot)) {
+				if (alias === sourceAlias) throw new Error("A bot cannot message itself.");
+				return { kind: "session", agentId: alias };
+			}
 			const runtime = host.botBindings.runtime(alias, context.teamId, context.teamIncarnationId);
 			if (runtime === sender) throw new Error("A bot cannot message itself.");
 			const recipient = host.listWorkerAgents().find((agent) => agent.agentId === runtime);
 			if (!recipient || recipient.status === "retired")
 				throw new Error(`Bot ${alias} is inactive in this parent session; ask the parent to start it.`);
-			return runtime;
+			return { kind: "worker", runtime };
+		},
+		mailSession: async (alias, message, replayKey, thirdParty, teamId): Promise<BotSessionMailSent> => {
+			assertCurrent();
+			// A worker in a group's thread gives the member its room, as its worker's start and the group's mail carry it.
+			const group = requireGroup(teamId);
+			const mailId = replayedMailId(replayKey);
+			const mail = workerMail({
+				sessionId: manager.getSessionId(),
+				runtime: sender,
+				...(senderRecord ? { name: sourceAlias } : {}),
+				text: message,
+				thirdParty,
+				mailId,
+				...(group ? { room: groupMailRoomBlock(readGroupRoom(store, group)) } : {}),
+			});
+			const sent = await host.botSessions.mailFromWorker(sourceAlias, alias, mail);
+			// The mail has left: the group's log records it without fencing again, so the model never sends it twice.
+			recordSent(mailId, alias, message);
+			return {
+				...sent,
+				messageId: mailId,
+				detail:
+					"Mailed to the bot's own session: its answer reaches you on its own as a later message; do not wait for it.",
+			};
 		},
 		threadId: (teamId) => {
 			assertCurrent();
@@ -243,21 +315,7 @@ export function createBotMessageDirectory(
 			)
 				throw new Error("Reply requester is outside this conversation group.");
 		},
-		recordSent: (messageId, target, message) => {
-			if (!context.teamId || !context.teamIncarnationId) return;
-			store.appendScopedTeamMessage(
-				{
-					messageId,
-					teamId: context.teamId,
-					sender: { kind: "bot", agentId: sourceAlias },
-					text: message,
-					timestamp: Date.now(),
-					targetAgentIds: [target],
-					deliveries: [{ agentId: target, outcome: "queued", messageId }],
-				},
-				context.teamIncarnationId,
-			);
-		},
+		recordSent,
 	};
 }
 
@@ -271,7 +329,10 @@ function leadsGoalHandedBy(records: readonly DelegationRecord[], parent: string,
 /** What a bot's send and reply go through: the coordinator's control calls, the sender's runtime and the invocation's replay key. */
 export interface BotMessageBrokerPorts {
 	readonly senderAgentId: string;
-	readonly control: Pick<WorkerAgentControlCoordinator, "messageWorkerPeer" | "replyToWorkerAgentMessage">;
+	readonly control: Pick<
+		WorkerAgentControlCoordinator,
+		"messageWorkerPeer" | "replyToWorkerAgentMessage" | "senderTurnOrigin"
+	>;
 	/** The replay key of one tool invocation: a repeated call with the same key is one message. */
 	idempotencyKey(invocationId: string): string;
 }
@@ -285,9 +346,19 @@ export function createBotMessageBroker(directory: BotMessageDirectory, ports: Bo
 	return {
 		...(sessionRootOnly ? { sessionRootOnly } : {}),
 		list: (teamId) => directory.list(teamId),
-		send: (target, message, expectReply, invocationId, teamId) => {
-			const runtime = directory.resolve(target, teamId);
-			const outcome = ports.control.messageWorkerPeer(runtime, message, {
+		send: async (target, message, expectReply, invocationId, teamId) => {
+			const resolved = directory.resolve(target, teamId);
+			// A bot with a session of its own takes the words as mail, carrying the sender's third party's taint; its answer
+			// always comes back, so expectReply does not apply.
+			if (resolved.kind === "session")
+				return directory.mailSession(
+					resolved.agentId,
+					message,
+					ports.idempotencyKey(invocationId),
+					ports.control.senderTurnOrigin(ports.senderAgentId) !== undefined,
+					teamId,
+				);
+			const outcome = ports.control.messageWorkerPeer(resolved.runtime, message, {
 				senderAgentId: ports.senderAgentId,
 				expectReply,
 				threadId: directory.threadId(teamId),

@@ -91,3 +91,25 @@ export function agentBasisTurnOrigin(
 	if (own?.thirdParty) return own;
 	return carry?.conversationTurnOrigin ?? own;
 }
+
+/**
+ * The origin of the words that reached an agent's turn, when a third party's: the attempt named (`attemptId`), else its
+ * active one, else its latest turn, released or not. Undefined when only the owner's words reached it.
+ */
+export function agentThirdPartyOrigin(
+	state: AgentTurnProjection,
+	agentId: string,
+	attemptId?: string,
+): TurnOriginRecord | undefined {
+	const agent = state.agents[agentId];
+	const named = attemptId ?? agent?.activeAttemptId;
+	let origin: TurnOriginRecord | undefined;
+	if (named !== undefined) {
+		const attempt = state.attempts[named];
+		origin = attempt ? conversationTurnOrigin(state, attempt) : undefined;
+	} else if (agent) {
+		const turn = agentTurnBasis(state, agentId);
+		origin = turn ? agentBasisTurnOrigin(state, agentId, turn) : undefined;
+	}
+	return origin?.thirdParty ? origin : undefined;
+}

@@ -80,7 +80,7 @@ import {
 import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
-import { BotMail } from "./bot-mail.ts";
+import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
 import { sendBotMailAnswers } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
@@ -576,6 +576,11 @@ export class BotSessionHost {
 		const entry = this.entries.get(agentId);
 		if (entry) return this.localState(entry);
 		return this.view.hostOf(agentId)?.state;
+	}
+
+	/** A worker of this session mails the bot `to` (`BotMail.fromWorker`); `from` names the worker as the refusal reads it. */
+	mailFromWorker(from: string, to: string, mail: ReturnedMail): Promise<BotMailSent> {
+		return this.mail.fromWorker(from, to, mail, this.ports.sender());
 	}
 
 	/** Whether the bot's session, here or in the process hosting it, is running a turn or holds queued input. */
