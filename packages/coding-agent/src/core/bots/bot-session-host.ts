@@ -241,6 +241,7 @@ export class BotSessionHost {
 					this.admission.modelRefusal(record, this.admission.define(record, sender)),
 				admissionTimers: () => ports.timers().port("provider-admission"),
 				retake: (agentId) => this.retakeRefused(agentId),
+				refusedNow: (agentId) => this.refusedNow(agentId),
 				takeInbox: (agentId) => this.takeInbox(agentId),
 				leavesTo: (cwd) => ports.leavesTo?.(cwd) === true,
 				sender: () => ports.sender(),
@@ -761,8 +762,7 @@ export class BotSessionHost {
 
 	/**
 	 * Whether the session's work keeps it loaded past its idle bound: a turn or input, a worker running, or a worker retry
-	 * due within the bound. A run holds it from its submission on, whatever phase the session's work state ranks above it
-	 * (a question awaiting the owner, a blocked goal), so a run admitted on the daemon's away bound is counted from there. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it. The one
+	 * due within the bound. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it. The one
 	 * idleness every change of the loaded session waits on: its idle close, a record change, a refusal's retake, a release.
 	 */
 	private holdsLoaded(entry: BotSessionEntry): boolean {
@@ -771,8 +771,6 @@ export class BotSessionHost {
 		return (
 			entry.inFlight > 0 ||
 			entry.session.deliverablePendingMessageCount > 0 ||
-			entry.session.isStreaming ||
-			entry.session.isPreparingSubmission ||
 			state.busyBesideWorkers ||
 			state.hasRunningWorker ||
 			!onlyWorkerRetriesWaitBeyond(state, closesAt)
@@ -940,10 +938,32 @@ export class BotSessionHost {
 		}
 	}
 
-	/** The loaded sessions working now (a turn, input or a worker), with their metered runs: whose spend may still grow. */
+	/**
+	 * The loaded sessions working now (a turn, input or a worker), with their metered runs: whose spend may still grow. A
+	 * run counts from its submission on (`isPreparingSubmission`, taken before its admission), whatever phase the work
+	 * state ranks above it (a question awaiting the owner, a blocked goal), so a run admitted on the daemon's away bound is
+	 * counted by the next bot's admission.
+	 */
 	working(): { readonly agentId: string; readonly runs: BotMeteredRuns }[] {
 		return [...this.entries.values()].flatMap((entry) =>
-			this.holdsLoaded(entry) ? [{ agentId: entry.agentId, runs: entry.meteredRuns() }] : [],
+			this.holdsLoaded(entry) || entry.session.isStreaming || entry.session.isPreparingSubmission
+				? [{ agentId: entry.agentId, runs: entry.meteredRuns() }]
+				: [],
+		);
+	}
+
+	/**
+	 * Whether the bot's loaded session is refused its model now under its record (`BotSessionAdmission.modelRefusal`): a
+	 * retake armed for a cause with no known end leaves it loaded while it is. False for a bot not loaded here, which is
+	 * asked again (its ask reads the refusal itself, `BotOwedWork.stillRefused`). Throws when its record does not read.
+	 */
+	private refusedNow(agentId: string): boolean {
+		const entry = this.entries.get(agentId);
+		if (!entry) return false;
+		const record = this.ports.store().getBot(agentId);
+		return (
+			record !== undefined &&
+			this.admission.modelRefusal(record, this.admission.define(record, entry.builtFor)) !== undefined
 		);
 	}
 

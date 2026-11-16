@@ -85,8 +85,10 @@ export function botTurnCharge(
  * The metered part of a charge costing `usage` (`BotChargeReport.meteredUsd`) when the session's metered spend reads
  * `meteredUsd` and the charges before it cover `covered` of it, with how much they cover once it is fixed: what the
  * reading reached past them, at most the charge's cost (a metered share recorded before the range's other records waits
- * for the next charge, never lost). With nothing known covered (an earlier build's ledger, a watermark read back), as
- * much of the charge as the session spent metered at all: never less than the metered spend it holds.
+ * for the next charge, never lost). With nothing known covered (an earlier build's ledger, a watermark read back), or a
+ * reading below what is covered (its history read again under other models: a worker's attempt moved or left the
+ * projection, a subscription logged in or out), as much of the charge as the session spent metered at all: never less
+ * than the metered spend it holds, and later metered spend is never held back behind a watermark the reading left.
  */
 export function botChargeMeteredPart(
 	usage: Usage,
@@ -94,7 +96,7 @@ export function botChargeMeteredPart(
 	covered: number | undefined,
 ): { readonly usd: number; readonly covered: number } {
 	const cost = usage.cost.total;
-	const from = covered ?? Math.max(0, meteredUsd - cost);
+	const from = covered !== undefined && covered <= meteredUsd ? covered : Math.max(0, meteredUsd - cost);
 	const usd = Math.min(cost, Math.max(0, meteredUsd - from));
 	return { usd, covered: from + usd };
 }

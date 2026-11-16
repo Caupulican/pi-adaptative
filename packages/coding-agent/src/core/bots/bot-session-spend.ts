@@ -11,14 +11,13 @@
  * they do not.
  */
 
-import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { receiptCountsAgainstDollars } from "../cost/request-spend-budget.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
-import type { MeteredUsageShare } from "../cost/session-usage.ts";
+import { isUsage, type MeteredUsageShare } from "../cost/session-usage.ts";
 import { AWAY_DAY_BUDGET_REFUSAL_REASONS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
 import { workerUsageReportIdPrefix } from "../delegation/worker-usage-receipt-delivery.ts";
@@ -26,6 +25,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { costCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import type { BotSessionTurnPorts, BotSpendCeiling } from "./bot-session-turns.ts";
@@ -171,8 +171,8 @@ export class BotSessionSpend {
 
 	/**
 	 * How much of each share of the session's recorded spend is metered (`isMeteredSpend`, the rule the windows and the
-	 * ceilings read), fixed into each charge: a response or a summary by the model each of its parts names (one that names
-	 * none, the bot's own); a worker's usage receipt by the model its attempt runs on (`attemptModel`), else the one it
+	 * ceilings read), fixed into each charge: a response by the model it names, a summary by the models its components
+	 * name (what names none, the bot's own model); a worker's usage receipt by the model its attempt runs on (`attemptModel`), else the one it
 	 * names; a spawned or System One report by the models it names; what names none (a baseline, a receipt with no model,
 	 * the journal's overflow) as metered spend, which is never laxer. Read once per charge, over the projection as it is then.
 	 */
@@ -186,16 +186,35 @@ export class BotSessionSpend {
 			spend.provider !== undefined && spend.model !== undefined
 				? receiptCountsAgainstDollars({ provider: spend.provider, model: spend.model }, this.registry)
 				: otherwise;
-		const parts = (
-			components: readonly { readonly provider?: string; readonly model?: string; readonly usage: Usage }[],
-			otherwise: boolean,
-		): number => components.reduce((usd, part) => usd + (named(part, otherwise) ? part.usage.cost.total : 0), 0);
+		// The parts of `usd` its recorded components show spent on a subscription (each whole: naming its model, its usage a
+		// usage record) are not metered; the rest is, so a component that does not read is never laxer.
+		const lessSubscription = (usd: number, components: unknown): number => {
+			if (!Array.isArray(components)) return usd;
+			let subscription = 0;
+			for (const part of components)
+				if (
+					isPlainRecord(part) &&
+					typeof part.provider === "string" &&
+					typeof part.model === "string" &&
+					isUsage(part.usage) &&
+					!named({ provider: part.provider, model: part.model }, true)
+				)
+					subscription += part.usage.cost.total;
+			return Math.max(0, usd - subscription);
+		};
 		return (usage, share) => {
-			if (share.kind === "direct") return parts(getSessionEntryUsageComponents(share.entry), own);
 			if (share.kind === "semantic") return named(share.report, true) ? usage.cost.total : 0;
+			if (share.kind === "direct") {
+				const { entry } = share;
+				if (entry.type === "message")
+					return named(entry.message.role === "assistant" ? entry.message : {}, own) ? usage.cost.total : 0;
+				if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usageComponents !== undefined)
+					return lessSubscription(usage.cost.total, entry.usageComponents);
+				return own ? usage.cost.total : 0;
+			}
 			if (share.kind !== "spawned") return usage.cost.total;
 			const { report } = share;
-			if (report.usageComponents) return parts(report.usageComponents, true);
+			if (report.usageComponents) return lessSubscription(usage.cost.total, report.usageComponents);
 			const attempt = report.reportId === undefined ? undefined : attemptOfReport(attempts, report.reportId);
 			const metered = attempt ? isMeteredSpend(this.attemptModel(attempt), this.registry) : named(report, true);
 			return metered ? usage.cost.total : 0;

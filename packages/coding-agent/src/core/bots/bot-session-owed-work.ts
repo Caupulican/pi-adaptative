@@ -150,6 +150,11 @@ export interface BotOwedWorkPorts {
 	stopPorts(): BotStopPorts;
 	/** A refusal's cause may have cleared: the host takes the bot's refused work up again. */
 	retake(agentId: string): void;
+	/**
+	 * Whether the bot's session loaded here is still refused its model now (false for one not loaded here, whose ask reads
+	 * the refusal itself); throws when its record does not read.
+	 */
+	refusedNow(agentId: string): boolean;
 	/** Takes the inbox of a bot the host runs. */
 	takeInbox(agentId: string): void;
 	/** Whether a root session of another process works in `cwd` and opens the bot there (`BotSessionHostPorts.leavesTo`). */
@@ -692,8 +697,10 @@ export class BotOwedWork {
 	/**
 	 * Takes the bot's work refused for a model cause up again at `clearsAt`, when the cause is known to end then, else
 	 * one sweep interval (`OWED_INBOX_SWEEP_MS`) on: a cause with no known end (the day's away bound held by runs that end
-	 * with no set time, an account listing) ends by a change no alarm observes, and each retake still refused arms the next
-	 * (`stillRefused`). A refusal of the definition itself waits for its change. Any earlier alarm ends.
+	 * with no set time, an account listing) ends by a change no alarm observes. Such a retake leaves a session loaded here
+	 * as it is while it is still refused (`refusedNow`), never closing and opening it again for nothing, and arms the next;
+	 * an ask still refused arms the next as well (`stillRefused`). A record that does not read keeps it waiting, told once
+	 * per cause. A refusal of the definition itself waits for its change. Any earlier alarm ends.
 	 */
 	private armRetake(agentId: string, refused: Pick<RecordedRefusal, "cause" | "clearsAt"> | undefined): void {
 		this.alarms.get(agentId)?.stop();
@@ -705,9 +712,20 @@ export class BotOwedWork {
 			agentId,
 			alarmAt(timers, at, () => {
 				this.alarms.delete(agentId);
-				this.ports.retake(agentId);
+				if (refused.clearsAt === undefined && this.stillRefusedHere(agentId)) this.armRetake(agentId, refused);
+				else this.ports.retake(agentId);
 			}),
 		);
+	}
+
+	/** Whether the bot's session loaded here is still refused (`refusedNow`); a record that does not read is told once per cause. */
+	private stillRefusedHere(agentId: string): boolean {
+		try {
+			return this.ports.refusedNow(agentId);
+		} catch (error) {
+			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
+			return true;
+		}
 	}
 
 	/**
