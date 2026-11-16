@@ -11,7 +11,8 @@
  * made the call: the session, under the authority of the turn the call ran in and charged to the entry it was made at
  * (both read when the call started), or a worker runtime, in its own slots and under ids of its own, its wakes going to
  * it, so a worker is woken by its own watch though the session waits on the same subject. Each tells its result on the
- * owner's phone besides waking its armer, the result told once however many watches wait on its subject. A call that
+ * owner's phone besides waking its armer, the result told once however many watches wait on its subject (a commit's CI
+ * armed though its triggers did not settle a run tells its timeout to the armer only: the owner was promised no result). A call that
  * began before an owner's stop arms nothing after the stop. What was armed, what is still looked for and what was not
  * armed (and why: nothing reads it, it was there before the call, the slots are full, the owner stopped the work) is told
  * to the armer in one note per call.
@@ -82,6 +83,8 @@ export interface AutoWatchRequest {
 	readonly parentToolName: string;
 	/** When the call it follows began, on `OWNER_STOP_CLOCK`: an owner's stop made since refuses the arming. */
 	readonly callStartedAt: number;
+	/** CI was not known to run for the commit: the owner was promised no result, so its timeout is not told to the phone. */
+	readonly ciRunUnknown?: true;
 }
 
 /**
@@ -480,11 +483,12 @@ export class WatchAutoArm {
 						expiresAt: port.timers.now() + deadlineMs,
 						parentToolName: call.toolName,
 						callStartedAt: call.stopClockStartedAt,
+						...(caveat === undefined ? {} : { ciRunUnknown: true as const }),
 					},
 					context,
 				);
 				armed.push(
-					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}`})`,
+					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}; so its timeout is told to you, not the owner`})`,
 				);
 			} catch (error) {
 				missed.push(`${subjectOf(source)}: ${errorText(error)}`);

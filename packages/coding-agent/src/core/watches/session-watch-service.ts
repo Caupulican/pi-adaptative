@@ -16,6 +16,12 @@
  * reads it as a watch wake; a worker's wake goes to its runtime and reaches the session instead once the runtime has not
  * taken it for {@link WORKER_WAKE_RETRY_MS}. A wake is marked delivered only after its delivery returned, and its id and
  * words derive from the record alone, so a redelivery after a restart is the same input.
+ *
+ * A watch on a typed GitHub source is not ended at its end time until a read of it begun then has settled (its poller's
+ * deadline read, `github-watch-poller.ts`): a result GitHub completed by the end time fires it though it was read after
+ * (the result's own time, `GithubWatchResult.doneAt`), as one that completed while the session was closed is at its
+ * reopen; a read that failed or found it pending or done later ends it as timed out. A condition watch has no such time:
+ * its end time ends it with what it last saw.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -63,11 +69,7 @@ import {
 	githubWatchSubject,
 	isGithubWatchSource,
 } from "./github-watch-source.ts";
-import {
-	githubWatchFailingWakeText,
-	githubWatchFiredWakeText,
-	githubWatchTimedOutWakeText,
-} from "./github-watch-wake.ts";
+import { githubWatchWakeText } from "./github-watch-wake.ts";
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
@@ -121,6 +123,8 @@ export interface SessionWatchArmRequest {
 	readonly armedBy: SessionWatchArmer;
 	/** Tell the owner each result on the phone besides the armer's wake. */
 	readonly tellOwner?: boolean;
+	/** A `ci` watch on a commit CI was not known to run for when armed: its timeout is told to the armer, not the phone. */
+	readonly ciRunUnknown?: boolean;
 	/**
 	 * When the call the host arms this after began, on `OWNER_STOP_CLOCK` (the host's own arming, `watch-auto-arm.ts`): an
 	 * owner's stop applied here at or after then refuses it, since the stop ended the work that call belongs to, and the
@@ -217,7 +221,7 @@ function wakePlan(record: SessionWatchRecord): WatchWakePlan {
 export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWatchWake, planChars?: number): string {
 	const plan = wakePlan(record);
 	const { condition } = record;
-	if (isGithubWatchSource(condition)) return githubWatchWakeText(record, condition, wake, planChars);
+	if (isGithubWatchSource(condition)) return githubWatchWakeText(plan, record, condition, wake, planChars);
 	if (wake.kind === "fired") {
 		if (!record.event) throw new Error(`Watch ${record.watchId} has no recorded firing.`);
 		return watchFiredWakeText(
@@ -240,24 +244,6 @@ export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWa
 		);
 	if (!wake.failing) throw new Error(`Watch ${record.watchId} has no recorded failing streak.`);
 	return watchFailingWakeText(plan, record.incarnationId, condition, record.expiresAt, wake.failing, planChars);
-}
-
-/** The words of one wake of a typed GitHub source. */
-function githubWatchWakeText(
-	record: SessionWatchRecord,
-	source: GithubWatchSource,
-	wake: SessionWatchWake,
-	planChars?: number,
-): string {
-	const plan = wakePlan(record);
-	if (wake.kind === "fired") {
-		if (!record.result) throw new Error(`Watch ${record.watchId} has no recorded result.`);
-		return githubWatchFiredWakeText(plan, wake.deliveryId, source, record.result, planChars);
-	}
-	if (wake.kind === "timed-out")
-		return githubWatchTimedOutWakeText(plan, wake.deliveryId, source, record.expiresAt, record.result, planChars);
-	if (!wake.failing) throw new Error(`Watch ${record.watchId} has no recorded failing streak.`);
-	return githubWatchFailingWakeText(plan, record.incarnationId, source, record.expiresAt, wake.failing, planChars);
 }
 
 /**
@@ -353,6 +339,12 @@ export class SessionWatchService implements WatchObservationStore {
 	private lastDeliveryFault: string | undefined;
 	/** The latest instant an owner's stop was applied at here, on `OWNER_STOP_CLOCK`: no call begun by then is armed after. */
 	private latestStopAt: number | undefined;
+	/**
+	 * The typed watches past their end time waiting for their deadline read, by incarnation: since when (routines clock) and
+	 * whether that read settled. In memory: a reopen reads each again, as the end time passed while nothing read it.
+	 */
+	private readonly deadlineReads = new Map<string, { readonly since: number; settled: boolean }>();
+	private readonly readListeners = new Set<() => void>();
 
 	constructor(deps: SessionWatchServiceDeps) {
 		this.deps = deps;
@@ -473,6 +465,7 @@ export class SessionWatchService implements WatchObservationStore {
 				expiresAt: request.expiresAt,
 				armedBy: request.armedBy,
 				...(request.tellOwner === true ? { tellOwner: true } : {}),
+				...(request.ciRunUnknown === true ? { ciRunUnknown: true } : {}),
 				...(request.forRequirement === undefined ? {} : { forRequirement: request.forRequirement }),
 				...(served === undefined ? {} : { served }),
 				cursor: { kind: "watch", truth: null, fires: 0 },
@@ -537,7 +530,8 @@ export class SessionWatchService implements WatchObservationStore {
 		)
 			throw new Error("the owner's stop ended the work of the call that started it, which began before the stop");
 		const live = this.deps.ledger.list().filter((record) => isLiveSessionWatch(record, nowMs));
-		if (live.some((record) => record.watchId === request.watchId))
+		// A watch past its end time not yet ended (its deadline read pending) still holds its id.
+		if (this.deps.ledger.list().some((record) => record.watchId === request.watchId && record.status === "live"))
 			throw new Error(`Watch ${request.watchId} is already armed; cancel it first or arm under another id.`);
 		// Arming an id replaces its record, so an ended watch's id is taken again only once its armer has had every wake.
 		if (
@@ -580,8 +574,8 @@ export class SessionWatchService implements WatchObservationStore {
 
 	/**
 	 * The watches bound to `goalId`'s requirements, the latest armed per requirement (one it replaced is history): live
-	 * while it waits before its end time, with what is left of it on the routines clock; else how it ended. A live record
-	 * past its end time has timed out, which the next expiry pass records.
+	 * while it waits before its end time, with what is left of it on the routines clock, or for its deadline read; else how
+	 * it ended. Any other live record past its end time has timed out, which the next expiry pass records.
 	 */
 	boundTo(goalId: string, nowMs = this.deps.timers.now()): GoalBoundWatch[] {
 		const latest = new Map<string, SessionWatchRecord>();
@@ -591,11 +585,14 @@ export class SessionWatchService implements WatchObservationStore {
 			const held = latest.get(bound.requirementId);
 			if (!held || held.armedAt <= record.armedAt) latest.set(bound.requirementId, record);
 		}
-		return [...latest].map(([requirementId, { watchId, status, expiresAt }]) =>
-			status === "live" && nowMs < expiresAt
-				? { requirementId, watchId, status, remainingMs: expiresAt - nowMs }
-				: { requirementId, watchId, status: status === "live" ? "timed-out" : status },
-		);
+		return [...latest].map(([requirementId, record]) => {
+			const { watchId, status, expiresAt } = record;
+			if (status === "live" && nowMs < expiresAt)
+				return { requirementId, watchId, status, remainingMs: expiresAt - nowMs };
+			// Its deadline read decides whether it fired or timed out; its wake tells which.
+			if (this.awaitsDeadlineRead(record, nowMs)) return { requirementId, watchId, status };
+			return { requirementId, watchId, status: status === "live" ? "timed-out" : status };
+		});
 	}
 
 	/** System One's answers about the session's goal requirements, as the ledger keeps them across restarts. */
@@ -628,8 +625,24 @@ export class SessionWatchService implements WatchObservationStore {
 			);
 	}
 
+	/** Hears every change of the ledger, and a typed watch starting to wait for its deadline read. */
 	subscribe(listener: () => void): () => void {
-		return this.deps.ledger.subscribe(listener);
+		const unsubscribe = this.deps.ledger.subscribe(listener);
+		this.readListeners.add(listener);
+		return () => {
+			unsubscribe();
+			this.readListeners.delete(listener);
+		};
+	}
+
+	/** Whether `record` is a typed watch past its end time whose deadline read has not settled (it may still fire). */
+	private awaitsDeadlineRead(record: SessionWatchRecord, nowMs: number): boolean {
+		return (
+			record.status === "live" &&
+			nowMs >= record.expiresAt &&
+			isGithubWatchSource(record.condition) &&
+			this.deadlineReads.get(record.incarnationId)?.settled !== true
+		);
 	}
 
 	/** The live watches on a condition the routine watch monitor samples; a typed source is read by its own poller. */
@@ -651,14 +664,39 @@ export class SessionWatchService implements WatchObservationStore {
 		});
 	}
 
-	/** The live watches on a typed GitHub source, for the poller that reads them (`github-watch-poller.ts`). */
-	githubWatches(nowMs: number): readonly { watchId: string; incarnationId: string; source: GithubWatchSource }[] {
+	/**
+	 * The live watches on a typed GitHub source, for the poller that reads them (`github-watch-poller.ts`), and those past
+	 * their end time whose deadline read is owed, with since when it is owed.
+	 */
+	githubWatches(nowMs: number): readonly {
+		watchId: string;
+		incarnationId: string;
+		source: GithubWatchSource;
+		deadlineReadSince?: number;
+	}[] {
 		return this.deps.ledger.list().flatMap((record) => {
-			const { condition } = record;
-			return isGithubWatchSource(condition) && isLiveSessionWatch(record, nowMs)
-				? [{ watchId: record.watchId, incarnationId: record.incarnationId, source: condition }]
-				: [];
+			const { condition, watchId, incarnationId } = record;
+			if (!isGithubWatchSource(condition)) return [];
+			if (isLiveSessionWatch(record, nowMs)) return [{ watchId, incarnationId, source: condition }];
+			if (!this.awaitsDeadlineRead(record, nowMs)) return [];
+			const since = this.deadlineReads.get(incarnationId)?.since ?? nowMs;
+			return [{ watchId, incarnationId, source: condition, deadlineReadSince: since }];
 		});
+	}
+
+	/**
+	 * The poller's deadline read of a typed watch settled, whether it read it or failed: one it did not fire on ends now as
+	 * timed out, with what it last read.
+	 */
+	settleDeadlineRead(watchId: string, incarnationId: string): void {
+		const nowMs = this.deps.timers.now();
+		const record = this.deps.ledger.get(watchId);
+		if (record?.incarnationId !== incarnationId || !this.awaitsDeadlineRead(record, nowMs)) return;
+		this.deadlineReads.set(incarnationId, {
+			since: this.deadlineReads.get(incarnationId)?.since ?? nowMs,
+			settled: true,
+		});
+		if (this.active) this.expireDue();
 	}
 
 	/**
@@ -682,13 +720,16 @@ export class SessionWatchService implements WatchObservationStore {
 	}
 
 	/**
-	 * One reading of a typed source: a pending one is recorded when it changed, a done one fires the watch in the same
-	 * write that records the wake it owes, as a condition's firing does.
+	 * One reading of a typed source: a done one fires the watch in the same write that records the wake it owes, as a
+	 * condition's firing does, when it was read before the end time or came about by it (`doneAgoMs` before the reading,
+	 * placed on the routines clock as `doneAt`); any other is recorded when it changed, and the deadline read that made it
+	 * ends the watch as timed out.
 	 */
 	observeGithub(
 		watchId: string,
 		incarnationId: string,
 		reading: GithubWatchResult,
+		doneAgoMs?: number,
 	): "stale" | "unchanged" | "recorded" | "fired" {
 		const nowMs = this.deps.timers.now();
 		const record = this.deps.ledger.get(watchId);
@@ -696,13 +737,22 @@ export class SessionWatchService implements WatchObservationStore {
 			!record ||
 			record.incarnationId !== incarnationId ||
 			!isGithubWatchSource(record.condition) ||
-			!isLiveSessionWatch(record, nowMs)
+			!(isLiveSessionWatch(record, nowMs) || this.awaitsDeadlineRead(record, nowMs))
 		)
 			return "stale";
-		const result = boundedGithubWatchResult(reading);
-		if (result.state === "pending") {
+		const doneAt = reading.state === "done" && doneAgoMs !== undefined ? Math.max(0, nowMs - doneAgoMs) : undefined;
+		const result = boundedGithubWatchResult({ ...reading, ...(doneAt === undefined ? {} : { doneAt }) });
+		const inTime = nowMs < record.expiresAt || (result.doneAt !== undefined && result.doneAt <= record.expiresAt);
+		if (result.state === "pending" || !inTime) {
 			const last = record.result;
-			if (last?.status === result.status && last.runId === result.runId && last.runAttempt === result.runAttempt)
+			if (
+				last?.state === result.state &&
+				last.status === result.status &&
+				last.conclusion === result.conclusion &&
+				last.runId === result.runId &&
+				last.runAttempt === result.runAttempt &&
+				last.doneAt === result.doneAt
+			)
 				return "unchanged";
 			this.replace({ ...record, result });
 			return "recorded";
@@ -733,14 +783,24 @@ export class SessionWatchService implements WatchObservationStore {
 	 * whether a watch the session armed (a worker's wakes reach the worker) now holds that attempt's firing, so the root
 	 * delivery of the same result would be the session's second copy of it (`HostEventSessionController`). Coverage is the
 	 * record's own firing, never a watch's liveness read at one instant and its firing made at another. A failed attempt's
-	 * first failed job is read after the firing (`ciJobsAwaited`), and the wake waits for that read.
+	 * first failed job is read after the firing (`ciJobsAwaited`), and the wake waits for that read. The event says no
+	 * time the attempt completed at, so a watch past its end time waiting for its deadline read is not fired by it: it
+	 * carries the result, which its wake tells whether that read fires it or it times out, so it covers the result too.
 	 */
 	claimCi(event: CiAttemptTerminalEvent): boolean {
 		const nowMs = this.deps.timers.now();
 		const onCommit = (record: SessionWatchRecord) =>
 			record.condition.type === "ci" && record.condition.sha === event.headSha;
-		const due = this.deps.ledger.list().filter((record) => onCommit(record) && isLiveSessionWatch(record, nowMs));
-		if (due.length > 0) {
+		const ofAttempt = (record: SessionWatchRecord) =>
+			record.result?.state === "done" &&
+			record.result.runId === event.identity.runId &&
+			record.result.runAttempt === event.identity.runAttempt;
+		const records = this.deps.ledger.list();
+		const due = records.filter((record) => onCommit(record) && isLiveSessionWatch(record, nowMs));
+		const held = records.filter(
+			(record) => onCommit(record) && this.awaitsDeadlineRead(record, nowMs) && !ofAttempt(record),
+		);
+		if (due.length + held.length > 0) {
 			const result: GithubWatchResult = boundedGithubWatchResult({
 				state: "done",
 				status: "completed",
@@ -750,26 +810,27 @@ export class SessionWatchService implements WatchObservationStore {
 				runAttempt: event.identity.runAttempt,
 				observedAt: nowMs,
 			});
-			const fired = new Map(
-				due.map((record) => {
-					const ended: SessionWatchRecord = {
-						...record,
-						cursor: { ...record.cursor, fires: record.cursor.fires + 1, spent: true },
-						status: "fired",
-						endedAt: nowMs,
-						result,
-						...(event.conclusion === "failure" ? { awaitingFailedJob: true as const } : {}),
-					};
-					const wake: SessionWatchWake = {
-						kind: "fired",
-						deliveryId: deliveryId(this.deps.sessionId, ended, "fired", nowMs),
-						at: nowMs,
-						delivered: false,
-					};
-					return [record.watchId, { ...ended, wakes: withWake(ended, wake) }] as const;
-				}),
+			const next = new Map<string, SessionWatchRecord>(
+				held.map((record) => [record.watchId, { ...record, result }]),
 			);
-			this.deps.ledger.commit(this.deps.ledger.list().map((record) => fired.get(record.watchId) ?? record));
+			for (const record of due) {
+				const ended: SessionWatchRecord = {
+					...record,
+					cursor: { ...record.cursor, fires: record.cursor.fires + 1, spent: true },
+					status: "fired",
+					endedAt: nowMs,
+					result,
+					...(event.conclusion === "failure" ? { awaitingFailedJob: true as const } : {}),
+				};
+				const wake: SessionWatchWake = {
+					kind: "fired",
+					deliveryId: deliveryId(this.deps.sessionId, ended, "fired", nowMs),
+					at: nowMs,
+					delivered: false,
+				};
+				next.set(record.watchId, { ...ended, wakes: withWake(ended, wake) });
+			}
+			this.deps.ledger.commit(records.map((record) => next.get(record.watchId) ?? record));
 			this.followEndTimes();
 			this.drain();
 		}
@@ -779,9 +840,8 @@ export class SessionWatchService implements WatchObservationStore {
 				(record) =>
 					onCommit(record) &&
 					record.armedBy.kind !== "worker" &&
-					record.status === "fired" &&
-					record.result?.runId === event.identity.runId &&
-					record.result.runAttempt === event.identity.runAttempt,
+					(record.status === "fired" || this.awaitsDeadlineRead(record, nowMs)) &&
+					ofAttempt(record),
 			);
 	}
 
@@ -928,10 +988,26 @@ export class SessionWatchService implements WatchObservationStore {
 		this.followEndTimes();
 	}
 
-	/** Ends every live watch whose end time passed, with what it last saw and the wake it owes. */
+	/**
+	 * Ends every live watch whose end time passed, with what it last saw and the wake it owes; a typed one only once its
+	 * deadline read settled, the poller hearing of each that starts to wait for one.
+	 */
 	private expireDue(): void {
 		const nowMs = this.deps.timers.now();
-		const due = this.deps.ledger.list().filter((record) => record.status === "live" && nowMs >= record.expiresAt);
+		const records = this.deps.ledger.list();
+		const live = new Set(records.flatMap((record) => (record.status === "live" ? [record.incarnationId] : [])));
+		for (const incarnationId of [...this.deadlineReads.keys()])
+			if (!live.has(incarnationId)) this.deadlineReads.delete(incarnationId);
+		let awaited = false;
+		for (const record of records)
+			if (this.awaitsDeadlineRead(record, nowMs) && !this.deadlineReads.has(record.incarnationId)) {
+				this.deadlineReads.set(record.incarnationId, { since: nowMs, settled: false });
+				awaited = true;
+			}
+		if (awaited) for (const listener of [...this.readListeners]) listener();
+		const due = records.filter(
+			(record) => record.status === "live" && nowMs >= record.expiresAt && !this.awaitsDeadlineRead(record, nowMs),
+		);
 		if (due.length > 0) {
 			const ended = new Map(
 				due.map((record) => {
@@ -969,14 +1045,15 @@ export class SessionWatchService implements WatchObservationStore {
 		this.drain();
 	}
 
-	/** One timer at the nearest end time of a live watch. */
+	/** One timer at the nearest end time of a live watch; one waiting for its deadline read is ended by its settling. */
 	private followEndTimes(): void {
 		this.clearTimer("expiryTimer");
 		if (!this.active) return;
+		const nowMs = this.deps.timers.now();
 		const next = Math.min(
 			...this.deps.ledger
 				.list()
-				.filter((record) => record.status === "live")
+				.filter((record) => record.status === "live" && !this.awaitsDeadlineRead(record, nowMs))
 				.map((record) => record.expiresAt),
 		);
 		if (!Number.isFinite(next)) return;
@@ -1039,7 +1116,8 @@ export class SessionWatchService implements WatchObservationStore {
 	): Promise<"delivered" | "settled" | "later"> {
 		const details = sessionWatchWakeDetails(record, wake);
 		const text = sessionWatchWakeText(record, wake);
-		if (record.tellOwner) this.tellOwner(record, wake);
+		// The owner was promised no CI result for a commit CI was not known to run for: its timeout is the armer's alone.
+		if (record.tellOwner && !(wake.kind === "timed-out" && record.ciRunUnknown)) this.tellOwner(record, wake);
 		const owed = () =>
 			this.deps.ledger
 				.get(record.watchId)

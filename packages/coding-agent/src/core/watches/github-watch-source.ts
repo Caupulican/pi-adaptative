@@ -122,6 +122,13 @@ export interface GithubWatchResult {
 	readonly runId?: number;
 	readonly runAttempt?: number;
 	readonly observedAt: number;
+	/**
+	 * When a done result came about, on the session's routines clock (the clock of its watch's `expiresAt`), when the
+	 * reading said: GitHub's own time of it (a completed run's `updated_at`, the run's last change, which its completion
+	 * is; a release's `published_at`) placed there by its age at the reading ({@link GithubWatchReading}), so no clock of
+	 * this machine is compared with GitHub's. A watch fires on a result done by its end time though read after it.
+	 */
+	readonly doneAt?: number;
 }
 
 function resultText(value: unknown, limit: number, label: string): string {
@@ -149,6 +156,7 @@ export function parseGithubWatchResult(value: unknown): GithubWatchResult {
 			"runId",
 			"runAttempt",
 			"observedAt",
+			"doneAt",
 		]) ||
 		(value.state !== "pending" && value.state !== "done")
 	)
@@ -169,6 +177,7 @@ export function parseGithubWatchResult(value: unknown): GithubWatchResult {
 		...(value.runId === undefined ? {} : { runId: positiveInteger(value.runId, "result run") }),
 		...(value.runAttempt === undefined ? {} : { runAttempt: positiveInteger(value.runAttempt, "result attempt") }),
 		observedAt: positiveInteger(value.observedAt, "result time"),
+		...(value.doneAt === undefined ? {} : { doneAt: positiveInteger(value.doneAt, "result done time") }),
 	};
 }
 
@@ -190,6 +199,7 @@ export function boundedGithubWatchResult(result: GithubWatchResult): GithubWatch
 		...(result.runId === undefined ? {} : { runId: result.runId }),
 		...(result.runAttempt === undefined ? {} : { runAttempt: result.runAttempt }),
 		observedAt: result.observedAt,
+		...(result.doneAt === undefined ? {} : { doneAt: result.doneAt }),
 	};
 }
 
@@ -283,6 +293,11 @@ export interface GithubWatchReader {
 		sources: readonly GithubPolledSource[],
 		signal: AbortSignal,
 	): Promise<readonly GithubWatchReading[]>;
+	/**
+	 * The CI of a commit read straight from GitHub: the newest run of the checkout's CI workflow on `sha` (pending while
+	 * none is listed). A `ci` watch is read so once its end time passed, since the CI source's stream says no time.
+	 */
+	observeCi(sha: string, signal: AbortSignal): Promise<GithubWatchReading>;
 	/** The first failed job of a failed CI attempt. */
 	failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined>;
 	/**
@@ -319,7 +334,11 @@ export interface GithubCreatedRun {
 	readonly createdAt: number;
 }
 
-/** One source's reading: what it was seen as, or why it could not be read. */
+/**
+ * One source's reading: what it was seen as, or why it could not be read. `doneAgoMs` is how long before the reading was
+ * returned a done result came about, measured on GitHub's clock (its response's `Date` less the result's own time, plus
+ * the monotonic time since that response); the service places it on its routines clock as `GithubWatchResult.doneAt`.
+ */
 export type GithubWatchReading =
-	| { readonly ok: true; readonly result: GithubWatchResult }
+	| { readonly ok: true; readonly result: GithubWatchResult; readonly doneAgoMs?: number }
 	| { readonly ok: false; readonly reason: string };

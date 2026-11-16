@@ -4,7 +4,11 @@
  * its recent runs (a run older than the listing is read on its own), its releases with one listing of the repository's
  * releases; a failed run's first failed job is read from the attempt's jobs. A `ci` watch's commit becomes a subject of
  * the checkout's CI source (`ci-session-resource.ts`) through {@link GithubWatchHostReader.ciSubjects}, pinned to the
- * checkout's repository and CI workflow as the source's own subjects are.
+ * checkout's repository and CI workflow as the source's own subjects are; once its end time passed it is read here, from
+ * the CI workflow's runs on the commit. A done result's time is GitHub's own: a completed run's `updated_at` (a run
+ * carries no completion time of its own, and its last change is its completion: a rerun makes it pending again) and a
+ * release's `published_at`, told as its age on GitHub's clock (the response's `Date` less that time), never compared
+ * with a clock of this machine.
  */
 import type { CiAttemptIdentity, CiSubject } from "../../core/events/host-event-contract.ts";
 import { monotonicNow } from "../../core/util/timer-port.ts";
@@ -21,6 +25,21 @@ import type { CiCommandPort, CiRepository } from "./ci-provider.ts";
 import { GithubActionsCiProvider } from "./github-actions-ci-provider.ts";
 
 const MAX_LISTED = 100;
+/** The status a `ci` watch's commit is read as while GitHub lists no run of the CI workflow on it. */
+const NO_RUN = "no run";
+
+/** A response's body with GitHub's time it states (its `Date`, whole seconds) and when it arrived (`monotonicNow`). */
+interface Dated {
+	readonly body: unknown;
+	readonly githubNow: number;
+	readonly receivedAt: number;
+}
+
+/** A reading, with when its done result came about on the monotonic clock (its age is taken when it is returned). */
+interface Found {
+	readonly reading: GithubWatchReading;
+	readonly doneAt?: number;
+}
 
 interface Checkout {
 	readonly host: string;
@@ -42,6 +61,28 @@ function word(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** GitHub's time a response's headers state (its `Date`). */
+function statedTime(headers: string): number {
+	const stated = /^date:[ \t]*(.+?)[ \t]*\r?$/imu.exec(headers)?.[1];
+	const time = stated === undefined ? Number.NaN : Date.parse(stated);
+	if (!Number.isFinite(time)) throw new Error("GitHub's response stated no time.");
+	return time;
+}
+
+/** When GitHub's `time` was, on the monotonic clock: its age at the response, on GitHub's clock, before the response arrived. */
+function doneAtOf(response: Dated, time: unknown): number | undefined {
+	const at = typeof time === "string" ? Date.parse(time) : Number.NaN;
+	return Number.isFinite(at) ? response.receivedAt - Math.max(0, response.githubNow - at) : undefined;
+}
+
+/** The readings with each done result's age, taken now: how long before they are returned it came about. */
+function aged(found: readonly Found[]): GithubWatchReading[] {
+	const now = monotonicNow();
+	return found.map(({ reading, doneAt }) =>
+		reading.ok && doneAt !== undefined ? { ...reading, doneAgoMs: Math.max(0, Math.floor(now - doneAt)) } : reading,
+	);
+}
+
 export class GithubWatchHostReader implements GithubWatchReader {
 	private readonly port: CiCommandPort;
 	private readonly ci: GithubActionsCiProvider;
@@ -59,6 +100,23 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		return JSON.parse(
 			await this.port.run("gh", ["api", ...(host === undefined ? [] : ["--hostname", host]), path], signal),
 		);
+	}
+
+	/** One read of `path` with GitHub's time its response states. */
+	private async dated(host: string | undefined, path: string, signal: AbortSignal): Promise<Dated> {
+		const response = await this.port.run(
+			"gh",
+			["api", "--include", ...(host === undefined ? [] : ["--hostname", host]), path],
+			signal,
+		);
+		const receivedAt = monotonicNow();
+		const gap = /\r?\n\r?\n/u.exec(response);
+		if (!gap) throw new Error("GitHub's response holds no body.");
+		return {
+			body: JSON.parse(response.slice(gap.index + gap[0].length)),
+			githubNow: statedTime(response.slice(0, gap.index)),
+			receivedAt,
+		};
 	}
 
 	/** The checkout's GitHub repository, read once; a failed read is read again by the next call. */
@@ -114,10 +172,7 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		);
 		const elapsed = Math.max(0, monotonicNow() - instant);
 		const [headers = ""] = response.split(/\r?\n\r?\n/u, 1);
-		const stated = /^date:[ \t]*(.+?)[ \t]*\r?$/imu.exec(headers)?.[1];
-		const githubNow = stated === undefined ? Number.NaN : Date.parse(stated);
-		if (!Number.isFinite(githubNow)) throw new Error("GitHub's response stated no time.");
-		return Math.floor((githubNow - elapsed) / 1_000) * 1_000;
+		return Math.floor((statedTime(headers) - elapsed) / 1_000) * 1_000;
 	}
 
 	async runsCreatedSince(
@@ -191,39 +246,73 @@ export class GithubWatchHostReader implements GithubWatchReader {
 	): Promise<readonly GithubWatchReading[]> {
 		const { host, name } = await this.repository(repo, signal);
 		const runIds = sources.flatMap((source) => (source.type === "github_run" ? [source.runId] : []));
-		const runs =
+		const listing =
 			runIds.length > 1
-				? new Map(
-						listed(
-							await this.api(host, `repos/${name}/actions/runs?per_page=${MAX_LISTED}`, signal),
-							"workflow_runs",
-						).map((run) => [run.id, run] as const),
-					)
-				: new Map<unknown, Record<string, unknown>>();
+				? await this.dated(host, `repos/${name}/actions/runs?per_page=${MAX_LISTED}`, signal)
+				: undefined;
+		const runs = new Map(listing ? listed(listing.body, "workflow_runs").map((run) => [run.id, run] as const) : []);
 		const releases = sources.some((source) => source.type === "release")
-			? listed(await this.api(host, `repos/${name}/releases?per_page=${MAX_LISTED}`, signal), "releases")
-			: [];
-		const readings: GithubWatchReading[] = [];
+			? await this.dated(host, `repos/${name}/releases?per_page=${MAX_LISTED}`, signal)
+			: undefined;
+		const releaseList = releases ? listed(releases.body, "releases") : [];
+		const found: Found[] = [];
 		for (const source of sources) {
 			signal.throwIfAborted();
 			try {
 				if (source.type === "release") {
-					readings.push({
-						ok: true,
-						result: releaseResult(releases.find((entry) => entry.tag_name === source.tag)),
-					});
+					found.push(releaseFound(releases, releaseList, source.tag));
 					continue;
 				}
-				const run =
-					runs.get(source.runId) ??
-					record(await this.api(host, `repos/${name}/actions/runs/${source.runId}`, signal));
-				readings.push({ ok: true, result: await this.runResult(host, name, run, signal) });
+				const listedRun = listing ? runs.get(source.runId) : undefined;
+				const response =
+					listing && listedRun
+						? listing
+						: await this.dated(host, `repos/${name}/actions/runs/${source.runId}`, signal);
+				found.push(await this.runFound(host, name, listedRun ?? record(response.body), response, signal));
 			} catch (error) {
 				signal.throwIfAborted();
-				readings.push({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+				found.push({ reading: { ok: false, reason: error instanceof Error ? error.message : String(error) } });
 			}
 		}
-		return readings;
+		return aged(found);
+	}
+
+	async observeCi(sha: string, signal: AbortSignal): Promise<GithubWatchReading> {
+		try {
+			const repository = await this.ci.repository(signal);
+			const response = await this.dated(
+				repository.host,
+				`repos/${repository.nameWithOwner}/actions/workflows/${repository.workflowId}/runs?head_sha=${sha}&per_page=${MAX_LISTED}`,
+				signal,
+			);
+			// The newest run is the commit's current CI, its latest attempt the run's own status and conclusion.
+			const newest = listed(response.body, "workflow_runs").reduce<Record<string, unknown> | undefined>(
+				(found, run) => (found === undefined || Number(run.run_number) > Number(found.run_number) ? run : found),
+				undefined,
+			);
+			if (!newest) return { ok: true, result: { state: "pending", status: NO_RUN, observedAt: Date.now() } };
+			const [reading] = aged([
+				await this.runFound(repository.host, repository.nameWithOwner, newest, response, signal),
+			]);
+			if (!reading) throw new Error("No reading of the commit's CI.");
+			return reading;
+		} catch (error) {
+			signal.throwIfAborted();
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	/** A run as a watch reads it, with when it completed (its last change) on the monotonic clock. */
+	private async runFound(
+		host: string | undefined,
+		name: string,
+		run: Record<string, unknown>,
+		response: Dated,
+		signal: AbortSignal,
+	): Promise<Found> {
+		const result = await this.runResult(host, name, run, signal);
+		const doneAt = result.state === "done" ? doneAtOf(response, run.updated_at) : undefined;
+		return { reading: { ok: true, result }, ...(doneAt === undefined ? {} : { doneAt }) };
 	}
 
 	private async runResult(
@@ -323,6 +412,14 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
 	}
+}
+
+/** The release of `tag` in a listing, with when it was published on the monotonic clock. */
+function releaseFound(response: Dated | undefined, releases: readonly Record<string, unknown>[], tag: string): Found {
+	const release = releases.find((entry) => entry.tag_name === tag);
+	const result = releaseResult(release);
+	const doneAt = response && result.state === "done" ? doneAtOf(response, release?.published_at) : undefined;
+	return { reading: { ok: true, result }, ...(doneAt === undefined ? {} : { doneAt }) };
 }
 
 /** A release as a watch reads it: published, a draft, or not there yet. */

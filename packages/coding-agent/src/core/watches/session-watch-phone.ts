@@ -2,8 +2,8 @@
  * A session watch's result as the owner's phone hears it (`OwnerPush.tell`) when its armer asked for that (`tellOwner`):
  * one sentence in the interface language, `Watch "<purpose, or what it waits on>": <outcome>.`, or `Watch: <outcome>.` when
  * the outcome already names what it waited on (a GitHub source's result, armed with no purpose), keyed by the wake it
- * tells of, so each firing, end or failing streak is told once however often its delivery is tried; a GitHub result is
- * keyed by what it is a result of, so two watches on one subject tell it once.
+ * tells of, so each firing, end or failing streak is told once however often its delivery is tried; a GitHub source's
+ * wake is keyed by its subject and what it tells, so two watches on one subject tell it once.
  */
 import { createHash } from "node:crypto";
 import type { InterfaceText } from "../language/interface-text.ts";
@@ -35,17 +35,26 @@ export function watchResultPhoneText(
 
 /**
  * The key one wake is told under: the watch and the wake's own delivery id, so a retried delivery tells nothing new. A
- * GitHub firing is keyed by what it is a result of instead (the subject and the run attempt it ended, or the release's
- * status), so the session's and a worker's watch on one subject tell the owner that result once, and a rerun's is told.
+ * GitHub source's wake is keyed by its subject instead, so the session's and a worker's watch on one subject tell the
+ * owner once: a firing by what it is a result of (the run attempt it ended, or the release's status), so a rerun's is
+ * told; a timeout or a failing streak by what it last read of the subject, since two watches on it are armed at their
+ * own times and so hold end times of their own (a deadline in the key would tell the same news twice). A later timeout
+ * or streak of the subject that read it otherwise is told; one that read it the same is news the owner already has.
  */
 export function sessionWatchPhoneKey(record: SessionWatchRecord, wake: SessionWatchWake): string {
 	const { condition, result } = record;
-	if (wake.kind === "fired" && isGithubWatchSource(condition) && result) {
-		const of = result.runId === undefined ? result.status : `${result.runId}:${result.runAttempt ?? 1}`;
-		const told = `${githubWatchSubject(condition)}\n${of}`;
-		return `watch:github:${createHash("sha256").update(told).digest("hex").slice(0, 16)}`;
-	}
-	return `watch:${record.watchId}:${wake.deliveryId.replace(/^watch:/u, "").slice(0, 16)}`;
+	if (!isGithubWatchSource(condition) || (wake.kind === "fired" && !result))
+		return `watch:${record.watchId}:${wake.deliveryId.replace(/^watch:/u, "").slice(0, 16)}`;
+	const subject = githubWatchSubject(condition);
+	const told =
+		wake.kind === "fired" && result
+			? `${subject}\n${result.runId === undefined ? result.status : `${result.runId}:${result.runAttempt ?? 1}`}`
+			: `${subject}\n${wake.kind}\n${
+					result === undefined
+						? "unread"
+						: [result.state, result.status, result.conclusion, result.runId, result.runAttempt].join(":")
+				}`;
+	return `watch:github:${createHash("sha256").update(told).digest("hex").slice(0, 16)}`;
 }
 
 /** What one wake tells the owner: the watch's purpose (or what it waits on) and how it ended or stands. */

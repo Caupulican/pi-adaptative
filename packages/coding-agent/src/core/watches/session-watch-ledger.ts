@@ -139,6 +139,11 @@ export interface SessionWatchRecord {
 	readonly awaitingFailedJob?: true;
 	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
 	readonly tellOwner?: true;
+	/**
+	 * A `ci` watch the host armed on a commit its CI workflow's triggers did not settle a run for (`watch-auto-arm.ts`):
+	 * the owner was promised no CI result, so its timeout wakes the armer only, never the phone.
+	 */
+	readonly ciRunUnknown?: true;
 	/** The goal requirement the watch waits for (`watch` arm `forRequirement`): the goal's continuation waits on it. */
 	readonly forRequirement?: SessionWatchRequirement;
 	/**
@@ -322,6 +327,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"result",
 			"awaitingFailedJob",
 			"tellOwner",
+			"ciRunUnknown",
 			"forRequirement",
 			"served",
 			"wakes",
@@ -333,11 +339,14 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 	const status = oneOf(value.status, SESSION_WATCH_STATUSES, "status");
 	const endedAt = value.endedAt === undefined ? undefined : instant(value.endedAt);
 	if ((status === "live") !== (endedAt === undefined)) throw new TypeError("Watch record is invalid.");
+	// `armedAt` is on OWNER_STOP_CLOCK and `expiresAt` on the routines clock: no order between them is a fact (the arming
+	// checked its end time against the routines clock, `SessionWatchService.requireRoom`).
 	const armedAt = instant(value.armedAt);
 	const expiresAt = instant(value.expiresAt);
-	if (expiresAt <= armedAt) throw new TypeError("Watch end time is invalid.");
 	if (value.tellOwner !== undefined && value.tellOwner !== true) throw new TypeError("Watch record is invalid.");
 	const condition = parseSessionWatchSource(value.condition);
+	if (value.ciRunUnknown !== undefined && (value.ciRunUnknown !== true || condition.type !== "ci"))
+		throw new TypeError("Watch record is invalid.");
 	if (value.result !== undefined && !isGithubWatchSource(condition)) throw new TypeError("Watch result is invalid.");
 	if (
 		value.awaitingFailedJob !== undefined &&
@@ -364,6 +373,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		...(value.result === undefined ? {} : { result: parseGithubWatchResult(value.result) }),
 		...(value.awaitingFailedJob === true ? { awaitingFailedJob: true as const } : {}),
 		...(value.tellOwner === true ? { tellOwner: true as const } : {}),
+		...(value.ciRunUnknown === true ? { ciRunUnknown: true as const } : {}),
 		...(value.forRequirement === undefined ? {} : { forRequirement: parseRequirement(value.forRequirement) }),
 		...(value.served === undefined ? {} : { served: parseServed(value.served) }),
 		wakes: value.wakes.map(parseWake),
