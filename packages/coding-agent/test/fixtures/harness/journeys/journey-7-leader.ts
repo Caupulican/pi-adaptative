@@ -19,6 +19,7 @@ import {
 	offeredActions,
 	offeredTools,
 	onlyAgentOn,
+	opensLeaderOutcome,
 	PHASE_JUDGMENTS,
 	reached,
 	TRACK,
@@ -330,10 +331,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			name: "j7-lead-outcome",
 			maxRequests: 8,
-			until: (request) => deliveredLines(request).some((line) => /^Leader \S+ finished /.test(line)),
+			until: (request) => deliveredLines(request).some(opensLeaderOutcome(LEADER)),
 			reply: (request) => {
 				const lines = deliveredLines(request);
-				if (!lines.some((line) => /^Leader \S+ finished /.test(line))) {
+				if (!lines.some(opensLeaderOutcome(LEADER))) {
 					return { content: [{ type: "text", text: "Nothing to read yet." }] };
 				}
 				seen.wakeLines = lines;
@@ -466,7 +467,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			// The leader's own words arrive marked as evidence, never as instructions.
 			reportMarked: seen.wakeLines.includes("Leader report (untrusted worker evidence):"),
 			reportQuoted: seen.wakeLines.join("\n").includes(LEADER_REPORT),
-			oneNotice: seen.wakeLines.filter((line) => /^Leader \S+ finished /.test(line)).length,
+			oneNotice: seen.wakeLines.filter(opensLeaderOutcome(LEADER)).length,
 		},
 		"the root is told once, by the goal's outcome notice, which names the goal and quotes the leader's words as a report",
 	).toEqual({

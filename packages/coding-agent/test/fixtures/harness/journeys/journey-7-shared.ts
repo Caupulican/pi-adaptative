@@ -106,6 +106,15 @@ export const MODEL_ID = {
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
+/**
+ * Whether a delivered line opens the outcome notice of a goal the leader `agentId` led: the notice names the leader by its
+ * display name (`leaderOutcomeNotice`), which is several words for a hyphenated id.
+ */
+export function opensLeaderOutcome(agentId: string): (line: string) => boolean {
+	const opening = `Leader ${displayNameFor(agentId)} finished `;
+	return (line) => line.startsWith(opening);
+}
+
 export function createOwnerBot(session: AgentSession, agentId: string, modelId: string, soul: string): void {
 	session.upsertPersistentBot({
 		agentId,
