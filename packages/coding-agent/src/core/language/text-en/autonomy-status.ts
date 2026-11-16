@@ -268,7 +268,7 @@ export const AUTONOMY_STATUS = {
 			`away ${settings.enabled ? "on" : "off"}: spent ${"amount" in settings.spent ? `$${settings.spent.amount}` : `unread (${settings.spent.unread.cause}: ${settings.spent.unread.path}; no metered run or turn away is admitted until it reads)`} of $${settings.maxPerDay} (24 h), $${settings.maxPerRun} per run, ${settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
 		/** Of the day's away spend, the whole day bound a channel journal set aside within the last day charges until `until`. */
 		resetCharge: (amount: string, until: string) =>
-			`of it, $${amount} is a channel journal that did not parse and was set aside: the turns away it held are unknown, so it is charged as the whole day bound until ${until} (the daemon's report names the file)`,
+			`of it, $${amount} is charged for a channel journal that did not parse and was set aside: the turns away it held are unknown, so it counts as the whole day bound until ${until}`,
 		parentsHosted: (hosted: string) => `parents hosted: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `always-on service: ${unavailable}`,
