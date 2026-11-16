@@ -7,8 +7,8 @@
  *
  * What it ends: the bot's own work first, which the stop waits on until it is ended: every open plan is closed and every
  * unended worker attempt cancelled, the bot's parent agents included (`OWNER_STOPPED_REASON`, whose ends wake no one), then
- * the bot's goal is paused when it runs or the system would resume it on its own and the owner has not set it going since
- * the stop was made (`holdPersistedGoalForOwnerStop`; the owner resumes it), and the usage-limit wait of every usage stop
+ * the bot's goal is held when it runs or the system would resume it on its own and the owner has not set it going since
+ * the stop was made (`holdPersistedGoalForOwnerStop`; the owner's next words resume it), and the usage-limit wait of every usage stop
  * made until the owner's is declined (`declineUsageWaitForOwner`, once per stop), and what the bot's session armed or was
  * fired for before the stop is ended: its watches armed until then are deleted and the results it has not taken, fired for
  * it until then or by those watches since, are settled without a turn, in the store and in its session's watch ledger alike (`endWatchesBeforeStop`). The stop is then taken, and every job a
@@ -446,7 +446,7 @@ function refuseMessagesBeforeStop(agentDir: string, agentId: string, at: number,
 
 /**
  * Applies the stops waiting for bot `agentId` while no process hosts it, under its host lock: its saved session's workers
- * ended (`cancelBundleWorkers`), its goal paused and its usage wait declined in its transcript, the messages the stop
+ * ended (`cancelBundleWorkers`), its goal held and its usage wait declined in its transcript, the messages the stop
  * covers refused and the stops deleted, then the jobs every session of its home placed ended, all in one synchronous run
  * that releases the lock at its end. The caller found a stop waiting (in the inbox, or held by `unrecorded`). The session is
  * read from the bot's home on disk under the lock ({@link UnrecordedBotStops.underLock}). A bot with no saved session has

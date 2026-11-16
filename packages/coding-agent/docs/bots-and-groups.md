@@ -136,7 +136,7 @@ worker's end opens the bot's next turn, as a worker's handoff opens the main ses
 bot's own workers hold no `bot_message` (the bot holds no messaging to lend), and a profile bot's workers that hold it
 are offered only `reply` to the bot. `/bot stop` stops the bot's turn and every worker it started, and says the
 bot was stopped when it ended a turn or input in flight, or the workers in flight; a stop that could not be recorded or
-taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also pauses its
+taken still ends the turn and the workers of the bot this process hosts, and one that could not be recorded also holds its
 goal, declines its usage-limit wait and refuses the messages sent to the bot before it, as a recorded stop does. A
 stop that could not be recorded for a bot no process hosts is held by the process that made it, across the root
 sessions it runs in turn (a new, resumed or forked session keeps it), scoped to the work there was when it was made: the
@@ -187,7 +187,7 @@ A bot's unfinished goal continues on its own, as the root's does, where the sett
 continue (`goalAutoContinue`). A closed bot whose saved session holds a goal its load would take up (a running goal, or
 one a stop the system's own recovery resumes held) is owed work: the process that finds it unhosted opens its session in
 the directory it worked in, and the session's own continuation carries the goal on until it settles. A goal a usage limit
-stopped waits for the usage reset instead; one the owner's stop paused waits for the owner. A session that closed holding
+stopped waits for the usage reset instead; one the owner's stop held waits for the owner's next words. A session that closed holding
 a goal it had taken up is not opened again for that goal, only for another goal or a later change of it. When the spend of
 the request a bot's turn serves reaches one of its dollar bounds, the turn stops and its running goal is held (`blocked`,
 reason `spend_bound:`): no automatic recovery resumes it, and the owner's next words, which open a new request, do.
@@ -208,7 +208,7 @@ Where a bot's goal is read:
 | --- | --- | --- |
 | `BotSessionHost.goalOf`, `BotRemoteView.savedGoalOf` | the loaded session's goal, else the saved session file's | the roster, `/bot list`, the selector, the chat badge and the Chats & Teams pane |
 | `SavedSessionLedger` (`bot-owed-ledgers.ts`) | the saved session file of a closed bot | its usage wait, whether its goal is owed, and the goal it closed holding |
-| `bot-stop.ts` | the loaded session's goal, or the closed transcript's | the owner's stop pauses it |
+| `bot-stop.ts` | the loaded session's goal, or the closed transcript's | the owner's stop holds it until the owner's next words |
 | the session's goal controller | its own goal | continuation, and its restore when the session loads |
 | the proactive review (`proactivity-controller.ts`) | the loaded session's goal | the summary the review weighs, and whether its result is still current |
 | `bot-session-turns.ts` | the loaded session's goal | the hold at a spend bound |

@@ -315,11 +315,18 @@ export function pausePersistedGoal(host: PersistedGoalStateHost, now = new Date(
 	return persistResult(host, current, pauseGoal(current, now));
 }
 
+/** The reason prefix of a goal the owner's stop of a bot holds: no automatic recovery or usage reset resumes it. */
+export const OWNER_STOP_GOAL_REASON_PREFIX = "owner_stop:";
+
+const OWNER_STOP_GOAL_REASON = `${OWNER_STOP_GOAL_REASON_PREFIX} the owner stopped this bot's work; the owner's next words resume the goal`;
+
 /**
  * The owner's stop of a bot's work, made at `stopAt` and applied at `now`, applied to its goal: a goal running, or stopped
- * by the system (a guard, a provider failure, a usage limit) and so resumed by the system on its own, is paused, and
- * resumes only when the owner resumes it. A goal the owner or its agent already holds, one that ended, or one the owner set
- * going after the stop was made (`goalSetGoingSince`) is left as it is; undefined then.
+ * by the system (a guard, a provider failure, a usage limit) and so resumed by the system on its own, is held as a system
+ * stop (`blocked`, reason {@link OWNER_STOP_GOAL_REASON_PREFIX}), which neither the system's own recovery nor a usage reset
+ * resumes and the owner's next delivered words do (`planSystemGoalResume`, source `"owner"`). A goal the owner or its agent
+ * already holds, one already held by an owner's stop, one that ended, or one the owner set going after the stop was made
+ * (`goalSetGoingSince`) is left as it is; undefined then.
  */
 export function holdPersistedGoalForOwnerStop(
 	host: PersistedGoalStateHost,
@@ -330,8 +337,11 @@ export function holdPersistedGoalForOwnerStop(
 	if (!current) return undefined;
 	const systemResumes =
 		isGoalExecutionActive(current.status) || isSystemStoppedGoal(current) || current.status === "usage_limited";
-	if (!systemResumes || goalSetGoingSince(current, stopAt)) return undefined;
-	return persistResult(host, current, { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) });
+	const held =
+		isSystemStoppedGoal(current) && current.blockedReason?.startsWith(OWNER_STOP_GOAL_REASON_PREFIX) === true;
+	if (!systemResumes || held || goalSetGoingSince(current, stopAt)) return undefined;
+	const stop = { type: "system_stop_goal", status: "blocked", reason: OWNER_STOP_GOAL_REASON, now } as const;
+	return persistResult(host, current, { ok: true, state: applyGoalEvent(current, stop) });
 }
 
 /**
