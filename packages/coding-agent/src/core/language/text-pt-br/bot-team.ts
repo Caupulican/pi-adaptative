@@ -79,6 +79,10 @@ export const BOT_TEAM = {
 		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pode ser lido (${reason}); até ser lido, todo o routines.away.maxUsdPerDay conta como gasto, então rotinas, canais e bots esperam enquanto você está fora. Ele é lido de novo a cada verificação.`,
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: esta sessão não conseguiu remover o registro de que hospeda bots (${reason}); o daemon de bots deixa os bots deste diretório para ela até este processo terminar.`,
+	botRootHostDeadNotRemoved: (file: string, reason: string) =>
+		`Bots: o registro de uma sessão que hospedava bots e já terminou (${file}) não pôde ser removido (${reason}); ele não é contado, e a remoção é tentada de novo a cada leitura.`,
+	botsOwedNotCounted: (reason: string) =>
+		`Bots: os bots com trabalho pendente não puderam ser contados (${reason}); rotinas e canais servidos na ausência continuam mantendo o daemon de bots ativo, e os bots são contados de novo na próxima verificação, com um intervalo crescente enquanto a contagem continuar falhando.`,
 	botRootHostNotRecorded: (reason: string) =>
 		`Bots: esta sessão não conseguiu registrar que hospeda bots (${reason}); o daemon de bots continua hospedando os bots que tem, e suas mensagens chegam a eles pelas caixas de entrada.`,
 	botProfileNeedsRoot: (agentId: string, profileId: string) =>

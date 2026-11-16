@@ -4,7 +4,8 @@
  * detaches. The bot daemon reads them (`readBotRootHostPlaces`): a bot working in a root's directory is that root's to
  * open, so the daemon opens none there and closes an idle one it hosts, which the root then opens for what it is owed.
  * A record whose process is proven gone on this machine is removed by the reader; one whose process cannot be judged
- * alive (another system's, an unreadable record) is not counted. Builds up to 0.104.65 write none: the daemon keeps
+ * alive (another system's, an unreadable record) is not counted, nor one proven gone whose removal the file system
+ * refused (told to the reader's owner once per cause, its removal tried again at each read). Builds up to 0.104.65 write none: the daemon keeps
  * hosting while one of their roots is open, and that root's messages reach the bot through its inbox, as they reach any
  * host in another process.
  */
@@ -21,8 +22,11 @@ import {
 } from "../../kernel/reliability/owner-identity.ts";
 import { botRootHostsDir } from "../agent-paths.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { errorText } from "./bot-error-text.ts";
+import { botFailureCause } from "./bot-failure-words.ts";
 
 /** One root session hosting bots: its process and the directory it works in. */
 interface BotRootHostRecord {
@@ -68,9 +72,10 @@ function readRecord(file: string): BotRootHostRecord | undefined {
 
 /**
  * The directories (`realPathIdentity`) live root sessions host bots in, read now; records of processes proven gone are
- * removed. Throws when the directory exists and cannot be listed.
+ * removed, and one whose removal fails is skipped and handed to `notRemoved`. Throws when the directory exists and
+ * cannot be listed.
  */
-export function readBotRootHostPlaces(agentDir: string): Set<string> {
+function readBotRootHostPlaces(agentDir: string, notRemoved: (file: string, error: unknown) => void): Set<string> {
 	const dir = botRootHostsDir(agentDir);
 	let names: string[];
 	try {
@@ -85,7 +90,38 @@ export function readBotRootHostPlaces(agentDir: string): Set<string> {
 		const record = readRecord(file);
 		if (!record) continue;
 		if (judgeOwner(record.owner) === "alive") places.add(realPathIdentity(record.cwd));
-		else if (isOwnerProvenDeadOnThisMachine(record.owner)) rmSync(file, { force: true });
+		else if (isOwnerProvenDeadOnThisMachine(record.owner))
+			try {
+				rmSync(file, { force: true });
+			} catch (error) {
+				notRemoved(file, error);
+			}
 	}
 	return places;
+}
+
+/**
+ * One reader's view of the root hosts' records (`readBotRootHostPlaces`): a record of a process proven gone that the file
+ * system does not let it remove (EPERM, EBUSY) is skipped, its process being gone, and told through `warn` once per file
+ * and cause (`botRootHostDeadNotRemoved`).
+ */
+export class BotRootHostReader {
+	private readonly agentDir: string;
+	private readonly warn: (message: string) => void;
+	private readonly told = new Set<string>();
+
+	constructor(agentDir: string, warn: (message: string) => void) {
+		this.agentDir = agentDir;
+		this.warn = warn;
+	}
+
+	/** The directories live root sessions host bots in, read now. Throws when the records' directory does not list. */
+	places(): Set<string> {
+		return readBotRootHostPlaces(this.agentDir, (file, error) => {
+			const cause = botFailureCause("remove-root-host", file, error);
+			if (this.told.has(cause)) return;
+			this.told.add(cause);
+			this.warn(interfaceText().botTeam.botRootHostDeadNotRemoved(file, errorText(error)));
+		});
+	}
 }

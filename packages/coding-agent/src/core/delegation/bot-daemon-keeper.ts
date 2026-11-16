@@ -11,6 +11,8 @@
  */
 
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { errorText } from "../bots/bot-error-text.ts";
+import { botFailureCause } from "../bots/bot-failure-words.ts";
 import { awayChannels, awayChannelsKey } from "../channels/away-channels.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { AwayService } from "../routines/away-service.ts";
@@ -63,6 +65,8 @@ export class BotDaemonKeeper {
 	private revision: number | undefined;
 	/** The last reason the daemon could not be started by itself, reported once until it changes. */
 	private startFailure: string | undefined;
+	/** Why the bots owed work last did not count (`botFailureCause`), told once until they count or the cause changes. */
+	private countFailure: string | undefined;
 	/** The lease token of the daemon this runtime last launched: one it never replaces for its build. */
 	private launchedToken: string | undefined;
 	/** The one alarm that re-ensures the daemon when the lease this session last saw would no longer be held. */
@@ -102,7 +106,8 @@ export class BotDaemonKeeper {
 	 * Every ensure that finds away work arms one alarm at the instant the lease it saw (or its fresh claim) stops being
 	 * held; the alarm runs this again (`recheck`: without the always-on reconcile), so a daemon that died mid-session is
 	 * relaunched by that expiry instead of waiting for a save or settings change, and so does a host letting bots go
-	 * (`botsLetGo`). A failed ensure backs off on the same alarm.
+	 * (`botsLetGo`). A failed ensure backs off on the same alarm, and so does an ensure whose bots owed work did not count
+	 * (`awayBots`), whatever else it found: the bots may be owed work, so they are counted again.
 	 */
 	ensure(recheck = false): void {
 		const { ports } = this;
@@ -110,8 +115,9 @@ export class BotDaemonKeeper {
 		if (!store) return;
 		this.revision = store.getRoutineRevision();
 		const clock = ports.clock();
-		const { awayWork, failure, leaseHeldUntil } = this.bringUp(store, clock);
-		this.arm(awayWork > 0 ? this.nextCheckAt(clock.now(), failure !== undefined, leaseHeldUntil) : undefined);
+		const { awayWork, failure, botsUncounted, leaseHeldUntil } = this.bringUp(store, clock);
+		const failed = failure !== undefined || botsUncounted;
+		this.arm(awayWork > 0 || botsUncounted ? this.nextCheckAt(clock.now(), failed, leaseHeldUntil) : undefined);
 		if (recheck) return;
 		try {
 			if (ports.ownsHostDuties()) ports.awayService().reconcile(awayWork);
@@ -216,15 +222,18 @@ export class BotDaemonKeeper {
 
 	/**
 	 * Launches the daemon while there is away work and no daemon holds the lease, or the one holding it is of an older build
-	 * this runtime did not launch: the away work found, the reason it could not start (told once until it changes) and when
-	 * the lease left behind stops being held (absent when nothing is read).
+	 * this runtime did not launch: the away work found, the reason it could not start (told once until it changes), whether
+	 * the bots owed work did not count (`awayBots`: told on its own, the rest counted all the same) and when the lease left
+	 * behind stops being held (absent when nothing is read).
 	 */
 	private bringUp(
 		store: PersistentBotTeamStore,
 		clock: TimerPort,
-	): { awayWork: number; failure: string | undefined; leaseHeldUntil: number | undefined } {
+	): { awayWork: number; failure: string | undefined; botsUncounted: boolean; leaseHeldUntil: number | undefined } {
 		const { ports } = this;
 		let failure: string | undefined;
+		// The bots owed work are counted in a step of their own: a count that fails never keeps routines and channels down.
+		const bots = this.awayBots();
 		// Enabled routines, channels served away and bots owed work: any keeps the daemon, and the always-on service, wanted.
 		let awayWork = 0;
 		let leaseHeldUntil: number | undefined;
@@ -233,7 +242,7 @@ export class BotDaemonKeeper {
 			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
 			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
 			this.channelsKey = awayChannelsKey(ports.settings());
-			awayWork = status.activeRoutines + awayChannels(ports.settings()).length + this.awayBots();
+			awayWork = status.activeRoutines + awayChannels(ports.settings()).length + (bots ?? 0);
 			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
 			// older than this session, and a relaunch would run the same build again.
 			const ownLaunch = this.launchedToken !== undefined && store.daemonLeaseBelongsTo(this.launchedToken);
@@ -256,16 +265,26 @@ export class BotDaemonKeeper {
 		}
 		if (failure !== undefined && failure !== this.startFailure) ports.warn(failure);
 		this.startFailure = failure;
-		return { awayWork, failure, leaseHeldUntil };
+		return { awayWork, failure, botsUncounted: bots === undefined, leaseHeldUntil };
 	}
 
 	/**
 	 * The bots owed work the daemon takes up (`botsOwed`), counted only while away work is on (`routines.away.enabled`):
 	 * with it off the daemon hosts no bot, none is counted, and the owner is told once, until none is owed, that their work
-	 * waits for a session opening where they work.
+	 * waits for a session opening where they work. Undefined when they do not count (the bots or the root hosts' records do
+	 * not list): told once per cause (`botsOwedNotCounted`), until they count again.
 	 */
-	private awayBots(): number {
-		const owed = this.ports.botsOwed(this.goalsContinue());
+	private awayBots(): number | undefined {
+		let owed: number;
+		try {
+			owed = this.ports.botsOwed(this.goalsContinue());
+		} catch (error) {
+			const cause = botFailureCause("count-bots-owed", "", error);
+			if (cause !== this.countFailure) this.ports.warn(interfaceText().botTeam.botsOwedNotCounted(errorText(error)));
+			this.countFailure = cause;
+			return undefined;
+		}
+		this.countFailure = undefined;
 		if (this.awayOn()) {
 			this.awayOffTold = false;
 			return owed;

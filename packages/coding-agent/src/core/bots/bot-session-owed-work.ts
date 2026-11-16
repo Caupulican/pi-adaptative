@@ -44,7 +44,7 @@ import {
 	WorkerWorkLedger,
 } from "./bot-owed-ledgers.ts";
 import { remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
-import { readBotRootHostPlaces } from "./bot-root-hosts.ts";
+import { BotRootHostReader } from "./bot-root-hosts.ts";
 import type { BotSender } from "./bot-session-host-ports.ts";
 import {
 	applyUnhostedBotStop,
@@ -258,6 +258,8 @@ export class BotOwedWork {
 	 * it does. Kept in this process only: a process that starts opens such a bot once.
 	 */
 	private readonly closedGoals = new Map<string, string>();
+	/** The root hosts' records as the daemon's count reads them ({@link owedCount}), read through this host's warnings. */
+	private rootHosts: BotRootHostReader | undefined;
 	/** The alarm at the time a bot's saved session continues what a usage limit stopped (`armOwedAt`). */
 	private readonly usageWaits = new Map<string, WallAlarm>();
 	/** Bots whose usage wait ended while no process hosted them: owed their session's open until it loads. */
@@ -784,7 +786,7 @@ export class BotOwedWork {
 	 * session for ({@link owedTerms}), now or at a time already known (its workers' next retry, the time its saved session
 	 * continues what a usage limit stopped). Not counted: a bot a host holds, this one included (loaded or opening here); one
 	 * working where a root session hosting bots works, this host's own while it runs (`senderIn`) or another process's
-	 * (`readBotRootHostPlaces`), which opens it there; one only a root opens (made from a profile, `botProfileNeedsRoot`). A bot whose files do not read counts by what read,
+	 * (`BotRootHostReader`), which opens it there; one only a root opens (made from a profile, `botProfileNeedsRoot`). A bot whose files do not read counts by what read,
 	 * and the owner is told once per cause. It reads the host's records, not whether the host runs, so a root's detach reads
 	 * it after its host let its bots go (`BotSessionHostPorts.botsLetGo`). `goalsContinue`: whether the daemon continues
 	 * an unfinished goal on its own (`autonomy.goalAutoContinue` in the owner's global settings, the only ones it reads); a
@@ -792,7 +794,8 @@ export class BotOwedWork {
 	 */
 	owedCount(goalsContinue: boolean): number {
 		const { ports } = this;
-		const places = readBotRootHostPlaces(ports.agentDir());
+		this.rootHosts ??= new BotRootHostReader(ports.agentDir(), (message) => ports.warn(message));
+		const places = this.rootHosts.places();
 		let count = 0;
 		for (const { agentId } of ports.store().listBots())
 			try {

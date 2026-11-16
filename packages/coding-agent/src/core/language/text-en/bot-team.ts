@@ -75,6 +75,12 @@ export const BOT_TEAM = {
 	/** A root's record that it hosts bots could not be removed as it closed; the daemon leaves its directory to it until its process ends. */
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: this session could not remove its record that it hosts bots (${reason}); the bot daemon leaves the bots of this directory to it until this process ends.`,
+	/** A record of a root session that hosted bots and has ended could not be removed: it is skipped, its removal tried again. */
+	botRootHostDeadNotRemoved: (file: string, reason: string) =>
+		`Bots: the record of a session that hosted bots and has ended (${file}) could not be removed (${reason}); it is not counted, and its removal is tried again at each read.`,
+	/** The bots owed work could not be counted: routines and channels away still keep the daemon up; counted again with a backoff. */
+	botsOwedNotCounted: (reason: string) =>
+		`Bots: the bots owed work could not be counted (${reason}); routines and channels served away still keep the bot daemon up, and the bots are counted again at the next check, with a growing interval while the count keeps failing.`,
 	/** A root session could not record that it hosts bots: the daemon keeps hosting the bots it holds. */
 	botRootHostNotRecorded: (reason: string) =>
 		`Bots: this session could not record that it hosts bots (${reason}); the bot daemon keeps hosting the bots it holds, and your messages reach them through their inboxes.`,

@@ -23,7 +23,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botProcessSources } from "./bot-process-sources.ts";
-import { readBotRootHostPlaces } from "./bot-root-hosts.ts";
+import { BotRootHostReader } from "./bot-root-hosts.ts";
 import { rootlessBotSessionHost } from "./bot-session-registry.ts";
 
 export interface BotDaemonHostInput {
@@ -56,9 +56,10 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 	let places = new Set<string>();
 	let placesTold: string | undefined;
 	let awayOn = settings.getRoutineAwaySettings().enabled;
+	const rootHosts = new BotRootHostReader(agentDir, (message) => input.report(message));
 	const readPlaces = (): Set<string> => {
 		try {
-			const read = readBotRootHostPlaces(agentDir);
+			const read = rootHosts.places();
 			placesTold = undefined;
 			return read;
 		} catch (error) {
