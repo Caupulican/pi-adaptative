@@ -354,6 +354,48 @@ export const NOTICES = {
 			unverified: (count: number) => `${count} unverified`,
 			burst: (count: number, name: string) => `${count} over channels.${name}.maxPendingPerConversation`,
 		},
+		/** The owner pool's words: what holds owner turns, what the owner's chat is told of it, and its status line. */
+		owner: {
+			/**
+			 * A subscription's usage at the line its turns wait at: the owner's (`bound`) or the provider's (`limit`);
+			 * `detail` what the reading reports and the owner's line, `resetAt` the reset the account reports.
+			 */
+			usageReached: (at: "bound" | "limit", detail: string | undefined, resetAt: string | undefined) =>
+				`the subscription's usage reached its ${at}${detail === undefined ? "" : ` (${detail})`}${resetAt === undefined ? "" : `; it resets at ${resetAt}`}`,
+			/** The subscription's usage (`usageReached`) holds owner messages until its reset. */
+			usageWait: (usage: string) => `${usage}, so owner messages wait for its reset`,
+			/** What the owner pool holds of its day bound. */
+			daySpend: (name: string, usedUsd: number, boundUsd: number) =>
+				`$${usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${boundUsd.toFixed(2)}) is held in the last 24 hours`,
+			/** `held` (`daySpend`), and when its oldest charge leaves the window (undefined: unknown). */
+			oldestCharge: (held: string, leavesAt: string | undefined) =>
+				`${held}; the oldest charge leaves the window at ${leavesAt ?? "its 24 hours' end"}`,
+			turnsPaused: (cause: string) => `Owner turns paused: ${cause}.`,
+			turnsOff: (name: string) => `Owner turns are off: channels.${name}.ownerMaxUsdPerDay is 0.`,
+			/** The push of owner messages held: `lead` says why (`turnsPaused`, `turnsOff`); `approveNeedsTurn` while no turn starts at all. */
+			heldPush: (lead: string, approveNeedsTurn: boolean) =>
+				`${lead} Your messages wait up to 24 hours; ${approveNeedsTurn ? "approve needs a turn, " : ""}deny, status and stop still answer.`,
+			turnBound: (name: string, boundUsd: number) =>
+				`this turn reached its bound (channels.${name}.ownerMaxUsdPerTurn, $${boundUsd.toFixed(2)})`,
+			emergencyStop: "the emergency stop is engaged",
+			/** The push of an owner turn stopped: `cause` says why (`turnBound`, `usageReached`, `emergencyStop`). */
+			stopped: (cause: string) => `Stopped: ${cause}.`,
+			/** The status line of the subscription's usage: its room, its exhaustion, or why no reading decides. */
+			usageStatus: (
+				reading:
+					| { readonly kind: "room"; readonly usedPercent: number; readonly percent: number; readonly key: string }
+					| { readonly kind: "exhausted"; readonly reason: string; readonly percent: number; readonly key: string }
+					| { readonly kind: "unread"; readonly reason: string },
+			) =>
+				reading.kind === "room"
+					? `Subscription usage: ${reading.usedPercent}% of ${reading.percent}% (${reading.key}); the dollar bounds do not apply.`
+					: reading.kind === "exhausted"
+						? `Subscription usage: ${reading.reason} (${reading.key} ${reading.percent}%); owner turns wait for its reset.`
+						: `Subscription usage: ${reading.reason}; the dollar bounds do not apply.`,
+			/** A reading of the subscription's usage failed: owner turns are held to the dollar bounds until one reads. */
+			usageUnread: (cause: string) =>
+				`Owner channels: the subscription usage could not be read (${cause}); owner turns are held to the dollar bounds until it reads.`,
+		},
 	},
 
 	/** An automatic routine intake state the owner can act on (`routine-intake.ts`). */

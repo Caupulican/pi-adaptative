@@ -34,14 +34,17 @@ export const SESSIONS = {
 	/** A fleet queue file under the name an earlier build gave a session's away runs' was not theirs to adopt. */
 	awayFleetQueueSetAside: (path: string) =>
 		`A queue file left by an earlier session was set aside, not adopted: ${path}.`,
-	/** The record of runs away reserved on the away spend bound after their admission (`away-metered-runs.ts`). */
+	/** The record of runs and channel turns away reserved on the away spend bound after their admission (`away-metered-runs.ts`). */
 	awayMeteredRuns: {
-		/** It did not read (`cause`: an error code, or `invalid`): every run away is charged as reserved until it reads. */
+		/** It did not read (`cause`: an error code, or `invalid`): every run and subscription turn away is charged as reserved until it reads. */
 		unreadable: (path: string, cause: string) =>
-			`The record of runs away reserved on the away spend bound could not be read (${cause}): ${path}. Every run away is charged its full routines.away.maxUsdPerRun until it reads again; it is read again on the next pass.`,
+			`The record of runs and channel turns away reserved on the away spend bound could not be read (${cause}): ${path}. Every run away and every channel turn away on a subscription is charged its full routines.away.maxUsdPerRun until it reads again; it is read again on the next pass.`,
 		/** A run away that moved to a metered model could not be reserved, so its metered requests are refused. */
 		notWritten: (path: string, cause: string) =>
 			`A run away that moved to a metered model could not be reserved on the away spend bound (${cause}): ${path}. Its metered requests are refused.`,
+		/** A channel turn away on a subscription could not be reserved before moving to a metered model, so it does not move. */
+		turnNotWritten: (channel: string, path: string, cause: string) =>
+			`Channel ${channel} away: a turn could not be reserved on the away spend bound to move to a metered model (${cause}): ${path}. It does not move to that model.`,
 	},
 	/** The startup sweep of old session bundles (`session-bundle-retention.ts`), for the owner's home and the run. */
 	retention: {

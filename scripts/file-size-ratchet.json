@@ -3,7 +3,7 @@
 	"limit": 1200,
 	"files": {
 		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6410,
-		"packages/coding-agent/src/core/agent-session.ts": 5225,
+		"packages/coding-agent/src/core/agent-session.ts": 5224,
 		"packages/coding-agent/src/core/memory/transcript-memory.ts": 3535,
 		"packages/coding-agent/src/kernel/session/session-manager.ts": 3391,
 		"packages/coding-agent/src/modes/interactive/interactive-mode.ts": 3058,
@@ -22,7 +22,7 @@
 		"packages/coding-agent/src/kernel/agent-loop.ts": 3016,
 		"packages/coding-agent/src/core/delegation/worker-conversation-store.ts": 3025,
 		"packages/coding-agent/src/core/compaction-controller.ts": 2841,
-		"packages/coding-agent/src/core/channels/session-channels.ts": 2502,
+		"packages/coding-agent/src/core/channels/session-channels.ts": 2500,
 		"packages/coding-agent/src/core/delegation/worker-agent-control.ts": 2563,
 		"packages/tui/src/components/editor.ts": 2578,
 		"packages/coding-agent/src/core/reflection-controller.ts": 2581,

@@ -314,6 +314,36 @@ export const NOTICES = {
 			unverified: (count: number) => `${count} não verificada(s)`,
 			burst: (count: number, name: string) => `${count} acima de channels.${name}.maxPendingPerConversation`,
 		},
+		owner: {
+			usageReached: (at: "bound" | "limit", detail: string | undefined, resetAt: string | undefined) =>
+				`o uso da assinatura chegou ${at === "bound" ? "ao limite configurado" : "ao limite do provedor"}${detail === undefined ? "" : ` (${detail})`}${resetAt === undefined ? "" : `; ele é renovado em ${resetAt}`}`,
+			usageWait: (usage: string) => `${usage}, então as mensagens do dono esperam a renovação`,
+			daySpend: (name: string, usedUsd: number, boundUsd: number) =>
+				`$${usedUsd.toFixed(2)} de channels.${name}.ownerMaxUsdPerDay ($${boundUsd.toFixed(2)}) estão reservados nas últimas 24 horas`,
+			oldestCharge: (held: string, leavesAt: string | undefined) =>
+				`${held}; a cobrança mais antiga sai da janela ${leavesAt === undefined ? "no fim das suas 24 horas" : `em ${leavesAt}`}`,
+			turnsPaused: (cause: string) => `Turnos do dono pausados: ${cause}.`,
+			turnsOff: (name: string) => `Os turnos do dono estão desligados: channels.${name}.ownerMaxUsdPerDay é 0.`,
+			heldPush: (lead: string, approveNeedsTurn: boolean) =>
+				`${lead} Suas mensagens esperam até 24 horas; ${approveNeedsTurn ? "approve precisa de um turno, " : ""}deny, status e stop continuam respondendo.`,
+			turnBound: (name: string, boundUsd: number) =>
+				`este turno chegou ao limite dele (channels.${name}.ownerMaxUsdPerTurn, $${boundUsd.toFixed(2)})`,
+			emergencyStop: "a parada de emergência está acionada",
+			stopped: (cause: string) => `Parado: ${cause}.`,
+			usageStatus: (
+				reading:
+					| { readonly kind: "room"; readonly usedPercent: number; readonly percent: number; readonly key: string }
+					| { readonly kind: "exhausted"; readonly reason: string; readonly percent: number; readonly key: string }
+					| { readonly kind: "unread"; readonly reason: string },
+			) =>
+				reading.kind === "room"
+					? `Uso da assinatura: ${reading.usedPercent}% de ${reading.percent}% (${reading.key}); os limites em dólar não se aplicam.`
+					: reading.kind === "exhausted"
+						? `Uso da assinatura: ${reading.reason} (${reading.key} ${reading.percent}%); os turnos do dono esperam a renovação.`
+						: `Uso da assinatura: ${reading.reason}; os limites em dólar não se aplicam.`,
+			usageUnread: (cause: string) =>
+				`Canais do dono: o uso da assinatura não pôde ser lido (${cause}); os turnos do dono ficam presos aos limites em dólar até que ele seja lido.`,
+		},
 	},
 
 	routineIntake: {

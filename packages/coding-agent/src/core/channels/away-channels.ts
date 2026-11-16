@@ -7,6 +7,7 @@
 import { readdirSync } from "node:fs";
 import { channelsDir } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
+import { awayChannelTurnKey, awayMeteredReservations } from "../routines/away-metered-runs.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import {
@@ -57,11 +58,14 @@ export function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): s
  * recorded metered (API) spend once answered, and the larger of its full per-run bound and its recorded spend while it
  * runs or when it ended without an answer (a turn is stopped only after a message took it past the bound, and a turn
  * settled by another session has no recorded spend). A turn served on a subscription (`quota`) reserves no per-run
- * bound: its usage windows hold it, never dollars.
+ * bound while it stays there, its usage windows holding it; once its session failed over to a metered model it was
+ * reserved (`reservedMetered`, `reserveAwayChannelTurns`) and is charged as a metered turn.
  */
 function channelAwayCharge(
+	name: string,
 	batch: ChannelBatchRecord,
 	maxUsdPerRun: number,
+	reservedMetered: (key: string) => boolean,
 	nowMs: number,
 ): RoutineAwayCharge | undefined {
 	// An owner turn charges its channel's owner pool alone (`owner-channel.ts`), wherever it ran.
@@ -69,7 +73,8 @@ function channelAwayCharge(
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= nowMs) return undefined;
 	const usd = batch.usd ?? 0;
-	const reserved = batch.quota === true ? 0 : maxUsdPerRun;
+	const metered = batch.quota !== true || reservedMetered(awayChannelTurnKey(name, batch.id, until));
+	const reserved = metered ? maxUsdPerRun : 0;
 	const charged = batch.state === "accepted" || batch.state === "unanswered" ? Math.max(reserved, usd) : usd;
 	return { micros: awaySpendMicros(charged), until };
 }
@@ -102,17 +107,33 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 		return [];
 	}
 	const charges: RoutineAwayCharge[] = [];
+	const reservedMetered = awayMeteredReservations(agentDir);
 	for (const file of files) {
 		const name = file.endsWith(".json") ? file.slice(0, -".json".length) : "";
 		if (!isValidChannelName(name)) continue;
 		const state = new ChannelJournal(agentDir, name).read().result;
 		for (const batch of state.batches) {
-			const charge = channelAwayCharge(batch, maxUsdPerRun, nowMs);
+			const charge = channelAwayCharge(name, batch, maxUsdPerRun, reservedMetered, nowMs);
 			if (charge) charges.push(charge);
 		}
 		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
 	return charges;
+}
+
+/**
+ * The reservation keys (`awayChannelTurnKey`) of the turns away `sessionId` accepted on a subscription (`quota`) and has
+ * not ended, none reserved yet: what its move to a metered model reserves first. A reservations file that does not
+ * read counts them reserved already (`awayMeteredReservations`).
+ */
+export function unreservedSubscriptionTurns(agentDir: string, name: string, sessionId: string): string[] {
+	const reservedMetered = awayMeteredReservations(agentDir);
+	return new ChannelJournal(agentDir, name).read().result.batches.flatMap((batch) => {
+		if (batch.state !== "accepted" || batch.sessionId !== sessionId) return [];
+		if (batch.away !== true || batch.owner === true || batch.quota !== true) return [];
+		const key = awayChannelTurnKey(name, batch.id, batch.acceptedAt + DAY_MS);
+		return reservedMetered(key) ? [] : [key];
+	});
 }
 
 /** What the channels core asks of the daemon's host while it serves a channel away (`SessionChannelsDeps.away`). */

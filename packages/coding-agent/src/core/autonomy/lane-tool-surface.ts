@@ -252,8 +252,8 @@ export interface LaneToolSurfaceOptions {
 	initialUsage?: GatewayInitialUsage;
 	/** Owner aggregate meter shared across retries and verification for this durable worker task. */
 	sharedBudget?: SharedCapabilityBudget;
-	/** Whether the grant's spend is metered, which the gateway's dollar ceiling counts alone (`CapabilityGatewayOptions`). */
-	meteredSpend?: boolean;
+	/** Whether the grant's spend is metered now, which the gateway's dollar ceiling counts alone (`CapabilityGatewayOptions`). */
+	meteredSpend?: () => boolean;
 	/** Host-owned fresh factories for worker-safe foreground/extension tools. */
 	workerToolAdapters?: WorkerToolAdapterRegistry;
 	/** Host-owned immutable task binding, installed before execution guards. */

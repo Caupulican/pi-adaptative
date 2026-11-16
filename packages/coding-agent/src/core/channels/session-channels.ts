@@ -37,6 +37,7 @@ import {
 	transcriptKeepsNotices,
 	wordedNotice,
 } from "../harness-notice.ts";
+import { englishText, interfaceText } from "../language/interface-text.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -113,6 +114,7 @@ import {
 	channelStateNotice,
 	nameableSenderId,
 	ownerHeldPush,
+	ownerStopPush,
 	quotaStatusLine,
 	senderNotice,
 } from "./owner-notice-text.ts";
@@ -369,6 +371,8 @@ export class SessionChannels {
 	private readonly ownerNotices = new Map<string, string>();
 	/** The one alarm for the earliest time a held item expires or a bound lifts (`armWake`); none while nothing is due. */
 	private wake: { readonly at: number; readonly handle: unknown } | undefined;
+	/** The cause the last reading of the subscription's usage failed with, told once (`ownerQuota`); none after one read. */
+	private usageUnreadTold: string | undefined;
 
 	constructor(deps: SessionChannelsDeps) {
 		this.deps = deps;
@@ -455,23 +459,30 @@ export class SessionChannels {
 		}
 	}
 
-	/** What the owner pool's bounds read of the session's model now (`readOwnerQuota`): the one reading every decision below uses. */
+	/**
+	 * What the owner pool's bounds read of the session's model now (`readOwnerQuota`): the one reading every decision below
+	 * uses. A reading that fails is told once per cause until a reading succeeds (`usageUnreadTold`).
+	 */
 	private ownerQuota(policy: ResolvedChannelPolicy): OwnerQuotaAllowance {
-		return readOwnerQuota(this.deps.ownerDelivery, policy);
+		return readOwnerQuota(this.deps.ownerDelivery, policy, (unread) => {
+			if (unread !== undefined && unread !== this.usageUnreadTold)
+				this.deps.warn(interfaceText().notices.channels.owner.usageUnread(unread));
+			this.usageUnreadTold = unread;
+		});
 	}
 
 	/** Why no owner turn of the channel may start now; undefined when one may. Reads the journal state it is given. */
 	private ownerTurnRefusal(name: string, policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number) {
+		// The cap's detail is the model's notice and the journal's record: English.
+		const words = englishText().notices.channels.owner;
 		if (!this.ownerPolicy(name)) return "owner authority is off for this channel in this session";
-		if (this.emergencyStopEngaged()) return "the emergency stop is engaged";
+		if (this.emergencyStopEngaged()) return words.emergencyStop;
 		if (policy.ownerMaxUsdPerDay === 0) return `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`;
 		const quota = this.ownerQuota(policy);
-		const wait = ownerQuotaWait(name, policy, quota);
-		if (wait) return `${wait}, so owner messages wait for its reset`;
+		const wait = ownerQuotaWait(words, name, policy, quota);
+		if (wait) return words.usageWait(wait);
 		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(quota));
-		return room.fits
-			? undefined
-			: `$${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours`;
+		return room.fits ? undefined : words.daySpend(name, room.usedUsd, policy.ownerMaxUsdPerDay);
 	}
 
 	/** The closure an owner turn's every guarded call asks (`ownerLiveCheck`). */
@@ -1562,8 +1573,8 @@ export class SessionChannels {
 				return;
 			}
 			const now = this.now();
-			// A third party's turn the daemon serves on a subscription reserves none of the away bound (an owner turn's
-			// `quota` is its own pool's reading).
+			// A third party's turn the daemon serves on a subscription reserves none of the away bound until it moves to a
+			// metered model (an owner turn's `quota` is its own pool's reading).
 			const base = this.acceptedBatch(batchId, sessionId, latest, delivered, composed.verified, now);
 			this.recordAccepted(name, awayHostUnmetered(this.deps.away) ? { ...base, quota: true } : base, now);
 		};
@@ -1746,22 +1757,9 @@ export class SessionChannels {
 			this.ownerRuns.delete(ref);
 		}
 		const policy = this.policy(run.name);
-		if (why === "bound" && policy)
-			void this.ownerPush.push(
-				run.name,
-				`stopped:${ref}`,
-				`Stopped: this turn reached its bound (channels.${run.name}.ownerMaxUsdPerTurn, $${policy.ownerMaxUsdPerTurn.toFixed(2)}).`,
-			);
-		const quotaWait =
-			why === "quota" && policy ? ownerQuotaWait(run.name, policy, this.ownerQuota(policy)) : undefined;
-		if (why === "quota")
-			void this.ownerPush.push(
-				run.name,
-				`stopped:${ref}`,
-				`Stopped: ${quotaWait ?? "the subscription's usage reached its bound"}.`,
-			);
-		if (why === "authority" && this.emergencyStopEngaged())
-			void this.ownerPush.push(run.name, `stopped:${ref}`, "Stopped: the emergency stop is engaged.");
+		const engaged = why === "authority" && this.emergencyStopEngaged();
+		const told = ownerStopPush(why, run.name, policy, (read) => this.ownerQuota(read), engaged);
+		if (told) void this.ownerPush.push(run.name, `stopped:${ref}`, told);
 		this.scheduleWork();
 	}
 

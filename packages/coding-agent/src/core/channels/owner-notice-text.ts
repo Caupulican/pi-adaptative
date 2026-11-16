@@ -7,11 +7,11 @@
 
 import type { ChannelSenderIds } from "../gateways/channel-provider.ts";
 import { type HarnessNotice, type WordedNotice, wordedNotice } from "../harness-notice.ts";
-import type { InterfaceText } from "../language/interface-text.ts";
+import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
 import { type ChannelAwayUntold, heldCount } from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
-import { type OwnerRoom, ownerQuotaLine, ownerQuotaWait } from "./owner-channel.ts";
+import { type OwnerRoom, ownerQuotaWait, ownerUsageLine, ownerUsageReached, toldInstant } from "./owner-channel.ts";
 import type { OwnerQuotaAllowance } from "./owner-channel-types.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
@@ -31,13 +31,9 @@ interface AwayCounts {
 const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
 
 /**
- * The one line that tells the owner of a held sender and the key to add them to: with the id only when the notice may
- * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
- * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
- */
-/**
- * What the owner's chat is told while owner messages wait: at the subscription's exhausted usage (once per reset), at the
- * owner pool's off switch or at its day bound (once per oldest charge); none while a turn may start.
+ * What the owner's chat is told while owner messages wait, in the interface language: at the subscription's exhausted
+ * usage (once per reset), at the owner pool's off switch or at its day bound (once per oldest charge); none while a turn
+ * may start.
  */
 export function ownerHeldPush(
 	name: string,
@@ -45,30 +41,64 @@ export function ownerHeldPush(
 	room: OwnerRoom,
 	quota: OwnerQuotaAllowance,
 ): { readonly key: string; readonly text: string } | undefined {
-	const tail = "Your messages wait up to 24 hours; deny, status and stop still answer.";
-	const wait = policy.ownerMaxUsdPerDay > 0 ? ownerQuotaWait(name, policy, quota) : undefined;
+	const words = interfaceText().notices.channels.owner;
+	const wait = policy.ownerMaxUsdPerDay > 0 ? ownerQuotaWait(words, name, policy, quota) : undefined;
 	if (wait && quota.kind === "exhausted")
-		return { key: `quota:${quota.retryAt ?? "open"}`, text: `Owner turns paused: ${wait}. ${tail}` };
+		return { key: `quota:${quota.retryAt ?? "open"}`, text: words.heldPush(words.turnsPaused(wait), false) };
 	if (room.fits) return undefined;
-	const text =
-		policy.ownerMaxUsdPerDay === 0
-			? `Owner turns are off: channels.${name}.ownerMaxUsdPerDay is 0. Your messages wait up to 24 hours; approve needs a turn, deny, status and stop still answer.`
-			: `Owner turns paused: $${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours; the oldest charge leaves the window at ${room.oldestUntil !== undefined ? new Date(room.oldestUntil).toISOString() : "its 24 hours' end"}. ${tail}`;
-	return { key: `bound:${room.oldestUntil ?? "off"}`, text };
+	const off = policy.ownerMaxUsdPerDay === 0;
+	const lead = off
+		? words.turnsOff(name)
+		: words.turnsPaused(
+				words.oldestCharge(
+					words.daySpend(name, room.usedUsd, policy.ownerMaxUsdPerDay),
+					toldInstant(room.oldestUntil),
+				),
+			);
+	return { key: `bound:${room.oldestUntil ?? "off"}`, text: words.heldPush(lead, off) };
 }
 
-/** The status line for the subscription allowance (none when the model is no subscription login, whose metered spend the dollar bounds hold): what holds its turns now, and why. */
+/**
+ * Why an owner turn was stopped, as the owner's chat is told in the interface language: at its dollar bound, at its
+ * subscription's usage line (the reading asked only then; with no policy left, the line unnamed) or at the emergency
+ * stop (`emergencyStopEngaged`, read by the caller); none for a stop it is not told of.
+ */
+export function ownerStopPush(
+	why: "bound" | "quota" | "authority" | "owner" | undefined,
+	name: string,
+	policy: ResolvedChannelPolicy | undefined,
+	quota: (policy: ResolvedChannelPolicy) => OwnerQuotaAllowance,
+	emergencyStopEngaged: boolean,
+): string | undefined {
+	const words = interfaceText().notices.channels.owner;
+	const cause =
+		why === "bound"
+			? policy && words.turnBound(name, policy.ownerMaxUsdPerTurn)
+			: why === "quota"
+				? policy
+					? ownerUsageReached(words, name, policy, quota(policy))
+					: words.usageReached("bound", undefined, undefined)
+				: why === "authority" && emergencyStopEngaged
+					? words.emergencyStop
+					: undefined;
+	return cause === undefined ? undefined : words.stopped(cause);
+}
+
+/**
+ * The status line for the subscription allowance, in the interface language (none when the model is no subscription
+ * login, whose metered spend the dollar bounds hold): what holds its turns now, and why.
+ */
 export function quotaStatusLine(
 	name: string,
 	policy: ResolvedChannelPolicy,
 	quota: OwnerQuotaAllowance,
 ): string | undefined {
-	const key = `channels.${name}.ownerQuotaMaxUsedPercent`;
+	const words = interfaceText().notices.channels.owner;
+	const line = ownerUsageLine(name, policy);
 	if (quota.kind === "room")
-		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${ownerQuotaLine(policy)}% (${key}); the dollar bounds do not apply.`;
-	if (quota.kind === "exhausted")
-		return `Subscription usage: ${quota.reason} (${key} ${ownerQuotaLine(policy)}%); owner turns wait for its reset.`;
-	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds do not apply.` : undefined;
+		return words.usageStatus({ kind: "room", usedPercent: Math.round(quota.usedPercent), ...line });
+	if (quota.kind === "exhausted") return words.usageStatus({ kind: "exhausted", reason: quota.reason, ...line });
+	return quota.subscription ? words.usageStatus({ kind: "unread", reason: quota.reason }) : undefined;
 }
 
 /**

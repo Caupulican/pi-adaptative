@@ -18,6 +18,7 @@ import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import { formatModelRouterModel, type ModelRouterController } from "./model-router-controller.ts";
 import type { ModelSelectionController } from "./model-selection-controller.ts";
 import type { OrchestrationModelUnusableCause } from "./orchestration/model-binding.ts";
+import { isMeteredSpend } from "./orchestration/risk-budget.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE, type ConversationTalkerRecord } from "./reply-route.ts";
 import type { RequestAuth } from "./request-auth.ts";
 
@@ -35,10 +36,23 @@ export interface AgentSessionModelAccessPorts {
 	extensionRunner(): ExtensionRunner;
 }
 
+/**
+ * What a host holds a session's moves to metered (API) models to (the daemon's channel host: a subscription turn away
+ * reserves nothing on the away day bound until it moves to a metered model). Consulted only for a metered target.
+ */
+export interface MeteredMoveGate {
+	/** Whether the work may move to a metered model now: its move is reserved already, or the host's bound has room. */
+	fits(): boolean;
+	/** Reserves the move before the metered model's first request; false: nothing is reserved and the work does not move. */
+	reserve(): boolean;
+}
+
 export class AgentSessionModelAccess {
 	private readonly ports: AgentSessionModelAccessPorts;
 	/** The session never leaves its model (`pinnedModel`): an unusable model is its host's to refuse, never replaced. */
 	pinned = false;
+	/** The host's hold on moves to metered models (`MeteredMoveGate`); none: they are not held. */
+	meteredMoves: MeteredMoveGate | undefined;
 
 	constructor(ports: AgentSessionModelAccessPorts) {
 		this.ports = ports;
@@ -176,16 +190,30 @@ export class AgentSessionModelAccess {
 		this.ports.modelRouter().recordOpeningRoute(decision, model);
 	}
 
-	/**
-	 * A hard failure (quota, an account that no longer offers the model) carries a chosen talker to the
-	 * model the session moved to; before the opening there is no talker to carry.
-	 */
+	/** Whether a move of the work to `model` is held: it is metered and the host's gate has no room for it now. */
+	private moveHeld(model: Model<Api>): boolean {
+		const gate = this.meteredMoves;
+		return gate !== undefined && isMeteredSpend(model, this.ports.modelRegistry()) && !gate.fits();
+	}
+
+	/** Where work goes when `failed` ran out of quota (`resolveQuotaFallbackModel`): never a model whose move is held. */
+	quotaFallback(failed: Model<Api>, contextTokens: number): Model<Api> | undefined {
+		return this.ports.modelRouter().resolveQuotaFallbackModel(failed, {
+			hasImages: false,
+			contextTokens,
+			admits: (model) => !this.moveHeld(model),
+		});
+	}
+
 	/**
 	 * A quota failover moves the session to `hop`: a routed turn's model stays inside that turn (as an unsupported model's
-	 * does), and a pinned session stays on its model. Returns where the work continues, or undefined.
+	 * does), and a pinned session stays on its model. A move to a metered model is reserved on the host's gate first
+	 * (`MeteredMoveGate.reserve`); one it refuses leaves the work where it is. Returns where the work continues, or undefined.
 	 */
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined {
 		if (this.pinned) return undefined;
+		const gate = this.meteredMoves;
+		if (gate && isMeteredSpend(hop, this.ports.modelRegistry()) && !gate.reserve()) return undefined;
 		if (this.ports.modelRouter().isRoutedTurnOn(failed))
 			return this.ports.modelRouter().replaceRefusedRoutedModel(failed, hop);
 		this.ports.agent().state.model = hop;
@@ -194,6 +222,10 @@ export class AgentSessionModelAccess {
 		return hop;
 	}
 
+	/**
+	 * A hard failure (quota, an account that no longer offers the model) carries a chosen talker to the
+	 * model the session moved to; before the opening there is no talker to carry.
+	 */
 	moveTalker(model: Model<Api>, reason: string): void {
 		if (this.ports.sessionManager().getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) === undefined)
 			return;

@@ -57,8 +57,8 @@ export interface OwnerChannelDelivery {
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
 	/**
 	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
-	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent) is a metered model,
-	 * which the dollar bounds hold (`ownerDollarsApply`).
+	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent or throws) is a metered
+	 * model or one whose billing is unknown, which the dollar bounds hold (`ownerDollarsApply`, `readOwnerQuota`).
 	 */
 	quotaAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
 	/** Aborts the run that `ref` opened. */
@@ -70,7 +70,7 @@ export type OwnerQuotaAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
 	/** `retryAt`: when every exhausted window resets, if the account reports all of them. */
 	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string; readonly retryAt?: number }
-	/** `subscription`: the model is a subscription login (so the status says why no reading decides); false when none applies. */
+	/** `subscription`: the model is a subscription login (so the status says why no reading decides); false when the dollar bounds hold. */
 	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
 
 /** The model-free control words an owner message can be, recognized before any model turn. */

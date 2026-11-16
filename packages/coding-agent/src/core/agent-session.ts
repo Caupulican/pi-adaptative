@@ -49,7 +49,7 @@ import {
 import { AgentSessionEvents } from "./agent-session-events.ts";
 import { handleRunawayStop, handleToolValidationEscalation, type SessionGuardDeps } from "./agent-session-guards.ts";
 import { AgentSessionMessageDelivery } from "./agent-session-message-delivery.ts";
-import { AgentSessionModelAccess } from "./agent-session-model-access.ts";
+import { AgentSessionModelAccess, type MeteredMoveGate } from "./agent-session-model-access.ts";
 import { AgentSessionToolActivation } from "./agent-session-tool-activation.ts";
 import { AgentSessionWorkState } from "./agent-session-work-state.ts";
 import type {
@@ -1713,11 +1713,7 @@ export class AgentSession {
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
 			applyFailoverModel: (failed, hop) => this._modelAccess.applyFailoverModel(failed, hop),
 			isModelPinned: () => this._modelAccess.pinned,
-			resolveFallbackModel: (failed) =>
-				this._modelRouter.resolveQuotaFallbackModel(failed, {
-					hasImages: false,
-					contextTokens: this.getContextUsage()?.tokens ?? 0,
-				}),
+			resolveFallbackModel: (failed) => this._modelAccess.quotaFallback(failed, this.getContextUsage()?.tokens ?? 0),
 			modelRegistry: this._modelRegistry,
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,
@@ -3099,6 +3095,11 @@ export class AgentSession {
 		return this._edgeIntent.isModelAllowed(model);
 	}
 
+	/** Holds this session's moves to metered models to its host's gate (`MeteredMoveGate`); undefined lifts the hold. */
+	holdMeteredMoves(gate: MeteredMoveGate | undefined): void {
+		this._modelAccess.meteredMoves = gate;
+	}
+
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
 		this._edgeIntent.grantEdge(edgeClass, source, details);
 	}
@@ -4402,9 +4403,7 @@ export class AgentSession {
 		return this._compaction.check(assistantMessage, skipAbortedCheck);
 	}
 
-	/**
-	 * Internal: Run auto-compaction with events.
-	 */
+	/** Internal: Run auto-compaction with events. */
 	private _runAutoCompaction(reason: AutoCompactionReason, willRetry: boolean): Promise<boolean> {
 		return this._compaction.runAuto(reason, willRetry);
 	}

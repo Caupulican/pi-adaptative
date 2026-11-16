@@ -22,7 +22,9 @@
  * what the turn spent.
  *
  * Every turn is bounded twice: by the channel's own daily bounds and by the away spend bound the daemon's routines run
- * under (`routines.away.maxUsdPerRun` per turn, `routines.away.maxUsdPerDay` across both). A host that cannot serve
+ * under (`routines.away.maxUsdPerRun` per turn, `routines.away.maxUsdPerDay` across both). A turn on a subscription
+ * reserves nothing on the away bound until its session fails over to a metered model: that move reserves the turn first,
+ * as a run away's does, and is held off metered models while the day has no room (`meteredMoves`). A host that cannot serve
  * (no priced model, no provider) leaves the messages with their transport; it is tried again after a backoff from one
  * minute to one hour, and at the daemon's next tick after the owner's credentials or the directory's model settings
  * change.
@@ -36,10 +38,12 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
+import type { MeteredMoveGate } from "../agent-session-model-access.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { boundSessionTurnSpend, turnSpendExcess, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import {
@@ -52,14 +56,20 @@ import {
 import { isProcessAlive } from "../process-liveness.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
-import { awayMeteredRunReserved } from "../routines/away-metered-runs.ts";
+import { awayMeteredRunReserved, reserveAwayChannelTurns } from "../routines/away-metered-runs.ts";
 import { awayRunMetered } from "../routines/away-routine-admission.ts";
 import { routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
 import type { RoutineOccurrence } from "../routines/routine-contract.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
-import { AWAY_CHANNEL_SPEND_REFUSAL, type AwayChannel, awayChannels, readAwayChannelCharges } from "./away-channels.ts";
+import {
+	AWAY_CHANNEL_SPEND_REFUSAL,
+	type AwayChannel,
+	awayChannels,
+	readAwayChannelCharges,
+	unreservedSubscriptionTurns,
+} from "./away-channels.ts";
 import { ChannelJournal } from "./channel-journal.ts";
 import { isOwnerChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
 import { JournalDirWatch } from "./journal-dir-watch.ts";
@@ -208,10 +218,10 @@ export class AwayChannelHosts {
 		this.input.report(message);
 	}
 
-	/** The away spend bound's reason to deliver no turn now, across routine runs and every channel's turns away. */
-	private capReason(nowMs: number): string | undefined {
+	/** The away spend bound's room, across routine runs and every channel's turns away. */
+	private awayRoom(nowMs: number): ReturnType<typeof routineAwaySpendRoom> {
 		const away = this.input.settings.getRoutineAwaySettings();
-		const room = routineAwaySpendRoom(
+		return routineAwaySpendRoom(
 			this.input.routineOccurrences(),
 			{
 				maxUsdPerRun: away.maxUsdPerRun,
@@ -223,7 +233,43 @@ export class AwayChannelHosts {
 			},
 			nowMs,
 		);
-		return room.fits(0) ? undefined : AWAY_CHANNEL_SPEND_REFUSAL;
+	}
+
+	/** The away spend bound's reason to deliver no turn now. */
+	private capReason(nowMs: number): string | undefined {
+		return this.awayRoom(nowMs).fits(0) ? undefined : AWAY_CHANNEL_SPEND_REFUSAL;
+	}
+
+	/**
+	 * The hold on a child session's moves to metered models: its subscription turns away reserve nothing on the away
+	 * bound, so a failover to a metered model first reserves each its full per-run bound, as a run away's attempt is
+	 * (`reserveAwayChannelTurns`), and is held off metered models while the day has no room for them.
+	 */
+	private meteredMoves(name: string, sessionManager: SessionManager): MeteredMoveGate {
+		const unreserved = () => unreservedSubscriptionTurns(this.input.agentDir, name, sessionManager.getSessionId());
+		const fits = (keys: readonly string[], nowMs: number) =>
+			keys.length === 0 || this.awayRoom(nowMs).fits(keys.length - 1);
+		return {
+			fits: () => fits(unreserved(), this.now()),
+			reserve: () => {
+				const nowMs = this.now();
+				const keys = unreserved();
+				if (!fits(keys, nowMs)) return false;
+				const reserved = reserveAwayChannelTurns({
+					agentDir: this.input.agentDir,
+					keys,
+					occurrences: [...this.input.routineOccurrences()],
+					nowMs,
+					notWritten: (path, cause) =>
+						this.report(
+							`reserve:${name}`,
+							interfaceText().sessions.awayMeteredRuns.turnNotWritten(name, path, cause),
+						),
+				});
+				if (reserved) this.reported.delete(`reserve:${name}`);
+				return reserved;
+			},
+		};
 	}
 
 	/**
@@ -576,6 +622,7 @@ export class AwayChannelHosts {
 			isMeteredSpend(session.model, session.modelRegistry)
 				? { usd: settings.getRoutineAwaySettings().maxUsdPerRun }
 				: undefined;
+		session.holdMeteredMoves(this.meteredMoves(name, sessionManager));
 		const unsubscribeSpend = boundSessionTurnSpend(session, {
 			// The turn's own spend: a channel turn away is its own run.
 			exceeded: (turnUsd) => turnSpendExcess(turnUsd, limit()),
@@ -667,7 +714,8 @@ export class AwayChannelHosts {
 			timers: this.input.timers.port("channel-poll"),
 			wakeTimers: this.input.timers.port("channel-expiry"),
 			away: {
-				// The away spend bound holds metered (API) turns alone; a subscription turn reserves nothing on it.
+				// The away spend bound holds metered (API) turns alone; a subscription turn reserves nothing on it until it
+				// moves to a metered model (`meteredMoves`).
 				capReason: (nowMs) =>
 					isMeteredSpend(session.model, session.modelRegistry) ? this.capReason(nowMs) : undefined,
 				spendsMetered: () => isMeteredSpend(session.model, session.modelRegistry),

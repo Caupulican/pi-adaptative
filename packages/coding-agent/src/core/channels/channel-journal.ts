@@ -94,7 +94,8 @@ export interface ChannelBatchRecord {
 	/**
 	 * Accepted while its spend was not metered (a subscription login, `ownerDollarsApply` false for an owner turn, the
 	 * daemon's host model for a turn away): it charges no dollars to the owner pool, and a turn away reserves no per-run
-	 * bound of the away bound, only its recorded metered spend. An earlier build reserves that bound for a turn away.
+	 * bound of the away bound, only its recorded metered spend, until its session moves to a metered model, which reserves
+	 * it in the away reservations file (`reserveAwayChannelTurns`). An earlier build reserves that bound for a turn away.
 	 */
 	readonly quota?: true;
 	/** The owner sender's digest (`ownerSenderDigest`): the answer goes back only while that sender is still listed. */

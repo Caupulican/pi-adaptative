@@ -8,6 +8,7 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
+import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -230,29 +231,29 @@ export function ownerRoom(
  * What the owner pool's bounds read of the session's model now: its subscription's allowance at the line
  * `ownerQuotaMaxUsedPercent` draws (100% when it is 0), or `unknown` with `subscription: false` for a model that is no
  * subscription login (`SubscriptionAllowanceReader` decides that by `isMeteredSpend`). A delivery that reads no usage
- * reports a metered model, so the dollar bounds keep holding it.
+ * reports a metered model, so the dollar bounds keep holding it; a reading that fails keeps that stricter reading too
+ * (the model's billing is then unknown). `unread` hears each read's failure cause, undefined when it did not fail.
  */
 export function readOwnerQuota(
 	delivery: Pick<OwnerChannelDelivery, "quotaAllowance"> | undefined,
 	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
+	unread: (cause: string | undefined) => void,
 ): OwnerQuotaAllowance {
+	let quota: OwnerQuotaAllowance | undefined;
 	try {
-		return (
-			delivery?.quotaAllowance?.(ownerQuotaLine(policy)) ?? {
-				kind: "unknown",
-				reason: "this session reads no subscription usage",
-				subscription: false,
-			}
-		);
-	} catch {
-		return { kind: "unknown", reason: "the subscription usage could not be read", subscription: true };
+		quota = delivery?.quotaAllowance?.(ownerQuotaLine(policy));
+	} catch (error) {
+		unread(error instanceof Error ? error.message : String(error));
+		return { kind: "unknown", reason: "the subscription usage could not be read", subscription: false };
 	}
+	unread(undefined);
+	return quota ?? { kind: "unknown", reason: "this session reads no subscription usage", subscription: false };
 }
 
 /**
  * Whether the owner pool's dollar bounds hold the spend of the reading's model: metered (API) spend alone, by the owner's
- * cost rule. A subscription login is held by its usage windows instead: its turns run while they have room or cannot
- * be read, and a turn stops once they are exhausted.
+ * cost rule, and a model whose billing could not be read. A subscription login is held by its usage windows instead:
+ * its turns run while they have room or its account reports no reading, and a turn stops once they are exhausted.
  */
 export function ownerDollarsApply(quota: OwnerQuotaAllowance): boolean {
 	return quota.kind === "unknown" && !quota.subscription;
@@ -263,19 +264,47 @@ export function ownerQuotaLine(policy: Pick<ResolvedChannelPolicy, "ownerQuotaMa
 	return policy.ownerQuotaMaxUsedPercent > 0 ? policy.ownerQuotaMaxUsedPercent : 100;
 }
 
+/** The owner pool's words, in one catalogue: the interface's for the owner's chat, English for a model or a record. */
+export type OwnerPoolWords = InterfaceText["notices"]["channels"]["owner"];
+
+/** An instant the owner is told, as ISO text; undefined stays unknown. */
+export function toldInstant(ms: number | undefined): string | undefined {
+	return ms === undefined ? undefined : new Date(ms).toISOString();
+}
+
+/** The owner's usage line of a channel's subscription turns, as the words name it: its setting key and percent. */
+export function ownerUsageLine(name: string, policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">) {
+	return { key: `channels.${name}.ownerQuotaMaxUsedPercent`, percent: ownerQuotaLine(policy) };
+}
+
 /**
- * Why a subscription login's owner turns are held now, or undefined: its usage windows are exhausted at the owner's line.
- * No new turn starts and a running one stops; the owner's messages wait, and the pass at the reset the account reports
- * (`retryAt`) or the next event delivers them.
+ * That a subscription login's usage reached the owner's line, in `words`: with what the reading reports and its reset
+ * while it is exhausted, the line alone otherwise (a turn stopped at it whose next reading has room again).
+ */
+export function ownerUsageReached(
+	words: OwnerPoolWords,
+	name: string,
+	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
+	quota: OwnerQuotaAllowance,
+): string {
+	const exhausted = quota.kind === "exhausted" ? quota : undefined;
+	const { key, percent } = ownerUsageLine(name, policy);
+	const detail = [...(exhausted ? [exhausted.reason] : []), `${key} ${percent}%`].join("; ");
+	return words.usageReached("bound", detail, toldInstant(exhausted?.retryAt));
+}
+
+/**
+ * Why a subscription login's owner turns are held now, in `words`, or undefined: its usage windows are exhausted at the
+ * owner's line. No new turn starts and a running one stops; the owner's messages wait, and the pass at the reset the
+ * account reports (`retryAt`) or the next event delivers them.
  */
 export function ownerQuotaWait(
+	words: OwnerPoolWords,
 	name: string,
 	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
 	quota: OwnerQuotaAllowance,
 ): string | undefined {
-	if (quota.kind !== "exhausted") return undefined;
-	const reset = quota.retryAt !== undefined ? `; it resets at ${new Date(quota.retryAt).toISOString()}` : "";
-	return `the subscription's usage reached its bound (${quota.reason}; channels.${name}.ownerQuotaMaxUsedPercent ${ownerQuotaLine(policy)}%)${reset}`;
+	return quota.kind === "exhausted" ? ownerUsageReached(words, name, policy, quota) : undefined;
 }
 
 /**
@@ -295,9 +324,9 @@ export function turnUsageHold(
 		return undefined;
 	}
 	if (quota?.kind !== "exhausted") return undefined;
-	const reset = quota.retryAt !== undefined ? `; it resets at ${new Date(quota.retryAt).toISOString()}` : "";
 	return {
-		reason: `the subscription's usage reached its limit (${quota.reason})${reset}`,
+		// A channel's hold reason is the model's notice detail and the journal's record: English.
+		reason: englishText().notices.channels.owner.usageReached("limit", quota.reason, toldInstant(quota.retryAt)),
 		...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}),
 	};
 }

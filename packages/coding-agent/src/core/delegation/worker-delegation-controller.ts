@@ -5370,7 +5370,7 @@ export class WorkerDelegationController {
 				}
 			},
 			grant,
-			meteredSpend: this.costBounds.isMeteredModel(model),
+			meteredSpend: () => this.costBounds.isMeteredModel(model),
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			checkEdge: async (toolName, args, executionCwd, purpose) => {

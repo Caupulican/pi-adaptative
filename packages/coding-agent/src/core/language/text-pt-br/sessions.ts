@@ -52,9 +52,11 @@ export const SESSIONS = {
 		`Um arquivo de fila deixado por uma sessão anterior foi separado, não adotado: ${path}.`,
 	awayMeteredRuns: {
 		unreadable: (path: string, cause: string) =>
-			`O registro das execuções ausentes reservadas no limite de gasto ausente não pôde ser lido (${cause}): ${path}. Cada execução ausente é cobrada pelo routines.away.maxUsdPerRun inteiro até ele ser lido de novo; ele é lido de novo na próxima passada.`,
+			`O registro das execuções e dos turnos de canal ausentes reservados no limite de gasto ausente não pôde ser lido (${cause}): ${path}. Cada execução ausente e cada turno de canal ausente numa assinatura é cobrado pelo routines.away.maxUsdPerRun inteiro até ele ser lido de novo; ele é lido de novo na próxima passada.`,
 		notWritten: (path: string, cause: string) =>
 			`Uma execução ausente que passou para um modelo cobrado por uso não pôde ser reservada no limite de gasto ausente (${cause}): ${path}. As requisições cobradas dela são recusadas.`,
+		turnNotWritten: (channel: string, path: string, cause: string) =>
+			`Canal ${channel} ausente: um turno não pôde ser reservado no limite de gasto ausente para passar a um modelo cobrado por uso (${cause}): ${path}. Ele não passa para esse modelo.`,
 	},
 	retention: {
 		ownerFilesUnlisted:
