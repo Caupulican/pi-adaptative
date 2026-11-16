@@ -646,7 +646,7 @@ const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveR
 	no_model: "the autoLearn model does not resolve",
 	model_unpriced: "the collection model has no declared price, so no bounded request can be admitted",
 	no_engine: "no semantic judge is available",
-	budget_exhausted: "the knowledge spending limit for this session is reached",
+	budget_exhausted: "the knowledge limit on metered (API) spend for this session is reached",
 	accounting_unresolved: "earlier knowledge spending is not settled yet",
 	ephemeral_session: "the session is not persisted",
 	child_session: "this session does not write the owner's memory",
@@ -712,7 +712,9 @@ export function formatKnowledgeCollectionLine(status: KnowledgeCollectionStatus)
 	if (status.engine)
 		parts.push(`judge ${status.engine.id} ${status.engine.model} (confidence ${status.engine.provenance})`);
 	if (status.spentUsd !== undefined && status.sessionMaxUsd !== undefined)
-		parts.push(`spent $${status.spentUsd.toFixed(4)} of $${status.sessionMaxUsd.toFixed(4)} this session`);
+		parts.push(
+			`spent $${status.spentUsd.toFixed(4)} of $${status.sessionMaxUsd.toFixed(4)} metered (API) this session`,
+		);
 	if (status.last)
 		parts.push(
 			`last pass ${status.last.status}: ${status.last.sources} source(s), ${status.last.applied} applied, ${status.last.rejected} rejected, ${status.last.held} held`,

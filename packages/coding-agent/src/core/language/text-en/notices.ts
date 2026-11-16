@@ -183,14 +183,14 @@ export const NOTICES = {
 		sessionSpent: (cause: string): string =>
 			`Automatic knowledge collection paused because ${cause} (autoLearn.knowledgeSessionMaxUsd). Raise autoLearn.knowledgeSessionMaxUsd to resume it in this session.`,
 		sourceUnpaid:
-			"Automatic knowledge collection paused because autoLearn.knowledgeMaxUsd is zero, so no source can be paid for. Raise autoLearn.knowledgeMaxUsd to resume it.",
+			"Automatic knowledge collection paused because autoLearn.knowledgeMaxUsd is zero, so no source that needs metered (API) spend can be paid for. Raise autoLearn.knowledgeMaxUsd to resume it.",
 		capReached:
-			"Automatic knowledge collection paused because this session's estimated cost cap allows no further spend.",
+			"Automatic knowledge collection paused because this session's estimated cost cap allows no further metered (API) spend.",
 	},
 	/** A proactive review that did not start for a cause the owner can act on (`proactivity-controller.ts`). */
 	proactiveReview: {
 		spendReached:
-			"Proactive review paused because review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if that setting is raised.",
+			"Proactive review paused because metered (API) review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay; spend on a subscription model is not counted. Reviews start again once older spend leaves the rolling day, or sooner if that setting is raised.",
 		modelUnresolved: (model: string) =>
 			`Proactive review paused because proactivity.model ${JSON.stringify(model)} does not resolve to an available model. Set proactivity.model to a configured, signed-in model, or remove it to use the session model.`,
 		modelTooSmall:

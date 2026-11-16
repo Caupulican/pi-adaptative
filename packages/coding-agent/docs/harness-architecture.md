@@ -162,8 +162,8 @@ Policy is a mandatory pre-lease gate. An attempt cannot lease without a compiled
 A worker's grant is compiled with its plan's budget as both the requested and the authority budget, so
 compilation never crosses budget; a required capability outside the owner's authority refuses the
 start with the compiler's reason codes. No approval is requested, persisted or replayed, and no spend
-is put to the owner: dollar ceilings are limits (`maxCostUsd` on all spend, `maxMeteredCostUsd` on
-metered spend only; see worker-profiles.md). Pausing an objective blocks lease, start, and agent resume;
+is put to the owner: dollar ceilings are limits on metered spend only (`maxCostUsd` and `maxMeteredCostUsd`;
+a subscription's usage windows hold its spend; see worker-profiles.md). Pausing an objective blocks lease, start, and agent resume;
 queued and suspended attempts remain nonterminal until an objective-resume event drains them.
 Cancellation remains a replayable terminal transition across its open tasks and attempts.
 

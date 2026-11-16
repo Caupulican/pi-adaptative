@@ -1,5 +1,6 @@
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
+import { costCeilingUsd } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { DEFAULT_WORKER_OUTCOME_SETTINGS } from "../settings/worker-outcome-settings.ts";
@@ -18,6 +19,11 @@ export interface OutcomeLadderContext {
 	thinkingCeiling?(modelRef: string): OrchestrationThinkingLevel | undefined;
 	/** Requirement ids that carry a host requirement check (an observational command the harness can rerun). */
 	requirementCheckIds?(): ReadonlySet<string>;
+	/**
+	 * Whether an attempt's spend is metered (`isMeteredAttemptSpend`): the task's dollar room counts that spend alone, by the
+	 * owner's cost rule. Absent, every attempt's spend counts as metered, which is never laxer.
+	 */
+	attemptMetered?(attempt: AttemptRuntimeState): boolean;
 }
 
 /** The result of one host requirement check run after an attempt ended. */
@@ -48,8 +54,14 @@ export function attemptRung(snapshot: TaskRuntimeProjection, attempt: AttemptRun
  * Whether the task's attempt ceiling, spent cost and cumulative wall-clock ceiling leave room for one more attempt like the
  * last one. Task/objective ceilings bind a non-completed task only (a completed source's rung is a successor with its own
  * budget), while `authority.budget.maxWallClockMs` is the per-attempt wall-clock cap rather than a cumulative task sum.
+ * The dollar room is the authority's ceiling on metered spend (`costCeilingUsd`) less the task's metered spend: an attempt
+ * like a last one on a subscription model is held by its usage windows, not by dollars.
  */
-function budgetLeft(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): boolean {
+function budgetLeft(
+	snapshot: TaskRuntimeProjection,
+	attempt: AttemptRuntimeState,
+	metered: (attempt: AttemptRuntimeState) => boolean,
+): boolean {
 	const task = snapshot.tasks[attempt.taskId];
 	const objective = task ? snapshot.objectives[task.task.objectiveId] : undefined;
 	const completed = task?.task.status === "completed";
@@ -61,14 +73,20 @@ function budgetLeft(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeStat
 		(value): value is number => value !== undefined && value > 0,
 	);
 	const budget = attempt.dispatch.executionContract?.worker.authority.budget;
-	if (!budget?.maxCostUsd && (completed || timeCeilings.length === 0)) return true;
+	const maxCostUsd = budget ? costCeilingUsd(budget, metered(attempt)) : undefined;
+	if (!maxCostUsd && (completed || timeCeilings.length === 0)) return true;
 	const attempts = (task?.attemptIds ?? [])
-		.map((attemptId) => snapshot.attempts[attemptId]?.usageAccounting?.total)
-		.filter((total) => total !== undefined);
-	const spentUsd = attempts.reduce((sum, total) => sum + total.costUsd, 0);
-	const spentMs = attempts.reduce((sum, total) => sum + total.activeWallClockMs, 0);
+		.map((attemptId) => snapshot.attempts[attemptId])
+		.filter((candidate) => candidate?.usageAccounting?.total !== undefined);
+	const spentUsd = attempts
+		.filter((candidate) => metered(candidate))
+		.reduce((sum, candidate) => sum + (candidate.usageAccounting?.total.costUsd ?? 0), 0);
+	const spentMs = attempts.reduce(
+		(sum, candidate) => sum + (candidate.usageAccounting?.total.activeWallClockMs ?? 0),
+		0,
+	);
 	const last = attempt.usageAccounting?.total;
-	const costRoom = !budget?.maxCostUsd || spentUsd + (last?.costUsd ?? 0) <= budget.maxCostUsd;
+	const costRoom = !maxCostUsd || spentUsd + (last?.costUsd ?? 0) <= maxCostUsd;
 	const timeRoom =
 		completed || timeCeilings.length === 0 || spentMs + (last?.activeWallClockMs ?? 0) <= Math.min(...timeCeilings);
 	return costRoom && timeRoom;
@@ -165,7 +183,7 @@ export function outcomeLadderFacts(args: {
 		settings: context?.settings?.() ?? DEFAULT_WORKER_OUTCOME_SETTINGS.escalation,
 		executor: context !== undefined,
 		hostCheckable,
-		budgetLeft: budgetLeft(snapshot, attempt),
+		budgetLeft: budgetLeft(snapshot, attempt, (candidate) => context?.attemptMetered?.(candidate) ?? true),
 		...(remoteMachineId !== undefined ? { remoteMachineId } : {}),
 		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
 		...(review?.kind === "rejected" ? { reviewRejection: boundedReasonCodes(review.reasonCodes) } : {}),

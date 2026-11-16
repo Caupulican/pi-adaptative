@@ -35,9 +35,9 @@ export interface ActAheadRecord {
 	readonly headSha: string;
 	/** The failure's identity: the same failure on the same revision never starts a second episode. */
 	readonly failureKey?: string;
-	/** `admitted`: the spend bound charged before the worker starts. */
+	/** `admitted`: the charge on the day's metered spend bound before the worker starts (0 when the day had no room). */
 	readonly chargeUsd?: number;
-	/** `settled`: what the worker spent; the day's account moves from the charge to it. */
+	/** `settled`: what the worker spent on metered models; the day's account moves from the charge to it. */
 	readonly spentUsd?: number;
 	readonly laneKey?: string;
 	readonly lanePath?: string;

@@ -21,14 +21,12 @@ import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
 /**
  * One dollar ceiling over a bot's spend per request, with the setting that sets it (the owner's worker bound, the main
- * session's, or the bot's profile's): on all of it, or (`meteredOnly`) on the part of it made on metered models, which a
- * subscription's spend never reaches (its limit is its plan's usage windows). A bot's turns are held to every ceiling on
- * metered spend alone (`botSpendCeilingsOn`).
+ * session's, or the bot's profile's), on the part of it made on metered models, as every dollar ceiling counts by the
+ * owner's cost rule (`costCeilingUsd`): a subscription's spend never reaches it, its plan's usage windows hold it.
  */
 export interface BotSpendCeiling {
 	readonly usd: number;
 	readonly bound: "worker" | "session" | "profile";
-	readonly meteredOnly: boolean;
 }
 
 /** What the per-turn owners read from, and tell, the bot's host. */
@@ -72,13 +70,7 @@ export function observeBotSessionTurns(
 		openingExceeded: (opening, turnUsd) => ports.openingExceeded(opening, turnUsd),
 		exceeded: (turnUsd, addedUsd) => ports.exceeded(turnUsd, addedUsd),
 		onExceeded: (spentUsd, limit) => {
-			const reason = words().botTurnOverBudget(
-				agentId,
-				spentUsd.toFixed(2),
-				limit.usd.toFixed(2),
-				limit.bound,
-				limit.meteredOnly,
-			);
+			const reason = words().botTurnOverBudget(agentId, spentUsd.toFixed(2), limit.usd.toFixed(2), limit.bound);
 			ports.notify(reason);
 			return reason;
 		},

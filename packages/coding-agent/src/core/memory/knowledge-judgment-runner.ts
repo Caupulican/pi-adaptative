@@ -5,7 +5,12 @@ import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { AgentTool } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
-import { RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
+import {
+	countsAgainstDollars,
+	RequestSpendBudget,
+	RequestSpendRefusal,
+	type SpendBilling,
+} from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import {
@@ -19,7 +24,7 @@ import { isolatedCompletionError } from "../provider-admission/refusal.ts";
 import type { MaintenanceUsageRoute } from "../review/system-one-review-port.ts";
 import type { AutoLearnSettings } from "../settings/settings-schema.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
-import { KNOWLEDGE_COLLECTION_OPERATION_PREFIX } from "./knowledge-collector.ts";
+import { KNOWLEDGE_COLLECTION_OPERATION_PREFIX, knowledgeSpending } from "./knowledge-collector.ts";
 
 export const KNOWLEDGE_JUDGMENT_TOOL_NAME = "submit_judgment";
 const MAX_STATE_TOKENS = 32_000;
@@ -125,6 +130,8 @@ export interface SessionKnowledgeJudgeDeps {
 	autoLearn(): Required<AutoLearnSettings>;
 	/** The session's dollar ceiling on spend whose model is `model` (`KnowledgeCollectionRuntime.maxEstimatedUsd`). */
 	maxEstimatedUsd(model: Model<Api> | undefined): number | undefined;
+	/** The model registry's billing: the knowledge dollar limits then count metered spend only (`knowledgeSpending`). */
+	readonly billing?: SpendBilling;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
 
@@ -169,18 +176,21 @@ export class SessionKnowledgeJudge {
 		if (!engine || engine !== current?.engine) return undefined;
 		const settings = this.deps.autoLearn();
 		const operationId = `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}explicit:${randomUUID()}`;
-		const spending = current.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
+		const billing = this.deps.billing;
+		const spending = knowledgeSpending(current.usageOwner, operationId, billing);
 		if (spending.unresolved)
 			throw new RequestSpendRefusal("Knowledge spending for this session is not settled yet; retry later.");
+		// The limits hold metered spend; the budget charges nothing else, so its ceiling is the one on metered spend.
 		const remaining = Math.min(
 			settings.knowledgeMaxUsd,
 			settings.knowledgeSessionMaxUsd - spending.totalUsd,
-			this.deps.maxEstimatedUsd(this.deps.model()) ?? Number.POSITIVE_INFINITY,
+			this.deps.maxEstimatedUsd(undefined) ?? Number.POSITIVE_INFINITY,
 		);
-		if (!(remaining > 0))
+		// A judgment on a subscription model is held by its plan's usage windows, never by these dollars.
+		if (!(remaining > 0) && countsAgainstDollars(this.deps.model(), billing))
 			throw new RequestSpendRefusal("The knowledge spending allowance for this session is exhausted.");
 		return {
-			budget: new RequestSpendBudget(remaining),
+			budget: new RequestSpendBudget(remaining > 0 ? remaining : 0, undefined, billing),
 			origin: { ...current.usageOwner.captureOrigin(), operationId },
 		};
 	}

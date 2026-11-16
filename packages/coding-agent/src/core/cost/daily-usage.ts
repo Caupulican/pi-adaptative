@@ -54,6 +54,8 @@ export type DailyUsageTotals = {
 	historySummaryCost: number;
 	/** The proactive-review share of `ownCost`. */
 	proactivityCost: number;
+	/** `proactivityCost` by the model that spent it, for a bound that counts only part of it (metered spend). */
+	proactivitySpend: ProactivitySpend[];
 	/** Accepted proactive-note deliveries that start a parent turn without an owner message. */
 	proactiveTurnWakes: number;
 	/** Host events (CI results) delivered to the main session as a parent turn without an owner message. */
@@ -76,6 +78,28 @@ export type DailyUsageTotals = {
 	reports: number;
 };
 
+/** Proactive-review spend made on one model, named as its usage records name it (either part may be absent). */
+export interface ProactivitySpend {
+	readonly provider?: string;
+	readonly model?: string;
+	usd: number;
+}
+
+function addProactivitySpend(
+	spend: ProactivitySpend[],
+	record: Pick<DailyUsageSpendRecord, "provider" | "model">,
+	usd: number,
+): void {
+	const same = spend.find((entry) => entry.provider === record.provider && entry.model === record.model);
+	if (same) same.usd += usd;
+	else
+		spend.push({
+			...(record.provider !== undefined ? { provider: record.provider } : {}),
+			...(record.model !== undefined ? { model: record.model } : {}),
+			usd,
+		});
+}
+
 function createZeroTotals(): DailyUsageTotals {
 	return {
 		ownCost: 0,
@@ -83,6 +107,7 @@ function createZeroTotals(): DailyUsageTotals {
 		spawnedCost: 0,
 		historySummaryCost: 0,
 		proactivityCost: 0,
+		proactivitySpend: [],
 		proactiveTurnWakes: 0,
 		hostEventTurnWakes: 0,
 		routineResultTurnWakes: 0,
@@ -239,7 +264,10 @@ function addDailyUsageRecord(
 		totals.reports++;
 	} else totals.ownCost += costTotal;
 	if (record.historySummary) totals.historySummaryCost += costTotal;
-	if (record.proactivity) totals.proactivityCost += costTotal;
+	if (record.proactivity) {
+		totals.proactivityCost += costTotal;
+		addProactivitySpend(totals.proactivitySpend, record, costTotal);
+	}
 	if (resolved?.estimated) totals.costEstimate = "base-rates";
 	addUsage(totals, usage);
 	return true;

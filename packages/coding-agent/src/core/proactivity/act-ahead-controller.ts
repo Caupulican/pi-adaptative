@@ -5,8 +5,9 @@
  * in the transcript and nothing more. The owner's checkout is only read; nothing is pushed, committed or applied.
  *
  * Every decision is deterministic and bounded (`proactivity.actAhead`): one episode at a time, a rolling-day attempt
- * and spend bound charged at admission, one episode per failure, and the model only works inside its lane. Progress is
- * event-driven: host-event state, foreground activity and the worker ledger wake the controller; nothing polls.
+ * bound and a rolling-day bound on metered (API) spend charged at admission, one episode per failure, and the model only
+ * works inside its lane. Progress is event-driven: host-event state, foreground activity and the worker ledger wake the
+ * controller; nothing polls.
  */
 
 import { createHash } from "node:crypto";
@@ -28,6 +29,7 @@ import {
 	ciThreadKey,
 } from "../events/host-event-contract.ts";
 import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
+import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { RoutineHostEventFact, RoutineHostEventFeed } from "../routines/routine-contract.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -87,6 +89,10 @@ export interface ActAheadControllerDeps {
 		/** The attempt's terminal notification, created when it ended; undefined while it has none. */
 		terminalNotification(attemptId: string): { notificationId: string; status: "pending" | "delivered" } | undefined;
 		acknowledge(notificationIds: readonly string[]): void;
+		/** Whether an attempt's spend is metered (`isMeteredSpend` of the model it runs on): only that spend is dollars. */
+		isMeteredAttempt(attempt: AttemptRuntimeState): boolean;
+		/** Whether a worker started now would spend metered (API) dollars: `isMeteredSpend` of the model it would run on. */
+		startsMetered(): boolean;
 	};
 	/** Worktree-sync engine deps rooted at `cwd`; undefined when worktree-sync is off. */
 	engineDeps(cwd: string): WorktreeSyncEngineDeps | undefined;
@@ -298,7 +304,8 @@ export class ActAheadController {
 			supersededByPassingCi(event, candidate.acceptedOrdinal, this.deps.hostEvents.feed().events)
 		)
 			return this.append({ ...base, phase: "abandoned", reason: "superseded" });
-		if (await this.overDayBound(settings)) return this.append({ ...base, phase: "capped", reason: "day_bound" });
+		if ((await this.dayAdmission(settings)) === undefined)
+			return this.append({ ...base, phase: "capped", reason: "day_bound" });
 		let evidence: CiFailureEvidence | undefined;
 		try {
 			evidence = await this.deps.evidence()?.(event, signal);
@@ -332,8 +339,10 @@ export class ActAheadController {
 		const namesFailure = evidence?.jobs.some((job) => job.failedSteps.length > 0) === true;
 		if (first.passed && !namesFailure) return this.end(base, lane, "abandoned", "not_reproduced");
 		const basis: ActAheadBasis = first.passed ? "ci-log" : "reproduced";
-		if (await this.overDayBound(settings)) return this.end(base, lane, "capped", "day_bound");
-		this.append({ ...base, phase: "admitted", failureKey, chargeUsd: settings.maxUsdPerAttempt, basis, ...lane });
+		const admission = await this.dayAdmission(settings);
+		if (admission === undefined) return this.end(base, lane, "capped", "day_bound");
+		const { chargeUsd, maxCostUsd } = admission;
+		this.append({ ...base, phase: "admitted", failureKey, chargeUsd, basis, ...lane });
 		this.ownedMessageIds.add(workerAgentMessageId(this.deps.sessionId(), workerReplayKey(base.episode)));
 		const started = await this.deps.workers.start(
 			{
@@ -343,8 +352,9 @@ export class ActAheadController {
 				turnOrigin: HOST_EVENT_ORIGIN,
 				authority: {
 					shellReadOnly: true,
+					// The worker's dollar ceiling holds its metered spend alone (`costCeilingUsd`), within the day's room.
 					budget: {
-						maxCostUsd: settings.maxUsdPerAttempt,
+						maxCostUsd,
 						maxWallClockMs: settings.maxMinutesPerAttempt * 60_000,
 					},
 				},
@@ -355,7 +365,7 @@ export class ActAheadController {
 		);
 		if (!started.started) {
 			this.append({ ...base, phase: "abandoned", reason: `worker_${started.skipReason}` });
-			return this.settleEpisode(base, lane, settings.maxUsdPerAttempt, 0);
+			return this.settleEpisode(base, lane, chargeUsd, 0);
 		}
 		this.append({ ...base, phase: "working", taskId: started.record.laneId, basis, ...lane });
 	}
@@ -388,8 +398,11 @@ export class ActAheadController {
 			if (notification.status === "pending") pending.push(notification.notificationId);
 		}
 		this.deps.workers.acknowledge(pending);
+		// The day's dollars are metered spend: an attempt on a subscription model spends none of them.
 		const spent = attempts.every((attempt) => attempt.usageAccounting)
-			? attempts.reduce((sum, attempt) => sum + (attempt.usageAccounting?.total.costUsd ?? 0), 0)
+			? attempts
+					.filter((attempt) => this.deps.workers.isMeteredAttempt(attempt))
+					.reduce((sum, attempt) => sum + (attempt.usageAccounting?.total.costUsd ?? 0), 0)
 			: charge;
 		const outcome = VALIDATED_WORKER_STATUSES.has(record.status)
 			? await this.validate(base, lane, admitted)
@@ -496,12 +509,25 @@ export class ActAheadController {
 		}
 	}
 
-	private async overDayBound(settings: ResolvedActAheadSettings): Promise<boolean> {
+	/**
+	 * One more attempt on the rolling day's account: what it charges and the worker's dollar ceiling; undefined past the
+	 * attempt bound, or past the day's dollar room for a worker that would spend metered (API) dollars. The day's dollars
+	 * count metered spend alone: a worker that would run on a subscription model (`startsMetered`) charges none and is
+	 * held by its plan's usage windows; a metered one charges the whole `maxUsdPerAttempt`. Either way the worker's ceiling
+	 * is `maxUsdPerAttempt` within what is left of `maxUsdPerDay`, so a worker whose start lands on a metered model never
+	 * spends past the day's room.
+	 */
+	private async dayAdmission(
+		settings: ResolvedActAheadSettings,
+	): Promise<{ readonly chargeUsd: number; readonly maxCostUsd: number } | undefined> {
 		const day = await this.deps.aggregateDay();
-		return (
-			day.actAheadAttempts >= settings.maxAttemptsPerDay ||
-			day.actAheadUsd + settings.maxUsdPerAttempt > settings.maxUsdPerDay + 1e-9
-		);
+		if (day.actAheadAttempts >= settings.maxAttemptsPerDay) return undefined;
+		const room = Math.max(0, settings.maxUsdPerDay - day.actAheadUsd);
+		const maxCostUsd = Math.min(settings.maxUsdPerAttempt, room);
+		if (!this.deps.workers.startsMetered()) return { chargeUsd: 0, maxCostUsd };
+		return settings.maxUsdPerAttempt <= room + 1e-9
+			? { chargeUsd: settings.maxUsdPerAttempt, maxCostUsd }
+			: undefined;
 	}
 
 	/**

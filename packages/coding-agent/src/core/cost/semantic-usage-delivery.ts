@@ -101,6 +101,7 @@ export interface SemanticUsageProjection {
 	readonly overflow?: { readonly usage: Usage; readonly reports: number };
 }
 
+export type SpendCounts = (spend: { readonly provider: string; readonly model: string }) => boolean;
 /** Original-session spending for one durable family of operations and one exact operation. */
 export interface SemanticOperationSpending {
 	readonly totalUsd: number;
@@ -152,8 +153,8 @@ export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	/** Confirms one receipt for the admission path. Only `physically_recorded` is a confirmed row. */
 	confirm(receipt: TypeSafeUsageReceipt): SemanticUsageOutcome;
 	pendingProjection(): SemanticUsageProjection;
-	/** Canonical and pending reports share receipt identity; retries never reset this baseline. */
-	spending(operationPrefix: string, operationId: string): SemanticOperationSpending;
+	/** Canonical and pending reports share receipt identity; retries never reset this baseline; `counts` keeps only what it accepts. */
+	spending(operationPrefix: string, operationId: string, counts?: SpendCounts): SemanticOperationSpending;
 	/** Fires after spending evidence changes. Listeners may only schedule work and must not throw. */
 	subscribeSpending(listener: () => void): () => void;
 	/** Records a history summary model call's paid spend through the same retention and canonical row as a System One review. */
@@ -864,7 +865,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		return { revision: this.revision, reports, ...(matches && this.overflow ? { overflow: this.overflow } : {}) };
 	}
 
-	spending(operationPrefix: string, operationId: string): SemanticOperationSpending {
+	spending(operationPrefix: string, operationId: string, counts?: SpendCounts): SemanticOperationSpending {
 		if (!operationPrefix || !operationId.startsWith(operationPrefix))
 			throw new SystemOneUsageRefusal("Spending projection requires an operation within its explicit prefix");
 		let unresolved =
@@ -882,7 +883,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				!receipt.origin.operationId?.startsWith(operationPrefix)
 			)
 				return;
-			if (seen.has(receipt.receiptId)) return;
+			if (seen.has(receipt.receiptId) || (counts && !counts(receipt))) return;
 			seen.add(receipt.receiptId);
 			if ((receipt.costStatus !== "catalog_priced" && !receipt.priceKnown) || receipt.usage.totalTokens < 1)
 				unresolved = true;
@@ -915,9 +916,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				unresolved = true;
 			include(receipt);
 		}
-		for (const request of this.unresolved.values()) {
-			if (request.origin.operationId?.startsWith(operationPrefix)) unresolved = true;
-		}
+		for (const request of this.unresolved.values())
+			if (request.origin.operationId?.startsWith(operationPrefix) && (!counts || counts(request))) unresolved = true;
 		if (!Number.isFinite(totalUsd) || !Number.isFinite(operationUsd)) unresolved = true;
 		return { totalUsd, operationUsd, unresolved };
 	}

@@ -26,7 +26,7 @@ export interface ContinuousChatSettings {
 	/** The reasoning effort of every compaction. Its reasoning tokens are billed as output on every reply, corrections included. */
 	readonly thinkingLevel: ContinuousChatThinkingLevel;
 	readonly allowExternalSummaryEgress: boolean;
-	/** Daily USD the background summaries may spend across all projects; 0 means no limit. */
+	/** Daily metered (API) USD the background summaries may spend across all projects; 0 means no limit. */
 	readonly maxUsdPerDay: number;
 	readonly maxConcurrentCompactions: number;
 	readonly turnView: ContinuousChatViewBudget;

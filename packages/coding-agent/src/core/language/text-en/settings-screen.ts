@@ -508,7 +508,8 @@ export const SETTINGS_SCREEN = {
 		},
 		budget: {
 			label: "Budget per pass",
-			description: "USD budget per research pass; breaches mark the lane as budget exhausted in diagnostics",
+			description:
+				"USD budget per research pass on metered (API) spend; breaches mark the lane as budget exhausted in diagnostics; a subscription model is held by its plan's usage windows instead",
 		},
 		maxMilliseconds: {
 			label: "Max milliseconds",

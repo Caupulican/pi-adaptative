@@ -145,8 +145,8 @@ export interface BotSessionHostPorts {
 	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
 	/**
-	 * The root's dollar ceilings over spend, as a worker's budget holds it: the owner's worker bound and the main session's
-	 * autonomy bound on all spend, and its metered-only ceiling; empty when none is set.
+	 * The root's dollar ceilings over metered spend, as a worker's budget holds it: the owner's worker bound and the main
+	 * session's autonomy ceiling (`costCeilingUsd`); empty when none is set.
 	 */
 	spendCeilings(): readonly BotSpendCeiling[];
 	/** What reads when a closed bot's saved session continues what a usage limit stopped (`savedUsageResumeAt`). */

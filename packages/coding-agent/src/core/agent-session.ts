@@ -244,6 +244,7 @@ import type { DeliveryState, SessionOperatorProjection } from "./operator-projec
 import type { AdaptationProjection } from "./operator-projection/types.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import { isMeteredSpend } from "./orchestration/risk-budget.ts";
 import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import { OwnerChannelSession } from "./owner-channel-session.ts";
 import type { ReturnBriefController } from "./owner-decisions/return-brief-controller.ts";
@@ -270,7 +271,6 @@ import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-a
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import {
-	hasAllowance,
 	heldExhaustion,
 	openSubscriptionAllowance,
 	type SubscriptionAllowancePort,
@@ -1123,7 +1123,7 @@ export class AgentSession {
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),
 			getSpawnedUsageCost: () => this.getSpawnedUsage().cost,
 			// A subscription costs no marginal dollars while the account has allowance (or reports none); past it, extra usage is money.
-			isUnmeteredSubscription: (model) => hasAllowance(this._modelRegistry, this._subscriptionAllowance, model),
+			isUnmeteredSubscription: (model) => !isMeteredSpend(model, this._modelRegistry),
 		});
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,
@@ -1421,9 +1421,8 @@ export class AgentSession {
 						config.timers.port("continuous-chat"),
 					),
 					summary: () =>
-						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), {
-							resolveModel: (reference) => historyModels.resolveModel(reference),
-						}),
+						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), historyModels),
+					billing: this._modelRegistry,
 					onModelFailure: (model, errorMessage) => {
 						const message = errorMessage ?? "";
 						const classified = classifyFailure({ message, provider: model.provider });

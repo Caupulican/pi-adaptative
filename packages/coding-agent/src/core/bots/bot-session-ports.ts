@@ -15,6 +15,7 @@ import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
+import { costCeilingUsd, envelopeCostBudget } from "../orchestration/risk-budget.ts";
 import type { ModelExhaustion } from "../provider-admission/gate.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import {
@@ -138,18 +139,12 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 			inRunRetryMaxMs: () => deps.getSettingsManager().getProviderRetrySettings().maxRetryDelayMs,
 			modelExhaustion: (ref) => sharedExhaustions(deps).exhaustion(ref),
 		}),
-		// A worker's budget is the owner's worker bound, intersected with the main session's own ceilings: on all spend, and
-		// on metered spend (a subscription's limit is its usage windows). None set, none applies.
+		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling (`costCeilingUsd` of
+		// its envelope), each on metered spend: a subscription's limit is its usage windows. None set, none applies.
 		spendCeilings: () => {
-			const envelope = deps.getCapabilityEnvelope();
 			const ceilings: BotSpendCeiling[] = [
-				{
-					usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd,
-					bound: "worker",
-					meteredOnly: false,
-				},
-				{ usd: envelope?.maxEstimatedUsd ?? 0, bound: "session", meteredOnly: false },
-				{ usd: envelope?.maxMeteredEstimatedUsd ?? 0, bound: "session", meteredOnly: true },
+				{ usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd, bound: "worker" },
+				{ usd: costCeilingUsd(envelopeCostBudget(deps.getCapabilityEnvelope()), true) ?? 0, bound: "session" },
 			];
 			return ceilings.filter((ceiling) => ceiling.usd > 0);
 		},

@@ -21,6 +21,7 @@ export interface CostGuardControllerDeps {
 	getSettings(): CostGuardSettings;
 	getCompactionReserveTokens(): number;
 	getSpawnedUsageCost(): number;
+	/** Whether spend on `model` is not metered (`isMeteredSpend`): a subscription's usage windows hold it, never this guard. */
 	isUnmeteredSubscription(model: Model<Api>): boolean;
 }
 

@@ -362,8 +362,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			const runId = awayRunKey(attempt, snapshot);
 			if (runId === undefined) return undefined;
 			const includes = (candidate: AttemptRuntimeState) => awayRunKey(candidate, snapshot) === runId;
-			// A run away is held to its spend bound on a priced model only: an unpriced one is refused, as before.
-			return { runId, maxCostUsd: input.maxUsdPerRun(), includes, unpriced: "refused" as const };
+			// A run away holds its metered spend to its bound; a metered attempt on a model with no price is refused.
+			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		// The file an earlier build named this controller's fleet queue metadata by is its own only when its ledger claims

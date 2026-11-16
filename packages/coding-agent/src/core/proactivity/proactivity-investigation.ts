@@ -111,6 +111,7 @@ export class ProactivityInvestigation {
 			cwd: this.authority.cwd,
 			readOnly: true,
 			grant: this.authority.grant,
+			meteredSpend: this.options.metered,
 			toolManifests: this.authority.manifests,
 			deniedPaths: this.authority.grant.deniedPaths,
 			memoryBroker: this.authority.manifests.some((manifest) => manifest.capabilities.includes("memory.query"))

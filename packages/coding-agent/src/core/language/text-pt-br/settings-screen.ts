@@ -517,7 +517,7 @@ export const SETTINGS_SCREEN = {
 		budget: {
 			label: "Orçamento por passada",
 			description:
-				"Orçamento em dólar por passada de pesquisa; estouros marcam a pesquisa como orçamento esgotado no diagnóstico",
+				"Orçamento em dólar por passada de pesquisa sobre o gasto medido (API); estouros marcam a pesquisa como orçamento esgotado no diagnóstico; um modelo de assinatura é contido pelas janelas de uso do plano",
 		},
 		maxMilliseconds: {
 			label: "Máximo de milissegundos",

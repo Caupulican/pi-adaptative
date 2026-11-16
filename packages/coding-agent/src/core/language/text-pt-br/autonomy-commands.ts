@@ -71,7 +71,7 @@ export const AUTONOMY_COMMANDS = {
 		reviewBounds: (seconds: number, turns: number, runs: number, notes: number, usd: string) =>
 			`Revisão após ${seconds}s ocioso, com pelo menos ${turns} ${turns === 1 ? "novo turno" : "novos turnos"} do dono entre uma e outra, ${runs} por sessão, até ${notes} ${notes === 1 ? "nota" : "notas"}, $${usd} de limite por revisão.`,
 		dailyBounds: (usd: string, wakes: number) =>
-			`Janela móvel de 24 h entre as sessões guardadas com esta: $${usd} de gasto em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} por notas e eventos de CI juntos; passado esse limite, os dois esperam o próximo turno do dono.`,
+			`Janela móvel de 24 h entre as sessões guardadas com esta: $${usd} de gasto medido (API) em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} por notas e eventos de CI juntos; passado esse limite, os dois esperam o próximo turno do dono.`,
 		delivery: (wakes: boolean) => `Entrega: ${wakes ? "inicia um turno" : "uma nota visível no próximo turno"}`,
 		preferences: (preferences: string) => `Preferências: ${preferences}`,
 		none: "nenhuma",
@@ -85,7 +85,7 @@ export const AUTONOMY_COMMANDS = {
 		intakeLast: (status: string, sources: number, created: number, refused: number) =>
 			`; última passada ${status}: ${sources} ${sources === 1 ? "fonte" : "fontes"}, ${created} ${created === 1 ? "criada" : "criadas"}, ${refused} ${refused === 1 ? "recusada" : "recusadas"}`,
 		lastMeasured: (usd: string, wakes: number, eventWakes: number) =>
-			`Última medição: $${usd} de gasto em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} (${eventWakes} por eventos de CI) na janela de 24 h`,
+			`Última medição: $${usd} de gasto medido (API) em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} (${eventWakes} por eventos de CI) na janela de 24 h`,
 		setAside: (label: string, until: string) =>
 			`Deixado de lado após notas sem resposta ou recusadas: ${label}, até ${until}`,
 		lastGate: (gate: string) => `Último bloqueio: ${gate}`,

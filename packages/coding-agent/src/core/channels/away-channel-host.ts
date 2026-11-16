@@ -41,6 +41,7 @@ import { boundSessionTurnSpend, turnSpendExcess, unpricedModelRefusal } from "..
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import {
 	ownerOrchestrationHome,
 	ownerSessionStorageRoots,
@@ -84,10 +85,14 @@ function ownerWanted({ name, policy }: AwayChannel): boolean {
 	return policy.ownerSenders.length > 0 && isOwnerChannelName(name);
 }
 
-/** The model refusal of a session whose spend is bounded; undefined when it can run. */
+/**
+ * The model refusal of a session whose spend is bounded; undefined when it can run. A metered model that declares no
+ * price cannot be held to the dollar bound; a subscription model is held by its usage windows, so none refuses it.
+ */
 function modelRefusal(session: AgentSession): string | undefined {
 	const model = session.model;
-	return model ? unpricedModelRefusal(model) : "no model is configured";
+	if (!model) return "no model is configured";
+	return isMeteredSpend(model, session.modelRegistry) ? unpricedModelRefusal(model) : undefined;
 }
 
 /** The transport of a channel the daemon serves; undefined when it has none for that name. */
@@ -559,8 +564,12 @@ export class AwayChannelHosts {
 		const activity = new Set<() => void>();
 		const unsubscribeWarnings = this.subscribeSessionWarnings(session, awaySessionSource(name));
 		const unsubscribeOwnerWarnings = owner && this.subscribeSessionWarnings(owner.session, phoneSessionSource(name));
-		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
-		const limit = () => ({ usd: settings.getRoutineAwaySettings().maxUsdPerRun });
+		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply. It holds the
+		// turn's metered spend, by the owner's cost rule: a subscription's turns are held by its usage windows instead.
+		const limit = () =>
+			isMeteredSpend(session.model, session.modelRegistry)
+				? { usd: settings.getRoutineAwaySettings().maxUsdPerRun }
+				: undefined;
 		const unsubscribeSpend = boundSessionTurnSpend(session, {
 			// The turn's own spend: a channel turn away is its own run.
 			exceeded: (turnUsd) => turnSpendExcess(turnUsd, limit()),
@@ -617,6 +626,8 @@ export class AwayChannelHosts {
 				return () => activity.delete(listener);
 			},
 			sendUserMessage: (text, options) => session.sendUserMessage(text, options),
+			// The channel's dollar bounds count metered (API) spend only (`readBatchOutcome`).
+			getModelRegistry: () => session.modelRegistry,
 			// No owner reads this session: what it would tell them goes to the daemon's reports, once per state, and the
 			// owner is never told here.
 			observeNotice: (kind, read) => {

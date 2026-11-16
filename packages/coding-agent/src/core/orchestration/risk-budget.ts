@@ -98,15 +98,17 @@ export function isMeteredSpend(model: Model<Api> | undefined, billing: ModelBill
 }
 
 /**
- * The dollar ceiling spend is held to: `maxCostUsd`, and also `maxMeteredCostUsd` when the spend is metered
- * (`isMeteredSpend`). A subscription's limit is its plan's usage windows, so the metered ceiling never stops it. Undefined
- * when neither ceiling applies.
+ * The dollar ceiling spend is held to, by the owner's cost rule: metered spend (`isMeteredSpend`) is held to the lower of
+ * `maxCostUsd` and `maxMeteredCostUsd`; subscription spend to neither, since its plan's usage windows hold it and wait for
+ * their reset. Undefined when no ceiling applies. Every dollar ceiling of the harness counts metered spend through this
+ * rule; `maxCostUsd` keeps its name in durable records, which earlier builds read as a ceiling on all spend.
  */
 export function costCeilingUsd(
 	budget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">,
 	metered: boolean,
 ): number | undefined {
-	const ceilings = [budget.maxCostUsd, metered ? budget.maxMeteredCostUsd : undefined].filter(
+	if (!metered) return undefined;
+	const ceilings = [budget.maxCostUsd, budget.maxMeteredCostUsd].filter(
 		(ceiling): ceiling is number => ceiling !== undefined,
 	);
 	return ceilings.length > 0 ? Math.min(...ceilings) : undefined;

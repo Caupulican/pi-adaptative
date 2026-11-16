@@ -232,10 +232,14 @@ export class ResearchLaneController {
 					cwd: this.deps.getCwd(),
 					maxSources: settings.maxSources,
 				});
-				const maxUsd = clampLaneMaxUsd(
-					settings.maxUsd,
-					this.models.envelopeCeilingUsd(this.deps.getCapabilityEnvelope(), model),
-				);
+				// Dollar ceilings count metered (API) spend only: a pass on a subscription model has none, its plan's usage
+				// windows hold it (the provider admission's usage-window exhaustion).
+				const maxUsd = this.models.isMeteredSpend(model)
+					? clampLaneMaxUsd(
+							settings.maxUsd,
+							this.models.envelopeCeilingUsd(this.deps.getCapabilityEnvelope(), model),
+						)
+					: undefined;
 				// An explicit run (`/autonomy research`) has no standing gate: a session that holds its workers to its own reach
 				// holds its research lane there too, as a worker's lane (`yoloGrantBound`, its read roots and denied paths).
 				const ceiling = workerCeilingOf(this.deps.standing, this.deps);
@@ -463,7 +467,7 @@ export class ResearchLaneController {
 	}
 
 	private buildEnvelope(
-		maxUsd: number,
+		maxUsd: number | undefined,
 		laneProfile: NormalizedProfile | undefined,
 		surface: LaneToolSurface,
 	): CapabilityEnvelope {
@@ -475,7 +479,8 @@ export class ResearchLaneController {
 			deniedTools: [...surface.deniedTools],
 			allowedPaths: [this.deps.getCwd()],
 			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
-			maxEstimatedUsd: clampLaneMaxUsd(maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd),
+			// Already clamped to the session envelope's ceiling on this pass's spend (`envelopeCeilingUsd`).
+			...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
 			createdAt: new Date().toISOString(),
 		};
 	}

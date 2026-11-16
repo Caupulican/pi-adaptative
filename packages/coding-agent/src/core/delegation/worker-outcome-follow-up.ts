@@ -3,10 +3,12 @@ import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { FleetScheduler } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { HostRequirementChecks } from "../goals/session-requirement-check.ts";
+import type { ModelRegistry } from "../model-registry.ts";
 import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { ResolvedWorkerOutcomeSettings } from "../settings/worker-outcome-settings.ts";
+import { isMeteredAttemptSpend } from "./request-cost-bounds.ts";
 import { WorkerEscalation } from "./worker-escalation.ts";
 import { type Outcome, subscribeOutcomes } from "./worker-outcome.ts";
 import { WorkerOutcomeLearning } from "./worker-outcome-learning.ts";
@@ -20,7 +22,8 @@ export interface WorkerOutcomeFollowUpDeps {
 	readonly recorder: Pick<WorkerOutcomeRecorder, "record" | "useLadderContext">;
 	readonly fleet: Pick<FleetScheduler, "prepare" | "admit">;
 	settings(): ResolvedWorkerOutcomeSettings;
-	findModel(provider: string, modelId: string): Model<Api> | undefined;
+	/** The model registry: a model's thinking ceiling, and the billing kind `isMeteredAttemptSpend` reads. */
+	readonly models: Pick<ModelRegistry, "find" | "isUsingSubscription">;
 	goalState(): GoalState | undefined;
 	cwd(): string;
 	/** Aborting it detaches the follow-up: no subscription, ladder context or placement outlives the controller. */
@@ -72,6 +75,12 @@ export class WorkerOutcomeFollowUp {
 			thinkingCeiling: (modelRef) => this.thinkingCeiling(modelRef),
 			requirementCheckIds: () =>
 				new Set((deps.goalState()?.requirements ?? []).filter((entry) => entry.check).map((entry) => entry.id)),
+			attemptMetered: (attempt) =>
+				isMeteredAttemptSpend(
+					attempt,
+					(binding) => deps.models.find(binding.provider, binding.modelId),
+					deps.models,
+				),
 		});
 		this.unsubscribe = subscribeOutcomes((outcome) => {
 			// Outcomes are published inside the recorder's write; acting on them waits for that write to return.
@@ -95,7 +104,7 @@ export class WorkerOutcomeFollowUp {
 
 	private thinkingCeiling(modelRef: string): OrchestrationThinkingLevel | undefined {
 		const [provider, ...rest] = modelRef.split("/");
-		const model = provider && rest.length > 0 ? this.deps.findModel(provider, rest.join("/")) : undefined;
+		const model = provider && rest.length > 0 ? this.deps.models.find(provider, rest.join("/")) : undefined;
 		const highest = model ? getSupportedThinkingLevels(model).at(-1) : undefined;
 		return ORCHESTRATION_THINKING_LEVELS.find((level) => level === highest);
 	}

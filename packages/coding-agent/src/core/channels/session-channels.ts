@@ -41,7 +41,7 @@ import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
-import { type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
+import { type BatchBranchSource, type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelAwayUntold,
@@ -220,7 +220,7 @@ export interface ChannelJournalSummary {
 	readonly name: string;
 	/** Turns delivered in the last 24 hours against `maxWakesPerDay`. */
 	readonly wakes: { readonly used: number; readonly max: number };
-	/** Dollars the channel's turns cost in the last 24 hours against `maxUsdPerDay`. */
+	/** Metered (API) dollars the channel's turns cost in the last 24 hours against `maxUsdPerDay`. */
 	readonly spendUsd: { readonly used: number; readonly max: number };
 	readonly pendingMessages: number;
 	readonly pendingDrafts: number;
@@ -266,7 +266,7 @@ export interface ChannelHeldSenderView {
 /** What a session exposes: a deployment wrapper registers providers and reads their states; it never starts them. */
 export type SessionChannelsView = Pick<SessionChannels, "registerChannel" | "registerScheduler" | "getStates">;
 
-export interface SessionChannelsDeps extends SessionChannelsOwnerDeps {
+export interface SessionChannelsDeps extends SessionChannelsOwnerDeps, Pick<BatchBranchSource, "getModelRegistry"> {
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
 	/** Where owner turns run when not in this session (the daemon's phone session); this session's own when omitted. */
@@ -1334,7 +1334,7 @@ export class SessionChannels {
 		if (wakes >= policy.maxWakesPerDay)
 			return `its bound of ${policy.maxWakesPerDay} turn(s) in 24 hours is reached (channels.${name}.maxWakesPerDay)`;
 		if (usd >= policy.maxUsdPerDay)
-			return `$${usd.toFixed(2)} spent in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
+			return `$${usd.toFixed(2)} of metered (API) spend in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
 		if (state.drafts.filter(isDraftOpen).length >= MAX_PENDING_DRAFTS)
 			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
 		return undefined;

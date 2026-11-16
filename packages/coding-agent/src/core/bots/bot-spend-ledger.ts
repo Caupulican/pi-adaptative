@@ -35,7 +35,7 @@ export interface SpendWindowRecord {
 	readonly kind: string;
 	/** The session's own spend while serving it, in dollars. */
 	foregroundUsd: number;
-	/** The part of it made on a metered model (`isMeteredSpend`): what a metered-only ceiling counts of it. */
+	/** The part of it made on a metered model (`isMeteredSpend`): what a dollar ceiling counts of it. */
 	meteredForegroundUsd: number;
 	/** The attempts found to serve it (their spend is read from the delegation ledger, never kept here). */
 	attemptIds: string[];

@@ -2,8 +2,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
-import { isRequestSpendRefusal, RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
-import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
+import {
+	countsAgainstDollars,
+	isRequestSpendRefusal,
+	RequestSpendBudget,
+	RequestSpendRefusal,
+	receiptCountsAgainstDollars,
+	referenceCountsAgainstDollars,
+	type SpendBilling,
+} from "../cost/request-spend-budget.ts";
+import type { SemanticOperationSpending, SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { ConfidenceProvenance } from "../decision/confidence.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
@@ -49,6 +57,22 @@ const HISTORY_LOOK_COMMITS = 50;
 /** Commits a sample must hold before a look is worth a request. */
 const MIN_HISTORY_SAMPLE_COMMITS = 5;
 
+/**
+ * A session's spending on knowledge collection under `operationId`, as its dollar limits count it: metered spend only when
+ * `billing` reads it (`receiptCountsAgainstDollars`), every spend otherwise.
+ */
+export function knowledgeSpending(
+	usageOwner: SessionSemanticUsageDelivery,
+	operationId: string,
+	billing: SpendBilling | undefined,
+): SemanticOperationSpending {
+	return usageOwner.spending(
+		KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
+		operationId,
+		billing && ((spend) => receiptCountsAgainstDollars(spend, billing)),
+	);
+}
+
 class CollectionDeadline extends Error {}
 /** The owner moved on. It stops the pass from starting requests and never aborts a request already sent. */
 class CollectionYield extends Error {}
@@ -90,7 +114,10 @@ export interface KnowledgeCollectionRuntime {
 	engine(): SemanticDecisionEngine | undefined;
 	isForegroundBusy(): boolean;
 	subscribeForegroundActivity(listener: () => void): () => void;
-	/** The session's dollar ceiling on collection spend whose model is `model` (`LaneModelResolver.envelopeCeilingUsd`). */
+	/**
+	 * The session's dollar ceiling on collection spend whose model is `model` (`LaneModelResolver.envelopeCeilingUsd`).
+	 * Collection reads it for no model's spend (`undefined`), the metered spend its budgets charge.
+	 */
 	maxEstimatedUsd(model: Model<Api> | undefined): number | undefined;
 	/** Persist the bounded handoff and notify the parent, even after cancellation. */
 	onTerminal(
@@ -167,6 +194,11 @@ export interface KnowledgeCollectorDeps extends KnowledgeCollectionBinding, Know
 	readonly evidence: OwnerEvidenceLedger;
 	readonly settings: KnowledgeCollectorSettings;
 	readonly usageOwner: SessionSemanticUsageDelivery;
+	/**
+	 * The model registry's billing: the knowledge dollar limits then count metered spend only, so a source read on a
+	 * subscription model is read with no metered room left, and only its metered requests are refused.
+	 */
+	readonly billing?: SpendBilling;
 	captureGuard(): () => string | undefined;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	warn(message: string): void;
@@ -301,20 +333,15 @@ export class KnowledgeCollector {
 					provenance: config.engine.capabilities().confidenceProvenance,
 				}
 			: undefined;
-		const spending = this.deps.usageOwner.spending(
-			KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-			KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-		);
-		// A zero per-source limit refuses every source before its first request, exactly like an exhausted session.
+		const spending = this.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX);
+		// A zero per-source limit refuses every source with a metered request before its first one, exactly like an
+		// exhausted session; a source whose requests all run on subscription models is still read.
 		const reason =
 			config.reason ??
 			(spending.unresolved
 				? "accounting_unresolved"
-				: Math.min(
-							config.settings.knowledgeMaxUsd,
-							config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-							this.deps.maxEstimatedUsd(config.model) ?? Number.POSITIVE_INFINITY,
-						) <= 0
+				: this.meteredRoomUsd(config.settings.knowledgeMaxUsd, spending, config.settings) <= 0 &&
+						this.spendsMetered(config)
 					? "budget_exhausted"
 					: undefined);
 		return {
@@ -348,7 +375,7 @@ export class KnowledgeCollector {
 		);
 		const model = this.deps.models.resolveModel(settings.model === "active" ? undefined : settings.model);
 		const engine = this.deps.engine();
-		const cap = this.deps.maxEstimatedUsd(model);
+		const cap = this.deps.maxEstimatedUsd(undefined);
 		const valid =
 			Number.isFinite(settings.knowledgeMaxUsd) &&
 			settings.knowledgeMaxUsd >= 0 &&
@@ -422,10 +449,7 @@ export class KnowledgeCollector {
 							this.active &&
 							this.accountingDirty &&
 							this.beganWithUnresolvedAccounting &&
-							!this.deps.usageOwner.spending(
-								KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-								KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-							).unresolved
+							!this.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX).unresolved
 						)
 							this.rescan = true;
 						if (this.more || this.rescan || this.retryAt !== undefined) this.schedule();
@@ -466,10 +490,7 @@ export class KnowledgeCollector {
 		);
 		try {
 			this.accountingDirty = false;
-			this.beganWithUnresolvedAccounting = this.deps.usageOwner.spending(
-				KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-				KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-			).unresolved;
+			this.beganWithUnresolvedAccounting = this.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX).unresolved;
 			const guard = this.deps.captureGuard();
 			const origin = this.deps.usageOwner.captureOrigin();
 			// The boundary before every step and every physical request. A busy foreground or a changed configuration
@@ -573,15 +594,11 @@ export class KnowledgeCollector {
 		// Spending first: a look nothing can pay for reads no git and asks nothing.
 		const project = this.deps.scope.project;
 		const operationId = `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}${REPOSITORY_HISTORY_ORIGIN}:${project}`;
-		const spending = this.deps.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
+		const spending = this.spending(operationId);
 		// An unresolved charge is settled by a later pass, which may look then: this pass reads nothing and stays undecided.
 		if (spending.unresolved) return;
-		const remaining = Math.min(
-			config.settings.historyMaxUsd - spending.operationUsd,
-			config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-			this.deps.maxEstimatedUsd(model) ?? Number.POSITIVE_INFINITY,
-		);
-		if (remaining <= 0) {
+		const remaining = this.meteredRoomUsd(config.settings.historyMaxUsd, spending, config.settings);
+		if (remaining <= 0 && this.spendsMetered(config)) {
 			this.historyDecided = true;
 			return;
 		}
@@ -600,7 +617,7 @@ export class KnowledgeCollector {
 			this.historyDecided = true;
 			return;
 		}
-		const budget = new RequestSpendBudget(remaining, assertCurrent);
+		const budget = new RequestSpendBudget(Math.max(0, remaining), assertCurrent, this.deps.billing);
 		const request = { budget, origin: { ...origin, operationId } };
 		const knownTasteTexts = this.tasteFacts().map((record) => record.text);
 		this.historyAttempts += 1;
@@ -647,6 +664,35 @@ export class KnowledgeCollector {
 		}
 	}
 
+	/** This session's collection spending under `operationId`, as the knowledge dollar limits count it (`knowledgeSpending`). */
+	private spending(operationId: string): SemanticOperationSpending {
+		return knowledgeSpending(this.deps.usageOwner, operationId, this.deps.billing);
+	}
+
+	/**
+	 * The metered room left for one operation: its own limit, the session's, and the envelope's ceiling on metered spend,
+	 * which is the only spend a collection budget charges.
+	 */
+	private meteredRoomUsd(
+		operationMaxUsd: number,
+		spending: SemanticOperationSpending,
+		settings: Required<AutoLearnSettings>,
+	): number {
+		return Math.min(
+			operationMaxUsd - spending.operationUsd,
+			settings.knowledgeSessionMaxUsd - spending.totalUsd,
+			this.deps.maxEstimatedUsd(undefined) ?? Number.POSITIVE_INFINITY,
+		);
+	}
+
+	/** Whether a source's requests spend metered dollars: extraction on its collection model, or its engine's judgments. */
+	private spendsMetered(config: Pick<Configuration, "model" | "engine">): boolean {
+		return (
+			countsAgainstDollars(config.model, this.deps.billing) ||
+			(config.engine !== undefined && referenceCountsAgainstDollars(config.engine.model, this.deps.billing))
+		);
+	}
+
 	private retryWhen(at: number | undefined): void {
 		if (at !== undefined) {
 			this.retryAt = Math.min(this.retryAt ?? at, at);
@@ -681,12 +727,7 @@ export class KnowledgeCollector {
 		return strictCanonicalDigest({
 			configKey,
 			...(code === "accounting:unresolved"
-				? {
-						spending: this.deps.usageOwner.spending(
-							KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-							KNOWLEDGE_COLLECTION_OPERATION_PREFIX,
-						),
-					}
+				? { spending: this.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX) }
 				: {}),
 			...(code?.startsWith("evidence:") || code?.startsWith("context:")
 				? { revision: this.deps.store.revision() }
@@ -730,20 +771,18 @@ export class KnowledgeCollector {
 		try {
 			assertCurrent();
 			const operationId = KNOWLEDGE_COLLECTION_OPERATION_PREFIX + knowledgeCollectionSourceIdentity(claim.source);
-			const spending = this.deps.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
-			const remaining = Math.min(
-				config.settings.knowledgeMaxUsd - spending.operationUsd,
-				config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-				this.deps.maxEstimatedUsd(config.model) ?? Number.POSITIVE_INFINITY,
-			);
+			const spending = this.spending(operationId);
+			const remaining = this.meteredRoomUsd(config.settings.knowledgeMaxUsd, spending, config.settings);
 			if (spending.unresolved) {
 				hold("accounting:unresolved");
 				return false;
 			}
-			if (remaining <= 0) throw new RequestSpendRefusal("Knowledge spending is held.");
+			// A source whose requests all run on subscription models (extraction and the engine's judgments) is read with no
+			// metered room left; one with a metered request (a System One judgment) is held before its first request.
+			if (remaining <= 0 && this.spendsMetered(config)) throw new RequestSpendRefusal("Knowledge spending is held.");
 			// Every physical request of this source (extraction turns, window grounding, admission and identity judgments)
 			// passes the pass boundary at dispatch, before its work cell opens.
-			const budget = new RequestSpendBudget(remaining, assertCurrent);
+			const budget = new RequestSpendBudget(Math.max(0, remaining), assertCurrent, this.deps.billing);
 			const request = { budget, origin: { ...origin, operationId } };
 			const original = this.deps.evidence.findSource(source.sourceId);
 			if (!original || !source.complete) {

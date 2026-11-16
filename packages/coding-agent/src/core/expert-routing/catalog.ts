@@ -10,6 +10,7 @@ import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
 import type { ModelPerfProfile } from "../models/perf-profile.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import { buildCapabilityCard } from "./capability-card.ts";
 import type {
@@ -173,11 +174,11 @@ export class ExpertCatalog {
 	private _resolveCandidateState(model: Model<Api>): ExpertCandidateState {
 		const authenticated = this.deps.modelRegistry ? this.deps.modelRegistry.hasConfiguredAuth(model) : true;
 		const quotaExhausted = this.deps.isModelExhausted ? this.deps.isModelExhausted(model) : false;
-		// Subscription truth is the registry's canonical ownership, never a hand-written provider list.
+		// Subscription truth is the registry's canonical ownership, never a hand-written provider list: spend on the model
+		// is not metered (`isMeteredSpend`), so no dollar ceiling (`max_cost_usd`) holds it.
+		const registry = this.deps.modelRegistry;
 		const subscriptionBacked =
-			typeof this.deps.modelRegistry?.isUsingSubscription === "function"
-				? this.deps.modelRegistry.isUsingSubscription(model)
-				: false;
+			typeof registry?.isUsingSubscription === "function" && !isMeteredSpend(model, registry);
 
 		// Calculate approximate cost per token or call with explicit provenance
 		// Model prices are already quoted per million tokens.

@@ -604,7 +604,7 @@ export class WorkerDelegationController {
 			...(this.deps.readMachine ? { readMachine: this.deps.readMachine } : {}),
 			accountKey: (provider) => resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, provider),
 			providerLimit: (provider) => this.deps.getSettingsManager().getProviderAdmissionSettings().limits[provider],
-			isMetered: (model) => !this.deps.getModelRegistry().isUsingSubscription(model),
+			isMetered: (model) => this.costBounds.isMeteredModel(model),
 			onSpendBrake: (state) =>
 				this.deps.observeHarnessNotice?.("fleet-spend-brake", () =>
 					state.engaged ? { reason: "spend-rate", text: state.text } : "clear",
@@ -744,7 +744,7 @@ export class WorkerDelegationController {
 			recorder: this.lifecycle.outcomeRecorder(),
 			fleet: this.fleet,
 			settings: () => this.deps.getSettingsManager().getWorkerOutcomeSettings(),
-			findModel: (provider, modelId) => this.deps.getModelRegistry().find(provider, modelId),
+			models: this.deps.getModelRegistry(),
 			goalState: () => this.deps.getGoalStateSnapshot(),
 			cwd: () => this.deps.getCwd(),
 			signal: this.workerAbort.signal,
@@ -2844,7 +2844,6 @@ export class WorkerDelegationController {
 		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
 		const authority = attempt?.dispatch.executionContract?.worker.authority;
 		if (!attempt || !authority) return undefined;
-		// The dollar cap the attempt's model is held to: the metered ceiling too when its spend is metered.
 		const maxCostUsd = costCeilingUsd(authority.budget, this.costBounds.isMeteredAttempt(attempt));
 		return {
 			toolNames: [...authority.toolNames],
@@ -5420,6 +5419,7 @@ export class WorkerDelegationController {
 				}
 			},
 			grant,
+			meteredSpend: this.costBounds.isMeteredModel(model),
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			checkEdge: async (toolName, args, executionCwd, purpose) => {

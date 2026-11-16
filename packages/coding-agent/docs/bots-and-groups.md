@@ -52,16 +52,14 @@ reaches the network unless its profile grants `network.http`, in every execution
 each outside input it serves (your message, a message its inbox took, a watch's wake) opens a spend window, and the turns
 serving it, the handoff turns its workers' results open and those workers' runs (a plan's steps included, however much
 later each is released, and the turns its plan's updates open) share its dollar ceilings, each when set:
-`workerDelegation.maxUsd`, the main session's own ceiling and a profile's `maxCostUsd` on all of the window's spend, and
-the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models.
-The bot's turns are held to every one of them on metered (API) spend alone: a subscription's spend runs on while its
-plan's usage windows have room and waits for their reset, never for a dollar bound, so a subscription bot's turn is
-stopped only by what its metered workers spent in the request. A turn is stopped once the window's metered spend (its own
+`workerDelegation.maxUsd`, the main session's own ceilings and a profile's `maxCostUsd` and `maxMeteredCostUsd`, each on
+the part of the window's spend made on metered (API) models, as every dollar ceiling counts: a subscription's spend runs
+on while its plan's usage windows have room and waits for their reset, never for a dollar bound, so a subscription bot's
+turn is stopped only by what its metered workers spent in the request. A turn is stopped once the window's metered spend (its own
 and its workers', from the delegation ledger) passes a ceiling, its running goal is held there (`blocked`,
 `spend_bound:`) until your next words, and a turn a worker's handoff opens into a window already past one is stopped before its first
-request; the window's workers share each ceiling less what the bot's turns spent in the window on the
-spend it counts (a metered worker the metered-only ones too, so a subscription bot's own turns never use up the metered
-ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
+request; the window's metered workers share the lowest ceiling less what the bot's turns spent in the window on
+metered models (so a subscription bot's own turns never use up the ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
 its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the
 reset and continues on its own. A bot or a worker on a subscription model that declares no price gets no dollar bound
 either: its spend cannot be priced, so its usage windows hold it. On a metered (API) model that declares no price, a
@@ -299,9 +297,9 @@ and soul, the model rules and the execution plan), without a worker run's admiss
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
 that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
 roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
-resources a worker of it carries, and the profile's cost budget as ceilings over its spend per request (`maxCostUsd` on
-all of it, `maxMeteredCostUsd` on the part made on a model reached with an API key rather than a subscription, each
-spend judged on the model that makes it, a worker's on its own), beside the worker and session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
+resources a worker of it carries, and the profile's cost budget as ceilings over its spend per request (`maxCostUsd` and
+`maxMeteredCostUsd`, each on the part made on a model reached with an API key rather than a subscription, each spend
+judged on the model that makes it, a worker's on its own), beside the worker and session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it

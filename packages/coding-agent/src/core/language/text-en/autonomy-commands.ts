@@ -68,7 +68,7 @@ export const AUTONOMY_COMMANDS = {
 		reviewBounds: (seconds: number, turns: number, runs: number, notes: number, usd: string) =>
 			`Review after ${seconds}s idle, at least ${turns} new owner turn(s) apart, ${runs} per session, up to ${notes} note(s), $${usd} bound per review.`,
 		dailyBounds: (usd: string, wakes: number) =>
-			`Rolling 24 h across the sessions stored with this one: $${usd} review spend, ${wakes} parent-turn wake(s) by notes and CI events together; past the wake bound, both wait for the owner's next turn.`,
+			`Rolling 24 h across the sessions stored with this one: $${usd} metered (API) review spend, ${wakes} parent-turn wake(s) by notes and CI events together; past the wake bound, both wait for the owner's next turn.`,
 		delivery: (wakes: boolean) => `Delivery: ${wakes ? "wakes a turn" : "a visible note with the next turn"}`,
 		preferences: (preferences: string) => `Preferences: ${preferences}`,
 		none: "none",
@@ -82,7 +82,7 @@ export const AUTONOMY_COMMANDS = {
 		intakeLast: (status: string, sources: number, created: number, refused: number) =>
 			`; last pass ${status}: ${sources} source(s), ${created} created, ${refused} refused`,
 		lastMeasured: (usd: string, wakes: number, eventWakes: number) =>
-			`Last measured: $${usd} review spend, ${wakes} parent-turn wake(s) (${eventWakes} by CI events) in the rolling 24 h`,
+			`Last measured: $${usd} metered (API) review spend, ${wakes} parent-turn wake(s) (${eventWakes} by CI events) in the rolling 24 h`,
 		setAside: (label: string, until: string) =>
 			`Set aside after unanswered or declined notes: ${label}, until ${until}`,
 		lastGate: (gate: string) => `Last gate: ${gate}`,

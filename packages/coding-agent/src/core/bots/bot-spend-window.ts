@@ -2,8 +2,8 @@
  * A bot's spend windows: one per outside input that woke its session (the owner's message, a message its inbox took, a
  * watch's wake, a host event), holding what the session spent itself (its foreground: its priced answers and the
  * compactions its turns ran) and naming the workers it started while serving that input. The bot's turns and its workers'
- * runs share the window's dollar bounds, so a request's whole spend is held to one bound however many handoffs it takes:
- * a ceiling on all spend counts all of it, a metered-only ceiling the part of it made on metered models.
+ * runs share the window's dollar bounds, so a request's spend is held to one bound however many handoffs it takes: each
+ * ceiling counts the part of it made on metered models, as every dollar ceiling does by the owner's cost rule.
  *
  * Which window an entry of the transcript belongs to is read from the transcript itself, walking back from the entry to
  * the input that opened its window. A turn a worker's handoff opened belongs to the window of the attempt that woke it,
@@ -171,10 +171,9 @@ export class BotSpendWindows {
 	}
 
 	/**
-	 * The bounds of one run of the window `attempt` serves, which the window's workers share as one run (`runId`, whose
-	 * spend the run budgets count from the workers' own usage): the lowest of `ceilings` on all spend less the session's
-	 * own spend in that window (`maxCostUsd`), and the lowest of the metered-only ones less the session's own metered spend
-	 * there (`maxMeteredCostUsd`, which holds the run's metered attempts only). A remainder at or below zero is zero: the
+	 * The bound of one run of the window `attempt` serves, which the window's metered workers share as one run (`runId`,
+	 * whose metered spend the run budget counts from the workers' own usage): the lowest of `ceilings` less the session's
+	 * own metered spend in that window (`maxCostUsd`); a subscription worker is held by its usage windows instead (`RequestCostBounds`). A remainder at or below zero is zero: the
 	 * run's next request is refused as a run whose bound is spent. The attempt, starting now, is counted to its window
 	 * first, whatever bounds apply (a window not kept opens again, and stays among the newest while it serves); the bound
 	 * includes every attempt serving the same window. Undefined when it serves no window of this session or no ceiling
@@ -193,20 +192,10 @@ export class BotSpendWindows {
 		}
 		this.flush(snapshot);
 		if (!window || ceilings.length === 0) return undefined;
-		const remainder = (meteredOnly: boolean, spentUsd: number): number | undefined => {
-			const usd = ceilings.filter((ceiling) => ceiling.meteredOnly === meteredOnly).map((ceiling) => ceiling.usd);
-			return usd.length === 0 ? undefined : Math.max(0, Math.min(...usd) - spentUsd);
-		};
-		const maxCostUsd = remainder(false, window.foregroundUsd);
-		const maxMeteredCostUsd = remainder(true, window.meteredForegroundUsd);
 		return {
 			runId: window.id,
-			...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
-			...(maxMeteredCostUsd !== undefined ? { maxMeteredCostUsd } : {}),
+			maxCostUsd: Math.max(0, Math.min(...ceilings.map((ceiling) => ceiling.usd)) - window.meteredForegroundUsd),
 			includes: (candidate) => this.windowOfAttempt(candidate, snapshot) === window.id,
-			// A subscription model with no published price gets no dollar run bound (its usage windows hold it); a metered one
-			// is priced against the bound, which refuses it, as the root's workers under a metered ceiling are.
-			unpriced: "unbounded",
 		};
 	}
 

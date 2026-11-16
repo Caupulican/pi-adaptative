@@ -190,20 +190,15 @@ export interface ParentExecutionEnvironment {
 	taskWatches?: TaskWatchPort;
 }
 
-/** One run's shared dollar bounds (`ParentExecutionPolicy.runCostBound`): on all its spend, and on its metered spend. */
+/**
+ * One run's shared dollar bound (`ParentExecutionPolicy.runCostBound`): on the run's metered spend, the only spend a dollar
+ * bound counts by the owner's cost rule.
+ */
 export interface RunCostBound {
 	readonly runId: string;
 	readonly maxCostUsd?: number;
-	readonly maxMeteredCostUsd?: number;
 	/** Whether an attempt of the same snapshot is one of the run's (its spend seeds the run's budgets); asking starts nothing. */
 	includes(attempt: AttemptRuntimeState): boolean;
-	/**
-	 * What the run's bounds do with an attempt on a model that declares no price, whose requests cannot be priced against
-	 * them: refuse its requests (`refused`), or hold it to no dollar run bound (`unbounded`) when its spend is not metered
-	 * (a subscription's usage windows hold it); a metered attempt with no price is refused either way, as the root's
-	 * workers are under a metered ceiling. Its spend, if any, still seeds the run's budgets for the others.
-	 */
-	readonly unpriced: "refused" | "unbounded";
 }
 
 /** The decisions a worker run consults: model availability, System One judges, context planning, memory, skills, edges. */
@@ -342,11 +337,11 @@ export interface ParentExecutionPolicy {
 	 */
 	runsControlMessage?(controlMessageId: string): boolean;
 	/**
-	 * Present on a host that bounds one run's whole spend, asked for each attempt as it starts: every attempt of the run
-	 * (subject, retries and verifier; the bound `includes` them) shares one cost budget of `maxCostUsd`, and every metered attempt of it one of
-	 * `maxMeteredCostUsd` over the run's metered spend (a subscription attempt is not held to it: its plan's usage windows
-	 * are), each checked before each provider request on top of the attempt's own agent tree budget. Absent, undefined
-	 * for an attempt, or a ceiling left out, only the agent tree budget applies in its place.
+	 * Present on a host that bounds one run's spend, asked for each attempt as it starts: every metered attempt of the run
+	 * (subject, retries and verifier; the bound `includes` them) shares one budget of `maxCostUsd` over the run's metered
+	 * spend, priced before each provider request on top of the attempt's own agent tree budget. A subscription attempt is
+	 * not held to it: its plan's usage windows are. Absent, undefined for an attempt, or no ceiling set, only the agent tree
+	 * budget applies in its place.
 	 */
 	runCostBound?(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): RunCostBound | undefined;
 	/**

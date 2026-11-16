@@ -171,15 +171,15 @@ export const NOTICES = {
 		paused: (reason: KnowledgeNoticeReason, _cause: string): string =>
 			`A coleta automática de conhecimento está pausada porque ${KNOWLEDGE_PAUSED[reason]}`,
 		sessionSpent: (_cause: string): string =>
-			"A coleta automática de conhecimento está pausada porque o limite de gasto com conhecimento desta sessão foi atingido (autoLearn.knowledgeSessionMaxUsd). Aumente autoLearn.knowledgeSessionMaxUsd para retomá-la nesta sessão.",
+			"A coleta automática de conhecimento está pausada porque o limite de gasto medido (API) com conhecimento desta sessão foi atingido (autoLearn.knowledgeSessionMaxUsd). Aumente autoLearn.knowledgeSessionMaxUsd para retomá-la nesta sessão.",
 		sourceUnpaid:
-			"A coleta automática de conhecimento está pausada porque autoLearn.knowledgeMaxUsd é zero, então nenhuma fonte pode ser paga. Aumente autoLearn.knowledgeMaxUsd para retomá-la.",
+			"A coleta automática de conhecimento está pausada porque autoLearn.knowledgeMaxUsd é zero, então nenhuma fonte que precise de gasto medido (API) pode ser paga. Aumente autoLearn.knowledgeMaxUsd para retomá-la.",
 		capReached:
-			"A coleta automática de conhecimento está pausada porque o teto de custo estimado desta sessão não permite mais gasto.",
+			"A coleta automática de conhecimento está pausada porque o teto de custo estimado desta sessão não permite mais gasto medido (API).",
 	},
 	proactiveReview: {
 		spendReached:
-			"A revisão proativa está pausada porque o gasto com revisões nas últimas 24 horas, somando as sessões deste agente, atingiu proactivity.maxUsdPerDay. As revisões voltam quando o gasto mais antigo sai do dia móvel, ou antes se essa configuração for aumentada.",
+			"A revisão proativa está pausada porque o gasto medido (API) com revisões nas últimas 24 horas, somando as sessões deste agente, atingiu proactivity.maxUsdPerDay; o gasto em um modelo de assinatura não é contado. As revisões voltam quando o gasto mais antigo sai do dia móvel, ou antes se essa configuração for aumentada.",
 		modelUnresolved: (model: string) =>
 			`A revisão proativa está pausada porque proactivity.model ${JSON.stringify(model)} não resolve para um modelo disponível. Defina proactivity.model como um modelo configurado e com login, ou remova-o para usar o modelo da sessão.`,
 		modelTooSmall:

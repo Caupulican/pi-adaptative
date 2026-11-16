@@ -40,7 +40,8 @@ import { attachBotSessions } from "./bots/bot-session-ports.ts";
 import { RootBots } from "./bots/root-bots.ts";
 import { type AwayChannelStatus, readAwayChannelCharges, readAwayChannelStatus } from "./channels/away-channels.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
-import { SessionChannels } from "./channels/session-channels.ts";
+import { createLaneSessionChannels } from "./channels/lane-session-channels.ts";
+import type { SessionChannels } from "./channels/session-channels.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
 import { botToolListEntry, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
@@ -148,6 +149,7 @@ import type { OrchestrationDelegationLimits, WorkerResultContract } from "./orch
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { OrchestrationRetentionController } from "./orchestration/retention-controller.ts";
 import type { RetentionPassDeps } from "./orchestration/retention-pass.ts";
+import { isMeteredSpend } from "./orchestration/risk-budget.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -171,11 +173,9 @@ import {
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
 import { observeReviewGauge } from "./proof/review-gauge.ts";
-import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import type { PlacedLateCharge, PlacedLateReceipt } from "./remote/abandoned-placements.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
 import { finishedPlacedJobReferences } from "./remote/job-store.ts";
-import { withLinkPolicy } from "./remote/link-policy.ts";
 import { PlacedJobTerminalAcks } from "./remote/placed-job-terminal-acks.ts";
 import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -284,25 +284,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
-		this.channels = new SessionChannels({
-			getAgentDir: () => deps.getAgentDir(),
-			getSessionManager: () => deps.getSessionManager(),
-			getChannelPolicies: () => withLinkPolicy(deps.getSettingsManager().getChannelPolicies(), deps.getAgentDir()),
-			subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
-			subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
-			sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
-			...(deps.ownerChannel ? { ownerDelivery: deps.ownerChannel } : {}),
-			ownerControl: () => deps.ownerChannel?.control(),
-			isEmergencyStopEngaged: () => isEmergencyStopEngaged(deps.getAgentDir()),
-			subscribeEmergencyStop: (listener) => subscribeEmergencyStop(deps.getAgentDir(), listener),
-			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
-			warn: (message) => this._safeWarn(message),
-			isDisposed: () => deps.isDisposed(),
-			servesChannels: () => deps.standing.ownsHostDuties,
-			refreshTools: () => deps.refreshToolRegistry(),
-			timers: deps.getTimers().port("channel-poll"),
-			wakeTimers: deps.getTimers().port("channel-expiry"),
-		});
+		this.channels = createLaneSessionChannels(deps, (message) => this._safeWarn(message));
 		this._botHost = attachBotSessions(deps, {
 			store: () => this.getBotTeamStore(),
 			warn: (message) => this._safeWarn(message),
@@ -1580,6 +1562,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				subscribe: (listener) => this.subscribeOrchestrationStore(listener),
 				terminalNotification: (attemptId) => this._getWorkerLifecycle().getAttemptTerminalNotification(attemptId),
 				acknowledge: (notificationIds) => this._getWorkerLifecycle().markNotificationsDelivered(notificationIds),
+				isMeteredAttempt: (attempt) => this._getWorkerController().attemptIsMetered(attempt),
+				startsMetered: () =>
+					isMeteredSpend(this.previewWorkerModel() ?? this.deps.getModel(), this.deps.getModelRegistry()),
 			},
 			engineDeps: (cwd) => this._worktreeEngineDeps(cwd),
 			cwd: () => this.deps.getCwd(),
@@ -1679,6 +1664,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			settings: this.deps.getSettingsManager(),
 			usageWindow: () =>
 				this.deps.aggregateUsageWindow(rollingDayWindow(this.deps.getTimers().port("proactivity").now())),
+			spendBilling: this.deps.getModelRegistry(),
 			routineStore: this._botTeamStore,
 			routines: this._routines,
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
@@ -1861,7 +1847,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					sessionId: () => this.deps.getSessionId(),
 					cwd: () => this.deps.getCwd(),
 					models: () => this.deps.getModelRegistry().getAvailable(),
-					usesSubscription: (model) => this.deps.getModelRegistry().isUsingOAuth(model),
+					// The billing kind every dollar ceiling reads (`isMeteredSpend`), not the credential's OAuth form alone.
+					usesSubscription: (model) => !isMeteredSpend(model, this.deps.getModelRegistry()),
 					// A job another process ended is settled here too: each session holds its own worker terminals.
 					onJobsChanged: () =>
 						this.acknowledgePlacedJobTerminals(finishedPlacedJobReferences(this.deps.getAgentDir())),

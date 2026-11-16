@@ -77,7 +77,13 @@ export class ExpertAdmissionPolicy {
 		}
 
 		// 6. Cost Hard Ceiling
-		if (request.max_cost_usd !== undefined && request.max_cost_usd !== null && state.estimatedCostUsd !== undefined) {
+		// A dollar ceiling holds metered (API) spend only; a subscription-backed candidate is held by its plan's usage windows.
+		if (
+			!state.subscriptionBacked &&
+			request.max_cost_usd !== undefined &&
+			request.max_cost_usd !== null &&
+			state.estimatedCostUsd !== undefined
+		) {
 			if (state.estimatedCostUsd > request.max_cost_usd) {
 				reasons.push("cost_hard_limit");
 			}

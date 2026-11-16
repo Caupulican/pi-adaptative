@@ -65,8 +65,7 @@ export interface BotSessionDefinition {
 	readonly contextFileScope?: ContextFileReadScope;
 	/**
 	 * The bot's own dollar ceilings (a profile's budget; none for a bot of its own), beside the owner's worker bound and
-	 * the main session's, over its spend per request (`bot-session-spend.ts`): `maxCostUsd` on all of it, `maxMeteredCostUsd`
-	 * on the part made on metered models.
+	 * the main session's, over its metered spend per request (`bot-session-spend.ts`, `costCeilingUsd`).
 	 */
 	readonly spendBudget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">;
 }
@@ -214,8 +213,8 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 		...director,
 	];
 	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
-	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
-	// when its spend is metered, `maxCostUsd` alone on a subscription. The profile's own ceilings are kept whole: each spend
+	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: its metered spend, never
+	// a subscription's (`costCeilingUsd`). The profile's own ceilings are kept whole: each spend
 	// is held to them on the model that spends it (a worker of the bot can run on another model than the bot's).
 	const laneCeilingUsd = costCeilingUsd(worker.authority.budget, compiled.metered);
 	const { maxCostUsd, maxMeteredCostUsd } = profile.budget;

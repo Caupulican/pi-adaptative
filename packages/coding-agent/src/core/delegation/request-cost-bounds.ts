@@ -1,8 +1,9 @@
 /**
- * The budget an attempt's provider requests are checked and priced against: its task tree's, and the cost bounds over it,
- * its run's (`runCostBound`: the run's whole spend, and its metered spend for a metered attempt), each budgeted delegation on its ancestry (`charter.envelope.budgetUsd`) and the tree's metered
- * ceiling (`maxMeteredCostUsd`). This owner composes them and decides which of an attempt's spend is metered. A
- * subscription model has no metered or delegation dollar bound: its spend is bounded by the plan's usage windows.
+ * The budget an attempt's provider requests are checked and priced against: its task tree's, and the dollar bounds over
+ * it, its tree's (`costCeilingUsd` of the tree budget), its run's (`runCostBound`) and each budgeted delegation's on its
+ * ancestry (`charter.envelope.budgetUsd`). This owner composes them and decides which of an attempt's spend is metered.
+ * By the owner's cost rule every dollar bound counts metered spend alone and holds a metered attempt only: a subscription
+ * model has no dollar bound, its spend is bounded by the plan's usage windows.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -36,6 +37,19 @@ import {
 	workerTreeTaskId,
 } from "./worker-tree-budget-coordinator.ts";
 
+/**
+ * Whether an attempt's spend is metered (`isMeteredSpend`): its running model, else the model its contract binds, is not
+ * a subscription model. A model `findModel` does not know counts as metered, which is never laxer.
+ */
+export function isMeteredAttemptSpend(
+	attempt: AttemptRuntimeState,
+	findModel: (binding: OrchestrationModelBinding) => Model<Api> | undefined,
+	billing: ModelBilling,
+): boolean {
+	const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+	return isMeteredSpend(binding && findModel(binding), billing);
+}
+
 /** One attempt about to run: what its budget is composed from. */
 export interface AttemptBudgetInput {
 	readonly attemptId: string;
@@ -62,15 +76,13 @@ export interface RequestCostBoundsDeps {
 
 export class RequestCostBounds {
 	private readonly deps: RequestCostBoundsDeps;
-	/** Budgets shared by every attempt of one bounded run, keyed by run. */
+	/** Budgets shared by the metered attempts of one bounded run over their spend, keyed by run. */
 	private readonly runBudgets = new WorkerTreeBudgetCoordinator();
-	/** Budgets shared by the metered attempts of one bounded run over their spend (`maxMeteredCostUsd`), keyed by run. */
-	private readonly meteredRunBudgets = new WorkerTreeBudgetCoordinator();
 	/** Budgets shared by every attempt under one budgeted delegation, keyed by `delegation:<objectiveId>`. */
 	private readonly delegationBudgets = new WorkerTreeBudgetCoordinator();
 	/** Each task tree's cumulative budget, keyed by `workerTreeBudgetKey`. */
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
-	/** Each task tree's metered spend under its `maxMeteredCostUsd`, keyed as the tree's. */
+	/** Each task tree's metered spend under its dollar ceiling, keyed as the tree's. */
 	private readonly meteredTreeBudgets = new WorkerTreeBudgetCoordinator();
 
 	/** The billing kind of a model's credential, as `isMeteredSpend` reads it. */
@@ -81,25 +93,26 @@ export class RequestCostBounds {
 		this.billing = { isUsingSubscription: (model) => deps.isSubscription(model) };
 	}
 
-	/**
-	 * Whether an attempt's spend is metered: its running model (else the model its contract binds) is not a subscription
-	 * model. A model the registry does not know counts as metered, which is never laxer.
-	 */
+	/** Whether an attempt's spend is metered (`isMeteredAttemptSpend`). */
 	isMeteredAttempt(attempt: AttemptRuntimeState): boolean {
-		const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
-		return isMeteredSpend(binding && this.deps.findModel(binding), this.billing);
+		return isMeteredAttemptSpend(attempt, this.deps.findModel, this.billing);
+	}
+
+	/** Whether spend on `model` is metered (`isMeteredSpend`). */
+	isMeteredModel(model: Model<Api>): boolean {
+		return isMeteredSpend(model, this.billing);
 	}
 
 	/** The dollar ceiling one attempt's own spend on `model` is held to (`costCeilingUsd`). */
 	costCeilingUsd(budget: RiskBudget, model: Model<Api>): number | undefined {
-		return costCeilingUsd(budget, isMeteredSpend(model, this.billing));
+		return costCeilingUsd(budget, this.isMeteredModel(model));
 	}
 
 	/**
-	 * The budget one attempt's provider requests are checked and recorded against: its tree's, bounded by its run's, by its
-	 * tree's metered ceiling and by each budgeted delegation on its ancestry, self first. A subscription model gets neither
-	 * the metered nor a delegation port. Every port is seeded from the projection, so spend made before this start is
-	 * already counted.
+	 * The budget one attempt's provider requests are checked and recorded against: its tree's (its limits other than
+	 * dollars), bounded by its run's, by its tree's dollar ceiling and by each budgeted delegation on its ancestry, self
+	 * first. A subscription model gets no dollar port. Every port is seeded from the projection, so spend made before this
+	 * start is already counted.
 	 */
 	compose(input: AttemptBudgetInput): SharedCapabilityBudget {
 		const { attemptId, initialUsage, snapshot, model } = input;
@@ -120,17 +133,19 @@ export class RequestCostBounds {
 			attemptId,
 			seeds: treeSeeds.length,
 		});
+		// The tree's dollar ceilings hold its metered spend alone (`meteredTreePort`), never its whole spend.
+		const { maxCostUsd: _treeCostUsd, maxMeteredCostUsd: _treeMeteredCostUsd, ...treeLimits } = treeBudget;
 		const tree = this.treeBudgets.createPort({
 			treeKey,
 			attemptId,
-			budget: treeBudget,
+			budget: treeLimits,
 			seeds: treeSeeds,
 			initialUsage,
 		});
 		const attempt = snapshot.attempts[attemptId];
-		const metered = isMeteredSpend(model, this.billing);
-		const ports: SharedCapabilityBudget[] = this.runBudgetPorts(attempt, attemptId, initialUsage, snapshot, model);
-		const meteredTree = metered && this.meteredTreePort(treeKey, treeBudget.maxMeteredCostUsd, treeSeeds, input);
+		const metered = this.isMeteredModel(model);
+		const ports: SharedCapabilityBudget[] = this.runBudgetPorts(attempt, attemptId, initialUsage, snapshot, metered);
+		const meteredTree = metered && this.meteredTreePort(treeKey, costCeilingUsd(treeBudget, true), treeSeeds, input);
 		if (meteredTree) ports.push(meteredTree);
 		if (attempt && metered) {
 			const records = readDelegations(snapshot);
@@ -167,20 +182,20 @@ export class RequestCostBounds {
 	}
 
 	/**
-	 * The tree's metered spend held to its `maxMeteredCostUsd`: only metered attempts seed it, and each request of a metered
-	 * attempt is priced against it before it is sent. Undefined when the tree sets no metered ceiling.
+	 * The tree's metered spend held to its dollar ceiling (`costCeilingUsd`): only metered attempts seed it, and each request
+	 * of a metered attempt is priced against it before it is sent. Undefined when the tree sets no dollar ceiling.
 	 */
 	private meteredTreePort(
 		treeKey: string,
-		maxMeteredCostUsd: number | undefined,
+		maxCostUsd: number | undefined,
 		seeds: readonly WorkerTreeBudgetSeed[],
 		input: AttemptBudgetInput,
 	): SharedCapabilityBudget | undefined {
-		if (maxMeteredCostUsd === undefined) return undefined;
+		if (maxCostUsd === undefined) return undefined;
 		return this.meteredTreeBudgets.createPort({
 			treeKey,
 			attemptId: input.attemptId,
-			budget: { maxCostUsd: maxMeteredCostUsd },
+			budget: { maxCostUsd },
 			pricesRequests: true,
 			seeds: seeds.filter((seed) => {
 				const attempt = input.snapshot.attempts[seed.attemptId];
@@ -191,54 +206,36 @@ export class RequestCostBounds {
 	}
 
 	/**
-	 * The budgets the attempt's run shares with its other attempts (`runCostBound`): its whole spend, seeded from every
-	 * durable attempt of the run, and for an attempt on a metered `model` its metered spend, seeded from the run's metered
-	 * attempts. None when the host bounds no run, or when `model` is a subscription model that declares no price and the
-	 * bound leaves such an attempt unbounded (`RunCostBound.unpriced`); a bound that refuses it, or a metered attempt with
-	 * no price, prices each of its requests, which refuses them.
+	 * The budget a metered attempt's run shares with the run's other metered attempts (`runCostBound`): the run's metered
+	 * spend, seeded from every durable metered attempt of the run, each request priced against it (one on a model with no
+	 * price is refused). None when the host bounds no run or sets it no dollar bound, or when the attempt is not metered
+	 * (`metered`): its plan's usage windows hold it.
 	 */
 	private runBudgetPorts(
 		attempt: AttemptRuntimeState | undefined,
 		attemptId: string,
 		initialUsage: AttemptUsageSnapshot,
 		snapshot: TaskRuntimeProjection,
-		model: Model<Api>,
+		metered: boolean,
 	): SharedCapabilityBudget[] {
+		// Asked for every attempt: the host counts the attempt to its run as it answers (`BotSpendWindows.runCostBound`).
 		const bound = attempt ? this.deps.runCostBound?.(attempt, snapshot) : undefined;
-		if (!bound) return [];
-		const metered = isMeteredSpend(model, this.billing);
-		// Unbounded leaves only a subscription attempt with no price unbounded: a metered one spends real dollars, so its
-		// requests are priced against the run's bounds, which refuses them.
-		if (model.costDefaulted && bound.unpriced === "unbounded" && !metered) return [];
-		const runAttempts = Object.values(snapshot.attempts).filter((candidate) => bound.includes(candidate));
-		const seedsOf = (attempts: readonly AttemptRuntimeState[]) =>
-			attempts.map((candidate) => ({
+		if (!metered || bound?.maxCostUsd === undefined) return [];
+		const seeds = Object.values(snapshot.attempts)
+			.filter((candidate) => bound.includes(candidate) && this.isMeteredAttempt(candidate))
+			.map((candidate) => ({
 				attemptId: candidate.attemptId,
 				usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
 			}));
-		const ports: SharedCapabilityBudget[] = [];
-		if (bound.maxCostUsd !== undefined)
-			ports.push(
-				this.runBudgets.createPort({
-					treeKey: bound.runId,
-					attemptId,
-					budget: { maxCostUsd: bound.maxCostUsd },
-					pricesRequests: true,
-					seeds: seedsOf(runAttempts),
-					initialUsage,
-				}),
-			);
-		if (metered && bound.maxMeteredCostUsd !== undefined)
-			ports.push(
-				this.meteredRunBudgets.createPort({
-					treeKey: bound.runId,
-					attemptId,
-					budget: { maxCostUsd: bound.maxMeteredCostUsd },
-					pricesRequests: true,
-					seeds: seedsOf(runAttempts.filter((candidate) => this.isMeteredAttempt(candidate))),
-					initialUsage,
-				}),
-			);
-		return ports;
+		return [
+			this.runBudgets.createPort({
+				treeKey: bound.runId,
+				attemptId,
+				budget: { maxCostUsd: bound.maxCostUsd },
+				pricesRequests: true,
+				seeds,
+				initialUsage,
+			}),
+		];
 	}
 }

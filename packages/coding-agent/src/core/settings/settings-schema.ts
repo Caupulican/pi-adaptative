@@ -117,7 +117,7 @@ export interface MemoryRetrievalSettings {
 export interface MemoryHistorySettings {
 	hierarchy?: boolean; // default: false -- durable summary hierarchy + history frontier over captured history (either system); the ICM continuous chat does not read it; exact local recall is NOT governed by this switch
 	summaryModel?: string; // model ref ("provider/id" or bare id) for summaries; required for the hierarchy to run, and for the ICM continuous chat's compactions, which need a model that supports compactionThinkingLevel
-	compactionMaxUsdPerDay?: number; // default: 10 -- daily USD the chat's background summaries may spend across all projects; 0 = no limit
+	compactionMaxUsdPerDay?: number; // default: 10 -- daily metered (API) USD the chat's background summaries may spend across all projects; 0 = no limit; a subscription summary model is held by its plan's usage windows
 	compactionThinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh"; // default: medium -- reasoning effort of every ICM compaction; its reasoning tokens are billed as output on every reply, and measured xhigh runs spent thousands of them on a line of at most 512 bytes
 	allowExternalSummaryEgress?: boolean; // default: false -- sending captured history to a non-local summarizer is external egress
 	allowExternalAdmissionEgress?: boolean; // default: false -- sending captured history to the remote System One evaluator that admits model summaries is external egress, independent of the summarizer's egress; without it model summaries are held (exact copies still flow)
@@ -221,10 +221,10 @@ export interface SelfModificationSettings {
 export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export interface AutoLearnSettings {
-	knowledgeMaxUsd?: number; // default: 0.05 per original owner source per session, extraction and admission combined
+	knowledgeMaxUsd?: number; // default: 0.05 metered (API) spend per original owner source per session, extraction and admission combined; subscription spend is held by its plan's usage windows
 	history?: boolean; // default: true; an idle collection pass may read the repository's history for taste proposals
-	historyMaxUsd?: number; // default: 0.25 spent at most by one look at the repository's history
-	knowledgeSessionMaxUsd?: number; // default: 0.50 cumulative collection spend per session, retained across restarts
+	historyMaxUsd?: number; // default: 0.25 metered (API) spend at most by one look at the repository's history
+	knowledgeSessionMaxUsd?: number; // default: 0.50 cumulative metered (API) collection spend per session, retained across restarts
 	announce?: boolean; // default: true; tell the owner on screen when automatic collection learns or updates a fact
 	knowledgeIdleDelayMs?: number; // default: 2000 before collecting original owner knowledge while idle
 	knowledgeMaxSourcesPerPass?: number; // default: 4 sources before yielding back to the session
@@ -315,8 +315,8 @@ export interface ProactivitySettings {
 	idleDelayMs?: number; // default: 120000 — foreground idle time before a review may start
 	minOwnerTurnsBetweenRuns?: number; // default: 3 — new owner turns required since the last review
 	maxRunsPerSession?: number; // default: 4 reviews per session
-	maxUsd?: number; // default: 0.05 for the isolated review; a parent wake uses normal session accounting and budgets
-	maxUsdPerDay?: number; // default: 0.25 review spend over a rolling 24 h across the agent dir's sessions; then no review starts
+	maxUsd?: number; // default: 0.05 metered (API) spend of the isolated review, whose requests on a subscription model it does not count; a parent wake uses normal session accounting and budgets
+	maxUsdPerDay?: number; // default: 0.25 metered (API) review spend over a rolling 24 h across the agent dir's sessions; then no review on a metered model starts; a review on a subscription model is held by its plan's usage windows
 	maxTurnWakesPerDay?: number; // default: 3 parent turns started without an owner message (proactive notes and CI events together) over a rolling 24 h; later deliveries wait for the owner's next turn
 	maxNotesPerRun?: number; // default: 2 notes a review may raise
 	delivery?: "note" | "turn"; // default: "turn" — wakes the parent; explicit "note" waits for the owner's next turn
@@ -347,8 +347,8 @@ export interface ActAheadSettings {
 	validate?: "static" | "command"; // default: "static" — the project's declared static check; "command" runs `command`
 	command?: string; // the validation command when `validate` is "command" (run in the lane through the shell)
 	maxAttemptsPerDay?: number; // default: 3 (0..20) — attempts started over a rolling 24 h across the agent dir's sessions
-	maxUsdPerDay?: number; // default: 0.50 (0..20) — worker spend over a rolling 24 h; charged at admission
-	maxUsdPerAttempt?: number; // default: 0.25 (0..5) — spend bound of one worker
+	maxUsdPerDay?: number; // default: 0.50 (0..20) — metered (API) worker spend over a rolling 24 h; charged at admission; a subscription worker is not counted
+	maxUsdPerAttempt?: number; // default: 0.25 (0..5) — metered (API) spend bound of one worker (0 once maxUsdPerDay has no room for it)
 	maxMinutesPerAttempt?: number; // default: 20 (1..120) — wall-clock bound of one worker
 }
 
@@ -362,7 +362,7 @@ export interface ChannelPolicySettings {
 	mode?: "ignore" | "explicit"; // default: "ignore" — "explicit" starts the provider and admits only `allowedSenders`
 	allowedSenders?: (string | number)[]; // provider sender ids whose verified messages may start a turn (at most 50); a whole number reads as its digits
 	maxWakesPerDay?: number; // default: 10 (0..200) — batches delivered as turns over a rolling 24 h
-	maxUsdPerDay?: number; // default: 0.50 (0..100) — spend of this channel's turns over a rolling 24 h
+	maxUsdPerDay?: number; // default: 0.50 (0..100) — metered (API) spend of this channel's turns over a rolling 24 h; subscription spend is not counted
 	maxBatch?: number; // default: 10 (1..25) — messages of one conversation delivered in one turn
 	maxPendingPerConversation?: number; // default: 25 (1..100) — waiting messages per conversation; more are held
 	replyMode?: "draft" | "auto"; // default: "draft" — the answer waits for the owner; "auto" sends it to the same address
@@ -412,7 +412,7 @@ export interface ResearchLaneSettings {
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
 	profile?: string; // shipped profile; model/soul/thinking plus grants over classified read-only lane tools govern it
 	systemPrompt?: string; // replaces the lane role prompt (the level-0 subagent core always remains)
-	maxUsd?: number; // default: 0.25 per research pass; post-hoc breaches mark the lane budget_exhausted
+	maxUsd?: number; // default: 0.25 per research pass on metered (API) spend only; post-hoc breaches mark the lane budget_exhausted; a subscription model is held by its plan's usage windows
 	maxSources?: number; // default: 8 evidence sources per bundle
 	maxFindings?: number; // default: 10 findings per bundle
 	maxWallClockMs?: number; // default: 120000; 0 disables the wall-clock budget

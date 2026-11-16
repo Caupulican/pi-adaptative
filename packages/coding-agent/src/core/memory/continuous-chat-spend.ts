@@ -22,7 +22,7 @@ import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
-/** What the chat's background summaries may spend per day when the setting is unset. */
+/** What the chat's background summaries may spend per day on metered (API) models when the setting is unset. */
 export const DEFAULT_CONTINUOUS_CHAT_COMPACTION_MAX_USD_PER_DAY = 10;
 export const CONTINUOUS_CHAT_ACCOUNTING_COOLDOWN_MS = DEFAULT_RETRY_POLICY.maxDelayMs;
 const MAX_CIRCUITS = 256;
@@ -280,7 +280,12 @@ export class ContinuousChatSpendMeter {
 		}
 	}
 
-	private addMeasured(state: SpendState, costUsd: number, observedAtMs: number): void {
+	/**
+	 * Counts one measured summary charge on its day. `metered` is false for a summary on a subscription model: its plan's
+	 * usage windows hold it, so the daily dollar total does not count it. A charge recovered from a receipt after its
+	 * process died has no model here and is counted as metered.
+	 */
+	private addMeasured(state: SpendState, costUsd: number, observedAtMs: number, metered = true): void {
 		if (!Number.isFinite(costUsd) || costUsd < 0 || !isObservationTime(observedAtMs))
 			throw new TypeError("Invalid measured summary cost or observation time.");
 		if (observedAtMs > this.timers.now())
@@ -289,6 +294,7 @@ export class ContinuousChatSpendMeter {
 		const observedDay = new Date(observedAtMs).toISOString().slice(0, 10);
 		if (observedDay > state.day)
 			throw new Error("Continuous-chat accounting clock moved before the response observation.");
+		if (!metered) return;
 		if (observedDay === state.day) state.usd += costUsd;
 		else state.archivedMeasuredUsd += costUsd;
 		if (!Number.isFinite(state.usd) || !Number.isFinite(state.archivedMeasuredUsd))
@@ -471,11 +477,15 @@ export class ContinuousChatSpendMeter {
 		);
 		if (unresolved) throw new ContinuousChatAccountingUnresolved();
 	}
-	/** Daily spend hold; invalid state is never treated as zero. */
-	hold(): string | undefined {
+	/**
+	 * Daily spend hold on a summary whose spend is `metered` (`countsAgainstDollars` of its model; a caller that names no
+	 * model's spend is metered). A subscription summary is held by its plan's usage windows, never by this limit. Invalid
+	 * state is never treated as zero.
+	 */
+	hold(metered = true): string | undefined {
 		this.reconcile();
 		const limit = this.maxUsdPerDay();
-		if (!(limit > 0)) return undefined;
+		if (!metered || !(limit > 0)) return undefined;
 		return this.locked((state, validatedDay) => {
 			const spent = state.day === validatedDay ? state.usd : 0;
 			return spent >= limit
@@ -492,8 +502,8 @@ export class ContinuousChatSpendMeter {
 		this.reconcile();
 		return this.locked((state) => this.remaining(state, key));
 	}
-	/** Recheck shared account rules under the same lock as each admission transition. */
-	private assertAccountAdmission(state: SpendState, validatedDay: string): void {
+	/** Recheck shared account rules under the same lock as each admission transition; the daily limit holds metered spend. */
+	private assertAccountAdmission(state: SpendState, validatedDay: string, metered: boolean): void {
 		if (
 			Object.values(state.circuits).some(
 				(item) =>
@@ -505,17 +515,17 @@ export class ContinuousChatSpendMeter {
 		)
 			throw new ContinuousChatAccountingUnresolved();
 		const limit = this.maxUsdPerDay();
-		if (limit > 0 && state.day === validatedDay && state.usd >= limit)
+		if (metered && limit > 0 && state.day === validatedDay && state.usd >= limit)
 			throw new ContinuousChatAccountingBusy("The daily memory summary spending limit is reached.");
 	}
-	/** Reserves the physical slot under the shared lock before the provider can be called. */
-	claim(key: string, identity: SemanticUsageLedgerIdentity): string {
+	/** Reserves the physical slot under the shared lock before the provider can be called; `metered` as `hold` reads it. */
+	claim(key: string, identity: SemanticUsageLedgerIdentity, metered = true): string {
 		if (!KEY_PATTERN.test(key)) throw new TypeError("Invalid continuous-chat accounting key.");
 		const reference = recoveryIdentity(identity);
 		if (!reference) throw new Error("Memory summary requires a persisted usage ledger identity.");
 		this.reconcile();
 		return this.locked((state, validatedDay) => {
-			this.assertAccountAdmission(state, validatedDay);
+			this.assertAccountAdmission(state, validatedDay, metered);
 			if (this.remaining(state, key) > 0) throw new ContinuousChatAccountingBusy();
 			this.ensureRoom(state, key);
 			const token = randomUUID();
@@ -529,17 +539,20 @@ export class ContinuousChatSpendMeter {
 		});
 	}
 	/** Fence the exact reservation as potentially sent before crossing the physical transport boundary. */
-	attempt(key: string, token: string): void {
+	attempt(key: string, token: string, metered = true): void {
 		this.reconcile();
 		this.locked((state, validatedDay) => {
 			const circuit = state.circuits[key];
 			if (circuit?.status !== "reserved" || circuit.token !== token) throw new ContinuousChatAccountingUnresolved();
-			this.assertAccountAdmission(state, validatedDay);
+			this.assertAccountAdmission(state, validatedDay, metered);
 			state.circuits[key] = { ...circuit, status: "flight" };
 			this.save(state);
 		});
 	}
-	/** Atomically count measured cost once and settle only the exact outstanding physical claim. */
+	/**
+	 * Atomically count measured cost once and settle only the exact outstanding physical claim. The daily total counts the
+	 * cost only when `metered`; the receipt to acknowledge keeps it whole either way.
+	 */
 	settle(
 		key: string,
 		token: string,
@@ -547,6 +560,7 @@ export class ContinuousChatSpendMeter {
 		measuredCostUsd?: number,
 		observedAtMs?: number,
 		physicalAttempted = true,
+		metered = true,
 	): void {
 		if (measuredCostUsd !== undefined && (!Number.isFinite(measuredCostUsd) || measuredCostUsd < 0))
 			throw new TypeError("Invalid measured summary cost.");
@@ -577,7 +591,7 @@ export class ContinuousChatSpendMeter {
 			if (circuit.status === "reserved" && physicalAttempted) throw new ContinuousChatAccountingUnresolved();
 			if (measuredCostUsd !== undefined) {
 				if (!circuit.identity) throw new ContinuousChatAccountingUnresolved();
-				this.addMeasured(state, measuredCostUsd, observedAtMs!);
+				this.addMeasured(state, measuredCostUsd, observedAtMs!, metered);
 				const pendingAck: PendingAck = {
 					identity: circuit.identity,
 					costUsd: measuredCostUsd,

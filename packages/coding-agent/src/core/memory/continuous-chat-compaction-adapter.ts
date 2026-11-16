@@ -18,8 +18,10 @@ import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../..
 import { safeErrorMessage } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { CompletionAccountingAdmissionError, CompletionResponseUsage } from "../cost/completion-response-usage.ts";
+import { countsAgainstDollars } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { SemanticUsageLedgerIdentity } from "../cost/session-ledger-port.ts";
+import type { ModelBilling } from "../orchestration/risk-budget.ts";
 import {
 	isolatedCompletionError,
 	logProviderLanePark,
@@ -117,6 +119,11 @@ export interface ContinuousChatCompactionAdapterDeps {
 	usage(): SessionSemanticUsageDelivery;
 	/** The summaries' daily spend, shared across projects: new claims wait once its limit is reached. */
 	spend: ContinuousChatSpendMeter;
+	/**
+	 * The model registry's billing: the daily limit then counts and holds metered summaries only, and a summary on a
+	 * subscription model is held by its plan's usage windows instead.
+	 */
+	billing?: ModelBilling;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
@@ -132,6 +139,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			token: string;
 			healthy: boolean;
 			physicalAttempted: boolean;
+			metered: boolean;
 			measuredCostUsd?: number;
 			observedAtMs?: number;
 			warned?: boolean;
@@ -153,6 +161,11 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			.digest("hex");
 	}
 
+	/** Whether a summary on `model` counts against the daily dollar limit (`countsAgainstDollars`). */
+	private metered(model: Model<Api> | undefined): boolean {
+		return countsAgainstDollars(model, this.deps.billing);
+	}
+
 	private settleAccounting(
 		key: string,
 		token: string,
@@ -160,12 +173,14 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		measuredCostUsd?: number,
 		observedAtMs?: number,
 		physicalAttempted = false,
+		metered = true,
 	): void {
 		this.pendingSettlements.set(token, {
 			key,
 			token,
 			healthy,
 			physicalAttempted,
+			metered,
 			...(measuredCostUsd !== undefined ? { measuredCostUsd } : {}),
 			...(observedAtMs !== undefined ? { observedAtMs } : {}),
 		});
@@ -182,6 +197,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 					pending.measuredCostUsd,
 					pending.observedAtMs,
 					pending.physicalAttempted,
+					pending.metered,
 				);
 				this.pendingSettlements.delete(token);
 			} catch (error) {
@@ -225,9 +241,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		}
 	}
 
-	private accountingAdmission(key: string, identity: SemanticUsageLedgerIdentity): string {
+	private accountingAdmission(key: string, identity: SemanticUsageLedgerIdentity, metered: boolean): string {
 		try {
-			return this.deps.spend.claim(key, identity);
+			return this.deps.spend.claim(key, identity, metered);
 		} catch (error) {
 			if (error instanceof ContinuousChatAccountingClaimWriteError) this.settleAccounting(key, error.token, false);
 			throw new ContinuousChatAccountingHold(error);
@@ -240,9 +256,10 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	dispatchHold(): ContinuousChatDispatchHold | undefined {
 		const meter = this.deps.spend;
+		const summary = this.deps.summary();
 		let spend: string | undefined;
 		try {
-			spend = meter.hold();
+			spend = meter.hold(this.metered(summary.ok ? summary.model : undefined));
 		} catch {
 			return {
 				message: "Memory summaries wait for accounting storage.",
@@ -250,7 +267,6 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			};
 		}
 		const providerWaitMs = this.providerHoldUntil - this.timers.now();
-		const summary = this.deps.summary();
 		const accountingWaitMs = summary.ok
 			? this.accountingHold(this.accountingKey(summary.model, this.deps.usage().captureOrigin().sessionId))
 			: 0;
@@ -363,6 +379,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		const { model: pinnedModel, thinkingLevel: pinnedThinking } = this.summaryResolution();
 		const pinned: PinnedSummary = { model: pinnedModel, thinkingLevel: pinnedThinking };
 		const accountingKey = this.accountingKey(pinnedModel, capturedOrigin.sessionId);
+		const metered = this.metered(pinnedModel);
 		const view: Message = {
 			role: "user",
 			content: renderContinuousChatViewBlocks(prefix.view, prefix.viewCache),
@@ -372,7 +389,11 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			send: async ({ task, correction }, signal) => {
 				signal?.throwIfAborted();
 				if (this.accountingHold(accountingKey) > 0) throw new ContinuousChatAccountingHold();
-				let reservedToken: string | undefined = this.accountingAdmission(accountingKey, accountingIdentity);
+				let reservedToken: string | undefined = this.accountingAdmission(
+					accountingKey,
+					accountingIdentity,
+					metered,
+				);
 				let usage: CompletionResponseUsage;
 				try {
 					usage = new CompletionResponseUsage(
@@ -438,7 +459,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 									begin: (requestModel, requestSignal) => {
 										let token: string | undefined;
 										try {
-											token = reservedToken ?? this.accountingAdmission(accountingKey, accountingIdentity);
+											token =
+												reservedToken ??
+												this.accountingAdmission(accountingKey, accountingIdentity, metered);
 											reservedToken = undefined;
 											const admittedToken = token;
 											let observedAtMs: number | undefined;
@@ -453,12 +476,14 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 														settlement.measuredCostUsd,
 														observedAtMs,
 														true,
+														metered,
 													);
 												},
 												{
 													receiptId: admittedToken,
 													observedAtMs: () => observedAtMs,
-													admitPhysical: () => this.deps.spend.attempt(accountingKey, admittedToken),
+													admitPhysical: () =>
+														this.deps.spend.attempt(accountingKey, admittedToken, metered),
 												},
 											);
 											return {

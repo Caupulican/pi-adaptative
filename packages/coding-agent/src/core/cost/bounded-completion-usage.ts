@@ -32,18 +32,24 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 		if (request.model.costDefaulted)
 			throw new RequestSpendRefusal("The selected model has no declared price for a bounded completion.");
 		const inputTokens = estimateProviderRequestTokens(request.context, request.model);
-		const maxTokens = affordableOutputTokenLimit({
-			inputTokens,
-			maxOutputTokens: Math.min(request.maxTokens ?? request.model.maxTokens, request.model.maxTokens),
-			cost: resolveModelCost(request.model, inputTokens),
-			remainingUsd: this.spending.remainingUsd(),
-		});
+		const maxOutputTokens = Math.min(request.maxTokens ?? request.model.maxTokens, request.model.maxTokens);
+		// Spend that is not metered has no dollars to fit into: its plan's usage windows hold it.
+		const remainingUsd = this.spending.remainingUsdFor(request.model);
+		const maxTokens =
+			remainingUsd === undefined
+				? maxOutputTokens
+				: affordableOutputTokenLimit({
+						inputTokens,
+						maxOutputTokens,
+						cost: resolveModelCost(request.model, inputTokens),
+						remainingUsd,
+					});
 		if (maxTokens < 1) {
 			harnessLog.warn("cost", "a bounded completion was refused: the budget cannot cover the next request", () => ({
 				provider: request.model.provider,
 				model: request.model.id,
 				inputTokens,
-				remainingUsd: this.spending.remainingUsd(),
+				remainingUsd,
 			}));
 			throw new RequestSpendRefusal("Completion's remaining budget cannot cover the next projected request.");
 		}

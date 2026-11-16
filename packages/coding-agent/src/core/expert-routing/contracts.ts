@@ -71,6 +71,7 @@ export interface WorkerCapabilityRequest {
 
 	local_only?: boolean;
 	remote_allowed?: boolean;
+	/** Ceiling on a candidate's estimated metered (API) cost; a subscription-backed candidate is never refused by it. */
 	max_cost_usd?: number | null;
 	target_latency_ms?: number | null;
 
@@ -150,7 +151,7 @@ export interface ExpertCandidateState {
 	costProvenance?: EstimateProvenance;
 	latencyProvenance?: EstimateProvenance;
 	concurrencySlotsAvailable?: number;
-	/** Auth for this model is a real provider subscription (ModelRegistry.isUsingSubscription). */
+	/** Auth for this model is a real provider subscription: its spend is not metered (`isMeteredSpend`). */
 	subscriptionBacked?: boolean;
 }
 

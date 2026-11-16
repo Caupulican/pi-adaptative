@@ -5,7 +5,8 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentSessionEvent, IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
-import type { DailyUsageTotals, DailyUsageWindow } from "../cost/daily-usage.ts";
+import type { DailyUsageTotals, DailyUsageWindow, ProactivitySpend } from "../cost/daily-usage.ts";
+import { RequestSpendBudget, type SpendBilling } from "../cost/request-spend-budget.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
@@ -16,6 +17,7 @@ import {
 	type HarnessNoticeObservation,
 	wordedNotice,
 } from "../harness-notice.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -78,6 +80,20 @@ export function rollingDayWindow(atMs: number): DailyUsageWindow {
 	return { startMs: atMs - DAY_MS, endMs: Number.POSITIVE_INFINITY };
 }
 
+/**
+ * The review spend a dollar bound counts: what was spent on a metered model (`isMeteredSpend`), read from the model each
+ * usage record names; a record that names none, or a model `billing` does not hold, counts as metered.
+ */
+export function meteredReviewSpendUsd(spend: readonly ProactivitySpend[], billing: SpendBilling): number {
+	return spend.reduce((sum, entry) => {
+		const model =
+			entry.provider !== undefined && entry.model !== undefined
+				? billing.find(entry.provider, entry.model)
+				: undefined;
+		return isMeteredSpend(model, billing) ? sum + entry.usd : sum;
+	}, 0);
+}
+
 /** The hold `proactivity.maxTurnWakesPerDay` names when it carries a delivery with the owner's next turn. */
 export const MAX_TURN_WAKES_HOLD = "max_turn_wakes_per_day_reached";
 
@@ -118,7 +134,8 @@ export interface ParentWakeDelivery {
 
 /**
  * The last rolling-day measurement across the owner's sessions, and how the last accepted notes and the last CI event
- * for the main session were delivered. `turnWakes` counts every wake the bound counts; `eventWakes` is the CI share.
+ * for the main session were delivered. `reviewUsd` is the metered (API) review spend `maxUsdPerDay` counts;
+ * `turnWakes` counts every wake the bound counts; `eventWakes` is the CI share.
  */
 export interface ProactivityDailyState {
 	readonly measured?: {
@@ -150,6 +167,8 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 	subscribeForegroundActivity(listener: () => void): () => void;
 	/** Whole current owner records, bounded for this review; separate from worker handoff authority. */
 	captureReviewContext(maxChars: number): { readonly text: string; isCurrent(): boolean };
+	/** The billing kind of each model's credential: which review spend is metered (`meteredReviewSpendUsd`). */
+	getModelRegistry(): SpendBilling;
 	/** Review spend, parent wakes and acting-ahead accounting inside a window across the owner's sessions. */
 	aggregateUsageWindow(
 		window: DailyUsageWindow,
@@ -157,6 +176,7 @@ export interface ProactivityControllerDeps extends ProactivityInvestigationHost 
 		Pick<
 			DailyUsageTotals,
 			| "proactivityCost"
+			| "proactivitySpend"
 			| "proactiveTurnWakes"
 			| "hostEventTurnWakes"
 			| "routineResultTurnWakes"
@@ -202,8 +222,8 @@ function reviewSubject(
 /**
  * Owns the idle review that raises notes the owner would want to hear. The host decides everything that has a cost or a
  * consequence: whether a review may start (enabled, per-session cap, enough new owner turns, an idle
- * foreground, the rolling-day review spend across the owner's sessions), which bounded source reads its current authority
- * permits, and what is delivered (well-formed, new, within the limit, with current evidence) and how (a parent wake only
+ * foreground, the rolling-day metered review spend across the owner's sessions), which bounded source reads its current
+ * authority permits, and what is delivered (well-formed, new, within the limit, with current evidence) and how (a parent wake only
  * within the rolling-day wake bound, otherwise with the owner's next turn). The model judges whether the conversation shows a need;
  * the host admits reads and validates their evidence before any note reaches the owner.
  */
@@ -372,6 +392,8 @@ export class ProactivityController {
 			return { started: false, skipReason: shipment.skipReason, delivered: [] };
 		}
 		const { model } = shipment;
+		const metered = this.models.isMeteredSpend(model);
+		const billing = this.deps.getModelRegistry();
 		const capability = this.models.capabilityProfile(model);
 		const manager = this.deps.getSessionManager();
 		const branchGuard = manager.captureBranchContext();
@@ -458,12 +480,15 @@ export class ProactivityController {
 			const atMs = Date.now();
 			const day = await this.deps.aggregateUsageWindow(rollingDayWindow(atMs));
 			const turnWakes = parentTurnWakes(day);
+			const reviewUsd = meteredReviewSpendUsd(day.proactivitySpend, billing);
 			this._daily = {
 				...this._daily,
-				measured: { reviewUsd: day.proactivityCost, turnWakes, eventWakes: day.hostEventTurnWakes, atMs },
+				measured: { reviewUsd, turnWakes, eventWakes: day.hostEventTurnWakes, atMs },
 			};
 			assertCurrent();
-			const remainingDayUsd = settings.maxUsdPerDay - day.proactivityCost;
+			// The dollar bounds count metered (API) spend alone: a review on a subscription model is held by its plan's usage
+			// windows, so the day's bound does not hold it, and its run budget charges none of its requests (`billing`).
+			const remainingDayUsd = metered ? settings.maxUsdPerDay - reviewUsd : Number.POSITIVE_INFINITY;
 			if (remainingDayUsd <= 0) {
 				this._lastSkipReason = "max_usd_per_day_reached";
 				this.noticeSkip("max_usd_per_day_reached", settings);
@@ -472,7 +497,12 @@ export class ProactivityController {
 			// Past the wake bound the review still runs; its accepted notes wait for the owner's next turn.
 			const deliveryHold =
 				settings.delivery === "turn" && turnWakes >= settings.maxTurnWakesPerDay ? MAX_TURN_WAKES_HOLD : undefined;
-			const runUsage = new BoundedCompletionUsage(usageOwner, "proactivity", Math.min(maxUsd, remainingDayUsd), 2);
+			const runUsage = new BoundedCompletionUsage(
+				usageOwner,
+				"proactivity",
+				new RequestSpendBudget(Math.min(maxUsd, remainingDayUsd), undefined, billing),
+				2,
+			);
 			usage = runUsage;
 			runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
 				kind: "lane",
@@ -490,7 +520,7 @@ export class ProactivityController {
 			const capture: { raised: ProactiveNote[] } = { raised: [] };
 			const reviewInvestigation = new ProactivityInvestigation(this.deps, {
 				model,
-				metered: this.models.isMeteredSpend(model),
+				metered,
 				maxOutputTokens: capability.laneMaxOutputTokens,
 				signal,
 				assertCurrent,

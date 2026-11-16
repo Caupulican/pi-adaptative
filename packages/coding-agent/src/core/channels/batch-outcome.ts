@@ -3,8 +3,10 @@
  * turn, or unanswered and why. It owns the reading of that branch (the turn-origin stamps that name the batch and the
  * assistant answer after them) and nothing else; it writes no journal and no transcript.
  */
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
 import { type ChannelBatchRecord, DAY_MS } from "./channel-journal.ts";
 
@@ -12,6 +14,22 @@ import { type ChannelBatchRecord, DAY_MS } from "./channel-journal.ts";
 export interface BatchBranchSource {
 	getSessionManager(): Pick<SessionManager, "getBranch">;
 	getOwnerSessionManager?(): Pick<SessionManager, "getBranch">;
+	/**
+	 * The models and the billing kind of their credentials (the model registry) a turn's spend is counted by: the channel's
+	 * dollar bounds count metered (API) spend only. Without it every assistant message's spend counts as metered.
+	 */
+	getModelRegistry?(): BatchSpendBilling;
+}
+
+/** The model registry members the metered reading uses. */
+export interface BatchSpendBilling extends ModelBilling {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+}
+
+/** What an assistant message cost in metered (API) spend: none when its model runs on a subscription (`isMeteredSpend`). */
+function meteredUsd(usd: number, provider: string, modelId: string, billing: BatchSpendBilling | undefined): number {
+	if (usd === 0 || !billing) return usd;
+	return isMeteredSpend(billing.find(provider, modelId), billing) ? usd : 0;
 }
 
 function messageText(message: AgentMessage): string | undefined {
@@ -40,10 +58,10 @@ export type BatchOutcome =
 	| { readonly kind: "unanswered"; readonly reason: UnansweredReason; readonly usd: number };
 
 /**
- * How a batch's turn ended, with what its assistant messages cost so far. Its user entry is the one whose origin
- * record names this channel and the batch's id (`ref`). The answer is the first completed assistant answer after it;
- * a decisive entry before that (the owner's words, or another third party's, a host event someone else wrote
- * included) means this batch got none.
+ * How a batch's turn ended, with the metered (API) spend of its assistant messages so far. Its user entry is the one
+ * whose origin record names this channel and the batch's id (`ref`). The answer is the first completed assistant
+ * answer after it; a decisive entry before that (the owner's words, or another third party's, a host event someone
+ * else wrote included) means this batch got none.
  */
 export function readBatchOutcome(
 	source: BatchBranchSource,
@@ -71,6 +89,7 @@ export function readBatchOutcome(
 		return now - batch.acceptedAt >= DAY_MS
 			? { kind: "unanswered", reason: "not_delivered", usd: 0 }
 			: { kind: "waiting", usd: 0 };
+	const billing = source.getModelRegistry?.();
 	let usd = 0;
 	for (let i = index + 1; i < branch.length; i++) {
 		const entry = branch[i];
@@ -90,7 +109,7 @@ export function readBatchOutcome(
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "assistant") continue;
-		usd += message.usage?.cost?.total ?? 0;
+		usd += meteredUsd(message.usage?.cost?.total ?? 0, message.provider, message.model, billing);
 		// An aborted turn answers nothing; left waiting it would hold the channel's next turn for a day.
 		if (message.stopReason === "aborted") return { kind: "unanswered", reason: "aborted", usd };
 		if (message.stopReason === "stop" || message.stopReason === "length") {

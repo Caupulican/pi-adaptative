@@ -19,6 +19,7 @@ import {
 	projectPendingAttemptGenerationUsage,
 } from "./attempt-usage-generations.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, HarnessCapability, ToolCapabilityManifest } from "./contracts.ts";
+import { costCeilingUsd } from "./risk-budget.ts";
 
 export type GatewayDecisionCode =
 	| "allowed"
@@ -52,6 +53,11 @@ export interface CapabilityGatewayOptions {
 	onAudit?: (record: GatewayAuditRecord) => void;
 	/** Session-tree cumulative budget owner. Per-attempt grants remain independently enforced. */
 	sharedBudget?: SharedCapabilityBudget;
+	/**
+	 * Whether the attempt's spend is metered (`isMeteredSpend` of the model it runs on): the grant's dollar ceilings hold it
+	 * only then (`costCeilingUsd`). Absent, it is held as metered spend, which is never laxer.
+	 */
+	meteredSpend?: boolean;
 	/** Per-lane process scratch directories whose spilled tool outputs this lane may read back. */
 	scratchReadPaths?: readonly string[];
 }
@@ -224,6 +230,7 @@ export class CapabilityGateway {
 	private readonly now: () => number;
 	private readonly onAudit?: (record: GatewayAuditRecord) => void;
 	private readonly sharedBudget?: SharedCapabilityBudget;
+	private readonly meteredSpend: boolean;
 	private readonly scratchReadPaths: readonly string[];
 	private startedAt: number;
 	private initialWallClockMs: number;
@@ -256,6 +263,7 @@ export class CapabilityGateway {
 		this.now = options.now ?? Date.now;
 		this.onAudit = options.onAudit;
 		this.sharedBudget = options.sharedBudget;
+		this.meteredSpend = options.meteredSpend ?? true;
 		this.scratchReadPaths = options.scratchReadPaths ?? [];
 		this.startedAt = this.currentTime();
 		this.initialWallClockMs = initialUsage.activeWallClockMs;
@@ -546,7 +554,8 @@ export class CapabilityGateway {
 		if (budget.maxTokens !== undefined && budgetedTokens(usage) >= budget.maxTokens) {
 			this.deny(toolName, "token_budget_exhausted", "Token budget exhausted.");
 		}
-		if (budget.maxCostUsd !== undefined && usage.costUsd >= budget.maxCostUsd) {
+		const maxCostUsd = costCeilingUsd(budget, this.meteredSpend);
+		if (maxCostUsd !== undefined && usage.costUsd >= maxCostUsd) {
 			this.deny(toolName, "cost_budget_exhausted", "Cost budget exhausted.");
 		}
 		if (budget.maxWallClockMs !== undefined && usage.wallClockMs >= budget.maxWallClockMs) {

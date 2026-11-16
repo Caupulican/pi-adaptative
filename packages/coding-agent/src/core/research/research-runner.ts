@@ -40,8 +40,11 @@ export interface ResearchRunnerOptions {
 	 * omitted / empty reproduces the pre-collector behavior exactly.
 	 */
 	sources?: readonly EvidenceRef[];
-	/** Budget for this pass; a post-hoc breach marks the run budget_exhausted (spend stays visible). */
-	maxUsd: number;
+	/**
+	 * Dollar ceiling of this pass on metered (API) spend; a post-hoc breach marks the run budget_exhausted (spend stays
+	 * visible). Absent when the pass runs on a subscription model, whose plan's usage windows hold it instead.
+	 */
+	maxUsd?: number;
 	maxSources: number;
 	maxFindings: number;
 	/** Wall-clock budget in milliseconds; 0 disables. */
@@ -181,7 +184,7 @@ export async function runResearch(options: ResearchRunnerOptions): Promise<Resea
 	}
 
 	const bundle = buildBundle(options, parsed);
-	const overBudget = options.maxUsd > 0 && completion.costUsd > options.maxUsd;
+	const overBudget = options.maxUsd !== undefined && options.maxUsd > 0 && completion.costUsd > options.maxUsd;
 	return {
 		status: overBudget ? "budget_exhausted" : "succeeded",
 		reasonCode: overBudget

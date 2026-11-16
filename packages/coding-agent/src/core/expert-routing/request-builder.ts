@@ -60,6 +60,7 @@ export interface BuildWorkerCapabilityRequestInput {
 	excludedProviders?: readonly string[];
 	localOnly?: boolean;
 	remoteAllowed?: boolean;
+	/** Ceiling on a candidate's estimated metered (API) cost (`max_cost_usd`); subscription-backed candidates pass it. */
 	maxCostUsd?: number | null;
 	targetLatencyMs?: number | null;
 	minimumContextWindow?: number | null;

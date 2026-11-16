@@ -1,15 +1,14 @@
 /**
- * A loaded bot session's spend, as its host composes it once per session: the dollar ceilings over its spend per request
- * (the root's and the bot's own, each on all spend or on metered spend only), the bot's spend windows over its transcript
+ * A loaded bot session's spend, as its host composes it once per session: the dollar ceilings over its metered spend per
+ * request (the root's and the bot's own), the bot's spend windows over its transcript
  * (`BotSpendWindows`), the bounds each of its workers' runs takes from them, the bound and the spend its turns read, and
  * the accounting that charges its spend to the root and records each turn's outcome (`BotTurnAccounting`). The windows and
  * the charges share one ledger (`BotSpendLedger`), so one write advances both.
  *
- * A ceiling counts the spend it is set on: one on all spend counts the window's whole spend, a metered-only one the part
- * of it made on metered models (the bot's own on its model, which a pinned bot never leaves, and each worker's on its
- * attempt's). The bot's turns are held to every ceiling on metered spend alone (`botSpendCeilingsOn`): the owner's cost
- * rule holds API spend at its dollar bound and lets a subscription's spend run while its plan's usage windows have room,
- * waiting for their reset once they do not.
+ * A ceiling counts the part of the window's spend made on metered models (the bot's own on its model, which a pinned bot
+ * never leaves, and each worker's on its attempt's): the owner's cost rule (`costCeilingUsd`) holds API spend at its
+ * dollar bound and lets a subscription's spend run while its plan's usage windows have room, waiting for their reset once
+ * they do not.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -20,7 +19,7 @@ import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { isMeteredSpend } from "../orchestration/risk-budget.ts";
+import { costCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
@@ -30,29 +29,25 @@ import { BotSpendWindows, type WindowSpend } from "./bot-spend-window.ts";
 import { BotTurnAccounting, type BotTurnAccountingPorts } from "./bot-turn-report.ts";
 
 /**
- * The ceilings over a bot's spend per request: the root's (`root`) and the bot's own (`spendBudget`: its profile's
- * `maxCostUsd` on all spend, `maxMeteredCostUsd` on metered spend). A ceiling of zero or less sets none, as the root's do
- * not.
+ * The ceilings over a bot's metered spend per request: the root's (`root`) and the bot's own (`costCeilingUsd` of its
+ * profile's `spendBudget`). A ceiling of zero or less sets none, as the root's do not.
  */
 function botSpendCeilings(
 	root: readonly BotSpendCeiling[],
 	spendBudget: BotSessionDefinition["spendBudget"],
 ): BotSpendCeiling[] {
-	const own: BotSpendCeiling[] = [
-		{ usd: spendBudget.maxCostUsd ?? 0, bound: "profile", meteredOnly: false },
-		{ usd: spendBudget.maxMeteredCostUsd ?? 0, bound: "profile", meteredOnly: true },
-	];
-	return [...root, ...own.filter((ceiling) => ceiling.usd > 0)];
+	const own = costCeilingUsd(spendBudget, true) ?? 0;
+	return own > 0 ? [...root, { usd: own, bound: "profile" }] : [...root];
 }
 
 /**
- * The ceilings that hold the bot's spend when its session runs on `model`: every one, each on metered spend alone, by the
- * owner's cost rule (a dollar bound holds API spend; a subscription's spend runs while its plan's usage windows have room
- * and waits for their reset, never for a dollar bound). So a subscription bot's turns are held only by what its metered
+ * The ceilings that hold the bot's spend when its session runs on `model`: every one, on metered spend, by the owner's
+ * cost rule (a dollar bound holds API spend; a subscription's spend runs while its plan's usage windows have room and
+ * waits for their reset, never for a dollar bound). So a subscription bot's turns are held only by what its metered
  * workers spent in the request, and a metered bot's by its own spend and theirs. A model the registry does not know
  * (undefined) is held as metered spend, which is never laxer. A subscription model that declares no price is held by none,
- * as its usage windows hold the bot's workers on such a model (`RunCostBound.unpriced` "unbounded"). A metered one that
- * declares no price is refused while a ceiling holds it (`BotSessionHost.modelRefusal`), as it refuses the root's workers.
+ * as its usage windows hold it and its workers on such a model. A metered one that declares no price is refused while a
+ * ceiling holds it (`BotSessionHost.modelRefusal`), as it refuses the root's workers.
  */
 export function botSpendCeilingsOn(
 	root: readonly BotSpendCeiling[],
@@ -61,9 +56,7 @@ export function botSpendCeilingsOn(
 	registry: ModelRegistry,
 ): BotSpendCeiling[] {
 	if (model?.costDefaulted && !isMeteredSpend(model, registry)) return [];
-	return botSpendCeilings(root, spendBudget).map((ceiling) =>
-		ceiling.meteredOnly ? ceiling : { ...ceiling, meteredOnly: true },
-	);
+	return botSpendCeilings(root, spendBudget);
 }
 
 /** What a bot session's spend reads from its host. */
@@ -127,9 +120,9 @@ export class BotSessionSpend {
 	}
 
 	/**
-	 * A worker's run shares the bounds of the request it serves with the request's other workers: each ceiling less what
-	 * the bot's turns spent in that window on the spend the ceiling counts (`BotSpendWindows.runCostBound`). With no ceiling
-	 * set, none: a subscription's usage windows hold it.
+	 * A worker's run shares the bound of the request it serves with the request's other workers: the lowest ceiling less
+	 * what the bot's turns spent in that window on metered models (`BotSpendWindows.runCostBound`). With no ceiling set,
+	 * none; a subscription worker is held by its usage windows.
 	 */
 	readonly workerRunCostBound: NonNullable<ParentExecutionPolicy["runCostBound"]> = (attempt, snapshot) =>
 		this.windows.runCostBound(attempt, snapshot, this.ceilings());
@@ -158,7 +151,7 @@ export class BotSessionSpend {
 
 	/**
 	 * Counts what the bot's turn just spent to its window and returns the window's spend past the lowest ceiling it passes
-	 * of those that hold the bot's own spend, each on the spend it counts. Before the transcript holds the turn's input,
+	 * of those that hold the bot's own spend, on its metered spend. Before the transcript holds the turn's input,
 	 * the turn's own spend is the window's.
 	 */
 	private exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotSpendCeiling> | undefined {
@@ -171,14 +164,13 @@ export class BotSessionSpend {
 		);
 	}
 
-	/** `spend` past the lowest ceiling it passes of those that hold the bot's own spend, each on the spend it counts. */
+	/** `spend` past the lowest ceiling it passes of those that hold the bot's own spend, on its metered spend. */
 	private excessOf(spend: WindowSpend): SpendExcess<BotSpendCeiling> | undefined {
 		const { model, spendBudget } = this.definition;
 		let excess: SpendExcess<BotSpendCeiling> | undefined;
 		for (const ceiling of botSpendCeilingsOn(this.ports.rootCeilings(), spendBudget, model, this.registry)) {
-			const spentUsd = ceiling.meteredOnly ? spend.meteredUsd : spend.usd;
-			if (spentUsd > ceiling.usd && (excess === undefined || ceiling.usd < excess.limit.usd))
-				excess = { spentUsd, limit: ceiling };
+			if (spend.meteredUsd > ceiling.usd && (excess === undefined || ceiling.usd < excess.limit.usd))
+				excess = { spentUsd: spend.meteredUsd, limit: ceiling };
 		}
 		return excess;
 	}

@@ -16,6 +16,7 @@ import type { EdgeClass, EdgeGrantSource, EdgeGrantView } from "../autonomy/edge
 import type { AwayChannelStatus } from "../channels/away-channels.ts";
 import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
+import type { SpendBilling } from "../cost/request-spend-budget.ts";
 import { OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { HostEventConnectionView } from "../events/host-event-contract.ts";
@@ -31,6 +32,7 @@ import type { OwnerDecisionItem } from "../owner-decisions/owner-decision-queue.
 import { isOpenPlanView, listPlanViews, type PlanCounts } from "../plan/plan-view.ts";
 import { type ActAheadPhase, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
 import {
+	meteredReviewSpendUsd,
 	type ProactivityDailyState,
 	type ProactivityFeedbackView,
 	parentTurnWakes,
@@ -394,7 +396,7 @@ export interface SessionAutonomyStatus {
 
 type UsageWindow = Pick<
 	DailyUsageTotals,
-	| "proactivityCost"
+	| "proactivitySpend"
 	| "proactiveTurnWakes"
 	| "hostEventTurnWakes"
 	| "routineResultTurnWakes"
@@ -423,6 +425,8 @@ export interface AutonomyStatusSources {
 	>;
 	/** The gates' rolling-24-hour usage across the owner's sessions. */
 	usageWindow(): Promise<UsageWindow>;
+	/** The billing kind of each model's credential: the review spend `proactivity.maxUsdPerDay` counts is metered (API). */
+	readonly spendBilling: SpendBilling;
 	/** The session's loaded routine store, as its own reloads last read it; undefined while it is not loaded. */
 	readonly routineStore:
 		| Pick<PersistentBotTeamStore, "listRoutines" | "listRoutineOccurrences" | "getDaemonStatus">
@@ -733,7 +737,10 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				enabled: configured.enabled,
 				delivery: configured.delivery,
 				turnWakes: { used: parentTurnWakes(window), max: configured.maxTurnWakesPerDay },
-				reviewSpend: { used: window.proactivityCost, max: configured.maxUsdPerDay },
+				reviewSpend: {
+					used: meteredReviewSpendUsd(window.proactivitySpend, sources.spendBilling),
+					max: configured.maxUsdPerDay,
+				},
 				...(skip ? { lastSkipReason: skip } : {}),
 				daily: sources.proactivity.daily,
 				setAside: bounded(

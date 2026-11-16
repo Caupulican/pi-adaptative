@@ -105,7 +105,7 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 			if (this.released) throw new RequestSpendRefusal("Completion ended during request admission.");
 			signal?.throwIfAborted();
 			// The last refusable step: an admission checkpoint it writes always belongs to a request that is dispatched.
-			this.spending?.beginRequest(receiptId);
+			this.spending?.beginRequest(receiptId, model);
 			if (summaryAccounting) {
 				try {
 					summaryAccounting.admitPhysical();

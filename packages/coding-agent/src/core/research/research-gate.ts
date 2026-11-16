@@ -4,7 +4,8 @@ import type { HarnessCapability } from "../capability-contract.ts";
 interface ResearchRequestArgs {
 	envelope?: CapabilityEnvelope | null;
 	sourceKind: EvidenceSourceKind | string;
-	estimatedUsd: number;
+	/** The pass's dollar ceiling on metered (API) spend; absent when its spend is on a subscription, which no dollar holds. */
+	estimatedUsd?: number;
 	maxEstimatedUsd?: number;
 	privateHistoryAllowed?: boolean;
 }
@@ -38,7 +39,7 @@ export function evaluateResearchRequest(args: ResearchRequestArgs): GateOutcome 
 
 	const { envelope, sourceKind, estimatedUsd, maxEstimatedUsd, privateHistoryAllowed } = args;
 	const limit = maxEstimatedUsd ?? envelope.maxEstimatedUsd;
-	if (limit !== undefined && estimatedUsd > limit) {
+	if (limit !== undefined && estimatedUsd !== undefined && estimatedUsd > limit) {
 		return {
 			outcome: "ask-user",
 			gate: "research_gate",

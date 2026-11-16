@@ -535,6 +535,7 @@ export class ReflectionController {
 			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
 			autoLearn,
 			maxEstimatedUsd: (model) => runtime.maxEstimatedUsd(model),
+			billing: this.deps.getModelRegistry(),
 			runIsolatedCompletion: (options) => this.runIsolatedCompletion(options),
 		});
 		// One selection, re-read on every call: a bound System One always wins and never falls back.
@@ -575,8 +576,7 @@ export class ReflectionController {
 					...binding,
 					...runtime,
 					engine,
-					// A bound System One wins as the engine (`engine` above): its spend is no model's own, so it is metered.
-					maxEstimatedUsd: (model) => runtime.maxEstimatedUsd(runtime.engine() ? undefined : model),
+					billing: this.deps.getModelRegistry(),
 					evidence: this.ownerEvidence,
 					settings: this.deps.getSettingsManager(),
 					usageOwner: sessionSemanticUsageOf(manager),
