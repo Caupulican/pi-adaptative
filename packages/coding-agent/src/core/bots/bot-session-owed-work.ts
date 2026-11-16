@@ -574,8 +574,11 @@ export class BotOwedWork {
 		});
 	}
 
-	/** The bot's inbox and owed work did not read (`error`): told once per cause until its listing reads clean again. */
-	private tellAskFailed(agentId: string, error: unknown): void {
+	/**
+	 * The bot's inbox, owed work or home did not read (`error`), here or in a callback of its host: told once per cause until
+	 * its listing reads clean again.
+	 */
+	tellAskFailed(agentId: string, error: unknown): void {
 		const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
 		const told = this.sweepTold.get(agentId) ?? new Set<string>();
 		this.sweepTold.set(agentId, told);

@@ -114,6 +114,11 @@ export interface BotRemoteViewPorts {
 	changed(agentIds: readonly string[]): void;
 	/** A message was written to the inbox of a bot the host runs: it takes it (`bot-inbox.ts`). */
 	inboxChanged(agentId: string): void;
+	/**
+	 * The bot's home did not read in one of the view's own callbacks (a home change, a liveness recheck): the owner is told
+	 * once per cause, and the bot's next change, recheck or minute's sweep reads it again.
+	 */
+	readFailed(agentId: string, error: unknown): void;
 }
 
 export class BotRemoteView {
@@ -201,8 +206,16 @@ export class BotRemoteView {
 						// The host's own bot sessions announce themselves; a change it wrote is not news.
 						if (this.ports.runsLocally(agentId) && (hostFile || isSessionChange(file))) continue;
 						if (hostFile) {
+							let hold: string | undefined;
+							try {
+								hold = this.otherHold(agentId);
+							} catch (error) {
+								// Its host files do not read: the host it had and the hold judged stand, and the batch's other bots are read.
+								this.ports.readFailed(agentId, error);
+								changed.add(agentId);
+								continue;
+							}
 							this.remote.delete(agentId);
-							const hold = this.otherHold(agentId);
 							if (hold !== this.holds.get(agentId)) this.tookUp(agentId, hold);
 						}
 						changed.add(agentId);
@@ -360,7 +373,15 @@ export class BotRemoteView {
 				const changed: string[] = [];
 				for (const [agentId, host] of [...this.remote]) {
 					if (!hostGone(host)) continue;
-					this.remote.set(agentId, readRemoteBotHost(this.ports.agentDir(), agentId, this.holder));
+					let now: RemoteBotHost | undefined;
+					try {
+						now = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
+					} catch (error) {
+						// Its home does not read: the gone host stays held here, so the next recheck reads the home again.
+						this.ports.readFailed(agentId, error);
+						continue;
+					}
+					this.remote.set(agentId, now);
 					changed.push(agentId);
 				}
 				// A killed host's watches are sampled by no one until a process takes the bot up (`hostChanged`).

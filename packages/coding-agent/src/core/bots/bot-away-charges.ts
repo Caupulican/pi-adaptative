@@ -54,22 +54,41 @@ function isChargeRecord(value: unknown): value is BotAwayChargeRecord {
 	);
 }
 
-/** The records the file holds, or why it does not read; none when it does not exist yet. */
+/** The code of a file system failure (`EACCES`), or `error` when it names none: the cause a failure is told once for. */
+function failureCode(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return typeof code === "string" ? code : "error";
+}
+
+/**
+ * The records the file holds, or why it does not read with the cause it is told once for (`malformed` when it does not
+ * parse); none when it does not exist yet.
+ */
 function readRecords(
 	file: string,
-): { readonly records: BotAwayChargeRecord[] } | { readonly unreadable: string; readonly malformed: boolean } {
+):
+	| { readonly records: BotAwayChargeRecord[] }
+	| { readonly unreadable: string; readonly cause: string; readonly malformed: boolean } {
 	let text: string;
 	try {
 		text = readFileSync(file, "utf8");
 	} catch (error) {
 		if (isMissingFileError(error)) return { records: [] };
-		return { unreadable: error instanceof Error ? error.message : String(error), malformed: false };
+		return {
+			unreadable: error instanceof Error ? error.message : String(error),
+			cause: failureCode(error),
+			malformed: false,
+		};
 	}
 	let value: unknown;
 	try {
 		value = JSON.parse(text);
 	} catch (error) {
-		return { unreadable: error instanceof Error ? error.message : String(error), malformed: true };
+		return {
+			unreadable: error instanceof Error ? error.message : String(error),
+			cause: "malformed",
+			malformed: true,
+		};
 	}
 	if (
 		!isPlainRecord(value) ||
@@ -77,7 +96,11 @@ function readRecords(
 		!Array.isArray(value.charges) ||
 		!value.charges.every(isChargeRecord)
 	)
-		return { unreadable: `${file} is not a version 1 record of bot away charges`, malformed: true };
+		return {
+			unreadable: `${file} is not a version 1 record of bot away charges`,
+			cause: "malformed",
+			malformed: true,
+		};
 	return { records: value.charges };
 }
 
@@ -126,14 +149,15 @@ export function recordBotAwayCharge(agentDir: string, charge: BotAwayChargeRecor
 
 /**
  * The bots' charges on the away spend bound now, each until it leaves the 24-hour window, with the record file this read
- * set aside when it did not parse; or why they do not read.
+ * set aside when it did not parse; or why they do not read, with the cause the owner is told once for (a file system
+ * code, never the timestamped name a set-aside would have taken).
  */
 export function readBotAwayCharges(
 	agentDir: string,
 	nowMs: number,
 ):
 	| { readonly charges: RoutineAwayCharge[]; readonly setAside?: BotAwayChargesSetAside }
-	| { readonly unreadable: string } {
+	| { readonly unreadable: string; readonly cause: string } {
 	const file = botAwayChargesFile(agentDir);
 	let read = readRecords(file);
 	let setAside: BotAwayChargesSetAside | undefined;
@@ -141,11 +165,14 @@ export function readBotAwayCharges(
 		try {
 			setAside = withFileLockSync(file, () => setAsideMalformed(file, nowMs));
 		} catch (error) {
-			return { unreadable: `${read.unreadable}; it was not set aside: ${errorText(error)}` };
+			return {
+				unreadable: `${read.unreadable}; it was not set aside: ${errorText(error)}`,
+				cause: `not set aside: ${failureCode(error)}`,
+			};
 		}
 		read = readRecords(file);
 	}
-	if ("unreadable" in read) return { unreadable: read.unreadable };
+	if ("unreadable" in read) return { unreadable: read.unreadable, cause: read.cause };
 	const charges = read.records.flatMap((entry) => {
 		const until = entry.at + ROUTINE_AWAY_SPEND_WINDOW_MS;
 		return entry.micros > 0 && until > nowMs ? [{ micros: entry.micros, until }] : [];

@@ -71,6 +71,8 @@ export class BotInboxDrain {
 	/** The bots whose inbox a pass is taking now: whether a change asked for another read when it ends, and its end. */
 	private readonly passes = new Map<string, { again: boolean; done?: Promise<void> }>();
 	private poll: unknown;
+	/** What the poll last told for each bot whose inbox it did not take: one cause is told once. */
+	private readonly toldNotTaken = new Map<string, string>();
 	private stopped = false;
 
 	constructor(ports: BotInboxDrainPorts) {
@@ -152,13 +154,31 @@ export class BotInboxDrain {
 		this.poll = timers.setTimeout(() => {
 			this.poll = undefined;
 			const agentDir = this.ports.agentDir();
-			for (const agentId of this.ports.hosted())
-				if (botInboxWaiting(agentDir, agentId) || botInboxStopWaiting(agentDir, agentId))
-					void this.drain(agentId).catch((error: unknown) =>
-						this.ports.warn(interfaceText().botTeam.botInboxNotTaken(agentId, errorText(error))),
+			for (const agentId of this.ports.hosted()) {
+				let waits: boolean;
+				try {
+					waits = botInboxWaiting(agentDir, agentId) || botInboxStopWaiting(agentDir, agentId);
+				} catch (error) {
+					// Its inbox does not list: the other bots' are read, and this one again at the next poll.
+					this.tellNotTaken(agentId, error);
+					continue;
+				}
+				if (!waits) this.toldNotTaken.delete(agentId);
+				else
+					void this.drain(agentId).then(
+						() => this.toldNotTaken.delete(agentId),
+						(error: unknown) => this.tellNotTaken(agentId, error),
 					);
+			}
 			this.arm();
 		}, INBOX_POLL_MS);
+	}
+
+	/** The bot's inbox was not taken on the poll (`error`): told once per cause, until a poll reads it clean again. */
+	private tellNotTaken(agentId: string, error: unknown): void {
+		const message = interfaceText().botTeam.botInboxNotTaken(agentId, errorText(error));
+		if (this.toldNotTaken.get(agentId) !== message) this.ports.warn(message);
+		this.toldNotTaken.set(agentId, message);
 	}
 
 	/** No pass starts after it, and the timer ends. */

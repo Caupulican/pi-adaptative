@@ -22,8 +22,9 @@ export interface AwaySpendBounds {
 }
 
 /**
- * Per agent directory, what this process told of its bot charges not reading: one owner per agent directory, told by
- * whichever of the process's readers meets a cause first, and forgotten once they read again, so a new cause is told.
+ * Per agent directory, the cause this process told of its bot charges not reading (a file system code, not the message,
+ * which can name a timestamped set-aside destination): one owner per agent directory, told by whichever of the process's
+ * readers meets a cause first, and forgotten once they read again, so a new cause is told.
  */
 const toldUnreadable = new Map<string, string>();
 
@@ -38,9 +39,9 @@ export function readAwayCharges(
 	const bots = readBotAwayCharges(agentDir, nowMs);
 	const place = resolve(agentDir);
 	if ("unreadable" in bots) {
-		const message = words.botAwayChargesUnreadable(botAwayChargesFile(agentDir), bots.unreadable);
-		if (toldUnreadable.get(place) !== message) tell(message);
-		toldUnreadable.set(place, message);
+		if (toldUnreadable.get(place) !== bots.cause)
+			tell(words.botAwayChargesUnreadable(botAwayChargesFile(agentDir), bots.unreadable));
+		toldUnreadable.set(place, bots.cause);
 	} else {
 		toldUnreadable.delete(place);
 		if (bots.setAside) tell(words.botAwayChargesSetAside(bots.setAside.file, bots.setAside.to, bots.setAside.reason));

@@ -311,6 +311,7 @@ export class BotSessionHost {
 				hostChanged: (agentId) => this.owed.unhosted(agentId),
 				changed: (agentIds) => this.changedMany(agentIds),
 				inboxChanged: (agentId) => this.takeInbox(agentId),
+				readFailed: (agentId, error) => this.owed.tellAskFailed(agentId, error),
 			},
 			this.holder,
 		);
@@ -871,35 +872,56 @@ export class BotSessionHost {
 		this.inbox.arm();
 		entry.idleTimer = this.idleTimers().setTimeout(() => {
 			entry.idleTimer = undefined;
-			if (this.entries.get(entry.agentId) !== entry || this.holdsLoaded(entry)) return;
-			// A message or a stop another process sent is taken before the session may close (the watch may have missed it).
-			const agentDir = this.ports.agentDir();
-			if (botInboxWaiting(agentDir, entry.agentId) || botInboxStopWaiting(agentDir, entry.agentId)) {
-				this.takeInbox(entry.agentId);
-				return this.armIdle(entry);
-			}
-			if (this.recheckIfIdle(entry)) return this.armIdle(entry);
-			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
-			const session = { id: entry.session.sessionId, file: entry.sessionManager.getSessionFile() };
-			let owesWatches: boolean;
 			try {
-				owesWatches = owesWatchWork(this.ports.store(), session, this.idleTimers().now());
+				this.closeIfIdle(entry);
 			} catch (error) {
-				// What it is owed did not read: it stays loaded and is asked again at the next tick, the owner told once.
-				if (!this.toldWatchesNotCounted.has(entry.agentId))
-					this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(entry.agentId, errorText(error)));
-				this.toldWatchesNotCounted.add(entry.agentId);
-				return this.armIdle(entry);
+				// A home record of the bot that does not read keeps it loaded: told once per cause, read again at the next bound.
+				this.owed.tellAskFailed(entry.agentId, error);
+				this.armIdle(entry);
 			}
-			if (owesWatches) return this.armIdle(entry);
-			// Its workers' owed execution (queued work, a retry due, a lease to take back) runs only while it is loaded.
-			const { orchestrationHome } = entry.sessionManager.getStorageRoots();
-			if (this.owed.owesLoadedExecution(entry.agentId, orchestrationHome, entry.session.sessionId))
-				return this.armIdle(entry);
-			void this.close(entry.agentId).catch((error: unknown) =>
-				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
-			);
 		}, BOT_SESSION_IDLE_BOUND_MS);
+	}
+
+	/** The idle bound ended: the session closes unless its work, its inbox, a record change or what it is owed keeps it. */
+	private closeIfIdle(entry: BotSessionEntry): void {
+		if (this.entries.get(entry.agentId) !== entry || this.holdsLoaded(entry)) return;
+		// A message or a stop another process sent is taken before the session may close (the watch may have missed it).
+		const agentDir = this.ports.agentDir();
+		if (botInboxWaiting(agentDir, entry.agentId) || botInboxStopWaiting(agentDir, entry.agentId)) {
+			this.takeInbox(entry.agentId);
+			this.armIdle(entry);
+			return;
+		}
+		if (this.recheckIfIdle(entry)) {
+			this.armIdle(entry);
+			return;
+		}
+		// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
+		const session = { id: entry.session.sessionId, file: entry.sessionManager.getSessionFile() };
+		let owesWatches: boolean;
+		try {
+			owesWatches = owesWatchWork(this.ports.store(), session, this.idleTimers().now());
+		} catch (error) {
+			// What it is owed did not read: it stays loaded and is asked again at the next tick, the owner told once.
+			if (!this.toldWatchesNotCounted.has(entry.agentId))
+				this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(entry.agentId, errorText(error)));
+			this.toldWatchesNotCounted.add(entry.agentId);
+			this.armIdle(entry);
+			return;
+		}
+		if (owesWatches) {
+			this.armIdle(entry);
+			return;
+		}
+		// Its workers' owed execution (queued work, a retry due, a lease to take back) runs only while it is loaded.
+		const { orchestrationHome } = entry.sessionManager.getStorageRoots();
+		if (this.owed.owesLoadedExecution(entry.agentId, orchestrationHome, entry.session.sessionId)) {
+			this.armIdle(entry);
+			return;
+		}
+		void this.close(entry.agentId).catch((error: unknown) =>
+			this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
+		);
 	}
 
 	/**
