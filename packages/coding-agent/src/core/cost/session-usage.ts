@@ -104,6 +104,25 @@ export function isBackgroundShare(share: CumulativeUsageShare): boolean {
 	return share.kind !== "semantic" || share.report.route === "history_summary";
 }
 
+/**
+ * What names one share of a session's cumulative usage across readings: its entry, or the report id it is counted once
+ * by; undefined for the paid history spend the journal had no room for, which changes as it is read.
+ */
+export function usageShareKey(share: CumulativeUsageShare): string | undefined {
+	switch (share.kind) {
+		case "direct":
+			return `entry:${share.entry.id}`;
+		case "spawned":
+			return share.report.reportId === undefined ? undefined : `spawned:${share.report.reportId}`;
+		case "receipt":
+			return `receipt:${share.receipt.reportId}`;
+		case "semantic":
+			return `semantic:${share.report.reportId}`;
+		case "overflow":
+			return undefined;
+	}
+}
+
 /** The dollars of `usage`, one share of a session's cumulative usage (`share`), that are metered spend (`isMeteredSpend`). */
 export type MeteredUsageShare = (usage: Usage, share: CumulativeUsageShare) => number;
 
@@ -140,45 +159,89 @@ export function meteredCumulativeUsd(
 	return usd;
 }
 
-/** Each share of the whole-session spend, counted once as `aggregateCumulativeUsageFromSessionEntries` counts it. */
+/** The spend of the shares a session's records hold past an entry, and the last entry read. */
+export interface SharesPastEntry {
+	/** Their cost, in dollars. */
+	readonly usd: number;
+	/** Their metered part, in dollars, as the reader's `metered` reads each share. */
+	readonly meteredUsd: number;
+	/** The last of the entries read: where the next reading of new shares starts; undefined with no entry. */
+	readonly lastEntryId: string | undefined;
+}
+
+/**
+ * The cumulative usage the entries recorded by `atMs` hold: those before the first entry dated after it (each by its
+ * `timestamp`), so a clock that went back never lets a later entry in.
+ */
+export function usageRecordedBy(entries: readonly SessionEntry[], atMs: number): Usage {
+	const after = entries.findIndex((entry) => !(Date.parse(entry.timestamp) <= atMs));
+	return aggregateCumulativeUsageFromSessionEntries(after < 0 ? entries : entries.slice(0, after));
+}
+
+/**
+ * The shares of the whole-session spend (counted once, as `aggregateCumulativeUsageFromSessionEntries` counts them) that
+ * the entries after `afterEntryId` hold: what a reading that fixes each share's metered part once (a bot's charge) adds
+ * since its last one, never reading the shares before it again. With no `afterEntryId`, or one `entries` do not hold (a
+ * history not loaded yet, another file's), every share is past it.
+ */
+export function sharesPastEntry(
+	entries: readonly SessionEntry[],
+	metered: MeteredUsageShare,
+	afterEntryId: string | undefined,
+): SharesPastEntry {
+	const after = afterEntryId === undefined ? -1 : entries.findIndex((entry) => entry.id === afterEntryId);
+	let usd = 0;
+	let meteredUsd = 0;
+	forEachCumulativeShare(entries, [], undefined, (usage, share, index) => {
+		if (index === undefined || index <= after) return;
+		usd += usage.cost.total;
+		meteredUsd += metered(usage, share);
+	});
+	return { usd, meteredUsd, lastEntryId: entries.at(-1)?.id };
+}
+
+/**
+ * Each share of the whole-session spend, counted once as `aggregateCumulativeUsageFromSessionEntries` counts it, with the
+ * index in `entries` of the entry that holds it (none for a held report or the overflow).
+ */
 function forEachCumulativeShare(
 	entries: readonly SessionEntry[],
 	pending: readonly SemanticUsageReport[],
 	overflow: Usage | undefined,
-	visit: (usage: Usage, share: CumulativeUsageShare) => void,
+	visit: (usage: Usage, share: CumulativeUsageShare, index?: number) => void,
 ): void {
 	const seenSpawnedReportIds = new Set<string>();
 	const seenSemanticReportIds = new Set<string>();
 	const ranges = new ChargedRanges();
-	for (const entry of entries) {
+	for (const [index, entry] of entries.entries()) {
 		const usage = getSessionEntryUsage(entry);
 		const receipt = usageReceiptOf(entry);
 		if (usage && isUsage(usage)) {
-			visit(usage, { kind: "direct", entry });
+			visit(usage, { kind: "direct", entry }, index);
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SpawnedUsageReport | undefined;
 			if (!data?.usage || !isUsage(data.usage)) continue;
 			const range = chargedRangeOf(data);
 			if (range) {
 				const open = ranges.take(range, data.usage);
-				if (open) visit(open, { kind: "spawned", report: data });
+				if (open) visit(open, { kind: "spawned", report: data }, index);
 				continue;
 			}
 			if (data.reportId) {
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);
 			}
-			visit(data.usage, { kind: "spawned", report: data });
+			visit(data.usage, { kind: "spawned", report: data }, index);
 		} else if (receipt) {
 			if (seenSpawnedReportIds.has(receipt.reportId)) continue;
 			seenSpawnedReportIds.add(receipt.reportId);
-			visit(usageOfReceipt(receipt), { kind: "receipt", receipt });
+			visit(usageOfReceipt(receipt), { kind: "receipt", receipt }, index);
 		} else if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SemanticAccountingReport | undefined;
 			if (!data?.usage || !isUsage(data.usage) || !data.reportId || seenSemanticReportIds.has(data.reportId))
 				continue;
 			seenSemanticReportIds.add(data.reportId);
-			visit(data.usage, { kind: "semantic", report: data });
+			visit(data.usage, { kind: "semantic", report: data }, index);
 		}
 	}
 	for (const report of pending) {

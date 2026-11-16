@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { configFile } from "../agent-paths.ts";
 import { daemonBaselineEnvironment, daemonGhCredentialPayload } from "../daemon-environment.ts";
-import { englishText, type InterfaceText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { botDaemonCommandArgs } from "./bot-daemon-command.ts";
@@ -67,7 +67,7 @@ export function claimBotDaemonLease(store: PersistentBotTeamStore, clock: TimerP
 
 /** The first report of a daemon whose predecessor ended on an error. */
 export function previousDaemonFailureReport(end: BotDaemonEnd): string {
-	return `The previous daemon stopped on an error${end.detail ? `: ${end.detail}` : ""}.`;
+	return interfaceText().botTeam.daemonPreviousFailed(end.detail);
 }
 
 export interface BotDaemonLaunch {

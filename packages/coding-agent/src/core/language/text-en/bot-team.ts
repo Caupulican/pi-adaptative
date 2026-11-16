@@ -66,9 +66,9 @@ export const BOT_TEAM = {
 	/** A bot made from a profile cannot run as the worker admission compiles that profile now. */
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`Bot ${agentId} was not started: its profile ${profileId} does not admit it now (${reason}). Fix the profile or the worker policy, then message it again.`,
-	/** The bot daemon's charge file did not parse: it was set aside, so its charges no longer count. */
-	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
-		`Bots: the record of what bots spent while no session was open (${file}) did not read (${reason}); it was set aside as ${to}, and the spend it held no longer counts toward routines.away.maxUsdPerDay.`,
+	/** The bot daemon's charge file did not parse: it was set aside, and charges the whole day bound until `until`. */
+	botAwayChargesSetAside: (file: string, to: string, reason: string, until: string) =>
+		`Bots: the record of what bots spent while no session was open (${file}) did not read (${reason}); it was set aside as ${to}. The spend it held is unknown, so it counts as the whole routines.away.maxUsdPerDay until ${until}, and no bot's spend recorded before it is charged again.`,
 	/** A root's record that it hosts bots could not be removed as it closed; the daemon leaves its directory to it until its process ends. */
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: this session could not remove its record that it hosts bots (${reason}); the bot daemon leaves the bots of this directory to it until this process ends.`,
@@ -545,6 +545,16 @@ export const BOT_TEAM = {
 					: `on an error${detail ? `: ${detail}` : ""}`
 		}.`,
 	daemonRefused: (routineId: string, reason: string) => `Routine ${routineId} was not run away: ${reason}`,
+	/** The daemon's reports into its lease record, which `/bot daemon status` shows as written. */
+	daemonPreviousFailed: (detail: string | undefined) =>
+		`The previous daemon stopped on an error${detail ? `: ${detail}` : ""}.`,
+	daemonBotsNotHosted: (reason: string) =>
+		`Bot hosting: the bots owed work were not hosted (${reason}); tried again at the next tick.`,
+	daemonBotSourcesNotRead: (reason: string) => `Bot hosting: the bots' sources were not read again: ${reason}`,
+	daemonRootHostsUnread: (reason: string) =>
+		`Bot hosting: the records of the sessions hosting bots did not read (${reason}); the bots stay where they are.`,
+	daemonLeaseChangeUnread: (reason: string) =>
+		`Lease: a change of the lease file was not read (${reason}); the renewal tick reads it.`,
 	channelServed: (name: string, cwd: string, servedBy: ChannelServedBy, drafts: number) =>
 		`Channel ${name} is served by the daemon in ${cwd} while no session is open (now: ${servedBy}); ${drafts} reply draft(s) it wrote wait for the next session (channel_reply).`,
 	awayServiceUnavailable: "The always-on service is unavailable in this session.",

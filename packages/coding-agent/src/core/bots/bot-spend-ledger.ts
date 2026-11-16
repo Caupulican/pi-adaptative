@@ -86,11 +86,12 @@ export interface BotChargeState {
 	/** That session's cumulative usage the charges cover: the next charge starts there. */
 	through: Usage;
 	/**
-	 * How much of that session's metered spend (`DurableUsageReading.meteredUsd`) the charges cover, in dollars: the next
-	 * charge's metered part starts there. Absent until a charge of this build sets it (an earlier build's ledger, a
+	 * The last entry of that session's records whose share of its spend a charge's metered part read: the next charge
+	 * reads only the shares past it (`sharesPastEntry`), each once, so a share charged before is never read again under the
+	 * models and billing of a later charge. Absent until a charge of this build sets it (an earlier build's ledger, a
 	 * watermark read back): the next charge then counts as metered as much of its range as the session spent metered.
 	 */
-	meteredThrough?: number;
+	sharesThrough?: string;
 	/** Charges whose range is fixed and written and whose report the root's file does not hold yet, oldest first. */
 	pending: BotCharge[];
 }
@@ -168,12 +169,12 @@ function parseCharge(value: unknown): BotCharge | undefined {
 
 function parseChargeState(value: unknown): BotChargeState | undefined {
 	if (!isPlainRecord(value) || !Array.isArray(value.pending)) return undefined;
-	const { sessionId, instance, through, meteredThrough } = value;
+	const { sessionId, instance, through, sharesThrough } = value;
 	if (typeof sessionId !== "string" || typeof instance !== "string" || !isUsage(through)) return undefined;
-	if (meteredThrough !== undefined && !isDollars(meteredThrough)) return undefined;
+	if (sharesThrough !== undefined && typeof sharesThrough !== "string") return undefined;
 	const pending = value.pending.map(parseCharge);
 	if (!pending.every((charge): charge is BotCharge => charge !== undefined)) return undefined;
-	return { sessionId, instance, through, pending, ...(meteredThrough !== undefined ? { meteredThrough } : {}) };
+	return { sessionId, instance, through, pending, ...(sharesThrough !== undefined ? { sharesThrough } : {}) };
 }
 
 /** What of the record `text` reads (see `ReadRecord`). */

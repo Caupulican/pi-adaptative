@@ -165,7 +165,9 @@ export interface AgentSessionConfig {
 	onClosingWarnings?: (warnings: readonly string[]) => void;
 	/**
 	 * The host's admission of every run the session starts, whatever opened it (a prompt, a wake, a continuation): it
-	 * throws the owner-facing reason a run may not start now. Absent, every run is admitted.
+	 * throws the owner-facing reason a run may not start now, marked as its refusal (`runAdmissionRefusal`), so a goal's
+	 * continuation the host refused neither counts a turn nor stops the goal, and the host takes it up again. Absent, every
+	 * run is admitted.
 	 */
 	admitRun?: () => void;
 	/** The owner line a bot's host keeps for its notices (`harness-notice.ts`); read only where the standing sends them there. */

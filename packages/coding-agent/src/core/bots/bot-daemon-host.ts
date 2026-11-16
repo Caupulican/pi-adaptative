@@ -16,6 +16,7 @@
 import type { AuthStorage } from "../auth-storage.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
 import {
@@ -71,7 +72,7 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 			return read;
 		} catch (error) {
 			// The bots stay where they are until the records read again; said once per cause.
-			const told = `Bot hosting: the records of the sessions hosting bots did not read (${errorText(error)}); the bots stay where they are.`;
+			const told = interfaceText().botTeam.daemonRootHostsUnread(errorText(error));
 			if (placesTold !== told) input.report(told);
 			placesTold = told;
 			return places;

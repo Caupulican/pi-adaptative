@@ -22,6 +22,8 @@ export interface SpawnedUsageOptions {
 	recordedAt?: string;
 	/** The metered part of the report's cost (`SpawnedUsageReport.meteredUsd`). */
 	meteredUsd?: number;
+	/** The model the report's spend ran on, beside the one it names (`SpawnedUsageReport.ranOn`). */
+	ranOn?: { readonly provider: string; readonly model: string };
 }
 
 export interface SpawnedUsageReporter {

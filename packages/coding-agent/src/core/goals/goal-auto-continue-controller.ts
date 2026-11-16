@@ -7,6 +7,7 @@ import type {
 	GoalContinuationLoopResult,
 	PromptOptions,
 } from "../agent-session.ts";
+import { isRunAdmissionRefusal } from "../run-admission.ts";
 import type { AutonomySettings } from "../settings/settings-schema.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
@@ -407,6 +408,9 @@ export class GoalAutoContinueController {
 			}
 		} catch (error) {
 			this.emitContinuationFailure(error);
+			// The session's host refused the run at its start: that host takes the goal up again once its cause clears
+			// (a bot's, `BotOwedWork.refused`), so a pass armed here would only be refused again.
+			if (isRunAdmissionRefusal(error)) return;
 		}
 		if (!interrupted && !this._disposed && !this.deps.isDisposed()) {
 			const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });

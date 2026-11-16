@@ -193,10 +193,11 @@ export interface AwayDaemonStatusView {
 		readonly maxParentHosts: number;
 	};
 	/**
-	 * Routine runs away and channel turns the daemon delivered while no session was open, on the same bound; `unread`
-	 * while the channel turns' charges do not read, when the daemon admits no metered run or turn away. `resetChargesUntil`:
-	 * of `usd`, the whole `maxUsdPerDay` each channel journal set aside within the last day charges (its turns are
-	 * unknown), by when that charge ends (`dayAllowanceUntil`), so a spend above the bound shows its cause.
+	 * Routine runs away, channel turns the daemon delivered and the metered spend of the bots it hosted while no session
+	 * was open, on the same bound; `unread` while the channel turns' or the bots' charges do not read, when the daemon
+	 * admits no metered run or turn away. `resetChargesUntil`: of `usd`, the whole `maxUsdPerDay` each channel journal or
+	 * bot charge record set aside within the last day charges (what it held is unknown), by when that charge ends
+	 * (`dayAllowanceUntil`), so a spend above the bound shows its cause.
 	 */
 	readonly spent:
 		| { readonly usd: number; readonly resetChargesUntil?: BoundedList<number> }

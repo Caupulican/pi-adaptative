@@ -14,6 +14,16 @@ import {
 /** The rolling window of the away spend bound. */
 export const ROUTINE_AWAY_SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * When the whole day allowance a record set aside at `setAsideAt` charges ends (`dayAllowanceUntil`), or undefined once it
+ * charges nothing. A set-aside dated after `now` (another host's clock ahead of this one, or a record no build wrote) is
+ * read as set aside now, so its charge ends a day from now at the latest and is always a date.
+ */
+export function awayDayAllowanceUntil(setAsideAt: number, now: number): number | undefined {
+	const until = Math.min(setAsideAt, now) + ROUTINE_AWAY_SPEND_WINDOW_MS;
+	return until > now ? until : undefined;
+}
+
 /** One charge on the away spend bound, in micro-dollars, until when (undefined: until the store that made it changes). */
 export interface RoutineAwayCharge {
 	readonly micros: number;
@@ -29,7 +39,7 @@ export interface RoutineAwayChargesUnread {
 /**
  * Charges another record holds on the away spend bound, or why they did not read: spend the bound cannot see is no room.
  * `dayAllowanceUntil`: for each record replaced within the last day because it did not parse (a channel journal's
- * `reset` gap), when a day after its replacement ends. Which charges it held is unknown, and none outlasts that day: each
+ * `reset` gap, a bot charge record set aside), when a day after its replacement ends (`awayDayAllowanceUntil`). Which charges it held is unknown, and none outlasts that day: each
  * charges the bound's whole `maxUsdPerDay` until then (`routineAwaySpendRoom`).
  */
 export type RoutineAwayChargesRead =

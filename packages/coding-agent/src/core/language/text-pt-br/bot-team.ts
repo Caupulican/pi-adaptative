@@ -73,8 +73,8 @@ export const BOT_TEAM = {
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
-	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
-		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pôde ser lido (${reason}); foi posto de lado como ${to}, e o gasto que ele guardava não conta mais para routines.away.maxUsdPerDay.`,
+	botAwayChargesSetAside: (file: string, to: string, reason: string, until: string) =>
+		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pôde ser lido (${reason}); foi posto de lado como ${to}. O gasto que ele guardava é desconhecido, então ele conta como o routines.away.maxUsdPerDay inteiro até ${until}, e nenhum gasto de bot registrado antes dele é cobrado de novo.`,
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: esta sessão não conseguiu remover o registro de que hospeda bots (${reason}); o daemon de bots deixa os bots deste diretório para ela até este processo terminar.`,
 	botRootHostDeadNotRemoved: (file: string, reason: string) =>
@@ -450,6 +450,16 @@ export const BOT_TEAM = {
 					: `com erro${detail ? `: ${detail}` : ""}`
 		}.`,
 	daemonRefused: (routineId: string, reason: string) => `A rotina ${routineId} não rodou na ausência: ${reason}`,
+	daemonPreviousFailed: (detail: string | undefined) =>
+		`O daemon anterior parou por um erro${detail ? `: ${detail}` : ""}.`,
+	daemonBotsNotHosted: (reason: string) =>
+		`Hospedagem de bots: os bots com trabalho devido não foram hospedados (${reason}); nova tentativa no próximo tick.`,
+	daemonBotSourcesNotRead: (reason: string) =>
+		`Hospedagem de bots: as fontes dos bots não foram lidas de novo: ${reason}`,
+	daemonRootHostsUnread: (reason: string) =>
+		`Hospedagem de bots: os registros das sessões que hospedam bots não puderam ser lidos (${reason}); os bots ficam onde estão.`,
+	daemonLeaseChangeUnread: (reason: string) =>
+		`Lease: uma mudança no arquivo de lease não foi lida (${reason}); o tick de renovação a lê.`,
 	channelServed: (name: string, cwd: string, servedBy: ChannelServedBy, drafts: number) =>
 		`O canal ${name} é atendido pelo daemon em ${cwd} enquanto nenhuma sessão está aberta (agora: ${CHANNEL_HOLDER[servedBy]}); ${drafts} ${drafts === 1 ? "rascunho de resposta gravado espera" : "rascunhos de resposta gravados esperam"} a próxima sessão (channel_reply).`,
 	awayServiceUnavailable: "O serviço sempre ativo não está disponível nesta sessão.",

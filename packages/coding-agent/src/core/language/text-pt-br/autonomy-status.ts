@@ -323,7 +323,7 @@ export const AUTONOMY_STATUS = {
 		settings: (settings: AutonomyAwaySettings) =>
 			`ausência ${settings.enabled ? "ligada" : "desligada"}: gasto ${"amount" in settings.spent ? `$${settings.spent.amount}` : `não lido (${settings.spent.unread.cause}: ${settings.spent.unread.path}; nenhuma execução ou turno cobrado por uso é admitido na ausência até ele ser lido)`} de $${settings.maxPerDay} (24 h), $${settings.maxPerRun} por execução, até ${settings.maxParentHosts} ${settings.maxParentHosts === 1 ? "sessão pai" : "sessões pai"} (configurações desta sessão; o daemon lê as configurações globais)`,
 		resetCharge: (amount: string, until: string) =>
-			`dele, $${amount} é cobrado por um diário de canal que não pôde ser interpretado e foi posto de lado: os turnos ausentes que ele guardava são desconhecidos, então ele conta como o limite do dia inteiro até ${until}`,
+			`dele, $${amount} é cobrado por um registro de cobranças na ausência (um diário de canal ou o registro dos bots) que não pôde ser interpretado e foi posto de lado: o que ele guardava é desconhecido, então ele conta como o limite do dia inteiro até ${until}`,
 		parentsHosted: (hosted: string) => `sessões pai hospedadas: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `serviço sempre ativo: ${unavailable}`,

@@ -40,6 +40,7 @@ import { type BotDaemonHost, startBotDaemonHost } from "../bots/bot-daemon-host.
 import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
 
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
@@ -176,7 +177,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 					botsStartTold = undefined;
 				},
 				(error: unknown) => {
-					const told = `Bot hosting: the bots owed work were not hosted (${errorText(error)}); tried again at the next tick.`;
+					const told = interfaceText().botTeam.daemonBotsNotHosted(errorText(error));
 					if (told !== botsStartTold) report(told);
 					botsStartTold = told;
 				},
@@ -310,9 +311,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				botCredentialsChanged = false;
 				return bots
 					?.refresh(credentials)
-					.catch((error: unknown) =>
-						report(`Bot hosting: the bots' sources were not read again: ${errorText(error)}`),
-					);
+					.catch((error: unknown) => report(interfaceText().botTeam.daemonBotSourcesNotRead(errorText(error))));
 			}, fail)
 			.finally(() => {
 				reloading = undefined;
@@ -329,7 +328,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			try {
 				ours = routineStore.daemonLeaseBelongsTo(token);
 			} catch (error) {
-				const told = `Lease: a change of the lease file was not read (${errorText(error)}); the renewal tick reads it.`;
+				const told = interfaceText().botTeam.daemonLeaseChangeUnread(errorText(error));
 				if (told !== leaseWatchTold) report(told);
 				leaseWatchTold = told;
 				return;

@@ -56,6 +56,10 @@ import {
 	isBackgroundShare,
 	type MeteredUsageShare,
 	meteredCumulativeUsd,
+	type SharesPastEntry,
+	sharesPastEntry,
+	usageRecordedBy,
+	usageShareKey,
 } from "./cost/session-usage.ts";
 import {
 	deliverSpawnedUsageReceipt,
@@ -93,8 +97,10 @@ export type { SpawnedUsageOptions };
 export interface DurableUsageReading {
 	readonly usage: Usage;
 	readonly settled: boolean;
-	/** The part of `usage` that is metered spend, in dollars, as the reader's `metered` reads each share; absent unasked. */
-	readonly meteredUsd?: number;
+	/** The shares past the reader's last entry (`sharesPastEntry`), each read once by its `metered`; absent unasked. */
+	readonly past?: SharesPastEntry;
+	/** The usage the entries recorded by the time asked hold (`usageRecordedBy`); absent unasked. */
+	readonly recordedBy?: Usage;
 }
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -207,6 +213,8 @@ export class SessionAnalytics {
 
 	private readonly deps: SessionAnalyticsDeps;
 	private readonly accountingHistory: SessionAccountingHistory;
+	/** The metered part of each background share `getSpawnedMeteredUsd` read, fixed at its first reading, per session. */
+	private _fixedBackgroundMetered: { readonly sessionId: string; readonly byShare: Map<string, number> } | undefined;
 
 	constructor(deps: SessionAnalyticsDeps) {
 		this.deps = deps;
@@ -427,14 +435,26 @@ export class SessionAnalytics {
 	 * The cumulative usage the session's ledger holds (`getCumulativeUsage` without the paid System One usage not recorded
 	 * yet): what a charge of the session's spend reads, so it covers recorded usage only. Until the historical accounting
 	 * has loaded, or when its load failed, it may read less than the session spent: `settled` says it is all of it. With
-	 * `metered`, the reading carries the part of it that is metered spend (`meteredCumulativeUsd`), read from the same
-	 * records.
+	 * `metered`, the reading carries the cost and metered part of the shares the entries after `metered.afterEntryId` hold
+	 * (`sharesPastEntry`), read from the same records: a charge fixes each share's metered part once, when it first counts.
+	 * With `recordedBy`, it carries the usage the entries recorded by then hold (`usageRecordedBy`).
 	 */
-	getDurableCumulativeUsage(metered?: MeteredUsageShare): DurableUsageReading {
+	getDurableCumulativeUsage(
+		metered?: {
+			readonly share: MeteredUsageShare;
+			readonly afterEntryId: string | undefined;
+		},
+		recordedBy?: number,
+	): DurableUsageReading {
 		const entries = this.getAccountingEntries();
 		const usage = aggregateCumulativeUsageFromSessionEntries(entries);
 		const settled = this.accountingHistory.settled();
-		return metered ? { usage, settled, meteredUsd: meteredCumulativeUsd(entries, metered) } : { usage, settled };
+		return {
+			usage,
+			settled,
+			...(metered ? { past: sharesPastEntry(entries, metered.share, metered.afterEntryId) } : {}),
+			...(recordedBy !== undefined ? { recordedBy: usageRecordedBy(entries, recordedBy) } : {}),
+		};
 	}
 
 	/**
@@ -467,6 +487,7 @@ export class SessionAnalytics {
 			through: opts?.through,
 			recordedAt: opts?.recordedAt,
 			meteredUsd: opts?.meteredUsd,
+			ranOn: opts?.ranOn,
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
@@ -589,21 +610,39 @@ export class SessionAnalytics {
 	 * The metered (API) part of the background spend {@link getSpawnedUsage} totals (spawned reports, usage receipts, history
 	 * summaries and their journal's overflow, held reports included), in dollars, read share by share as every dollar
 	 * ceiling reads spend (`meteredUsageShare`): `billing` the models' billing, `workers` the session's worker attempts.
+	 * Each share's metered part is fixed at its first reading in this process (`usageShareKey`), so a share is never read
+	 * again under the models and billing of a later reading (a subscription logged in or out): the guard's turn baseline
+	 * and its later readings differ by the shares new since. The journal's overflow, which names no share, is read as it is.
 	 */
 	getSpawnedMeteredUsd(
 		billing: SpendBilling,
 		workers: { getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined },
 	): number {
+		const sessionId = this.deps.getSessionManager().getSessionId();
 		const metered = meteredUsageShare({
 			billing,
-			sessionId: this.deps.getSessionManager().getSessionId(),
+			sessionId,
 			snapshot: workers.getTaskRuntimeSnapshot(),
 			ownModel: this.deps.getModel(),
 		});
+		let fixed = this._fixedBackgroundMetered;
+		if (fixed?.sessionId !== sessionId) {
+			fixed = { sessionId, byShare: new Map() };
+			this._fixedBackgroundMetered = fixed;
+		}
+		const { byShare } = fixed;
 		const pending = this.deps.getPendingSemanticUsage();
 		return meteredCumulativeUsd(
 			this.getAccountingEntries(),
-			(usage, share) => (isBackgroundShare(share) ? metered(usage, share) : 0),
+			(usage, share) => {
+				if (!isBackgroundShare(share)) return 0;
+				const key = usageShareKey(share);
+				const held = key === undefined ? undefined : byShare.get(key);
+				if (held !== undefined) return held;
+				const usd = metered(usage, share);
+				if (key !== undefined) byShare.set(key, usd);
+				return usd;
+			},
 			pending.reports,
 			pending.overflow?.usage,
 		);

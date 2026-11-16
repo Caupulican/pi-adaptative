@@ -205,10 +205,17 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 								: 0,
 					at: awayClock.now(),
 				});
-				if (setAside)
+				if (setAside) {
+					const text = interfaceText();
 					input.report(
-						interfaceText().botTeam.botAwayChargesSetAside(setAside.file, setAside.to, setAside.reason),
+						text.botTeam.botAwayChargesSetAside(
+							setAside.file,
+							setAside.to,
+							setAside.reason,
+							text.reports.formats.dateTime(new Date(setAside.until).toISOString()),
+						),
 					);
+				}
 				return "persisted";
 			},
 			// The roots' session files hold the charges made while a root hosted the bot; the ledger the daemon's own.
@@ -225,7 +232,7 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 					instance,
 					since,
 				);
-				return withBotAwayChargesReach(held, agentDir, sessionId, instance);
+				return withBotAwayChargesReach(held, agentDir, sessionId, instance, awayClock.now());
 			},
 			// Every charge is held at once (`persisted`): no write is ever awaited.
 			chargesPersisted: () => () => {},

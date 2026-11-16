@@ -70,8 +70,30 @@ export interface SpawnedUsageReport {
 	 * not say it. Absent on a report that names its spend by its model alone, and on one an earlier build recorded.
 	 */
 	meteredUsd?: number;
+	/**
+	 * The model the report's spend ran on, when it is not the one `provider` and `model` name: a worker's usage receipt
+	 * names the model its contract assigned (what earlier builds name and match a receipt delivered again by), and this
+	 * names the model the receipt was recorded on, a failover's (`WorkerUsageReceiptDelivery`). Earlier builds ignore it.
+	 */
+	ranOn?: { readonly provider: string; readonly model: string };
 	/** Stable idempotency identity for retry-safe ingestion. */
 	reportId?: string;
+}
+
+/** The model a spawned report's spend ran on: the one it names it ran on (`ranOn`), else the one it names. */
+export function spawnedReportModel(report: SpawnedUsageReport): { provider?: string; model?: string } {
+	const ranOn = report.ranOn as unknown;
+	if (
+		ranOn !== null &&
+		typeof ranOn === "object" &&
+		typeof (ranOn as { provider?: unknown }).provider === "string" &&
+		typeof (ranOn as { model?: unknown }).model === "string"
+	)
+		return { provider: (ranOn as { provider: string }).provider, model: (ranOn as { model: string }).model };
+	return {
+		...(typeof report.provider === "string" ? { provider: report.provider } : {}),
+		...(typeof report.model === "string" ? { model: report.model } : {}),
+	};
 }
 
 export function getSpawnedUsageComponents(
@@ -84,8 +106,7 @@ export function getSpawnedUsageComponents(
 			sourceId: report.reportId ?? timestamp,
 			timestamp,
 			usage: report.usage,
-			provider: report.provider,
-			model: report.model,
+			...spawnedReportModel(report),
 		},
 	];
 }

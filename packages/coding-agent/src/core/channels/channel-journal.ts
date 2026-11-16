@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { renameSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { awayDayAllowanceUntil } from "../routines/routine-away-spend.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { BoundedReadError, readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -496,14 +497,11 @@ export function chargesAwayBound(gap: Pick<ChannelGapRecord, "reason" | "at">, n
 }
 
 /**
- * When the reset's charge on the away spend bound ends, or undefined when the gap charges nothing now. A reset dated after
- * `now` (another host's clock ahead of this one, or a record no build wrote) is read as set aside now, so its charge ends a
- * day from now at the latest and is always a date.
+ * When the reset's charge on the away spend bound ends, or undefined when the gap charges nothing now: a day after the
+ * reset, a reset dated after `now` read as set aside now (`awayDayAllowanceUntil`).
  */
 export function awayBoundResetUntil(gap: Pick<ChannelGapRecord, "reason" | "at">, now: number): number | undefined {
-	if (gap.reason !== "reset") return undefined;
-	const until = Math.min(gap.at, now) + DAY_MS;
-	return until > now ? until : undefined;
+	return gap.reason === "reset" ? awayDayAllowanceUntil(gap.at, now) : undefined;
 }
 
 /**

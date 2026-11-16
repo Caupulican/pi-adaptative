@@ -11,7 +11,6 @@
  */
 
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
-import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
@@ -318,16 +317,12 @@ export class BotOwedWork {
 	}
 
 	/**
-	 * A run of the bot's session, built on `key`, was refused at its start with `error` while `manager` held wakes: they
-	 * do not open the session again until the definition or the cause changes.
+	 * A run of the bot's session, built on `key`, was refused at its start with `error`, whatever it held (wakes, its goal's
+	 * continuation, which stops for none): what it is owed does not open the session again until the definition or the cause
+	 * changes, and the retake takes it up once the cause clears; its close keeps the goal mark it had (`closed`).
 	 */
-	refused(
-		agentId: string,
-		key: string,
-		manager: Pick<SessionManager, "getPendingParentInputs">,
-		error: unknown,
-	): void {
-		if (manager.getPendingParentInputs("turn").length > 0) this.record(agentId, "run", key, error);
+	refused(agentId: string, key: string, error: unknown): void {
+		this.record(agentId, "run", key, error);
 	}
 
 	/** A run of the bot's session was admitted: no refusal holds its work back any more. */

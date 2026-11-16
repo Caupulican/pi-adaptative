@@ -13,7 +13,6 @@
  * a different recovery approach even when a model omits a voluntary `no_progress` call.
  */
 
-import { AgentBusyError } from "../kernel/agent.ts";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
@@ -30,6 +29,7 @@ import {
 import { GoalBudgetExhaustedError } from "./goals/goal-execution-errors.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
+import { isContinuationNotAdmitted } from "./run-admission.ts";
 
 /**
  * Resolve an owner-supplied durable goal budget. Wall-clock and spend counters are deliberately
@@ -169,9 +169,10 @@ export class GoalLoopController {
 			try {
 				result = await this.continueGoalOnce(options);
 			} catch (error) {
-				// Prompt admission did not happen. A concurrent foreground owner is transient session
-				// coordination, not a consumed goal turn and not evidence that the goal is blocked.
-				if (error instanceof AgentBusyError) throw error;
+				// Prompt admission did not happen. A concurrent foreground owner is transient session coordination, and a host's
+				// refusal of the run waits for that host to take it up again: neither is a consumed goal turn nor evidence that
+				// the goal is blocked.
+				if (isContinuationNotAdmitted(error)) throw error;
 				if (error instanceof GoalBudgetExhaustedError) {
 					// The goal already stopped itself durably (markBudgetLimited ran synchronously before
 					// this signal was thrown) — surface the existing clean stop instead of charging a turn.

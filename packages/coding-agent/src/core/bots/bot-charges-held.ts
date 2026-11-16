@@ -98,6 +98,12 @@ export interface BotChargesHeld {
 	readonly through: Usage;
 	readonly unwritten: readonly UnwrittenBotCharge[];
 	readonly unread: readonly BotChargeUnread[];
+	/**
+	 * When a record of the daemon's charges that did not parse was last set aside (ms since the epoch,
+	 * `withBotAwayChargesReach`): how far its charges reached is lost, and every range it held ended at what the session
+	 * had recorded by then. Absent: none was set aside.
+	 */
+	readonly lostBefore?: number;
 }
 
 /** An unread path as it is met, before its identity is resolved. */

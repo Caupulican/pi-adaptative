@@ -33,6 +33,7 @@ import {
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
+	spawnedReportModel,
 } from "./usage-records.ts";
 
 export type DailyUsageWindow = {
@@ -452,8 +453,7 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			timestamp: recordedAt,
 			usage: data.usage,
 			kind: "spawned",
-			...(typeof data.model === "string" ? { model: data.model } : {}),
-			...(typeof data.provider === "string" ? { provider: data.provider } : {}),
+			...spawnedReportModel(data),
 			...(data.costBasis === "response" ? { perResponse: true } : {}),
 			reportId: data.reportId,
 			...(range ? { range } : {}),

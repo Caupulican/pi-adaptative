@@ -158,7 +158,7 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 				instance,
 				since,
 			);
-			return withBotAwayChargesReach(held, agentDir, sessionId, instance);
+			return withBotAwayChargesReach(held, agentDir, sessionId, instance, Date.now());
 		},
 	};
 }

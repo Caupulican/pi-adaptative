@@ -16,6 +16,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { HostLock } from "../remote/host-lock.ts";
 import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
+import { runAdmissionRefusal } from "../run-admission.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -229,9 +230,10 @@ export class BotSessionLoader {
 						try {
 							this.ports.admission.admit(agentId, session?.model, definition, sender);
 						} catch (error) {
-							// The wakes it holds are refused with this run, for this cause: they are taken up again once it clears.
-							this.ports.owed.refused(agentId, definition.key, sessionManager, error);
-							throw error;
+							// What it holds (its wakes, its goal's continuation) is refused with this run, for this cause: taken up again
+							// once it clears. The session reads the refusal as its host's, which ran no turn (`runAdmissionRefusal`).
+							this.ports.owed.refused(agentId, definition.key, error);
+							throw runAdmissionRefusal(error);
 						}
 						this.ports.owed.admitted(agentId);
 					},

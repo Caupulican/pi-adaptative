@@ -1,5 +1,4 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { AgentBusyError } from "../../kernel/agent.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentRunawayStopInfo } from "../../kernel/index.ts";
 import { classifyFailure } from "../../kernel/reliability/index.ts";
@@ -24,6 +23,7 @@ import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objecti
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
+import { isContinuationNotAdmitted } from "../run-admission.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
 import { type ChatGoalAdmission, planExplicitChatGoal } from "./chat-goal-admission.ts";
@@ -1200,9 +1200,9 @@ export class GoalSessionController {
 				...(submitted ? { turnOutcome } : {}),
 			};
 		} catch (error) {
-			// The auto-continuation owner waits for the foreground lease and retries this admission race.
-			// Recording it here would block the goal before that retry can run.
-			if (error instanceof AgentBusyError || error instanceof ObjectiveExecutionInterruptedError) throw error;
+			// A pass whose run was not admitted (the foreground lease, which the auto-continuation owner waits for, or the host's
+			// refusal, which its host takes up again) ran no turn: recording it here would block the goal before that retry.
+			if (isContinuationNotAdmitted(error) || error instanceof ObjectiveExecutionInterruptedError) throw error;
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
 				recordSubmittedTurn("interrupted");
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };

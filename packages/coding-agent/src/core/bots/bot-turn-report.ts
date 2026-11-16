@@ -9,7 +9,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { createEmptyUsage } from "../../kernel/usage.ts";
 import type { AgentSession } from "../agent-session.ts";
-import type { MeteredUsageShare } from "../cost/session-usage.ts";
+import type { MeteredUsageShare, SharesPastEntry } from "../cost/session-usage.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import { usageReach, usageSince } from "../cost/usage-delta.ts";
 import { BOT_SESSION_USAGE_LABEL } from "../cost/usage-records.ts";
@@ -82,23 +82,17 @@ export function botTurnCharge(
 }
 
 /**
- * The metered part of a charge costing `usage` (`BotChargeReport.meteredUsd`) when the session's metered spend reads
- * `meteredUsd` and the charges before it cover `covered` of it, with how much they cover once it is fixed: what the
- * reading reached past them, at most the charge's cost (a metered share recorded before the range's other records waits
- * for the next charge, never lost). With nothing known covered (an earlier build's ledger, a watermark read back), or a
- * reading below what is covered (its history read again under other models: a worker's attempt moved or left the
- * projection, a subscription logged in or out), as much of the charge as the session spent metered at all: never less
- * than the metered spend it holds, and later metered spend is never held back behind a watermark the reading left.
+ * The metered part of a charge costing `usage` (`BotChargeReport.meteredUsd`) when the shares the session's records hold
+ * past the last charge's entry read `past` (`sharesPastEntry`): their metered part, each share read once, when it is first
+ * charged, so a share charged before is never read again under the models and billing of now (a worker's attempt that
+ * moved or left the projection, a subscription logged in or out); and the part of the charge's cost they do not explain
+ * (a history that loaded after its shares were passed, a range that reached a share's cost only now), as metered, which is
+ * never laxer; at most the charge's cost. With no entry known charged (an earlier build's ledger, a watermark read back),
+ * every share is past it: as much of the charge as the session spent metered at all.
  */
-export function botChargeMeteredPart(
-	usage: Usage,
-	meteredUsd: number,
-	covered: number | undefined,
-): { readonly usd: number; readonly covered: number } {
+export function botChargeMeteredPart(usage: Usage, past: Pick<SharesPastEntry, "usd" | "meteredUsd">): number {
 	const cost = usage.cost.total;
-	const from = covered !== undefined && covered <= meteredUsd ? covered : Math.max(0, meteredUsd - cost);
-	const usd = Math.min(cost, Math.max(0, meteredUsd - from));
-	return { usd, covered: from + usd };
+	return Math.min(cost, past.meteredUsd + Math.max(0, cost - past.usd));
 }
 
 /**
@@ -170,7 +164,7 @@ export interface BotTurnAccountingPorts {
  * (a history still loading, or one whose load failed) charges only the fields that passed it, and the rest once the
  * reading reaches past it, so nothing is charged twice and nothing is dropped. Each charge fixes its range first: the
  * charge (its usage, the report id its range derives, the range's end and when it was fixed, and the metered part of its
- * cost, read by the host's `metered` share by share and kept under its own watermark, `botChargeMeteredPart`) joins the ledger's pending
+ * cost, each share read once, as it is first charged, past the last charge's entry, `botChargeMeteredPart`) joins the ledger's pending
  * charges and the watermark moves to the range's end, in one write, before the charge is delivered; it leaves the pending
  * charges once the root's file holds it, either at once or when the root's write lands (a root holds a charge unwritten
  * until it writes its file; a root that keeps no file holds it as it holds its own spend, for as long as it lives, so the
@@ -184,7 +178,8 @@ export interface BotTurnAccountingPorts {
  * file or one created again under the same id: each file instance has a watermark of its own, `botSessionInstance`; a
  * ledger whose watermark was lost) never starts one at what it spent: a session that recorded no reportable usage
  * starts at zero (none of its spend can have been charged), any other at the furthest of how far the roots' files hold its
- * charges (`botChargesHeld`), its transcript's mark, and the ledger's pending charges of it, the charges a live root holds
+ * charges (`botChargesHeld`), its transcript's mark, what it had recorded when a record of the daemon's charges was set
+ * aside (`BotChargesHeld.lostBefore`), and the ledger's pending charges of it, the charges a live root holds
  * unwritten taken back as pending; nothing is charged until that read-back lands. The turn's last words written since its
  * start are its outcome, reported once per turn on the boundary every per-turn count of the session reads
  * (`observeSessionTurns`).
@@ -290,8 +285,8 @@ export class BotTurnAccounting {
 		const delivered = this.deliverPending(keepsFile);
 		const state = this.watermark();
 		if (!state) return;
-		const { instance, through, pending, meteredThrough } = state;
-		const reading = this.session.getDurableCumulativeUsage(this.metered());
+		const { instance, through, pending, sharesThrough } = state;
+		const reading = this.session.getDurableCumulativeUsage({ share: this.metered(), afterEntryId: sharesThrough });
 		const range = botTurnCharge(
 			this.agentId,
 			this.session,
@@ -301,15 +296,16 @@ export class BotTurnAccounting {
 			new Date().toISOString(),
 		);
 		if (!range) return;
-		const metered = botChargeMeteredPart(range.usage, reading.meteredUsd ?? 0, meteredThrough);
-		const charge: BotCharge = { usage: range.usage, report: { ...range.report, meteredUsd: metered.usd } };
+		const past = reading.past ?? { usd: 0, meteredUsd: 0, lastEntryId: undefined };
+		const meteredUsd = botChargeMeteredPart(range.usage, past);
+		const charge: BotCharge = { usage: range.usage, report: { ...range.report, meteredUsd } };
 		pending.push(charge);
 		state.through = charge.report.through;
-		state.meteredThrough = metered.covered;
+		if (past.lastEntryId !== undefined) state.sharesThrough = past.lastEntryId;
 		if (!this.ledger.write()) {
 			pending.pop();
 			state.through = through;
-			state.meteredThrough = meteredThrough;
+			state.sharesThrough = sharesThrough;
 			return;
 		}
 		this.fixedFor.set(charge.report.reportId, this.ports.rootSessionId());
@@ -380,16 +376,28 @@ export class BotTurnAccounting {
 
 	/**
 	 * Writes the watermark of file instance `instance` of `sessionId` read back as `held`: the furthest of the roots' files,
-	 * the transcript's mark and the pending charges of that instance, the ones a live root holds unwritten taken back as
+	 * the transcript's mark, what the session had recorded when a record of the daemon's charges was set aside
+	 * (`lostBefore`) and the pending charges of that instance, the ones a live root holds unwritten taken back as
 	 * pending before the pending charges kept (those of the session or file instance before stay: they are their own
 	 * ranges, delivered under their own ids). True once written.
 	 */
-	private adopt(sessionId: string, instance: string, held: Pick<BotChargesHeld, "through" | "unwritten">): boolean {
+	private adopt(
+		sessionId: string,
+		instance: string,
+		held: Pick<BotChargesHeld, "through" | "unwritten" | "lostBefore">,
+	): boolean {
 		const kept = this.ledger.charge;
 		if (kept?.sessionId === sessionId && kept.instance === instance) return false;
 		const keptPending = kept?.pending ?? [];
 		const keptIds = new Set(keptPending.map((charge) => charge.report.reportId));
 		let through = usageReach(held.through, this.mark.reach() ?? held.through);
+		// A record of the daemon's charges set aside lost how far they reached; each ended at what the session had recorded
+		// by then, so the watermark starts there at the lowest and none of them is charged again.
+		const lost =
+			held.lostBefore === undefined
+				? undefined
+				: this.session.getDurableCumulativeUsage(undefined, held.lostBefore).recordedBy;
+		if (lost) through = usageReach(through, lost);
 		for (const { report } of keptPending)
 			if (report.sessionId === sessionId && report.instance === instance)
 				through = usageReach(through, report.through);

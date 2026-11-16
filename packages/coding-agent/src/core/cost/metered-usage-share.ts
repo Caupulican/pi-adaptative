@@ -16,6 +16,7 @@ import {
 import { isPlainRecord } from "../util/value-guards.ts";
 import { receiptCountsAgainstDollars, type SpendBilling } from "./request-spend-budget.ts";
 import { isUsage, type MeteredUsageShare } from "./session-usage.ts";
+import { spawnedReportModel } from "./usage-records.ts";
 
 /** What a session's metered reading reads besides its records. */
 export interface MeteredShareSources {
@@ -50,10 +51,13 @@ function attemptOfReport(
 /**
  * How much of each share of the session's recorded spend is metered (`isMeteredSpend`): a response by the model it
  * names, a summary by the models its components name (what names none, the session's own model); a spawned report by the
- * metered part it fixed when it was charged (`meteredUsd`, a bot's charge), else by its components, else a worker's usage
- * receipt by the model its attempt runs on (`attemptModel`), else by the model it names; a System One report by the model
- * it names; what names none, or a model `billing` does not know (a report an earlier build wrote without its metered
- * part included), as metered spend, which is never laxer. Read over the sources as they are now.
+ * metered part it fixed when it was recorded (`meteredUsd`: a bot's charge, a worker receipt whose model is not known),
+ * else by its components, else by the model it ran on (`ranOn`, a worker receipt's), else by the model it names; only one
+ * that names none (an earlier build's worker receipt whose attempt named no model) by the model its attempt runs on
+ * (`attemptModel`); a System One report by the model it names; what names none, or a model `billing` does not know (a
+ * report an earlier build wrote without its metered part included), as metered spend, which is never laxer. Each share
+ * is read over the sources as they are now: a reader that must not read a share again under later models and billing
+ * fixes it once (`sharesPastEntry`, `SessionAnalytics.getSpawnedMeteredUsd`).
  */
 export function meteredUsageShare(sources: MeteredShareSources): MeteredUsageShare {
 	const { billing, sessionId } = sources;
@@ -96,8 +100,9 @@ export function meteredUsageShare(sources: MeteredShareSources): MeteredUsageSha
 		// A report that fixed its metered part (a bot's charge) counts it, at most the part of it counted here.
 		if (typeof report.meteredUsd === "number") return Math.min(usage.cost.total, Math.max(0, report.meteredUsd));
 		if (report.usageComponents) return lessSubscription(usage.cost.total, report.usageComponents);
+		const ranOn = spawnedReportModel(report);
+		if (ranOn.provider !== undefined && ranOn.model !== undefined) return named(ranOn, true) ? usage.cost.total : 0;
 		const attempt = report.reportId === undefined ? undefined : attemptOfReport(attempts, report.reportId);
-		const metered = attempt ? isMeteredSpend(attemptModel(attempt, billing), billing) : named(report, true);
-		return metered ? usage.cost.total : 0;
+		return !attempt || isMeteredSpend(attemptModel(attempt, billing), billing) ? usage.cost.total : 0;
 	};
 }
