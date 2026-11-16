@@ -1,6 +1,7 @@
 /**
  * The host's own arming of the session's waits on what its tool calls start outside it: a `git push` from the session's
- * checkout arms a `ci` watch on each commit it pushed (while the host's CI source follows the checkout), a pushed version
+ * checkout arms a `ci` watch on each commit it pushed (while the host's CI source follows the checkout, and unless the CI
+ * workflow's triggers settle that it does not run for the push, which the armer is told instead), a pushed version
  * tag a `release` watch, and a `gh workflow run` or a release script (`npm run release*` and its pnpm, yarn and bun
  * forms) a `github_run` watch on each Actions run URL its output names that GitHub created after the call began (a run or a
  * release only while the host offers its reader of GitHub). A `gh workflow run` whose output names no run (older gh

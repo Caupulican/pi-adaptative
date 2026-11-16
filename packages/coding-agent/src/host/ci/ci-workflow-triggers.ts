@@ -1,10 +1,12 @@
 /**
  * Whether the checkout's CI workflow (`.github/workflows/ci.yml`, the workflow the CI source reads) runs for a pushed
  * commit, read as GitHub reads it for a push: the workflow file at that commit, its `on` triggers, a `push` trigger's
- * branch filters, the commit message's skip instruction and, when only a pull request runs it, the open pull requests
- * from the pushed branch and their base branches. `none` is said only when those facts settle it; a trigger or filter
- * this reader does not judge (paths, another workflow's run, a branch's creation) and a file or listing it cannot read
- * are `unknown`, and the host arms its watch as it would for a run.
+ * branch filters, the commit message's skip instruction and the open pull requests from the pushed branch. `none` is
+ * said only when those facts settle it: no push run and no pull request open from the branch, or a skip instruction. A
+ * trigger or filter this reader does not judge (paths, another workflow's run, a branch's creation, a deployment), an
+ * open pull request whose run follows a workflow it does not read (its merge's) unless the pushed commit's
+ * `pull_request` trigger already runs it, and a file or listing it cannot read are `unknown`: the host arms its watch
+ * as it would for a run.
  */
 import { parse } from "yaml";
 import type { CiPushTriggers, CiPushVerdict } from "../../core/watches/github-watch-source.ts";
@@ -15,12 +17,13 @@ const WORKFLOW_PATH = `.github/workflows/${CI_WORKFLOW}`;
 /** The activity a push to an open pull request's head branch emits, and the activities run when a trigger names none. */
 const SYNCHRONIZE = "synchronize";
 const PULL_REQUEST_DEFAULT_TYPES = ["opened", SYNCHRONIZE, "reopened"];
-/** Events no push starts a run of: a workflow triggered only by these does not run for a push. */
+/**
+ * Events no push starts a run of: a workflow triggered only by these does not run for a push. Events an app or another
+ * workflow may raise for the pushed commit (a deployment, a release, a repository dispatch) are not among them.
+ */
 const NOT_FROM_A_PUSH = new Set([
 	"branch_protection_rule",
 	"delete",
-	"deployment",
-	"deployment_status",
 	"discussion",
 	"discussion_comment",
 	"fork",
@@ -30,23 +33,24 @@ const NOT_FROM_A_PUSH = new Set([
 	"label",
 	"merge_group",
 	"milestone",
-	"page_build",
 	"project",
 	"project_card",
 	"project_column",
 	"public",
 	"pull_request_review",
 	"pull_request_review_comment",
-	"registry_package",
-	"release",
-	"repository_dispatch",
 	"schedule",
 	"watch",
 	"workflow_call",
 	"workflow_dispatch",
 ]);
-/** A head commit message that asks GitHub to skip the push's and pull request's workflow runs. */
-const SKIP_INSTRUCTION = /\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]|^skip-checks: ?true$/imu;
+/**
+ * A head commit message that asks GitHub to skip the push's and its pull requests' workflow runs, in the forms GitHub
+ * documents: one of its bracketed words anywhere, or a `skip-checks` trailer after two empty lines at its end.
+ */
+const SKIP_INSTRUCTION = /\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]/u;
+const SKIP_CHECKS_TRAILER = /\n\n\nskip-checks: ?true\n*$/u;
+const SKIPPED = "its commit message asks GitHub to skip the runs of its push and pull requests";
 const MAX_OPEN_PULL_REQUESTS = 100;
 
 /** A branch filter's verdict: whether it admits the branch, or why this reader cannot say. */
@@ -96,7 +100,11 @@ function filterPattern(glob: string): RegExp {
 			index = end;
 		} else source += escaped(character);
 	}
-	return new RegExp(`^(?:${source})$`, "u");
+	try {
+		return new RegExp(`^(?:${source})$`, "u");
+	} catch (error) {
+		throw new UnjudgedFilter(`its pattern ${glob} does not read as a pattern: ${errorText(error)}`);
+	}
 }
 
 /** The ordered patterns over `name`: the last that matches decides, a `!` pattern excluding what it matches. */
@@ -171,7 +179,12 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 			signal.throwIfAborted();
 			return unknown(`the commit's ${WORKFLOW_PATH} could not be read: ${errorText(error)}`);
 		}
-		if (workflow === undefined) return { verdict: "none", why: `the commit holds no ${WORKFLOW_PATH}` };
+		const skipped = SKIP_INSTRUCTION.test(message) || SKIP_CHECKS_TRAILER.test(message);
+		// A pull request's run reads the workflow of its merge with the base, not the pushed commit's file.
+		if (workflow === undefined)
+			return skipped
+				? { verdict: "none", why: SKIPPED }
+				: this.withoutPushRun(branch, [], `the commit holds no ${WORKFLOW_PATH}`, signal);
 		let triggers: ReadonlyMap<string, unknown> | undefined;
 		try {
 			const document: unknown = parse(workflow);
@@ -189,81 +202,83 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 		);
 		if (unjudged !== undefined)
 			return unknown(`its ${WORKFLOW_PATH} also runs on ${unjudged}, which the host does not judge`);
-		const fromPullRequest = triggers.has("pull_request") || triggers.has("pull_request_target");
-		if (SKIP_INSTRUCTION.test(message) && (triggers.has("push") || fromPullRequest))
-			return { verdict: "none", why: "its commit message asks GitHub to skip CI" };
+		// The skip instruction holds back the push's and its pull requests' runs, the only ones a push starts here.
+		if (skipped) return { verdict: "none", why: SKIPPED };
 		const onPush = triggers.has("push") ? admitsBranch(triggers.get("push"), branch, "push") : false;
 		if (onPush === true) return { verdict: "runs" };
-		if (!fromPullRequest)
-			return typeof onPush === "object"
-				? unknown(onPush.unknown)
-				: { verdict: "none", why: `${WORKFLOW_PATH} runs for no push to ${branch}` };
-		return this.fromPullRequests(triggers, branch, onPush, signal);
+		return this.withoutPushRun(
+			branch,
+			typeof onPush === "object" ? [onPush.unknown] : [],
+			`${WORKFLOW_PATH} runs for no push to ${branch}`,
+			signal,
+			triggers,
+		);
 	}
 
-	/** A push the push trigger does not run for: whether an open pull request from its branch runs the workflow. */
-	private async fromPullRequests(
-		triggers: ReadonlyMap<string, unknown>,
+	/**
+	 * A push its own trigger does not run for (`why`, or the `unsettled` reasons it might): `none` only while no pull
+	 * request from its branch is open. With one open, the pushed commit's `pull_request` trigger admitting its base runs it;
+	 * otherwise the run is decided by the workflow of the pull request's merge, which this reader does not read.
+	 */
+	private async withoutPushRun(
 		branch: string,
-		onPush: Admits,
+		unsettled: readonly string[],
+		why: string,
 		signal: AbortSignal,
+		triggers?: ReadonlyMap<string, unknown>,
 	): Promise<CiPushVerdict> {
 		let bases: readonly string[];
 		try {
-			const listed: unknown = JSON.parse(
-				await this.port.run(
-					"gh",
-					[
-						"pr",
-						"list",
-						"--head",
-						branch,
-						"--state",
-						"open",
-						"--json",
-						"baseRefName",
-						"--limit",
-						String(MAX_OPEN_PULL_REQUESTS),
-					],
-					signal,
-				),
-			);
-			if (!Array.isArray(listed) || listed.length >= MAX_OPEN_PULL_REQUESTS)
-				throw new Error("the listing is not complete");
-			bases = listed.map((entry: unknown) => {
-				const base = plainObject(entry) ? entry.baseRefName : undefined;
-				if (typeof base !== "string" || base.length === 0) throw new Error("a pull request names no base branch");
-				return base;
-			});
+			bases = await this.openPullRequestBases(branch, signal);
 		} catch (error) {
 			signal.throwIfAborted();
 			return unknown(`the open pull requests from ${branch} could not be read: ${errorText(error)}`);
 		}
-		if (bases.length > 0 && triggers.has("pull_request_target"))
-			return unknown(
-				"a pull request from its branch is open, and pull_request_target runs the base branch's workflow",
-			);
-		const reasons = typeof onPush === "object" ? [onPush.unknown] : [];
-		const config = triggers.get("pull_request");
-		if (bases.length > 0 && config !== undefined) {
-			const types = plainObject(config) && config.types !== undefined ? config.types : PULL_REQUEST_DEFAULT_TYPES;
-			const synchronizes =
-				typeof types === "string" ? types === SYNCHRONIZE : Array.isArray(types) && types.includes(SYNCHRONIZE);
-			if (synchronizes)
-				for (const base of bases) {
-					const admitted = admitsBranch(config, base, "pull_request");
-					if (admitted === true) return { verdict: "runs" };
-					if (typeof admitted === "object") reasons.push(admitted.unknown);
-				}
-		}
-		if (reasons.length > 0) return unknown(reasons.join("; "));
-		return {
-			verdict: "none",
-			why:
-				bases.length === 0
-					? `${WORKFLOW_PATH} runs for no push to ${branch}, and no pull request from it is open`
-					: `${WORKFLOW_PATH} runs for no push to ${branch}, nor for the pull requests open from it`,
-		};
+		if (bases.length === 0)
+			return unsettled.length > 0
+				? unknown(unsettled.join("; "))
+				: { verdict: "none", why: `${why}, and no pull request from it is open` };
+		const config = triggers?.get("pull_request");
+		const types = plainObject(config) && config.types !== undefined ? config.types : PULL_REQUEST_DEFAULT_TYPES;
+		const synchronizes =
+			typeof types === "string" ? types === SYNCHRONIZE : Array.isArray(types) && types.includes(SYNCHRONIZE);
+		if (triggers?.has("pull_request") && synchronizes)
+			for (const base of bases) if (admitsBranch(config, base, "pull_request") === true) return { verdict: "runs" };
+		return unknown(
+			[
+				...unsettled,
+				`a pull request from ${branch} is open, and its run follows a workflow other than the pushed commit's (its merge's, or its base's for pull_request_target), which the host does not read`,
+			].join("; "),
+		);
+	}
+
+	/** The base branches of the pull requests open from `branch`; a listing that may be cut short throws. */
+	private async openPullRequestBases(branch: string, signal: AbortSignal): Promise<readonly string[]> {
+		const listed: unknown = JSON.parse(
+			await this.port.run(
+				"gh",
+				[
+					"pr",
+					"list",
+					"--head",
+					branch,
+					"--state",
+					"open",
+					"--json",
+					"baseRefName",
+					"--limit",
+					String(MAX_OPEN_PULL_REQUESTS),
+				],
+				signal,
+			),
+		);
+		if (!Array.isArray(listed) || listed.length >= MAX_OPEN_PULL_REQUESTS)
+			throw new Error("the listing is not complete");
+		return listed.map((entry: unknown) => {
+			const base = plainObject(entry) ? entry.baseRefName : undefined;
+			if (typeof base !== "string" || base.length === 0) throw new Error("a pull request names no base branch");
+			return base;
+		});
 	}
 }
 
