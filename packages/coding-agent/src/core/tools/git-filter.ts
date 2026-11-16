@@ -779,10 +779,10 @@ async function handlePush(
 	if (outputLines.some((line) => line.includes("Everything up-to-date"))) {
 		return { output: "Everything up-to-date.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
 	}
-	const remoteMessages = outputLines.filter((line) => line.trim().startsWith("remote:"));
-	const pushDetail = outputLines.find((line) => line.includes("->"));
-	const summary = pushDetail ? `Pushed: ${pushDetail.trim()}` : "Push successful.";
-	return { output: [...remoteMessages, summary].join("\n"), exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	// Git's report as git words it, without its progress lines: the remote's messages, the destination and every ref the
+	// push updated, so a push of several refs names them all and the host reads what it pushed from them (`pushedRefs`).
+	const output = outputLines.length > 0 ? outputLines.join("\n") : "Push successful.";
+	return { output, exitCode: 0, rawOut, rawBytes: res.rawBytes };
 }
 
 async function handlePull(
