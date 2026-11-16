@@ -15,6 +15,7 @@ import { awayChannels, awayChannelsKey } from "../channels/away-channels.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { AwayService } from "../routines/away-service.ts";
 import { getSessionRole } from "../session-role.ts";
+import { resolveRoutineAwaySettings } from "../settings/proactivity-lane-settings.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { recordWatchCommandBase } from "../watches/watch-command-base.ts";
@@ -155,7 +156,7 @@ export class BotDaemonKeeper {
 	status(): PersistentBotDaemonStatus {
 		const store = this.ports.store();
 		store.reload();
-		const awayOn = this.ports.settings().getRoutineAwaySettings().enabled;
+		const awayOn = this.awayOn();
 		let botsOwed: PersistentBotDaemonStatus["botsOwed"];
 		try {
 			botsOwed = { awayOn, count: this.ports.botsOwed() };
@@ -254,13 +255,21 @@ export class BotDaemonKeeper {
 	 */
 	private awayBots(): number {
 		const owed = this.ports.botsOwed();
-		if (this.ports.settings().getRoutineAwaySettings().enabled) {
+		if (this.awayOn()) {
 			this.awayOffTold = false;
 			return owed;
 		}
 		if (owed > 0 && !this.awayOffTold) this.ports.warn(interfaceText().botTeam.botsOwedAwayOff(owed));
 		this.awayOffTold = owed > 0;
 		return 0;
+	}
+
+	/**
+	 * Whether away work is on (`routines.away.enabled`) as the daemon reads it, from the owner's global settings alone: no
+	 * project's settings turn the daemon's bot hosting on or off.
+	 */
+	private awayOn(): boolean {
+		return resolveRoutineAwaySettings(this.ports.settings().getGlobalSettings()).enabled;
 	}
 
 	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */
