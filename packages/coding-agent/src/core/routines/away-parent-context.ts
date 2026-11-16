@@ -475,8 +475,11 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getGoalStateSnapshot: () => undefined,
 				// The parent may open while this host still runs: each keeps its own fleet queue metadata.
 				fleetQueueKey: awayFleetQueueKey(parentSessionId),
-				// The parent's own record of its goals' mail, read as it is now: the parent may record more while this runs.
-				goalMailSpentUsd: (objectiveId) => readGoalMailSpentUsd(sessionFile, parentSessionId, objectiveId),
+				// The parent's own record of its goals' mail, read as it is now: the parent may record more while this runs. This
+				// host reads no message another turn would read (`runsControlMessage`), so no bot's reply: it tells no read.
+				workerMail: {
+					goalSpentUsd: (objectiveId) => readGoalMailSpentUsd(sessionFile, parentSessionId, objectiveId),
+				},
 			},
 			notifications,
 			lifecycle,

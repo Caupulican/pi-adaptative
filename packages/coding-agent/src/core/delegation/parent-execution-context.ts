@@ -86,6 +86,7 @@ import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import type { BudgetRefusalReasons } from "./budget-reason-codes.ts";
 import type { WorkerResponseObservation, WorkerToolSelection } from "./worker-attempt-executor.ts";
+import type { WorkerMailPort } from "./worker-mail-ledger.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import type { WorkerCeiling } from "./worker-parent-ceiling.ts";
 import type { WorkerTerminalHandoff } from "./worker-terminal-handoff-coordinator.ts";
@@ -375,6 +376,11 @@ export interface ParentExecutionPolicy {
 	 * "unbounded" where it lends the owner's reach, else its own reach, in every mode.
 	 */
 	workerCeiling(): WorkerCeiling;
+	/**
+	 * The session's record of its workers' mail to bots (`WorkerMailLedger`): the spend a goal's mail made, which the goal's
+	 * request bounds count, and which mailbox messages each running attempt read, told as it reads them.
+	 */
+	workerMail: WorkerMailPort;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;
 	/** The best model the policy allows, for a worker whose own binding it disallows. */

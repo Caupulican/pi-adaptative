@@ -6,9 +6,9 @@
  * does. A worker's mail to such a bot (`workerMail`) is answered the same way, and the reply is handed to that worker's
  * mailbox (`toWorker`), or to this session when the worker has ended. The session keeps its workers' mail
  * (`WorkerMailLedger`): each goal's mail, which holds the goal open until its reply is handed on, and the hop of each
- * reply handed to a worker, which the mail of the worker turn it starts or joins continues, kept while the worker's mailbox
- * holds the reply unread or a turn of it runs. A refusal of the ask reaches the orchestrator's model in English
- * (`botFailureForModel`).
+ * reply handed to a worker, which the mail of the worker turn it starts or whose attempt reads it continues, kept while the
+ * worker's mailbox holds the reply unread or a turn of it runs. A refusal of the ask reaches the orchestrator's model in
+ * English (`botFailureForModel`).
  */
 
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -28,9 +28,11 @@ import {
 import { WorkerMailLedger } from "../delegation/worker-mail-ledger.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { createBotToolDefinition } from "../tools/bot.ts";
 import { AGENT_MAIL_CHANNEL } from "../turn-origin.ts";
+import { errorText } from "./bot-error-text.ts";
 import { botFailureForModel } from "./bot-owner-error.ts";
 import { RootBotReplies, type WorkerBotReply } from "./root-bot-replies.ts";
 
@@ -43,7 +45,7 @@ export interface RootBotsPorts {
 	 * worker's mail is held open by until its reply is handed on.
 	 */
 	leaders(): Pick<LeaderController, "currentFor" | "goalOfMail" | "mailEnded" | "recheckMail">;
-	/** The session's orchestration projection: whether the worker turn a reply started or joined is over. */
+	/** The session's orchestration projection: whether the worker turn a reply started, or the attempt that read it, runs. */
 	snapshot(): TaskRuntimeProjection;
 	/** The bot tool's actions other than the ask. */
 	tool(): Omit<BotToolPort, "ask">;
@@ -70,18 +72,28 @@ export class RootBots {
 	readonly replies: RootBotReplies;
 	/** The session's record of its workers' mail to bots that answer in sessions of their own. */
 	readonly workerMail: WorkerMailLedger;
+	/** The cause last logged per worker whose mailbox did not read, until it reads again or is gone: each logged once. */
+	private readonly unreadMailboxes = new Map<string, string>();
+	private readonly warn: (message: string) => void;
 
 	constructor(deps: BackgroundLaneControllerDeps, ports: RootBotsPorts) {
 		this.ports = ports;
 		this.sessionId = () => deps.getSessionManager().getSessionId();
 		const warn = (message: string) => deps.emit({ type: "warning", message });
+		this.warn = warn;
 		this.workerMail = new WorkerMailLedger({
 			sessionId: this.sessionId,
 			sessionFile: () => deps.getSessionManager().getSessionFile(),
 			now: () => deps.getTimers().port("orchestration").now(),
 			warn,
-			replyTurnOver: (turn) =>
-				replyTurnOver(ports.snapshot(), turn, () => this.replyUnread(deps, turn.worker, turn.messageId)),
+			replyTurnOver: (turn) => {
+				const over = replyTurnOver(ports.snapshot(), turn, () =>
+					this.replyUnread(deps, turn.worker, turn.messageId),
+				);
+				// Over only once the worker is gone or its mailbox read: nothing more to warn of for it.
+				if (over) this.unreadMailboxes.delete(turn.worker);
+				return over;
+			},
 		});
 		this.replies = new RootBotReplies({
 			agentDir: () => deps.getAgentDir(),
@@ -122,9 +134,9 @@ export class RootBots {
 	/**
 	 * Hands a bot's reply to the worker that mailed it, once (keyed by the reply), as the bot's words, not the session's:
 	 * under the goal the mail was sent in while that goal is open (its turn is the goal's), else a leader's under the goal
-	 * it runs. The reply's hop is recorded first, under the mailbox message the worker's turn starts from, and on the
-	 * running turn when the reply joins it instead, so a mail of that turn continues the chain. "ended" when that worker
-	 * takes no message any more.
+	 * it runs. The reply's hop is recorded first, under the mailbox message it is handed on as, so a mail of the turn that
+	 * message starts, or of the attempt that reads it (`WorkerMailLedger.messagesRead`), continues the chain. "ended" when
+	 * that worker takes no message any more.
 	 */
 	private toWorker(runtime: string, reply: WorkerBotReply): "taken" | "ended" {
 		const worker = this.ports.workers().find((agent) => agent.agentId === runtime);
@@ -135,33 +147,41 @@ export class RootBots {
 			(alias === undefined ? undefined : this.runningGoalOf(alias));
 		const idempotencyKey = botReplyMessageKey(reply.replyId);
 		const messageId = workerAgentMessageId(this.sessionId(), idempotencyKey);
-		this.workerMail.replyHanded({ messageId, worker: runtime, hop: reply.hop });
 		try {
+			this.workerMail.replyHanded({ messageId, worker: runtime, hop: reply.hop });
 			const result = this.ports.followUp(runtime, reply.text, {
 				idempotencyKey,
 				agentWords: reply.thirdParty ? { turnOrigin: thirdPartyReplyOrigin(reply) } : {},
 				...(goal !== undefined ? { delegationObjectiveId: goal } : {}),
 			});
-			if (result.messageId) {
-				const running = result.steering ? this.ports.snapshot().agents[runtime]?.activeAttemptId : undefined;
-				if (running !== undefined) this.workerMail.replyJoined(messageId, running);
-				return "taken";
-			}
+			if (result.messageId) return "taken";
 			if (result.skipReason?.startsWith("agent_")) {
 				this.workerMail.replyDropped(messageId);
 				return "ended";
 			}
 			throw new Error(`worker ${runtime} did not take it: ${result.skipReason ?? "no reason given"}`);
 		} finally {
-			// Taken or not, the reply's hop now lives as long as a turn of the worker can read it.
+			this.releaseReply(messageId);
+		}
+	}
+
+	/**
+	 * Taken or not, the reply's hop now lives as long as a turn of the worker can read it. A failed write of that release
+	 * is told on its own, never in place of the hand-on's outcome: the ledger no longer holds the reply as being handed on,
+	 * so its next change releases it if no turn can read it.
+	 */
+	private releaseReply(messageId: string): void {
+		try {
 			this.workerMail.replyLeft(messageId);
+		} catch (error) {
+			this.warn(interfaceText().botTeam.workerMailLedgerUnwritten(errorText(error)));
 		}
 	}
 
 	/**
 	 * Whether the worker's mailbox holds the reply's message unread, read without a claim as the retention pass reads it. A
 	 * mailbox that does not read holds it: what became of the message is unknown, so its hop is kept (until the worker is
-	 * gone) rather than lost to a turn that may still read it.
+	 * gone) rather than lost to a turn that may still read it. Each cause is logged once per worker until its mailbox reads.
 	 */
 	private replyUnread(deps: BackgroundLaneControllerDeps, worker: string, messageId: string): boolean {
 		try {
@@ -171,13 +191,18 @@ export class RootBots {
 				parentSessionId: this.sessionId(),
 				agentId: worker,
 			}).getMessage(messageId);
+			this.unreadMailboxes.delete(worker);
 			return message !== undefined && message.deliveredAt === undefined && message.failedAt === undefined;
 		} catch (error) {
-			harnessLog.warn("bots", "a worker's mailbox did not read; the hop of a reply handed to it is kept", () => ({
-				worker,
-				messageId,
-				error: error instanceof Error ? error.message : String(error),
-			}));
+			const cause = errorText(error);
+			if (this.unreadMailboxes.get(worker) !== cause) {
+				this.unreadMailboxes.set(worker, cause);
+				harnessLog.warn("bots", "a worker's mailbox did not read; the hop of a reply handed to it is kept", () => ({
+					worker,
+					messageId,
+					error: cause,
+				}));
+			}
 			return true;
 		}
 	}

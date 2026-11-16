@@ -6,11 +6,13 @@
  *   no longer open is released, as nothing waits on it any more;
  * - the metered spend those bots' turns made answering each goal's mail, which the goal's budget counts, kept while the
  *   goal's objective is in the session's store;
- * - the hop of each bot's reply handed to a worker's mailbox, kept while the reply is being handed on, while the worker
- *   turn it started or joined runs, and while the mailbox holds it unread (it may yet start or join one), until that worker
- *   is gone (`replyTurnOver`): a mail that turn sends continues the reply's chain (`hopAfter`), in a goal or not, so a
- *   worker and a bot answering each other stop at `MAX_BOT_MAIL_HOPS`. A reply its mailbox read, refused or forgot with
- *   no turn of it running is released with it.
+ * - the hop of each bot's reply handed to a worker's mailbox, and the worker attempt that read the reply into its turn,
+ *   recorded when that attempt reads it (`messagesRead`, told by the worker's mailbox admission before the message is
+ *   marked delivered): kept while the reply is being handed on, while the turn its message started or the attempt that
+ *   read it runs, and while the mailbox holds it unread (a turn may yet read it), until that worker is gone
+ *   (`replyTurnOver`). A mail that turn sends continues the reply's chain (`hopAfter`), in a goal or not, so a worker
+ *   and a bot answering each other stop at `MAX_BOT_MAIL_HOPS`. A reply no turn of it runs any more, its message read,
+ *   refused or forgotten, is released.
  *
  * It is a file of its own with its own version, which no older build lists (they list a session directory by `.jsonl`)
  * and the orchestration store never holds, so mail takes nothing of a goal's evidence bound. The one process hosting the
@@ -62,13 +64,14 @@ export interface GoalMail {
 }
 
 /**
- * A bot's reply handed to a worker's mailbox under `messageId`: the worker turn that message starts, or the running
- * turn it joined (`attemptId`), continues the reply's chain.
+ * A bot's reply handed to a worker's mailbox under `messageId`: the worker turn that message starts, or the attempt that
+ * read it into its running turn (`attemptId`), continues the reply's chain.
  */
 export interface ReplyTurn {
 	readonly messageId: string;
 	readonly worker: string;
 	readonly hop: number;
+	/** The worker attempt that last read the reply's message into its turn (`messagesRead`); absent while none has. */
 	readonly attemptId?: string;
 }
 
@@ -76,6 +79,17 @@ export interface ReplyTurn {
 export interface WorkerMailTurn {
 	readonly attemptId: string;
 	readonly controlMessageId?: string;
+}
+
+/** What a session's worker controller reads of its workers' mail and tells it. */
+export interface WorkerMailPort {
+	/** The metered spend bots answering in sessions of their own made for a goal's mail. */
+	goalSpentUsd(objectiveId: string): number;
+	/**
+	 * Told, before the messages can be marked delivered, when a worker's attempt reads mailbox messages into its turn.
+	 * Absent on a host that runs only part of its parent's work: such a host reads no message another turn would read.
+	 */
+	messagesRead?(worker: string, attemptId: string, messageIds: readonly string[]): void;
 }
 
 interface WorkerMailState {
@@ -214,7 +228,7 @@ export interface WorkerMailLedgerDeps {
 }
 
 /** One session's worker mail: read when first used for that session, then every change written whole before it is taken. */
-export class WorkerMailLedger {
+export class WorkerMailLedger implements WorkerMailPort {
 	private readonly deps: WorkerMailLedgerDeps;
 	private loaded: { readonly sessionId: string; writable: boolean; state: WorkerMailState } | undefined;
 	private readonly listeners = new Set<() => void>();
@@ -247,8 +261,8 @@ export class WorkerMailLedger {
 	}
 
 	/**
-	 * The hop of a mail `worker` sends in `turn`: one past the latest reply handed to it that started or joined that
-	 * turn, else 1 (a chain of its own).
+	 * The hop of a mail `worker` sends in `turn`: one past the latest reply handed to it that started that turn or that
+	 * the turn's attempt read, else 1 (a chain of its own).
 	 */
 	hopAfter(worker: string, turn: WorkerMailTurn | undefined): number {
 		if (!turn) return 1;
@@ -333,11 +347,17 @@ export class WorkerMailLedger {
 		});
 	}
 
-	/** The reply `messageId` joined the worker's running turn `attemptId` instead of starting one. */
-	replyJoined(messageId: string, attemptId: string): void {
+	/**
+	 * The attempt `attemptId` of `worker` read the mailbox messages `messageIds` into its turn: each reply among them
+	 * continues its chain in that turn and is kept while that attempt runs. A message read again by a later attempt (the
+	 * first ended before it was marked delivered) moves to that attempt.
+	 */
+	messagesRead(worker: string, attemptId: string, messageIds: readonly string[]): void {
+		const read = (entry: ReplyTurn) => entry.worker === worker && messageIds.includes(entry.messageId);
+		if (!this.state().replies.some((entry) => read(entry) && entry.attemptId !== attemptId)) return;
 		this.change((state) => ({
 			...state,
-			replies: state.replies.map((entry) => (entry.messageId === messageId ? { ...entry, attemptId } : entry)),
+			replies: state.replies.map((entry) => (read(entry) ? { ...entry, attemptId } : entry)),
 		}));
 	}
 

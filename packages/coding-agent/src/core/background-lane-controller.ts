@@ -540,7 +540,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
 				fleetAllowance: subscriptionAllowancePort(() => this.deps.subscriptionAllowance),
 				taskWatches: this._routineAssembly.taskWatches(() => this._routines.current),
-				goalMailSpentUsd: (objectiveId) => this._rootBots.workerMail.goalSpentUsd(objectiveId),
+				workerMail: this._rootBots.workerMail,
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),

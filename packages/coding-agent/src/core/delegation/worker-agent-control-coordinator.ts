@@ -1,5 +1,4 @@
 import { isDeepStrictEqual } from "node:util";
-import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest } from "../../kernel/index.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
@@ -96,6 +95,8 @@ import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import { type HostEventConsumingExecution, WorkerHostEventTransport } from "./worker-host-event-transport.ts";
 import { attemptAwaitsParent, attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import type { WorkerMailPort } from "./worker-mail-ledger.ts";
+import { recordMailboxAdmission, type WorkerMailboxConversationMessage } from "./worker-mailbox-admission.ts";
 import { type QueuedPeerMessage, WorkerReplyRouting } from "./worker-reply-routing.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
@@ -187,6 +188,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	noteAttemptOwnerEpoch?(attemptId: string, ownerEpoch: number): void;
 	/** How long an interrupted worker gets to reach a request boundary and report. */
 	haltReportDeadlineMs?(): number;
+	/** Told which mailbox messages a running attempt read into its turn (`WorkerMailPort.messagesRead`). */
+	messagesRead?: WorkerMailPort["messagesRead"];
 }
 
 export interface WorkerAgentControlResourceSnapshot {
@@ -201,14 +204,7 @@ const MAX_BROADCAST_ERROR_CHARS = 512;
 /** Attempt statuses whose task has not reached a terminal outcome. */
 const LIVE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running", "suspended"]);
 
-/** Mailbox identity and user content are kept separate from their transcript presentation. */
-export interface WorkerMailboxConversationMessage {
-	messageId: string;
-	instructions: string;
-	message: UserMessage;
-	/** The third party's words the sender carried (`WorkerAgentMessage.turnOrigin`); admission records them. */
-	turnOrigin?: TurnOriginRecord;
-}
+export type { WorkerMailboxConversationMessage } from "./worker-mailbox-admission.ts";
 
 /**
  * Sole owner of model-facing logical-agent controls and their durable inboxes.
@@ -388,17 +384,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const admitted = accepted.length
 			? accepted
 			: candidates.filter(({ message }) => workerControlOf(message)?.k !== "host_event");
-		// A steer or follow-up carrying a third party's words taints the running attempt before the model reads it.
-		const thirdParty = admitted.find((candidate) => candidate.turnOrigin?.thirdParty)?.turnOrigin;
-		if (thirdParty)
-			this.options
-				.getLifecycle()
-				.ledger.runtime.recordAttemptThirdPartyWords(
-					execution.attemptId,
-					execution.leaseId,
-					execution.fencingToken,
-					thirdParty,
-				);
+		const runtime = this.options.getLifecycle().ledger.runtime;
+		recordMailboxAdmission(runtime, agentId, execution, admitted, this.options.messagesRead);
 		return admitted;
 	}
 
@@ -686,8 +673,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
 		rejectGenericReplyOptions(options);
 		if (this.activityForAgent(agent) === "active") {
-			// A delegation's words wait for a turn of their own, filed under that delegation: a steer would be absorbed into
-			// the live turn, which was filed under whatever started it.
+			// A delegation's words are queued as a follow-up, never a steer: the live turn reads them only when it would stop
+			// (its follow-up read), inside that turn; words no turn read start one of their own, filed under that delegation.
 			const delegated =
 				options.delegationObjectiveId !== undefined ||
 				this.senderTurn(options.senderAgentId)?.objectiveId !== undefined;

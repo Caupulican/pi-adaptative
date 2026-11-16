@@ -164,7 +164,7 @@ import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import type { ParentExecutionContext } from "./parent-execution-context.ts";
-import { RequestCostBounds, type RequestCostBoundsDeps, withAttemptCostCeiling } from "./request-cost-bounds.ts";
+import { RequestCostBounds, withAttemptCostCeiling } from "./request-cost-bounds.ts";
 import {
 	type SanitizedContextForkMessage,
 	type SanitizedContextForkMode,
@@ -352,7 +352,6 @@ export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	fleetQueueKey?: string;
 	/** The session's owner notices (once per episode); absent where no notice can be kept. */
 	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
-	goalMailSpentUsd: RequestCostBoundsDeps["goalMailSpentUsd"];
 }
 
 interface PreparedWorkerAttempt {
@@ -587,7 +586,7 @@ export class WorkerDelegationController {
 		this.deps = deps;
 		this.costBounds = new RequestCostBounds({
 			runCostBound: deps.runCostBound,
-			goalMailSpentUsd: deps.goalMailSpentUsd,
+			goalMailSpentUsd: (objectiveId) => deps.workerMail.goalSpentUsd(objectiveId),
 			isSubscription: (model) => this.deps.getModelRegistry().isUsingSubscription(model),
 			findModel: (binding) => this.deps.getModelRegistry().find(binding.provider, binding.modelId),
 		});
@@ -841,6 +840,7 @@ export class WorkerDelegationController {
 			getGoalState: () => this.deps.getGoalStateSnapshot(),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
+			messagesRead: (agentId, attemptId, ids) => this.deps.workerMail.messagesRead?.(agentId, attemptId, ids),
 			cancelLane: (laneId, reasonCode) => {
 				// A worker that was running reports what it changed even though it never got to speak.
 				const inFlight = this.inFlightLedgers.get(laneId);

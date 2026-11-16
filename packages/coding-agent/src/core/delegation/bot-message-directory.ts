@@ -275,7 +275,7 @@ export function createBotMessageDirectory(
 			const group = requireGroup(teamId);
 			const mailId = replayedMailId(replayKey);
 			const sessionId = manager.getSessionId();
-			// The mail continues the chain of a bot's reply that started or joined the sender's turn, in a goal or not.
+			// The mail continues the chain of a bot's reply that started the sender's turn or that the turn read, in a goal or not.
 			const hop = host.workerMail().hopAfter(sender, turn);
 			// Sent in a goal's turn, the goal waits for the answer (`LeaderController.mailSent`).
 			const goal = turn?.objectiveId;

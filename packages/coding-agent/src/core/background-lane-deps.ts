@@ -31,7 +31,10 @@ import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
-	extends Omit<ParentExecutionContext, keyof ForegroundTranscriptWrites | "getSessionManager" | "workerCeiling">,
+	extends Omit<
+			ParentExecutionContext,
+			keyof ForegroundTranscriptWrites | "getSessionManager" | "workerCeiling" | "workerMail"
+		>,
 		Pick<ForegroundTranscriptWriteDeps, "reportWorkerTerminal">,
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
