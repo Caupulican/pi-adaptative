@@ -578,7 +578,8 @@ export class SessionAnalytics {
 	 * accumulator processes only new entries, so repeated turns do not rescan the full session.
 	 */
 	getSpawnedUsage(): SpawnedUsageTotals {
-		// The same pending projection as CURRENT: background spend the cost guard and /context read is never below it.
+		// The same pending projection as CURRENT: background spend /context reads is never below it (the cost guard reads its
+		// metered part, getSpawnedMeteredUsd).
 		const pending = this.deps.getPendingSemanticUsage();
 		const totals = projectPendingSemanticCost(this.getCurrentSessionCostTotals(), pending.reports, pending.overflow);
 		return { cost: totals.subagentCost, reports: totals.subagentReports };

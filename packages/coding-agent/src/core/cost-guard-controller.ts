@@ -32,15 +32,20 @@ export interface CostGuardControllerDeps {
 export class CostGuardController {
 	private readonly deps: CostGuardControllerDeps;
 	private lastDecision: CostGuardDecision | undefined;
-	private turnBaselineUsd = 0;
+	private turnBaselineUsd: number | undefined;
 
 	constructor(deps: CostGuardControllerDeps) {
 		this.deps = deps;
 	}
 
-	/** Snapshot the cumulative metered background spend before any work in a new foreground turn begins. */
+	/**
+	 * Snapshot the cumulative metered background spend before any work in a new foreground turn begins, while the guard
+	 * holds a ceiling (the reading passes over the session's accounting entries); a guard enabled later in the turn takes it
+	 * at its first projection.
+	 */
 	beginForegroundTurn(): void {
-		this.turnBaselineUsd = this.deps.getSpawnedMeteredUsd();
+		const settings = this.deps.getSettings();
+		this.turnBaselineUsd = settings.enabled && settings.maxTurnUsd > 0 ? this.deps.getSpawnedMeteredUsd() : undefined;
 	}
 
 	/** Latest decision for the host UI. Disabled settings hide and invalidate prior projections. */
@@ -93,7 +98,9 @@ export class CostGuardController {
 			});
 			// A dedup/rollup correction may move the cumulative total backward transiently; it must never
 			// turn background spend negative or lower the request projection.
-			const cumulativeBackgroundUsd = Math.max(0, this.deps.getSpawnedMeteredUsd() - this.turnBaselineUsd);
+			const spentUsd = this.deps.getSpawnedMeteredUsd();
+			this.turnBaselineUsd ??= spentUsd;
+			const cumulativeBackgroundUsd = Math.max(0, spentUsd - this.turnBaselineUsd);
 			const decision = evaluateCostGuard(estUsd, guard, cumulativeBackgroundUsd);
 			this.lastDecision = decision;
 			if (!decision.over || guard.action !== "downgrade" || reasoning === undefined) return reasoning;

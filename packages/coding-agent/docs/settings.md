@@ -596,7 +596,7 @@ Unlike other settings, a value outside its range is not replaced: the whole poli
 | `costGuard.maxTurnUsd` | number | `0` | Projected per-turn USD ceiling; a positive legacy value remains dormant until `enabled` is `true` |
 | `costGuard.action` | string | `"warn"` | `"warn"` only reports the estimate; `"downgrade"` also lowers reasoning one rung for that request without changing saved/profile state |
 
-The projection uses the session response reserve, cached-input rates, and model-declared long-context tiers. ChatGPT subscription usage is marked `(sub)` and does not enter the USD guard. Enable it explicitly through `/settings` → **Foreground cost guard**, or in JSON:
+The projection uses the session response reserve, cached-input rates, and model-declared long-context tiers. ChatGPT subscription usage is marked `(sub)` and does not enter the USD guard. The turn's background spend (workers, spawned sessions, history summaries) enters it by its metered (API) part alone, each report read by the model it ran on. Enable it explicitly through `/settings` → **Foreground cost guard**, or in JSON:
 
 ```json
 {
