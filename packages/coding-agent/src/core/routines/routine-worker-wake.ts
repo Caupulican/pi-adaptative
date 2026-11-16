@@ -33,6 +33,15 @@ export function workerUnreachableLine(runtimeId: string, reason: string): string
 	return `Worker ${runtimeId} armed this watch but could not be woken by it (${reason}), so it reaches you instead: act on it, or pass it to the worker yourself.`;
 }
 
+/**
+ * The line a session reads before a note of the host's about a worker's own calls that asks for action (a subject left
+ * unwatched) and came after the worker's attempt had ended: the worker takes no more notes in that attempt, since one would
+ * start it a new task, so the note is the session's to act on or pass on.
+ */
+export function workerAttemptEndedLine(runtimeId: string): string {
+	return `Worker ${runtimeId}'s attempt had ended when the host finished arming watches for its calls, so this reaches you instead: act on it, or pass it to the worker yourself.`;
+}
+
 /** Sends one wake; `key` makes a redelivery the same message. */
 export function wakeWorkerRuntime(
 	host: WorkerWakeHost,

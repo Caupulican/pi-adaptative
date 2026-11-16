@@ -65,8 +65,16 @@ export interface TaskWatchPort {
 	 * worker's slots with its wakes going to it (`watch-auto-arm.ts`); undefined while the session holds no watches.
 	 */
 	autoArm(worker: WorkerWatchAuthority): WatchAutoArmPort | undefined;
-	/** Tells the worker runtime a note of the host's (what it armed for the worker), once per key. */
+	/**
+	 * Tells the worker runtime a note of the host's (what it armed for the worker), once per key; only while the worker's
+	 * attempt runs, since a runtime whose attempt ended would start a new task for it.
+	 */
 	noteWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
+	/**
+	 * Tells the session root a note of the host's about the worker's calls that asks for action (a subject left unwatched)
+	 * and came after the worker's attempt ended, as a wake of the session led by whose calls it follows; once per key.
+	 */
+	noteSessionForWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
 }
 
 /** The worker the tool arms for: its runtime id, its lane's scope and its own gate, which judges the call a check would make. */

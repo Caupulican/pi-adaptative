@@ -32,7 +32,12 @@ import type { SkillVaultController } from "./skill-vault.ts";
 import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import type { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
-import { WATCH_AUTO_ARM_CUSTOM_TYPE, WatchAutoArm, type WatchAutoArmPort } from "./watches/watch-auto-arm.ts";
+import {
+	WATCH_AUTO_ARM_CUSTOM_TYPE,
+	WatchAutoArm,
+	type WatchAutoArmPort,
+	watchAutoArmNoteText,
+} from "./watches/watch-auto-arm.ts";
 
 export interface AgentSessionEventsPorts {
 	agent(): Agent;
@@ -81,10 +86,14 @@ export class AgentSessionEvents {
 		this.autoWatches = new WatchAutoArm({
 			port: () => ports.autoWatches(),
 			cwd: () => ports.cwd(),
-			note: (text) =>
-				ports
-					.durableCustomMessageTurns()
-					.enqueue({ customType: WATCH_AUTO_ARM_CUSTOM_TYPE, content: text, display: false, details: undefined }),
+			// The session reads the whole note: it is the one working, whatever the note asks of it.
+			note: (note) =>
+				ports.durableCustomMessageTurns().enqueue({
+					customType: WATCH_AUTO_ARM_CUSTOM_TYPE,
+					content: watchAutoArmNoteText(note),
+					display: false,
+					details: undefined,
+				}),
 			failed: (error) =>
 				this.emit({
 					type: "warning",

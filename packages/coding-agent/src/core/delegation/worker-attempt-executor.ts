@@ -6,19 +6,12 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentContextPlan, AgentContextPlanRequest, AgentContextWire } from "../../kernel/index.ts";
 import type { FollowUpState, RequestPreflightContext } from "../../kernel/loop-config.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
-import {
-	classifyFailure,
-	computeRetryDelayMs,
-	type RetryPolicy,
-	sleepAbortable,
-} from "../../kernel/reliability/index.ts";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import { sanitizeToolFailureContext } from "../../kernel/tool-failure-memory.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
-import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../kernel/verification-obligations.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
@@ -55,6 +48,7 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { createWorkerHostTools, WORKER_HOST_TOOL_NAMES } from "./worker-host-tools.ts";
 import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { runProviderCompletionWithBackoff } from "./worker-provider-backoff.ts";
 import {
 	callbackEvidencedCompletion,
 	WorkerCompletionProtocolError,
@@ -113,80 +107,8 @@ export interface WorkerAttemptExecutionResult {
 
 type WorkerCompletionInput = Parameters<WorkerRunnerOptions["complete"]>[0];
 
-/**
- * Backoff policy for transient worker provider failures. Without it, a dropped provider socket
- * kills the attempt instantly at $0 spend and an immediate re-dispatch hits the same dead
- * connection (field session 019fd4dc: paired $0 `completion_error` lanes ~10s apart). Jitter
- * de-synchronizes sibling workers that all lost the same connection at once.
- */
-const WORKER_PROVIDER_RETRY_POLICY: RetryPolicy = {
-	maxAttempts: 3,
-	baseDelayMs: 2_000,
-	maxDelayMs: 30_000,
-	jitterRatio: 0.2,
-};
-
 /** Provider/child-loop settlement has no process kill tier; its grace is independent of shell disposal. */
 const WORKER_PHYSICAL_SETTLEMENT_GRACE_MS = 5_000;
-
-export async function runProviderCompletionWithBackoff(args: {
-	attempt: () => Promise<IsolatedCompletionResult>;
-	/** Release per-attempt provider reservations before waiting; the final failure is rethrown. */
-	onAttemptFailure: () => void;
-	provider: string;
-	laneId: string;
-	warn: (message: string) => void;
-	signal?: AbortSignal;
-	/** The `worker-provider-retry` port the backoff waits on; defaults to the system timers. */
-	timers?: TimerPort;
-}): Promise<IsolatedCompletionResult> {
-	for (let attempt = 1; ; attempt++) {
-		try {
-			const completion = await args.attempt();
-			if (completion.stopReason !== "error" || completion.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
-				return completion;
-			}
-			throw new Error(
-				completion.errorMessage?.trim() || "Provider completion stopped with an error without diagnostic detail.",
-			);
-		} catch (error) {
-			args.onAttemptFailure();
-			if (args.signal?.aborted) throw error;
-			if (error instanceof WorkerCompletionProtocolError) {
-				throw new BoundedCompletionFailureError("failed", "worker_protocol_error", error.message, error);
-			}
-			if (
-				error instanceof WorkerConversationOwnershipError ||
-				error instanceof CapabilityGatewayDeniedError ||
-				error instanceof WorkerTreeBudgetExceededError ||
-				error instanceof BoundedCompletionFailureError
-			) {
-				throw error;
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			const classified = classifyFailure({ message, provider: args.provider });
-			// A stated delay longer than this loop waits (a recorded reset) is the attempt ladder's to wait out.
-			const statedTooLong =
-				classified.retryAfterMs !== undefined && classified.retryAfterMs > WORKER_PROVIDER_RETRY_POLICY.maxDelayMs;
-			if (!classified.retryable || statedTooLong || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) {
-				throw new BoundedCompletionFailureError("failed", "completion_error", message, error);
-			}
-			const delayMs = computeRetryDelayMs(WORKER_PROVIDER_RETRY_POLICY, attempt, {
-				...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
-			});
-			args.warn(
-				`Worker ${args.laneId} provider request failed (${classified.reason}); retrying in ${Math.ceil(delayMs / 1000)}s (attempt ${attempt + 1}/${WORKER_PROVIDER_RETRY_POLICY.maxAttempts}).`,
-			);
-			harnessLog.warn("workers", "a worker provider request is retried", {
-				laneId: args.laneId,
-				reason: classified.reason,
-				attempt,
-				delayMs,
-			});
-			await sleepAbortable(delayMs, args.signal, args.timers);
-		}
-	}
-}
 
 /**
  * The provider/tool-loop portion of a prepared worker attempt.
@@ -1658,6 +1580,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				}));
 				throw error;
 			} finally {
+				// The worker's loop ended: before its terminal is recorded, the host's later notes stop going to it.
+				hostTools.settle();
 				stopUsageClock();
 				for (const signal of usageSignals) signal.removeEventListener("abort", stopUsageClock);
 				usageSignals.clear();

@@ -15,7 +15,7 @@
  * armed though its triggers did not settle a run tells its timeout to the armer only: the owner was promised no result). A call that
  * began before an owner's stop arms nothing after the stop. What was armed, what is still looked for and what was not
  * armed (and why: nothing reads it, it was there before the call, the slots are full, the owner stopped the work) is told
- * to the armer in one note per call.
+ * to the armer in one note per call, its lines split by whether they ask anything of the armer ({@link WatchAutoArmNote}).
  *
  * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once; a read of
  * GitHub that waits for a run to be listed waits outside that order. A session's call handed off to the background is read
@@ -119,12 +119,28 @@ export interface WatchAutoArmPort {
 	readonly closing: AbortSignal;
 }
 
+/**
+ * One note the host tells an armer after a call, its model-facing lines in two parts: `informational` only reports what
+ * the host armed or still looks for and asks nothing of the armer, since each armed watch's own wake names its id and its
+ * result; `action` names a subject the host left unwatched (or could not arm at all), which the armer waits on itself if
+ * its work needs the result. A recipient that can no longer act (a worker whose attempt ended) is told only the second.
+ */
+export interface WatchAutoArmNote {
+	readonly informational: readonly string[];
+	readonly action: readonly string[];
+}
+
+/** A note's whole text, as an armer that still works reads it: what was armed first, then what was not. */
+export function watchAutoArmNoteText(note: WatchAutoArmNote): string {
+	return [...note.informational, ...note.action].join("\n");
+}
+
 export interface WatchAutoArmDeps {
 	/** Undefined where the session holds no watches (before its routine runtime is built, or a session without one). */
 	port(): WatchAutoArmPort | undefined;
 	cwd(): string;
-	/** Tells the armer the model-facing note; resolves once it is durable. */
-	note(text: string): Promise<void>;
+	/** Tells the armer the model-facing note (never an empty one); resolves once it is durable. */
+	note(note: WatchAutoArmNote): Promise<void>;
 	/** Arming or its note failed while the session is not disposed: the owner is told. */
 	failed(error: unknown): void;
 	disposed(): boolean;
@@ -451,24 +467,30 @@ export class WatchAutoArm {
 		// A read the close ended is no subject left unwatched: nothing is armed or told after it.
 		if (this.closed(port)) return;
 		const { armed, missed } = await this.armPlanned(plan.planned, call, port, context);
-		this.tell([
-			...(armed.length === 0
-				? []
-				: [
-						`The host armed watches for what your last ${call.toolName} call started: ${armed.join("; ")}. Each result wakes you and is told to the owner; keep working instead of polling it, and arm no second watch on it.`,
-					]),
-			...(plan.dispatched.length === 0
-				? []
-				: [
-						`Your ${call.toolName} call named no run it started, so the host is asking GitHub for the run of ${plan.dispatched.map(dispatchText).join("; ")} created since the call began, for up to two minutes, and arms a watch on it once listed; you are told then.`,
-					]),
-			...(plan.noCi.length === 0
-				? []
-				: [
-						`CI does not run for ${plan.noCi.join("; ")}, so the host armed no watch on it; arm one yourself if a run of it starts later (a pull request you open, a dispatch).`,
-					]),
-			...this.missedLines([...plan.unwatched, ...missed]),
-		]);
+		// A close during the arming ends its arms as failures: they are no subjects left unwatched, and no one hears them.
+		if (this.closed(port)) return;
+		this.tell({
+			informational: [
+				...(armed.length === 0
+					? []
+					: [
+							`The host armed watches for what your last ${call.toolName} call started: ${armed.join("; ")}. Each result wakes you and is told to the owner; keep working instead of polling it, and arm no second watch on it.`,
+						]),
+				...(plan.dispatched.length === 0
+					? []
+					: [
+							`Your ${call.toolName} call named no run it started, so the host is asking GitHub for the run of ${plan.dispatched.map(dispatchText).join("; ")} created since the call began, for up to two minutes, and arms a watch on it once listed; you are told then.`,
+						]),
+			],
+			action: [
+				...(plan.noCi.length === 0
+					? []
+					: [
+							`CI does not run for ${plan.noCi.join("; ")}, so the host armed no watch on it; arm one yourself if a run of it starts later (a pull request you open, a dispatch).`,
+						]),
+				...this.missedLines([...plan.unwatched, ...missed]),
+			],
+		});
 		for (const dispatch of plan.dispatched) this.followDispatch(call, dispatch, 0);
 	}
 
@@ -512,10 +534,10 @@ export class WatchAutoArm {
 			: [`The host armed no watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`];
 	}
 
-	/** Tells the armer the lines, without holding the arms of later calls: the note may land only at a later boundary. */
-	private tell(lines: readonly string[]): void {
-		if (lines.length === 0) return;
-		void this.deps.note(lines.join("\n")).catch((error: unknown) => {
+	/** Tells the armer the note, without holding the arms of later calls: the note may land only at a later boundary. */
+	private tell(note: WatchAutoArmNote): void {
+		if (note.informational.length === 0 && note.action.length === 0) return;
+		void this.deps.note(note).catch((error: unknown) => {
 			if (!this.closed(this.deps.port())) this.deps.failed(error);
 		});
 	}
@@ -555,7 +577,11 @@ export class WatchAutoArm {
 		} catch (error) {
 			if (this.closed(port)) return;
 			if (!last) this.followDispatch(call, dispatch, attempt + 1);
-			else this.tell(this.missedLines([`the run of ${dispatchText(dispatch)}: ${errorText(error)}`]));
+			else
+				this.tell({
+					informational: [],
+					action: this.missedLines([`the run of ${dispatchText(dispatch)}: ${errorText(error)}`]),
+				});
 			return;
 		}
 		this.enqueue(async () => {
@@ -568,11 +594,12 @@ export class WatchAutoArm {
 			if (!run) {
 				if (!last) this.followDispatch(call, dispatch, attempt + 1);
 				else
-					this.tell(
-						this.missedLines([
+					this.tell({
+						informational: [],
+						action: this.missedLines([
 							`the run of ${dispatchText(dispatch)}: GitHub listed none created since your ${call.toolName} call began`,
 						]),
-					);
+					});
 				return;
 			}
 			const { armed, missed } = await this.armPlanned(
@@ -581,14 +608,16 @@ export class WatchAutoArm {
 				port,
 				context,
 			);
-			this.tell([
-				...(armed.length === 0
-					? []
-					: [
-							`The host armed a watch on the run your earlier ${call.toolName} call started (${dispatchText(dispatch)}): ${armed.join("; ")}. Its result wakes you and is told to the owner; keep working instead of polling it.`,
-						]),
-				...this.missedLines(missed),
-			]);
+			if (this.closed(port)) return;
+			this.tell({
+				informational:
+					armed.length === 0
+						? []
+						: [
+								`The host armed a watch on the run your earlier ${call.toolName} call started (${dispatchText(dispatch)}): ${armed.join("; ")}. Its result wakes you and is told to the owner; keep working instead of polling it.`,
+							],
+				action: this.missedLines(missed),
+			});
 		});
 	}
 

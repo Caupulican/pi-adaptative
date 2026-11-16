@@ -92,6 +92,7 @@ import {
 	WORKER_WAKE_RETRY_MS,
 	type WorkerWakeHost,
 	wakeWorkerRuntime,
+	workerAttemptEndedLine,
 	workerUnreachableLine,
 } from "./routine-worker-wake.ts";
 import type { TaskWatchPort } from "./task-watch-tool.ts";
@@ -285,9 +286,21 @@ export class RoutineRuntimeAssembly {
 					)
 				);
 			},
-			// A runtime that does not take the note now still hears each watch's result when it fires.
+			// Called only until the worker's attempt run ends (`followOwnCalls`' settle), so the note goes to that attempt's loop
+			// rather than to an idle runtime, where it would start a new task; a runtime that does not take it now still hears
+			// each armed watch's result when it fires.
 			noteWorker: (worker, text, key) => {
 				wakeWorkerRuntime(this.workerWakeHost(), worker.runtimeId, text, key);
+			},
+			noteSessionForWorker: (worker, text, key) => {
+				const content = `${workerAttemptEndedLine(worker.runtimeId)}\n${text}`;
+				this.deps
+					.deliverParentInput(this.sessionWake(key, content, undefined))
+					.catch((error: unknown) =>
+						this.host.warn(
+							`What the host could not watch for worker ${worker.runtimeId}'s calls could not be told to the session: ${error instanceof Error ? error.message : String(error)}`,
+						),
+					);
 			},
 		};
 	}
@@ -342,8 +355,9 @@ export class RoutineRuntimeAssembly {
 
 	/**
 	 * One wake of the session itself, as a routine-completion parent input in steer mode (a running turn reads it at its next
-	 * model step, an idle session starts a turn): what a failing watch tells its armer, and what a worker's watch delivers when
-	 * its worker cannot take the wake (the event is not lost).
+	 * model step, an idle session starts a turn): what a failing watch tells its armer, what a worker's watch delivers when
+	 * its worker cannot take the wake (the event is not lost), and what the host left unwatched for a worker whose attempt
+	 * had ended.
 	 */
 	private sessionWake(deliveryId: string, content: string, details: unknown): ParentInputDelivery {
 		return {
