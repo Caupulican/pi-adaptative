@@ -689,11 +689,11 @@ export class BotSessionHost {
 			});
 		const outcome = await accepted;
 		if (!outcome.accepted) {
-			const words = interfaceText().botTeam;
-			throw new BotOwnerError(
-				outcome.reason === undefined
-					? words.botMessageNotTaken(agentId)
-					: words.botMessageRefused(agentId, outcome.reason),
+			const { reason } = outcome;
+			throw new BotOwnerError((text) =>
+				reason === undefined
+					? text.botTeam.botMessageNotTaken(agentId)
+					: text.botTeam.botMessageRefused(agentId, reason),
 			);
 		}
 		return {
@@ -728,19 +728,18 @@ export class BotSessionHost {
 
 	/** The bot's loaded session, built or continued as the record defines it. */
 	private async open(agentId: string, sender: BotSender): Promise<BotSessionEntry> {
-		const stopped = () => new Error(interfaceText().botTeam.botSessionsClosing(agentId));
+		const stopped = () => new BotOwnerError((text) => text.botTeam.botSessionsClosing(agentId));
 		if (this.stopped) throw stopped();
 		// A close that never ends (a disposal that hangs) refuses the message instead of holding it, and every later one, forever.
 		if (!(await this.endedWithinCloseWait([this.previousStop, this.closing.get(agentId)])))
-			throw new BotOwnerError(interfaceText().botTeam.botSessionStillClosing(agentId));
+			throw new BotOwnerError((text) => text.botTeam.botSessionStillClosing(agentId));
 		// A stop that came while the previous session closed has already counted the sessions it must close: none is built now.
 		if (this.stopped) throw stopped();
 		const record = this.ports.store().getBot(agentId);
-		if (!record || record.retired) throw new BotOwnerError(interfaceText().botTeam.botMissing(agentId));
+		if (!record || record.retired) throw new BotOwnerError((text) => text.botTeam.botMissing(agentId));
 		// The one predicate the dispatch routes by: a bot it sends to a worker has no session here to diverge from it.
 		const existing = this.entries.get(agentId);
-		if (!this.runsAsSession(record, sender))
-			throw new BotOwnerError(interfaceText().botTeam.botRunsAsWorker(agentId));
+		if (!this.runsAsSession(record, sender)) throw new BotOwnerError((text) => text.botTeam.botRunsAsWorker(agentId));
 		if (existing) {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
 			if (this.isBusy(existing) || existing.profileKey === this.admission.keyOf(record, existing.builtFor))

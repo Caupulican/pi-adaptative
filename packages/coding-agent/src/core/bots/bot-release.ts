@@ -99,7 +99,7 @@ export class BotRelease {
 	prepare(agentId: string): () => void {
 		const { ports } = this;
 		const loaded = ports.loaded(agentId);
-		if (loaded?.busy) throw new BotOwnerError(interfaceText().botTeam.botHasActiveWork(agentId));
+		if (loaded?.busy) throw new BotOwnerError((text) => text.botTeam.botHasActiveWork(agentId));
 		const sessionId = loaded?.session.sessionId ?? ports.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) ports.store().listRoutines({ sessionId, scope: "own-watches" });
 		ports.waiting(agentId);

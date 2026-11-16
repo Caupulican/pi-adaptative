@@ -14,7 +14,7 @@ import {
 } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { FileLockDeadlineError, isFileLockContentionError } from "../../kernel/storage/atomic-file.ts";
 import { RoutineRevisionChangedError } from "../delegation/routine-revision.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { holderPlace } from "../session-switch-failures.ts";
 import { BotBundleSplitError } from "./bot-bundle-move.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
@@ -42,8 +42,8 @@ function causeChain(error: unknown): string[] {
 	return chain;
 }
 
-function holderWords(holder: SessionLeaseHolderRef): string {
-	const words = interfaceText().botTeam;
+function holderWords(holder: SessionLeaseHolderRef, text: InterfaceText): string {
+	const words = text.botTeam;
 	const process =
 		holder.role === "channel-host"
 			? words.botSessionHolderPhone(holder.pid)
@@ -55,11 +55,14 @@ function holderWords(holder: SessionLeaseHolderRef): string {
 }
 
 /** The owner's words for `error` when this module words it, else undefined (see the module comment). */
-function wordsFor(agentId: string, error: unknown): string | undefined {
-	const words = interfaceText().botTeam;
-	if (error instanceof BotOwnerError) return error.message;
+function wordsFor(agentId: string, error: unknown, text: InterfaceText): string | undefined {
+	const words = text.botTeam;
+	if (error instanceof BotOwnerError) return error.words(text);
 	if (error instanceof SessionHeldError)
-		return words.botSessionOpenElsewhere(agentId, error.holders.map(holderWords).join(", "));
+		return words.botSessionOpenElsewhere(
+			agentId,
+			error.holders.map((holder) => holderWords(holder, text)).join(", "),
+		);
 	if (error instanceof SessionHomeChangedError) return words.botSessionHomeChanged(agentId);
 	if (error instanceof SessionLeaseRegistryError) return words.botSessionLeasesUnreadable(agentId, error.file);
 	if (error instanceof BotBundleSplitError)
@@ -99,12 +102,22 @@ export function logBotsFailure(what: string, error: unknown): void {
 
 /** What failed for bot `agentId` with `error`, in the owner's words; the failure's cause chain goes to the harness log. */
 export function botFailureText(agentId: string, error: unknown): string {
-	const worded = wordsFor(agentId, error);
-	harnessLog.warn("bots", worded === undefined ? "a bot failure has no words for the owner" : "a bot failure", () => ({
+	const worded = wordsFor(agentId, error, interfaceText());
+	logBotFailure(agentId, error, worded !== undefined);
+	return worded ?? interfaceText().botTeam.botFailureUnworded(agentId);
+}
+
+/** Writes the failure's cause chain to the harness log, and whether this module words it. */
+function logBotFailure(agentId: string, error: unknown, worded: boolean): void {
+	harnessLog.warn("bots", worded ? "a bot failure" : "a bot failure has no words for the owner", () => ({
 		agentId,
 		error: causeChain(error).join(" <- caused by "),
 	}));
-	return worded ?? interfaceText().botTeam.botFailureUnworded(agentId);
+}
+
+/** What failed for bot `agentId` with `error`, in the words of the catalogue passed in (`botFailureText`), unlogged. */
+function botFailureWords(agentId: string, error: unknown, text: InterfaceText): string {
+	return wordsFor(agentId, error, text) ?? text.botTeam.botFailureUnworded(agentId);
 }
 
 /**
@@ -117,5 +130,7 @@ export function inOwnerWords(agentId: string, error: unknown): unknown {
 		error instanceof SessionHomeChangedError ||
 		error instanceof SessionLeaseRegistryError ||
 		error instanceof BotBundleSplitError;
-	return kernel ? new BotOwnerError(botFailureText(agentId, error), { cause: error }) : error;
+	if (!kernel) return error;
+	logBotFailure(agentId, error, true);
+	return new BotOwnerError((text) => botFailureWords(agentId, error, text), { cause: error });
 }

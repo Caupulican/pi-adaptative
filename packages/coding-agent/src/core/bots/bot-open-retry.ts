@@ -13,7 +13,6 @@
 import { isAbsolute, relative } from "node:path";
 import { SessionHeldError } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { isLockBusy } from "./bot-failure-words.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
@@ -40,13 +39,13 @@ const STORE_CODES: ReadonlyMap<string, Exclude<BotOpenFailure, "held">> = new Ma
 export class BotSessionStoreError extends BotOwnerError {
 	readonly failure: Exclude<BotOpenFailure, "held">;
 	constructor(agentId: string, failure: Exclude<BotOpenFailure, "held">, cause: unknown) {
-		const words = interfaceText().botTeam;
 		super(
-			failure === "busy"
-				? words.botSessionStoreBusy(agentId)
-				: failure === "failing"
-					? words.botSessionStoreFailing(agentId)
-					: words.botSessionStorePermission(agentId),
+			(text) =>
+				failure === "busy"
+					? text.botTeam.botSessionStoreBusy(agentId)
+					: failure === "failing"
+						? text.botTeam.botSessionStoreFailing(agentId)
+						: text.botTeam.botSessionStorePermission(agentId),
 			{ cause },
 		);
 		this.name = "BotSessionStoreError";

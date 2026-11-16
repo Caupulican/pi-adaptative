@@ -6,9 +6,8 @@
  */
 import type { Api, Model } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
-import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
+import { unpricedModelWords } from "../cost/session-turn-spend-bound.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
@@ -59,23 +58,22 @@ export class BotSessionAdmission {
 		builtFor: BotSessionRoot,
 	): void {
 		const record = this.ports.store().getBot(agentId);
-		const words = interfaceText().botTeam;
-		if (!record || !model) throw new BotOwnerError(words.botMissing(agentId));
+		if (!record || !model) throw new BotOwnerError((text) => text.botTeam.botMissing(agentId));
 		const defined = this.route(record, builtFor);
 		// A record that left the session path (a leader's, a leader, a profile only a worker's run holds) runs here no more:
 		// the session is released once its work settles, and its messages go to a worker.
 		if (defined === "worker") {
 			queueMicrotask(() => this.ports.recheck(record));
-			throw new BotOwnerError(words.botRunsAsWorker(agentId));
+			throw new BotOwnerError((text) => text.botTeam.botRunsAsWorker(agentId));
 		}
 		if (defined.key !== built.key) {
 			queueMicrotask(() => this.ports.recheck(record));
-			throw new BotOwnerError(words.botSessionOutdated(agentId));
+			throw new BotOwnerError((text) => text.botTeam.botSessionOutdated(agentId));
 		}
 		// The session never leaves its model (`pinnedModel`); a run on any other is refused, never moved.
 		if (!modelsAreEqual(model, defined.model))
-			throw new BotOwnerError(
-				words.botModelMoved(
+			throw new BotOwnerError((text) =>
+				text.botTeam.botModelMoved(
 					agentId,
 					`${model.provider}/${model.id}`,
 					`${defined.model.provider}/${defined.model.id}`,
@@ -99,8 +97,8 @@ export class BotSessionAdmission {
 			if (refused) return refused;
 		}
 		const bounded = botSpendCeilingsOn(this.ports.spendCeilings(), spendBudget, model, this.ports.modelRegistry());
-		const unpriced = bounded.length === 0 ? undefined : unpricedModelRefusal(model);
-		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
+		const unpriced = bounded.length === 0 ? undefined : unpricedModelWords(model);
+		return unpriced === undefined ? undefined : { cause: "model_unpriced", words: unpriced };
 	}
 
 	/**
@@ -114,8 +112,8 @@ export class BotSessionAdmission {
 		if (profileId === undefined) return ownBotSession(record, sender.cwd(), this.ports.modelRegistry());
 		const compiled = sender.compileProfile({ ...record, profileId });
 		if (!compiled.ok)
-			throw new BotOwnerError(
-				interfaceText().botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason),
+			throw new BotOwnerError((text) =>
+				text.botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason),
 			);
 		const session = profileBotSession(compiled);
 		return session.route === "worker" ? "worker" : session.definition;
@@ -124,7 +122,7 @@ export class BotSessionAdmission {
 	/** The session the record defines now; throws the owner's words when it cannot run as one. */
 	define(record: PersistentBotRecord, sender: BotSessionRoot): BotSessionDefinition {
 		const defined = this.route(record, sender);
-		if (defined === "worker") throw new BotOwnerError(interfaceText().botTeam.botRunsAsWorker(record.agentId));
+		if (defined === "worker") throw new BotOwnerError((text) => text.botTeam.botRunsAsWorker(record.agentId));
 		return defined;
 	}
 

@@ -138,7 +138,7 @@ export class BotSessionLoader {
 		const taken = this.ports.takeLock(agentId);
 		if (!taken.held) {
 			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
-			throw new BotSessionHeldError(words.botSessionHeld(agentId, taken.owner.pid, sessionId));
+			throw new BotSessionHeldError((text) => text.botTeam.botSessionHeld(agentId, taken.owner.pid, sessionId));
 		}
 		const { lock } = taken;
 		let session: AgentSession | undefined;

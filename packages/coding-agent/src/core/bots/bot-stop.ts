@@ -868,7 +868,7 @@ export function endClosedBotWork(
 	ports: LinkNoticePorts,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
-	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
+	if (!taken.held) throw new BotOwnerError((text) => text.botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
 		const saved = "saved" in session ? session.saved : undefined;
 		// Nothing is ended through the link: the owner is told, once for the release however often it runs again.

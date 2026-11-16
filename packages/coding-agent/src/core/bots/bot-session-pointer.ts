@@ -12,7 +12,6 @@ import { readSessionHeaderResult } from "../../kernel/session/session-header.ts"
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { newestSessionFileIn, SessionFileLinkError } from "../../kernel/session/session-listing.ts";
 import { BoundedReadError, readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import { resolveSessionHome } from "../orchestration-homes.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { BotHome } from "./bot-home.ts";
@@ -81,7 +80,7 @@ function deleted(agentDir: string, home: BotHome, sessionId: string): boolean {
 export class BotSessionLinkError extends BotOwnerError {
 	readonly path: string;
 	constructor(path: string, options?: ErrorOptions) {
-		super(interfaceText().botTeam.botSessionFileLinked(path), options);
+		super((text) => text.botTeam.botSessionFileLinked(path), options);
 		this.name = "BotSessionLinkError";
 		this.path = path;
 	}

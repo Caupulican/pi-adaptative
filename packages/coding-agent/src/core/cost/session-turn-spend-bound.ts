@@ -23,12 +23,20 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { observeSessionTurns, stopSessionTurn } from "../session-turn-boundary.ts";
 
 /** Why a model cannot run under a dollar bound, in the owner's words; undefined when it declares a price. */
 export function unpricedModelRefusal(model: Pick<Model<Api>, "provider" | "id" | "costDefaulted">): string | undefined {
-	return model.costDefaulted ? interfaceText().common.modelUnpriced(`${model.provider}/${model.id}`) : undefined;
+	return unpricedModelWords(model)?.(interfaceText());
+}
+
+/** Why a model cannot run under a dollar bound, in the words of the catalogue passed in; undefined when it declares a price. */
+export function unpricedModelWords(
+	model: Pick<Model<Api>, "provider" | "id" | "costDefaulted">,
+): ((text: InterfaceText) => string) | undefined {
+	const ref = `${model.provider}/${model.id}`;
+	return model.costDefaulted ? (text) => text.common.modelUnpriced(ref) : undefined;
 }
 
 /** A turn's bound: its dollars, with whatever else names it to the owner (the setting it comes from, say). */

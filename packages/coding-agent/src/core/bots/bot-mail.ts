@@ -27,7 +27,7 @@ import type {
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { BOT_MAIL_TOOL_NAME } from "../tools/bot-mail-tool-name.ts";
 import { agentMailTurnOrigin, entryTurnOrigin, isOutsideInputKind, latestDecisiveEntry } from "../turn-origin.ts";
-import { BotInboxFullError } from "./bot-inbox.ts";
+import { botFailureForModel } from "./bot-owner-error.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
 /** The longest chain of mails: a mail or a reply past it is never sent. */
@@ -235,9 +235,8 @@ export class BotMail {
 				...(result.deliveredTo !== undefined ? { hostedElsewhere: true as const } : {}),
 			};
 		} catch (error) {
-			// The sending bot's model reads the refusal: in its words, not the owner's.
-			if (error instanceof BotInboxFullError) throw new Error(`Mail to ${to} refused: its inbox is full.`);
-			throw error;
+			// The sending bot's model reads the refusal: in English, not the owner's language.
+			throw botFailureForModel(error);
 		}
 	}
 }

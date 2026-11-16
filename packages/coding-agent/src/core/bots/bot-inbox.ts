@@ -34,7 +34,6 @@ import {
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type BotHomeRecord,
@@ -313,7 +312,7 @@ export function enqueueBotInbox(
 	const text = `${JSON.stringify(message)}\n`;
 	const bytes = waiting.reduce((sum, file) => sum + (statSync(file, { throwIfNoEntry: false })?.size ?? 0), 0);
 	if (waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
-		throw new BotInboxFullError(interfaceText().botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
+		throw new BotInboxFullError((text) => text.botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
 	const suffix = input.origin === undefined ? ".json" : ".mail.json";
 	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}${suffix}`);
 	writeFileAtomicSync(file, text, { mode: 0o600 });

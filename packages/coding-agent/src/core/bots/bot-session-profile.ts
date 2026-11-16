@@ -31,7 +31,6 @@ import {
 	REPO_READ_TOOL_NAME,
 	WRITE_TOOL_NAMES,
 } from "../delegation/worker-execution-policy.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationThinkingLevel, RiskBudget, WorkerRole } from "../orchestration/contracts.ts";
 import { costCeilingUsd } from "../orchestration/risk-budget.ts";
@@ -124,14 +123,15 @@ export function ownBotSessionKey(record: PersistentBotRecord): string {
 
 /** A bot of its own, on its record and its model as the registry knows it now; throws the owner's words when it cannot run. */
 export function ownBotSession(record: PersistentBotRecord, cwd: string, registry: ModelRegistry): BotSessionDefinition {
-	const words = interfaceText().botTeam;
 	const profile = botProfileOf(record);
 	const model = registry.find(profile.provider, profile.modelId);
 	if (!model || !registry.hasConfiguredAuth(model))
-		throw new BotOwnerError(words.botModelUnavailable(record.agentId, `${profile.provider}/${profile.modelId}`));
+		throw new BotOwnerError((text) =>
+			text.botTeam.botModelUnavailable(record.agentId, `${profile.provider}/${profile.modelId}`),
+		);
 	// The soul is judged again here: a stored record can have been edited by hand.
 	const soul = profile.soul === undefined ? { ok: true as const, soul: undefined } : checkSoulText(profile.soul);
-	if (!soul.ok) throw new BotOwnerError(words.botSoulRefused(record.agentId, soul.reason));
+	if (!soul.ok) throw new BotOwnerError((text) => text.botTeam.botSoulRefused(record.agentId, soul.reason));
 	return {
 		key: ownBotSessionKey(record),
 		model,

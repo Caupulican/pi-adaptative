@@ -15,7 +15,6 @@ import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import type { ModelExhaustion } from "../provider-admission/gate.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import {
@@ -56,7 +55,6 @@ function botModelRefusal(
 	record: PersistentBotRecord,
 	model: Parameters<BotSessionRootPorts["modelRefusal"]>[1],
 ): BotModelRefusal | undefined {
-	const words = interfaceText().botTeam;
 	const metered = meteredModelRefusalFacts({
 		authority: {
 			model: { provider: record.provider, modelId: record.modelId },
@@ -72,7 +70,7 @@ function botModelRefusal(
 	if (metered)
 		return {
 			cause: "model_metered",
-			reason: words.botModelMetered(metered.ref, metered.alternatives, metered.provider),
+			words: (text) => text.botTeam.botModelMetered(metered.ref, metered.alternatives, metered.provider),
 		};
 	// Out of quota (a recorded refusal, or the used-up usage windows of its subscription) or refused for the account: the
 	// bot waits for its own model, never moved to another, until the exhaustion that holds longer resets.
@@ -85,12 +83,15 @@ function botModelRefusal(
 				: undefined;
 		return {
 			cause: unusable,
-			reason: words.botModelUnusable(`${model.provider}/${model.id}`, unusable),
+			words: (text) => text.botTeam.botModelUnusable(`${model.provider}/${model.id}`, unusable),
 			...(clearsAt !== undefined ? { clearsAt } : {}),
 		};
 	}
 	return deps.isModelAllowed && !deps.isModelAllowed(model)
-		? { cause: "model_not_allowed", reason: words.botModelNotAllowed(`${model.provider}/${model.id}`) }
+		? {
+				cause: "model_not_allowed",
+				words: (text) => text.botTeam.botModelNotAllowed(`${model.provider}/${model.id}`),
+			}
 		: undefined;
 }
 

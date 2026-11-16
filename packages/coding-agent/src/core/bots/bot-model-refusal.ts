@@ -3,9 +3,8 @@
  * price), in the owner's words, with when the refusal ends when that is known: the host refuses a run or an open with it,
  * and the opening of owed sessions keys a refusal by it and takes the work up again once it no longer holds.
  */
-import { interfaceText } from "../language/interface-text.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
-import { BotOwnerError } from "./bot-owner-error.ts";
+import { type BotFailureWords, BotOwnerError } from "./bot-owner-error.ts";
 
 /**
  * Which rule refuses the bot's model: the host reports it unusable (its own cause), the subscription rule holds it to a
@@ -21,8 +20,8 @@ export type BotModelRefusalCause =
 export interface BotModelRefusal {
 	/** What a recorded refusal is compared by: the words change with the owner's language, the cause does not. */
 	readonly cause: BotModelRefusalCause;
-	/** The owner's words, shown only. */
-	readonly reason: string;
+	/** The rule in the words of the catalogue passed in, shown only: the owner's, or English for a model. */
+	readonly words: BotFailureWords;
 	/** When the refusal ends (a quota exhaustion's recorded reset), on the provider admission clock. */
 	readonly clearsAt?: number;
 }
@@ -33,7 +32,7 @@ export class BotModelRefusedError extends BotOwnerError {
 	readonly refusal: BotModelRefusal;
 
 	constructor(agentId: string, refusal: BotModelRefusal) {
-		super(interfaceText().botTeam.botModelRefused(agentId, refusal.reason));
+		super((text) => text.botTeam.botModelRefused(agentId, refusal.words(text)));
 		this.refusal = refusal;
 	}
 }
