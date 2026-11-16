@@ -364,27 +364,32 @@ export class GithubWatchPoller {
 		}
 		for (const [repo, group] of byRepo) {
 			if (!this.active) return;
+			// Only GitHub's read counts toward a watch's failing streak: a ledger write that fails below throws to the
+			// pass's warning (`request`), and the pass reads again one interval on.
+			let readings: Awaited<ReturnType<typeof reader.observe>>;
 			try {
-				const readings = await reader.observe(
+				readings = await reader.observe(
 					repo === "" ? undefined : repo,
 					group.map((watch) => watch.source),
 					this.abort.signal,
 				);
 				if (readings.length !== group.length) throw new Error("GitHub returned a different number of readings.");
-				group.forEach((watch, index) => {
-					const reading = readings[index];
-					if (!reading?.ok) {
-						this.failed(watch, reading?.reason ?? "no reading");
-						return;
-					}
-					this.streaks.delete(watch.incarnationId);
-					this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading);
-				});
 			} catch (error) {
 				if (!this.active) return;
 				const reason = error instanceof Error ? error.message : String(error);
 				for (const watch of group) this.failed(watch, reason);
+				continue;
 			}
+			if (!this.active) return;
+			group.forEach((watch, index) => {
+				const reading = readings[index];
+				if (!reading?.ok) {
+					this.failed(watch, reading?.reason ?? "no reading");
+					return;
+				}
+				this.streaks.delete(watch.incarnationId);
+				this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading);
+			});
 		}
 	}
 
