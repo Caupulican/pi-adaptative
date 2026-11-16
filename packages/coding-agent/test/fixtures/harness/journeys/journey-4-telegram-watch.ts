@@ -495,6 +495,7 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		// The note lands at the run's next provider boundary: the answer's request when the arming came first, else the
 		// request after the answer. The answer is held until the note is queued, so the run reads it either way.
 		let noteInAnswer = false;
+		let answerTexts: readonly string[] = [];
 		const answerReached = createBarrier();
 		const answerHeld = createBarrier();
 		world.provider.enqueue(
@@ -505,6 +506,7 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "bash");
 					expect(result?.isError, result?.text).toBe(false);
+					answerTexts = requestTexts(request);
 					noteInAnswer = carriesNote(request);
 					answerReached.release();
 				},
@@ -522,6 +524,20 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 			};
 			try {
 				await withDeadline(trace, "the host's arming note is queued for the push run", queued());
+			} catch (error) {
+				// What the host told instead, if anything: the answer request's host lines, the notes saved and the warnings.
+				const saved = manager
+					.getEntries()
+					.flatMap((entry) =>
+						entry.type === "custom_message" && entry.customType === WATCH_AUTO_ARM_CUSTOM_TYPE
+							? [JSON.stringify(entry.content)]
+							: [],
+					);
+				const hostLines = answerTexts.filter((text) => /host|watch/iu.test(text));
+				throw new Error(
+					`${error instanceof Error ? error.message : String(error)}; the answer request's host lines: ${JSON.stringify(hostLines)}; notes saved: ${JSON.stringify(saved)}; warnings: ${JSON.stringify(world.warnings.slice(warningsBefore))}`,
+					{ cause: error },
+				);
 			} finally {
 				waiting = false;
 			}
@@ -620,7 +636,12 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		// Keyed by what the result is of (the commit and the run attempt that ended), not by the watch that told it.
 		const resultKey = createHash("sha256").update(`ci:${sha}\n${CI_RUN_ID}:1`).digest("hex").slice(0, 16);
 		expect(told[0]?.k, "the result's key").toBe(`push:watch:github:${resultKey}`);
-		expect(told[0]?.c, "on the owner's chat").toBe(`telegram:${ownerChat}`);
+		// A told result is pushed to every chat of the owner the channel lists (its record names no chat: only a held
+		// action's presentation is shown to one): the phone's one chat got it.
+		expect(
+			api.sent.filter((message) => message.body.text === phoneText).map((message) => message.body.chat_id),
+			"on the owner's chat",
+		).toEqual([ownerChat]);
 		expect(api.openPolls, "closing aborts the held poll").toBe(0);
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
 		trace.mark("root", "telegram-ci-watch.closed");
