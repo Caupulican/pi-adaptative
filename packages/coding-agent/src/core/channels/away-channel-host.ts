@@ -659,7 +659,9 @@ export class AwayChannelHosts {
 			timers: this.input.timers.port("channel-poll"),
 			wakeTimers: this.input.timers.port("channel-expiry"),
 			away: {
-				capReason: (nowMs) => this.capReason(nowMs),
+				// The away spend bound holds metered (API) turns alone; a subscription turn reserves nothing on it.
+				capReason: (nowMs) =>
+					isMeteredSpend(session.model, session.modelRegistry) ? this.capReason(nowMs) : undefined,
 				spendsMetered: () => isMeteredSpend(session.model, session.modelRegistry),
 			},
 		});

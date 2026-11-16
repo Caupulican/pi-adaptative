@@ -117,7 +117,7 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 
 /** What the channels core asks of the daemon's host while it serves a channel away (`SessionChannelsDeps.away`). */
 export interface AwayChannelServing {
-	/** The away spend bound's reason to deliver no turn now. */
+	/** The away spend bound's reason to deliver no turn now; none while the host spends unmetered (it holds metered turns alone). */
 	capReason(now: number): string | undefined;
 	/** Whether the host's turns spend metered (API) dollars (`isMeteredSpend`); absent: they do. */
 	spendsMetered?(): boolean;
