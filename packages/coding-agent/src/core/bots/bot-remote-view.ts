@@ -24,6 +24,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { sessionStorageRootsOfFile } from "../orchestration-homes.ts";
 import { type HostLockResult, takeProcessLock } from "../remote/host-lock.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import { logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
@@ -171,22 +172,29 @@ export class BotRemoteView {
 		};
 		try {
 			// Each bot's hold before the watch starts: a change between this read and the start reaches no batch.
-			const before = new Map(
-				this.ports
-					.store()
-					.listBots({ includeRetired: true })
-					.map((bot) => [bot.agentId, this.otherHold(bot.agentId)]),
-			);
+			// A bot whose host files do not read is left out: its next change or the minute's sweep reads it again.
+			const before = new Map<string, string | undefined>();
+			for (const bot of this.ports.store().listBots({ includeRetired: true })) {
+				const hold = this.readHold(bot.agentId);
+				if (hold.read) before.set(bot.agentId, hold.token);
+			}
 			this.homeWatch = watchBotHomes(
 				this.ports.agentDir(),
 				this.ports.timers().port("bot-home-watch"),
 				(changes) => {
-					const ids = new Map(
-						this.ports
-							.store()
-							.listBots({ includeRetired: true })
-							.map((bot) => [botHomeName(bot.agentId), bot.agentId]),
-					);
+					let ids: Map<string, string>;
+					try {
+						ids = new Map(
+							this.ports
+								.store()
+								.listBots({ includeRetired: true })
+								.map((bot) => [botHomeName(bot.agentId), bot.agentId]),
+						);
+					} catch (error) {
+						// The bots did not list: the batch is left to the bots' next change or the minute's sweep.
+						logBotsFailure("the bot homes' changes could not be matched to the bots", error);
+						return;
+					}
 					const changed = new Set<string>();
 					// A home's session files changed: what it saved is read again, before a host's change below opens it.
 					for (const { home, file } of changes) {
@@ -206,17 +214,14 @@ export class BotRemoteView {
 						// The host's own bot sessions announce themselves; a change it wrote is not news.
 						if (this.ports.runsLocally(agentId) && (hostFile || isSessionChange(file))) continue;
 						if (hostFile) {
-							let hold: string | undefined;
-							try {
-								hold = this.otherHold(agentId);
-							} catch (error) {
-								// Its host files do not read: the host it had and the hold judged stand, and the batch's other bots are read.
-								this.ports.readFailed(agentId, error);
+							// Its host files do not read: the host it had and the hold judged stand, and the batch's other bots are read.
+							const hold = this.readHold(agentId);
+							if (!hold.read) {
 								changed.add(agentId);
 								continue;
 							}
 							this.remote.delete(agentId);
-							if (hold !== this.holds.get(agentId)) this.tookUp(agentId, hold);
+							if (hold.token !== this.holds.get(agentId)) this.tookUp(agentId, hold.token);
 						}
 						changed.add(agentId);
 					}
@@ -229,7 +234,9 @@ export class BotRemoteView {
 			// taken up here.
 			const moved: string[] = [];
 			for (const [agentId, read] of before) {
-				const hold = this.otherHold(agentId);
+				const now = this.readHold(agentId);
+				if (!now.read) continue;
+				const hold = now.token;
 				const judged = this.holds.has(agentId) ? this.holds.get(agentId) : read;
 				if (hold === judged) this.holds.set(agentId, hold);
 				else {
@@ -288,6 +295,21 @@ export class BotRemoteView {
 	/** The token of another host's hold on the bot's lock now; undefined when none holds it or the hold is this host's. */
 	private otherHold(agentId: string): string | undefined {
 		return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder)?.lockToken;
+	}
+
+	/**
+	 * {@link otherHold} for the view's own reads (its watch's start and changes): a bot whose host files do not read is told
+	 * once per cause (`readFailed`) and read again at its next change or the minute's sweep.
+	 */
+	private readHold(
+		agentId: string,
+	): { readonly read: true; readonly token: string | undefined } | { readonly read: false } {
+		try {
+			return { read: true, token: this.otherHold(agentId) };
+		} catch (error) {
+			this.ports.readFailed(agentId, error);
+			return { read: false };
+		}
 	}
 
 	/** Another host's hold on the bot changed to `hold`: the host takes the bot's waits up again. */
