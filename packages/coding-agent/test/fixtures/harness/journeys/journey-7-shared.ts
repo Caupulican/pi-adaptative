@@ -103,6 +103,8 @@ export const MODEL_ID = {
 	mailWorker: "worker-c",
 	/** The owner's bot that answers that worker's mail in its own session; its soul tells it apart on the shared model. */
 	mailReader: "worker-b",
+	/** The owner's bot that keeps a goal of its own and continues it on its own; its soul tells it apart on the shared model. */
+	goalBot: "worker-c",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -166,6 +168,7 @@ export const TRACK = {
 	mailAnswerer: "j7-mail-answerer",
 	mailWorker: "j7-mail-worker",
 	mailReader: "j7-mail-reader",
+	goalBot: "j7-goal-bot",
 } as const;
 
 /**
@@ -555,12 +558,14 @@ export function botSessionIds(world: HarnessWorld, agentId: string): string[] {
 /**
  * A root session whose file already exists, so a bot's charge can be settled in it: a main session buffers its entries
  * until one needs its file, and a bot's charge is settled only once that file holds it, so the root starts with one
- * recorded reply, as a session the owner already spoke in does.
+ * recorded reply, as a session the owner already spoke in does. `systemOneEnabled` selects the root's System One mode, which
+ * its bots' sessions follow; the world's mode when omitted.
  */
 export async function createChargedRoot(
 	world: HarnessWorld,
 	label: string,
 	settings?: Partial<Settings>,
+	systemOneEnabled?: boolean,
 ): Promise<{ readonly session: AgentSession; readonly manager: SessionManager; readonly rootFile: string }> {
 	const manager = world.createSessionManager();
 	const rootModel = world.provider.model(MODEL_ID.root);
@@ -580,6 +585,7 @@ export async function createChargedRoot(
 	const { session } = await world.createRootSession(MODEL_ID.root, {
 		sessionManager: manager,
 		...(settings ? { settings } : {}),
+		...(systemOneEnabled === undefined ? {} : { systemOneEnabled }),
 	});
 	return { session, manager, rootFile };
 }
