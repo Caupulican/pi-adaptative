@@ -94,6 +94,10 @@ export const MODEL_ID = {
 	 * it apart on the shared model.
 	 */
 	scoper: "worker-b",
+	/** The owner's bot that mails another bot; its soul tells it apart on the shared model. */
+	mailAsker: "worker-a",
+	/** The owner's bot that answers the mail in its own session; its soul tells it apart on the shared model. */
+	mailAnswerer: "worker-b",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -144,6 +148,8 @@ export const TRACK = {
 	scoper: "j7-scoper",
 	scopedFirstWorker: "j7-scoped-first-worker",
 	scopedLaterWorker: "j7-scoped-later-worker",
+	mailAsker: "j7-mail-asker",
+	mailAnswerer: "j7-mail-answerer",
 } as const;
 
 /**
