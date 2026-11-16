@@ -32,6 +32,13 @@ import { parseWorkerWatchScope, type WorkerWatchScope } from "../routines/worker
 import type { TurnAuthority } from "../turn-origin.ts";
 import { atomicFileFamily, isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import {
+	type GithubWatchResult,
+	type GithubWatchSource,
+	isGithubWatchSource,
+	parseGithubWatchResult,
+	parseGithubWatchSource,
+} from "./github-watch-source.ts";
 
 export const SESSION_WATCH_LEDGER_VERSION = 1;
 /** The ledger's suffix beside a session's transcript; no reader of a session directory lists it. */
@@ -84,13 +91,26 @@ export interface SessionWatchWake {
 
 export type SessionWatchCursor = Extract<RoutineCursor, { kind: "watch" }>;
 
+/**
+ * What a session watch waits on: a condition the routine watch monitor samples, as a routine watch's, or a typed GitHub
+ * source (`github-watch-source.ts`) the host reads, which only this ledger ever holds.
+ */
+export type SessionWatchSource = WatchCondition | GithubWatchSource;
+
+/** What a watch waits on, as the ledger keeps it and the `watch` tool takes it, or a TypeError. */
+export function parseSessionWatchSource(value: unknown): SessionWatchSource {
+	return isPlainRecord(value) && typeof value.type === "string" && isGithubWatchSource({ type: value.type })
+		? parseGithubWatchSource(value)
+		: parseWatchCondition(value);
+}
+
 export interface SessionWatchRecord {
 	readonly watchId: string;
 	/** Changes when a watch id is armed again after the earlier watch of that id ended. */
 	readonly incarnationId: string;
 	readonly purpose?: string;
 	readonly onFire: string;
-	readonly condition: WatchCondition;
+	readonly condition: SessionWatchSource;
 	/** On the clock an owner's stop of a bot is dated on (`OWNER_STOP_CLOCK`), which the stop judges it by. */
 	readonly armedAt: number;
 	/** On the session's `routines` clock, as its samples and end-time alarm are. */
@@ -103,6 +123,8 @@ export interface SessionWatchRecord {
 	readonly event?: WatchFiredEvent;
 	/** What the watch last saw when it reached its end time. */
 	readonly lastSeen?: WatchLastSeen;
+	/** A typed source's last reading: pending while it watches, the done one it fired on. */
+	readonly result?: GithubWatchResult;
 	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
 	readonly tellOwner?: true;
 	/**
@@ -232,6 +254,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"endedAt",
 			"event",
 			"lastSeen",
+			"result",
 			"tellOwner",
 			"served",
 			"wakes",
@@ -247,6 +270,8 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 	const expiresAt = instant(value.expiresAt);
 	if (expiresAt <= armedAt) throw new TypeError("Watch end time is invalid.");
 	if (value.tellOwner !== undefined && value.tellOwner !== true) throw new TypeError("Watch record is invalid.");
+	const condition = parseSessionWatchSource(value.condition);
+	if (value.result !== undefined && !isGithubWatchSource(condition)) throw new TypeError("Watch result is invalid.");
 	return {
 		watchId: watchIdOf(value.watchId),
 		incarnationId: boundedRoutineText(value.incarnationId, MAX_ID_CHARS, "incarnation"),
@@ -254,7 +279,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			? {}
 			: { purpose: boundedRoutineText(value.purpose, MAX_ROUTINE_PROMPT_CHARS, "purpose") }),
 		onFire: boundedRoutineText(value.onFire, MAX_ROUTINE_PROMPT_CHARS, "plan"),
-		condition: parseWatchCondition(value.condition),
+		condition,
 		armedAt,
 		expiresAt,
 		armedBy: parseArmer(value.armedBy),
@@ -263,6 +288,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		...(endedAt === undefined ? {} : { endedAt }),
 		...(value.event === undefined ? {} : { event: parseWatchFiredEvent(value.event) }),
 		...(value.lastSeen === undefined ? {} : { lastSeen: oneOf(value.lastSeen, WATCH_LAST_SEEN, "last seen") }),
+		...(value.result === undefined ? {} : { result: parseGithubWatchResult(value.result) }),
 		...(value.tellOwner === true ? { tellOwner: true as const } : {}),
 		...(value.served === undefined ? {} : { served: parseServed(value.served) }),
 		wakes: value.wakes.map(parseWake),

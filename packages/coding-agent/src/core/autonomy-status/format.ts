@@ -15,6 +15,7 @@ import {
 import { describeWatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
+import { describeSessionWatchSource } from "../watches/github-watch-source.ts";
 import type {
 	BoundedList,
 	DayCount,
@@ -151,7 +152,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				words.routines.watchLine({
 					watchId: watch.watchId,
 					state: words.routines.watchState[watch.status],
-					condition: describeWatchCondition(watch.condition, interfaceText().chat.watch),
+					condition: describeSessionWatchSource(watch.condition, interfaceText().chat.watch),
 					ends: at(watch.expiresAt),
 					worker: watch.runtimeId,
 					owed: watch.pendingWakes,

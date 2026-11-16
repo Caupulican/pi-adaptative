@@ -7,6 +7,7 @@ import type { ParentWakeDelivery } from "../proactivity/proactivity-controller.t
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import {
+	type CiAttemptTerminalEvent,
 	type HostEventConnectionView,
 	HostEventError,
 	type HostEventReplayGap,
@@ -37,6 +38,11 @@ export interface HostEventSessionControllerDeps {
 	admitRootDelivery(deliveryId: string): Promise<ParentWakeDelivery>;
 	/** Records how a root delivery was accepted, for `/proactivity status`. */
 	rootDelivered(delivery: ParentWakeDelivery): void;
+	/**
+	 * Whether a CI result reaches the session through one of its own watches (`SessionWatchService.reportsCi`), so its
+	 * root delivery `deliveryId` would be a second copy of it; absent where no session watch is held.
+	 */
+	reportedByWatch?(event: CiAttemptTerminalEvent, deliveryId: string): boolean;
 	deliverParent(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;
 	/** Delivery ids of the parent inputs held for the owner's next turn and not yet selected by one. */
 	heldParentInputs(): readonly string[];
@@ -360,12 +366,19 @@ export class HostEventSessionController {
 			if (!probe) return;
 			probe.release();
 			try {
-				if (events.eligible(delivery.deliveryId)) await this.deliverRoot(delivery);
+				// The session's own watch wakes it with this result: the root copy is settled instead of told twice.
+				if (this.reportedByWatch(delivery)) events.settle(delivery.deliveryId, "non_actionable");
+				else if (events.eligible(delivery.deliveryId)) await this.deliverRoot(delivery);
 				this.warned.delete(delivery.deliveryId);
 			} catch (error) {
 				this.report(delivery.deliveryId, error);
 			}
 		}
+	}
+
+	private reportedByWatch(delivery: HostEventDelivery): boolean {
+		const event = this.deps.runtime.hostEvents.getEvent(delivery.eventId)?.envelope.event;
+		return event?.kind === "ci-attempt-terminal" && this.deps.reportedByWatch?.(event, delivery.deliveryId) === true;
 	}
 
 	private settleTask(

@@ -94,6 +94,22 @@ export const CHAT = {
 			commandPasses: "A watched command check now passes",
 			pageMatches: (label: string) => `A watched page now matches${label}`,
 		},
+		/** A typed GitHub source, as the owner reads what a watch waits on. */
+		github: {
+			run: (runId: number, repo: string) => `GitHub run ${runId} of ${repo}`,
+			ci: (sha: string) => `the CI of commit ${sha}`,
+			release: (tag: string) => `release ${tag}`,
+			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed. */
+			runEnded: (subject: string, conclusion: string, failedJob: string | undefined) =>
+				`${subject} finished: ${conclusion}${failedJob === undefined ? "" : ` (failed job: ${failedJob})`}`,
+			released: (subject: string) => `${subject} was published`,
+		},
+		/** A watch's result told on the owner's phone (`watchResultPhoneText`): its lead word and the outcomes besides a firing. */
+		phone: {
+			lead: "Watch",
+			timedOut: "reached its deadline without a result",
+			failing: (failures: number) => `could not be checked ${failures} times in a row; it keeps trying`,
+		},
 	},
 	/** The daemon's build beside the session's: what runs, and what this session runs. */
 	daemonBuildRunning: (build: string | undefined) =>

@@ -65,8 +65,11 @@ export function routineWatchPlan(
 	};
 }
 
-/** The saved plan as the wake carries it: the armer's own words as they are, any other plan fenced as data. */
-function savedPlan(plan: WatchWakePlan, fenceKey: string, planChars: number): string {
+/**
+ * The saved plan as the wake carries it: the armer's own words as they are, any other plan fenced as data. A session
+ * watch's typed sources word their wakes with it too (`core/watches/github-watch-wake.ts`).
+ */
+export function savedPlan(plan: WatchWakePlan, fenceKey: string, planChars: number): string {
 	const text = plan.text.length > planChars ? `${plan.text.slice(0, planChars - 1)}…` : plan.text;
 	if (plan.trusted) return `Your plan when you armed it: ${text}`;
 	return [

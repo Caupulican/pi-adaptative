@@ -32,6 +32,7 @@ import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
+import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
 import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
@@ -102,6 +103,8 @@ export interface RoutineRuntime {
 	/** The session's own watches (`core/watches/`), and the monitor that samples them with the same samplers. */
 	readonly sessionWatches: SessionWatchService;
 	readonly sessionWatchMonitor: RoutineWatchMonitor;
+	/** Reads the session's watches on typed GitHub sources through the host's {@link GithubWatchLink}. */
+	readonly githubWatchPoller: GithubWatchPoller;
 	/** The session's own watches as its `watch` tool (and a bot's own `task_watch`) reach them. */
 	readonly watchPort: SessionWatchPort;
 	stop(): Promise<void>;
@@ -117,6 +120,10 @@ export interface RoutineAssemblyHost {
 	parentWriteHolds(): ReadonlySet<string>;
 	landRecordedParentWrites(lifecycle: WorkerLifecycle): void;
 	hostEventFeed(): RoutineHostEventPort;
+	/** What the host offers the session's typed GitHub watches: its reader and its CI source (`github-watch-poller.ts`). */
+	githubWatches(): GithubWatchLink;
+	/** Tells the owner once per key on the phone (`OwnerPush.tell`). */
+	tellOwner(key: string, text: string): void;
 	subscribeStateChanges(listener: () => void): () => void;
 	subscribeOrchestrationStore(listener: () => void): () => void;
 	sendOperatorMessageToBot(
@@ -412,6 +419,7 @@ export class RoutineRuntimeAssembly {
 				return leafId === null ? undefined : { sessionId: current.getSessionId(), leafId };
 			},
 			warnOwner: warn,
+			tellOwner: (key, text) => this.host.tellOwner(key, text),
 			isDisposed: () => this.deps.isDisposed(),
 			warn,
 		});
@@ -578,6 +586,14 @@ export class RoutineRuntimeAssembly {
 		} satisfies WatchCheckAdmitter;
 		const sessionWatches = this.sessionWatches(store, scope, checks);
 		const sessionWatchMonitor = monitorOver(sessionWatches, (failing) => sessionWatches.noteFailing(failing));
+		const githubWatchPoller = new GithubWatchPoller({
+			watches: sessionWatches,
+			link: this.host.githubWatches(),
+			hostEvents: this.host.hostEventFeed(),
+			timers: routineTimers,
+			isDisposed: () => this.deps.isDisposed(),
+			warn: (message) => this.host.warn(message),
+		});
 		const session = new RoutineSessionController({
 			store,
 			scheduler,
@@ -665,7 +681,7 @@ export class RoutineRuntimeAssembly {
 			const completions = [
 				start("stop routine watches", () => watches.dispose()),
 				start("stop session watches", async () => {
-					await sessionWatchMonitor.dispose();
+					await Promise.all([sessionWatchMonitor.dispose(), githubWatchPoller.stop()]);
 					await sessionWatches.stop();
 				}),
 				start("stop routine scheduler", () => scheduler.close()),
@@ -695,6 +711,16 @@ export class RoutineRuntimeAssembly {
 			},
 			now: () => routineTimers.now(),
 		};
-		return { scheduler, session, intake, watches, sessionWatches, sessionWatchMonitor, watchPort, stop };
+		return {
+			scheduler,
+			session,
+			intake,
+			watches,
+			sessionWatches,
+			sessionWatchMonitor,
+			githubWatchPoller,
+			watchPort,
+			stop,
+		};
 	}
 }

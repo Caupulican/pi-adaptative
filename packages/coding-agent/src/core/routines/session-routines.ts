@@ -106,6 +106,7 @@ export class SessionRoutines {
 		runtime.watches.start();
 		runtime.sessionWatches.start();
 		runtime.sessionWatchMonitor.start();
+		runtime.githubWatchPoller.start();
 	}
 
 	/** The runtime over the session's store, loading the store (which builds the runtime) first. */

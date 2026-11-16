@@ -20,6 +20,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
+import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import {
 	MAX_AGENT_ARMED_WATCHES,
@@ -48,11 +49,24 @@ import {
 	workerUnreachableLine,
 } from "../routines/routine-worker-wake.ts";
 import { admitWatchCheck, type WatchCheckAdmitter } from "../routines/watch-check-admission.ts";
-import { type WatchCondition, watchFiredLine } from "../routines/watch-contract.ts";
+import { watchFiredLine } from "../routines/watch-contract.ts";
 import { watchCheckRefusal } from "../routines/worker-watch-scope.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { type TurnAuthority, turnAuthorityCovers } from "../turn-origin.ts";
 import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
+import {
+	boundedGithubWatchResult,
+	describeGithubWatchResult,
+	type GithubWatchResult,
+	type GithubWatchSource,
+	githubWatchSubject,
+	isGithubWatchSource,
+} from "./github-watch-source.ts";
+import {
+	githubWatchFailingWakeText,
+	githubWatchFiredWakeText,
+	githubWatchTimedOutWakeText,
+} from "./github-watch-wake.ts";
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
@@ -60,11 +74,13 @@ import {
 	type SessionWatchLedger,
 	type SessionWatchRecord,
 	type SessionWatchServed,
+	type SessionWatchSource,
 	type SessionWatchStatus,
 	type SessionWatchWake,
 	type SessionWatchWakeKind,
 	withWake,
 } from "./session-watch-ledger.ts";
+import { sessionWatchPhoneKey, sessionWatchPhoneText } from "./session-watch-phone.ts";
 
 /** How long a wake that could not be delivered waits before it is tried again. */
 const WATCH_WAKE_RETRY_DELAY_MS = 5_000;
@@ -97,7 +113,7 @@ export interface SessionWatchArmRequest {
 	readonly watchId: string;
 	readonly purpose?: string;
 	readonly onFire: string;
-	readonly condition: WatchCondition;
+	readonly condition: SessionWatchSource;
 	readonly expiresAt: number;
 	readonly armedBy: SessionWatchArmer;
 	/** Tell the owner each result on the phone besides the armer's wake. */
@@ -114,7 +130,7 @@ export interface SessionWatchArmRequest {
 export interface SessionWatchView {
 	readonly watchId: string;
 	readonly status: SessionWatchStatus;
-	readonly condition: WatchCondition;
+	readonly condition: SessionWatchSource;
 	readonly purpose?: string;
 	readonly onFire: string;
 	readonly armedAt: string;
@@ -129,6 +145,8 @@ export interface SessionWatchView {
 	readonly lastObservation: WatchLastSeen;
 	/** What its firing saw, once it fired. */
 	readonly result?: { readonly cause: string; readonly observedAt: string };
+	/** A typed source's last reading of GitHub: its status, conclusion, failed job and URL, pending or done. */
+	readonly reading?: GithubWatchResult;
 	/** Wakes the armer is still owed. */
 	readonly pendingWakes: number;
 }
@@ -162,6 +180,8 @@ export interface SessionWatchServiceDeps {
 	armingEntry(): SessionWatchServed | undefined;
 	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
 	warnOwner(message: string): void;
+	/** Tells the owner once per key on the phone (`OwnerPush.tell`); absent where no owner channel is hosted. */
+	tellOwner?(key: string, text: string): void;
 	isDisposed(): boolean;
 	warn(message: string): void;
 }
@@ -181,6 +201,8 @@ function wakePlan(record: SessionWatchRecord): WatchWakePlan {
 /** The words of one wake, from the record alone. */
 export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWatchWake, planChars?: number): string {
 	const plan = wakePlan(record);
+	const { condition } = record;
+	if (isGithubWatchSource(condition)) return githubWatchWakeText(record, condition, wake, planChars);
 	if (wake.kind === "fired") {
 		if (!record.event) throw new Error(`Watch ${record.watchId} has no recorded firing.`);
 		return watchFiredWakeText(
@@ -195,14 +217,32 @@ export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWa
 		return watchTimedOutWakeText(
 			plan,
 			wake.deliveryId,
-			record.condition,
+			condition,
 			record.expiresAt,
 			record.lastSeen,
 			false,
 			planChars,
 		);
 	if (!wake.failing) throw new Error(`Watch ${record.watchId} has no recorded failing streak.`);
-	return watchFailingWakeText(plan, record.incarnationId, record.condition, record.expiresAt, wake.failing, planChars);
+	return watchFailingWakeText(plan, record.incarnationId, condition, record.expiresAt, wake.failing, planChars);
+}
+
+/** The words of one wake of a typed GitHub source. */
+function githubWatchWakeText(
+	record: SessionWatchRecord,
+	source: GithubWatchSource,
+	wake: SessionWatchWake,
+	planChars?: number,
+): string {
+	const plan = wakePlan(record);
+	if (wake.kind === "fired") {
+		if (!record.result) throw new Error(`Watch ${record.watchId} has no recorded result.`);
+		return githubWatchFiredWakeText(plan, wake.deliveryId, source, record.result, planChars);
+	}
+	if (wake.kind === "timed-out")
+		return githubWatchTimedOutWakeText(plan, wake.deliveryId, source, record.expiresAt, record.result, planChars);
+	if (!wake.failing) throw new Error(`Watch ${record.watchId} has no recorded failing streak.`);
+	return githubWatchFailingWakeText(plan, record.incarnationId, source, record.expiresAt, wake.failing, planChars);
 }
 
 /**
@@ -213,6 +253,18 @@ export function sessionWatchWakeText(record: SessionWatchRecord, wake: SessionWa
 export function sessionWatchWakeDetails(record: SessionWatchRecord, wake: SessionWatchWake): Record<string, unknown> {
 	// The entry the watch was armed from: its wake turns are charged to that entry's spend window.
 	const served = record.served === undefined ? {} : { served: record.served };
+	// A typed source's firing: its cause in English (what every reader of a wake's row shows when it holds no firing
+	// line) and the reading itself, which this build's row words in the interface language.
+	if (wake.kind === "fired" && record.result && isGithubWatchSource(record.condition))
+		return {
+			routineId: record.watchId,
+			outcome: "succeeded",
+			wake: true,
+			cause: describeGithubWatchResult(record.condition, record.result),
+			github: { source: record.condition, result: record.result },
+			oneShotWatch: true,
+			...served,
+		};
 	if (wake.kind === "fired" && record.event)
 		return {
 			routineId: record.watchId,
@@ -235,6 +287,8 @@ function deliveryId(sessionId: string, record: SessionWatchRecord, kind: Session
 }
 
 function view(record: SessionWatchRecord): SessionWatchView {
+	const github = isGithubWatchSource(record.condition) ? record.condition : undefined;
+	const done = github && record.result?.state === "done" ? record.result : undefined;
 	return {
 		watchId: record.watchId,
 		status: record.status,
@@ -249,10 +303,23 @@ function view(record: SessionWatchRecord): SessionWatchView {
 				? { kind: "worker", runtimeId: record.armedBy.runtimeId }
 				: { kind: record.armedBy.kind },
 		...(record.tellOwner ? { tellOwner: true as const } : {}),
-		lastObservation: record.lastSeen ?? watchLastSeen(record.cursor),
+		lastObservation: github
+			? record.result === undefined
+				? "unobserved"
+				: "not-met"
+			: (record.lastSeen ?? watchLastSeen(record.cursor)),
 		...(record.event === undefined
 			? {}
 			: { result: { cause: watchCauseText(record.event), observedAt: record.event.observedAt } }),
+		...(github && done
+			? {
+					result: {
+						cause: describeGithubWatchResult(github, done),
+						observedAt: new Date(done.observedAt).toISOString(),
+					},
+				}
+			: {}),
+		...(record.result === undefined ? {} : { reading: record.result }),
 		pendingWakes: record.wakes.filter((wake) => !wake.delivered).length,
 	};
 }
@@ -351,16 +418,19 @@ export class SessionWatchService implements WatchObservationStore {
 			request.armedBy.kind === "worker"
 				? { runtimeId: request.armedBy.runtimeId, scope: request.armedBy.scope }
 				: undefined;
-		const admitted =
-			request.toolCallId === undefined
-				? { condition: this.deps.checks.admitWatch(request.condition, worker), check: undefined }
+		const { condition } = request;
+		// A typed source runs no check: the host reads GitHub itself, read-only, and no command or page is admitted.
+		const admitted = isGithubWatchSource(condition)
+			? { condition, check: undefined }
+			: request.toolCallId === undefined
+				? { condition: this.deps.checks.admitWatch(condition, worker), check: undefined }
 				: await admitWatchCheck(
 						this.deps.checks,
 						{
 							toolCallId: request.toolCallId,
 							parentToolName: request.parentToolName,
 							watchId: request.watchId,
-							condition: request.condition,
+							condition,
 							...(worker ? { worker } : {}),
 						},
 						signal,
@@ -483,19 +553,109 @@ export class SessionWatchService implements WatchObservationStore {
 		return this.deps.ledger.subscribe(listener);
 	}
 
+	/** The live watches on a condition the routine watch monitor samples; a typed source is read by its own poller. */
 	observedWatches(nowMs: number): readonly ObservedWatch[] {
-		return this.deps.ledger
+		return this.deps.ledger.list().flatMap((record) => {
+			const { condition } = record;
+			if (isGithubWatchSource(condition) || !isLiveSessionWatch(record, nowMs)) return [];
+			return [
+				{
+					routineId: record.watchId,
+					incarnationId: record.incarnationId,
+					condition,
+					worker:
+						record.armedBy.kind === "worker"
+							? { runtimeId: record.armedBy.runtimeId, scope: record.armedBy.scope }
+							: undefined,
+				},
+			];
+		});
+	}
+
+	/** The live watches on a typed GitHub source, for the poller that reads them (`github-watch-poller.ts`). */
+	githubWatches(nowMs: number): readonly { watchId: string; incarnationId: string; source: GithubWatchSource }[] {
+		return this.deps.ledger.list().flatMap((record) => {
+			const { condition } = record;
+			return isGithubWatchSource(condition) && isLiveSessionWatch(record, nowMs)
+				? [{ watchId: record.watchId, incarnationId: record.incarnationId, source: condition }]
+				: [];
+		});
+	}
+
+	/** The watch of this session on the thing `source` names, live or ended, whoever armed it: one wait per subject. */
+	armedOn(source: GithubWatchSource): SessionWatchView | undefined {
+		const subject = githubWatchSubject(source);
+		const record = this.deps.ledger
 			.list()
-			.filter((record) => isLiveSessionWatch(record, nowMs))
-			.map((record) => ({
-				routineId: record.watchId,
-				incarnationId: record.incarnationId,
-				condition: record.condition,
-				worker:
-					record.armedBy.kind === "worker"
-						? { runtimeId: record.armedBy.runtimeId, scope: record.armedBy.scope }
-						: undefined,
-			}));
+			.find(({ condition }) => isGithubWatchSource(condition) && githubWatchSubject(condition) === subject);
+		return record && view(record);
+	}
+
+	/**
+	 * One reading of a typed source: a pending one is recorded when it changed, a done one fires the watch in the same
+	 * write that records the wake it owes, as a condition's firing does.
+	 */
+	observeGithub(
+		watchId: string,
+		incarnationId: string,
+		reading: GithubWatchResult,
+	): "stale" | "unchanged" | "recorded" | "fired" {
+		const nowMs = this.deps.timers.now();
+		const record = this.deps.ledger.get(watchId);
+		if (
+			!record ||
+			record.incarnationId !== incarnationId ||
+			!isGithubWatchSource(record.condition) ||
+			!isLiveSessionWatch(record, nowMs)
+		)
+			return "stale";
+		const result = boundedGithubWatchResult(reading);
+		if (result.state === "pending") {
+			const last = record.result;
+			if (last?.status === result.status && last.runId === result.runId && last.runAttempt === result.runAttempt)
+				return "unchanged";
+			this.replace({ ...record, result });
+			return "recorded";
+		}
+		const fired: SessionWatchRecord = {
+			...record,
+			cursor: { ...record.cursor, fires: record.cursor.fires + 1, spent: true },
+			status: "fired",
+			endedAt: nowMs,
+			result,
+		};
+		this.replace({
+			...fired,
+			wakes: withWake(fired, {
+				kind: "fired",
+				deliveryId: deliveryId(this.deps.sessionId, fired, "fired", nowMs),
+				at: nowMs,
+				delivered: false,
+			}),
+		});
+		this.followEndTimes();
+		this.drain();
+		return "fired";
+	}
+
+	/**
+	 * Whether a CI attempt's result reaches the session through one of its watches: a live `ci` watch on its commit the
+	 * session armed (a worker's wakes reach the worker), or one that fired on that very attempt. The root delivery of the
+	 * same result is then the session's second copy of it (`HostEventSessionController`).
+	 */
+	reportsCi(event: CiAttemptTerminalEvent): boolean {
+		const nowMs = this.deps.timers.now();
+		return this.deps.ledger.list().some((record) => {
+			const { condition } = record;
+			if (condition.type !== "ci" || condition.sha !== event.headSha || record.armedBy.kind === "worker")
+				return false;
+			if (isLiveSessionWatch(record, nowMs)) return true;
+			return (
+				record.status === "fired" &&
+				record.result?.runId === event.identity.runId &&
+				record.result.runAttempt === event.identity.runAttempt
+			);
+		});
 	}
 
 	/** The edge rule over a watch's cursor: a firing ends the watch in the same write that records the wake it owes. */
@@ -705,6 +865,7 @@ export class SessionWatchService implements WatchObservationStore {
 	): Promise<"delivered" | "settled" | "later"> {
 		const details = sessionWatchWakeDetails(record, wake);
 		const text = sessionWatchWakeText(record, wake);
+		if (record.tellOwner) this.tellOwner(record, wake);
 		const owed = () =>
 			this.deps.ledger
 				.get(record.watchId)
@@ -725,6 +886,21 @@ export class SessionWatchService implements WatchObservationStore {
 			details,
 			owed,
 		);
+	}
+
+	/**
+	 * Tells the owner a wake's result on the phone, once per wake (`OwnerPush` keeps one push per key), whether or not its
+	 * armer takes it now. A sentence that cannot be built is warned and does not hold the armer's wake back.
+	 */
+	private tellOwner(record: SessionWatchRecord, wake: SessionWatchWake): void {
+		try {
+			this.deps.tellOwner?.(
+				sessionWatchPhoneKey(record, wake),
+				sessionWatchPhoneText(record, wake, interfaceText().chat.watch),
+			);
+		} catch (error) {
+			this.warn(error);
+		}
 	}
 
 	private markDelivered(watchId: string, wakeId: string): void {

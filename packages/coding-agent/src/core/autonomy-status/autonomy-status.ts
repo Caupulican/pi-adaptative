@@ -70,7 +70,7 @@ import type { SessionSemanticPlaneController } from "../session-semantic-plane-c
 import type { SettingsManager } from "../settings-manager.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { TurnAuthority, TurnOriginKind } from "../turn-origin.ts";
-import type { SessionWatchStatus } from "../watches/session-watch-ledger.ts";
+import type { SessionWatchSource, SessionWatchStatus } from "../watches/session-watch-ledger.ts";
 import type { SessionWatchView } from "../watches/session-watch-service.ts";
 import type { RunToolManifest } from "./tool-manifest.ts";
 
@@ -145,7 +145,7 @@ export interface RoutineStatusItem {
 export interface SessionWatchStatusItem {
 	readonly watchId: string;
 	readonly status: SessionWatchStatus;
-	readonly condition: WatchCondition;
+	readonly condition: SessionWatchSource;
 	readonly expiresAt: number;
 	/** The worker runtime that armed it; absent when the session did. */
 	readonly runtimeId?: string;

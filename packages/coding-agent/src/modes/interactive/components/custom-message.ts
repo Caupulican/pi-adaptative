@@ -21,6 +21,7 @@ import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { describeWatchFired, parseWatchFiredLine } from "../../../core/routines/watch-contract.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
+import { describeGithubWatchResultForOwner, parseGithubWatchWake } from "../../../core/watches/github-watch-source.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
 import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
@@ -431,8 +432,16 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 		};
 	// A watch's wake started no run: the row says what the host saw and that the armer was woken with it.
 	const fired = parseWatchFiredLine(details.watch);
-	// A message saved before the firing's line was kept holds its cause as English words.
-	const cause = fired ? describeFired(fired) : typeof details.cause === "string" ? details.cause : undefined;
+	// A session watch's GitHub reading is worded here; a message saved before the firing's line was kept holds its cause
+	// as English words.
+	const github = parseGithubWatchWake(details.github);
+	const cause = github
+		? describeGithubWatchResultForOwner(github.source, github.result, interfaceText().chat.watch.github)
+		: fired
+			? describeFired(fired)
+			: typeof details.cause === "string"
+				? details.cause
+				: undefined;
 	if (details.wake === true && cause)
 		return { text: text.routineOutcomeWithCause(cause, text.watchWokeArmer), status: "success" };
 	const outcome = typeof details.outcome === "string" ? details.outcome : text.routineEndedOutcome;

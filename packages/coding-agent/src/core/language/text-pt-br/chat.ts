@@ -88,6 +88,19 @@ export const CHAT = {
 			commandPasses: "Uma verificação por comando acompanhada agora passa",
 			pageMatches: (label: string) => `Uma página acompanhada agora confere${label}`,
 		},
+		github: {
+			run: (runId: number, repo: string) => `execução ${runId} do GitHub em ${repo}`,
+			ci: (sha: string) => `o CI do commit ${sha}`,
+			release: (tag: string) => `release ${tag}`,
+			runEnded: (subject: string, conclusion: string, failedJob: string | undefined) =>
+				`${subject} terminou: ${conclusion}${failedJob === undefined ? "" : ` (job com falha: ${failedJob})`}`,
+			released: (subject: string) => `${subject} foi publicada`,
+		},
+		phone: {
+			lead: "Monitoramento",
+			timedOut: "chegou ao prazo sem resultado",
+			failing: (failures: number) => `não pôde ser verificado ${failures} vezes seguidas; continua tentando`,
+		},
 	},
 	daemonBuildRunning: (build: string | undefined) =>
 		build === undefined ? "build sem identificação (um build anterior)" : `build ${build}`,

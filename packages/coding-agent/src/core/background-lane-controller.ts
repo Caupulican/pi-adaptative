@@ -133,7 +133,8 @@ import type {
 	HostEventQuery,
 	HostEventSubscriptionChange,
 } from "./events/host-event-control.ts";
-import { HostEventSessionController } from "./events/host-event-session-controller.ts";
+import { openHostEventSessionBinding } from "./events/host-event-session-binding.ts";
+import type { HostEventSessionController } from "./events/host-event-session-controller.ts";
 import type { ManagedLaneEvent, ManagedLaneHostFacts } from "./extensions/managed-lane-records.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
 import { subscriptionAllowancePort } from "./fleet/capacity/allowance-room.ts";
@@ -164,12 +165,10 @@ import type { PlanExecutorPort } from "./plan/plan-executor-port.ts";
 import { ActAheadController } from "./proactivity/act-ahead-controller.ts";
 import type { CiFailureEvidenceReader } from "./proactivity/act-ahead-record.ts";
 import {
-	MAX_TURN_WAKES_HOLD,
 	type ParentWakeDelivery,
 	ProactivityController,
 	type ProactivityDailyState,
 	type ProactivityFeedbackView,
-	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
 import { observeReviewGauge } from "./proof/review-gauge.ts";
@@ -195,6 +194,7 @@ import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
+import { GithubWatchLink } from "./watches/github-watch-poller.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
@@ -373,6 +373,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			parentWriteHolds: () => this._parentWriteHolds,
 			landRecordedParentWrites: (lifecycle) => this._landRecordedParentWrites(lifecycle),
 			hostEventFeed: () => this._hostEventFeed(),
+			githubWatches: () => this.githubWatches,
+			tellOwner: (key, text) => this.channels.ownerPush.tell(key, text),
 			subscribeStateChanges: (listener) => this.subscribeStateChanges(listener),
 			subscribeOrchestrationStore: (listener) => this.subscribeOrchestrationStore(listener),
 			sendOperatorMessageToBot: (agentId, message, options) =>
@@ -838,6 +840,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The session's own watches (`core/watches/`) the operator bar counts beside its routine watches. */
 	readonly ownWatches = () => this._routines.ownWatches;
+	/** What the host's CI resource offers the session's typed GitHub watches: its reader and its CI source. */
+	readonly githubWatches = new GithubWatchLink();
 
 	subscribeRoutineDefinitions(listener: () => void): () => void {
 		return this.getBotTeamStore().subscribe(listener);
@@ -860,60 +864,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** Runtime resources own this binding's lifetime; every accepted event uses the shared task ledger. */
 	openHostEventSession(signal: AbortSignal): HostEventSessionController {
-		const manager = this.deps.getSessionManager();
-		const sessionId = manager.getSessionId();
-		const sessionFile = manager.getSessionFile();
-		const assertCurrent = () => {
-			signal.throwIfAborted();
-			if (
-				this.deps.isDisposed() ||
-				this.deps.getSessionManager() !== manager ||
-				manager.getSessionId() !== sessionId ||
-				manager.getSessionFile() !== sessionFile
-			)
-				throw new Error("Host events belong to a retired session.");
-		};
-		assertCurrent();
-		const controller = new HostEventSessionController({
-			runtime: this._getWorkerLifecycle().ledger.runtime,
-			agentDir: this.deps.getAgentDir(),
-			sessionId,
+		const controller = openHostEventSessionBinding(
+			{
+				deps: this.deps,
+				runtime: () => this._getWorkerLifecycle().ledger.runtime,
+				workerController: () => this._getWorkerController(),
+				rootDelivered: (delivery) => {
+					this._lastEventDelivery = delivery;
+				},
+				reportedByWatch: (event) => this._routines.current?.sessionWatches.reportsCi(event) === true,
+				deliverParent: (input, options) => this.deps.deliverParentInput(input, options),
+				warn: (message) => this._safeWarn(message),
+				retired: (retired) => this._hostEventSessions.delete(retired),
+			},
 			signal,
-			assertCurrent,
-			captureOrigin: () => captureWorkerReceiptOrigin(manager, assertCurrent),
-			canDeliver: () => !this.deps.isDisposed() && this.deps.getSettingsManager().getProactivitySettings().enabled,
-			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
-			subscribeSettings: (listener) => this.deps.getSettingsManager().subscribeChanges(listener),
-			admitRootDelivery: async (deliveryId) => {
-				// A replay must repeat the saved metadata, so a saved delivery is never measured again.
-				const saved = manager.getParentInput(deliveryId);
-				if (saved) return { mode: saved.metadata.mode };
-				const nowMs = this.deps.getTimers().port("proactivity").now();
-				const day = await this.deps.aggregateUsageWindow(rollingDayWindow(nowMs));
-				return parentTurnWakes(day) >= this.deps.getSettingsManager().getProactivitySettings().maxTurnWakesPerDay
-					? { mode: "next-owner-turn", hold: MAX_TURN_WAKES_HOLD }
-					: { mode: "turn" };
-			},
-			rootDelivered: (delivery) => {
-				this._lastEventDelivery = delivery;
-			},
-			deliverParent: (input, options) => this.deps.deliverParentInput(input, options),
-			heldParentInputs: () =>
-				manager.getPendingParentInputs("next-owner-turn").map((input) => input.metadata.deliveryId),
-			skipParentInput: (deliveryId, reason) => manager.skipPendingParentInput(deliveryId, reason),
-			deliverTask: async (delivery, active) => {
-				const control = this._getWorkerController().getAgentControl();
-				return control.deliverHostEvent ? control.deliverHostEvent(delivery, active) : "unavailable";
-			},
-			reconcileTask: (delivery) => {
-				const control = this._getWorkerController().getAgentControl();
-				if (!control.reconcileHostEventDelivery) throw new Error("Host event reconciliation is unavailable.");
-				control.reconcileHostEventDelivery(delivery);
-			},
-			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
-			warn: (message) => this._safeWarn(message),
-			retired: (retired) => this._hostEventSessions.delete(retired),
-		});
+		);
 		this._hostEventSessions.add(controller);
 		return controller;
 	}

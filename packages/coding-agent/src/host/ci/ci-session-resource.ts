@@ -6,6 +6,8 @@ import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.t
 import { HostEventSessionResource } from "../host-event-session-resource.ts";
 import { createCiHostRuntime } from "./ci-host-event-source.ts";
 import { type CiGitPaths, readCiStatusView, resolveCiGitPathsAsync } from "./ci-status-record.ts";
+import { createCiCommandPort } from "./github-actions-ci-provider.ts";
+import { GithubWatchHostReader } from "./github-watch-reader.ts";
 
 const STATUS_CACHE_MS = 1000;
 
@@ -29,6 +31,10 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 				signal.throwIfAborted();
 				this.setPaths(paths);
 				signal.addEventListener("abort", () => this.setPaths(undefined), { once: true });
+				// The session's typed GitHub watches read GitHub from its working directory while this resource runs.
+				const watches = session.backgroundLanes.githubWatches;
+				const reader = new GithubWatchHostReader(createCiCommandPort(active.sessionManager.getCwd(), onDiagnostic));
+				signal.addEventListener("abort", watches.provideReader(reader), { once: true });
 				// `proactivity.ciEvents: false` stops CI discovery (git reads and GitHub calls) for host events.
 				if (!paths || !active.services.settingsManager.getProactivitySettings().ciEvents) return [];
 				const runtime = await createCiHostRuntime({
@@ -36,8 +42,21 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 					paths,
 					signal,
 					onDiagnostic,
-					getSubscribedSubjects: () => session.backgroundLanes.getHostEventSubjects(),
-					subscribeSubjects: (listener) => session.backgroundLanes.subscribeOrchestrationStore(listener),
+					// The commits the session's `ci` watches wait on are collected beside its tasks' subscriptions.
+					getSubscribedSubjects: () => [
+						...session.backgroundLanes.getHostEventSubjects(),
+						...reader.ciSubjects(watches.ciShas()),
+					],
+					subscribeSubjects: (listener) => {
+						const stops = [
+							session.backgroundLanes.subscribeOrchestrationStore(listener),
+							watches.subscribe(listener),
+							reader.subscribe(listener),
+						];
+						return () => {
+							for (const stop of stops) stop();
+						};
+					},
 					// GitHub routines need this same source, so they watch only a checkout with the CI workflow.
 					getGithubInterests: () => session.backgroundLanes.getGithubInterests(),
 					subscribeGithubInterests: (listener) => session.backgroundLanes.subscribeRoutineDefinitions(listener),
@@ -48,6 +67,7 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 				if (!runtime) return [];
 				const unsubscribe = runtime.subscribeStatus(() => this.notify());
 				signal.addEventListener("abort", unsubscribe, { once: true });
+				signal.addEventListener("abort", watches.followCi(), { once: true });
 				return [runtime.source];
 			},
 		});
