@@ -91,8 +91,8 @@ export type InboxEnqueueResult =
 
 export class InboxCorruptError extends Error {
 	readonly path: string;
-	constructor(path: string, reason: string) {
-		super(`pi-chat inbox ${path} is unusable: ${reason}`);
+	constructor(label: string, path: string, reason: string) {
+		super(`${label} ${path} is unusable: ${reason}`);
 		this.name = "InboxCorruptError";
 		this.path = path;
 	}
@@ -100,6 +100,8 @@ export class InboxCorruptError extends Error {
 
 export interface MessageInboxOptions {
 	readonly dir: string;
+	/** What the inbox is, as its errors name it ("pi-chat inbox"). */
+	readonly label: string;
 	readonly limits?: Partial<InboxLimits>;
 	/** Epoch milliseconds; the system clock unless a host drives time itself. */
 	readonly now?: () => number;
@@ -321,11 +323,13 @@ function sweep(state: InboxState, nowMs: number, limits: InboxLimits): InboxStat
 
 export class MessageInbox {
 	private readonly dir: string;
+	private readonly label: string;
 	private readonly limits: InboxLimits;
 	private readonly now: () => number;
 
 	constructor(options: MessageInboxOptions) {
 		this.dir = options.dir;
+		this.label = options.label;
 		this.limits = { ...DEFAULT_INBOX_LIMITS, ...options.limits };
 		this.now = options.now ?? Date.now;
 	}
@@ -506,12 +510,12 @@ export class MessageInbox {
 
 	private readIfPresent(recipient: string): InboxState | undefined {
 		const file = this.fileFor(recipient);
-		const raw = readOptionalBoundedTextFileSync(file, MAX_FILE_BYTES, "pi-chat inbox");
+		const raw = readOptionalBoundedTextFileSync(file, MAX_FILE_BYTES, this.label);
 		if (raw === undefined) return undefined;
 		try {
 			return parseState(raw, recipient, this.limits);
 		} catch (error) {
-			throw new InboxCorruptError(file, error instanceof Error ? error.message : String(error));
+			throw new InboxCorruptError(this.label, file, error instanceof Error ? error.message : String(error));
 		}
 	}
 
@@ -571,7 +575,7 @@ export class MessageInbox {
 
 	private listFiles(): string[] {
 		if (!existsSync(this.dir)) return [];
-		return readBoundedDirectoryNamesSync(this.dir, MAX_DIRECTORY_ENTRIES, "pi-chat inbox directory").filter((name) =>
+		return readBoundedDirectoryNamesSync(this.dir, MAX_DIRECTORY_ENTRIES, `${this.label} directory`).filter((name) =>
 			name.endsWith(FILE_SUFFIX),
 		);
 	}

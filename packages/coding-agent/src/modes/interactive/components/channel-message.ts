@@ -22,7 +22,9 @@ export class ChannelMessageComponent extends Container {
 		const source = mail
 			? mail.kind === "bot"
 				? text.mailReceived(plainLabel(mail.agentId))
-				: text.mailReceived(text.you, plainLabel(mail.teamId))
+				: mail.kind === "group"
+					? text.mailReceived(text.you, plainLabel(mail.teamId))
+					: text.mailReceived(text.orchestrator)
 			: channel === "link"
 				? text.fromAnotherMachine(REMOTE_MARK)
 				: text.onChannel(plainLabel(channel));

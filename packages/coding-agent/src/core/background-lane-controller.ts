@@ -37,6 +37,7 @@ import {
 import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
 import { BotRoster } from "./bots/bot-roster.ts";
 import { attachBotSessions } from "./bots/bot-session-ports.ts";
+import { RootBots } from "./bots/root-bots.ts";
 import { type AwayChannelStatus, readAwayChannelCharges, readAwayChannelStatus } from "./channels/away-channels.ts";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
@@ -190,7 +191,6 @@ import type { RoutineToolFields, RoutineToolView } from "./routines/routine-tool
 import { SessionRoutines } from "./routines/session-routines.ts";
 import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
-import { createBotToolDefinition } from "./tools/bot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
@@ -267,6 +267,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _botChat: BotChatTranscript;
 	private readonly _botDispatch: BotOperatorDispatch;
 	private readonly _botLifecycle: BotLifecycleController;
+	/** The orchestrator's `bot` tool and the bots' replies to its asks. */
+	private readonly _rootBots: RootBots;
 	private readonly _attemptWaits: WorkerAttemptWaits;
 	private readonly _routineAssembly: RoutineRuntimeAssembly;
 	private readonly _terminalReports: WorkerTerminalReport;
@@ -359,6 +361,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			leaderDelegations: () => this.leaderDelegations(),
 			workerLifecycle: () => this._getWorkerLifecycle(),
 			workerController: () => this._getWorkerController(),
+		});
+		this._rootBots = new RootBots({
+			send: (agentId, message, options) => this.sendOperatorMessageToBot(agentId, message, options),
+			currentDelegation: (alias) => this.getLeaders().currentFor(alias),
+			tool: () => ({
+				...this._botLifecycle.botToolLifecycle(),
+				lead: (request) => this.getLeaders().delegate(request),
+				list: () => this.getBotTeamStore().listBots({ includeRetired: true }).map(botToolListEntry),
+			}),
+			agentDir: () => deps.getAgentDir(),
+			sessionId: () => deps.getSessionManager().getSessionId(),
+			timers: deps.getTimers().port("bot-replies"),
+			deliver: (input) => deps.deliverParentInput(input),
+			hasDelivered: (id) => deps.getSessionManager().getParentInput(id) !== undefined,
+			origin: () => captureWorkerReceiptOrigin(deps.getSessionManager()),
 		});
 		this._attemptWaits = new WorkerAttemptWaits(deps, {
 			workerController: () => this._getWorkerController(),
@@ -1035,6 +1052,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("stop the always-on install", () => {
 			awayServiceShutdown = this._awayService?.close() ?? Promise.resolve();
 		});
+		this._runTeardownStep("stop reading the bots' replies", () => this._rootBots.replies.close());
 		let botSessionsShutdown = Promise.resolve();
 		this._runTeardownStep("leave the bot sessions' host", () => {
 			botSessionsShutdown = this._botHost.detach();
@@ -1513,6 +1531,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._getRetention().scheduleFromIdle();
 		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
 		if (standing.ownsProcessSingletons && !this._channelsHostedByDaemon) this._botHost.host.openOwed();
+		if (standing.managesBots) this._rootBots.replies.start();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -1856,21 +1875,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._remoteHub;
 	}
 
-	/** The orchestrator's tool for bots on the fly. */
-	private createBotToolDefinition(): ToolDefinition {
-		return createBotToolDefinition({
-			ask: async (agentId, message) => {
-				await this.sendOperatorMessageToBot(agentId, message, {
-					fromRoot: true,
-					delegationObjectiveId: this.runningDelegationOf(agentId),
-				});
-			},
-			...this._botLifecycle.botToolLifecycle(),
-			lead: (request) => this.getLeaders().delegate(request),
-			list: () => this.getBotTeamStore().listBots({ includeRetired: true }).map(botToolListEntry),
-		});
-	}
-
 	/** The plan executor the root's `plan` tool reaches; composed with the worker runtime of a root session. */
 	private _planExecutor: PlanExecutor | undefined;
 	private _planRouteOff: (() => void) | undefined;
@@ -1892,7 +1896,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const { managesBots, directsWorkers } = this.deps.standing;
 		return [
 			...this._routines.tools(),
-			managesBots ? this.createBotToolDefinition() : undefined,
+			managesBots ? this._rootBots.toolDefinition() : undefined,
 			this.createChannelReplyToolDefinition(),
 			directsWorkers ? createPlanToolDefinition(() => this._getPlanExecutor()) : undefined,
 		].filter((definition): definition is ToolDefinition => definition !== undefined);
@@ -2047,13 +2051,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			const model = bot ? registry.find(bot.provider, bot.modelId) : undefined;
 			return model !== undefined && reader.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind === "exhausted";
 		});
-	}
-
-	/** The delegation a leader is running right now: the orchestrator's words to that leader are that goal's input. */
-	private runningDelegationOf(alias: string): string | undefined {
-		if (!this.deps.standing.managesBots) return undefined;
-		const record = this.getLeaders().currentFor(alias);
-		return record?.state === "running" ? record.objectiveId : undefined;
 	}
 
 	/**

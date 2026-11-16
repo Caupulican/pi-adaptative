@@ -6,11 +6,11 @@ import { OUTWARD_DRAFT_CUSTOM_TYPE, type OutwardDraftRecord } from "../../../../
 import { piChatExtension } from "../../../../src/core/chat/extension.ts";
 import { sessionMeshId } from "../../../../src/core/chat/identity.ts";
 import type { AgentSendResult } from "../../../../src/core/chat/mesh.ts";
+import { openChatInbox } from "../../../../src/core/chat/state.ts";
 import type { ExtensionRunner } from "../../../../src/core/extensions/runner.ts";
 import { emitSessionShutdownEvent } from "../../../../src/core/extensions/runner.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
-import { MessageInbox } from "../../../../src/core/messaging/inbox.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
@@ -233,7 +233,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 
 	// Mail forged into the inbox by a process without the machine's session secret arrives as an unverified peer.
 	const forgedTurn = expectTurn("pi-chat-forged-turn", "Read the forged message.");
-	new MessageInbox({ dir: inboxDir }).enqueue({
+	openChatInbox(stateRoot).enqueue({
 		id: "leg-forged-1",
 		sender: "session-forger",
 		recipient: meshIdB,

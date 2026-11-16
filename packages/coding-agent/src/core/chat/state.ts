@@ -15,6 +15,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { MessageInbox } from "../messaging/inbox.ts";
 import { isWorkerSession } from "../session-role.ts";
 import { CHAT_CONFIG_VERSION } from "./constants.ts";
 
@@ -75,6 +76,11 @@ export function getChatStatePaths(root: string): ChatStatePaths {
 		inbox: join(root, "inbox"),
 		credentials: join(localSessions, "credentials"),
 	};
+}
+
+/** The durable inbox that holds pi-chat messages for sessions not listening yet (`ChatStatePaths.inbox`). */
+export function openChatInbox(root: string): MessageInbox {
+	return new MessageInbox({ dir: getChatStatePaths(root).inbox, label: "pi-chat inbox" });
 }
 
 function chmodBestEffort(targetPath: string, mode: number): void {

@@ -1,16 +1,18 @@
 /**
  * Operator messages to a bot or a group: each send to a bot is ordered behind the earlier send to the same bot generation,
- * then goes to the bot's own session as its turn (the owner's word, a group's message, a routine's prompt, to a bot that
- * answers in a session of its own), or reaches the bot's live worker (a follow-up, a queued message or a steer) or starts
- * a fresh worker generation bound to the bot, and a group send fans out to its members and records the group's message.
+ * then goes to the bot's own session as its turn (the owner's word, a group's message, a routine's prompt, the
+ * orchestrator's ask, to a bot that answers in a session of its own), or reaches the bot's live worker (a follow-up, a
+ * queued message or a steer) or starts a fresh worker generation bound to the bot, and a group send fans out to its
+ * members and records the group's message.
  * The branch and disposal guards are checked before each durable write. The coordinator supplies the lanes, workers and
  * roster through its host port.
  */
 import { randomUUID } from "node:crypto";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
-import { botMailAddressText, botMailPrompt, botMailRef } from "../bots/bot-mail.ts";
+import { botMailAddressText, botMailPrompt, botMailRef, rootAskMail } from "../bots/bot-mail.ts";
 import type { BotSessionDelivery } from "../bots/bot-session-host.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orchestration/contracts.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
@@ -78,8 +80,8 @@ export interface BotOperatorDispatchHost {
 /**
  * Whether a message is the owner's own direct word to a bot (the roster chat, `/bot msg`, `@bot`): only it makes a bot it
  * names or brings a retired one back. A group's message, the orchestrator's ask, a routine's send and a leader's brief are
- * not: a group's message and a routine's prompt go to a bot's own session under an origin of their own (`sessionWords`),
- * and the orchestrator's ask and a leader's words still run as workers of this session.
+ * not: a group's message, a routine's prompt and the orchestrator's ask go to a bot's own session under an origin of their
+ * own (`sessionWords`), and a leader's words still run as workers of this session.
  */
 function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOptions | undefined): boolean {
 	return (
@@ -93,26 +95,33 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 }
 
 /**
- * The words a group's message or a routine's prompt gives a bot's own session, and the origin its turn is stamped with: a
- * group's message is a mail from the group (`agent-mail`, its answer appended to the group's log), a routine's prompt to
- * the bot alone carries the routine's origin. None for the orchestrator's ask and a leader's words, which run as workers.
+ * The words a group's message, a routine's prompt or the orchestrator's ask gives a bot's own session, and the origin its
+ * turn is stamped with: a group's message is a mail from the group (`agent-mail`, its answer appended to the group's log),
+ * the orchestrator's ask a mail from its session (`rootAskMail`, its answer written back for that session), and a
+ * routine's prompt to the bot alone carries the routine's origin. None for a leader's words, which run as workers.
  */
 function sessionWords(
 	context: BotRuntimeContext,
 	message: string,
 	options: GroupMemberMessageOptions | undefined,
 	room: () => string,
+	asking: () => Pick<SessionManager, "getSessionId" | "getBranch">,
 ): { readonly message: string; readonly origin: BotDeliveryOrigin } | undefined {
 	if (
-		options?.fromRoot ||
 		options?.fromLeader !== undefined ||
 		options?.delegationObjectiveId !== undefined ||
 		options?.idempotencyKey !== undefined
 	)
 		return undefined;
 	const { teamId, teamIncarnationId } = context;
-	if (teamId === undefined || teamIncarnationId === undefined)
+	if (teamId === undefined || teamIncarnationId === undefined) {
+		if (options?.fromRoot) {
+			const manager = asking();
+			const mail = rootAskMail(manager.getSessionId(), manager.getBranch(), message);
+			return { message: mail.prompt, origin: mail.origin };
+		}
 		return options?.fromRoutine ? { message, origin: options.fromRoutine } : undefined;
+	}
 	const group = { kind: "group", teamId, incarnation: teamIncarnationId } as const;
 	// The group's message is the owner's room words or a routine's prompt: a third party's only when the routine's is.
 	const origin = agentMailTurnOrigin({
@@ -239,13 +248,15 @@ export class BotOperatorDispatch {
 				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
 			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
 		}
-		// The owner's word, a group's message and a routine's prompt to a bot with a session of its own never need the worker
-		// runtime: they are that session's turn, the owner's or under their own origin.
+		// The owner's word, a group's message, a routine's prompt and the orchestrator's ask to a bot with a session of its own
+		// never need the worker runtime: they are that session's turn, the owner's or under their own origin.
 		const room = () => {
 			const team = teamId === undefined ? undefined : store.getTeam(teamId);
 			return team ? groupMailRoomBlock(readGroupRoom(store, team, options?.teamMessageId)) : "";
 		};
-		const words = ownerDirect ? { message, origin: "owner" as const } : sessionWords(context, message, options, room);
+		const words = ownerDirect
+			? { message, origin: "owner" as const }
+			: sessionWords(context, message, options, room, () => this.deps.getSessionManager());
 		if (words) {
 			let sessionBot = store.ensureBotForDispatch(
 				normId,

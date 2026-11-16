@@ -9,6 +9,7 @@ import {
 	Text,
 	truncateToWidth,
 } from "@caupulican/pi-tui";
+import { type BotReplyView, botReplyView } from "../../../core/bots/root-bot-replies.ts";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import {
 	type BackgroundActivitySummaryContract,
@@ -109,6 +110,12 @@ export class CustomMessageComponent extends Container {
 			return;
 		}
 
+		const reply = botReplyView(this.message.customType, this.message.content, this.message.details);
+		if (reply) {
+			this.renderBotReply(reply);
+			return;
+		}
+
 		const backgroundSummary = formatBackgroundActivitySummary(this.message);
 		if (backgroundSummary) {
 			this.customComponent = new BackgroundActivitySummaryComponent(backgroundSummary);
@@ -168,6 +175,28 @@ export class CustomMessageComponent extends Container {
 					color: (text: string) => theme.fg("customMessageText", text),
 				},
 			),
+		);
+	}
+
+	/** A bot's reply to the orchestrator's ask: who answered and its words, or that it gave none; never the model's framing. */
+	private renderBotReply(reply: BotReplyView): void {
+		this.addChild(this.box);
+		this.box.clear();
+		const text = interfaceText().conversation;
+		const agent = plainLabel(reply.agentId);
+		const label =
+			reply.kind === "answered"
+				? text.botAnswered(agent)
+				: reply.kind === "unanswered"
+					? text.botAnsweredNothing(agent)
+					: text.botAnswerExpired(agent);
+		this.box.addChild(new Text(renderTitleBadge(theme, { label }), 0, 0));
+		if (reply.kind !== "answered") return;
+		this.box.addChild(new Spacer(1));
+		this.box.addChild(
+			new Markdown(reply.words, 0, 0, this.markdownTheme, {
+				color: (words: string) => theme.fg("customMessageText", words),
+			}),
 		);
 	}
 }

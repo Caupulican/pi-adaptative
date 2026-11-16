@@ -246,9 +246,10 @@ A group's message and a routine's prompt to a bot that answers in a session of i
 under an origin of their own, never as your words: a group's message is stamped as the group's mail (the bot reads that
 it was posted in the group's room, and its answer is appended to the group's log), and a routine's prompt as the
 routine's (a third party's when the routine's trigger carried a third party's words). A routine run ends when the bot's
-session took the prompt; the bot's answer is not part of the run. These still run as workers of the session that sends
-them: the orchestrator's `bot ask`, leaders, the bots a leader made and machines joined over the link (a group's message
-or a routine's prompt to such a bot as well). A bot made from a worker profile runs as a session of its own too, on the contract its profile compiles to at every
+session took the prompt; the bot's answer is not part of the run. The orchestrator's `bot ask` is a turn of that session
+as well, as the orchestrator's mail (see "The orchestrator asks a bot" below). These still run as workers of the session
+that sends them: leaders, the bots a leader made and machines joined over the link (a group's message, a routine's prompt
+or the orchestrator's ask to such a bot as well). A bot made from a worker profile runs as a session of its own too, on the contract its profile compiles to at every
 run, by the resolution a fresh worker of it takes (the owner's pin for its role, the bot's model stance, read-only grant
 and soul, the model rules and the execution plan), without a worker run's admission gates (whether the session delegates
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
@@ -539,6 +540,23 @@ it starts again as the same mail from the same sender. A mail the session took i
 again unless the bot's transcript already holds it. A group's message and a routine's prompt to a bot that is running a
 turn wait the same way. A bot's chat shows a mail as `alice wrote` (`alice escreveu`), and a group's message as
 yours in that group.
+
+### The orchestrator asks a bot
+
+The orchestrator's `bot` tool `action ask` to a bot that answers in a session of its own gives the words to that session
+as its turn, as mail from the orchestrator (`agent-mail` from `root:<session id>`, first in its chain): the bot reads that
+it is another agent's words that grant no authority, and that its answer goes back to the orchestrator on its own. A third
+party's words that decide the orchestrator's run make the mail a third party's. The ask returns once the bot's session took
+the words (or queued them behind a running turn, as any mail waits); it is refused, in English, when the bot's session
+cannot take them.
+
+When the bot's turn ends, its last words after the ask are written, by whichever process hosted the bot, to a reply inbox
+for the asking session (`state/orchestration/bot-replies/` in pi's home), which a build before this one never lists. The
+orchestrator's session reads it while it runs and hands each reply to its conversation once, as the event that starts
+its next turn, framed as the bot's words and not yours (a turn that ended without words, or on an error, says so). A reply
+read again after a restart is taken once. A reply not read in 30 days expires, and the orchestrator
+is told it did. Your chat shows the reply as `<bot> answered` (`<bot> respondeu`). An ask to a leader running a goal is
+that goal's input, and an ask to a bot that runs only as a worker or to a machine joined over the link is taken as before.
 
 ## History and lifecycle
 

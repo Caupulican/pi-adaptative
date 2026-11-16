@@ -28,6 +28,7 @@
  *                                      host.lock, host-state.json, history.json, typesafe-reviews/ (read only),
  *                                      orchestration/ (its sessions' orchestration home)
  *   state/orchestration/              the owner's orchestration home                         -- ownerOrchestrationHome
+ *     bot-replies/                    bots' answers to the orchestrator's asks, per session  -- rootBotRepliesDir
  *     sessions/<session-key>/         one foreground-session-owned control-plane bundle      -- orchestrationSessionDir
  *       worker-context-forks/<identity-digest>-<content-digest>.json                       -- immutable birth snapshots
  *     deletions/<session-key>.json    bundle tombstone (+ `.leases.json` lifetime leases)    -- orchestrationSessionDeletionFile
@@ -607,6 +608,15 @@ export function workerAgentMailboxFile(home: OrchestrationHome, parentSessionId:
  * owning foreground session. The parent session identity is already encoded in the enclosing
  * session directory, so this fixed filename cannot collide with another session root.
  */
+/**
+ * `<owner orchestration home>/bot-replies/` -- the answers bots give the orchestrator's asks, one durable inbox file per
+ * asking session (`bots/root-bot-replies.ts`). Outside the sessions' bundles, so a reply written for a deleted session
+ * never brings its bundle back.
+ */
+export function rootBotRepliesDir(agentDir: string): string {
+	return join(ownerOrchestrationHome(agentDir).root, "bot-replies");
+}
+
 export function sessionRootMailboxFile(home: OrchestrationHome, parentSessionId: string): string {
 	return join(orchestrationSessionDir(home, parentSessionId), "session-root-mailbox.json");
 }

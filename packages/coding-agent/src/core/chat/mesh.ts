@@ -1,11 +1,11 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import {
-	type InboxEnqueueResult,
-	type InboxEntry,
-	type InboxExpiredUnread,
-	type InboxFate,
+import type {
+	InboxEnqueueResult,
+	InboxEntry,
+	InboxExpiredUnread,
+	InboxFate,
 	MessageInbox,
 } from "../messaging/inbox.ts";
 import {
@@ -35,8 +35,8 @@ import { getChatPlatformInfo } from "./platform.ts";
 import {
 	appendChatAudit,
 	ensureChatStateDirs,
-	getChatStatePaths,
 	loadSessionCredential,
+	openChatInbox,
 	type PeerRecord,
 	readChatSessionSecret,
 } from "./state.ts";
@@ -435,7 +435,7 @@ export class ChatMesh {
 		this.stateRoot = options.stateRoot;
 		this.socketPath = getChatPlatformInfo(options.stateRoot).socketPath;
 		this.sessionSecret = this.socketPath ? readChatSessionSecret(options.stateRoot) : undefined;
-		this.inbox = this.socketPath ? new MessageInbox({ dir: getChatStatePaths(options.stateRoot).inbox }) : undefined;
+		this.inbox = this.socketPath ? openChatInbox(options.stateRoot) : undefined;
 		this.self = this.buildSelf(options.self);
 	}
 

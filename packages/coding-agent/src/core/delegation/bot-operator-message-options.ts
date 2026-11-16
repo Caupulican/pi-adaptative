@@ -5,7 +5,11 @@ import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 /** How the orchestrator's or a leader's words reach a bot: the kind of turn, who asked, and the delegation it is filed under. */
 export interface BotOperatorMessageOptions {
 	mode?: "follow_up" | "queue" | "start";
-	/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
+	/**
+	 * The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. A bot that answers in a
+	 * session of its own takes the ask there as mail from the asking session (`rootAskMail`), and its answer is written
+	 * back for that session (`root-bot-replies.ts`); any other bot takes it as a worker.
+	 */
 	fromRoot?: boolean;
 	/**
 	 * A scheduled routine sent it, under this origin (`routineBotMessageOrigin`): a bot that answers in a session of its own

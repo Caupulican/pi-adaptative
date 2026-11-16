@@ -104,6 +104,7 @@ import {
 	writeOwnerStop,
 } from "./bot-stop.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
+import { sendRootBotReply } from "./root-bot-replies.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
@@ -380,6 +381,8 @@ export class BotSessionHost {
 					sendBotMailAnswers(
 						{
 							store: () => ports.store(),
+							replyToRoot: (reply) =>
+								sendRootBotReply(ports.agentDir(), () => ports.timers().port("bot-replies").now(), reply),
 							deliver: (agentId, message, options, origin, sender) =>
 								this.deliver(agentId, message, options, origin, sender),
 							warn: (message) => entry.sender.warn(message),

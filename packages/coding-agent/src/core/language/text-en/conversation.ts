@@ -15,6 +15,12 @@ export const CONVERSATION = {
 	onChannel: (channel: string) => `${channel} message`,
 	/** Mail from another agent (a bot's name, or "You" for the owner's side of a group), and the group it was written in. */
 	mailReceived: (from: string, room?: string) => `${from} wrote${room ? ` in ${room}` : ""}`,
+	/** The sender of the orchestrator's ask, as a bot's chat shows it. */
+	orchestrator: "The orchestrator",
+	/** A bot's reply to the orchestrator's ask, as the orchestrator's chat shows it: answered, ended without words, expired unread. */
+	botAnswered: (agentId: string) => `${agentId} answered`,
+	botAnsweredNothing: (agentId: string) => `${agentId} ended its turn without an answer`,
+	botAnswerExpired: (agentId: string) => `${agentId}'s answer expired before this session read it`,
 	/** The byline of a reply that a router sent to another model, and the route value beside it. */
 	routed: "routed",
 	noModelName: "none",

@@ -246,6 +246,8 @@ export const BOT_TEAM = {
 	/** The bot's answer to another bot's mail did not reach that bot. */
 	botMailReplyNotSent: (agentId: string, to: string, reason: string) =>
 		`Bot ${agentId}: its answer to the mail from ${to} was not sent (${reason}).`,
+	botAskReplyNotSent: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its answer to the orchestrator's ask was not sent (${reason}).`,
 	/** A message waiting in the bot's inbox, as the chat shows it. */
 	botInboxWaitingLine: (text: string) => `Waiting for the session hosting the bot: ${text}`,
 	/** A message the bot's session refused, as the chat shows it. */
