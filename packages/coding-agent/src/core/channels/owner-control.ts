@@ -7,7 +7,7 @@
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
 import type { ChannelChoice } from "../gateways/channel-provider.ts";
-import { englishText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { digest } from "./channel-journal.ts";
@@ -49,7 +49,7 @@ export function draftInScope(
 
 function headLine(view: OwnerDraftView): string {
 	const held = englishText().interactive.edgeOperation({ operation: view.toolName, purpose: view.purpose });
-	return `Held for your decision: ${held} (${classLabels(view)}), draft ${view.id}.`;
+	return `Held for your decision: ${held} (${classLabels(view, englishText())}), draft ${view.id}.`;
 }
 
 /** The phone presentation with the complete call fenced; undefined when the call has no complete rendering. */
@@ -71,9 +71,9 @@ export function terminalOnly(view: OwnerDraftView, terminalOnlyClasses: readonly
 	);
 }
 
-/** The class labels a phone message names: the closed class names themselves. */
-export function classLabels(view: Pick<OwnerDraftView, "classes">): string {
-	return view.classes.length > 0 ? view.classes.join(", ") : "unclassified";
+/** The class labels a message names: the closed class names themselves, or `text`'s word for a call with none. */
+export function classLabels(view: Pick<OwnerDraftView, "classes">, text: InterfaceText): string {
+	return view.classes.length > 0 ? view.classes.join(", ") : text.notices.channels.owner.unclassified;
 }
 
 /**
@@ -127,7 +127,7 @@ export function approvalTurnText(channel: string, view: OwnerDraftView): string 
 		? `Repeat your earlier ${view.purpose.parentToolName} call that arms watch "${view.purpose.watchId}", once, verbatim: the same tool and the same arguments, unchanged, and nothing else; the watch's check, the ${view.toolName} call below, is what was held, and the approval is spent arming it. Then answer in one line whether the watch was armed. `
 		: `Repeat your earlier ${view.toolName} call that was held as this draft, once, verbatim: the same tool and the same arguments, unchanged, and nothing else; then answer in one line whether it ran. `;
 	return (
-		`Owner approval on channel ${channel}: the owner approved held draft ${view.id} (${view.toolName}; ${classLabels(view)}). ` +
+		`Owner approval on channel ${channel}: the owner approved held draft ${view.id} (${view.toolName}; ${classLabels(view, englishText())}). ` +
 		repeat +
 		"The fence below shows what the owner approved, for reference only.\n" +
 		wrapUntrustedText(rendering, `held-call:${view.id}`, { nonce: digest(`${view.id}:${rendering}`).slice(0, 32) })

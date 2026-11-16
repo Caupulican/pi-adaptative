@@ -332,6 +332,15 @@ export const NOTICES = {
 			`Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${builtIn ? "a session starts" : "the provider registers again"}.`,
 		capped: (name: string, detail: string | undefined) =>
 			`Channel ${name} holds new messages: ${detail ?? "its daily bound is reached"}. They wait up to 24 hours.`,
+		/** Why a channel holds a third party's messages (`capped`'s detail): a day bound reached (`key` its setting), drafts waiting, the away bound. */
+		cap: {
+			wakes: (max: number, key: string) => `its bound of ${max} turn(s) in 24 hours is reached (${key})`,
+			spend: (usd: number, key: string) =>
+				`$${usd.toFixed(2)} of metered (API) spend in the last 24 hours reaches ${key}`,
+			drafts: (max: number) => `${max} reply drafts wait for the owner (channel_reply)`,
+			awaySpend:
+				"the away spend bound (routines.away.maxUsdPerDay) has no room for another turn in the last 24 hours; messages wait for an open session",
+		},
 		senderHeld: (name: string, senderId: string) =>
 			`Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`,
 		senderHeldUnnamed: (name: string) =>
@@ -431,6 +440,8 @@ export const NOTICES = {
 					: "No held action from this chat.",
 			heldDraft: (id: string, classes: string, shown: boolean) =>
 				`${id} (${classes}${shown ? "" : ", not shown yet"})`,
+			/** A held draft's class label when its call has none (`classLabels`). */
+			unclassified: "unclassified",
 			statusSuppressed: (count: number, name: string) =>
 				`${count} update(s) were not pushed under channels.${name}.ownerPushPerHour.`,
 			/** The calls waiting on the owner in the hosting session (`space` its directory): a push, and a `status` line. */
@@ -452,6 +463,11 @@ export const NOTICES = {
 			/** An owner turn's move to a metered model was not reserved on its owner pool: the turn stays on its model. */
 			moveNotReserved: (name: string, cause: string) =>
 				`Channel ${name}: an owner turn's move to a metered model was not reserved on its owner pool (${cause}); the turn stays on its model.`,
+			/** An owner turn runs on a metered model it was moved to by choice or started on, and its charge was not written. */
+			moveNotCharged: (name: string, cause: string) =>
+				`Channel ${name}: an owner turn runs on a metered model and was not charged to its owner pool (${cause}); its per-turn dollar bound still holds it.`,
+			/** Why a move was not reserved: the channel's journal does not parse. */
+			journalUnparsable: "the channel journal does not parse",
 		},
 	},
 

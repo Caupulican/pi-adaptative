@@ -38,8 +38,11 @@ export interface ModelSelectionControllerSettingsSource {
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
 export interface ModelSelectionControllerDeps {
-	/** The session never leaves its model (`pinnedModel`): a change to another model is refused. */
-	isModelPinned?(): boolean;
+	/**
+	 * The session's model access: `pinned`, the session never leaves its model (`pinnedModel`) and a change to another is
+	 * refused; `chargeMove`, a chosen move to a metered model is charged on the hosts' metered-move gates.
+	 */
+	modelAccess?(): { readonly pinned: boolean; chargeMove(model: Model<Api>): void };
 	getAgent(): Agent;
 	getModel(): Model<Api> | undefined;
 	getThinkingLevel(): ThinkingLevel;
@@ -99,7 +102,7 @@ export class ModelSelectionController {
 		assertCurrent?: () => void,
 	): Promise<void> {
 		const previousModel = this.deps.getModel();
-		if (this.deps.isModelPinned?.() && previousModel && !modelsAreEqual(previousModel, model))
+		if (this.deps.modelAccess?.().pinned && previousModel && !modelsAreEqual(previousModel, model))
 			throw new Error(
 				interfaceText().sessions.model.pinned(
 					`${previousModel.provider}/${previousModel.id}`,
@@ -112,8 +115,7 @@ export class ModelSelectionController {
 
 		const persistSettings = options.persistSettings ?? true;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.deps.getAgent().state.model = model;
-		this.deps.getSessionManager().appendModelChange(model.provider, model.id);
+		this._applyModel(model);
 		if (persistSettings) {
 			this.deps.getSettingsManager().setDefaultModelAndProvider(model.provider, model.id);
 		}
@@ -125,6 +127,13 @@ export class ModelSelectionController {
 		await this._emitModelSelect(model, previousModel, "set");
 		this.deps.checkContextWindowUsageWarning();
 		await this._warnIfManualModelChoiceIsRisky(model);
+	}
+
+	/** The session moves to `model`: recorded on its branch, and a metered one charged on the hosts' gates (`chargeMove`). */
+	private _applyModel(model: Model<Api>): void {
+		this.deps.getAgent().state.model = model;
+		this.deps.getSessionManager().appendModelChange(model.provider, model.id);
+		this.deps.modelAccess?.().chargeMove(model);
 	}
 
 	private _resyncToolSurfaceForModel(assertCurrent?: () => void): void {
@@ -219,9 +228,7 @@ export class ModelSelectionController {
 		const next = scopedModels[nextIndex];
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 
-		// Apply model
-		this.deps.getAgent().state.model = next.model;
-		this.deps.getSessionManager().appendModelChange(next.model.provider, next.model.id);
+		this._applyModel(next.model);
 		this.deps.getSettingsManager().setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		// Apply thinking level.
@@ -252,8 +259,7 @@ export class ModelSelectionController {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.deps.getAgent().state.model = nextModel;
-		this.deps.getSessionManager().appendModelChange(nextModel.provider, nextModel.id);
+		this._applyModel(nextModel);
 		this.deps.getSettingsManager().setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		// Re-clamp thinking level for new model's capabilities

@@ -102,7 +102,6 @@ import type {
 } from "./owner-channel-types.ts";
 import {
 	approvalTurnText,
-	classLabels,
 	decideOwnerDraft,
 	draftInScope,
 	MAX_STATUS_DRAFTS,
@@ -112,6 +111,7 @@ import {
 import { OwnerMeteredMoves, type OwnerMoveRun } from "./owner-metered-moves.ts";
 import {
 	channelAwayNotice,
+	channelCapWords,
 	channelStateNotice,
 	nameableSenderId,
 	ownerHeldPush,
@@ -187,8 +187,8 @@ function clearOffer(entry: ChannelPendingMessage): void {
 /** What the delivery pass found in the journal for this session. */
 type DeliveryPick =
 	| { readonly kind: "not_holder" | "busy" | "idle" }
-	/** `worded`: the cap in each catalogue's words (the owner pool's), `cap` its English. */
-	| { readonly kind: "capped"; readonly cap: string; readonly worded?: Worded }
+	/** `worded`: the cap in each catalogue's words (a third party's bounds, the owner pool's), `cap` its English. */
+	| { readonly kind: "capped"; readonly cap: string; readonly worded: Worded }
 	| {
 			readonly kind: "deliver";
 			readonly batch: readonly ChannelPendingMessage[];
@@ -404,6 +404,7 @@ export class SessionChannels {
 			policy: (name) => this.policy(name),
 			journal: (name) => this.journal(name),
 			sessionId: () => this.sessionId(),
+			started: (ref) => this.deps.ownerDelivery?.isRunning(ref) === true,
 			now: () => this.now(),
 			warn: (message) => deps.warn(message),
 		});
@@ -1342,21 +1343,12 @@ export class SessionChannels {
 		}));
 	}
 
-	/** Why the channel delivers nothing now, or undefined. Reads the journal state it is given. */
-	private capReason(
-		name: string,
-		policy: ResolvedChannelPolicy,
-		state: ChannelJournalState,
-		now: number,
-	): string | undefined {
+	/** Why the channel delivers no third party's turn now (`channelCapWords`), or undefined. Reads the state it is given. */
+	private capReason(name: string, policy: ResolvedChannelPolicy, state: ChannelJournalState, now: number) {
 		const { wakes, usd } = channelDayUsage(state, now);
-		if (wakes >= policy.maxWakesPerDay)
-			return `its bound of ${policy.maxWakesPerDay} turn(s) in 24 hours is reached (channels.${name}.maxWakesPerDay)`;
-		if (usd >= policy.maxUsdPerDay)
-			return `$${usd.toFixed(2)} of metered (API) spend in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
-		if (state.drafts.filter(isDraftOpen).length >= MAX_PENDING_DRAFTS)
-			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
-		return turnUsageHold(this.deps)?.reason;
+		const openDrafts = state.drafts.filter(isDraftOpen).length;
+		const usage = () => turnUsageHold(this.deps);
+		return channelCapWords(name, policy, { wakes, usd, openDrafts, maxDrafts: MAX_PENDING_DRAFTS, usage });
 	}
 
 	/**
@@ -1420,10 +1412,9 @@ export class SessionChannels {
 			entry.owner === true ? ownerCap === undefined && ownerListed(entry) : thirdPartyCap === undefined,
 		);
 		if (!first) {
-			if (thirdPartyCap !== undefined) return { kind: "capped", cap: thirdPartyCap };
 			// The state's detail and the journal's record are English; the owner's notice is in the interface language.
 			const worded: Worded =
-				ownerCap ?? ((text: InterfaceText) => text.notices.channels.owner.sendersUnlisted(name));
+				thirdPartyCap ?? ownerCap ?? ((text: InterfaceText) => text.notices.channels.owner.sendersUnlisted(name));
 			return { kind: "capped", cap: worded(englishText()), worded };
 		}
 		const owner = first.owner === true;
@@ -1692,7 +1683,8 @@ export class SessionChannels {
 			}
 			run.accepted = true;
 			try {
-				run.unobserve = delivery.observeRunUsage(origin.ref, (usd) => this.onOwnerUsage(origin.ref, usd));
+				const usage = (usd: number) => this.onOwnerUsage(origin.ref, usd);
+				run.unobserve = delivery.observeRunUsage(origin.ref, usage, () => this.onOwnerStarted(run.name));
 			} catch (error) {
 				// Without its spend observer the turn has no per-turn bound: it is stopped.
 				this.deps.warn(
@@ -1740,6 +1732,12 @@ export class SessionChannels {
 		else if (dollars ? usd >= policy.ownerMaxUsdPerTurn : quota.kind === "exhausted")
 			this.stopOwnerRun(ref, run, dollars ? "bound" : "quota");
 		else if (!run.live()) this.stopOwnerRun(ref, run, "authority");
+	}
+
+	/** An owner turn started: on a metered model its subscription batch is charged to its pool (`OwnerMeteredMoves`). */
+	private onOwnerStarted(name: string): void {
+		const policy = this.policy(name);
+		if (!policy || ownerDollarsApply(this.ownerQuota(policy))) this.ownerMoves.reserve("charge");
 	}
 
 	private abortOwnerRun(ref: string, name: string): void {
@@ -2240,7 +2238,7 @@ export class SessionChannels {
 			running: [...this.ownerRuns.values()].some((run) => run.name === name && run.accepted && !run.stopped),
 			waiting: state.pending.filter((entry) => entry.owner === true && entry.conversationKey === conversationKey)
 				.length,
-			drafts: drafts.map((view) => ({ id: view.id, classes: classLabels(view), shown: shown(view) })),
+			drafts: drafts.map((view) => ({ id: view.id, classes: view.classes, shown: shown(view) })),
 			calls,
 			suppressed: this.ownerPush.takeSuppressed(name),
 		};

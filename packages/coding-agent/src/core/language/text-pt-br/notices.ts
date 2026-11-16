@@ -291,6 +291,14 @@ export const NOTICES = {
 			`O canal ${name} não iniciou (${detail ?? "a inicialização falhou"}); ele é tentado de novo quando as configurações mudam ou ${builtIn ? "uma sessão começa" : "o provedor se registra de novo"}.`,
 		capped: (name: string, detail: string | undefined) =>
 			`O canal ${name} retém mensagens novas: ${detail ?? "o limite diário dele foi atingido"}. Elas esperam até 24 horas.`,
+		cap: {
+			wakes: (max: number, key: string) => `o limite de ${max} turno(s) em 24 horas foi atingido (${key})`,
+			spend: (usd: number, key: string) =>
+				`$${usd.toFixed(2)} de gasto cobrado por uso (API) nas últimas 24 horas atinge ${key}`,
+			drafts: (max: number) => `${max} rascunhos de resposta esperam pelo dono (channel_reply)`,
+			awaySpend:
+				"o limite de gasto fora (routines.away.maxUsdPerDay) não tem espaço para outro turno nas últimas 24 horas; as mensagens esperam por uma sessão aberta",
+		},
 		senderHeld: (name: string, senderId: string) =>
 			`O canal ${name} reteve uma mensagem do remetente ${senderId}, que não está em channels.${name}.allowedSenders. Para deixá-lo iniciar turnos, adicione "${senderId}" a essa lista.`,
 		senderHeldUnnamed: (name: string) =>
@@ -370,6 +378,7 @@ export const NOTICES = {
 					: "Nenhuma ação retida deste chat.",
 			heldDraft: (id: string, classes: string, shown: boolean) =>
 				`${id} (${classes}${shown ? "" : ", ainda não mostrada"})`,
+			unclassified: "sem classe",
 			statusSuppressed: (count: number, name: string) =>
 				`${count} atualização(ões) não foram enviadas por causa de channels.${name}.ownerPushPerHour.`,
 			waitingOn: (space: string, calls: readonly string[], more: number) =>
@@ -387,6 +396,9 @@ export const NOTICES = {
 			},
 			moveNotReserved: (name: string, cause: string) =>
 				`Canal ${name}: a passagem de um turno do dono para um modelo cobrado por uso não foi reservada no limite do dono (${cause}); o turno fica no modelo dele.`,
+			moveNotCharged: (name: string, cause: string) =>
+				`Canal ${name}: um turno do dono roda em um modelo cobrado por uso e não foi cobrado no limite do dono (${cause}); o limite em dólar por turno dele continua valendo.`,
+			journalUnparsable: "o diário do canal não pôde ser interpretado",
 		},
 	},
 

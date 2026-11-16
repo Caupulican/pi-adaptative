@@ -37,14 +37,21 @@ export interface AgentSessionModelAccessPorts {
 }
 
 /**
+ * How a move to a metered model is reserved: `admit` only while the host's bound has room (false: nothing is reserved and
+ * the work does not move); `charge` for a move made whatever the gate says (an explicit model choice), reserved whether
+ * or not the bound has room (false: the reservation was not written).
+ */
+export type MeteredMoveMode = "admit" | "charge";
+
+/**
  * What a host holds a session's moves to metered (API) models to (the daemon's channel host: a subscription turn away
  * reserves nothing on the away day bound until it moves to a metered model). Consulted only for a metered target.
  */
 export interface MeteredMoveGate {
 	/** Whether the work may move to a metered model now: its move is reserved already, or the host's bound has room. */
 	fits(): boolean;
-	/** Reserves the move before the metered model's first request; false: nothing is reserved and the work does not move. */
-	reserve(): boolean;
+	/** Reserves the move before the metered model's first request (`MeteredMoveMode`; `admit` when absent). */
+	reserve(mode?: MeteredMoveMode): boolean;
 }
 
 export class AgentSessionModelAccess {
@@ -212,12 +219,23 @@ export class AgentSessionModelAccess {
 	/**
 	 * Admits a move of the work to `model` before its first request: a metered one is reserved on each host's gate
 	 * (`MeteredMoveGate.reserve`), and one a gate refuses does not move (a gate that reserved before keeps it, the
-	 * stricter reading). Every move to another model passes here: a failover, an opening's talker, a routed turn's swap.
+	 * stricter reading). Every automatic move to another model passes here: a failover, an opening's talker, a routed
+	 * turn's swap; a chosen one is charged instead (`chargeMove`).
 	 */
 	admitMove(model: Model<Api>): boolean {
 		if (!isMeteredSpend(model, this.ports.modelRegistry())) return true;
 		for (const gate of this.meteredMoves) if (!gate.reserve()) return false;
 		return true;
+	}
+
+	/**
+	 * A move of the session to `model` that is never refused (an explicit choice: `/model`, a cycle, an extension's
+	 * `setModel`; an account that no longer offers the model): a metered one is charged on each host's gate, reserved
+	 * while its bound has room and charged past it otherwise (`MeteredMoveGate.reserve("charge")`).
+	 */
+	chargeMove(model: Model<Api>): void {
+		if (!isMeteredSpend(model, this.ports.modelRegistry())) return;
+		for (const gate of this.meteredMoves) gate.reserve("charge");
 	}
 
 	/** Where work goes when `failed` ran out of quota (`resolveQuotaFallbackModel`): never a model whose move is held. */

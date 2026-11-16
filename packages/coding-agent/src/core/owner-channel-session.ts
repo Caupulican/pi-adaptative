@@ -157,10 +157,17 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		this.submit(text, "", { requestEntryId }, origin, live, onAccepted);
 	}
 
-	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void {
+	observeRunUsage(ref: string, onUsd: (usd: number) => void, onStarted: () => void): () => void {
 		let usd = 0;
+		let started = false;
 		return this.host.agent.subscribe((event) => {
-			if (event.type !== "message_end" || event.message.role !== "assistant" || !this.runOpenedBy(ref)) return;
+			if (event.type !== "message_end" || !this.isRunning(ref)) return;
+			// The run's first message to end (the owner's words it took in) is seen before its first response is requested.
+			if (!started) {
+				started = true;
+				onStarted();
+			}
+			if (event.message.role !== "assistant") return;
 			// Only metered (API) spend is held by dollars; every response is still reported, so a subscription's turn is
 			// asked about its usage windows at each.
 			const registry = this.host.modelRegistry;
@@ -184,7 +191,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	 * typed-word judgments, a pending human-input resume and runtime updates are left as they are.
 	 */
 	abortRun(ref: string): void {
-		if (!this.runOpenedBy(ref)) return;
+		if (!this.isRunning(ref)) return;
 		const reason = "owner channel stop";
 		this.abortPromptSubmission(reason);
 		const foreground = this.getForeground();
@@ -320,7 +327,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	}
 
 	/** Whether the foreground run in progress is the one the batch `ref` decided. */
-	private runOpenedBy(ref: string): boolean {
+	isRunning(ref: string): boolean {
 		const turnOrigin = this.getForeground().turnOrigin;
 		const origin = turnOrigin.origin();
 		return turnOrigin.isActive() && isRemoteOwnerOrigin(origin) && origin?.ref === ref;

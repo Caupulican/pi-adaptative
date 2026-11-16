@@ -64,7 +64,6 @@ import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import {
-	AWAY_CHANNEL_SPEND_REFUSAL,
 	type AwayChannel,
 	awayChannels,
 	readAwayChannelCharges,
@@ -73,6 +72,7 @@ import {
 import { ChannelJournal } from "./channel-journal.ts";
 import { isOwnerChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
 import { JournalDirWatch } from "./journal-dir-watch.ts";
+import type { Worded } from "./owner-notice-text.ts";
 import { SessionChannels } from "./session-channels.ts";
 
 /** The tools a channel turn away may call: it reads the working directory and answers. */
@@ -236,14 +236,15 @@ export class AwayChannelHosts {
 	}
 
 	/** The away spend bound's reason to deliver no turn now. */
-	private capReason(nowMs: number): string | undefined {
-		return this.awayRoom(nowMs).fits(0) ? undefined : AWAY_CHANNEL_SPEND_REFUSAL;
+	private capReason(nowMs: number): Worded | undefined {
+		return this.awayRoom(nowMs).fits(0) ? undefined : (text) => text.notices.channels.cap.awaySpend;
 	}
 
 	/**
 	 * The hold on a child session's moves to metered models: its subscription turns away reserve nothing on the away
 	 * bound, so a failover to a metered model first reserves each its full per-run bound, as a run away's attempt is
-	 * (`reserveAwayChannelTurns`), and is held off metered models while the day has no room for them.
+	 * (`reserveAwayChannelTurns`), and is held off metered models while the day has no room for them; a charged move
+	 * (an explicit model choice) reserves them whatever the room.
 	 */
 	private meteredMoves(name: string, sessionManager: SessionManager): MeteredMoveGate {
 		const unreserved = () => unreservedSubscriptionTurns(this.input.agentDir, name, sessionManager.getSessionId());
@@ -251,10 +252,10 @@ export class AwayChannelHosts {
 			keys.length === 0 || this.awayRoom(nowMs).fits(keys.length - 1);
 		return {
 			fits: () => fits(unreserved(), this.now()),
-			reserve: () => {
+			reserve: (mode = "admit") => {
 				const nowMs = this.now();
 				const keys = unreserved();
-				if (!fits(keys, nowMs)) return false;
+				if (mode === "admit" && !fits(keys, nowMs)) return false;
 				const reserved = reserveAwayChannelTurns({
 					agentDir: this.input.agentDir,
 					keys,

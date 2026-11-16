@@ -2288,7 +2288,7 @@ export class AgentSession {
 			},
 		});
 		this._modelSelection = new ModelSelectionController({
-			isModelPinned: () => this._modelAccess.pinned,
+			modelAccess: () => this._modelAccess,
 			getAgent: () => this.agent,
 			getModel: () => this.model,
 			getThinkingLevel: () => this.thinkingLevel,

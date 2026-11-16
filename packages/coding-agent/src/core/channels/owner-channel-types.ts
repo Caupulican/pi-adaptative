@@ -55,8 +55,13 @@ export interface OwnerChannelDelivery {
 		onAccepted: (accepted: boolean) => void,
 		requestEntryId: string | undefined,
 	): void;
-	/** Reports the metered (API) cost of the run that `ref` opened at each of its responses; returns the unsubscribe. */
-	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
+	/**
+	 * Reports the metered (API) cost of the run that `ref` opened at each of its responses, and `onStarted` once that run
+	 * is the session's run in progress (before its first response is requested); returns the unsubscribe.
+	 */
+	observeRunUsage(ref: string, onUsd: (usd: number) => void, onStarted: () => void): () => void;
+	/** Whether the session's run in progress is the one `ref` opened (an owner turn queued behind another has not started). */
+	isRunning(ref: string): boolean;
 	/**
 	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
 	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent or throws) is a metered
@@ -65,7 +70,7 @@ export interface OwnerChannelDelivery {
 	quotaAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
 	/**
 	 * Holds the session's moves to metered (API) models to the owner pool's gate until the returned release: an owner turn
-	 * accepted on a subscription charges the pool nothing until it moves (`owner-metered-moves.ts`). Absent: not held.
+	 * accepted on a subscription charges the pool nothing until it moves or starts on one (`owner-metered-moves.ts`).
 	 */
 	holdMeteredMoves(gate: MeteredMoveGate): () => void;
 	/** Aborts the run that `ref` opened. */

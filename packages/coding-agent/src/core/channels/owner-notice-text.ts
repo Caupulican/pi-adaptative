@@ -12,8 +12,16 @@ import { allowanceCauseText } from "../provider-admission/subscription-allowance
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
 import { type ChannelAwayUntold, heldCount } from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
-import { type OwnerRoom, ownerQuotaWait, ownerUsageLine, ownerUsageReached, toldInstant } from "./owner-channel.ts";
-import type { OwnerQuotaAllowance, OwnerWaitingView } from "./owner-channel-types.ts";
+import {
+	type OwnerRoom,
+	ownerQuotaWait,
+	ownerUsageLine,
+	ownerUsageReached,
+	type TurnUsageHold,
+	toldInstant,
+} from "./owner-channel.ts";
+import type { OwnerDraftView, OwnerQuotaAllowance, OwnerWaitingView } from "./owner-channel-types.ts";
+import { classLabels } from "./owner-control.ts";
 import { waitingStatusLine } from "./owner-waiting-notices.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
@@ -141,6 +149,40 @@ export function ownerRefusalWords(
 		: (text) => text.notices.channels.owner.daySpend(name, room.usedUsd, policy.ownerMaxUsdPerDay);
 }
 
+/** What a channel's third-party bounds read: its turns and metered spend in the last 24 hours, its open reply drafts. */
+export interface ChannelCapFacts {
+	readonly wakes: number;
+	readonly usd: number;
+	readonly openDrafts: number;
+	readonly maxDrafts: number;
+	/** The serving session's subscription usage at its limit (`turnUsageHold`), read only once the bounds before it pass. */
+	usage(): TurnUsageHold | undefined;
+}
+
+/**
+ * Why a channel delivers no third party's turn now (`Worded`), or undefined, by the first that holds: its turns' day
+ * bound, its metered spend's day bound, the reply drafts waiting for the owner, the serving session's subscription usage.
+ */
+export function channelCapWords(
+	name: string,
+	policy: Pick<ResolvedChannelPolicy, "maxWakesPerDay" | "maxUsdPerDay">,
+	facts: ChannelCapFacts,
+): Worded | undefined {
+	if (facts.wakes >= policy.maxWakesPerDay)
+		return (text) => text.notices.channels.cap.wakes(policy.maxWakesPerDay, `channels.${name}.maxWakesPerDay`);
+	if (facts.usd >= policy.maxUsdPerDay)
+		return (text) => text.notices.channels.cap.spend(facts.usd, `channels.${name}.maxUsdPerDay`);
+	if (facts.openDrafts >= facts.maxDrafts) return (text) => text.notices.channels.cap.drafts(facts.maxDrafts);
+	const hold = facts.usage();
+	if (hold === undefined) return undefined;
+	return (text) =>
+		text.notices.channels.owner.usageReached(
+			"limit",
+			allowanceCauseText(text.notices.subscriptionUsage, hold.cause),
+			toldInstant(hold.retryAt),
+		);
+}
+
 /** What the `status` reply reads of a channel's owner pool, its turns, its held drafts and the calls waiting on the owner. */
 export interface OwnerStatusFacts {
 	readonly room: OwnerRoom;
@@ -148,8 +190,8 @@ export interface OwnerStatusFacts {
 	readonly quota: OwnerQuotaAllowance;
 	readonly running: boolean;
 	readonly waiting: number;
-	/** The held drafts in scope: id, class labels, and whether this chat was shown it. */
-	readonly drafts: readonly { readonly id: string; readonly classes: string; readonly shown: boolean }[];
+	/** The held drafts in scope: id, classes, and whether this chat was shown it. */
+	readonly drafts: readonly (Pick<OwnerDraftView, "id" | "classes"> & { readonly shown: boolean })[];
 	/** The calls waiting on the owner in the hosting session; undefined when none could be read. */
 	readonly calls: OwnerWaitingView | undefined;
 	/** Pushes held back under `ownerPushPerHour` since the last status. */
@@ -167,7 +209,7 @@ export function ownerStatusReply(
 	const words = text.notices.channels.owner;
 	const listed = facts.drafts
 		.slice(0, maxDrafts)
-		.map((draft) => words.heldDraft(draft.id, draft.classes, draft.shown));
+		.map((draft) => words.heldDraft(draft.id, classLabels(draft, text), draft.shown));
 	const quotaLine = quotaStatusLine(text, name, policy, facts.quota);
 	const waitingLine = waitingStatusLine(words, facts.calls);
 	return [

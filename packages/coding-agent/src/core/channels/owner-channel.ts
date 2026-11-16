@@ -8,8 +8,8 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
-import { englishText, type InterfaceText } from "../language/interface-text.ts";
-import { allowanceCauseText } from "../provider-admission/subscription-allowance.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
+import { type AllowanceExhaustedCause, allowanceCauseText } from "../provider-admission/subscription-allowance.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -330,16 +330,20 @@ export function ownerQuotaWait(
 	return quota.kind === "exhausted" ? ownerUsageReached(text, name, policy, quota) : undefined;
 }
 
+/** Why a third party's turn waits on its session's subscription usage: what the reading reports, and its reset. */
+export interface TurnUsageHold {
+	readonly cause: AllowanceExhaustedCause;
+	readonly retryAt?: number;
+}
+
 /**
  * Why a third party's turn waits: the serving session's own subscription (the model the turn runs on) reports its usage
  * at the line workers wait at (`DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT`) or at the provider's limit, past which a turn is
  * refused or billed as extra usage; it waits for the reset the account reports, or the next
  * channel pass with room. None for a metered model (the channel's dollar bounds hold it) or a reading that fails (the
- * provider's refusal then holds it).
+ * provider's refusal then holds it). Told in each catalogue's words by `channelCapWords`.
  */
-export function turnUsageHold(
-	source: Pick<SessionChannelsOwnerDeps, "turnAllowance">,
-): { readonly reason: string; readonly retryAt?: number } | undefined {
+export function turnUsageHold(source: Pick<SessionChannelsOwnerDeps, "turnAllowance">): TurnUsageHold | undefined {
 	let quota: OwnerQuotaAllowance | undefined;
 	try {
 		quota = source.turnAllowance?.(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT);
@@ -347,14 +351,5 @@ export function turnUsageHold(
 		return undefined;
 	}
 	if (quota?.kind !== "exhausted") return undefined;
-	// A channel's hold reason is the model's notice detail and the journal's record: English.
-	const words = englishText().notices;
-	return {
-		reason: words.channels.owner.usageReached(
-			"limit",
-			allowanceCauseText(words.subscriptionUsage, quota.cause),
-			toldInstant(quota.retryAt),
-		),
-		...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}),
-	};
+	return { cause: quota.cause, ...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}) };
 }

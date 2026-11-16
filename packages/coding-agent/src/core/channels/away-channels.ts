@@ -20,10 +20,7 @@ import {
 	pendingOfferTimes,
 } from "./channel-journal.ts";
 import { isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
-
-/** Why the daemon delivers no channel turn now for lack of room under the away spend bound. */
-export const AWAY_CHANNEL_SPEND_REFUSAL =
-	"the away spend bound (routines.away.maxUsdPerDay) has no room for another turn in the last 24 hours; messages wait for an open session";
+import type { Worded } from "./owner-notice-text.ts";
 
 /** A channel the daemon serves while no session is open, and where. */
 export interface AwayChannel {
@@ -138,8 +135,11 @@ export function unreservedSubscriptionTurns(agentDir: string, name: string, sess
 
 /** What the channels core asks of the daemon's host while it serves a channel away (`SessionChannelsDeps.away`). */
 export interface AwayChannelServing {
-	/** The away spend bound's reason to deliver no turn now; none while the host spends unmetered (it holds metered turns alone). */
-	capReason(now: number): string | undefined;
+	/**
+	 * The away spend bound's reason to deliver no turn now, in each catalogue's words (`notices.channels.cap.awaySpend`);
+	 * none while the host spends unmetered (it holds metered turns alone).
+	 */
+	capReason(now: number): Worded | undefined;
 	/** Whether the host's turns spend metered (API) dollars (`isMeteredSpend`); absent: they do. */
 	spendsMetered?(): boolean;
 }
