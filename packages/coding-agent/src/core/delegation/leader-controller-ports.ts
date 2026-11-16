@@ -12,6 +12,7 @@ import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
 import type { LeaderBotView } from "./leader-delegation.ts";
 import type { LeaderLedgerRuntime } from "./leader-delegation-ledger.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
+import type { WorkerMailLedger } from "./worker-mail-ledger.ts";
 
 export interface LeaderControllerDeps {
 	/** The root session's durable task runtime: the one store the delegation record lives in. */
@@ -77,6 +78,14 @@ export interface LeaderControllerDeps {
 	 * process writes; throws when they cannot be read.
 	 */
 	botHoldsMail(alias: string, mailId: string): boolean;
+	/**
+	 * The session's record of its workers' mail (`WorkerMailLedger`): each goal's mail, which holds it open until its
+	 * answer is handed on, and the spend the answers made, which its budget counts. Its changes trigger a pass.
+	 */
+	readonly mail: Pick<
+		WorkerMailLedger,
+		"subscribe" | "goalMails" | "openMail" | "goalSpentUsd" | "sent" | "awaited" | "ended" | "retainGoals"
+	>;
 	/** Starts the messages the goal filed while it was paused, now that it runs again. */
 	reconcileDelegatedMessages(delegationObjectiveId: string): void;
 	/** The orchestration clock: the one attempts are stamped on. */

@@ -1,5 +1,5 @@
 import type { BotMailSent } from "../bots/bot-mail.ts";
-import type { SenderGoalTurn } from "./goal-mail.ts";
+import type { SenderTurn } from "./goal-mail.ts";
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 import type { WorkerAgentControlPort, WorkerAgentReplyResult } from "./worker-agent-control.ts";
 
@@ -47,8 +47,11 @@ export interface BotSessionMailInput {
 	/** A third party's words reached the sender's run. */
 	readonly thirdParty: boolean;
 	readonly teamId?: string;
-	/** The goal turn the sender runs (`senderGoalTurn`): the goal waits for the bot's answer, and the hop follows it. */
-	readonly goalTurn?: SenderGoalTurn;
+	/**
+	 * The turn the sender runs (`senderTurn`): the mail continues the chain of a bot's reply that started or joined it,
+	 * and a goal it is filed under waits for the bot's answer.
+	 */
+	readonly turn?: SenderTurn;
 }
 
 /** Parent-owned alias resolution, fenced to the sender's exact execution and branch. */

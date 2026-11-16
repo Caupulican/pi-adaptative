@@ -579,17 +579,22 @@ where no answer was sent (its host stopped first) is answered from the bot's con
 the worker always hears back. A bot that runs only as a worker is reached as before.
 
 A mail a worker sends in a leader's goal (the leader's, or a bot's working under it) holds the goal open until the reply
-reaches that worker: the goal records the mail in its store (in this session's orchestration store, so a restart keeps
-it), the reply starts the worker's next turn under the goal, and the goal settles only after that. The goal stops waiting
+reaches that worker: the session records the mail beside its transcript (`<session>.worker-mail.json`, so a restart
+keeps it, and a goal's own record is not filled by its mail), the reply starts the worker's next turn under the goal, and
+the goal settles only after that. The goal stops waiting
 for a mail that was not sent, whose bot is retired, removed or no longer answers in a session of its own, or whose reply
 expired unread, and for a mail the bot no longer holds: its inbox keeps no record of it and no reply to it waits unread
 (a refusal reply that could not be written, a record that did not read as one). Each time the goal is kept open for a
 mail, the mail is marked as awaited and read again a minute later, so no mail holds a goal open without bound, whether
 the goal has a deadline or not. The metered spend of the bot's turn that answered (its workers'
 included, as of the turn's end) counts against the goal's budget once the reply is handed on, as a bot's worker turn under
-the goal counted. A worker's mail is first in its chain unless a reply started the worker's turn, in which case it is one
-hop past that reply, so a worker and a bot answering each other stop at the bound of 8 mails as bots mailing each other do
-(a goal mails bots at most 128 times). A bot's
+the goal counted, and the session keeps that spend per goal for as long as the goal is in its store. A worker's mail,
+in a goal or not, is first in its chain unless a bot's reply started the worker's turn or reached it while it ran, in
+which case it is one hop past that reply (the session keeps each reply's hop until that turn ends), so a worker and a bot
+answering each other stop at the bound of 8 mails as bots mailing each other do. When this session's reply inbox does
+not read, it is set aside as `<file>.unreadable-<time>` and you are told once; a reply it held is lost, and a goal that
+waited for one stops waiting. A record of the workers' mail that does not read is set aside the same way, and one a
+newer version wrote is left as it is while this version keeps its own in memory. A bot's
 chat shows such a mail as `The orchestrator's worker <worker> wrote` (`O worker <worker> do orquestrador escreveu`).
 
 ## History and lifecycle

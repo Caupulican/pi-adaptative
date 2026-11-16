@@ -303,6 +303,14 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: the record of which session it continues ${POINTER_SET_ASIDE[reason.kind](reason as never)} and was set aside as ${file}; it continues its newest session file, or a new session when it has none, recorded anew.`,
 	botWatchesNotCounted: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its saved session did not read (${reason}); its watches are not counted until it reads.`,
+	botRepliesSetAside: (file: string, reason: string) =>
+		`The bots' replies to this session did not read (${reason}) and were set aside as ${file}; a reply they held is lost, and a goal that waited for one waits no more.`,
+	workerMailLedgerNewer: (file: string) =>
+		`The record of this session's workers' mail to bots (${file}) was written by a newer version; this one keeps its own in memory and leaves the file as it is.`,
+	workerMailLedgerUnreadable: (file: string, aside: string | undefined, reason?: string) =>
+		aside === undefined
+			? `The record of this session's workers' mail to bots (${file}) did not read and could not be set aside (${reason ?? "unknown"}); the mail is kept in memory only.`
+			: `The record of this session's workers' mail to bots did not read and was set aside as ${aside}; goals stop waiting for the mail it held, and the spend it counted is no longer counted.`,
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>

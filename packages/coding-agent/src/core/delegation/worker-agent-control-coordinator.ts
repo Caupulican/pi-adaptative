@@ -36,7 +36,7 @@ import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-ge
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { attemptDelegationObjectiveId } from "./delegation-spend.ts";
-import { type SenderGoalTurn, senderGoalTurn } from "./goal-mail.ts";
+import { type SenderTurn, senderTurn } from "./goal-mail.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
 import {
 	SessionRootMailbox,
@@ -693,7 +693,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			// A delegation's words wait for a turn of their own, filed under that delegation: a steer would be absorbed into
 			// the live turn, which was filed under whatever started it.
 			const delegated =
-				options.delegationObjectiveId !== undefined || this.senderGoalTurn(options.senderAgentId) !== undefined;
+				options.delegationObjectiveId !== undefined ||
+				this.senderTurn(options.senderAgentId)?.objectiveId !== undefined;
 			const queued = this.enqueuePeerMessage(agent, delegated ? "follow_up" : "steer", message, options, {
 				kind: "agent_turn",
 			});
@@ -1072,12 +1073,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * The goal turn a bot's words come from (`senderGoalTurn`): its own running turn, when a delegation filed it. The
-	 * session root and an idle or unknown sender have none.
+	 * The turn a worker's words come from (`senderTurn`): its own running turn, with the goal a delegation filed it under.
+	 * The session root and an idle or unknown sender have none.
 	 */
-	senderGoalTurn(senderAgentId: string | undefined): SenderGoalTurn | undefined {
+	senderTurn(senderAgentId: string | undefined): SenderTurn | undefined {
 		if (!senderAgentId || senderAgentId === this.sessionRootAddress) return undefined;
-		return senderGoalTurn(this.options.getLifecycle().getTaskRuntimeSnapshot(), senderAgentId);
+		return senderTurn(this.options.getLifecycle().getTaskRuntimeSnapshot(), senderAgentId);
 	}
 
 	/** The delegation a finished attempt was filed under, when a delegation started it; undefined for session work. */
@@ -1954,9 +1955,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const turnOrigin = replay ? undefined : agentWords ? agentWords.turnOrigin : this.senderTurnOrigin(sender);
 		// The delegation the words belong to: the root's host-only tag, else the delegation the sender's own turn is filed
 		// under, so a leader's bots' turns stay that delegation's. A replay keeps the stored message's.
-		const delegationObjectiveId = replay
-			? undefined
-			: (requestedDelegation ?? this.senderGoalTurn(sender)?.objectiveId);
+		const delegationObjectiveId = replay ? undefined : (requestedDelegation ?? this.senderTurn(sender)?.objectiveId);
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
 			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.

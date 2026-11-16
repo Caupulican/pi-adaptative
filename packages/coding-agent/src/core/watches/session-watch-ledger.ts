@@ -12,8 +12,7 @@
  * days after the session last closed, and at most {@link MAX_ENDED_SESSION_WATCHES} of them; one whose wake is not
  * delivered yet is always kept. A session with no transcript file keeps its ledger in memory.
  */
-import { readdirSync, readFileSync, renameSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { readFileSync, renameSync } from "node:fs";
 import {
 	isRoutineId,
 	MAX_ROUTINE_PROMPT_CHARS,
@@ -31,7 +30,7 @@ import {
 } from "../routines/watch-contract.ts";
 import { parseWorkerWatchScope, type WorkerWatchScope } from "../routines/worker-watch-scope.ts";
 import type { TurnAuthority } from "../turn-origin.ts";
-import { atomicTemporaryTarget, isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { atomicFileFamily, isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
 export const SESSION_WATCH_LEDGER_VERSION = 1;
@@ -361,20 +360,7 @@ export function endWatchesArmedByStop(
  * temporaries of its crashed atomic writes. They hold only the session's own watches, so they go with its transcript.
  */
 export function sessionWatchLedgerFiles(sessionFile: string): string[] {
-	const ledger = sessionWatchLedgerPath(sessionFile);
-	const [directory, name] = [dirname(ledger), basename(ledger)];
-	let names: string[];
-	try {
-		names = readdirSync(directory);
-	} catch (error) {
-		if (isMissingFileError(error)) return [];
-		throw error;
-	}
-	return names
-		.filter(
-			(entry) => entry === name || entry.startsWith(`${name}.unreadable-`) || atomicTemporaryTarget(entry) === name,
-		)
-		.map((entry) => join(directory, entry));
+	return atomicFileFamily(sessionWatchLedgerPath(sessionFile));
 }
 
 export interface SessionWatchLedgerDeps {

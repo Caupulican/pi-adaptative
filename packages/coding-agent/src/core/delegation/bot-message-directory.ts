@@ -19,7 +19,6 @@ import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import { groupMailRoomBlock, readGroupRoom } from "./bot-group-room.ts";
 import type { BotMessageBroker, BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
-import { goalMailHop } from "./goal-mail.ts";
 import type { LeaderController } from "./leader-controller.ts";
 import type { LeadRequest } from "./leader-delegation.ts";
 import type { DelegationRecord } from "./leader-delegation-ledger.ts";
@@ -33,6 +32,7 @@ import {
 import { sessionRootAddress } from "./session-root-mailbox.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
+import type { WorkerMailLedger } from "./worker-mail-ledger.ts";
 
 /** The coordinator's members one bot messaging directory uses; each is a plain port, bound at the call. */
 export interface BotMessageDirectoryHost {
@@ -45,6 +45,8 @@ export interface BotMessageDirectoryHost {
 	invalidateBotViews(): void;
 	listWorkerAgents(): WorkerAgentView[];
 	getLeaders(): LeaderController;
+	/** The session's record of its workers' mail: the hop of the bots' replies its workers' turns continue. */
+	workerMail(): Pick<WorkerMailLedger, "hopAfter">;
 	/** Every delegation to a leader, read without building the leader controller. */
 	leaderDelegations(): DelegationRecord[];
 	startOwnedBotAsChild(
@@ -267,25 +269,17 @@ export function createBotMessageDirectory(
 				throw new Error(`Bot ${alias} is inactive in this parent session; ask the parent to start it.`);
 			return { kind: "worker", runtime };
 		},
-		mailSession: async ({ agentId: alias, message, replayKey, thirdParty, teamId, goalTurn }) => {
+		mailSession: async ({ agentId: alias, message, replayKey, thirdParty, teamId, turn }) => {
 			assertCurrent();
 			// A worker in a group's thread gives the member its room, as its worker's start and the group's mail carry it.
 			const group = requireGroup(teamId);
 			const mailId = replayedMailId(replayKey);
 			const sessionId = manager.getSessionId();
-			// Sent in a goal's turn, the goal waits for the answer (`LeaderController.mailSent`), and the mail carries the hop of
-			// the reply that started the turn.
-			const leaders = goalTurn ? host.getLeaders() : undefined;
-			const hop =
-				goalTurn && leaders ? goalMailHop(leaders.goalMails(goalTurn.objectiveId), sessionId, sender, goalTurn) : 1;
-			// A replay of a send that failed is not sent either: the goal stopped waiting for its answer when it failed.
-			if (
-				goalTurn &&
-				leaders?.goalMails(goalTurn.objectiveId).some((m) => m.mailId === mailId && m.end?.how === "unsent")
-			)
-				throw new Error(
-					"Not sent: this same send already failed; send the words again as a new message if still needed.",
-				);
+			// The mail continues the chain of a bot's reply that started or joined the sender's turn, in a goal or not.
+			const hop = host.workerMail().hopAfter(sender, turn);
+			// Sent in a goal's turn, the goal waits for the answer (`LeaderController.mailSent`).
+			const goal = turn?.objectiveId;
+			const leaders = goal === undefined ? undefined : host.getLeaders();
 			if (hop > MAX_BOT_MAIL_HOPS)
 				throw new Error(
 					`Not sent: this would be mail ${hop} in one chain of mails, past the bound of ${MAX_BOT_MAIL_HOPS}. Stop the exchange and report what you have in your answer.`,
@@ -301,8 +295,7 @@ export function createBotMessageDirectory(
 				...(group ? { room: groupMailRoomBlock(readGroupRoom(store, group)) } : {}),
 			});
 			const held =
-				goalTurn !== undefined &&
-				leaders?.mailSent(goalTurn.objectiveId, { mailId, agentId: alias, worker: sender, hop }) === true;
+				goal !== undefined && leaders?.mailSent(goal, { mailId, agentId: alias, worker: sender, hop }) === true;
 			let sent: Awaited<ReturnType<typeof host.botSessions.mailFromWorker>>;
 			try {
 				sent = await host.botSessions.mailFromWorker(sourceAlias, alias, mail);
@@ -312,7 +305,7 @@ export function createBotMessageDirectory(
 				throw error;
 			} finally {
 				// Sent or not, the goal now reads the mail where the bot holds it (`LeaderController.mailLeft`).
-				if (goalTurn) leaders?.mailLeft(mailId);
+				if (held) leaders?.mailLeft(mailId);
 			}
 			// The mail has left: the group's log records it without fencing again, so the model never sends it twice.
 			recordSent(mailId, alias, message);
@@ -359,7 +352,7 @@ export interface BotMessageBrokerPorts {
 	readonly senderAgentId: string;
 	readonly control: Pick<
 		WorkerAgentControlCoordinator,
-		"messageWorkerPeer" | "replyToWorkerAgentMessage" | "senderTurnOrigin" | "senderGoalTurn"
+		"messageWorkerPeer" | "replyToWorkerAgentMessage" | "senderTurnOrigin" | "senderTurn"
 	>;
 	/** The replay key of one tool invocation: a repeated call with the same key is one message. */
 	idempotencyKey(invocationId: string): string;
@@ -379,14 +372,14 @@ export function createBotMessageBroker(directory: BotMessageDirectory, ports: Bo
 			// A bot with a session of its own takes the words as mail, carrying the sender's third party's taint; its answer
 			// always comes back, so expectReply does not apply.
 			if (resolved.kind === "session") {
-				const goalTurn = ports.control.senderGoalTurn(ports.senderAgentId);
+				const turn = ports.control.senderTurn(ports.senderAgentId);
 				return directory.mailSession({
 					agentId: resolved.agentId,
 					message,
 					replayKey: ports.idempotencyKey(invocationId),
 					thirdParty: ports.control.senderTurnOrigin(ports.senderAgentId) !== undefined,
 					...(teamId !== undefined ? { teamId } : {}),
-					...(goalTurn ? { goalTurn } : {}),
+					...(turn ? { turn } : {}),
 				});
 			}
 			const outcome = ports.control.messageWorkerPeer(resolved.runtime, message, {

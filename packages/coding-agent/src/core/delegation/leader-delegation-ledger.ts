@@ -42,47 +42,6 @@ const ASK_EVIDENCE_PREFIX = "delegation-ask-";
 export const MAX_DELEGATION_UPDATES = 32;
 /** The most mid-goal questions one delegation keeps; past it the leader asks in its report. */
 const MAX_DELEGATION_ASKS = 32;
-/**
- * One per mail a worker of the goal sent to a bot that answers in a session of its own (`delegation-mail-sent-<mail id>`), and
- * one once the goal no longer waits for its reply (`delegation-mail-end-<mail id>`); a build that predates them ignores both.
- */
-const MAIL_SENT_EVIDENCE_PREFIX = "delegation-mail-sent-";
-const MAIL_END_EVIDENCE_PREFIX = "delegation-mail-end-";
-const MAIL_AWAITED_EVIDENCE_PREFIX = "delegation-mail-awaited-";
-/**
- * The most such mails one delegation keeps; past it the leader works with the answers it has. Each holds up to three
- * evidence entries (sent, awaited, end), within the objective's evidence bound beside the updates and asks.
- */
-export const MAX_DELEGATION_MAILS = 128;
-
-/**
- * How a goal stopped waiting for a mail: its reply reached the worker or the session (`answered`), the mail was never sent
- * (`unsent`), the bot no longer answers in a session of its own (`gone`), or the reply expired unread (`expired`).
- */
-export const DELEGATION_MAIL_ENDS = ["answered", "unsent", "gone", "expired"] as const;
-export type DelegationMailEndHow = (typeof DELEGATION_MAIL_ENDS)[number];
-
-/** How a goal stopped waiting for a mail, and the metered spend the bot's session made answering it. */
-export interface DelegationMailEnd {
-	readonly how: DelegationMailEndHow;
-	/** The reply's hop: the chain the worker's next mail continues, when the reply started its turn. */
-	readonly replyHop?: number;
-	readonly meteredUsd: number;
-}
-
-/** A mail a worker of the goal sent to a bot that answers in a session of its own: the goal waits for its reply. */
-export interface DelegationMail {
-	readonly mailId: string;
-	/** The bot mailed. */
-	readonly agentId: string;
-	/** The runtime of the worker that sent it. */
-	readonly worker: string;
-	/** Its place in its chain (`MAX_BOT_MAIL_HOPS`). */
-	readonly hop: number;
-	/** When the goal's settle step first found the goal done but for this mail's answer, and kept it open for it. */
-	readonly awaitedAt?: string;
-	readonly end?: DelegationMailEnd;
-}
 
 /** Throws when a delegation has no room for another mid-goal question; checked before the question is delivered. */
 export function assertMayAsk(record: Pick<DelegationRecord, "askedAt">): void {
@@ -134,10 +93,6 @@ export interface DelegationRecord {
 	readonly updates: readonly string[];
 	/** When each mid-goal question (`ask_root`) reached its addressee, oldest first: the goal waits for a later leader turn. */
 	readonly askedAt: readonly string[];
-	/** The mail its workers sent to bots that answer in sessions of their own, oldest first: the goal waits for each reply. */
-	readonly mails: readonly DelegationMail[];
-	/** The metered spend those bots' sessions made answering it, counted against the goal's budget. */
-	readonly mailSpentUsd: number;
 	readonly outcome?: Outcome;
 	/** Whether a nested delegation's Outcome reached its parent leader (always false for a delegation with no parent). */
 	readonly outcomeDeliveredToParent: boolean;
@@ -240,41 +195,6 @@ function charterFrom(value: unknown): LeaderCharter | undefined {
 	};
 }
 
-function mailEndFrom(value: unknown): DelegationMailEnd | undefined {
-	if (!isPlainRecord(value) || !(DELEGATION_MAIL_ENDS as readonly unknown[]).includes(value.how)) return undefined;
-	const { meteredUsd, replyHop } = value;
-	return {
-		how: value.how as DelegationMailEndHow,
-		meteredUsd: typeof meteredUsd === "number" && Number.isFinite(meteredUsd) && meteredUsd > 0 ? meteredUsd : 0,
-		...(typeof replyHop === "number" && Number.isSafeInteger(replyHop) && replyHop > 0 ? { replyHop } : {}),
-	};
-}
-
-/** The mail a delegation's evidence records, in the order it was sent, each with how the goal stopped waiting for it. */
-function delegationMails(
-	evidence: readonly { readonly evidenceId: string; readonly createdAt: string; readonly metadata?: JsonObject }[],
-): DelegationMail[] {
-	const ends = new Map<string, DelegationMailEnd>();
-	const awaited = new Map<string, string>();
-	for (const entry of evidence) {
-		if (entry.evidenceId.startsWith(MAIL_AWAITED_EVIDENCE_PREFIX))
-			awaited.set(entry.evidenceId.slice(MAIL_AWAITED_EVIDENCE_PREFIX.length), entry.createdAt);
-		const end = entry.evidenceId.startsWith(MAIL_END_EVIDENCE_PREFIX) ? mailEndFrom(entry.metadata) : undefined;
-		if (end) ends.set(entry.evidenceId.slice(MAIL_END_EVIDENCE_PREFIX.length), end);
-	}
-	return evidence.flatMap((entry) => {
-		const sent = entry.metadata;
-		if (!entry.evidenceId.startsWith(MAIL_SENT_EVIDENCE_PREFIX) || !isPlainRecord(sent)) return [];
-		const { agentId, worker, hop } = sent;
-		if (typeof agentId !== "string" || typeof worker !== "string") return [];
-		if (typeof hop !== "number" || !Number.isSafeInteger(hop) || hop < 1) return [];
-		const mailId = entry.evidenceId.slice(MAIL_SENT_EVIDENCE_PREFIX.length);
-		const end = ends.get(mailId);
-		const awaitedAt = awaited.get(mailId);
-		return [{ mailId, agentId, worker, hop, ...(awaitedAt ? { awaitedAt } : {}), ...(end ? { end } : {}) }];
-	});
-}
-
 function closeReasonFrom(value: unknown): DelegationCloseReason | undefined {
 	return (DELEGATION_CLOSE_REASONS as readonly unknown[]).includes(value)
 		? (value as DelegationCloseReason)
@@ -307,7 +227,6 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 			.filter((entry) => entry.evidenceId.startsWith(ASK_EVIDENCE_PREFIX))
 			.map((entry) => entry.createdAt)
 			.sort();
-		const mails = delegationMails(state.evidence);
 		const status = state.objective.status;
 		const closedObjective = status === "completed" || status === "cancelled";
 		const closeReason = closeReasonFrom(closing?.metadata?.closeReason);
@@ -328,8 +247,6 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 			filedByObjective: dispatch?.filing === DISPATCH_FILING_BY_OBJECTIVE,
 			updates,
 			askedAt,
-			mails,
-			mailSpentUsd: mails.reduce((sum, mail) => sum + (mail.end?.meteredUsd ?? 0), 0),
 			...(outcome ? { outcome } : {}),
 			outcomeDeliveredToParent: evidence.has(DELIVERED_TO_PARENT_EVIDENCE),
 			...(closeReason ? { closeReason } : {}),
@@ -512,64 +429,6 @@ export class LeaderDelegationLedger {
 			trusted: true,
 			createdAt: new Date(this.now()).toISOString(),
 			metadata: { askId },
-		});
-	}
-
-	/**
-	 * Records a mail a worker of the goal sent to a bot that answers in a session of its own, before it is sent: the goal is
-	 * not settled until it no longer waits for the reply (`recordMailEnd`). False when it is recorded already (a send
-	 * replayed), which leaves the record as it was. Throws when the goal holds its bound of mails.
-	 */
-	recordMailSent(objectiveId: string, mail: Omit<DelegationMail, "awaitedAt" | "end">): boolean {
-		const record = this.require(objectiveId);
-		if (record.mails.some((entry) => entry.mailId === mail.mailId)) return false;
-		if (record.mails.length >= MAX_DELEGATION_MAILS)
-			throw new Error(
-				`Not sent: this goal already mailed bots ${MAX_DELEGATION_MAILS} times; work with the answers you have and put the rest in your report.`,
-			);
-		this.runtime().recordObjectiveEvidence(objectiveId, {
-			evidenceId: `${MAIL_SENT_EVIDENCE_PREFIX}${mail.mailId}`,
-			kind: "observation",
-			summary: `A worker of the goal mailed bot ${mail.agentId}.`,
-			artifactIds: [],
-			trusted: true,
-			createdAt: new Date(this.now()).toISOString(),
-			metadata: { agentId: mail.agentId, worker: mail.worker, hop: mail.hop },
-		});
-		return true;
-	}
-
-	/**
-	 * Records that the goal's settle step found the goal done but for the mail's answer and kept it open: once per mail; a
-	 * call for a closed goal, an unknown or ended mail, or one recorded already, changes nothing.
-	 */
-	recordMailAwaited(objectiveId: string, mailId: string): void {
-		const record = this.get(objectiveId);
-		const mail = record?.mails.find((entry) => entry.mailId === mailId);
-		if (!record || record.state === "closed" || !mail || mail.end || mail.awaitedAt !== undefined) return;
-		this.runtime().recordObjectiveEvidence(objectiveId, {
-			evidenceId: `${MAIL_AWAITED_EVIDENCE_PREFIX}${mailId}`,
-			kind: "observation",
-			summary: `The goal waits for bot ${mail.agentId}'s answer to its mail before it settles.`,
-			artifactIds: [],
-			trusted: true,
-			createdAt: new Date(this.now()).toISOString(),
-		});
-	}
-
-	/** Records that the goal no longer waits for the mail; a second call, or one for a closed goal, changes nothing. */
-	recordMailEnd(objectiveId: string, mailId: string, end: DelegationMailEnd): void {
-		const record = this.get(objectiveId);
-		const mail = record?.mails.find((entry) => entry.mailId === mailId);
-		if (!record || record.state === "closed" || !mail || mail.end) return;
-		this.runtime().recordObjectiveEvidence(objectiveId, {
-			evidenceId: `${MAIL_END_EVIDENCE_PREFIX}${mailId}`,
-			kind: "observation",
-			summary: `The goal no longer waits for its mail to bot ${mail.agentId} (${end.how}).`,
-			artifactIds: [],
-			trusted: true,
-			createdAt: new Date(this.now()).toISOString(),
-			metadata: toJson(end),
 		});
 	}
 

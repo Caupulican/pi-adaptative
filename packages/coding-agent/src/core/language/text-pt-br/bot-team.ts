@@ -245,6 +245,14 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o registro de qual sessão ele continua ${POINTER_SET_ASIDE[reason.kind](reason as never)} e foi separado como ${file}; ele continua o arquivo de sessão mais recente, ou uma sessão nova quando não há nenhum, registrado de novo.`,
 	botWatchesNotCounted: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão salva dele não foi lida (${reason}); as esperas dele não são contadas até ela ser lida.`,
+	botRepliesSetAside: (file: string, reason: string) =>
+		`As respostas dos bots a esta sessão não foram lidas (${reason}) e foram separadas como ${file}; uma resposta que estava nelas se perdeu, e um objetivo que esperava por uma não espera mais.`,
+	workerMailLedgerNewer: (file: string) =>
+		`O registro das mensagens dos workers desta sessão aos bots (${file}) foi escrito por uma versão mais nova; esta guarda o seu só na memória e deixa o arquivo como está.`,
+	workerMailLedgerUnreadable: (file: string, aside: string | undefined, reason?: string) =>
+		aside === undefined
+			? `O registro das mensagens dos workers desta sessão aos bots (${file}) não foi lido e não pôde ser separado (${reason ?? "desconhecido"}); as mensagens ficam só na memória.`
+			: `O registro das mensagens dos workers desta sessão aos bots não foi lido e foi separado como ${aside}; os objetivos deixam de esperar pelas mensagens que ele tinha, e o gasto que ele contava não é mais contado.`,
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele está tanto na casa dele quanto na da sessão principal; ele usa o da casa dele, e a cópia da sessão principal fica sem uso em ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>

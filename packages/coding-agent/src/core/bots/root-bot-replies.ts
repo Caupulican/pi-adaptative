@@ -10,7 +10,10 @@
  *
  * The replies are a durable inbox (`MessageInbox`) under the owner's orchestration home (`rootBotRepliesDir`), one file
  * per asking session. A reply is written once: a turn that ran again and answered otherwise keeps the first answer. A reply
- * the session does not read within `ROOT_BOT_REPLY_TTL_MS` expires, and the session is told so when it next reads.
+ * the session does not read within `ROOT_BOT_REPLY_TTL_MS` expires, and the session is told so when it next reads. A file
+ * that does not read is set aside under its lock (`MessageInbox.setAsideUnreadable`, `<file>.unreadable-<time>`) by whoever
+ * reads or writes it first, the owner is told once by that reader, and the goals' mail it held ends as gone; a later read
+ * failure is transient and tried again.
  *
  * A reply is delivered under the type a worker's result to the orchestrator carries (`background-worker-completion`), as
  * the bot's answer to an ask was before such a bot answered in a session of its own: every build reads its origin alike,
@@ -20,8 +23,9 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TimerPort } from "../../kernel/timer-port.ts";
 import { rootBotRepliesDir } from "../agent-paths.ts";
-import type { DelegationMailEnd } from "../delegation/leader-delegation-ledger.ts";
-import { type InboxEntry, type InboxExpiredUnread, MessageInbox } from "../messaging/inbox.ts";
+import type { GoalMailEnd } from "../delegation/worker-mail-ledger.ts";
+import { interfaceText } from "../language/interface-text.ts";
+import { InboxCorruptError, type InboxEntry, type InboxExpiredUnread, MessageInbox } from "../messaging/inbox.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE } from "../proof/proof-sheet.ts";
@@ -112,10 +116,37 @@ function replyText(reply: RootBotReply): { readonly text: string; readonly words
 }
 
 /**
- * Writes the reply for the session that asked. A reply written before (the turn ran again) is not written again, whatever
- * it said; throws when the session's replies are at their bound.
+ * Runs `read` over the session's replies. A file that does not read as an inbox (`InboxCorruptError`) is set aside
+ * first, under the inbox's lock (`MessageInbox.setAsideUnreadable`), so the next write starts a new one; whichever reader
+ * set it aside tells the owner, once (`told`), and `read` runs again. Any other failure is thrown, to be read again.
  */
-export function sendRootBotReply(agentDir: string, now: () => number, reply: RootBotReply): void {
+function readingReplies<T>(
+	inbox: MessageInbox,
+	rootSessionId: string,
+	told: (message: string) => void,
+	read: () => T,
+): T {
+	try {
+		return read();
+	} catch (error) {
+		if (!(error instanceof InboxCorruptError)) throw error;
+		const aside = inbox.setAsideUnreadable(rootSessionId);
+		if (aside !== undefined) told(interfaceText().botTeam.botRepliesSetAside(aside, error.message));
+		return read();
+	}
+}
+
+/**
+ * Writes the reply for the session that asked. A reply written before (the turn ran again) is not written again, whatever
+ * it said; throws when the session's replies are at their bound. A replies file that does not read is set aside, the
+ * owner told through `warn`, and the reply written to a new one.
+ */
+export function sendRootBotReply(
+	agentDir: string,
+	now: () => number,
+	reply: RootBotReply,
+	warn: (message: string) => void,
+): void {
 	const { text, wordsFrom } = replyText(reply);
 	const envelope: ReplyEnvelope = {
 		v: 1,
@@ -126,26 +157,17 @@ export function sendRootBotReply(agentDir: string, now: () => number, reply: Roo
 		...(wordsFrom !== undefined ? { wordsFrom } : {}),
 		...(isUsd(reply.meteredUsd) && reply.meteredUsd > 0 ? { meteredUsd: reply.meteredUsd } : {}),
 	};
-	const result = replyInbox(agentDir, now).enqueue({
-		id: reply.replyId,
-		sender: `bot:${reply.agentId}`,
-		recipient: reply.rootSessionId,
-		envelope: { ...envelope },
-		body: text,
-	});
+	const inbox = replyInbox(agentDir, now);
+	const result = readingReplies(inbox, reply.rootSessionId, warn, () =>
+		inbox.enqueue({
+			id: reply.replyId,
+			sender: `bot:${reply.agentId}`,
+			recipient: reply.rootSessionId,
+			envelope: { ...envelope },
+			body: text,
+		}),
+	);
 	if (result.status === "full") throw new Error(result.reason);
-}
-
-/** Whether the reply `replyId` waits, unexpired, for session `rootSessionId` to take it. Read-only. */
-export function rootBotReplyWaiting(
-	agentDir: string,
-	now: () => number,
-	rootSessionId: string,
-	replyId: string,
-): boolean {
-	return replyInbox(agentDir, now)
-		.pending(rootSessionId)
-		.some((entry) => entry.id === replyId);
 }
 
 function isUsd(value: unknown): value is number {
@@ -262,6 +284,8 @@ export interface WorkerBotReply {
 	readonly agentId: string;
 	readonly text: string;
 	readonly thirdParty: boolean;
+	/** Its place in its chain: a mail the turn it starts or joins sends is one further on. */
+	readonly hop: number;
 }
 
 /** What the asking session lends the reading of its replies. */
@@ -275,7 +299,11 @@ export interface RootBotReplyPorts {
 	 * The worker's mail `replyId` answers no longer holds its goal open (`LeaderController.mailEnded`): its reply was
 	 * handed on (its spend counted to the goal), or expired unread.
 	 */
-	mailEnded(replyId: string, end: DelegationMailEnd): void;
+	mailEnded(replyId: string, end: GoalMailEnd): void;
+	/** Tells the owner, in the owner's language: the replies did not read and were set aside. */
+	warn(message: string): void;
+	/** The replies were set aside: a goal that waited for a reply in them reads its mail again. */
+	setAside(): void;
 	agentDir(): string;
 	sessionId(): string;
 	readonly timers: TimerPort;
@@ -318,6 +346,22 @@ export class RootBotReplies {
 		return replyInbox(this.ports.agentDir(), () => timers.now());
 	}
 
+	/** `read` over this session's replies, a file that does not read set aside first (`readingReplies`). */
+	private read<T>(inbox: MessageInbox, read: () => T): T {
+		return readingReplies(inbox, this.ports.sessionId(), (message) => this.setAside(message), read);
+	}
+
+	private setAside(message: string): void {
+		this.ports.warn(message);
+		this.ports.setAside();
+	}
+
+	/** Whether the reply `replyId` waits, unexpired, for this session to take it; throws when the replies cannot be read. */
+	waiting(replyId: string): boolean {
+		const inbox = this.inbox();
+		return this.read(inbox, () => inbox.pending(this.ports.sessionId())).some((entry) => entry.id === replyId);
+	}
+
 	private trigger(): void {
 		if (!this.unsubscribe) return;
 		if (this.running) {
@@ -352,7 +396,7 @@ export class RootBotReplies {
 		let done = true;
 		try {
 			const inbox = this.inbox();
-			for (const entry of inbox.pending(recipient)) {
+			for (const entry of this.read(inbox, () => inbox.pending(recipient))) {
 				const envelope = replyEnvelope(entry);
 				if (!envelope) continue;
 				if (!(await this.handOn(entry, envelope))) {
@@ -377,7 +421,7 @@ export class RootBotReplies {
 			}
 			if (told.length > 0) inbox.acknowledgeExpired(recipient, told);
 		} catch (error) {
-			harnessLog.warn("bots", "the bots' replies to this session's asks could not be read", () => ({
+			harnessLog.warn("bots", "the bots' replies to this session's asks could not be read yet", () => ({
 				error: error instanceof Error ? error.message : String(error),
 			}));
 			return false;
@@ -390,7 +434,7 @@ export class RootBotReplies {
 		const { worker, agentId, thirdParty } = envelope;
 		if (worker !== undefined) {
 			try {
-				const reply = { replyId: entry.id, agentId, text: entry.body, thirdParty };
+				const reply = { replyId: entry.id, agentId, text: entry.body, thirdParty, hop: envelope.hop };
 				if (this.ports.toWorker(worker, reply) === "taken") return true;
 			} catch (error) {
 				harnessLog.warn("bots", "a bot's reply could not reach the worker that mailed it yet", () => ({

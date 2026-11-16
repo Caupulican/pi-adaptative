@@ -1,30 +1,32 @@
 /**
- * A leader goal's mail to bots that answer in sessions of their own: the turn of a goal a worker's words come from
- * (`senderGoalTurn`), the mailbox key a bot's reply reaches that worker under (`botReplyMessageKey`), and the hop a mail
- * sent in such a turn carries (`goalMailHop`): one past the reply that started the turn, so the chain a goal's worker
- * and a bot mail each other through stays bounded as the bots' own mail is. Pure over the projection and the goal's
- * mail record (`DelegationRecord.mails`); the leader controller and the bot messaging directory decide with these.
+ * A worker's mail to bots that answer in sessions of their own, as the session reads it from its store: the turn a
+ * worker's words come from (`senderTurn`: its running attempt, the mailbox message that started it, and the goal it is
+ * filed under), the mailbox key a bot's reply reaches that worker under (`botReplyMessageKey`), and whether the worker
+ * turn a reply started or joined is over (`replyTurnOver`), which ends what the session keeps of the reply's hop
+ * (`WorkerMailLedger`). Pure over the projection; the leader controller and the bot messaging directory decide with these.
  */
 
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { attemptDelegationObjectiveId } from "./delegation-spend.ts";
-import type { DelegationMail } from "./leader-delegation-ledger.ts";
-import { workerAgentMessageId } from "./worker-agent-control.ts";
+import { ACTIVE_ATTEMPT_STATUSES, attemptDelegationObjectiveId } from "./delegation-spend.ts";
+import type { ReplyTurn, WorkerMailTurn } from "./worker-mail-ledger.ts";
 
-/** The running turn of a worker that a leader goal filed, and the mailbox message that started it, when one did. */
-export interface SenderGoalTurn {
-	readonly objectiveId: string;
-	readonly controlMessageId?: string;
+/** The running turn of a worker: its attempt, the mailbox message that started it, and the leader goal it is filed under. */
+export interface SenderTurn extends WorkerMailTurn {
+	readonly objectiveId?: string;
 }
 
-/** The goal turn `senderAgentId` runs now: its active attempt, when that attempt is filed under a leader goal. */
-export function senderGoalTurn(snapshot: TaskRuntimeProjection, senderAgentId: string): SenderGoalTurn | undefined {
+/** The turn `senderAgentId` runs now: its active attempt; undefined when it runs none. */
+export function senderTurn(snapshot: TaskRuntimeProjection, senderAgentId: string): SenderTurn | undefined {
 	const activeAttemptId = snapshot.agents[senderAgentId]?.activeAttemptId;
 	const attempt = activeAttemptId === undefined ? undefined : snapshot.attempts[activeAttemptId];
-	const objectiveId = attempt ? attemptDelegationObjectiveId(attempt, snapshot) : undefined;
-	if (!attempt || objectiveId === undefined) return undefined;
+	if (!attempt) return undefined;
+	const objectiveId = attemptDelegationObjectiveId(attempt, snapshot);
 	const { controlMessageId } = attempt.dispatch;
-	return { objectiveId, ...(controlMessageId !== undefined ? { controlMessageId } : {}) };
+	return {
+		attemptId: attempt.attemptId,
+		...(controlMessageId !== undefined ? { controlMessageId } : {}),
+		...(objectiveId !== undefined ? { objectiveId } : {}),
+	};
 }
 
 /** The mail id a reply answers: `reply:<mail id>`. */
@@ -38,21 +40,20 @@ export function botReplyMessageKey(replyId: string): string {
 }
 
 /**
- * The hop of a mail `worker` sends in the goal turn `turn`: one past the reply that started that turn (an answered mail
- * of the same worker, whose reply's mailbox message is the turn's `controlMessageId`), else 1, a chain of its own.
+ * Whether the worker turn a reply started (the attempt its mailbox message owns) or joined (`attemptId`) has ended, or
+ * its worker is retired or gone: no mail of that turn reads the reply's hop any more. A reply whose message has started
+ * no turn yet is not over.
  */
-export function goalMailHop(
-	mails: readonly DelegationMail[],
-	sessionId: string,
-	worker: string,
-	turn: SenderGoalTurn,
-): number {
-	if (turn.controlMessageId === undefined) return 1;
-	const answered = mails.find(
-		(mail) =>
-			mail.worker === worker &&
-			mail.end?.how === "answered" &&
-			workerAgentMessageId(sessionId, botReplyMessageKey(`reply:${mail.mailId}`)) === turn.controlMessageId,
+export function replyTurnOver(snapshot: TaskRuntimeProjection, turn: ReplyTurn): boolean {
+	const agent = snapshot.agents[turn.worker];
+	if (!agent || agent.status === "retired") return true;
+	if (turn.attemptId !== undefined) {
+		const joined = snapshot.attempts[turn.attemptId];
+		return !joined || !ACTIVE_ATTEMPT_STATUSES.has(joined.status);
+	}
+	const started = Object.values(snapshot.attempts).find(
+		(attempt) =>
+			attempt.dispatch.logicalLaneId === turn.worker && attempt.dispatch.controlMessageId === turn.messageId,
 	);
-	return answered?.end ? (answered.end.replyHop ?? answered.hop + 1) + 1 : 1;
+	return started !== undefined && !ACTIVE_ATTEMPT_STATUSES.has(started.status);
 }

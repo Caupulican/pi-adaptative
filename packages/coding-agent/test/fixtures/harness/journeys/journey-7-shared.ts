@@ -21,6 +21,7 @@ import type {
 	PersistentTeamMessage,
 } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "../../../../src/core/delegation/worker-agent-control.ts";
+import type { GoalMail } from "../../../../src/core/delegation/worker-mail-ledger.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { HARNESS_PROVIDER, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
@@ -352,6 +353,11 @@ export function delegationOf(session: AgentSession, leader: string): DelegationR
 	const records = delegationsOf(session).filter((record) => record.charter.leader === leader);
 	if (records.length !== 1) throw new Error(`expected one delegation led by ${leader}, found ${records.length}`);
 	return records[0]!;
+}
+
+/** The mail the workers of a goal sent bots that answer in sessions of their own, as the session keeps it. */
+export function goalMailsOf(session: AgentSession, record: DelegationRecord): readonly GoalMail[] {
+	return session.backgroundLanes.getLeaders().goalMails(record.objectiveId);
 }
 
 /** Waits until the one delegation `leader` ran in this session `holds` (`delegationOf`). */

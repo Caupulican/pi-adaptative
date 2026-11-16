@@ -20,7 +20,8 @@
  * `MAX_BOT_MAIL_HOPS` (a reply then is not sent, and the receiver is told so with the mail). The orchestrator's ask, as a
  * group's message, opens a chain (hop 1): the reply wakes the orchestrator as a worker's result does, and its next ask is
  * its own turn's, bounded by its goal and its spend as its workers are, not a link of the chain. A worker's mail opens one
- * too: a worker keeps no chain, and its next mail is its own run's, bounded by that run's limits.
+ * too, unless a bot's reply started or joined the worker's turn: the session keeps each reply's hop until that turn ends
+ * (`WorkerMailLedger`), and the turn's mail is one past it.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -197,7 +198,7 @@ export function workerMail(input: {
 	readonly text: string;
 	readonly thirdParty: boolean;
 	readonly mailId: string;
-	/** Its place in a chain of mails: one past the reply that started the worker's turn (`goalMailHop`), else 1. */
+	/** Its place in a chain of mails: one past a reply that started or joined the worker's turn (`WorkerMailLedger.hopAfter`), else 1. */
 	readonly hop?: number;
 	readonly room?: string;
 }): ReturnedMail {

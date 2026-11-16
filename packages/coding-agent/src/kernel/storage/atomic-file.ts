@@ -19,8 +19,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { promises as fsPromises, mkdirSync, realpathSync, unlinkSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { promises as fsPromises, mkdirSync, readdirSync, realpathSync, unlinkSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import lockfile from "proper-lockfile";
 import type { TimerPort } from "../timer-port.ts";
@@ -585,6 +585,27 @@ const TEMPORARY_NAME_PATTERN = /^(.+)\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
  */
 export function atomicTemporaryTarget(name: string): string | undefined {
 	return TEMPORARY_NAME_PATTERN.exec(name)?.[1];
+}
+
+/**
+ * The paths of a file kept by atomic writes and every file it left beside it: the file, the copies set aside under its
+ * name as unreadable (`<name>.unreadable-<suffix>`) and the temporaries of its crashed writes. Empty when its directory
+ * is missing; throws when the directory cannot be listed.
+ */
+export function atomicFileFamily(filePath: string): string[] {
+	const [directory, name] = [dirname(filePath), basename(filePath)];
+	let names: string[];
+	try {
+		names = readdirSync(directory);
+	} catch (error) {
+		if (isMissingFileError(error)) return [];
+		throw error;
+	}
+	return names
+		.filter(
+			(entry) => entry === name || entry.startsWith(`${name}.unreadable-`) || atomicTemporaryTarget(entry) === name,
+		)
+		.map((entry) => join(directory, entry));
 }
 
 /**

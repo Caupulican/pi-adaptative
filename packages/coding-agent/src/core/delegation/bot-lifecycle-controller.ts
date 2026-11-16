@@ -38,6 +38,7 @@ import type {
 import type { WorkerDelegationController } from "./worker-delegation-controller.ts";
 import { isGeneratedWorkerLaneId } from "./worker-lane-id.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import type { WorkerMailLedger } from "./worker-mail-ledger.ts";
 import { contractGrantsChildren } from "./worker-nested-start.ts";
 
 /** What the lifecycle reads from and asks of the coordinator: the roster, the worker runtime and the leaders. */
@@ -72,6 +73,8 @@ export interface BotLifecycleHost {
 	assertBotDispatchIdle(agentId: string): void;
 	resolveModelSpec(rawModel?: string): { provider: string; modelId: string; thinkingLevel?: string };
 	getLeaders(): LeaderController;
+	/** The session's record of its workers' mail to bots that answer in sessions of their own. */
+	workerMail(): Pick<WorkerMailLedger, "hopAfter">;
 	leaderDelegations(): DelegationRecord[];
 	workerLifecycle(): Pick<WorkerLifecycle, "getAgentTurnDispatch">;
 	workerController(): Pick<WorkerDelegationController, "admitNested">;
@@ -231,6 +234,7 @@ export class BotLifecycleController {
 				},
 				listWorkerAgents: () => this.host.listWorkerAgents(),
 				getLeaders: () => this.host.getLeaders(),
+				workerMail: () => this.host.workerMail(),
 				leaderDelegations: () => this.host.leaderDelegations(),
 				startOwnedBotAsChild: (leaderAgentId, leaderAlias, alias, message, invocationId) =>
 					this.startOwnedBotAsChild(leaderAgentId, leaderAlias, alias, message, invocationId),

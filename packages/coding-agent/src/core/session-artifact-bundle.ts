@@ -6,6 +6,7 @@ import { accountingProjectionPath } from "./cost/accounting-evidence.ts";
 import { accountingFragmentPath } from "./cost/accounting-fragments.ts";
 import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
 import { canDeleteReservedWorkerBundle } from "./delegation/worker-bundle-deletion.ts";
+import { workerMailLedgerFiles } from "./delegation/worker-mail-ledger.ts";
 import { reserveSessionBundleDeletion, settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { sessionWatchLedgerFiles } from "./watches/session-watch-ledger.ts";
@@ -27,7 +28,10 @@ export interface ForegroundSessionBundleDeletion {
 	foreground: SessionArtifactPathDeletion;
 	/** The session's usage-journal sidecars: they record spend into this file and cannot outlive it. */
 	journal: SessionArtifactBundlePart;
-	/** The session's watch ledger (`watches/session-watch-ledger.ts`): its own watches, which end with it. */
+	/**
+	 * The session's own ledgers beside its transcript: its watches (`watches/session-watch-ledger.ts`) and its workers' mail
+	 * (`delegation/worker-mail-ledger.ts`), which end with it.
+	 */
 	watches: SessionArtifactBundlePart;
 	workerArtifacts: SessionArtifactBundlePart;
 	complete: boolean;
@@ -96,14 +100,14 @@ async function removeEach(
 	return last;
 }
 
-/** The session's watch ledger files, removed under the same policy; preserved when they cannot be listed. */
-async function removeWatchLedger(
+/** The session's watch and worker-mail ledger files, removed under the same policy; preserved when they cannot be listed. */
+async function removeSessionLedgers(
 	sessionPath: string,
 	removePath: (path: string) => Promise<SessionArtifactPathDeletion>,
 ): Promise<SessionArtifactBundlePart> {
 	let paths: string[];
 	try {
-		paths = sessionWatchLedgerFiles(sessionPath);
+		paths = [...sessionWatchLedgerFiles(sessionPath), ...workerMailLedgerFiles(sessionPath)];
 	} catch {
 		return { ok: false, method: "preserved" };
 	}
@@ -135,7 +139,7 @@ async function removeJournalSidecars(
 	return removeEach(paths, removePath);
 }
 
-/** One deletion reservation spans foreground, journal, watch-ledger and optional worker-artifact removal. */
+/** One deletion reservation spans foreground, journal, session-ledger and optional worker-artifact removal. */
 export async function deleteForegroundSessionBundle(
 	options: DeleteForegroundSessionBundleOptions,
 ): Promise<ForegroundSessionBundleDeletion> {
@@ -185,7 +189,7 @@ export async function deleteForegroundSessionBundle(
 					complete: false,
 				};
 			const journal = await removeJournalSidecars(options.sessionPath, removePath);
-			const watches = await removeWatchLedger(options.sessionPath, removePath);
+			const watches = await removeSessionLedgers(options.sessionPath, removePath);
 			const sidecars = journal.ok && watches.ok;
 			if (!canDeleteReservedWorkerBundle(options.agentDir, options.orchestrationHome, reservation))
 				return {

@@ -6,7 +6,7 @@
  * for the session that sent it (`root-bot-replies.ts`), which hears too of a turn that ended without any and hands a
  * worker's reply to that worker. A reply is not answered; a reply to a bot goes no further than `MAX_BOT_MAIL_HOPS`, and
  * one to the orchestrator's ask or a worker's mail always goes, its sender waiting for it (a worker's next mail carries
- * the hop on, `goalMailHop`). A mail its host did not take is refused through the same routes, a bot's mail by a reply
+ * the hop on, `WorkerMailLedger.hopAfter`). A mail its host did not take is refused through the same routes, a bot's mail by a reply
  * mailed back to it (`refuseUntakenMail`), and the orchestrator's ask or a worker's mail whose turn ended where no
  * answer was sent is answered all the same (`settleReturnedMail`), so no sender waits forever.
  *
@@ -322,7 +322,12 @@ export class BotMailAnswering {
 
 	/** Writes a bot's reply for the session that asked or whose worker mailed (`sendRootBotReply`). */
 	private replyToRoot(reply: RootBotReply): void {
-		sendRootBotReply(this.ports.agentDir(), () => this.ports.now(), reply);
+		sendRootBotReply(
+			this.ports.agentDir(),
+			() => this.ports.now(),
+			reply,
+			(message) => this.ports.warn(message),
+		);
 	}
 
 	/** What the answers of the loaded session's turns are sent through. */

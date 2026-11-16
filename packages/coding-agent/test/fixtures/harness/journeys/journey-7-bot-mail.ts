@@ -17,6 +17,7 @@ import {
 	delegationOf,
 	enqueueBot,
 	enqueueRoot,
+	goalMailsOf,
 	loadBotToolStep,
 	MODEL_ID,
 	offeredTools,
@@ -364,10 +365,11 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 	// The leader's turn that mailed ended: the goal's settle step found the goal done but for the reader's answer, and kept
 	// it open for that mail (its own decision, recorded on the mail).
 	await waitForDelegation(world, session, WORKER, "kept open for its mail's answer", (record) =>
-		record.mails.some((mail) => mail.awaitedAt !== undefined),
+		goalMailsOf(session, record).some((mail) => mail.awaitedAt !== undefined),
 	);
 	await withDeadline(trace, "J7 worker mail: the root is idle", session.waitForForegroundIdle());
 	const held = delegationOf(session, WORKER);
+	const heldMails = goalMailsOf(session, held);
 	const heldRootRequests =
 		world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length - rootRequestsBefore;
 	workerIdle.release();
@@ -418,7 +420,7 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 			state: held.state,
 			// The goal holds the mail its worker sent, unanswered: the root's requests are the tool's loading, the lead and its
 			// result, and no outcome notice.
-			mails: held.mails.map((mail) => [
+			mails: heldMails.map((mail) => [
 				mail.agentId,
 				mail.worker === runtime,
 				mail.hop,
@@ -444,7 +446,7 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 				requestsOf(world, MODEL_ID.mailReader, READER_SOUL).length,
 			],
 			// The reply was handed on under the goal, one hop further on, and its turn's end settled the goal.
-			mails: settled.mails.map((mail) => [mail.agentId, mail.end?.how, mail.end?.replyHop]),
+			mails: goalMailsOf(session, settled).map((mail) => [mail.agentId, mail.end?.how, mail.end?.replyHop]),
 			goal: [settled.state, settled.closeReason],
 			outcome: seen.wakeLines.filter((line) => GOAL_FINISHED.test(line)).length,
 			reportQuoted: seen.wakeLines.join("\n").includes(WORKER_NOTED),

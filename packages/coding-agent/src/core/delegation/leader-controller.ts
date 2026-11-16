@@ -56,8 +56,6 @@ import {
 import {
 	assertMayAsk,
 	type DelegationCloseReason,
-	type DelegationMail,
-	type DelegationMailEnd,
 	type DelegationRecord,
 	earliestDeadlineMs,
 	LeaderDelegationLedger,
@@ -67,6 +65,7 @@ import {
 	turnBelongsToDelegation,
 } from "./leader-delegation-ledger.ts";
 import { currentDelegationFor } from "./leader-view.ts";
+import type { GoalMail, GoalMailEnd } from "./worker-mail-ledger.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import { type Outcome, sameOutcomeAttempt } from "./worker-outcome.ts";
 
@@ -94,7 +93,7 @@ function iso(ms: number): string {
 export class LeaderController {
 	private readonly deps: LeaderControllerDeps;
 	private readonly ledger: LeaderDelegationLedger;
-	private unsubscribe: (() => void) | undefined;
+	private unsubscribe: (() => void)[] | undefined;
 	private timer: { handle: unknown; at: number } | undefined;
 	/** When the next pass reads again the mail a goal waits for (`MAIL_HOLD_RECHECK_MS`); undefined when none waits. */
 	private mailRecheckAt: number | undefined;
@@ -124,13 +123,13 @@ export class LeaderController {
 	/** Follows the store and reconciles what the last process left: a restart adopts every open delegation. */
 	start(): void {
 		if (this.unsubscribe || this.disposed) return;
-		this.unsubscribe = this.deps.subscribe(() => this.trigger());
+		this.unsubscribe = [this.deps.subscribe(() => this.trigger()), this.deps.mail.subscribe(() => this.trigger())];
 		this.trigger();
 	}
 
 	dispose(): void {
 		this.disposed = true;
-		this.unsubscribe?.();
+		for (const unsubscribe of this.unsubscribe ?? []) unsubscribe();
 		this.unsubscribe = undefined;
 		if (this.timer) this.deps.timers.clearTimeout(this.timer.handle);
 		this.timer = undefined;
@@ -227,6 +226,7 @@ export class LeaderController {
 			this.ledger.list(),
 			parent,
 			this.deps.isMeteredAttempt,
+			this.mailSpent,
 		);
 		return this.open(lead, {
 			envelope: leaderEnvelopeFromRecord(parent, remaining),
@@ -395,17 +395,19 @@ export class LeaderController {
 		return this.ledger.get(record.objectiveId) ?? record;
 	}
 
+	/** The spend bots answering in sessions of their own made for a goal's mail, which its budget counts. */
+	private readonly mailSpent = (objectiveId: string): number => this.deps.mail.goalSpentUsd(objectiveId);
+
 	/**
-	 * Records that a worker of the open goal `objectiveId` mailed a bot that answers in a session of its own: the goal
-	 * stays open until the reply reaches that worker (`mailEnded`). False when the goal is not open or the mail is
-	 * recorded already; throws at the goal's bound of mails.
+	 * Records, before it is sent, that a worker of the open goal `objectiveId` mailed a bot that answers in a session of
+	 * its own: the goal stays open until the reply reaches that worker (`mailEnded`). False when the goal is not open.
 	 */
-	mailSent(objectiveId: string, mail: Omit<DelegationMail, "awaitedAt" | "end">): boolean {
+	mailSent(objectiveId: string, mail: Omit<GoalMail, "objectiveId" | "sentAt" | "awaitedAt" | "end">): boolean {
 		const record = this.ledger.get(objectiveId);
 		if (record === undefined || !isOpen(record)) return false;
-		const recorded = this.ledger.recordMailSent(objectiveId, mail);
+		this.deps.mail.sent({ ...mail, objectiveId });
 		this.mailsInFlight.add(mail.mailId);
-		return recorded;
+		return true;
 	}
 
 	/** The send of the mail `mailId` (`mailSent`) returned: the bot's inbox holds it now, or it was not sent. */
@@ -414,21 +416,28 @@ export class LeaderController {
 	}
 
 	/** The goal no longer waits for the mail `mailId`: its reply was handed on, it was not sent, or it expired unread. */
-	mailEnded(mailId: string, end: DelegationMailEnd): void {
-		for (const record of this.ledger.list())
-			if (isOpen(record) && record.mails.some((mail) => mail.mailId === mailId))
-				this.ledger.recordMailEnd(record.objectiveId, mailId, end);
+	mailEnded(mailId: string, end: GoalMailEnd): void {
+		this.deps.mail.ended(mailId, end);
 	}
 
-	/** The open goal whose worker sent the mail `mailId`: the reply's turn is that goal's. */
+	/** The open goal whose worker sent the mail `mailId`, while the goal waits for it: the reply's turn is that goal's. */
 	goalOfMail(mailId: string): string | undefined {
-		return this.ledger.list().find((record) => isOpen(record) && record.mails.some((mail) => mail.mailId === mailId))
-			?.objectiveId;
+		const objectiveId = this.deps.mail.openMail(mailId)?.objectiveId;
+		const record = objectiveId === undefined ? undefined : this.ledger.get(objectiveId);
+		return record && isOpen(record) ? record.objectiveId : undefined;
 	}
 
-	/** The mail the goal's workers sent bots that answer in sessions of their own. */
-	goalMails(objectiveId: string): readonly DelegationMail[] {
-		return this.ledger.get(objectiveId)?.mails ?? [];
+	/** The mail the goal's workers sent bots that answer in sessions of their own, open and recently ended. */
+	goalMails(objectiveId: string): readonly GoalMail[] {
+		return this.deps.mail.goalMails(objectiveId);
+	}
+
+	/**
+	 * Reads again the mail the open goals wait for: a store a reply waits in changed outside this session's stores (it
+	 * was set aside as unreadable), so a mail it held may be gone.
+	 */
+	recheckMail(): void {
+		this.trigger();
 	}
 
 	private requireCurrent(leader: string): DelegationRecord {
@@ -467,6 +476,11 @@ export class LeaderController {
 		this.mailRecheckAt = undefined;
 		const snapshot = this.deps.snapshot();
 		const records = readDelegations(snapshot);
+		// The mail kept for goals the store no longer holds open (or at all) is released.
+		this.deps.mail.retainGoals(
+			new Set(records.filter(isOpen).map((record) => record.objectiveId)),
+			new Set(records.map((record) => record.objectiveId)),
+		);
 		if (records.length === 0) return;
 		const aliases = new Map<string, string | undefined>();
 		const aliasOf = (agentId: string) => {
@@ -501,7 +515,14 @@ export class LeaderController {
 			// Every turn filed under this delegation: the leader's own and those its work started, nothing else.
 			const delegated = this.turnsOf(snapshot, record);
 			const { leaderTurns, ownedTurns } = splitTurnsByLeader(delegated, aliasOf, leader.agentId);
-			const stop = delegationBudgetStop(record, snapshot, records, delegated, this.deps.isMeteredAttempt);
+			const stop = delegationBudgetStop(
+				record,
+				snapshot,
+				records,
+				delegated,
+				this.deps.isMeteredAttempt,
+				this.mailSpent,
+			);
 			if (stop !== undefined) {
 				await this.forceClose(record, "budget", stop === "unpriced" ? UNPRICED_BUDGET_REMEDY : undefined);
 				changed = true;
@@ -568,21 +589,21 @@ export class LeaderController {
 	 */
 	private awaitsMail(record: DelegationRecord, bots: ReadonlyMap<string, LeaderBotView>): boolean {
 		let waits = false;
-		for (const mail of record.mails) {
+		for (const mail of this.deps.mail.goalMails(record.objectiveId)) {
 			if (mail.end) continue;
 			const bot = bots.get(mail.agentId);
 			const answers = bot !== undefined && !bot.retired && this.deps.botAnswersInSession(mail.agentId);
 			if (answers && (this.mailsInFlight.has(mail.mailId) || this.mailHeld(mail))) {
 				waits = true;
-				this.ledger.recordMailAwaited(record.objectiveId, mail.mailId);
-			} else this.ledger.recordMailEnd(record.objectiveId, mail.mailId, { how: "gone", meteredUsd: 0 });
+				this.deps.mail.awaited(mail.mailId);
+			} else this.deps.mail.ended(mail.mailId, { how: "gone", meteredUsd: 0 });
 		}
 		if (waits) this.mailRecheckAt = this.deps.now() + MAIL_HOLD_RECHECK_MS;
 		return waits;
 	}
 
 	/** Whether the bot holds the mail (`botHoldsMail`); a read that fails holds it until a later pass reads it. */
-	private mailHeld(mail: DelegationMail): boolean {
+	private mailHeld(mail: GoalMail): boolean {
 		try {
 			return this.deps.botHoldsMail(mail.agentId, mail.mailId);
 		} catch (error) {

@@ -18,7 +18,12 @@ import type {
 import { costCeilingUsd, isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { DELEGATION_BUDGET_REFUSAL_REASONS } from "./budget-reason-codes.ts";
-import { delegationAttempts, delegationCostBounds, delegationMailSpentUsd } from "./delegation-spend.ts";
+import {
+	delegationAttempts,
+	delegationCostBounds,
+	delegationMailSpentUsd,
+	type GoalMailSpend,
+} from "./delegation-spend.ts";
 import { readDelegations } from "./leader-delegation-ledger.ts";
 import type { ParentExecutionPolicy } from "./parent-execution-context.ts";
 import {
@@ -51,6 +56,8 @@ export interface RequestCostBoundsDeps {
 	readonly runCostBound?: ParentExecutionPolicy["runCostBound"];
 	readonly isSubscription: (model: Model<Api>) => boolean;
 	readonly findModel: (binding: OrchestrationModelBinding) => Model<Api> | undefined;
+	/** The spend bots answering in sessions of their own made for a goal's mail, kept beside the session's store. */
+	readonly goalMailSpentUsd: GoalMailSpend;
 }
 
 export class RequestCostBounds {
@@ -145,7 +152,10 @@ export class RequestCostBounds {
 							// The bots that answered the subtree's mail in sessions of their own spent outside this session's attempts.
 							{
 								attemptId: `goal-mail:${bound.objectiveId}`,
-								usage: { ...EMPTY_ATTEMPT_USAGE, costUsd: delegationMailSpentUsd(records, bound.objectiveId) },
+								usage: {
+									...EMPTY_ATTEMPT_USAGE,
+									costUsd: delegationMailSpentUsd(records, bound.objectiveId, this.deps.goalMailSpentUsd),
+								},
 							},
 						],
 						initialUsage,

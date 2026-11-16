@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, join } from "node:path";
 import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -506,6 +506,29 @@ export class MessageInbox {
 
 	private fileFor(recipient: string): string {
 		return join(this.dir, `${digestOf(`pi-inbox-v1\0${recipient}`).slice(0, 40)}${FILE_SUFFIX}`);
+	}
+
+	/**
+	 * Sets the recipient's file aside when it does not read as an inbox (`InboxCorruptError`), so the next write starts a
+	 * new one: decided under the file's lock, so a file another reader set aside and a writer started again is never set
+	 * aside in its turn. The name it was set aside under, or undefined when the file reads or is gone.
+	 */
+	setAsideUnreadable(recipient: string): string | undefined {
+		const owner = identityText(recipient, "recipient");
+		const file = this.fileFor(owner);
+		if (!existsSync(file)) return undefined;
+		let aside: string | undefined;
+		withFileLockSync(file, () => {
+			try {
+				this.readIfPresent(owner);
+			} catch (error) {
+				if (!(error instanceof InboxCorruptError)) throw error;
+				aside = `${file}.unreadable-${this.now()}`;
+				renameSync(file, aside);
+			}
+		});
+		if (aside !== undefined) inboxChanges.notify(file);
+		return aside;
 	}
 
 	private readIfPresent(recipient: string): InboxState | undefined {

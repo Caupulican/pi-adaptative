@@ -15,9 +15,13 @@ import { type LeaderCharter, readDelegations } from "./leader-delegation-ledger.
 export interface DelegationSpendRecord {
 	readonly objectiveId: string;
 	readonly charter: Pick<LeaderCharter, "envelope" | "parentObjectiveId">;
-	/** The metered spend bots answering in sessions of their own made for the delegation's mail (`DelegationRecord.mailSpentUsd`). */
-	readonly mailSpentUsd?: number;
 }
+
+/**
+ * The metered spend bots answering in sessions of their own made for one delegation's mail, which the session keeps
+ * beside its store (`WorkerMailLedger.goalSpentUsd`).
+ */
+export type GoalMailSpend = (objectiveId: string) => number;
 
 /** A walk visits its start record and at most `LEADER_MAX_DEPTH_CEILING` parents: no chain can be deeper than that. */
 const MAX_ANCESTRY_RECORDS = LEADER_MAX_DEPTH_CEILING + 1;
@@ -79,11 +83,12 @@ export function delegationBudgetLeftUsd(
 	records: readonly DelegationSpendRecord[],
 	record: DelegationSpendRecord,
 	isMetered: (attempt: AttemptRuntimeState) => boolean,
+	mailSpent: GoalMailSpend,
 ): number | undefined {
 	const budget = record.charter.envelope.budgetUsd;
 	return budget === undefined
 		? undefined
-		: Math.max(0, budget - delegationSpentUsd(snapshot, records, record.objectiveId, isMetered));
+		: Math.max(0, budget - delegationSpentUsd(snapshot, records, record.objectiveId, isMetered, mailSpent));
 }
 
 /** The cost an attempt recorded: its usage accounting, else its result's usage. A figure that is not a positive number counts nothing. */
@@ -115,14 +120,17 @@ export function delegationAttempts(
 
 /**
  * The metered spend the bots that answer in sessions of their own made answering the mail of a delegation's subtree: no
- * attempt of this session holds it, so each goal records it once the reply reached its worker.
+ * attempt of this session holds it, so the session's worker-mail ledger (`WorkerMailLedger`) records it per goal once the
+ * reply reached its worker, read here through `mailSpent`.
  */
-export function delegationMailSpentUsd(records: readonly DelegationSpendRecord[], objectiveId: string): number {
-	const subtree = delegationSubtree(records, objectiveId);
-	return records.reduce(
-		(sum, record) => (subtree.has(record.objectiveId) ? sum + (record.mailSpentUsd ?? 0) : sum),
-		0,
-	);
+export function delegationMailSpentUsd(
+	records: readonly DelegationSpendRecord[],
+	objectiveId: string,
+	mailSpent: GoalMailSpend,
+): number {
+	let sum = 0;
+	for (const id of delegationSubtree(records, objectiveId)) sum += mailSpent(id);
+	return sum;
 }
 
 /** The metered spend of a delegation's subtree: its turns' and the mail its bots answered in sessions of their own. */
@@ -131,10 +139,11 @@ export function delegationSpentUsd(
 	records: readonly DelegationSpendRecord[],
 	objectiveId: string,
 	isMetered: (attempt: AttemptRuntimeState) => boolean,
+	mailSpent: GoalMailSpend,
 ): number {
 	return (
 		sumMeteredSpendUsd(delegationAttempts(snapshot, records, objectiveId), isMetered) +
-		delegationMailSpentUsd(records, objectiveId)
+		delegationMailSpentUsd(records, objectiveId, mailSpent)
 	);
 }
 
@@ -169,11 +178,12 @@ export function delegationBudgetStop(
 	records: readonly DelegationSpendRecord[],
 	attributed: readonly AttemptRuntimeState[],
 	isMetered: (attempt: AttemptRuntimeState) => boolean,
+	mailSpent: GoalMailSpend,
 ): "exhausted" | "unpriced" | undefined {
 	const budget = record.charter.envelope.budgetUsd;
 	const spent = record.filedByObjective
-		? delegationSpentUsd(snapshot, records, record.objectiveId, isMetered)
-		: sumMeteredSpendUsd(attributed, isMetered) + (record.mailSpentUsd ?? 0);
+		? delegationSpentUsd(snapshot, records, record.objectiveId, isMetered, mailSpent)
+		: sumMeteredSpendUsd(attributed, isMetered) + mailSpent(record.objectiveId);
 	if (budget !== undefined && spent >= budget) return "exhausted";
 	const ownTreeKey = delegationBudgetTreeKey(record.objectiveId);
 	const turns = record.filedByObjective ? delegationAttempts(snapshot, records, record.objectiveId) : attributed;

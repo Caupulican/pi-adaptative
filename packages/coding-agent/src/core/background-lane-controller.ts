@@ -357,6 +357,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			assertBotDispatchIdle: (agentId) => this.assertBotDispatchIdle(agentId),
 			resolveModelSpec: (rawModel) => this.resolveModelSpec(rawModel),
 			getLeaders: () => this.getLeaders(),
+			workerMail: () => this._rootBots.workerMail,
 			leaderDelegations: () => this.leaderDelegations(),
 			workerLifecycle: () => this._getWorkerLifecycle(),
 			workerController: () => this._getWorkerController(),
@@ -372,6 +373,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			workers: () => this.listWorkerAgents(),
 			botOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			followUp: (runtime, message, options) => this.followUpSessionRootWorkerAgent(runtime, message, options),
+			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
 		});
 		this._attemptWaits = new WorkerAttemptWaits(deps, {
 			workerController: () => this._getWorkerController(),
@@ -549,6 +551,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
 				fleetAllowance: subscriptionAllowancePort(() => this.deps.subscriptionAllowance),
 				taskWatches: this._routineAssembly.taskWatches(() => this._routines.current),
+				goalMailSpentUsd: (objectiveId) => this._rootBots.workerMail.goalSpentUsd(objectiveId),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -2054,11 +2057,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			runtime: () => this._getWorkerLifecycle().ledger.runtime,
 			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
 			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
-			...leaderBotFacts({
-				store,
-				host: this.deps,
-				runsAsSession: (bot) => this._botHost.host.runsAsSession(bot),
-			}),
+			...leaderBotFacts({ store, host: this.deps, botSessions: this._botHost.host, rootBots: this._rootBots }),
 			createGoalLeader: (request) => this._botLifecycle.createGoalLeader(request),
 			directBotOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
