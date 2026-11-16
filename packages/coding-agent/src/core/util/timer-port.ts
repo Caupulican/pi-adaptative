@@ -114,3 +114,11 @@ export interface TimerSource {
 
 /** Every owner on the system clock and the global timers; the sync lock gaps block the calling thread. */
 export const SYSTEM_TIMER_SOURCE: TimerSource = { port: () => SYSTEM_TIMER_PORT, sleepSync: blockingSleepMs };
+
+/**
+ * The clock an owner's stop of a bot is dated on, and every stamp the stop decides by against it: the owner's words in a
+ * bot's inbox and the arming of a session's own watch (`core/watches/`). A stop is made in whichever process the owner
+ * stops from and a watch is armed in the process that hosts the bot's session, each built with timers of its own, so the
+ * one clock both read is the system clock; a watch's deadline and samples stay on the `routines` port.
+ */
+export const OWNER_STOP_CLOCK: TimerPort = SYSTEM_TIMER_PORT;

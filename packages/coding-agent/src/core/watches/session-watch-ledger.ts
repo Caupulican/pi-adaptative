@@ -87,7 +87,9 @@ export interface SessionWatchRecord {
 	readonly purpose?: string;
 	readonly onFire: string;
 	readonly condition: WatchCondition;
+	/** On the clock an owner's stop of a bot is dated on (`OWNER_STOP_CLOCK`), which the stop judges it by. */
 	readonly armedAt: number;
+	/** On the session's `routines` clock, as its samples and end-time alarm are. */
 	readonly expiresAt: number;
 	readonly armedBy: SessionWatchArmer;
 	readonly cursor: SessionWatchCursor;

@@ -54,7 +54,7 @@ import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
-import type { TimerPort, TimerSource } from "../util/timer-port.ts";
+import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/timer-port.ts";
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
@@ -418,6 +418,7 @@ export class BotSessionHost {
 		return {
 			warn: (message) => this.ports.warn(message),
 			now: () => this.ports.timers().port("provider-admission").now(),
+			routineClock: this.ports.timers().port("routines"),
 			links: this.keeps.links,
 			watches: () => this.ports.store(),
 		};
@@ -924,7 +925,13 @@ export class BotSessionHost {
 			const elsewhere = host && interfaceText().botTeam.botStopSentElsewhere(agentId, host.pid, host.hostSessionId);
 			return elsewhere ? { stopped: false, elsewhere } : { stopped: false };
 		}
-		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now(), scope: WHOLE_FLEET_STOP_SCOPE };
+		const stop = {
+			agentId,
+			reasonCode: OWNER_STOPPED_REASON,
+			from,
+			at: OWNER_STOP_CLOCK.now(),
+			scope: WHOLE_FLEET_STOP_SCOPE,
+		};
 		const unwritten = writeOwnerStop(this.ports.agentDir(), stop, (message) => this.ports.warn(message));
 		const state = entry.session.getSessionWorkState();
 		// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).

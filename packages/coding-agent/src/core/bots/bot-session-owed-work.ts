@@ -32,7 +32,14 @@ import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
-import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import {
+	alarmAt,
+	OWNER_STOP_CLOCK,
+	type RepeatingAlarm,
+	repeatEvery,
+	type TimerPort,
+	type WallAlarm,
+} from "../util/timer-port.ts";
 import { readSessionWatchWork } from "../watches/session-watch-ledger.ts";
 import { botFailureCause, botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeSessionIds } from "./bot-home.ts";
@@ -1069,7 +1076,7 @@ export class BotOwedWork {
 	ownerStopped(agentId: string, from: OwnerStopRequest["from"]): RemoteBotHost | undefined {
 		const agentDir = this.ports.agentDir();
 		const [words, made] = [interfaceText().botTeam, readStopScope(agentDir, agentId)];
-		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() };
+		const stop = { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: OWNER_STOP_CLOCK.now() };
 		const unwritten = writeOwnerStop(agentDir, { ...stop, scope: WHOLE_FLEET_STOP_SCOPE }, (line) =>
 			this.ports.warn(line),
 		);

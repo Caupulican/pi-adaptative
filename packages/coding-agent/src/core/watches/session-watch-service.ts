@@ -50,7 +50,7 @@ import { type WatchCondition, watchFiredLine } from "../routines/watch-contract.
 import { watchCheckRefusal } from "../routines/worker-watch-scope.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { type TurnAuthority, turnAuthorityCovers } from "../turn-origin.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
@@ -346,7 +346,8 @@ export class SessionWatchService implements WatchObservationStore {
 				...(request.purpose === undefined ? {} : { purpose: request.purpose }),
 				onFire: request.onFire,
 				condition: admitted.condition,
-				armedAt: this.deps.timers.now(),
+				// On the clock an owner's stop of a bot is dated on, so a stop judges what was armed before it by one clock.
+				armedAt: OWNER_STOP_CLOCK.now(),
 				expiresAt: request.expiresAt,
 				armedBy: request.armedBy,
 				cursor: { kind: "watch", truth: null, fires: 0 },

@@ -53,6 +53,7 @@ import { MAX_ROUTINE_OCCURRENCES, type PersistentRoutineDefinition } from "../ro
 import { routineResultInputIds } from "../routines/routine-parent-input.ts";
 import { isWatchSchedule } from "../routines/routine-watch-arming.ts";
 import { declineUsageWaitForOwner, type UsageWakeLog, type UsageWakeWriter } from "../usage-wake-record.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
@@ -79,11 +80,12 @@ import { BotSessionLinkError } from "./bot-session-pointer.ts";
 /**
  * What applying a stop needs besides the bot's files: the owner's notices, the provider admission clock's time, what
  * the owner was told of the work a stop or a release left behind a symbolic link, kept for the process (`LinkedSessionNotices`),
- * and the store of the bot's watches.
+ * the store of the bot's watches, and the `routines` clock a closed session's watch ledger is written on.
  */
 export interface BotStopPorts {
 	warn(message: string): void;
 	now(): number;
+	readonly routineClock: TimerPort;
 	readonly links: LinkedSessionNotices;
 	watches(): BotWatchStore;
 }
@@ -774,7 +776,7 @@ function stopClosedSession(
 			? new SessionWatchLedger({
 					sessionId: saved.id,
 					path: () => sessionWatchLedgerPath(saved.file),
-					now: () => ports.now(),
+					now: () => ports.routineClock.now(),
 					warn: tell,
 				})
 			: undefined;

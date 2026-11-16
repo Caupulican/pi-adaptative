@@ -14,6 +14,7 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { OWNER_STOP_CLOCK } from "../util/timer-port.ts";
 import { readRemoteBotHost } from "./bot-host-state.ts";
 import { enqueueBotInbox, takeBotInboxMessage } from "./bot-inbox.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
@@ -79,7 +80,8 @@ function enqueueOwnerWords(
 		text: message,
 		...(mode !== undefined ? { mode } : {}),
 		from: { pid: process.pid, sessionId: from.sessionId, cwd: from.cwd },
-		at: Date.now(),
+		// The clock a stop of the bot is dated on, which decides whether these words came before it.
+		at: OWNER_STOP_CLOCK.now(),
 	});
 }
 
