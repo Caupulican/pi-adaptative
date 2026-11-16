@@ -735,6 +735,13 @@ export class BotSessionHost {
 		this.armIdle(entry);
 		harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued }));
 		this.changed(agentId);
+		// Its watches live in its session's watch ledger, not the bot store: the roster's count follows the ledger's changes.
+		const unwatch = session.backgroundLanes.ownWatches().subscribe(() => this.changed(agentId));
+		const unobserve = entry.unsubscribe;
+		entry.unsubscribe = () => {
+			unwatch();
+			unobserve();
+		};
 		// The home watch announces the inbox's next messages (the timer reads them while it does not run).
 		this.view.watch();
 		this.inbox.arm();
