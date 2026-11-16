@@ -72,6 +72,7 @@ import {
 	githubReadingOutcome,
 	githubWatchSubject,
 	isGithubWatchSource,
+	owesFailedJobRead,
 } from "./github-watch-source.ts";
 import { githubWatchWakeText } from "./github-watch-wake.ts";
 import {
@@ -767,9 +768,7 @@ export class SessionWatchService implements WatchObservationStore {
 			status: "fired",
 			endedAt: nowMs,
 			result,
-			...(record.condition.type === "ci" && result.conclusion === "failure" && result.runId !== undefined
-				? { awaitingFailedJob: true as const }
-				: {}),
+			...(owesFailedJobRead(record.condition.type, result) ? { awaitingFailedJob: true as const } : {}),
 		};
 		this.replace({
 			...fired,

@@ -369,6 +369,20 @@ export type GithubWatchReading =
 	| { readonly ok: false; readonly reason: string };
 
 /**
+ * Whether a fired `ci` watch's failure still owes the read of its failed job: a reading that already carries the job,
+ * or why it could not be read, owes none, so the job is read once.
+ */
+export function owesFailedJobRead(conditionType: string, result: GithubWatchResult): boolean {
+	return (
+		conditionType === "ci" &&
+		result.conclusion === "failure" &&
+		result.runId !== undefined &&
+		result.failedJob === undefined &&
+		result.failedJobUnread === undefined
+	);
+}
+
+/**
  * What one reading makes of a typed watch ending at `expiresAt` that carries `held` (its last result), read at `nowMs`
  * on the routines clock: the result it fires on, the one it records, or none new (`unchanged`, the same result as
  * `held`). A done result fires when it was read before the end time or came about by it. A pending reading never

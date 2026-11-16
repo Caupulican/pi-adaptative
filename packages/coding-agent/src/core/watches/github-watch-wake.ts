@@ -75,7 +75,9 @@ function githubWatchTimedOutWakeText(
 	const end = new Date(expiresAt).toISOString();
 	const words = englishText().chat.watch.github;
 	const seen =
-		last === undefined ? "no reading could be made" : `${last.status} at ${new Date(last.observedAt).toISOString()}`;
+		last === undefined
+			? "no reading could be made"
+			: `${last.status}, unchanged since it was first read at ${new Date(last.observedAt).toISOString()}`;
 	const headline =
 		last?.state !== "done"
 			? `Watch ${plan.watchId} timed out: it reached the end time you set (${end}) before ${describeGithubWatchSource(source, words)} was done, and it stopped watching and will not fire again. Last seen: ${seen}.`
