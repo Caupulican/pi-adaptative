@@ -97,6 +97,8 @@ export type { SpawnedUsageOptions };
 export interface DurableUsageReading {
 	readonly usage: Usage;
 	readonly settled: boolean;
+	/** Why it is not settled: its history still loading ("pending") or its load failed ("unavailable"; told by the session). */
+	readonly history?: "pending" | "unavailable";
 	/** The shares past the reader's last entry (`sharesPastEntry`), each read once by its `metered`; absent unasked. */
 	readonly past?: SharesPastEntry;
 	/** The usage the entries recorded by the time asked hold (`usageRecordedBy`); absent unasked. */
@@ -449,9 +451,11 @@ export class SessionAnalytics {
 		const entries = this.getAccountingEntries();
 		const usage = aggregateCumulativeUsageFromSessionEntries(entries);
 		const settled = this.accountingHistory.settled();
+		const history = settled ? undefined : this.accountingHistory.status();
 		return {
 			usage,
 			settled,
+			...(history ? { history } : {}),
 			...(metered ? { past: sharesPastEntry(entries, metered.share, metered.afterEntryId) } : {}),
 			...(recordedBy !== undefined ? { recordedBy: usageRecordedBy(entries, recordedBy) } : {}),
 		};

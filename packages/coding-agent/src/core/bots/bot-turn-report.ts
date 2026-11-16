@@ -359,8 +359,11 @@ export class BotTurnAccounting {
 					if (this.session.sessionId !== sessionId || this.instance() !== instance || !this.ledger.readable())
 						return;
 					// A lost record of the daemon's charges floors the watermark at what the session had recorded by then: a
-					// history not loaded yet would read that short and charge its ranges again, so the read-back waits for it.
-					if (held.lostBefore !== undefined && !this.session.getDurableCumulativeUsage().settled) {
+					// history still loading would read that short and charge its ranges again, so the read-back waits for it. A
+					// history whose load failed (the session tells it) is not waited for: the floor read from the entries in hand
+					// can only be lower, so a range may be charged again but none goes uncharged.
+					const reading = this.session.getDurableCumulativeUsage();
+					if (held.lostBefore !== undefined && !reading.settled && reading.history !== "unavailable") {
 						this.recoverAfter = Date.now() + RECOVERY_RETRY_MS;
 						return;
 					}
