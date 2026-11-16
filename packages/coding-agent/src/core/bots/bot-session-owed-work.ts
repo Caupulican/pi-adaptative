@@ -431,21 +431,29 @@ export class BotOwedWork {
 	 * What the bot's saved session `saved` holds for its owed work, read through the ledger; none while a process hosts it
 	 * (its own session takes it up) or for a session that never ran. A file that does not read is told to the owner once.
 	 */
-	private savedFacts(agentId: string, saved: SavedBotSession | undefined): SavedSessionFacts | undefined {
+	private savedFacts(
+		agentId: string,
+		saved: SavedBotSession | undefined,
+		unreadable?: () => void,
+	): SavedSessionFacts | undefined {
 		const { ports } = this;
 		if (saved?.cwd === undefined || ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId))
 			return undefined;
 		const read = this.savedSessions.read(agentId, saved.file, ports.agentDir());
-		if (read.kind === "unreadable" && read.fresh) this.notReadable(agentId, read.error);
+		if (read.kind === "unreadable") {
+			// Told once per fresh failure; `unreadable` hears every one, so what it holds is read again.
+			if (read.fresh) this.notReadable(agentId, read.error);
+			unreadable?.();
+		}
 		return read.kind === "read" ? read.facts : undefined;
 	}
 
 	/**
 	 * Whether the goal the bot's saved session holds opens it: one its load takes up (`SavedGoal.resumes`), unless its
-	 * session closed here holding that goal (`closedGoals`).
+	 * session closed here holding that goal (`closedGoals`). `unreadable`: the saved session did not read.
 	 */
-	private goalOwed(agentId: string, saved: SavedBotSession): boolean {
-		const goal = this.savedFacts(agentId, saved)?.goal;
+	private goalOwed(agentId: string, saved: SavedBotSession, unreadable: () => void): boolean {
+		const goal = this.savedFacts(agentId, saved, unreadable)?.goal;
 		return goal?.resumes === true && this.closedGoals.get(agentId) !== goal.key;
 	}
 
@@ -853,7 +861,13 @@ export class BotOwedWork {
 		const usage = worked !== undefined && !stopWaiting && this.usageDue.has(agentId);
 		// An unfinished goal its load takes up continues it, where the settings it opens with let a goal continue on its own
 		// (read once its root is known): owed only by a session that ran, and held back by the owner's stop as its workers are.
-		const goal = worked !== undefined && !stopWaiting && this.goalOwed(agentId, worked);
+		// A saved session that did not read is told by `savedFacts` once per cause, and leaves what it is owed unread.
+		const goal =
+			worked !== undefined &&
+			!stopWaiting &&
+			this.goalOwed(agentId, worked, () => {
+				unread = true;
+			});
 		let unrun = "";
 		try {
 			// The file, only when nothing else owes.
