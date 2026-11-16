@@ -99,14 +99,25 @@ export const CHAT = {
 			run: (runId: number, repo: string) => `GitHub run ${runId} of ${repo}`,
 			ci: (sha: string) => `the CI of commit ${sha}`,
 			release: (tag: string, repo: string | undefined) => `release ${tag}${repo === undefined ? "" : ` of ${repo}`}`,
-			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed (or why it could not be read). */
+			/** Why a failed attempt's first failed job could not be read, by the reason its result keeps (`GithubJobUnread`). */
+			jobUnread: {
+				"no-reader":
+					"GitHub cannot be read from this session (no GitHub checkout was found here, or the gh command is unavailable)",
+				"attempt-gone": "the session no longer holds the CI attempt's identity",
+				"read-failed": "reading its jobs from GitHub failed",
+			},
+			/**
+			 * A run's end: GitHub's own conclusion word, and its first failed job when one failed, or why it could not be read
+			 * (`jobUnread`, one of the words above) with the failed call's own error (`detail`, data).
+			 */
 			runEnded: (
 				subject: string,
 				conclusion: string,
 				failedJob: string | undefined,
 				jobUnread: string | undefined,
+				detail: string | undefined,
 			) =>
-				`${subject} finished: ${conclusion}${failedJob !== undefined ? ` (failed job: ${failedJob})` : jobUnread !== undefined ? ` (its failed job could not be read: ${jobUnread})` : ""}`,
+				`${subject} finished: ${conclusion}${failedJob !== undefined ? ` (failed job: ${failedJob})` : jobUnread !== undefined ? ` (its failed job could not be read: ${jobUnread}${detail === undefined ? "" : `: ${detail}`})` : ""}`,
 			released: (subject: string, prerelease: boolean) =>
 				`${subject} was published${prerelease ? " as a prerelease" : ""}`,
 		},
@@ -114,6 +125,8 @@ export const CHAT = {
 		phone: {
 			lead: "Watch",
 			timedOut: "reached its deadline without a result",
+			/** A typed GitHub source's result that was done, or read, only after the watch's deadline. */
+			doneAfterDeadline: (result: string) => `${result} (known only after its deadline)`,
 			failing: (failures: number) => `could not be checked ${failures} times in a row; it keeps trying`,
 		},
 		/** The host's own arming of watches after a tool call (a push, a dispatched run, a release script) failed. */

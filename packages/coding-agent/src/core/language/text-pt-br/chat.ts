@@ -92,19 +92,27 @@ export const CHAT = {
 			run: (runId: number, repo: string) => `execução ${runId} do GitHub em ${repo}`,
 			ci: (sha: string) => `o CI do commit ${sha}`,
 			release: (tag: string, repo: string | undefined) => `release ${tag}${repo === undefined ? "" : ` de ${repo}`}`,
+			jobUnread: {
+				"no-reader":
+					"o GitHub não pode ser lido nesta sessão (nenhum checkout do GitHub foi encontrado aqui, ou o comando gh não está disponível)",
+				"attempt-gone": "a sessão não guarda mais a identificação da tentativa de CI",
+				"read-failed": "a leitura dos jobs no GitHub falhou",
+			},
 			runEnded: (
 				subject: string,
 				conclusion: string,
 				failedJob: string | undefined,
 				jobUnread: string | undefined,
+				detail: string | undefined,
 			) =>
-				`${subject} terminou: ${conclusion}${failedJob !== undefined ? ` (job com falha: ${failedJob})` : jobUnread !== undefined ? ` (não foi possível ler o job com falha: ${jobUnread})` : ""}`,
+				`${subject} terminou: ${conclusion}${failedJob !== undefined ? ` (job com falha: ${failedJob})` : jobUnread !== undefined ? ` (não foi possível ler o job com falha: ${jobUnread}${detail === undefined ? "" : `: ${detail}`})` : ""}`,
 			released: (subject: string, prerelease: boolean) =>
 				`${subject} foi publicada${prerelease ? " como pré-release" : ""}`,
 		},
 		phone: {
 			lead: "Monitoramento",
 			timedOut: "chegou ao prazo sem resultado",
+			doneAfterDeadline: (result: string) => `${result} (só se soube depois do prazo)`,
 			failing: (failures: number) => `não pôde ser verificado ${failures} vezes seguidas; continua tentando`,
 		},
 		autoArmFailed: (reason: string) =>

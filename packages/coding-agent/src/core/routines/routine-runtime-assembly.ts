@@ -275,9 +275,14 @@ export class RoutineRuntimeAssembly {
 				const routines = runtime();
 				return (
 					routines &&
-					this.autoWatchPort(routines.sessionWatches, this.deps.getTimers().port("routines"), () => ({
-						armer: { kind: "worker", runtimeId: worker.runtimeId, scope: worker.scope },
-					}))
+					this.autoWatchPort(
+						routines.sessionWatches,
+						this.deps.getTimers().port("routines"),
+						routines.autoWatches.closing,
+						() => ({
+							armer: { kind: "worker", runtimeId: worker.runtimeId, scope: worker.scope },
+						}),
+					)
 				);
 			},
 			// A runtime that does not take the note now still hears each watch's result when it fires.
@@ -303,6 +308,7 @@ export class RoutineRuntimeAssembly {
 	private autoWatchPort(
 		sessionWatches: SessionWatchService,
 		timers: TimerPort,
+		closing: AbortSignal,
 		armingContext: () => AutoArmContext,
 	): WatchAutoArmPort {
 		return {
@@ -318,6 +324,7 @@ export class RoutineRuntimeAssembly {
 					...(served === undefined ? {} : { served }),
 				}),
 			timers,
+			closing,
 		};
 	}
 
@@ -741,8 +748,11 @@ export class RoutineRuntimeAssembly {
 						warn: (message) => this.host.warn(message),
 					});
 		let shutdown: Promise<void> | undefined;
+		// Aborted as the runtime stops: the host's reads for an arming after a call end with the session.
+		const closing = new AbortController();
 		const stop = (): Promise<void> => {
 			if (shutdown) return shutdown;
+			closing.abort();
 			let complete!: () => void;
 			let fail!: (error: unknown) => void;
 			shutdown = new Promise<void>((resolve, reject) => {
@@ -805,7 +815,7 @@ export class RoutineRuntimeAssembly {
 			},
 			now: () => routineTimers.now(),
 		};
-		const autoWatches = this.autoWatchPort(sessionWatches, routineTimers, () => {
+		const autoWatches = this.autoWatchPort(sessionWatches, routineTimers, closing.signal, () => {
 			const served = this.armingEntry();
 			return { armer: { kind: "auto", authority: authority() }, ...(served === undefined ? {} : { served }) };
 		});

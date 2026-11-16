@@ -397,7 +397,9 @@ export class GithubWatchHostReader implements GithubWatchReader {
 			);
 		} catch (error) {
 			signal.throwIfAborted();
-			return { failedJobUnread: error instanceof Error ? error.message : String(error) };
+			return {
+				failedJobUnread: { reason: "read-failed", detail: error instanceof Error ? error.message : String(error) },
+			};
 		}
 		const failedJob = jobs.find((job) => job.conclusion === "failure")?.name;
 		return typeof failedJob === "string" && failedJob.length > 0 ? { failedJob } : {};

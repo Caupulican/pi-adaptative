@@ -115,6 +115,8 @@ export interface WatchAutoArmPort {
 	arm(request: AutoWatchRequest, context: AutoArmContext): Promise<SessionWatchView>;
 	/** The session's routines clock: a watch's end time is on it, and the host's waits for a dispatched run are timed on it. */
 	readonly timers: TimerPort;
+	/** Aborted once the session's watches stop (the session disposes): every read of GitHub an arming makes ends with it. */
+	readonly closing: AbortSignal;
 }
 
 export interface WatchAutoArmDeps {
@@ -541,7 +543,7 @@ export class WatchAutoArm {
 					event: "workflow_dispatch",
 					...(dispatch.ref === undefined ? {} : { branch: dispatch.ref }),
 				},
-				AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS),
+				AbortSignal.any([AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS), port.closing]),
 			);
 		} catch (error) {
 			if (this.deps.disposed()) return;
@@ -602,7 +604,7 @@ export class WatchAutoArm {
 		const leave = (source: GithubWatchSource, why: string) => unwatched.push(`${subjectOf(source)} (${why})`);
 		const ciTriggers = port.ciTriggers();
 		const reader = port.github();
-		const signal = AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS);
+		const signal = AbortSignal.any([AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS), port.closing]);
 		if (call.pushes || call.releases)
 			for (const ref of pushedRefs(output)) {
 				if (ref.kind === "tag") {

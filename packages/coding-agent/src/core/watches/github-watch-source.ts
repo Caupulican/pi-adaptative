@@ -107,6 +107,19 @@ export function githubWatchSubject(source: GithubWatchSource): string {
 }
 
 /**
+ * Why the first failed job of a failed attempt could not be read: no reader of GitHub is offered here (`no-reader`), the
+ * session no longer holds the attempt's identity (`attempt-gone`), or GitHub's read of its jobs failed (`read-failed`).
+ * A sentence words the reason in its own language; `detail`, the failed call's own error, is data as a job's name is.
+ */
+export const GITHUB_JOB_UNREAD_REASONS = ["no-reader", "attempt-gone", "read-failed"] as const;
+export type GithubJobUnreadReason = (typeof GITHUB_JOB_UNREAD_REASONS)[number];
+
+export interface GithubJobUnread {
+	readonly reason: GithubJobUnreadReason;
+	readonly detail?: string;
+}
+
+/**
  * What a typed source was last seen as: `pending` while the run is queued or running or the release is not published,
  * `done` once it completed or was published. `status` and `conclusion` are GitHub's own words.
  */
@@ -116,7 +129,7 @@ export interface GithubWatchResult {
 	readonly conclusion?: string;
 	readonly failedJob?: string;
 	/** Why the first failed job of a failed attempt could not be read, when it could not: the result is told without it. */
-	readonly failedJobUnread?: string;
+	readonly failedJobUnread?: GithubJobUnread;
 	readonly url?: string;
 	/** The run (and its attempt) the result is of; a release has none. */
 	readonly runId?: number;
@@ -136,6 +149,21 @@ function resultText(value: unknown, limit: number, label: string): string {
 	if (typeof value !== "string" || value.length === 0 || value.length > limit)
 		throw new TypeError(`Watch ${label} is invalid.`);
 	return value;
+}
+
+function parseJobUnread(value: unknown): GithubJobUnread {
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["reason", "detail"]) ||
+		!(GITHUB_JOB_UNREAD_REASONS as readonly unknown[]).includes(value.reason)
+	)
+		throw new TypeError("Watch failed job reason is invalid.");
+	return {
+		reason: value.reason as GithubJobUnreadReason,
+		...(value.detail === undefined
+			? {}
+			: { detail: resultText(value.detail, MAX_RESULT_TEXT_CHARS, "failed job reason detail") }),
+	};
 }
 
 function positiveInteger(value: unknown, label: string): number {
@@ -171,9 +199,7 @@ export function parseGithubWatchResult(value: unknown): GithubWatchResult {
 		...(value.failedJob === undefined
 			? {}
 			: { failedJob: resultText(value.failedJob, MAX_RESULT_TEXT_CHARS, "failed job") }),
-		...(value.failedJobUnread === undefined
-			? {}
-			: { failedJobUnread: resultText(value.failedJobUnread, MAX_RESULT_TEXT_CHARS, "failed job reason") }),
+		...(value.failedJobUnread === undefined ? {} : { failedJobUnread: parseJobUnread(value.failedJobUnread) }),
 		...(value.url === undefined ? {} : { url: resultText(value.url, MAX_RESULT_URL_CHARS, "result URL") }),
 		...(value.runId === undefined ? {} : { runId: positiveInteger(value.runId, "result run") }),
 		...(value.runAttempt === undefined ? {} : { runAttempt: positiveInteger(value.runAttempt, "result attempt") }),
@@ -188,7 +214,11 @@ export function boundedGithubWatchResult(result: GithubWatchResult): GithubWatch
 		text === undefined || text.length === 0 ? undefined : text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 	const conclusion = cut(result.conclusion, MAX_RESULT_TEXT_CHARS);
 	const failedJob = cut(result.failedJob, MAX_RESULT_TEXT_CHARS);
-	const failedJobUnread = cut(result.failedJobUnread, MAX_RESULT_TEXT_CHARS);
+	const unreadDetail = cut(result.failedJobUnread?.detail, MAX_RESULT_TEXT_CHARS);
+	const failedJobUnread =
+		result.failedJobUnread === undefined
+			? undefined
+			: { reason: result.failedJobUnread.reason, ...(unreadDetail === undefined ? {} : { detail: unreadDetail }) };
 	const url = result.url !== undefined && result.url.length <= MAX_RESULT_URL_CHARS ? result.url : undefined;
 	return {
 		state: result.state,
@@ -250,8 +280,8 @@ export function describeSessionWatchSource(
 }
 
 /**
- * What a done result says, in `words`: the run's conclusion and first failed job (or why that job could not be read), or
- * the published release.
+ * What a done result says, in `words`: the run's conclusion and first failed job (or why that job could not be read, its
+ * reason in `words` and a failed call's error as data), or the published release.
  */
 export function describeGithubWatchResult(
 	source: GithubWatchSource,
@@ -260,11 +290,13 @@ export function describeGithubWatchResult(
 ): string {
 	const subject = describeGithubWatchSource(source, words);
 	if (source.type === "release") return words.released(subject, result.status === RELEASE_STATUS.prerelease);
+	const unread = result.failedJob === undefined ? result.failedJobUnread : undefined;
 	return words.runEnded(
 		subject,
 		result.conclusion ?? result.status,
 		result.failedJob,
-		result.failedJob === undefined ? result.failedJobUnread : undefined,
+		unread === undefined ? undefined : words.jobUnread[unread.reason],
+		unread?.detail,
 	);
 }
 

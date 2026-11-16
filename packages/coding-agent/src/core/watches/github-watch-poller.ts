@@ -18,6 +18,7 @@ import type { RoutineHostEventFeed } from "../routines/routine-contract.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type {
 	CiPushTriggers,
+	GithubJobUnread,
 	GithubPolledSource,
 	GithubWatchReader,
 	GithubWatchSource,
@@ -215,6 +216,11 @@ export class GithubWatchPoller {
 			});
 	}
 
+	/**
+	 * One pass over the watches. The next read is armed however the pass ends: a pass that throws (a ledger write that
+	 * failed) is warned where every failed pass is (`request`), and the watches it left unread, those it was to read now
+	 * and those past their end time, are read again one read interval later, so no failure stops the reads and none spins.
+	 */
 	private async run(): Promise<void> {
 		const nowMs = this.deps.timers.now();
 		const watches = this.deps.watches.githubWatches(nowMs);
@@ -224,29 +230,31 @@ export class GithubWatchPoller {
 		const atDeadline = watches.filter((watch) => watch.deadlineReadSince !== undefined);
 		const live = watches.filter((watch) => watch.deadlineReadSince === undefined);
 		const followed = this.deps.link.followsCi;
-		// A result the CI source collected reaches a watch past its end time too, which carries it to its deadline read.
-		const ciCollected = watches.filter((watch) => watch.source.type === "ci" && followed);
-		if (ciCollected.length > 0) this.readCi(ciCollected);
 		const fromCi = live.filter((watch) => watch.source.type === "ci" && followed);
-		await this.readFailedJobs();
-		const waitingReader = await this.readAtDeadline(atDeadline, nowMs);
-		if (!this.active) return;
-		const due = live.filter(
-			(watch) => !fromCi.includes(watch) && (this.nextRead.get(watch.incarnationId) ?? 0) <= nowMs,
-		);
+		const clocked = live.filter((watch) => !fromCi.includes(watch));
+		// Marked before any read: what this pass is to read now is next read an interval on, whether or not the pass ends.
+		const due = clocked.filter((watch) => (this.nextRead.get(watch.incarnationId) ?? 0) <= nowMs);
 		for (const watch of due) this.nextRead.set(watch.incarnationId, nowMs + GITHUB_WATCH_POLL_MS);
-		const polled: PolledWatch[] = [];
-		for (const watch of due) {
+		let waits = atDeadline.map(() => nowMs + GITHUB_WATCH_POLL_MS);
+		try {
+			// A result the CI source collected reaches a watch past its end time too, which carries it to its deadline read.
+			const ciCollected = watches.filter((watch) => watch.source.type === "ci" && followed);
+			if (ciCollected.length > 0) this.readCi(ciCollected);
+			await this.readFailedJobs();
+			const waitingReader = await this.readAtDeadline(atDeadline, nowMs);
+			waits = waitingReader.map((watch) => (watch.deadlineReadSince ?? nowMs) + GITHUB_WATCH_POLL_MS);
 			if (!this.active) return;
-			if (isPolled(watch)) polled.push(watch);
-			// A `ci` watch here is one no CI source collects for: it cannot be read.
-			else this.failed(watch, NO_CI_SOURCE);
+			const polled: PolledWatch[] = [];
+			for (const watch of due) {
+				if (!this.active) return;
+				if (isPolled(watch)) polled.push(watch);
+				// A `ci` watch here is one no CI source collects for: it cannot be read.
+				else this.failed(watch, NO_CI_SOURCE);
+			}
+			await this.readPolled(polled);
+		} finally {
+			this.followNextRead(clocked, waits);
 		}
-		await this.readPolled(polled);
-		this.followNextRead(
-			live.filter((watch) => !fromCi.includes(watch)),
-			waitingReader.map((watch) => (watch.deadlineReadSince ?? nowMs) + GITHUB_WATCH_POLL_MS),
-		);
 	}
 
 	/**
@@ -321,16 +329,18 @@ export class GithubWatchPoller {
 					event.identity.runId === watch.runId &&
 					event.identity.runAttempt === watch.runAttempt,
 			)?.event;
-			let read: { job?: string } | { unread: string };
-			if (!reader) read = { unread: NO_READER };
-			else if (!attempt) read = { unread: "the session no longer holds the CI attempt's identity" };
+			let read: { job?: string } | { unread: GithubJobUnread };
+			if (!reader) read = { unread: { reason: "no-reader" } };
+			else if (!attempt) read = { unread: { reason: "attempt-gone" } };
 			else
 				try {
 					const job = await reader.failedCiJob(attempt.identity, this.abort.signal);
 					read = job === undefined ? {} : { job };
 				} catch (error) {
 					if (!this.active) return;
-					read = { unread: error instanceof Error ? error.message : String(error) };
+					read = {
+						unread: { reason: "read-failed", detail: error instanceof Error ? error.message : String(error) },
+					};
 				}
 			this.deps.watches.settleFailedJob(watch.watchId, watch.incarnationId, read);
 		}

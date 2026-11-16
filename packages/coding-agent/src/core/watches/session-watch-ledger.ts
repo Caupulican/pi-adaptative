@@ -134,14 +134,15 @@ export interface SessionWatchRecord {
 	readonly result?: GithubWatchResult;
 	/**
 	 * A `ci` watch fired on a failed attempt whose first failed job is still being read: its wake waits for that read, which
-	 * names the job or says why it could not be read (`result.failedJobUnread`).
+	 * names the job or says why it could not be read (`result.failedJobUnread`, a reason code with the failed call's error).
 	 */
 	readonly awaitingFailedJob?: true;
 	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
 	readonly tellOwner?: true;
 	/**
 	 * A `ci` watch the host armed on a commit its CI workflow's triggers did not settle a run for (`watch-auto-arm.ts`):
-	 * the owner was promised no CI result, so its timeout wakes the armer only, never the phone.
+	 * the owner was promised no CI result, so its timeout wakes the armer only, never the phone, unless it holds a done
+	 * result of that commit's CI, which the phone is told.
 	 */
 	readonly ciRunUnknown?: true;
 	/** The goal requirement the watch waits for (`watch` arm `forRequirement`): the goal's continuation waits on it. */
