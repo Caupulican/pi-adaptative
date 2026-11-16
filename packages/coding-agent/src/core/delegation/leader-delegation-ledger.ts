@@ -48,7 +48,11 @@ const MAX_DELEGATION_ASKS = 32;
  */
 const MAIL_SENT_EVIDENCE_PREFIX = "delegation-mail-sent-";
 const MAIL_END_EVIDENCE_PREFIX = "delegation-mail-end-";
-/** The most such mails one delegation keeps; past it the leader works with the answers it has. */
+const MAIL_AWAITED_EVIDENCE_PREFIX = "delegation-mail-awaited-";
+/**
+ * The most such mails one delegation keeps; past it the leader works with the answers it has. Each holds up to three
+ * evidence entries (sent, awaited, end), within the objective's evidence bound beside the updates and asks.
+ */
 export const MAX_DELEGATION_MAILS = 128;
 
 /**
@@ -75,6 +79,8 @@ export interface DelegationMail {
 	readonly worker: string;
 	/** Its place in its chain (`MAX_BOT_MAIL_HOPS`). */
 	readonly hop: number;
+	/** When the goal's settle step first found the goal done but for this mail's answer, and kept it open for it. */
+	readonly awaitedAt?: string;
 	readonly end?: DelegationMailEnd;
 }
 
@@ -246,10 +252,13 @@ function mailEndFrom(value: unknown): DelegationMailEnd | undefined {
 
 /** The mail a delegation's evidence records, in the order it was sent, each with how the goal stopped waiting for it. */
 function delegationMails(
-	evidence: readonly { readonly evidenceId: string; readonly metadata?: JsonObject }[],
+	evidence: readonly { readonly evidenceId: string; readonly createdAt: string; readonly metadata?: JsonObject }[],
 ): DelegationMail[] {
 	const ends = new Map<string, DelegationMailEnd>();
+	const awaited = new Map<string, string>();
 	for (const entry of evidence) {
+		if (entry.evidenceId.startsWith(MAIL_AWAITED_EVIDENCE_PREFIX))
+			awaited.set(entry.evidenceId.slice(MAIL_AWAITED_EVIDENCE_PREFIX.length), entry.createdAt);
 		const end = entry.evidenceId.startsWith(MAIL_END_EVIDENCE_PREFIX) ? mailEndFrom(entry.metadata) : undefined;
 		if (end) ends.set(entry.evidenceId.slice(MAIL_END_EVIDENCE_PREFIX.length), end);
 	}
@@ -261,7 +270,8 @@ function delegationMails(
 		if (typeof hop !== "number" || !Number.isSafeInteger(hop) || hop < 1) return [];
 		const mailId = entry.evidenceId.slice(MAIL_SENT_EVIDENCE_PREFIX.length);
 		const end = ends.get(mailId);
-		return [{ mailId, agentId, worker, hop, ...(end ? { end } : {}) }];
+		const awaitedAt = awaited.get(mailId);
+		return [{ mailId, agentId, worker, hop, ...(awaitedAt ? { awaitedAt } : {}), ...(end ? { end } : {}) }];
 	});
 }
 
@@ -510,7 +520,7 @@ export class LeaderDelegationLedger {
 	 * not settled until it no longer waits for the reply (`recordMailEnd`). False when it is recorded already (a send
 	 * replayed), which leaves the record as it was. Throws when the goal holds its bound of mails.
 	 */
-	recordMailSent(objectiveId: string, mail: Omit<DelegationMail, "end">): boolean {
+	recordMailSent(objectiveId: string, mail: Omit<DelegationMail, "awaitedAt" | "end">): boolean {
 		const record = this.require(objectiveId);
 		if (record.mails.some((entry) => entry.mailId === mail.mailId)) return false;
 		if (record.mails.length >= MAX_DELEGATION_MAILS)
@@ -527,6 +537,24 @@ export class LeaderDelegationLedger {
 			metadata: { agentId: mail.agentId, worker: mail.worker, hop: mail.hop },
 		});
 		return true;
+	}
+
+	/**
+	 * Records that the goal's settle step found the goal done but for the mail's answer and kept it open: once per mail; a
+	 * call for a closed goal, an unknown or ended mail, or one recorded already, changes nothing.
+	 */
+	recordMailAwaited(objectiveId: string, mailId: string): void {
+		const record = this.get(objectiveId);
+		const mail = record?.mails.find((entry) => entry.mailId === mailId);
+		if (!record || record.state === "closed" || !mail || mail.end || mail.awaitedAt !== undefined) return;
+		this.runtime().recordObjectiveEvidence(objectiveId, {
+			evidenceId: `${MAIL_AWAITED_EVIDENCE_PREFIX}${mailId}`,
+			kind: "observation",
+			summary: `The goal waits for bot ${mail.agentId}'s answer to its mail before it settles.`,
+			artifactIds: [],
+			trusted: true,
+			createdAt: new Date(this.now()).toISOString(),
+		});
 	}
 
 	/** Records that the goal no longer waits for the mail; a second call, or one for a closed goal, changes nothing. */

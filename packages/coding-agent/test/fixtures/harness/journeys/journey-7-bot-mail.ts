@@ -26,7 +26,7 @@ import {
 	soulMatcher,
 	TRACK,
 	waitForBotRosterState,
-	waitForBotRosterView,
+	waitForDelegation,
 } from "./journey-7-shared.ts";
 
 const ASKER = "mail-asker";
@@ -361,13 +361,10 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 		"J7 worker mail: the worker read its send's result",
 		world.provider.whenReached(reached(TRACK.mailWorker, "j7-mail-worker-sent")),
 	);
-	// The leader's turn that mailed ends: its end is a store commit, whose reconcile pass decides the goal before it awaits.
-	await waitForBotRosterView(
-		world,
-		session,
-		WORKER,
-		"with its worker idle after the turn that mailed",
-		() => agentsOn(session, MODEL_ID.mailWorker)[0]?.activity === "idle",
+	// The leader's turn that mailed ended: the goal's settle step found the goal done but for the reader's answer, and kept
+	// it open for that mail (its own decision, recorded on the mail).
+	await waitForDelegation(world, session, WORKER, "kept open for its mail's answer", (record) =>
+		record.mails.some((mail) => mail.awaitedAt !== undefined),
 	);
 	await withDeadline(trace, "J7 worker mail: the root is idle", session.waitForForegroundIdle());
 	const held = delegationOf(session, WORKER);
@@ -421,14 +418,20 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 			state: held.state,
 			// The goal holds the mail its worker sent, unanswered: the root's requests are the tool's loading, the lead and its
 			// result, and no outcome notice.
-			mails: held.mails.map((mail) => [mail.agentId, mail.worker === runtime, mail.hop, mail.end?.how]),
+			mails: held.mails.map((mail) => [
+				mail.agentId,
+				mail.worker === runtime,
+				mail.hop,
+				mail.awaitedAt !== undefined,
+				mail.end?.how,
+			]),
 			rootRequests: heldRootRequests,
 		},
 		"after the leader's turn that mailed ended, its goal stays open, holding the mail until the bot answers",
 	).toEqual({
 		delegated: true,
 		state: "running",
-		mails: [[READER, true, 1, undefined]],
+		mails: [[READER, true, 1, true, undefined]],
 		rootRequests: 3,
 	});
 	const settled = delegationOf(session, WORKER);

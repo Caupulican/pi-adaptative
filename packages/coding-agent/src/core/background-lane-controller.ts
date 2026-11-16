@@ -2056,8 +2056,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
 			...leaderBotFacts({
 				store,
-				registry: () => this.deps.getModelRegistry(),
-				allowance: this.deps.subscriptionAllowance,
+				host: this.deps,
 				runsAsSession: (bot) => this._botHost.host.runsAsSession(bot),
 			}),
 			createGoalLeader: (request) => this._botLifecycle.createGoalLeader(request),

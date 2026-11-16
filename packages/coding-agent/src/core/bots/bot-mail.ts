@@ -104,6 +104,14 @@ function senderText(from: BotMailAddress, workerName: string | undefined): strin
 }
 
 /**
+ * The words an agent's model reads when bot `agentId`'s host did not take its ask or mail (refused it, set it aside, or
+ * the owner's stop covered it): no answer comes, and why. English, for a model.
+ */
+export function botMailRefusedText(agentId: string, asked: "ask" | "mail", reason: string | undefined): string {
+	return `Bot ${agentId} did not take your ${asked}${reason ? `: ${reason}` : "."}`;
+}
+
+/**
  * The words as the receiving session's model reads them: who sent them, their place in the chain and where the answer goes.
  * `workerName`: the bot a worker sender is, when it is one.
  */

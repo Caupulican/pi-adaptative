@@ -76,6 +76,13 @@ export const LEADER_QUESTION_CUSTOM_TYPE = "leader-question";
 /** The longest single timer the platform keeps; a later deadline re-arms when this one fires. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
+/**
+ * How long after a pass that kept a goal open for a bot's answer the next pass reads again whether the bot still holds
+ * the mail: a mail its host dropped without a reply (one it could not write, a record that did not read) changes nothing
+ * in this session's store, so no other pass may come to release it.
+ */
+export const MAIL_HOLD_RECHECK_MS = 60_000;
+
 function isOpen(record: DelegationRecord): boolean {
 	return record.state !== "closed";
 }
@@ -89,6 +96,10 @@ export class LeaderController {
 	private readonly ledger: LeaderDelegationLedger;
 	private unsubscribe: (() => void) | undefined;
 	private timer: { handle: unknown; at: number } | undefined;
+	/** When the next pass reads again the mail a goal waits for (`MAIL_HOLD_RECHECK_MS`); undefined when none waits. */
+	private mailRecheckAt: number | undefined;
+	/** The mail of this process's workers being sent now: recorded on its goal, not yet in the bot's inbox. */
+	private readonly mailsInFlight = new Set<string>();
 	private running: Promise<void> | undefined;
 	private again = false;
 	/** Deliveries this process saw land; the session's parent-input ledger is the durable answer. */
@@ -389,9 +400,17 @@ export class LeaderController {
 	 * stays open until the reply reaches that worker (`mailEnded`). False when the goal is not open or the mail is
 	 * recorded already; throws at the goal's bound of mails.
 	 */
-	mailSent(objectiveId: string, mail: Omit<DelegationMail, "end">): boolean {
+	mailSent(objectiveId: string, mail: Omit<DelegationMail, "awaitedAt" | "end">): boolean {
 		const record = this.ledger.get(objectiveId);
-		return record !== undefined && isOpen(record) && this.ledger.recordMailSent(objectiveId, mail);
+		if (record === undefined || !isOpen(record)) return false;
+		const recorded = this.ledger.recordMailSent(objectiveId, mail);
+		this.mailsInFlight.add(mail.mailId);
+		return recorded;
+	}
+
+	/** The send of the mail `mailId` (`mailSent`) returned: the bot's inbox holds it now, or it was not sent. */
+	mailLeft(mailId: string): void {
+		this.mailsInFlight.delete(mailId);
 	}
 
 	/** The goal no longer waits for the mail `mailId`: its reply was handed on, it was not sent, or it expired unread. */
@@ -445,6 +464,7 @@ export class LeaderController {
 	}
 
 	private async reconcile(): Promise<void> {
+		this.mailRecheckAt = undefined;
 		const snapshot = this.deps.snapshot();
 		const records = readDelegations(snapshot);
 		if (records.length === 0) return;
@@ -536,23 +556,42 @@ export class LeaderController {
 			changed = true;
 		}
 		changed = (await this.dispatchQueued(bots)) || changed;
-		this.armDeadline();
+		this.armAlarm();
 		if (changed) this.notifyListeners();
 	}
 
 	/**
-	 * Whether the goal still waits for a bot's reply to its workers' mail. A bot that is gone, retired or no longer answers
-	 * in a session of its own gives none, so the goal stops waiting for its mail; the deadline and the budget bound the rest.
+	 * Whether the goal, done but for them, still waits for a bot's reply to its workers' mail: each such mail is recorded as
+	 * awaited, and read again after `MAIL_HOLD_RECHECK_MS`. A mail waits while it is being sent, or while the bot's inbox
+	 * or this session's replies hold it (`botHoldsMail`); one neither holds, or whose bot is gone, retired or no longer
+	 * answers in a session of its own, gets no reply (its host dropped it without one), so the goal stops waiting for it.
 	 */
 	private awaitsMail(record: DelegationRecord, bots: ReadonlyMap<string, LeaderBotView>): boolean {
 		let waits = false;
 		for (const mail of record.mails) {
 			if (mail.end) continue;
 			const bot = bots.get(mail.agentId);
-			if (bot && !bot.retired && this.deps.botAnswersInSession(mail.agentId)) waits = true;
-			else this.ledger.recordMailEnd(record.objectiveId, mail.mailId, { how: "gone", meteredUsd: 0 });
+			const answers = bot !== undefined && !bot.retired && this.deps.botAnswersInSession(mail.agentId);
+			if (answers && (this.mailsInFlight.has(mail.mailId) || this.mailHeld(mail))) {
+				waits = true;
+				this.ledger.recordMailAwaited(record.objectiveId, mail.mailId);
+			} else this.ledger.recordMailEnd(record.objectiveId, mail.mailId, { how: "gone", meteredUsd: 0 });
 		}
+		if (waits) this.mailRecheckAt = this.deps.now() + MAIL_HOLD_RECHECK_MS;
 		return waits;
+	}
+
+	/** Whether the bot holds the mail (`botHoldsMail`); a read that fails holds it until a later pass reads it. */
+	private mailHeld(mail: DelegationMail): boolean {
+		try {
+			return this.deps.botHoldsMail(mail.agentId, mail.mailId);
+		} catch (error) {
+			harnessLog.warn("leaders", "a goal's mail to a bot could not be read", () => ({
+				agentId: mail.agentId,
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			return true;
+		}
 	}
 
 	/**
@@ -891,9 +930,16 @@ export class LeaderController {
 		return this.deps.bots().find((bot) => bot.agentId === alias)?.displayName ?? alias;
 	}
 
-	/** One alarm for the earliest open deadline; firing runs a pass, which closes what is due and re-arms. */
-	private armDeadline(): void {
-		const next = earliestDeadlineMs(this.ledger.list());
+	/**
+	 * One alarm for the earliest open deadline or mail read again (`MAIL_HOLD_RECHECK_MS`); firing runs a pass, which
+	 * closes what is due and re-arms.
+	 */
+	private armAlarm(): void {
+		const deadline = earliestDeadlineMs(this.ledger.list());
+		const next =
+			deadline === undefined || this.mailRecheckAt === undefined
+				? (deadline ?? this.mailRecheckAt)
+				: Math.min(deadline, this.mailRecheckAt);
 		if (this.timer && this.timer.at === next) return;
 		if (this.timer) this.deps.timers.clearTimeout(this.timer.handle);
 		this.timer = undefined;

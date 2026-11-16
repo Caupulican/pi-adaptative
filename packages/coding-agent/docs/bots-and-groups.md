@@ -531,7 +531,9 @@ reached carries that taint on. The receiver reads who wrote it and answers in pl
 words after the mail go back to the sender once, as a reply that is a turn of the sender's own session. A reply is not
 answered again, and a reply sent twice (the receiver's turn ran again after its session reopened) is taken once. A chain
 of mails holds at most 8; a send past that is refused and the bot is told to stop the exchange and report. Every refusal
-reaches the sending bot in English, whatever language your interface draws in. A mail to a bot whose session is not
+reaches the sending bot in English, whatever language your interface draws in, and a mail the receiver's host does not
+take once it waits there (it refuses it, sets its record aside as unreadable, or your stop covers it) is answered the
+same way as a reply: the sender reads that no answer comes and why. A mail to a bot whose session is not
 open, that another process hosts, or whose session is running a turn waits in its inbox as a `.mail.json` record, which
 a build before this one never lists: a mail is given only to an idle session, as a turn of its own (never as a steer of
 the running turn, nor in the session's own queue, which keeps no origin), so a mail waiting when pi stops is given after
@@ -580,7 +582,10 @@ A mail a worker sends in a leader's goal (the leader's, or a bot's working under
 reaches that worker: the goal records the mail in its store (in this session's orchestration store, so a restart keeps
 it), the reply starts the worker's next turn under the goal, and the goal settles only after that. The goal stops waiting
 for a mail that was not sent, whose bot is retired, removed or no longer answers in a session of its own, or whose reply
-expired unread; its deadline and budget bound the rest. The metered spend of the bot's turn that answered (its workers'
+expired unread, and for a mail the bot no longer holds: its inbox keeps no record of it and no reply to it waits unread
+(a refusal reply that could not be written, a record that did not read as one). Each time the goal is kept open for a
+mail, the mail is marked as awaited and read again a minute later, so no mail holds a goal open without bound, whether
+the goal has a deadline or not. The metered spend of the bot's turn that answered (its workers'
 included, as of the turn's end) counts against the goal's budget once the reply is handed on, as a bot's worker turn under
 the goal counted. A worker's mail is first in its chain unless a reply started the worker's turn, in which case it is one
 hop past that reply, so a worker and a bot answering each other stop at the bound of 8 mails as bots mailing each other do

@@ -310,6 +310,9 @@ export function createBotMessageDirectory(
 				// Not sent: no answer comes, so the goal no longer waits for one.
 				if (held) leaders?.mailEnded(mailId, { how: "unsent", meteredUsd: 0 });
 				throw error;
+			} finally {
+				// Sent or not, the goal now reads the mail where the bot holds it (`LeaderController.mailLeft`).
+				if (goalTurn) leaders?.mailLeft(mailId);
 			}
 			// The mail has left: the group's log records it without fencing again, so the model never sends it twice.
 			recordSent(mailId, alias, message);

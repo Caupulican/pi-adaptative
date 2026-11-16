@@ -9,7 +9,8 @@
  * bot's session takes under that origin and never as the owner's words, only while it is idle (a mail waits here while a
  * turn runs, never in the session's own queue, whose record keeps no origin), `<at>-<id>.mail.given.json` a mail record
  * the session took, kept until the turn that took it ends (a host killed before then leaves it to the next host, which
- * gives it again unless the transcript holds it), `<at>-<id>.stop.json` the owner's stop of the bot's
+ * gives it again unless the transcript holds it; the session whose goal sent a mail reads whether either still holds it,
+ * `botInboxHoldsMail`), `<at>-<id>.stop.json` the owner's stop of the bot's
  * work, `<at>-<id>.scoped.stop.json` a stop recorded after it was made (the process that made it could not record it then),
  * which ends only the work there was when it was made, `<name>.unreadable` a file that did not read as a record, set aside
  * so it neither blocks the queue nor is lost.
@@ -27,7 +28,7 @@
  * process tools are refused the bot homes.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	isRecordedDeliveryOrigin,
@@ -180,7 +181,7 @@ function parseScope(value: unknown): FleetStopScope | undefined {
 /**
  * The owner told of an inbox record that did not read (`tellUnreadableHomeRecord`), and, for a record set aside that
  * still names a mail's origin, `setAsideMail` given that origin and the reason in English: the mail's sender is
- * answered that no answer comes (`refuseReturnedMail`).
+ * answered that no answer comes (`refuseUntakenMail`).
  */
 export function tellUnreadableInboxRecord(
 	agentId: string,
@@ -196,7 +197,8 @@ export function tellUnreadableInboxRecord(
 			const value: unknown = JSON.parse(readFileSync(`${file}.unreadable`, "utf8"));
 			origin = isPlainRecord(value) ? parseTurnOriginRecord(value.origin) : undefined;
 		} catch {
-			// Not JSON, or gone: it names no origin, and its sender is held by its goal's deadline or budget alone.
+			// Not JSON, or gone: it names no origin and gets no reply; a goal that waits for it reads that the inbox no longer
+			// holds it (`botInboxHoldsMail`) and stops waiting.
 		}
 		if (origin) setAsideMail(origin, `its record in the bot's inbox did not read (${reason}) and was set aside`);
 	};
@@ -247,6 +249,50 @@ export function botInboxWaiting(agentDir: string, agentId: string): boolean {
  */
 export function botInboxOwnerWordsWaiting(agentDir: string, agentId: string): boolean {
 	return homeRecordNames(botInboxDir(agentDir, agentId), WAITING).length > 0;
+}
+
+/** The reference a mail record's origin names; undefined for a record that does not read, which is never given. */
+function mailRecordRef(text: string): string | undefined {
+	try {
+		const value: unknown = JSON.parse(text);
+		return isPlainRecord(value) ? parseTurnOriginRecord(value.origin)?.ref : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether the bot's inbox holds the mail whose origin names `ref`: waiting, or given to a turn that has not ended. Read
+ * without setting anything aside, as the process that sent it reads it while another hosts the bot. A record renamed
+ * while it is read (given, or put back) is read again under its new name; a file that cannot be read throws. A record
+ * that does not read as one names no mail: it is never given, and its host sets it aside.
+ */
+export function botInboxHoldsMail(agentDir: string, agentId: string, ref: string): boolean {
+	const dir = botInboxDir(agentDir, agentId);
+	for (let pass = 0; pass < 3; pass++) {
+		let moved = false;
+		let names: string[];
+		try {
+			names = readdirSync(dir).filter((name) => MAIL_WAITING.test(name) || MAIL_GIVEN.test(name));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw error;
+		}
+		for (const name of names) {
+			let text: string;
+			try {
+				text = readFileSync(join(dir, name), "utf8");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				moved = true;
+				continue;
+			}
+			if (mailRecordRef(text) === ref) return true;
+		}
+		if (!moved) return false;
+	}
+	// Still moving after three reads: it is in hand, and a later pass reads it again.
+	return true;
 }
 
 /**

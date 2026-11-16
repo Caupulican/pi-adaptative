@@ -89,8 +89,8 @@ export interface BotStopPorts {
 	now(): number;
 	readonly routineClock: TimerPort;
 	/**
-	 * Answers the sender of a returned mail (the orchestrator's ask, a worker's mail) the stop refused that no answer
-	 * comes, with `reason` in English (`refuseReturnedMail`); nothing for other words. The owner is told when it cannot.
+	 * Answers the sender of a mail (the orchestrator's ask, a worker's or a bot's mail) the stop refused that no answer
+	 * comes, with `reason` in English (`refuseUntakenMail`); nothing for other words. The owner is told when it cannot.
 	 */
 	refuseMail(agentId: string, origin: TurnOriginRecord | undefined, reason: string): void;
 	readonly links: LinkedSessionNotices;

@@ -71,6 +71,12 @@ export interface LeaderControllerDeps {
 	 * excepted): the goal waits for such a bot's reply to its workers' mail only while it does.
 	 */
 	botAnswersInSession(alias: string): boolean;
+	/**
+	 * Whether the bot `alias` still holds the mail `mailId` a goal's worker sent it: its inbox keeps the mail's record
+	 * (waiting, or given to a turn not yet ended), or this session's replies keep the reply to it unread. Read from files any
+	 * process writes; throws when they cannot be read.
+	 */
+	botHoldsMail(alias: string, mailId: string): boolean;
 	/** Starts the messages the goal filed while it was paused, now that it runs again. */
 	reconcileDelegatedMessages(delegationObjectiveId: string): void;
 	/** The orchestration clock: the one attempts are stamped on. */

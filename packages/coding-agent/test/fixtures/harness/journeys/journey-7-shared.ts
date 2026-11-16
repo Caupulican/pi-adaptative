@@ -354,6 +354,29 @@ export function delegationOf(session: AgentSession, leader: string): DelegationR
 	return records[0]!;
 }
 
+/** Waits until the one delegation `leader` ran in this session `holds` (`delegationOf`). */
+export async function waitForDelegation(
+	world: HarnessWorld,
+	session: AgentSession,
+	leader: string,
+	what: string,
+	holds: (record: DelegationRecord) => boolean,
+): Promise<void> {
+	let ended = false;
+	try {
+		await withDeadline(
+			world.trace,
+			`the goal ${leader} leads is ${what}`,
+			(async () => {
+				while (!ended && !holds(delegationOf(session, leader)))
+					await new Promise<void>((resolve) => setImmediate(resolve));
+			})(),
+		);
+	} finally {
+		ended = true;
+	}
+}
+
 /** The text a group message was stored with. */
 export function storedMessageText(session: AgentSession, teamId: string, index: number): string {
 	const message = teamMessages(session, teamId)[index];

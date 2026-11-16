@@ -48,7 +48,7 @@ export interface BotInboxDrainPorts {
 	 * which keeps the record for the next pass. True for any other record.
 	 */
 	settleGiven(agentId: string, message: BotInboxMessage): boolean;
-	/** Answers the sender of a mail the session refused, or set aside, that no answer comes (`refuseReturnedMail`). */
+	/** Answers the sender of a mail the session refused, or set aside, that no answer comes (`refuseUntakenMail`). */
 	refuseMail(agentId: string, origin: TurnOriginRecord | undefined, reason: string): void;
 	/** Whether the bot's loaded session runs a turn or holds input; undefined when none is loaded here. */
 	busy(agentId: string): boolean | undefined;
@@ -126,7 +126,7 @@ export class BotInboxDrain {
 				given = await this.ports.give(agentId, item.message);
 			} catch (error) {
 				const reason = errorText(error);
-				// The sender of a returned mail is answered first, in English for its model.
+				// The sender of a mail (the orchestrator, a worker, a bot) is answered first, in English for its model.
 				this.ports.refuseMail(agentId, item.message.origin, errorText(botFailureForModel(error)));
 				refuseBotInboxMessage(agentDir, item, reason, this.ports.timers().now());
 				this.ports.warn(words.botInboxRefused(agentId, reason));
