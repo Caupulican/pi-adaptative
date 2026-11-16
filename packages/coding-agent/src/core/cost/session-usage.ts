@@ -6,7 +6,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import { type ChargedRange, ChargedRanges, chargedRangeSource, legacyChargedRangeSource } from "./charged-ranges.ts";
-import { usageOfReceipt, usageReceiptOf } from "./usage-receipt.ts";
+import { type UsageReceiptReport, usageOfReceipt, usageReceiptOf } from "./usage-receipt.ts";
 import {
 	BOT_SESSION_USAGE_LABEL,
 	SEMANTIC_USAGE_CUSTOM_TYPE,
@@ -81,6 +81,22 @@ export function readAutoLearnSessionIdFromFile(filePath: string): string | undef
 	}
 }
 
+/** What one share of a session's cumulative usage was spent on, as the record that holds it names it. */
+export type CumulativeUsageShare =
+	/** An entry's own usage: an assistant or tool result message, a compaction or a branch summary. */
+	| { readonly kind: "direct"; readonly entry: SessionEntry }
+	/** A spawned report (its open part, for one that charges a range). */
+	| { readonly kind: "spawned"; readonly report: SpawnedUsageReport }
+	/** A usage receipt, which names no model. */
+	| { readonly kind: "receipt"; readonly receipt: UsageReceiptReport }
+	/** A semantic report, recorded or held. */
+	| { readonly kind: "semantic"; readonly report: SemanticAccountingReport }
+	/** Paid history spend the bounded journal had no room for. */
+	| { readonly kind: "overflow" };
+
+/** The dollars of `usage`, one share of a session's cumulative usage (`share`), that are metered spend (`isMeteredSpend`). */
+export type MeteredUsageShare = (usage: Usage, share: CumulativeUsageShare) => number;
+
 /**
  * Whole-session spend, including direct entry charges and already-rolled-up descendants. `pending` are held semantic
  * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row. Spawned reports
@@ -93,6 +109,34 @@ export function aggregateCumulativeUsageFromSessionEntries(
 	overflow?: Usage,
 ): Usage {
 	const total = createEmptyUsage();
+	forEachCumulativeShare(entries, pending, overflow, (usage) => addUsage(total, usage));
+	return total;
+}
+
+/**
+ * The part of the whole-session spend (`aggregateCumulativeUsageFromSessionEntries`, over the same records counted the
+ * same way) that is metered, as `metered` reads each share: in dollars.
+ */
+export function meteredCumulativeUsd(
+	entries: readonly SessionEntry[],
+	metered: MeteredUsageShare,
+	pending: readonly SemanticUsageReport[] = [],
+	overflow?: Usage,
+): number {
+	let usd = 0;
+	forEachCumulativeShare(entries, pending, overflow, (usage, share) => {
+		usd += metered(usage, share);
+	});
+	return usd;
+}
+
+/** Each share of the whole-session spend, counted once as `aggregateCumulativeUsageFromSessionEntries` counts it. */
+function forEachCumulativeShare(
+	entries: readonly SessionEntry[],
+	pending: readonly SemanticUsageReport[],
+	overflow: Usage | undefined,
+	visit: (usage: Usage, share: CumulativeUsageShare) => void,
+): void {
 	const seenSpawnedReportIds = new Set<string>();
 	const seenSemanticReportIds = new Set<string>();
 	const ranges = new ChargedRanges();
@@ -100,39 +144,38 @@ export function aggregateCumulativeUsageFromSessionEntries(
 		const usage = getSessionEntryUsage(entry);
 		const receipt = usageReceiptOf(entry);
 		if (usage && isUsage(usage)) {
-			addUsage(total, usage);
+			visit(usage, { kind: "direct", entry });
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SpawnedUsageReport | undefined;
 			if (!data?.usage || !isUsage(data.usage)) continue;
 			const range = chargedRangeOf(data);
 			if (range) {
 				const open = ranges.take(range, data.usage);
-				if (open) addUsage(total, open);
+				if (open) visit(open, { kind: "spawned", report: data });
 				continue;
 			}
 			if (data.reportId) {
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);
 			}
-			addUsage(total, data.usage);
+			visit(data.usage, { kind: "spawned", report: data });
 		} else if (receipt) {
 			if (seenSpawnedReportIds.has(receipt.reportId)) continue;
 			seenSpawnedReportIds.add(receipt.reportId);
-			addUsage(total, usageOfReceipt(receipt));
+			visit(usageOfReceipt(receipt), { kind: "receipt", receipt });
 		} else if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SemanticAccountingReport | undefined;
 			if (!data?.usage || !isUsage(data.usage) || !data.reportId || seenSemanticReportIds.has(data.reportId))
 				continue;
 			seenSemanticReportIds.add(data.reportId);
-			addUsage(total, data.usage);
+			visit(data.usage, { kind: "semantic", report: data });
 		}
 	}
 	for (const report of pending) {
 		if (seenSemanticReportIds.has(report.reportId) || !isUsage(report.usage)) continue;
 		seenSemanticReportIds.add(report.reportId);
-		addUsage(total, report.usage);
+		visit(report.usage, { kind: "semantic", report });
 	}
 	// Paid history spend the bounded journal had no room for: live only.
-	if (overflow !== undefined && isUsage(overflow)) addUsage(total, overflow);
-	return total;
+	if (overflow !== undefined && isUsage(overflow)) visit(overflow, { kind: "overflow" });
 }

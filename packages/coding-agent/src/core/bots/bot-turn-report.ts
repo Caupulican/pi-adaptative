@@ -9,6 +9,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { createEmptyUsage } from "../../kernel/usage.ts";
 import type { AgentSession } from "../agent-session.ts";
+import type { MeteredUsageShare } from "../cost/session-usage.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import { usageReach, usageSince } from "../cost/usage-delta.ts";
 import { BOT_SESSION_USAGE_LABEL } from "../cost/usage-records.ts";
@@ -81,6 +82,24 @@ export function botTurnCharge(
 }
 
 /**
+ * The metered part of a charge costing `usage` (`BotChargeReport.meteredUsd`) when the session's metered spend reads
+ * `meteredUsd` and the charges before it cover `covered` of it, with how much they cover once it is fixed: what the
+ * reading reached past them, at most the charge's cost (a metered share recorded before the range's other records waits
+ * for the next charge, never lost). With nothing known covered (an earlier build's ledger, a watermark read back), as
+ * much of the charge as the session spent metered at all: never less than the metered spend it holds.
+ */
+export function botChargeMeteredPart(
+	usage: Usage,
+	meteredUsd: number,
+	covered: number | undefined,
+): { readonly usd: number; readonly covered: number } {
+	const cost = usage.cost.total;
+	const from = covered ?? Math.max(0, meteredUsd - cost);
+	const usd = Math.min(cost, Math.max(0, meteredUsd - from));
+	return { usd, covered: from + usd };
+}
+
+/**
  * The words of the newest assistant message that has any, written at or after `since`: the outcome of the turn that
  * began then. Read by time, so a compaction during the turn does not hide its answer.
  */
@@ -148,7 +167,8 @@ export interface BotTurnAccountingPorts {
  * is charged once, whenever it lands. The watermark only moves forward, field by field: a reading short of it in some field
  * (a history still loading, or one whose load failed) charges only the fields that passed it, and the rest once the
  * reading reaches past it, so nothing is charged twice and nothing is dropped. Each charge fixes its range first: the
- * charge (its usage, the report id its range derives, the range's end and when it was fixed) joins the ledger's pending
+ * charge (its usage, the report id its range derives, the range's end and when it was fixed, and the metered part of its
+ * cost, read by the host's `metered` share by share and kept under its own watermark, `botChargeMeteredPart`) joins the ledger's pending
  * charges and the watermark moves to the range's end, in one write, before the charge is delivered; it leaves the pending
  * charges once the root's file holds it, either at once or when the root's write lands (a root holds a charge unwritten
  * until it writes its file; a root that keeps no file holds it as it holds its own spend, for as long as it lives, so the
@@ -174,6 +194,8 @@ export class BotTurnAccounting {
 	private readonly mark: BotChargeMark;
 	private readonly ledger: BotSpendLedger;
 	private readonly ports: BotTurnAccountingPorts;
+	/** How the host reads the metered part of the session's spend, fixed into each charge (`BotChargeReport.meteredUsd`). */
+	private readonly metered: () => MeteredUsageShare;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
 	private startedAt: number | undefined;
 	/** The session file instance whose watermark is being read back from the root. */
@@ -205,8 +227,10 @@ export class BotTurnAccounting {
 		transcript: Pick<SessionManager, "getHeader" | "getEntries" | "getSessionId" | "appendCustomEntry">,
 		ledger: BotSpendLedger,
 		ports: BotTurnAccountingPorts,
+		metered: () => MeteredUsageShare,
 	) {
 		this.agentId = agentId;
+		this.metered = metered;
 		this.session = session;
 		this.transcript = transcript;
 		this.mark = new BotChargeMark(transcript);
@@ -253,9 +277,10 @@ export class BotTurnAccounting {
 	}
 
 	/**
-	 * Delivers the pending charges again, then charges what the session spent past the watermark: its range is fixed in
-	 * the ledger first, then delivered, unless an earlier range failed to be. A ledger that is not read or cannot be written
-	 * charges nothing now; the range is charged by a later charge.
+	 * Delivers the pending charges again, then charges what the session spent past the watermark: its range, and the part
+	 * of its cost that is metered (`botChargeMeteredPart`), are fixed in the ledger first, then delivered, unless an earlier
+	 * range failed to be. A ledger that is not read or cannot be written charges nothing now; the range is charged by a later
+	 * charge.
 	 */
 	charge(): void {
 		if (this.closed || !this.ledger.readable()) return;
@@ -263,21 +288,26 @@ export class BotTurnAccounting {
 		const delivered = this.deliverPending(keepsFile);
 		const state = this.watermark();
 		if (!state) return;
-		const { instance, through, pending } = state;
-		const charge = botTurnCharge(
+		const { instance, through, pending, meteredThrough } = state;
+		const reading = this.session.getDurableCumulativeUsage(this.metered());
+		const range = botTurnCharge(
 			this.agentId,
 			this.session,
 			instance,
 			through,
-			usageReach(through, this.session.getDurableCumulativeUsage().usage),
+			usageReach(through, reading.usage),
 			new Date().toISOString(),
 		);
-		if (!charge) return;
+		if (!range) return;
+		const metered = botChargeMeteredPart(range.usage, reading.meteredUsd ?? 0, meteredThrough);
+		const charge: BotCharge = { usage: range.usage, report: { ...range.report, meteredUsd: metered.usd } };
 		pending.push(charge);
 		state.through = charge.report.through;
+		state.meteredThrough = metered.covered;
 		if (!this.ledger.write()) {
 			pending.pop();
 			state.through = through;
+			state.meteredThrough = meteredThrough;
 			return;
 		}
 		this.fixedFor.set(charge.report.reportId, this.ports.rootSessionId());

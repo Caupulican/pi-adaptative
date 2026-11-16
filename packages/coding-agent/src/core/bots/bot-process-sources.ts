@@ -11,8 +11,11 @@
  *   Metered spend is held per request to `workerDelegation.maxUsd` and to the away bound of one run
  *   (`routines.away.maxUsdPerRun`, bound "away"), and a metered turn is refused (`away_spend_exhausted`) while the day's
  *   away bound (`routines.away.maxUsdPerDay`), which the daemon's routines and channels share, has no room for one more
- *   run; the refusal ends when the oldest charge leaves the 24-hour window. What a bot spent is charged once per report
- *   id to the daemon's ledger (`bot-away-charges.ts`), its metered part counted on that bound, not to a session's cost view.
+ *   run; the refusal ends when the oldest charge leaves the 24-hour window. A metered worker run of a bot, whatever the
+ *   bot's own model, starts its metered requests only with that room (`meteredRunFits`), else they are refused as the
+ *   day bound's. What a bot spent is charged once per report id to the daemon's ledger (`bot-away-charges.ts`), its
+ *   metered part (each share by its own model, `BotChargeReport.meteredUsd`) counted on that bound, not to a session's
+ *   cost view.
  * - System One: on as a session started with no choice resolves it (off in settings, or with no key never configured, is
  *   off), resolved again at each `refresh`; the provider and transport are the settings' own.
  * - Settings: the owner's global settings over the bot's directory, never a project's (the project is untrusted, as for
@@ -49,6 +52,16 @@ import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import type { BotSender, BotSessionHostPorts } from "./bot-session-host-ports.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 
+/**
+ * The run a check of the away bound is for, set aside from the bots' runs it counts: a turn of `agentId` (the run its
+ * turns serve, unless one of its metered workers serves the same window, so a worker's reservation is never dropped), or,
+ * with `runId`, that metered run of it (`BotMeteredRuns`).
+ */
+export interface BotAwayRunAside {
+	readonly agentId: string;
+	readonly runId?: string;
+}
+
 export interface BotProcessSourcesInput {
 	readonly agentDir: string;
 	readonly store: PersistentBotTeamStore;
@@ -62,9 +75,9 @@ export interface BotProcessSourcesInput {
 	report(message: string): void;
 	/**
 	 * What else is charged to the away bound now besides the routines' runs: the channels' turns, the bots' recorded
-	 * charges, and the turns of the bots working now other than `agentId` (each at the bound of one run).
+	 * charges, and the metered runs of the bots working now (each at the bound of one run), but the one `aside` names.
 	 */
-	otherAwayCharges(nowMs: number, agentId: string): readonly RoutineAwayCharge[];
+	otherAwayCharges(nowMs: number, aside: BotAwayRunAside): readonly RoutineAwayCharge[];
 	/** Whether the host leaves the bots working in `cwd` to another (`BotSessionHostPorts.leavesTo`). */
 	leavesTo(cwd: string): boolean;
 }
@@ -113,23 +126,28 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 	const botSettings = new Set<SettingsManager>();
 	const senders = new Map<string, BotSender>();
 
-	/** A metered turn of `record` refused while the day's away bound has no room for one more run, until the oldest charge leaves it. */
-	const awayRoomRefusal = (record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined => {
-		if (!isMeteredSpend(model, modelRegistry)) return undefined;
+	/** The day's away bound now, with the bots' runs working counted but the one `aside` names (the run asking for room). */
+	const awayRoom = (aside: BotAwayRunAside) => {
 		const away = settings.getRoutineAwaySettings();
 		const nowMs = awayClock.now();
-		const room = routineAwaySpendRoom(
+		return routineAwaySpendRoom(
 			store.listRoutineOccurrences(),
 			{
 				maxUsdPerRun: away.maxUsdPerRun,
 				maxUsdPerDay: away.maxUsdPerDay,
-				otherCharges: input.otherAwayCharges(nowMs, record.agentId),
+				otherCharges: input.otherAwayCharges(nowMs, aside),
 				// The routines' runs away are charged as every host of the bound charges them: metered runs and reserved ones.
 				spendsMetered: (definition) => awayRunMetered(definition.executionSnapshot?.savedIntent, modelRegistry),
 				reservedMetered: awayMeteredRunReserved(agentDir),
 			},
 			nowMs,
 		);
+	};
+
+	/** A metered turn of `record` refused while the day's away bound has no room for one more run, until the oldest charge leaves it. */
+	const awayRoomRefusal = (record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined => {
+		if (!isMeteredSpend(model, modelRegistry)) return undefined;
+		const room = awayRoom({ agentId: record.agentId });
 		if (room.fits(0)) return undefined;
 		return {
 			cause: "away_spend_exhausted",
@@ -165,7 +183,14 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 					sessionId: report.sessionId,
 					instance: report.instance,
 					through: structuredClone(report.through),
-					micros: isMeteredSpend(model, modelRegistry) ? awaySpendMicros(usage.cost.total) : 0,
+					// The charge's metered part as the bot's session read it, each share by its own model; a charge an earlier
+					// build fixed names none and counts as that build counted it, by the bot's model.
+					micros:
+						report.meteredUsd !== undefined
+							? awaySpendMicros(report.meteredUsd)
+							: isMeteredSpend(model, modelRegistry)
+								? awaySpendMicros(usage.cost.total)
+								: 0,
 					at: awayClock.now(),
 				});
 				if (setAside)
@@ -209,6 +234,8 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 		timers: () => timers,
 		warn: (message) => input.report(message),
 		modelRefusal: (record, model) => botModelRefusal(facts, record, model) ?? awayRoomRefusal(record, model),
+		// A bot's metered worker run starts only with room for one more run on the day's away bound, as its metered turn does.
+		meteredRunFits: (agentId, runId) => awayRoom({ agentId, runId }).fits(0),
 		spendCeilings: () => {
 			const ceilings: BotSpendCeiling[] = [
 				{ usd: settings.getWorkerDelegationSettings().maxUsd, bound: "worker" },

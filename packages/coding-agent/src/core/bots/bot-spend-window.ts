@@ -113,6 +113,19 @@ export interface WindowSpend {
 	readonly meteredUsd: number;
 }
 
+/** The run the session's own turns serve before its transcript holds anything (no window places them yet). */
+const FIRST_TURNS_RUN = "first-turns";
+
+/**
+ * A bot session's runs whose spend counts as metered now, each named as the bound it shares (`runCostBound`'s run):
+ * `turns`, the one its own turns serve (present only when its model is metered), and `workers`, those its metered
+ * worker attempts not ended serve. A turn and a worker serving the same window share one run.
+ */
+export interface BotMeteredRuns {
+	readonly turns?: string;
+	readonly workers: ReadonlySet<string>;
+}
+
 /** The bot's spend windows over its session's transcript (see the module comment). */
 export class BotSpendWindows {
 	/** The windows kept, the ledger's own. */
@@ -212,6 +225,27 @@ export class BotSpendWindows {
 			maxCostUsd: Math.max(0, Math.min(...ceilings.map((ceiling) => ceiling.usd)) - window.meteredForegroundUsd),
 			includes: (candidate) => this.windowOfAttempt(candidate, snapshot) === window.id,
 		};
+	}
+
+	/** The run a metered attempt's spend is held under: the window it serves (`runCostBound`'s run), else its own id. */
+	meteredRunOf(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection | undefined): string {
+		return this.windowOfAttempt(attempt, snapshot) ?? attempt.attemptId;
+	}
+
+	/**
+	 * The session's metered runs now (`BotMeteredRuns`): with `turnsMetered` the window the transcript is in now, and the
+	 * run of each metered attempt the projection shows not ended. No window is opened.
+	 */
+	meteredRuns(turnsMetered: boolean): BotMeteredRuns {
+		const snapshot = this.ports.snapshot();
+		const workers = new Set<string>();
+		for (const attempt of Object.values(snapshot?.attempts ?? {}))
+			if (ACTIVE_ATTEMPT_STATUSES.has(attempt.status) && this.ports.attemptMetered(attempt))
+				workers.add(this.meteredRunOf(attempt, snapshot));
+		if (!turnsMetered) return { workers };
+		const leafId = this.transcript.getLeafId();
+		const turns = (leafId === null ? undefined : this.windowOfEntry(leafId, snapshot)?.windowId) ?? FIRST_TURNS_RUN;
+		return { turns, workers };
 	}
 
 	/**

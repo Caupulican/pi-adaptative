@@ -49,7 +49,11 @@ import {
 } from "./cost/daily-usage.ts";
 import type { SemanticUsageProjection } from "./cost/semantic-usage-delivery.ts";
 import { SessionAccountingHistory } from "./cost/session-accounting-history.ts";
-import { aggregateCumulativeUsageFromSessionEntries } from "./cost/session-usage.ts";
+import {
+	aggregateCumulativeUsageFromSessionEntries,
+	type MeteredUsageShare,
+	meteredCumulativeUsd,
+} from "./cost/session-usage.ts";
 import {
 	deliverSpawnedUsageReceipt,
 	type SpawnedUsageReceiptDisposition,
@@ -85,6 +89,8 @@ export type { SpawnedUsageOptions };
 export interface DurableUsageReading {
 	readonly usage: Usage;
 	readonly settled: boolean;
+	/** The part of `usage` that is metered spend, in dollars, as the reader's `metered` reads each share; absent unasked. */
+	readonly meteredUsd?: number;
 }
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -416,11 +422,15 @@ export class SessionAnalytics {
 	/**
 	 * The cumulative usage the session's ledger holds (`getCumulativeUsage` without the paid System One usage not recorded
 	 * yet): what a charge of the session's spend reads, so it covers recorded usage only. Until the historical accounting
-	 * has loaded, or when its load failed, it may read less than the session spent: `settled` says it is all of it.
+	 * has loaded, or when its load failed, it may read less than the session spent: `settled` says it is all of it. With
+	 * `metered`, the reading carries the part of it that is metered spend (`meteredCumulativeUsd`), read from the same
+	 * records.
 	 */
-	getDurableCumulativeUsage(): DurableUsageReading {
-		const usage = aggregateCumulativeUsageFromSessionEntries(this.getAccountingEntries());
-		return { usage, settled: this.accountingHistory.settled() };
+	getDurableCumulativeUsage(metered?: MeteredUsageShare): DurableUsageReading {
+		const entries = this.getAccountingEntries();
+		const usage = aggregateCumulativeUsageFromSessionEntries(entries);
+		const settled = this.accountingHistory.settled();
+		return metered ? { usage, settled, meteredUsd: meteredCumulativeUsd(entries, metered) } : { usage, settled };
 	}
 
 	/**

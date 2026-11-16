@@ -5,6 +5,14 @@ import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { ReceiptDeliveryLoop } from "./receipt-delivery-loop.ts";
 
+/**
+ * What the report id of every usage receipt of attempt `attemptId` a parent session `parentSessionId` records starts with
+ * (its receipt's id follows): the attempt a recorded worker charge is of.
+ */
+export function workerUsageReportIdPrefix(parentSessionId: string, attemptId: string): string {
+	return `worker-usage:${parentSessionId}:${attemptId}:`;
+}
+
 export interface WorkerUsageReceiptDeliveryDeps {
 	parentSessionId: string;
 	runtime: Pick<DurableTaskRuntime, "getSnapshot" | "acknowledgeUsageReceipt">;
@@ -55,7 +63,7 @@ export class WorkerUsageReceiptDelivery {
 					const reportId =
 						receipt.kind === "baseline"
 							? `worker:${this.deps.parentSessionId}:${attempt.taskId}`
-							: `worker-usage:${this.deps.parentSessionId}:${attempt.attemptId}:${receipt.receiptId}`;
+							: `${workerUsageReportIdPrefix(this.deps.parentSessionId, attempt.attemptId)}${receipt.receiptId}`;
 					const disposition = this.deps.deliver(providerUsageFromAttemptUsage(receipt.usage), {
 						parentSessionId: this.deps.parentSessionId,
 						reportId,

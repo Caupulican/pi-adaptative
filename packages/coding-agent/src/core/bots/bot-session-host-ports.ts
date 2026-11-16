@@ -61,6 +61,12 @@ export interface BotSessionHostPorts {
 	/** What kind of process hosts the bots: a root session's, or the bot daemon's (`host-state.json`). */
 	hostKind(): BotHostKind;
 	/**
+	 * Present on a host whose wider spend bound holds the bots' metered workers (the daemon's away day bound,
+	 * `routines.away.maxUsdPerDay`): whether the metered run `runId` of bot `agentId` (`BotMeteredRuns`) fits it now, its
+	 * own reservation aside. Absent: none holds them.
+	 */
+	meteredRunFits?(agentId: string, runId: string): boolean;
+	/**
 	 * Whether a root session of another process that hosts bots works in `cwd`: this host (the daemon's) leaves the bots
 	 * that work there to it, opening none for that directory and closing an idle one (`leaveIdleToRoots`). Absent: none is left.
 	 */

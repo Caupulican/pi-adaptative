@@ -60,6 +60,12 @@ export interface BotChargeReport {
 	readonly through: Usage;
 	/** When the range was fixed (ISO time): the day the charge counts on, in whichever root's file holds it. */
 	readonly recordedAt: string;
+	/**
+	 * The part of the charge's cost that is metered spend, in dollars, fixed with its range (`BotTurnAccounting`): what a
+	 * dollar bound counts of it (the daemon's away bound). Absent on a charge an earlier build fixed, or one taken back from
+	 * a root's unwritten entries: such a charge is counted as its own model's spend.
+	 */
+	readonly meteredUsd?: number;
 }
 
 export interface BotCharge {
@@ -78,6 +84,12 @@ export interface BotChargeState {
 	instance: string;
 	/** That session's cumulative usage the charges cover: the next charge starts there. */
 	through: Usage;
+	/**
+	 * How much of that session's metered spend (`DurableUsageReading.meteredUsd`) the charges cover, in dollars: the next
+	 * charge's metered part starts there. Absent until a charge of this build sets it (an earlier build's ledger, a
+	 * watermark read back): the next charge then counts as metered as much of its range as the session spent metered.
+	 */
+	meteredThrough?: number;
 	/** Charges whose range is fixed and written and whose report the root's file does not hold yet, oldest first. */
 	pending: BotCharge[];
 }
@@ -104,12 +116,16 @@ interface ReadRecord {
 	readonly problems: readonly string[];
 }
 
+/** A dollar amount as the record keeps one: a finite number, zero or more. */
+function isDollars(usd: unknown): usd is number {
+	return typeof usd === "number" && Number.isFinite(usd) && usd >= 0;
+}
+
 function parseWindow(value: unknown): SpendWindowRecord | undefined {
 	if (!isPlainRecord(value)) return undefined;
 	const { id, input, kind, foregroundUsd, meteredForegroundUsd, attemptIds, updatedAt } = value;
 	if (typeof id !== "string" || typeof input !== "string" || typeof kind !== "string") return undefined;
-	const dollars = (usd: unknown): usd is number => typeof usd === "number" && Number.isFinite(usd) && usd >= 0;
-	if (!dollars(foregroundUsd) || !dollars(meteredForegroundUsd)) return undefined;
+	if (!isDollars(foregroundUsd) || !isDollars(meteredForegroundUsd)) return undefined;
 	if (typeof updatedAt !== "number" || !Array.isArray(attemptIds)) return undefined;
 	if (!attemptIds.every((attemptId) => typeof attemptId === "string")) return undefined;
 	return { id, input, kind, foregroundUsd, meteredForegroundUsd, attemptIds: [...attemptIds], updatedAt };
@@ -117,8 +133,10 @@ function parseWindow(value: unknown): SpendWindowRecord | undefined {
 
 function parseCharge(value: unknown): BotCharge | undefined {
 	if (!isPlainRecord(value) || !isUsage(value.usage) || !isPlainRecord(value.report)) return undefined;
-	const { agentId, reportId, sessionId, instance, provider, model, from, through, recordedAt } = value.report;
+	const { agentId, reportId, sessionId, instance, provider, model, from, through, recordedAt, meteredUsd } =
+		value.report;
 	if (
+		(meteredUsd !== undefined && !isDollars(meteredUsd)) ||
 		typeof agentId !== "string" ||
 		typeof reportId !== "string" ||
 		typeof sessionId !== "string" ||
@@ -132,17 +150,29 @@ function parseCharge(value: unknown): BotCharge | undefined {
 		return undefined;
 	return {
 		usage: value.usage,
-		report: { agentId, reportId, sessionId, instance, provider, model, from, through, recordedAt },
+		report: {
+			agentId,
+			reportId,
+			sessionId,
+			instance,
+			provider,
+			model,
+			from,
+			through,
+			recordedAt,
+			...(meteredUsd !== undefined ? { meteredUsd } : {}),
+		},
 	};
 }
 
 function parseChargeState(value: unknown): BotChargeState | undefined {
 	if (!isPlainRecord(value) || !Array.isArray(value.pending)) return undefined;
-	const { sessionId, instance, through } = value;
+	const { sessionId, instance, through, meteredThrough } = value;
 	if (typeof sessionId !== "string" || typeof instance !== "string" || !isUsage(through)) return undefined;
+	if (meteredThrough !== undefined && !isDollars(meteredThrough)) return undefined;
 	const pending = value.pending.map(parseCharge);
 	if (!pending.every((charge): charge is BotCharge => charge !== undefined)) return undefined;
-	return { sessionId, instance, through, pending };
+	return { sessionId, instance, through, pending, ...(meteredThrough !== undefined ? { meteredThrough } : {}) };
 }
 
 /** What of the record `text` reads (see `ReadRecord`). */

@@ -11,12 +11,17 @@
  * they do not.
  */
 
-import type { Api, Model } from "@caupulican/pi-ai";
+import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import type { AgentSession } from "../agent-session.ts";
+import { receiptCountsAgainstDollars } from "../cost/request-spend-budget.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
+import type { MeteredUsageShare } from "../cost/session-usage.ts";
+import { AWAY_DAY_BUDGET_REFUSAL_REASONS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
+import { workerUsageReportIdPrefix } from "../delegation/worker-usage-receipt-delivery.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { costCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
@@ -25,7 +30,7 @@ import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import type { BotSessionTurnPorts, BotSpendCeiling } from "./bot-session-turns.ts";
 import { BotSpendLedger } from "./bot-spend-ledger.ts";
-import { BotSpendWindows, type WindowSpend } from "./bot-spend-window.ts";
+import { type BotMeteredRuns, BotSpendWindows, type WindowSpend } from "./bot-spend-window.ts";
 import { BotTurnAccounting, type BotTurnAccountingPorts } from "./bot-turn-report.ts";
 
 /**
@@ -68,6 +73,23 @@ export interface BotSessionSpendPorts {
 	now(): number;
 	/** An owner-facing warning (a spend record that could not be read or written). */
 	warn(message: string): void;
+	/**
+	 * Whether the metered worker run `runId` of the bot fits the host's wider spend bound now, its own reservation aside
+	 * (`BotSessionHostPorts.meteredRunFits`: the daemon's away day bound); true where no such bound holds the bot's workers.
+	 */
+	meteredRunFits(runId: string): boolean;
+}
+
+/** The attempt a worker's usage report id names (`workerUsageReportIdPrefix`), among `attempts` keyed by that prefix. */
+function attemptOfReport(
+	attempts: ReadonlyMap<string, AttemptRuntimeState>,
+	reportId: string,
+): AttemptRuntimeState | undefined {
+	for (let at = reportId.indexOf(":"); at >= 0; at = reportId.indexOf(":", at + 1)) {
+		const attempt = attempts.get(reportId.slice(0, at + 1));
+		if (attempt) return attempt;
+	}
+	return undefined;
 }
 
 /** One loaded bot session's spend (see the module comment). */
@@ -122,10 +144,63 @@ export class BotSessionSpend {
 	/**
 	 * A worker's run shares the bound of the request it serves with the request's other workers: the lowest ceiling less
 	 * what the bot's turns spent in that window on metered models (`BotSpendWindows.runCostBound`). With no ceiling set,
-	 * none; a subscription worker is held by its usage windows.
+	 * none; a subscription worker is held by its usage windows. A metered attempt whose run the host's wider bound has no
+	 * room for (`meteredRunFits`: the daemon's away day bound) is refused its metered requests under a zero bound of that
+	 * bound's own, which names it and leaves the run's bound as it was for an attempt that starts once room returns; the
+	 * bot's subscription work is not held by it.
 	 */
-	readonly workerRunCostBound: NonNullable<ParentExecutionPolicy["runCostBound"]> = (attempt, snapshot) =>
-		this.windows.runCostBound(attempt, snapshot, this.ceilings());
+	readonly workerRunCostBound: NonNullable<ParentExecutionPolicy["runCostBound"]> = (attempt, snapshot, metered) => {
+		const bound = this.windows.runCostBound(attempt, snapshot, this.ceilings());
+		const runId = bound?.runId ?? this.windows.meteredRunOf(attempt, snapshot);
+		if (!metered || this.ports.meteredRunFits(runId)) return bound;
+		return {
+			runId: `away-day-bound:${runId}`,
+			maxCostUsd: 0,
+			includes: bound?.includes ?? ((candidate) => candidate.attemptId === attempt.attemptId),
+			refusalReasons: AWAY_DAY_BUDGET_REFUSAL_REASONS,
+		};
+	};
+
+	/**
+	 * The bot's runs whose spend counts as metered now, each named as the bound it shares (`BotSpendWindows.meteredRuns`):
+	 * those of its metered workers not ended, and the one its own turns serve when its model is metered.
+	 */
+	meteredRuns(): BotMeteredRuns {
+		return this.windows.meteredRuns(isMeteredSpend(this.definition.model, this.registry));
+	}
+
+	/**
+	 * How much of each share of the session's recorded spend is metered (`isMeteredSpend`, the rule the windows and the
+	 * ceilings read), fixed into each charge: a response or a summary by the model each of its parts names (one that names
+	 * none, the bot's own); a worker's usage receipt by the model its attempt runs on (`attemptModel`), else the one it
+	 * names; a spawned or System One report by the models it names; what names none (a baseline, a receipt with no model,
+	 * the journal's overflow) as metered spend, which is never laxer. Read once per charge, over the projection as it is then.
+	 */
+	private meteredShare(): MeteredUsageShare {
+		const sessionId = this.transcript.getSessionId();
+		const attempts = new Map<string, AttemptRuntimeState>();
+		for (const attempt of Object.values(this.ports.snapshot()?.attempts ?? {}))
+			attempts.set(workerUsageReportIdPrefix(sessionId, attempt.attemptId), attempt);
+		const own = isMeteredSpend(this.definition.model, this.registry);
+		const named = (spend: { readonly provider?: string; readonly model?: string }, otherwise: boolean): boolean =>
+			spend.provider !== undefined && spend.model !== undefined
+				? receiptCountsAgainstDollars({ provider: spend.provider, model: spend.model }, this.registry)
+				: otherwise;
+		const parts = (
+			components: readonly { readonly provider?: string; readonly model?: string; readonly usage: Usage }[],
+			otherwise: boolean,
+		): number => components.reduce((usd, part) => usd + (named(part, otherwise) ? part.usage.cost.total : 0), 0);
+		return (usage, share) => {
+			if (share.kind === "direct") return parts(getSessionEntryUsageComponents(share.entry), own);
+			if (share.kind === "semantic") return named(share.report, true) ? usage.cost.total : 0;
+			if (share.kind !== "spawned") return usage.cost.total;
+			const { report } = share;
+			if (report.usageComponents) return parts(report.usageComponents, true);
+			const attempt = report.reportId === undefined ? undefined : attemptOfReport(attempts, report.reportId);
+			const metered = attempt ? isMeteredSpend(this.attemptModel(attempt), this.registry) : named(report, true);
+			return metered ? usage.cost.total : 0;
+		};
+	}
 
 	/** The bounds the bot's turns are held to and the spend they count toward them: the request's, its workers' included. */
 	turnBound(): Pick<BotSessionTurnPorts, "openingExceeded" | "exceeded"> {
@@ -175,13 +250,15 @@ export class BotSessionSpend {
 		return excess;
 	}
 
-	/** The accounting of the built session's charges and turns. */
 	/** The metered spend of the window a transcript entry opened (`BotSpendWindows.meteredSpendOfEntry`). */
 	meteredSpendOfEntry(entryId: string): number {
 		return this.windows.meteredSpendOfEntry(entryId);
 	}
 
+	/** The accounting of the built session's charges and turns. */
 	accounting(session: AgentSession, ports: BotTurnAccountingPorts): BotTurnAccounting {
-		return new BotTurnAccounting(this.agentId, session, this.transcript, this.ledger, ports);
+		return new BotTurnAccounting(this.agentId, session, this.transcript, this.ledger, ports, () =>
+			this.meteredShare(),
+		);
 	}
 }

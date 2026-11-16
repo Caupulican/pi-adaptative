@@ -4686,8 +4686,8 @@ export class AgentSession {
 		return this._analytics.getCumulativeUsage();
 	}
 
-	getDurableCumulativeUsage(): DurableUsageReading {
-		return this._analytics.getDurableCumulativeUsage();
+	getDurableCumulativeUsage(...read: Parameters<SessionAnalytics["getDurableCumulativeUsage"]>): DurableUsageReading {
+		return this._analytics.getDurableCumulativeUsage(...read);
 	}
 
 	addSpawnedUsage(usage: Usage, opts?: SpawnedUsageOptions): string | undefined {

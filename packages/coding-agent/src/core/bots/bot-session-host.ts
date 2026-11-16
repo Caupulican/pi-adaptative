@@ -35,7 +35,6 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type {
@@ -94,6 +93,7 @@ import {
 import { type BotSessionEntry, BotSessionLoader } from "./bot-session-load.ts";
 import { BotOwedWork, owesWatchWork } from "./bot-session-owed-work.ts";
 import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
+import type { BotMeteredRuns } from "./bot-spend-window.ts";
 import { endUnrecordedStopWork, writeOwnerStop } from "./bot-stop.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -311,6 +311,7 @@ export class BotSessionHost {
 				idleTimers: () => this.idleTimers(),
 				spendCeilings: () => ports.spendCeilings(),
 				hostKind: () => ports.hostKind(),
+				meteredRunFits: (agentId, runId) => ports.meteredRunFits?.(agentId, runId) !== false,
 				warn: (message) => ports.warn(message),
 				admission: this.admission,
 				owed: this.owed,
@@ -760,7 +761,8 @@ export class BotSessionHost {
 
 	/**
 	 * Whether the session's work keeps it loaded past its idle bound: a turn or input, a worker running, or a worker retry
-	 * due within the bound. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it. The one
+	 * due within the bound. A run holds it from its submission on, whatever phase the session's work state ranks above it
+	 * (a question awaiting the owner, a blocked goal), so a run admitted on the daemon's away bound is counted from there. A retry due later opens it again at its time (`BotOwedWork`), so it does not hold it. The one
 	 * idleness every change of the loaded session waits on: its idle close, a record change, a refusal's retake, a release.
 	 */
 	private holdsLoaded(entry: BotSessionEntry): boolean {
@@ -769,6 +771,8 @@ export class BotSessionHost {
 		return (
 			entry.inFlight > 0 ||
 			entry.session.deliverablePendingMessageCount > 0 ||
+			entry.session.isStreaming ||
+			entry.session.isPreparingSubmission ||
 			state.busyBesideWorkers ||
 			state.hasRunningWorker ||
 			!onlyWorkerRetriesWaitBeyond(state, closesAt)
@@ -936,10 +940,10 @@ export class BotSessionHost {
 		}
 	}
 
-	/** The loaded sessions working now (a turn, input or a worker), with their models: whose spend may still grow. */
-	working(): { readonly agentId: string; readonly model: Model<Api> | undefined }[] {
+	/** The loaded sessions working now (a turn, input or a worker), with their metered runs: whose spend may still grow. */
+	working(): { readonly agentId: string; readonly runs: BotMeteredRuns }[] {
 		return [...this.entries.values()].flatMap((entry) =>
-			this.holdsLoaded(entry) ? [{ agentId: entry.agentId, model: entry.session.model }] : [],
+			this.holdsLoaded(entry) ? [{ agentId: entry.agentId, runs: entry.meteredRuns() }] : [],
 		);
 	}
 

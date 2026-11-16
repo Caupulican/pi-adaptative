@@ -34,6 +34,7 @@ import { type BotOwedWork, cancelOtherSessionsWatches } from "./bot-session-owed
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import { BotSessionSpend } from "./bot-session-spend.ts";
 import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
+import type { BotMeteredRuns } from "./bot-spend-window.ts";
 import type { BotStopPorts } from "./bot-stop.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 
@@ -70,6 +71,8 @@ export interface BotSessionEntry {
 	readonly turns: BotTurnAccounting;
 	/** The metered spend of the window a transcript entry opened (`BotSessionSpend.meteredSpendOfEntry`). */
 	readonly meteredSpendOf: (entryId: string) => number;
+	/** Its runs whose spend counts as metered now (`BotSessionSpend.meteredRuns`). */
+	readonly meteredRuns: () => BotMeteredRuns;
 	idleTimer: unknown;
 }
 
@@ -87,6 +90,8 @@ export interface BotSessionLoadPorts {
 	spendCeilings(): readonly BotSpendCeiling[];
 	/** What kind of process hosts the bots (`BotSessionHostPorts.hostKind`). */
 	hostKind(): BotHostKind;
+	/** Whether a metered worker run of the bot fits the host's wider spend bound now (`BotSessionHostPorts.meteredRunFits`). */
+	meteredRunFits(agentId: string, runId: string): boolean;
 	warn(message: string): void;
 	/** What defines the bot's session and whether its model may run now. */
 	readonly admission: BotSessionAdmission;
@@ -193,6 +198,7 @@ export class BotSessionLoader {
 				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
 				now: () => this.ports.idleTimers().now(),
 				warn: (message) => this.ports.warn(message),
+				meteredRunFits: (runId) => this.ports.meteredRunFits(agentId, runId),
 			});
 			session = await createBotAgentSession({
 				agentId,
@@ -258,6 +264,7 @@ export class BotSessionLoader {
 				turnSince: undefined,
 				recheckWhenIdle: false,
 				meteredSpendOf: (entryId) => spend.meteredSpendOfEntry(entryId),
+				meteredRuns: () => spend.meteredRuns(),
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
 					chargesHeld: (sessionId, instance, since) => entry.sender.chargesHeld(sessionId, instance, since),

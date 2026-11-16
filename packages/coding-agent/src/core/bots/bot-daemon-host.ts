@@ -8,21 +8,21 @@
  * root's messages reach it through its inbox. When a root leaves, the bots it left are asked again. With
  * `routines.away.enabled` off nothing is hosted away: every bot is left to a root.
  *
- * The bots' turns charge the away spend bound beside the daemon's routines and channels (`awayCharges`): their recorded
- * metered spend, and each metered turn working now at the bound of one run until its spend is recorded.
+ * The bots charge the away spend bound beside the daemon's routines and channels (`awayCharges`): their recorded
+ * metered spend (each share by its own model, so a subscription bot's metered workers count), and each metered run
+ * working now (a metered bot's turns, any bot's metered workers) at the bound of one run until its spend is recorded.
  */
 
 import type { AuthStorage } from "../auth-storage.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
-import { botProcessSources } from "./bot-process-sources.ts";
+import { type BotAwayRunAside, botProcessSources } from "./bot-process-sources.ts";
 import { BotRootHostReader } from "./bot-root-hosts.ts";
 import { rootlessBotSessionHost } from "./bot-session-registry.ts";
 
@@ -52,7 +52,7 @@ export interface BotDaemonHost {
 
 /** Starts hosting the bots owed work (see the module comment). */
 export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<BotDaemonHost> {
-	const { agentDir, settings, modelRegistry } = input;
+	const { agentDir, settings } = input;
 	let places = new Set<string>();
 	let placesTold: string | undefined;
 	let awayOn = settings.getRoutineAwaySettings().enabled;
@@ -70,21 +70,29 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 			return places;
 		}
 	};
-	/** The bots working now other than `except` on a metered model, each at the bound of one run. */
-	const working = (except: string | undefined): RoutineAwayCharge[] => {
+	/**
+	 * The metered runs of the bots working now (their metered turns and metered workers, a turn and a worker serving one
+	 * window as one run), each at the bound of one run, but the run `aside` names (`BotAwayRunAside`).
+	 */
+	const working = (aside: BotAwayRunAside | undefined): RoutineAwayCharge[] => {
 		const perRun = awaySpendMicros(settings.getRoutineAwaySettings().maxUsdPerRun);
-		return host
-			.working()
-			.filter(({ agentId, model }) => agentId !== except && isMeteredSpend(model, modelRegistry))
-			.map(() => ({ micros: perRun }));
+		return host.working().flatMap(({ agentId, runs }) => {
+			const held = new Set(runs.workers);
+			if (runs.turns !== undefined) held.add(runs.turns);
+			if (agentId === aside?.agentId) {
+				if (aside.runId !== undefined) held.delete(aside.runId);
+				else if (runs.turns !== undefined && !runs.workers.has(runs.turns)) held.delete(runs.turns);
+			}
+			return [...held].map(() => ({ micros: perRun }));
+		});
 	};
-	const charges = (nowMs: number, except: string | undefined): RoutineAwayCharge[] => [
+	const charges = (nowMs: number, aside: BotAwayRunAside | undefined): RoutineAwayCharge[] => [
 		...readAwayCharges(agentDir, settings.getRoutineAwaySettings(), nowMs, input.report),
-		...working(except),
+		...working(aside),
 	];
 	const sources = botProcessSources({
 		...input,
-		otherAwayCharges: (nowMs, agentId) => charges(nowMs, agentId),
+		otherAwayCharges: (nowMs, aside) => charges(nowMs, aside),
 		leavesTo: (cwd) => !awayOn || places.has(realPathIdentity(cwd)),
 	});
 	await sources.refresh(true);
