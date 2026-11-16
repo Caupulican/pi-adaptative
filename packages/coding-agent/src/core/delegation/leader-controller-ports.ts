@@ -66,6 +66,11 @@ export interface LeaderControllerDeps {
 	isMeteredAttempt(attempt: AttemptRuntimeState): boolean;
 	/** Whether a message filed under this delegation still waits in some bot's mailbox (unfinished work of the goal). */
 	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean;
+	/**
+	 * Whether the bot answers in a session of its own (`BotSessionHost.runsAsSession`, a machine joined over the link
+	 * excepted): the goal waits for such a bot's reply to its workers' mail only while it does.
+	 */
+	botAnswersInSession(alias: string): boolean;
 	/** Starts the messages the goal filed while it was paused, now that it runs again. */
 	reconcileDelegatedMessages(delegationObjectiveId: string): void;
 	/** The orchestration clock: the one attempts are stamped on. */

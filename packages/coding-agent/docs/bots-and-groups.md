@@ -563,17 +563,28 @@ that goal's input, and an ask to a bot that runs only as a worker or to a machin
 A worker of the orchestrator's session that holds `bot_message` (a leader, a bot a leader made, a bot whose profile needs a
 worker's run) reaches a bot that answers in a session of its own in that session, never through a worker for it. `list`
 shows such a bot available with its session's state (`idle`, `queued` or `running`), and `send` gives the words to its
-session as mail from that worker (`agent-mail` from `worker:<session id>:<worker>`, first in its chain, a third party's
-when a third party's words reached the worker's run) and returns at once with the mail's id; `expectReply` does not
+session as mail from that worker (`agent-mail` from `worker:<session id>:<worker>`, a third party's when a third party's
+words reached the worker's run) and returns at once with the mail's id; `expectReply` does not
 apply, since the answer always comes back. A send in a group's thread carries the group's room after the words, as a
 group's message does, and is recorded in the group's log. A send replayed after a restart is the same mail and runs once.
 Refusals reach the worker in English.
 
 When the bot's turn ends, its answer is written to the same reply inbox as an ask's, and the orchestrator's session hands
-it to the worker's mailbox once, as the bot's words and not the orchestrator's (a leader's under the goal it runs); when
-that worker has ended, the reply goes to the orchestrator's conversation instead, saying so. A leader's goal does not wait
-for such an answer: a goal whose leader ended its turn with nothing else open settles, and an answer that arrives after
-it starts a turn of the leader's own outside the goal. A bot that runs only as a worker is reached as before. A bot's
+it to the worker's mailbox once, as the bot's words and not the orchestrator's; when that worker has ended, the reply goes
+to the orchestrator's conversation instead, saying so. A bot whose host does not take the mail (it refuses it, sets its
+record aside as unreadable, or your stop covers it) answers that no answer comes and why, and a mail whose turn ended
+where no answer was sent (its host stopped first) is answered from the bot's conversation by the next host to open it, so
+the worker always hears back. A bot that runs only as a worker is reached as before.
+
+A mail a worker sends in a leader's goal (the leader's, or a bot's working under it) holds the goal open until the reply
+reaches that worker: the goal records the mail in its store (in this session's orchestration store, so a restart keeps
+it), the reply starts the worker's next turn under the goal, and the goal settles only after that. The goal stops waiting
+for a mail that was not sent, whose bot is retired, removed or no longer answers in a session of its own, or whose reply
+expired unread; its deadline and budget bound the rest. The metered spend of the bot's turn that answered (its workers'
+included, as of the turn's end) counts against the goal's budget once the reply is handed on, as a bot's worker turn under
+the goal counted. A worker's mail is first in its chain unless a reply started the worker's turn, in which case it is one
+hop past that reply, so a worker and a bot answering each other stop at the bound of 8 mails as bots mailing each other do
+(a goal mails bots at most 128 times). A bot's
 chat shows such a mail as `The orchestrator's worker <worker> wrote` (`O worker <worker> do orquestrador escreveu`).
 
 ## History and lifecycle
@@ -590,8 +601,9 @@ existing direct or group runtime for later messages; different groups remain sep
 a session of its own takes every message in that one session, a group's message included: its group turns sit beside its
 direct chat, each labelled with the group's room, and a group's message carries the room as a worker's start does: the
 end of the group's blackboard and the group's latest messages in its current incarnation (the message itself left out),
-read when the message is sent. The blackboard lies outside the bot's workspace, so it reads it there and a line of its
-answer is added to it when its turn ends.
+read when the message is sent. The blackboard lies outside the bot's workspace, so it reads it there, and when its turn
+ends a line of its answer (or, for a turn that failed without one, why) is added to it, as a member running as a worker
+adds one.
 
 For a member that runs as a worker, group replies and automatic memory updates belong only to their originating group, and
 group prompts exclude direct-chat summaries, the shared bot blackboard and other groups' history. Older unscoped

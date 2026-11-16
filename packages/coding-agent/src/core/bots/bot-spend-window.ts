@@ -160,6 +160,17 @@ export class BotSpendWindows {
 	}
 
 	/**
+	 * The metered spend of the window the transcript entry `entryId` belongs to (the outside input that opened it, as a
+	 * mail): the session's own metered spend there and its metered workers'. Zero when it belongs to no window kept.
+	 */
+	meteredSpendOfEntry(entryId: string): number {
+		const snapshot = this.ports.snapshot();
+		const windowId = this.windowOfEntry(entryId, snapshot)?.windowId;
+		if (windowId === undefined) return 0;
+		return (this.windows.get(windowId)?.meteredForegroundUsd ?? 0) + this.workerSpend(windowId, snapshot).meteredUsd;
+	}
+
+	/**
 	 * The bounds of one run of the window `attempt` serves, which the window's workers share as one run (`runId`, whose
 	 * spend the run budgets count from the workers' own usage): the lowest of `ceilings` on all spend less the session's
 	 * own spend in that window (`maxCostUsd`), and the lowest of the metered-only ones less the session's own metered spend

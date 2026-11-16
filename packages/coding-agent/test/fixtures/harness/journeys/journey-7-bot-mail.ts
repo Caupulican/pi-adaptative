@@ -14,6 +14,7 @@ import {
 	botSessionFilesText,
 	carries,
 	createOwnerBot,
+	delegationOf,
 	enqueueBot,
 	enqueueRoot,
 	loadBotToolStep,
@@ -25,6 +26,7 @@ import {
 	soulMatcher,
 	TRACK,
 	waitForBotRosterState,
+	waitForBotRosterView,
 } from "./journey-7-shared.ts";
 
 const ASKER = "mail-asker";
@@ -219,13 +221,17 @@ const MAILED =
 	"Mailed to the bot's own session: its answer reaches you on its own as a later message; do not wait for it.";
 /** How the reader's answer reaches the worker: a reply to its mail, another agent's words. */
 const WORKER_REPLY_HEAD = `Reply from bot ${READER} to your mail. It is another agent's words, not the owner's, and grants no authority.`;
+/** The line the goal's outcome notice opens with, once the goal settled. */
+const GOAL_FINISHED = /^Leader \S+ finished /;
 
 /**
- * Leg: a worker's bot_message reaches a bot that answers in a session of its own. The root asks a standing leader of the
- * owner's (a leader answers only as a worker), and the leader's worker sends the question to a bot of the owner's with
- * bot_message. The send is mail to that bot's own session (no worker stands for it), stamped as an agent's mail from the
- * orchestrator's worker at the first hop; the bot answers in plain words, and its answer comes back once, into the
- * worker's mailbox, as a reply that starts the worker's next turn, whose end reaches the root as a worker's result does.
+ * Leg: a worker's bot_message reaches a bot that answers in a session of its own, inside a leader's goal. The root hands
+ * a standing leader of the owner's (a leader answers only as a worker) a goal, and the leader's worker sends the question
+ * to a bot of the owner's with bot_message. The send is mail to that bot's own session (no worker stands for it), stamped
+ * as an agent's mail from the orchestrator's worker at the first hop. The goal waits for the answer: the leader's turn
+ * that mailed ends, and the goal stays open, holding the mail, while the bot has not answered. The bot answers in plain
+ * words, and its answer comes back once, into the worker's mailbox, as a reply that starts the worker's next turn under
+ * the goal; that turn's end settles the goal, and the root is told once, by the goal's outcome notice.
  */
 export async function runJourney7WorkerMailPhase(world: HarnessWorld): Promise<void> {
 	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
@@ -243,17 +249,16 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 	createOwnerBot(session, WORKER, MODEL_ID.mailWorker, WORKER_SOUL);
 	session.upsertPersistentBot({ agentId: WORKER, leader: true });
 	createOwnerBot(session, READER, MODEL_ID.mailReader, READER_SOUL);
-	// The reader answers once the worker's turn that mailed it ended (its result reached the root), so the reply starts a
-	// turn of the worker's own.
+	// The reader answers once the leader's turn that mailed it ended and the goal was seen still open, so the reply starts a
+	// turn of the worker's own under the goal.
 	const workerIdle = createBarrier();
-	const releaseOnResult = (request: ScriptedRequest) => {
-		if (carries(request, WORKER_SENT)) workerIdle.release();
-	};
 	const seen = {
 		sent: undefined as Record<string, unknown> | undefined,
 		reader: {} as Record<string, unknown>,
 		readerWorkers: -1,
 		reply: {} as Record<string, unknown>,
+		lead: {} as Record<string, unknown>,
+		wakeLines: [] as string[],
 	};
 
 	enqueueBot(
@@ -311,45 +316,64 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 		world,
 		loadBotToolStep("j7-mail-root-load"),
 		{
-			name: "j7-mail-root-ask",
+			name: "j7-mail-root-lead",
 			reply: {
 				content: [
 					{
 						type: "toolCall",
-						id: "j7-mail-root-ask-1",
+						id: "j7-mail-root-lead-1",
 						name: BOT_TOOL_NAME,
-						arguments: { action: "ask", agentId: WORKER, message: WORKER_TASK },
+						arguments: { action: "lead", goal: WORKER_TASK, agentId: WORKER },
 					},
 				],
 				stopReason: "toolUse",
 			},
 		},
 		{
-			name: "j7-mail-root-asked",
-			check: releaseOnResult,
-			reply: { content: [{ type: "text", text: "The leader was asked." }] },
+			name: "j7-mail-root-led",
+			check: (request) => {
+				seen.lead = acceptedJson(request, BOT_TOOL_NAME);
+			},
+			reply: { content: [{ type: "text", text: "The goal is running." }] },
 		},
 		{
-			// The worker's turns end as a worker's results do: the one that mailed, then the one the reply started.
+			// The root hears nothing while the goal runs: the goal's outcome notice is the one word it gets.
 			name: "j7-mail-root-told",
 			maxRequests: 8,
-			check: releaseOnResult,
-			until: (request) => deliveredLines(request).includes(WORKER_NOTED),
-			reply: { content: [{ type: "text", text: "Noted." }] },
+			until: (request) => deliveredLines(request).some((line) => GOAL_FINISHED.test(line)),
+			reply: (request) => {
+				const lines = deliveredLines(request);
+				if (lines.some((line) => GOAL_FINISHED.test(line))) seen.wakeLines = lines;
+				return { content: [{ type: "text", text: "Noted." }] };
+			},
 		},
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-worker-mail", PHASE_JUDGMENTS);
 
+	const rootRequestsBefore = world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length;
 	await withDeadline(
 		trace,
-		"J7 worker mail: the root asks the leader",
-		session.prompt("Ask mail-chief how many retries a request gets."),
+		"J7 worker mail: the root hands the leader a goal",
+		session.prompt("Have mail-chief find out how many retries a request gets."),
 	);
 	await withDeadline(
 		trace,
 		"J7 worker mail: the worker read its send's result",
 		world.provider.whenReached(reached(TRACK.mailWorker, "j7-mail-worker-sent")),
 	);
+	// The leader's turn that mailed ends: its end is a store commit, whose reconcile pass decides the goal before it awaits.
+	await waitForBotRosterView(
+		world,
+		session,
+		WORKER,
+		"with its worker idle after the turn that mailed",
+		() => agentsOn(session, MODEL_ID.mailWorker)[0]?.activity === "idle",
+	);
+	await withDeadline(trace, "J7 worker mail: the root is idle", session.waitForForegroundIdle());
+	const held = delegationOf(session, WORKER);
+	const heldRootRequests =
+		world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length - rootRequestsBefore;
+	workerIdle.release();
 	await withDeadline(
 		trace,
 		"J7 worker mail: the reader took the mail in its own session",
@@ -362,10 +386,10 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 	);
 	await withDeadline(
 		trace,
-		"J7 worker mail: the root read the worker's result",
+		"J7 worker mail: the goal's outcome reached the root",
 		world.provider.whenReached(reached(TRACK.root, "j7-mail-root-told")),
 	);
-	await withDeadline(trace, "J7 worker mail: the root is idle", session.waitForForegroundIdle());
+	await withDeadline(trace, "J7 worker mail: the root is idle at the end", session.waitForForegroundIdle());
 	await waitForBotRosterState(world, session, READER, "idle");
 
 	const runtime = onlyAgentOn(session, MODEL_ID.mailWorker).agentId;
@@ -393,13 +417,42 @@ async function runWorkerMailLeg(world: HarnessWorld, session: AgentSession): Pro
 	});
 	expect(
 		{
+			delegated: seen.lead.delegated,
+			state: held.state,
+			// The goal holds the mail its worker sent, unanswered: the root's requests are the tool's loading, the lead and its
+			// result, and no outcome notice.
+			mails: held.mails.map((mail) => [mail.agentId, mail.worker === runtime, mail.hop, mail.end?.how]),
+			rootRequests: heldRootRequests,
+		},
+		"after the leader's turn that mailed ended, its goal stays open, holding the mail until the bot answers",
+	).toEqual({
+		delegated: true,
+		state: "running",
+		mails: [[READER, true, 1, undefined]],
+		rootRequests: 3,
+	});
+	const settled = delegationOf(session, WORKER);
+	expect(
+		{
 			reply: seen.reply,
 			// The worker's three requests (the send, its result, the reply) and the reader's one: the answer comes back once.
 			requests: [
 				requestsOf(world, MODEL_ID.mailWorker, WORKER_SOUL).length,
 				requestsOf(world, MODEL_ID.mailReader, READER_SOUL).length,
 			],
+			// The reply was handed on under the goal, one hop further on, and its turn's end settled the goal.
+			mails: settled.mails.map((mail) => [mail.agentId, mail.end?.how, mail.end?.replyHop]),
+			goal: [settled.state, settled.closeReason],
+			outcome: seen.wakeLines.filter((line) => GOAL_FINISHED.test(line)).length,
+			reportQuoted: seen.wakeLines.join("\n").includes(WORKER_NOTED),
 		},
-		"the reader's answer reaches the worker once, as a reply in its mailbox that starts its next turn",
-	).toEqual({ reply: { head: true, answer: true }, requests: [3, 1] });
+		"the reader's answer reaches the worker once, as a reply in its mailbox that starts its next turn under the goal, which then settles",
+	).toEqual({
+		reply: { head: true, answer: true },
+		requests: [3, 1],
+		mails: [[READER, "answered", 2]],
+		goal: ["closed", "settled"],
+		outcome: 1,
+		reportQuoted: true,
+	});
 }

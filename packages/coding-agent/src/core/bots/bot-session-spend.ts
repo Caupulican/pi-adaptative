@@ -179,6 +179,11 @@ export class BotSessionSpend {
 	}
 
 	/** The accounting of the built session's charges and turns. */
+	/** The metered spend of the window a transcript entry opened (`BotSpendWindows.meteredSpendOfEntry`). */
+	meteredSpendOfEntry(entryId: string): number {
+		return this.windows.meteredSpendOfEntry(entryId);
+	}
+
 	accounting(session: AgentSession, ports: BotTurnAccountingPorts): BotTurnAccounting {
 		return new BotTurnAccounting(this.agentId, session, this.transcript, this.ledger, ports);
 	}

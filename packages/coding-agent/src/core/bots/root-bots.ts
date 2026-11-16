@@ -12,7 +12,8 @@ import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { BotToolPort } from "../delegation/bot-creation.ts";
 import type { BotOperatorMessageOptions } from "../delegation/bot-operator-message-options.ts";
-import type { DelegationRecord } from "../delegation/leader-delegation-ledger.ts";
+import { botReplyMessageKey, mailIdOfReply } from "../delegation/goal-mail.ts";
+import type { LeaderController } from "../delegation/leader-controller.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
 	WorkerAgentControlPort,
@@ -29,8 +30,11 @@ import { RootBotReplies, type WorkerBotReply } from "./root-bot-replies.ts";
 export interface RootBotsPorts {
 	/** Sends the orchestrator's words to a bot (`BotOperatorDispatch.sendOperatorMessageToBot`). */
 	send(agentId: string, message: string, options: BotOperatorMessageOptions): Promise<unknown>;
-	/** The latest goal handed to a leader, whose input an ask to it is while it runs. */
-	currentDelegation(alias: string): Pick<DelegationRecord, "state" | "objectiveId"> | undefined;
+	/**
+	 * The leader goals: the latest one handed to a leader, whose input an ask to it is while it runs, and the goal a
+	 * worker's mail is held open by until its reply is handed on.
+	 */
+	leaders(): Pick<LeaderController, "currentFor" | "goalOfMail" | "mailEnded">;
 	/** The bot tool's actions other than the ask. */
 	tool(): Omit<BotToolPort, "ask">;
 	/** The session's workers, and the bot a worker's runtime is (in any generation), when it is one. */
@@ -64,6 +68,7 @@ export class RootBots {
 			hasDelivered: (id) => deps.getSessionManager().getParentInput(id) !== undefined,
 			origin: () => captureWorkerReceiptOrigin(deps.getSessionManager()),
 			toWorker: (runtime, reply) => this.toWorker(runtime, reply),
+			mailEnded: (replyId, end) => ports.leaders().mailEnded(mailIdOfReply(replyId), end),
 		});
 	}
 
@@ -85,21 +90,24 @@ export class RootBots {
 
 	/** The goal a leader runs now, whose input words to it are. */
 	private runningGoalOf(alias: string): string | undefined {
-		const current = this.ports.currentDelegation(alias);
+		const current = this.ports.leaders().currentFor(alias);
 		return current?.state === "running" ? current.objectiveId : undefined;
 	}
 
 	/**
-	 * Hands a bot's reply to the worker that mailed it, once (keyed by the reply), as the bot's words, not the session's: a
-	 * leader's under the goal it runs. "ended" when that worker takes no message any more.
+	 * Hands a bot's reply to the worker that mailed it, once (keyed by the reply), as the bot's words, not the session's:
+	 * under the goal the mail was sent in while that goal is open (its turn is the goal's), else a leader's under the goal
+	 * it runs. "ended" when that worker takes no message any more.
 	 */
 	private toWorker(runtime: string, reply: WorkerBotReply): "taken" | "ended" {
 		const worker = this.ports.workers().find((agent) => agent.agentId === runtime);
 		if (!worker || worker.status === "retired") return "ended";
 		const alias = this.ports.botOf(runtime);
-		const goal = alias === undefined ? undefined : this.runningGoalOf(alias);
+		const goal =
+			this.ports.leaders().goalOfMail(mailIdOfReply(reply.replyId)) ??
+			(alias === undefined ? undefined : this.runningGoalOf(alias));
 		const result = this.ports.followUp(runtime, reply.text, {
-			idempotencyKey: `bot-reply:${reply.replyId}`,
+			idempotencyKey: botReplyMessageKey(reply.replyId),
 			agentWords: reply.thirdParty ? { turnOrigin: thirdPartyReplyOrigin(reply) } : {},
 			...(goal !== undefined ? { delegationObjectiveId: goal } : {}),
 		});

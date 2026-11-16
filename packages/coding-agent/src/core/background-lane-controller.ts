@@ -39,7 +39,6 @@ import { BotRoster } from "./bots/bot-roster.ts";
 import { attachBotSessions } from "./bots/bot-session-ports.ts";
 import { RootBots } from "./bots/root-bots.ts";
 import { type AwayChannelStatus, readAwayChannelCharges, readAwayChannelStatus } from "./channels/away-channels.ts";
-import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
@@ -60,8 +59,8 @@ import {
 	type ForegroundTranscriptWrites,
 	importRecordedParentWrites,
 } from "./delegation/foreground-parent-writes.ts";
+import { leaderBotFacts } from "./delegation/leader-bot-facts.ts";
 import { LeaderController } from "./delegation/leader-controller.ts";
-import { leaderBotViewOf } from "./delegation/leader-delegation.ts";
 import { type DelegationRecord, readDelegations } from "./delegation/leader-delegation-ledger.ts";
 import { type LeaderRow, leaderRows } from "./delegation/leader-view.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
@@ -364,7 +363,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		this._rootBots = new RootBots(deps, {
 			send: (agentId, message, options) => this.sendOperatorMessageToBot(agentId, message, options),
-			currentDelegation: (alias) => this.getLeaders().currentFor(alias),
+			leaders: () => this.getLeaders(),
 			tool: () => ({
 				...this._botLifecycle.botToolLifecycle(),
 				lead: (request) => this.getLeaders().delegate(request),
@@ -2037,20 +2036,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Whether a subscription login one of these bots runs on has no allowance left in its usage window: the same reading the
-	 * owner channel and the cost guard use, taken on each bot's own model.
-	 */
-	private subscriptionExhaustedFor(aliases: readonly string[]): boolean {
-		const registry = this.deps.getModelRegistry();
-		const reader = this.deps.subscriptionAllowance;
-		return aliases.some((alias) => {
-			const bot = this.getBotTeamStore().getBot(alias);
-			const model = bot ? registry.find(bot.provider, bot.modelId) : undefined;
-			return model !== undefined && reader.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind === "exhausted";
-		});
-	}
-
-	/**
 	 * The Leaders rows of the Orchestration panel. Served until an orchestration commit or a bot-store change drops them;
 	 * reading the rows never builds the worker runtime.
 	 */
@@ -2069,7 +2054,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			runtime: () => this._getWorkerLifecycle().ledger.runtime,
 			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
 			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
-			bots: () => store().listBots({ includeRetired: true }).map(leaderBotViewOf),
+			...leaderBotFacts({
+				store,
+				registry: () => this.deps.getModelRegistry(),
+				allowance: this.deps.subscriptionAllowance,
+				runsAsSession: (bot) => this._botHost.host.runsAsSession(bot),
+			}),
 			createGoalLeader: (request) => this._botLifecycle.createGoalLeader(request),
 			directBotOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
@@ -2089,7 +2079,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			origin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			maxDepth: () => this.deps.getSettingsManager().getLeaderSettings().maxDepth,
-			subscriptionExhausted: (aliases) => this.subscriptionExhaustedFor(aliases),
 			isMeteredAttempt: (attempt) => this._workers?.attemptIsMetered(attempt) ?? true,
 			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),
 			openSubtree: (alias, parentAlias) => this.openLeaderSubtree(alias, parentAlias),

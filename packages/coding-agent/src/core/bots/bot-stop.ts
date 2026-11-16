@@ -27,6 +27,7 @@ import { existsSync, statSync } from "node:fs";
 import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { botHostLockFile, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -41,7 +42,7 @@ import {
 } from "../delegation/worker-fleet-stop.ts";
 import { holdPersistedGoalForOwnerStop, type PersistedGoalStateHost } from "../goals/goal-lifecycle.ts";
 import { appendGoalStateSnapshot, getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { englishText, interfaceText } from "../language/interface-text.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.ts";
@@ -58,7 +59,7 @@ import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-w
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { botHomeOf, botHomeOwnSessionIds } from "./bot-home.ts";
-import { LEFTOVER_REREAD_MAX_MINUTES, tellUnreadableHomeRecord } from "./bot-home-records.ts";
+import { LEFTOVER_REREAD_MAX_MINUTES } from "./bot-home-records.ts";
 import {
 	type BotInboxStop,
 	readBotInbox,
@@ -66,6 +67,7 @@ import {
 	refuseBotInboxMessage,
 	requestBotStop,
 	takeBotInboxStop,
+	tellUnreadableInboxRecord,
 } from "./bot-inbox.ts";
 import {
 	type LinkedSessionNotices,
@@ -86,6 +88,11 @@ export interface BotStopPorts {
 	warn(message: string): void;
 	now(): number;
 	readonly routineClock: TimerPort;
+	/**
+	 * Answers the sender of a returned mail (the orchestrator's ask, a worker's mail) the stop refused that no answer
+	 * comes, with `reason` in English (`refuseReturnedMail`); nothing for other words. The owner is told when it cannot.
+	 */
+	refuseMail(agentId: string, origin: TurnOriginRecord | undefined, reason: string): void;
 	readonly links: LinkedSessionNotices;
 	watches(): BotWatchStore;
 }
@@ -425,9 +432,16 @@ export function endUnrecordedStopWork(
  */
 function refuseMessagesBeforeStop(agentDir: string, agentId: string, at: number, ports: BotStopPorts): void {
 	const reason = interfaceText().botTeam.botTurnAbortReasons.ownerStopped;
-	const unreadable = tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => ports.warn(message));
+	const unreadable = tellUnreadableInboxRecord(
+		agentId,
+		(message) => ports.warn(message),
+		(origin, why) => ports.refuseMail(agentId, origin, why),
+	);
 	for (const item of readBotInbox(agentDir, agentId, unreadable))
-		if (item.message.at <= at) refuseBotInboxMessage(agentDir, item, reason, ports.now());
+		if (item.message.at <= at) {
+			ports.refuseMail(agentId, item.message.origin, englishText().botTeam.botTurnAbortReasons.ownerStopped);
+			refuseBotInboxMessage(agentDir, item, reason, ports.now());
+		}
 }
 
 /**

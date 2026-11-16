@@ -189,10 +189,12 @@ export function workerMail(input: {
 	readonly text: string;
 	readonly thirdParty: boolean;
 	readonly mailId: string;
+	/** Its place in a chain of mails: one past the reply that started the worker's turn (`goalMailHop`), else 1. */
+	readonly hop?: number;
 	readonly room?: string;
 }): ReturnedMail {
 	const { sessionId, runtime, name, text, thirdParty, mailId, room } = input;
-	const mail = returnedMail({ kind: "worker", sessionId, runtime }, text, thirdParty, mailId, name);
+	const mail = returnedMail({ kind: "worker", sessionId, runtime }, text, thirdParty, mailId, name, input.hop ?? 1);
 	return room ? { ...mail, prompt: `${mail.prompt}${BOT_MEMORY_BLOCK_SEPARATOR}${room}` } : mail;
 }
 
@@ -208,12 +210,13 @@ function returnedMail(
 	thirdParty: boolean,
 	mailId: string,
 	workerName?: string,
+	hop = 1,
 ): ReturnedMail {
 	return {
-		prompt: botMailPrompt(address, 1, text, false, workerName),
+		prompt: botMailPrompt(address, hop, text, false, workerName),
 		origin: agentMailTurnOrigin({
 			from: botMailAddressText(address),
-			hop: 1,
+			hop,
 			ref: botMailRef(mailId),
 			shown: text,
 			thirdParty,

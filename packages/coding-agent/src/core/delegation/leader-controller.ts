@@ -56,6 +56,8 @@ import {
 import {
 	assertMayAsk,
 	type DelegationCloseReason,
+	type DelegationMail,
+	type DelegationMailEnd,
 	type DelegationRecord,
 	earliestDeadlineMs,
 	LeaderDelegationLedger,
@@ -382,6 +384,34 @@ export class LeaderController {
 		return this.ledger.get(record.objectiveId) ?? record;
 	}
 
+	/**
+	 * Records that a worker of the open goal `objectiveId` mailed a bot that answers in a session of its own: the goal
+	 * stays open until the reply reaches that worker (`mailEnded`). False when the goal is not open or the mail is
+	 * recorded already; throws at the goal's bound of mails.
+	 */
+	mailSent(objectiveId: string, mail: Omit<DelegationMail, "end">): boolean {
+		const record = this.ledger.get(objectiveId);
+		return record !== undefined && isOpen(record) && this.ledger.recordMailSent(objectiveId, mail);
+	}
+
+	/** The goal no longer waits for the mail `mailId`: its reply was handed on, it was not sent, or it expired unread. */
+	mailEnded(mailId: string, end: DelegationMailEnd): void {
+		for (const record of this.ledger.list())
+			if (isOpen(record) && record.mails.some((mail) => mail.mailId === mailId))
+				this.ledger.recordMailEnd(record.objectiveId, mailId, end);
+	}
+
+	/** The open goal whose worker sent the mail `mailId`: the reply's turn is that goal's. */
+	goalOfMail(mailId: string): string | undefined {
+		return this.ledger.list().find((record) => isOpen(record) && record.mails.some((mail) => mail.mailId === mailId))
+			?.objectiveId;
+	}
+
+	/** The mail the goal's workers sent bots that answer in sessions of their own. */
+	goalMails(objectiveId: string): readonly DelegationMail[] {
+		return this.ledger.get(objectiveId)?.mails ?? [];
+	}
+
 	private requireCurrent(leader: string): DelegationRecord {
 		const record = this.currentFor(leader);
 		if (!record) throw new Error(`${leader} leads no open goal.`);
@@ -479,6 +509,8 @@ export class LeaderController {
 				continue;
 			// A message filed under this goal still waiting in a bot's mailbox is the goal's unfinished work; an owner's chat is not.
 			if (this.deps.hasPendingDelegatedMessage(record.objectiveId)) continue;
+			// A bot's answer to a worker's mail that has not reached that worker is the goal's unfinished work too.
+			if (this.awaitsMail(record, bots)) continue;
 			// A question the leader asked in the middle of its goal waits for its answer: a leader turn that started after it.
 			const lastAsk = record.askedAt.at(-1);
 			if (lastAsk !== undefined && last.createdAt <= lastAsk) continue;
@@ -506,6 +538,21 @@ export class LeaderController {
 		changed = (await this.dispatchQueued(bots)) || changed;
 		this.armDeadline();
 		if (changed) this.notifyListeners();
+	}
+
+	/**
+	 * Whether the goal still waits for a bot's reply to its workers' mail. A bot that is gone, retired or no longer answers
+	 * in a session of its own gives none, so the goal stops waiting for its mail; the deadline and the budget bound the rest.
+	 */
+	private awaitsMail(record: DelegationRecord, bots: ReadonlyMap<string, LeaderBotView>): boolean {
+		let waits = false;
+		for (const mail of record.mails) {
+			if (mail.end) continue;
+			const bot = bots.get(mail.agentId);
+			if (bot && !bot.retired && this.deps.botAnswersInSession(mail.agentId)) waits = true;
+			else this.ledger.recordMailEnd(record.objectiveId, mail.mailId, { how: "gone", meteredUsd: 0 });
+		}
+		return waits;
 	}
 
 	/**

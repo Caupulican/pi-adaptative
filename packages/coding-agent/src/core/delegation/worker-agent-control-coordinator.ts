@@ -27,7 +27,6 @@ import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	type WorkerResultContract,
 } from "../orchestration/contracts.ts";
-import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
@@ -36,6 +35,8 @@ import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-or
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import type { TimerPort } from "../util/timer-port.ts";
+import { attemptDelegationObjectiveId } from "./delegation-spend.ts";
+import { type SenderGoalTurn, senderGoalTurn } from "./goal-mail.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
 import {
 	SessionRootMailbox,
@@ -692,8 +693,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			// A delegation's words wait for a turn of their own, filed under that delegation: a steer would be absorbed into
 			// the live turn, which was filed under whatever started it.
 			const delegated =
-				options.delegationObjectiveId !== undefined ||
-				this.senderDelegationObjectiveId(options.senderAgentId) !== undefined;
+				options.delegationObjectiveId !== undefined || this.senderGoalTurn(options.senderAgentId) !== undefined;
 			const queued = this.enqueuePeerMessage(agent, delegated ? "follow_up" : "steer", message, options, {
 				kind: "agent_turn",
 			});
@@ -1072,25 +1072,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * The delegation a bot's words belong to: the delegation its own running turn is filed under, when a delegation started
-	 * that turn. The session root and an idle or unknown sender have none.
+	 * The goal turn a bot's words come from (`senderGoalTurn`): its own running turn, when a delegation filed it. The
+	 * session root and an idle or unknown sender have none.
 	 */
-	private senderDelegationObjectiveId(senderAgentId: string | undefined): string | undefined {
+	senderGoalTurn(senderAgentId: string | undefined): SenderGoalTurn | undefined {
 		if (!senderAgentId || senderAgentId === this.sessionRootAddress) return undefined;
-		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
-		const activeAttemptId = snapshot.agents[senderAgentId]?.activeAttemptId;
-		const attempt = activeAttemptId === undefined ? undefined : snapshot.attempts[activeAttemptId];
-		const objectiveId = attempt ? snapshot.tasks[attempt.taskId]?.task.objectiveId : undefined;
-		return objectiveId !== undefined && isLeaderDelegationObjectiveId(objectiveId) ? objectiveId : undefined;
+		return senderGoalTurn(this.options.getLifecycle().getTaskRuntimeSnapshot(), senderAgentId);
 	}
 
 	/** The delegation a finished attempt was filed under, when a delegation started it; undefined for session work. */
 	private delegationOfAttempt(attemptId: string | undefined): string | undefined {
-		if (attemptId === undefined) return undefined;
 		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
-		const attempt = snapshot.attempts[attemptId];
-		const objectiveId = attempt ? snapshot.tasks[attempt.taskId]?.task.objectiveId : undefined;
-		return objectiveId !== undefined && isLeaderDelegationObjectiveId(objectiveId) ? objectiveId : undefined;
+		const attempt = attemptId === undefined ? undefined : snapshot.attempts[attemptId];
+		return attempt ? attemptDelegationObjectiveId(attempt, snapshot) : undefined;
 	}
 
 	private sessionRootMessageOptions(options: SessionRootWorkerAgentMessageOptions): WorkerAgentMessageOptions {
@@ -1962,7 +1956,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// under, so a leader's bots' turns stay that delegation's. A replay keeps the stored message's.
 		const delegationObjectiveId = replay
 			? undefined
-			: (requestedDelegation ?? this.senderDelegationObjectiveId(sender));
+			: (requestedDelegation ?? this.senderGoalTurn(sender)?.objectiveId);
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
 			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.

@@ -68,6 +68,8 @@ export interface BotSessionEntry {
 	recheckWhenIdle: boolean;
 	/** Its turns' spend and outcome, each reported once per turn. */
 	readonly turns: BotTurnAccounting;
+	/** The metered spend of the window a transcript entry opened (`BotSessionSpend.meteredSpendOfEntry`). */
+	readonly meteredSpendOf: (entryId: string) => number;
 	idleTimer: unknown;
 }
 
@@ -250,6 +252,7 @@ export class BotSessionLoader {
 				turnEnding: Promise.resolve(),
 				turnSince: undefined,
 				recheckWhenIdle: false,
+				meteredSpendOf: (entryId) => spend.meteredSpendOfEntry(entryId),
 				turns: spend.accounting(session, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
 					chargesHeld: (sessionId, instance, since) => entry.sender.chargesHeld(sessionId, instance, since),

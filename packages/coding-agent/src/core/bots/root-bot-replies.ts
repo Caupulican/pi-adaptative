@@ -20,6 +20,7 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TimerPort } from "../../kernel/timer-port.ts";
 import { rootBotRepliesDir } from "../agent-paths.ts";
+import type { DelegationMailEnd } from "../delegation/leader-delegation-ledger.ts";
 import { type InboxEntry, type InboxExpiredUnread, MessageInbox } from "../messaging/inbox.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
@@ -50,8 +51,12 @@ export interface RootBotReply {
 	readonly thirdParty: boolean;
 	/** The bot's last words after the ask; empty when its turn ended without any. */
 	readonly answer: string;
-	/** Why the turn ended, when it ended on an error and without words. */
+	/** Why the turn ended, when it ended on an error and without words; why the bot did not take the mail, when `refused`. */
 	readonly failure?: string;
+	/** The bot's host did not take the mail (refused it, set it aside, or the owner's stop covered it): no turn answered it. */
+	readonly refused?: boolean;
+	/** The metered spend of the bot's turn that answered, its workers' included: a goal's budget counts it once handed on. */
+	readonly meteredUsd?: number;
 }
 
 /** What a reply's record holds beside its words, versioned: a record of a version this build does not read is left for one that does. */
@@ -64,6 +69,8 @@ interface ReplyEnvelope {
 	readonly worker?: string;
 	/** Where the bot's own words begin in the record's text; absent when the turn ended without words. */
 	readonly wordsFrom?: number;
+	/** The metered spend of the turn that answered (`RootBotReply.meteredUsd`); absent for none. */
+	readonly meteredUsd?: number;
 }
 
 function replyInbox(agentDir: string, now: () => number): MessageInbox {
@@ -90,6 +97,8 @@ function cutToBytes(text: string, bytes: number): string {
 function replyText(reply: RootBotReply): { readonly text: string; readonly wordsFrom?: number } {
 	const { agentId, answer } = reply;
 	const asked = reply.worker === undefined ? "ask" : "mail";
+	if (reply.refused === true)
+		return { text: `Bot ${agentId} did not take your ${asked}${reply.failure ? `: ${reply.failure}` : "."}` };
 	if (answer.length === 0)
 		return {
 			text: `Bot ${agentId}'s turn after your ${asked} ended without an answer${reply.failure ? `: ${reply.failure}` : "."}`,
@@ -115,6 +124,7 @@ export function sendRootBotReply(agentDir: string, now: () => number, reply: Roo
 		thirdParty: reply.thirdParty,
 		...(reply.worker !== undefined ? { worker: reply.worker } : {}),
 		...(wordsFrom !== undefined ? { wordsFrom } : {}),
+		...(isUsd(reply.meteredUsd) && reply.meteredUsd > 0 ? { meteredUsd: reply.meteredUsd } : {}),
 	};
 	const result = replyInbox(agentDir, now).enqueue({
 		id: reply.replyId,
@@ -126,6 +136,10 @@ export function sendRootBotReply(agentDir: string, now: () => number, reply: Roo
 	if (result.status === "full") throw new Error(result.reason);
 }
 
+function isUsd(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 function isCount(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
@@ -134,11 +148,12 @@ function isCount(value: unknown): value is number {
 function replyEnvelope(entry: InboxEntry): ReplyEnvelope | undefined {
 	const value: unknown = entry.envelope;
 	if (!isPlainRecord(value) || value.v !== 1) return undefined;
-	const { agentId, hop, thirdParty, worker, wordsFrom } = value;
+	const { agentId, hop, thirdParty, worker, wordsFrom, meteredUsd } = value;
 	if (typeof agentId !== "string" || entry.sender !== `bot:${agentId}`) return undefined;
 	if (!isCount(hop) || typeof thirdParty !== "boolean") return undefined;
 	if (worker !== undefined && (typeof worker !== "string" || worker.length === 0)) return undefined;
 	if (wordsFrom !== undefined && (!isCount(wordsFrom) || wordsFrom > entry.body.length)) return undefined;
+	if (meteredUsd !== undefined && !isUsd(meteredUsd)) return undefined;
 	return {
 		v: 1,
 		agentId,
@@ -146,6 +161,7 @@ function replyEnvelope(entry: InboxEntry): ReplyEnvelope | undefined {
 		thirdParty,
 		...(worker !== undefined ? { worker } : {}),
 		...(wordsFrom !== undefined ? { wordsFrom } : {}),
+		...(meteredUsd !== undefined ? { meteredUsd } : {}),
 	};
 }
 
@@ -243,6 +259,11 @@ export interface RootBotReplyPorts {
 	 * "ended" when that worker no longer takes messages; throws when it cannot take it yet.
 	 */
 	toWorker(runtime: string, reply: WorkerBotReply): "taken" | "ended";
+	/**
+	 * The worker's mail `replyId` answers no longer holds its goal open (`LeaderController.mailEnded`): its reply was
+	 * handed on (its spend counted to the goal), or expired unread.
+	 */
+	mailEnded(replyId: string, end: DelegationMailEnd): void;
 	agentDir(): string;
 	sessionId(): string;
 	readonly timers: TimerPort;
@@ -326,13 +347,21 @@ export class RootBotReplies {
 					done = false;
 					continue;
 				}
+				// Recorded before the reply is settled: a crash between the two hands it on again, which the key keeps once.
+				this.ports.mailEnded(entry.id, {
+					how: "answered",
+					replyHop: envelope.hop,
+					meteredUsd: envelope.meteredUsd ?? 0,
+				});
 				inbox.settle(recipient, entry.sender, entry.id);
 			}
 			const told: InboxExpiredUnread[] = [];
 			for (const expired of inbox.expiredUnread(recipient)) {
 				const input = expiredInput(expired, this.ports.origin());
-				if (!input || (await this.deliverOnce(input))) told.push(expired);
-				else done = false;
+				if (!input || (await this.deliverOnce(input))) {
+					this.ports.mailEnded(expired.id, { how: "expired", meteredUsd: 0 });
+					told.push(expired);
+				} else done = false;
 			}
 			if (told.length > 0) inbox.acknowledgeExpired(recipient, told);
 		} catch (error) {

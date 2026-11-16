@@ -27,7 +27,7 @@
  * process tools are refused the bot homes.
  */
 import { randomUUID } from "node:crypto";
-import { renameSync, rmSync, statSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	isRecordedDeliveryOrigin,
@@ -44,6 +44,7 @@ import {
 	keepNewestHomeRecords,
 	parseHomeRecordHead,
 	readHomeRecords,
+	tellUnreadableHomeRecord,
 } from "./bot-home-records.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 
@@ -176,6 +177,31 @@ function parseScope(value: unknown): FleetStopScope | undefined {
 }
 
 /** The messages waiting for the bot's session, the owner's words and mail together, oldest first. */
+/**
+ * The owner told of an inbox record that did not read (`tellUnreadableHomeRecord`), and, for a record set aside that
+ * still names a mail's origin, `setAsideMail` given that origin and the reason in English: the mail's sender is
+ * answered that no answer comes (`refuseReturnedMail`).
+ */
+export function tellUnreadableInboxRecord(
+	agentId: string,
+	warn: (message: string) => void,
+	setAsideMail: (origin: TurnOriginRecord, reason: string) => void,
+): (file: string, reason: string, setAside: boolean) => void {
+	const tell = tellUnreadableHomeRecord(agentId, "inboxMessage", warn);
+	return (file, reason, setAside) => {
+		tell(file, reason, setAside);
+		if (!setAside) return;
+		let origin: TurnOriginRecord | undefined;
+		try {
+			const value: unknown = JSON.parse(readFileSync(`${file}.unreadable`, "utf8"));
+			origin = isPlainRecord(value) ? parseTurnOriginRecord(value.origin) : undefined;
+		} catch {
+			// Not JSON, or gone: it names no origin, and its sender is held by its goal's deadline or budget alone.
+		}
+		if (origin) setAsideMail(origin, `its record in the bot's inbox did not read (${reason}) and was set aside`);
+	};
+}
+
 export function readBotInbox(
 	agentDir: string,
 	agentId: string,

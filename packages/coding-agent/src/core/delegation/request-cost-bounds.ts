@@ -18,7 +18,7 @@ import type {
 import { costCeilingUsd, isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { DELEGATION_BUDGET_REFUSAL_REASONS } from "./budget-reason-codes.ts";
-import { delegationAttempts, delegationCostBounds } from "./delegation-spend.ts";
+import { delegationAttempts, delegationCostBounds, delegationMailSpentUsd } from "./delegation-spend.ts";
 import { readDelegations } from "./leader-delegation-ledger.ts";
 import type { ParentExecutionPolicy } from "./parent-execution-context.ts";
 import {
@@ -135,12 +135,19 @@ export class RequestCostBounds {
 						budget: { maxCostUsd: bound.maxCostUsd },
 						pricesRequests: true,
 						refusalReasons: DELEGATION_BUDGET_REFUSAL_REASONS,
-						seeds: delegationAttempts(snapshot, records, bound.objectiveId)
-							.filter((candidate) => this.isMeteredAttempt(candidate))
-							.map((candidate) => ({
-								attemptId: candidate.attemptId,
-								usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
-							})),
+						seeds: [
+							...delegationAttempts(snapshot, records, bound.objectiveId)
+								.filter((candidate) => this.isMeteredAttempt(candidate))
+								.map((candidate) => ({
+									attemptId: candidate.attemptId,
+									usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
+								})),
+							// The bots that answered the subtree's mail in sessions of their own spent outside this session's attempts.
+							{
+								attemptId: `goal-mail:${bound.objectiveId}`,
+								usage: { ...EMPTY_ATTEMPT_USAGE, costUsd: delegationMailSpentUsd(records, bound.objectiveId) },
+							},
+						],
 						initialUsage,
 					}),
 				);

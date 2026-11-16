@@ -15,6 +15,8 @@ import { type LeaderCharter, readDelegations } from "./leader-delegation-ledger.
 export interface DelegationSpendRecord {
 	readonly objectiveId: string;
 	readonly charter: Pick<LeaderCharter, "envelope" | "parentObjectiveId">;
+	/** The metered spend bots answering in sessions of their own made for the delegation's mail (`DelegationRecord.mailSpentUsd`). */
+	readonly mailSpentUsd?: number;
 }
 
 /** A walk visits its start record and at most `LEADER_MAX_DEPTH_CEILING` parents: no chain can be deeper than that. */
@@ -111,14 +113,29 @@ export function delegationAttempts(
 	});
 }
 
-/** The metered spend of a delegation's subtree. */
+/**
+ * The metered spend the bots that answer in sessions of their own made answering the mail of a delegation's subtree: no
+ * attempt of this session holds it, so each goal records it once the reply reached its worker.
+ */
+export function delegationMailSpentUsd(records: readonly DelegationSpendRecord[], objectiveId: string): number {
+	const subtree = delegationSubtree(records, objectiveId);
+	return records.reduce(
+		(sum, record) => (subtree.has(record.objectiveId) ? sum + (record.mailSpentUsd ?? 0) : sum),
+		0,
+	);
+}
+
+/** The metered spend of a delegation's subtree: its turns' and the mail its bots answered in sessions of their own. */
 export function delegationSpentUsd(
 	snapshot: TaskRuntimeProjection,
 	records: readonly DelegationSpendRecord[],
 	objectiveId: string,
 	isMetered: (attempt: AttemptRuntimeState) => boolean,
 ): number {
-	return sumMeteredSpendUsd(delegationAttempts(snapshot, records, objectiveId), isMetered);
+	return (
+		sumMeteredSpendUsd(delegationAttempts(snapshot, records, objectiveId), isMetered) +
+		delegationMailSpentUsd(records, objectiveId)
+	);
 }
 
 /**
@@ -156,7 +173,7 @@ export function delegationBudgetStop(
 	const budget = record.charter.envelope.budgetUsd;
 	const spent = record.filedByObjective
 		? delegationSpentUsd(snapshot, records, record.objectiveId, isMetered)
-		: sumMeteredSpendUsd(attributed, isMetered);
+		: sumMeteredSpendUsd(attributed, isMetered) + (record.mailSpentUsd ?? 0);
 	if (budget !== undefined && spent >= budget) return "exhausted";
 	const ownTreeKey = delegationBudgetTreeKey(record.objectiveId);
 	const turns = record.filedByObjective ? delegationAttempts(snapshot, records, record.objectiveId) : attributed;

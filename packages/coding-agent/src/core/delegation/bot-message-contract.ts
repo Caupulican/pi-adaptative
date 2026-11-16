@@ -1,4 +1,5 @@
 import type { BotMailSent } from "../bots/bot-mail.ts";
+import type { SenderGoalTurn } from "./goal-mail.ts";
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 import type { WorkerAgentControlPort, WorkerAgentReplyResult } from "./worker-agent-control.ts";
 
@@ -37,6 +38,19 @@ export interface BotSessionMailSent extends BotMailSent {
 	readonly detail: string;
 }
 
+/** One send mailed to a bot that answers in a session of its own (`BotMessageDirectory.mailSession`). */
+export interface BotSessionMailInput {
+	readonly agentId: string;
+	readonly message: string;
+	/** The send's replay key, which the mail id derives from. */
+	readonly replayKey: string;
+	/** A third party's words reached the sender's run. */
+	readonly thirdParty: boolean;
+	readonly teamId?: string;
+	/** The goal turn the sender runs (`senderGoalTurn`): the goal waits for the bot's answer, and the hop follows it. */
+	readonly goalTurn?: SenderGoalTurn;
+}
+
 /** Parent-owned alias resolution, fenced to the sender's exact execution and branch. */
 export interface BotMessageDirectory {
 	/** Set where the sender reaches no bot or group and only replies to its own session root. */
@@ -51,15 +65,9 @@ export interface BotMessageDirectory {
 	resolve(agentId: string, teamId?: string): BotMessageTarget;
 	/**
 	 * Mails the words to a bot that answers in a session of its own, as the sender's (`workerMail`): a third party's when
-	 * `thirdParty`, under the mail id its replay key derives.
+	 * `thirdParty`, under the mail id its replay key derives. Sent in a goal's turn, the goal waits for the answer.
 	 */
-	mailSession(
-		agentId: string,
-		message: string,
-		replayKey: string,
-		thirdParty: boolean,
-		teamId?: string,
-	): Promise<BotSessionMailSent>;
+	mailSession(input: BotSessionMailInput): Promise<BotSessionMailSent>;
 	threadId(teamId?: string): string | undefined;
 	authorizeReply(threadId: string | undefined, sender: string | undefined, teamId?: string): void;
 	recordSent(messageId: string, target: string, message: string): void;

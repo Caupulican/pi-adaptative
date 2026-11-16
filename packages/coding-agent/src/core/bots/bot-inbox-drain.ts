@@ -8,10 +8,10 @@
  * per bot at a time; a change during a pass reads the inbox again when it ends. Passes start when the session is loaded,
  * when the home watch sees a message written and, while that watch does not run, on a timer.
  */
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
-import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import {
 	type BotInboxMessage,
 	botInboxStopWaiting,
@@ -21,7 +21,9 @@ import {
 	readBotInboxGiven,
 	refuseBotInboxMessage,
 	takeBotInboxMessage,
+	tellUnreadableInboxRecord,
 } from "./bot-inbox.ts";
+import { botFailureForModel } from "./bot-owner-error.ts";
 
 /** How often the inboxes of the hosted bots are read while the home watch does not run. */
 const INBOX_POLL_MS = 5 * 1000;
@@ -40,6 +42,14 @@ export interface BotInboxDrainPorts {
 	 * is loaded here any more (the message waits for the next host); rejects with the session's refusal.
 	 */
 	give(agentId: string, message: BotInboxMessage): Promise<BotInboxGiven>;
+	/**
+	 * Writes the reply a mail record given before this pass owes (the orchestrator's ask, a worker's mail:
+	 * `settleReturnedMail`), read from the bot's transcript, before the record leaves: false when it could not be written,
+	 * which keeps the record for the next pass. True for any other record.
+	 */
+	settleGiven(agentId: string, message: BotInboxMessage): boolean;
+	/** Answers the sender of a mail the session refused, or set aside, that no answer comes (`refuseReturnedMail`). */
+	refuseMail(agentId: string, origin: TurnOriginRecord | undefined, reason: string): void;
 	/** Whether the bot's loaded session runs a turn or holds input; undefined when none is loaded here. */
 	busy(agentId: string): boolean | undefined;
 	/**
@@ -99,9 +109,15 @@ export class BotInboxDrain {
 		if (botInboxStopWaiting(agentDir, agentId) && !this.ports.takeStops(agentId)) return false;
 		const busy = this.ports.busy(agentId);
 		if (busy === undefined) return false;
-		const unreadable = tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => this.ports.warn(message));
-		// The mail given before this pass: an idle session has ended the turns that took it.
-		if (!busy) for (const item of readBotInboxGiven(agentDir, agentId, unreadable)) takeBotInboxMessage(item);
+		const unreadable = tellUnreadableInboxRecord(
+			agentId,
+			(message) => this.ports.warn(message),
+			(origin, reason) => this.ports.refuseMail(agentId, origin, reason),
+		);
+		// The mail given before this pass: an idle session has ended the turns that took it, and each is answered.
+		if (!busy)
+			for (const item of readBotInboxGiven(agentDir, agentId, unreadable))
+				if (this.ports.settleGiven(agentId, item.message)) takeBotInboxMessage(item);
 		const items = readBotInbox(agentDir, agentId, unreadable);
 		for (const item of items) {
 			if (this.stopped) return false;
@@ -110,6 +126,8 @@ export class BotInboxDrain {
 				given = await this.ports.give(agentId, item.message);
 			} catch (error) {
 				const reason = errorText(error);
+				// The sender of a returned mail is answered first, in English for its model.
+				this.ports.refuseMail(agentId, item.message.origin, errorText(botFailureForModel(error)));
 				refuseBotInboxMessage(agentDir, item, reason, this.ports.timers().now());
 				this.ports.warn(words.botInboxRefused(agentId, reason));
 				this.ports.changed(agentId);

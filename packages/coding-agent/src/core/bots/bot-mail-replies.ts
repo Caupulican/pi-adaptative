@@ -4,8 +4,10 @@
  * as a reply one hop further on, its words after a group's message go to the group's log (as a member's answer to the
  * group, for that incarnation of it), and its words after the orchestrator's ask or a worker's mail are written as a reply
  * for the session that sent it (`root-bot-replies.ts`), which hears too of a turn that ended without any and hands a
- * worker's reply to that worker. A reply is not answered, and none
- * goes past `MAX_BOT_MAIL_HOPS`.
+ * worker's reply to that worker. A reply is not answered; a reply to a bot goes no further than `MAX_BOT_MAIL_HOPS`, and
+ * one to the orchestrator's ask or a worker's mail always goes, its sender waiting for it (a worker's next mail carries
+ * the hop on, `goalMailHop`). A mail its host did not take, or whose turn ended where no answer was sent, is answered
+ * all the same (`refuseReturnedMail`, `settleReturnedMail`), so no sender waits forever.
  *
  * A reply's reference derives from the mail's alone (`reply:<mail id>`), so a reply sent again (the turn ran again after
  * its session reopened) is the same reply, which the asker's session does not take twice (`branchHoldsTurnRef`).
@@ -21,7 +23,7 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { agentMailTurnOrigin, isOutsideInputKind, turnOriginOf } from "../turn-origin.ts";
+import { agentMailTurnOrigin, entryTurnOrigin, isOutsideInputKind, turnOriginOf } from "../turn-origin.ts";
 import { errorText } from "./bot-error-text.ts";
 import {
 	BOT_MAIL_REF_PREFIX,
@@ -33,7 +35,8 @@ import {
 	parseBotMailAddress,
 } from "./bot-mail.ts";
 import type { BotSender } from "./bot-session-host.ts";
-import type { RootBotReply } from "./root-bot-replies.ts";
+import type { BotSessionEntry } from "./bot-session-load.ts";
+import { type RootBotReply, sendRootBotReply } from "./root-bot-replies.ts";
 
 /** The reference of the reply to the mail `ref` names; undefined when `ref` is no mail's (a reply is not answered). */
 export function botMailReplyRef(ref: string | undefined): string | undefined {
@@ -75,7 +78,11 @@ function botMailAnswers(messages: readonly AgentMessage[], since: number): BotMa
 	let last = "";
 	let failure: string | undefined;
 	const close = () => {
-		if (open && (last.length > 0 || open.from.kind === "root" || open.from.kind === "worker"))
+		// A group's log records a turn that failed without words as well (`groupSummary`).
+		if (
+			open &&
+			(last.length > 0 || failure !== undefined || open.from.kind === "root" || open.from.kind === "worker")
+		)
 			answers.push({ ...open, answer: last, ...(failure !== undefined ? { failure } : {}) });
 		open = undefined;
 		last = "";
@@ -95,6 +102,19 @@ function botMailAnswers(messages: readonly AgentMessage[], since: number): BotMa
 	return answers;
 }
 
+/** The sender a mail's answer is written back for (the orchestrator's ask, a worker's mail), when it is such a mail. */
+export function returnedMailSender(
+	origin: TurnOriginRecord | undefined,
+): Extract<BotMailAddress, { kind: "root" | "worker" }> | undefined {
+	const from = origin?.from === undefined ? undefined : parseBotMailAddress(origin.from);
+	return from?.kind === "root" || from?.kind === "worker" ? from : undefined;
+}
+
+/** What a group's log records of a member's answer: its words, else why its turn ended without any. */
+function groupSummary(answer: string, failure: string | undefined): string {
+	return answer.length > 0 || failure === undefined ? answer : `The turn ended without an answer: ${failure}`;
+}
+
 /** What sending a turn's answers reaches of the host. */
 export interface BotMailReplyHost {
 	store(): Pick<PersistentBotTeamStore, "recordBotTurnOutcome">;
@@ -107,6 +127,8 @@ export interface BotMailReplyHost {
 		origin: BotDeliveryOrigin,
 		sender: BotSender,
 	): Promise<BotOperatorMessageDispatchResult>;
+	/** The metered spend of the window the transcript entry `entryId` opened (`BotSpendWindows.meteredSpendOfEntry`). */
+	meteredSpendOf(entryId: string): number;
 	/** An owner-facing warning: an answer did not reach where its mail came from. */
 	warn(message: string): void;
 }
@@ -132,34 +154,30 @@ export function sendBotMailAnswers(host: BotMailReplyHost, turn: BotMailTurn): v
 					agentId,
 					teamId: from.teamId,
 					teamIncarnationId: from.incarnation,
-					summary: answer,
+					summary: groupSummary(answer, failure),
 				});
 			} catch (error) {
 				host.warn(words.botTurnOutcomeNotRecorded(agentId, errorText(error)));
 			}
 			continue;
 		}
-		const ref = botMailReplyRef(origin.ref);
-		const hop = origin.hop + 1;
-		if (ref === undefined || hop > MAX_BOT_MAIL_HOPS) continue;
 		const thirdParty = origin.thirdParty === true || runThirdParty;
 		if (from.kind === "root" || from.kind === "worker") {
+			// Its sender waits for it, whatever the hop: a reply is not answered, and the sender's next mail is bounded.
 			try {
-				host.replyToRoot({
-					replyId: ref,
-					agentId,
-					rootSessionId: from.sessionId,
-					...(from.kind === "worker" ? { worker: from.runtime } : {}),
-					hop,
-					thirdParty,
+				replyToSender(host, turn, origin, from, {
 					answer,
-					...(answer.length === 0 && failure !== undefined ? { failure } : {}),
+					...(failure !== undefined ? { failure } : {}),
+					thirdParty,
 				});
 			} catch (error) {
 				host.warn(words.botAskReplyNotSent(agentId, errorText(error)));
 			}
 			continue;
 		}
+		const ref = botMailReplyRef(origin.ref);
+		const hop = origin.hop + 1;
+		if (ref === undefined || hop > MAX_BOT_MAIL_HOPS) continue;
 		const address: BotMailAddress = { kind: "bot", agentId };
 		const reply = agentMailTurnOrigin({
 			from: botMailAddressText(address),
@@ -171,5 +189,158 @@ export function sendBotMailAnswers(host: BotMailReplyHost, turn: BotMailTurn): v
 		void host
 			.deliver(from.agentId, botMailPrompt(address, hop, answer, true), { mode: "queue" }, reply, turn.sender)
 			.catch((error: unknown) => host.warn(words.botMailReplyNotSent(agentId, from.agentId, errorText(error))));
+	}
+}
+
+/** Writes the reply to the orchestrator's ask or a worker's mail `origin`, with the metered spend of the turn that took it. */
+function replyToSender(
+	host: Pick<BotMailReplyHost, "replyToRoot" | "meteredSpendOf">,
+	turn: Pick<BotMailTurn, "agentId" | "branch">,
+	origin: TurnOriginRecord,
+	from: Extract<BotMailAddress, { kind: "root" | "worker" }>,
+	reply: { readonly answer: string; readonly failure?: string; readonly thirdParty: boolean },
+): void {
+	const replyId = botMailReplyRef(origin.ref);
+	if (replyId === undefined) return;
+	const entryId = turn.branch.find((entry) => entryTurnOrigin(entry)?.ref === origin.ref)?.id;
+	host.replyToRoot({
+		replyId,
+		agentId: turn.agentId,
+		rootSessionId: from.sessionId,
+		...(from.kind === "worker" ? { worker: from.runtime } : {}),
+		hop: (origin.hop ?? 1) + 1,
+		thirdParty: reply.thirdParty,
+		answer: reply.answer,
+		...(reply.answer.length === 0 && reply.failure !== undefined ? { failure: reply.failure } : {}),
+		meteredUsd: entryId === undefined ? 0 : host.meteredSpendOf(entryId),
+	});
+}
+
+/**
+ * Writes the reply to the returned mail `origin` (the orchestrator's ask, a worker's mail) that the bot's session took,
+ * read from its transcript: the turn that took it ended where no answer was sent (its host stopped first, or the reply
+ * could not be written then). A reply written before stays as it was. Nothing for other words; throws when it cannot
+ * write the reply.
+ */
+export function settleReturnedMail(
+	host: Pick<BotMailReplyHost, "replyToRoot" | "meteredSpendOf">,
+	turn: Pick<BotMailTurn, "agentId" | "branch" | "messages">,
+	origin: TurnOriginRecord,
+): void {
+	const from = returnedMailSender(origin);
+	if (!from) return;
+	const found = botMailAnswers(turn.messages, Number.NEGATIVE_INFINITY).find(
+		(answer) => answer.origin.ref === origin.ref,
+	);
+	replyToSender(host, turn, origin, from, {
+		answer: found?.answer ?? "",
+		...(found?.failure !== undefined ? { failure: found.failure } : {}),
+		thirdParty: origin.thirdParty === true || botMailChain(turn.branch).thirdParty,
+	});
+}
+
+/**
+ * Writes the refusal reply to the returned mail `origin` a bot's host did not take (refused, set aside, or covered by the
+ * owner's stop): its sender is told, in English for its model, that no answer comes and why (`reason`). Nothing for
+ * other words; throws when it cannot write the reply.
+ */
+export function refuseReturnedMail(
+	replyToRoot: (reply: RootBotReply) => void,
+	agentId: string,
+	origin: TurnOriginRecord | undefined,
+	reason: string,
+): void {
+	const from = returnedMailSender(origin);
+	const replyId = botMailReplyRef(origin?.ref);
+	if (!origin || !from || replyId === undefined) return;
+	replyToRoot({
+		replyId,
+		agentId,
+		rootSessionId: from.sessionId,
+		...(from.kind === "worker" ? { worker: from.runtime } : {}),
+		hop: (origin.hop ?? 1) + 1,
+		thirdParty: origin.thirdParty === true,
+		answer: "",
+		failure: reason,
+		refused: true,
+	});
+}
+
+/** What answering a host's mail needs of it beyond each loaded session. */
+export interface BotMailAnsweringPorts {
+	agentDir(): string;
+	/** The clock the replies are stamped on. */
+	now(): number;
+	store(): Pick<PersistentBotTeamStore, "recordBotTurnOutcome">;
+	deliver: BotMailReplyHost["deliver"];
+	/** An owner-facing warning of the host's own session. */
+	warn(message: string): void;
+}
+
+/** A loaded bot session, as answering its mail reads it. */
+export type BotMailSession = Pick<
+	BotSessionEntry,
+	"agentId" | "session" | "sessionManager" | "sender" | "meteredSpendOf"
+>;
+
+/**
+ * How one host answers the mail its bots' sessions take: each ended turn's answers (`turnEnded`), a returned mail a
+ * turn took and left unanswered (`settle`), and one the host did not take (`refuse`).
+ */
+export class BotMailAnswering {
+	private readonly ports: BotMailAnsweringPorts;
+
+	constructor(ports: BotMailAnsweringPorts) {
+		this.ports = ports;
+	}
+
+	/** Writes a bot's reply for the session that asked or whose worker mailed (`sendRootBotReply`). */
+	private replyToRoot(reply: RootBotReply): void {
+		sendRootBotReply(this.ports.agentDir(), () => this.ports.now(), reply);
+	}
+
+	/** What the answers of the loaded session's turns are sent through. */
+	private host(entry: BotMailSession): BotMailReplyHost {
+		return {
+			store: () => this.ports.store(),
+			replyToRoot: (reply) => this.replyToRoot(reply),
+			deliver: (agentId, message, options, origin, sender) =>
+				this.ports.deliver(agentId, message, options, origin, sender),
+			meteredSpendOf: (entryId) => entry.meteredSpendOf(entryId),
+			warn: (message) => entry.sender.warn(message),
+		};
+	}
+
+	/** Sends the answers of the session's turn that began at `since` and ended (`sendBotMailAnswers`). */
+	turnEnded(entry: BotMailSession, since: number): void {
+		const { agentId, session, sessionManager, sender } = entry;
+		const branch = sessionManager.getBranch();
+		sendBotMailAnswers(this.host(entry), { agentId, messages: session.messages, since, branch, sender });
+	}
+
+	/**
+	 * Writes the reply the returned mail `origin` the session took is owed, read from its transcript (`settleReturnedMail`):
+	 * false, the owner told, when it cannot be written yet, so its record stays and is settled again. True for other words.
+	 */
+	settle(entry: BotMailSession, origin: TurnOriginRecord | undefined): boolean {
+		if (origin === undefined || returnedMailSender(origin) === undefined) return true;
+		try {
+			const { agentId, session, sessionManager } = entry;
+			const turn = { agentId, messages: session.messages, branch: sessionManager.getBranch() };
+			settleReturnedMail(this.host(entry), turn, origin);
+			return true;
+		} catch (error) {
+			entry.sender.warn(interfaceText().botTeam.botAskReplyNotSent(entry.agentId, errorText(error)));
+			return false;
+		}
+	}
+
+	/** Answers the sender of a returned mail the host did not take that no answer comes (`refuseReturnedMail`). */
+	refuse(agentId: string, origin: TurnOriginRecord | undefined, reason: string): void {
+		try {
+			refuseReturnedMail((reply) => this.replyToRoot(reply), agentId, origin, reason);
+		} catch (error) {
+			this.ports.warn(interfaceText().botTeam.botAskReplyNotSent(agentId, errorText(error)));
+		}
 	}
 }

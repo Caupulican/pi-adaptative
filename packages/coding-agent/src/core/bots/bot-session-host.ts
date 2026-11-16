@@ -76,12 +76,13 @@ import {
 	readBotInbox,
 	readBotInboxRefusals,
 	restoreGivenBotInboxMail,
+	tellUnreadableInboxRecord,
 } from "./bot-inbox.ts";
 import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
 import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
-import { sendBotMailAnswers } from "./bot-mail-replies.ts";
+import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
@@ -104,7 +105,6 @@ import {
 	writeOwnerStop,
 } from "./bot-stop.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
-import { sendRootBotReply } from "./root-bot-replies.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
@@ -252,6 +252,14 @@ export class BotSessionHost {
 		runsAsSession: (record, sender) => this.runsAsSession(record, sender),
 		deliver: (agentId, message, options, origin, sender) => this.deliver(agentId, message, options, origin, sender),
 	});
+	/** Answers the mail its bots' sessions take (`bot-mail-replies.ts`): each turn's answers, and the mail left unanswered. */
+	private readonly answers = new BotMailAnswering({
+		agentDir: () => this.ports.agentDir(),
+		now: () => this.ports.timers().port("bot-replies").now(),
+		store: () => this.ports.store(),
+		deliver: (agentId, message, options, origin, sender) => this.deliver(agentId, message, options, origin, sender),
+		warn: (message) => this.ports.warn(message),
+	});
 	/** Builds the bots' sessions this host loads. */
 	private readonly loader: BotSessionLoader;
 
@@ -327,6 +335,11 @@ export class BotSessionHost {
 			watching: () => this.view.watching(),
 			hosted: () => [...this.entries.keys()],
 			give: (agentId, message) => this.giveRecord(agentId, message),
+			settleGiven: (agentId, message) => {
+				const entry = this.entries.get(agentId);
+				return entry !== undefined && this.answers.settle(entry, message.origin);
+			},
+			refuseMail: (agentId, origin, reason) => this.answers.refuse(agentId, origin, reason),
 			busy: (agentId) => {
 				const entry = this.entries.get(agentId);
 				return entry === undefined || this.stopped ? undefined : this.isBusy(entry);
@@ -376,25 +389,9 @@ export class BotSessionHost {
 				notify: (agentId, text, mark, deliveryId) => this.notify(agentId, text, mark, deliveryId),
 				recordOutcome: (agentId, summary) => this.recordOutcome(agentId, summary),
 				mailTool: (agentId) => createBotMailToolDefinition(this.mail.port(agentId)),
+				// A host stopped first sends nothing: the next host answers the mail its transcript took (`giveRecord`).
 				turnEnded: (entry, since) => {
-					if (this.stopped) return;
-					sendBotMailAnswers(
-						{
-							store: () => ports.store(),
-							replyToRoot: (reply) =>
-								sendRootBotReply(ports.agentDir(), () => ports.timers().port("bot-replies").now(), reply),
-							deliver: (agentId, message, options, origin, sender) =>
-								this.deliver(agentId, message, options, origin, sender),
-							warn: (message) => entry.sender.warn(message),
-						},
-						{
-							agentId: entry.agentId,
-							messages: entry.session.messages,
-							since,
-							branch: entry.sessionManager.getBranch(),
-							sender: entry.sender,
-						},
-					);
+					if (!this.stopped) this.answers.turnEnded(entry, since);
 				},
 				settle: (entry) => this.settle(entry),
 				register: (entry, continued) => this.register(entry, continued),
@@ -469,6 +466,7 @@ export class BotSessionHost {
 			routineClock: this.ports.timers().port("routines"),
 			links: this.keeps.links,
 			watches: () => this.ports.store(),
+			refuseMail: (agentId, origin, reason) => this.answers.refuse(agentId, origin, reason),
 		};
 	}
 
@@ -490,7 +488,11 @@ export class BotSessionHost {
 		readonly refused: readonly BotInboxItem<BotInboxRefusal>[];
 	} {
 		const agentDir = this.ports.agentDir();
-		const unreadable = tellUnreadableHomeRecord(agentId, "inboxMessage", (message) => this.ports.warn(message));
+		const unreadable = tellUnreadableInboxRecord(
+			agentId,
+			(message) => this.ports.warn(message),
+			(origin, reason) => this.answers.refuse(agentId, origin, reason),
+		);
 		return {
 			waiting: readBotInbox(agentDir, agentId, unreadable),
 			refused: readBotInboxRefusals(agentDir, agentId, unreadable),
@@ -633,16 +635,22 @@ export class BotSessionHost {
 		// Words its inbox holds (left behind a stop since taken) go first, and these follow them in order. Words under a
 		// recorded origin also wait there while the session runs (`giveRecord`): its own queue would keep no origin.
 		if (!behindStop && botInboxWaiting(agentDir, agentId)) await this.inbox.drain(agentId);
+		// The orchestrator's ask and a worker's mail always pass through the inbox, kept there until the turn that took them
+		// ends, so a host killed first gives them again and their sender is answered; admitted here first, so a refusal
+		// answers the send itself.
+		const returned = origin !== "owner" && returnedMailSender(origin) !== undefined;
+		if (returned && !behindStop) this.admitNow(entry);
 		const waits =
 			origin === "owner"
 				? botInboxOwnerWordsWaiting(agentDir, agentId)
-				: botInboxWaiting(agentDir, agentId) || this.isBusy(entry);
+				: returned || botInboxWaiting(agentDir, agentId) || this.isBusy(entry);
 		if (!behindStop && !waits) return this.give(entry, message, mode, origin);
 		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
 		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop, origin);
 		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
 		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
+		if (returned && !behindStop) await this.inbox.drain(agentId);
 		return result;
 	}
 
@@ -656,10 +664,21 @@ export class BotSessionHost {
 		const entry = this.entries.get(agentId);
 		if (!entry || this.stopped) return "gone";
 		const { origin } = message;
-		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), origin.ref)) return "take";
+		// Its transcript took it already: a returned mail whose turn ended where no answer was sent is answered now.
+		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), origin.ref)) {
+			if (returnedMailSender(origin) === undefined) return "take";
+			if (this.isBusy(entry)) return "keep";
+			return this.answers.settle(entry, origin) ? "take" : "keep";
+		}
 		if (origin !== undefined && this.isBusy(entry)) return "keep";
 		await this.give(entry, message.text, message.mode, origin ?? "owner");
 		return origin === undefined ? "take" : "given";
+	}
+
+	/** Admits the session's model for words given now (`BotSessionAdmission.admit`); throws its refusal. */
+	private admitNow(entry: BotSessionEntry): void {
+		const { profileKey: key, spendBudget } = entry;
+		this.admission.admit(entry.agentId, entry.session.model, { key, spendBudget }, entry.builtFor);
 	}
 
 	/**
@@ -681,12 +700,7 @@ export class BotSessionHost {
 		// A turn the owner's stop aborted ends first: the words start the next turn, never steer the one dying.
 		await entry.turnEnding;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
-		this.admission.admit(
-			agentId,
-			entry.session.model,
-			{ key: entry.profileKey, spendBudget: entry.spendBudget },
-			entry.builtFor,
-		);
+		this.admitNow(entry);
 		const queued = mode === "queue";
 		const wasRunning = this.isBusy(entry);
 		const continued = entry.session.messages.length > 0;
