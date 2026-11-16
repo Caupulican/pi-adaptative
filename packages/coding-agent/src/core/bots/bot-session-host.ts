@@ -62,7 +62,7 @@ import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/time
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
-import { botFailureCause, botFailureText, inOwnerWords } from "./bot-failure-words.ts";
+import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
@@ -82,11 +82,12 @@ import {
 import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
+import { BotLoadedStops } from "./bot-loaded-stops.ts";
 import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
 import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
+import { botOpenFailure } from "./bot-open-retry.ts";
 import type { SavedUsageResumeRules } from "./bot-owed-ledgers.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRelease } from "./bot-release.ts";
@@ -97,15 +98,7 @@ import { BotOwedWork, owesWatchWork } from "./bot-session-owed-work.ts";
 import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
-import {
-	type BotStopPorts,
-	endUnrecordedStopWork,
-	type OwnerStop,
-	STOP_TAKE,
-	stopLoadedBot,
-	type UnrecordedBotStops,
-	writeOwnerStop,
-} from "./bot-stop.ts";
+import { endUnrecordedStopWork, type UnrecordedBotStops, writeOwnerStop } from "./bot-stop.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -216,14 +209,8 @@ export class BotSessionHost {
 	private readonly owed: BotOwedWork;
 	/** What defines each bot's session and whether its model may run now. */
 	private readonly admission: BotSessionAdmission;
-	/** Bots whose loaded session failed to take the owner's stop: taken again after a backoff until it is. */
-	private readonly stopRetries = new BotOpenRetries({
-		timers: () => this.idleTimers(),
-		stopped: () => this.stopped,
-		retry: (agentId) => this.takeInbox(agentId),
-	});
-	/** The cause last told of a bot's stop that its loaded session could not take (`botFailureCause`): told once per cause. */
-	private readonly stopTold = new Map<string, string>();
+	/** The owner's stops of the bots it has loaded (`bot-loaded-stops.ts`). */
+	private readonly stops: BotLoadedStops;
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -265,9 +252,6 @@ export class BotSessionHost {
 	/** Builds the bots' sessions this host loads. */
 	private readonly loader: BotSessionLoader;
 
-	/** What the host keeps for its process and agent directory, across the hosts that replace it there. */
-	private readonly keeps: BotHostProcessKeeps;
-
 	/**
 	 * `keeps` is what its process keeps for the agent directory across its hosts (`bot-session-registry.ts`): the owner's
 	 * stops it could not record, what the owner was told of the work a stop or release left behind a symbolic link, and
@@ -275,8 +259,19 @@ export class BotSessionHost {
 	 */
 	constructor(ports: BotSessionHostPorts, keeps: BotHostProcessKeeps, previousStop?: Promise<void>) {
 		this.ports = ports;
-		this.keeps = keeps;
 		this.previousStop = previousStop ?? Promise.resolve();
+		this.stops = new BotLoadedStops({
+			agentDir: () => ports.agentDir(),
+			timers: () => ports.timers(),
+			retryTimers: () => this.idleTimers(),
+			stopped: () => this.stopped,
+			retry: (agentId) => this.takeInbox(agentId),
+			warn: (message) => ports.warn(message),
+			watches: () => ports.store(),
+			links: keeps.links,
+			refuseMail: (agentId, origin, reason) => this.answers.refuse(agentId, origin, reason),
+			busy: (entry) => this.isBusy(entry),
+		});
 		this.admission = new BotSessionAdmission({
 			store: () => ports.store(),
 			modelRegistry: () => ports.modelRegistry(),
@@ -335,7 +330,7 @@ export class BotSessionHost {
 						settings.release();
 					}
 				},
-				stopPorts: () => this.stopPorts(),
+				stopPorts: () => this.stops.stopPorts(),
 			},
 			keeps.unrecorded,
 		);
@@ -394,7 +389,7 @@ export class BotSessionHost {
 				admission: this.admission,
 				owed: this.owed,
 				takeLock: (agentId) => this.view.takeLock(agentId),
-				stopPorts: () => this.stopPorts(),
+				stopPorts: () => this.stops.stopPorts(),
 				toldNotMoved: keeps.notMoved,
 				notify: (agentId, text, mark, deliveryId) => this.notify(agentId, text, mark, deliveryId),
 				recordOutcome: (agentId, summary) => this.recordOutcome(agentId, summary),
@@ -421,63 +416,7 @@ export class BotSessionHost {
 	/** Takes the owner's stops waiting for the bot this host runs: false when its session is not loaded here or they failed. */
 	private takeStops(agentId: string): boolean {
 		const entry = this.entries.get(agentId);
-		return entry !== undefined && this.applyWaitingStops(agentId, entry).failure === undefined;
-	}
-
-	/**
-	 * Takes the owner's stops waiting for the bot whose session `entry` holds (`stopLoadedBot`), with what the stop ended;
-	 * a take that failed is told to the owner and tried again later.
-	 */
-	private applyWaitingStops(agentId: string, entry: BotSessionEntry): ReturnType<typeof stopLoadedBot> {
-		const taken = stopLoadedBot(
-			this.ports.agentDir(),
-			agentId,
-			entry,
-			(stop) => this.stopTurn(entry, stop),
-			this.stopPorts(),
-		);
-		if (taken.failure === undefined) {
-			this.stopRetries.forget(agentId);
-			this.stopTold.delete(agentId);
-			return taken;
-		}
-		const cause = botFailureCause(STOP_TAKE, agentId, taken.failure.cause);
-		if (this.stopTold.get(agentId) !== cause)
-			this.ports.warn(
-				interfaceText().botTeam.botStopNotApplied(agentId, botFailureText(agentId, taken.failure.cause)),
-			);
-		this.stopTold.set(agentId, cause);
-		this.stopRetries.arm(agentId, false);
-		return taken;
-	}
-
-	/**
-	 * Aborts the turn the bot's session works on, for the owner's stop `stop`: one recorded late (`scoped`) only when the
-	 * turn began by the time it was made (`turnSince`, the wall clock its `at` is on). The words given next wait for its end.
-	 */
-	private stopTurn(entry: BotSessionEntry, stop: OwnerStop): void {
-		if (!this.isBusy(entry)) return;
-		if (stop.scope.kind === "scoped" && (entry.turnSince === undefined || entry.turnSince > stop.at)) return;
-		entry.turnEnding = entry.session
-			.abort(interfaceText().botTeam.botTurnAbortReasons.ownerStopped)
-			.catch((error: unknown) =>
-				this.ports.warn(interfaceText().botTeam.botTurnFailed(entry.agentId, errorText(error))),
-			);
-	}
-
-	/**
-	 * What applying a stop reads: the owner's warnings, the provider admission clock a usage wait is dated on, and what the
-	 * owner was told of the work a stop left behind a symbolic link.
-	 */
-	private stopPorts(): BotStopPorts {
-		return {
-			warn: (message) => this.ports.warn(message),
-			now: () => this.ports.timers().port("provider-admission").now(),
-			routineClock: this.ports.timers().port("routines"),
-			links: this.keeps.links,
-			watches: () => this.ports.store(),
-			refuseMail: (agentId, origin, reason) => this.answers.refuse(agentId, origin, reason),
-		};
+		return entry !== undefined && this.stops.take(agentId, entry).failure === undefined;
 	}
 
 	/** Takes the messages written to the inbox of a bot this host runs; a failure reaches the owner as a warning. */
@@ -1074,13 +1013,13 @@ export class BotSessionHost {
 		// What the stop ends: a turn or input in flight, and every worker lane in flight (one waiting for its retry included).
 		const turn = entry.inFlight > 0 || entry.session.deliverablePendingMessageCount > 0 || state.busyBesideWorkers;
 		// Not taken from its record, the stop still ends the turn and own work; held in memory, it also applies whole.
-		const taken = unwritten === undefined ? this.applyWaitingStops(agentId, entry) : undefined;
+		const taken = unwritten === undefined ? this.stops.take(agentId, entry) : undefined;
 		const memory = taken?.stop || taken?.failure ? undefined : stop;
-		const [dir, end] = [this.ports.agentDir(), () => this.stopTurn(entry, stop)];
+		const [dir, end] = [this.ports.agentDir(), () => this.stops.endTurn(entry, stop)];
 		// What a failed take ended before it failed counts with what the fallback ends after it.
 		const rest = taken?.stop
 			? undefined
-			: endUnrecordedStopWork(dir, agentId, entry, end, memory, stopOperation(stop.at), this.stopPorts());
+			: endUnrecordedStopWork(dir, agentId, entry, end, memory, stopOperation(stop.at), this.stops.stopPorts());
 		if (unwritten !== undefined) this.ports.warn(interfaceText().botTeam.botStopNotRecordedHere(agentId, unwritten));
 		this.takeInbox(agentId);
 		return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };
@@ -1201,7 +1140,7 @@ export class BotSessionHost {
 			if (failures.length > 0) throw new AggregateError(failures, words.botSessionsNotClosed);
 		} finally {
 			this.inbox.stop();
-			this.stopRetries.stop();
+			this.stops.stop();
 			this.owed.stop();
 			this.releases.stop();
 			this.view.stop();
