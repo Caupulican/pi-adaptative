@@ -256,7 +256,10 @@ function retained(
 	return records.filter((record) => kept.has(record));
 }
 
-/** A watch's wakes with one more, the oldest delivered ones dropped past the bound. */
+/**
+ * A watch's wakes with one more, the oldest delivered ones dropped past the bound. At most one undelivered failing wake
+ * is ever recorded beside its one firing or end (`SessionWatchService`), so the undelivered ones never pass the bound.
+ */
 export function withWake(record: SessionWatchRecord, wake: SessionWatchWake): readonly SessionWatchWake[] {
 	const wakes = [...record.wakes, wake];
 	while (wakes.length > MAX_WATCH_WAKES) {

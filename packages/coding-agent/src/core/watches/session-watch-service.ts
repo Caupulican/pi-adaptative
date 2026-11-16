@@ -396,7 +396,10 @@ export class SessionWatchService implements WatchObservationStore {
 		}
 	}
 
-	/** Why one more watch may not be armed now, as a numeric bound: the end time, a live watch of the same id, the slots. */
+	/**
+	 * Why one more watch may not be armed now, as a numeric bound: the end time, a watch of the same id still live or still
+	 * owed a wake, the slots.
+	 */
 	private requireRoom(request: SessionWatchArmRequest): void {
 		const nowMs = this.deps.timers.now();
 		const hours = MAX_AGENT_WATCH_HORIZON_MS / 3_600_000;
@@ -405,6 +408,15 @@ export class SessionWatchService implements WatchObservationStore {
 		const live = this.deps.ledger.list().filter((record) => isLiveSessionWatch(record, nowMs));
 		if (live.some((record) => record.watchId === request.watchId))
 			throw new Error(`Watch ${request.watchId} is already armed; cancel it first or arm under another id.`);
+		// Arming an id replaces its record, so an ended watch's id is taken again only once its armer has had every wake.
+		if (
+			this.deps.ledger
+				.list()
+				.some((record) => record.watchId === request.watchId && record.wakes.some((wake) => !wake.delivered))
+		)
+			throw new Error(
+				`Watch ${request.watchId} ended and its wake is not delivered yet; arm under another id, or again once it is.`,
+			);
 		if (live.length + this.deps.legacyAgentWatches() >= MAX_AGENT_ARMED_WATCHES)
 			throw new Error(
 				`This session already holds ${MAX_AGENT_ARMED_WATCHES} watches, the most it may; cancel one or wait for one to fire or end.`,
@@ -496,6 +508,8 @@ export class SessionWatchService implements WatchObservationStore {
 		const nowMs = this.deps.timers.now();
 		const record = this.deps.ledger.get(failing.routineId);
 		if (!record || record.incarnationId !== failing.incarnationId || !isLiveSessionWatch(record, nowMs)) return;
+		// One failing wake is owed at a time: the armer hears the streak once, and the record stays within its wake bound.
+		if (record.wakes.some((wake) => wake.kind === "failing" && !wake.delivered)) return;
 		this.replace({
 			...record,
 			wakes: withWake(record, {

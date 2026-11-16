@@ -132,7 +132,8 @@ function routineWatchArmedAt(routine: Pick<PersistentRoutineDefinition, "created
  * delivery appended while the stop waited is delivered, not settled: it is marked by that input, as the delivery would
  * mark it, so it is never both. A watch armed after the stop, and what it fires, are the bot's later work and stay. What
  * it ended is told through `ports.warn` as it ends, failure or not, so a take that fails after it and is tried again,
- * which finds them ended, has told them once. The watches the session armed into its own `ledger` (`core/watches/`) end by
+ * which finds them ended, has told them once. The watches the session armed into its own ledger (`core/watches/`, built by
+ * `ledgerOf` inside the same failure path) end by
  * the same rule: armed by the stop, a live one is cancelled and every wake it is owed settled, one the transcript already
  * carries marked by that input; one armed after it stays. A failure throws.
  */
@@ -140,7 +141,7 @@ function endWatchesBeforeStop(
 	agentId: string,
 	sessionId: string,
 	transcript: StopNoteTranscript | undefined,
-	ledger: StopWatchLedger | undefined,
+	ledgerOf: () => StopWatchLedger | undefined,
 	stop: OwnerStop,
 	ports: Pick<BotStopPorts, "warn" | "now" | "watches">,
 ): void {
@@ -152,6 +153,7 @@ function endWatchesBeforeStop(
 	try {
 		// The session's watch ledger first: what it armed by the stop ends, and the wakes owed it are settled, a wake its
 		// transcript already carries (to the session, or to it for a worker that could not take it) marked by that input.
+		const ledger = ledgerOf();
 		if (ledger) {
 			const carried = (deliveryId: string) =>
 				transcript?.getParentInput(deliveryId) !== undefined ||
@@ -401,7 +403,7 @@ export function endUnrecordedStopWork(
 				agentId,
 				loaded.session.sessionId,
 				loaded.sessionManager,
-				loadedWatches(loaded),
+				() => loadedWatches(loaded),
 				stop,
 				ports,
 			);
@@ -573,7 +575,7 @@ export function stopLoadedBot(
 					agentId,
 					loaded.session.sessionId,
 					loaded.sessionManager,
-					loadedWatches(loaded),
+					() => loadedWatches(loaded),
 					taken,
 					ports,
 				);
@@ -782,7 +784,7 @@ function stopClosedSession(
 		declineUsageWaitForOwner(transcript, stop.at, now);
 	}
 	// The ledger beside the transcript is read only when the file is the bot's session: one beside another session's file is that session's.
-	const ledger =
+	const ledger = () =>
 		saved && transcript
 			? new SessionWatchLedger({
 					sessionId: saved.id,

@@ -801,7 +801,17 @@ export class BotSessionHost {
 			if (this.recheckIfIdle(entry)) return this.armIdle(entry);
 			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
 			const session = { id: entry.session.sessionId, file: entry.sessionManager.getSessionFile() };
-			if (owesWatchWork(this.ports.store(), session, this.idleTimers().now())) return this.armIdle(entry);
+			let owesWatches: boolean;
+			try {
+				owesWatches = owesWatchWork(this.ports.store(), session, this.idleTimers().now());
+			} catch (error) {
+				// What it is owed did not read: it stays loaded and is asked again at the next tick, the owner told once.
+				if (!this.toldWatchesNotCounted.has(entry.agentId))
+					this.ports.warn(interfaceText().botTeam.botWatchesNotCounted(entry.agentId, errorText(error)));
+				this.toldWatchesNotCounted.add(entry.agentId);
+				return this.armIdle(entry);
+			}
+			if (owesWatches) return this.armIdle(entry);
 			// Its workers' owed execution (queued work, a retry due, a lease to take back) runs only while it is loaded.
 			const { orchestrationHome } = entry.sessionManager.getStorageRoots();
 			if (this.owed.owesLoadedExecution(entry.agentId, orchestrationHome, entry.session.sessionId))

@@ -63,7 +63,8 @@ import {
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
 /**
- * Whether the bot session has watch work, as the store and the session's watch ledger (`core/watches/`) say now: a live
+ * Whether the bot session has watch work, as the store and the session's watch ledger (`core/watches/`) say now (a ledger
+ * that exists and does not read throws, for the caller to tell and ask again): a live
  * watch to sample, or a firing or end whose wake it has not yet taken (a one-shot that fired is no longer live, and its
  * wake is delivered only by its own session). A session with no file yet holds no ledger.
  */
@@ -918,7 +919,13 @@ export class BotOwedWork {
 			return;
 		}
 		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
-		const watching = worked !== undefined && owesWatchWork(ports.store(), worked, ports.timers().now());
+		let watching = false;
+		try {
+			watching = worked !== undefined && owesWatchWork(ports.store(), worked, ports.timers().now());
+		} catch (error) {
+			// Its watch ledger did not read: the rest it is owed is still asked, and the owner told why.
+			notResumed(error);
+		}
 		// Stops that did not list may hold back any of its work: it waits, and the owner is told why once (a held stop that
 		// failed to apply told it already).
 		if (stopNames === undefined) {
