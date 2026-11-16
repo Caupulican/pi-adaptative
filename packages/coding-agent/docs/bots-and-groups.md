@@ -190,7 +190,11 @@ the directory it worked in, and the session's own continuation carries the goal 
 stopped waits for the usage reset instead; one the owner's stop held waits for the owner's next words. A session that closed holding
 a goal it had taken up is not opened again for that goal, only for another goal or a later change of it. When the spend of
 the request a bot's turn serves reaches one of its dollar bounds, the turn stops and its running goal is held (`blocked`,
-reason `spend_bound:`): no automatic recovery resumes it, and the owner's next words, which open a new request, do.
+reason `spend_bound:`); a turn stopped at its time bound (`workerDelegation.maxWallClockMs`) holds it with `time_bound:`,
+and one System One's supervision stops with `supervision_stop:`. An aborted turn arms no continuation, so no stop leaves
+the goal running with nothing to continue it: no automatic recovery or usage reset resumes such a hold, and the owner's
+next words do. None of these holds, nor the owner's stop, counts as a provider failure toward a goal's automatic
+recovery allowance.
 
 A bot's own session runs the proactive review the main session runs (the research lane stays the main session's): once
 it has been idle for `proactivity.idleDelayMs` after `proactivity.minOwnerTurnsBetweenRuns` new owner turns, a review
@@ -211,7 +215,7 @@ Where a bot's goal is read:
 | `bot-stop.ts` | the loaded session's goal, or the closed transcript's | the owner's stop holds it until the owner's next words |
 | the session's goal controller | its own goal | continuation, and its restore when the session loads |
 | the proactive review (`proactivity-controller.ts`) | the loaded session's goal | the summary the review weighs, and whether its result is still current |
-| `bot-session-turns.ts` | the loaded session's goal | the hold at a spend bound |
+| `stopSessionTurn` (`session-turn-boundary.ts`) | the loaded session's goal | the hold of a turn stopped at its spend or time bound or by its supervision |
 
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is

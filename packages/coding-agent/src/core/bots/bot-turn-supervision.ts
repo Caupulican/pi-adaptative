@@ -2,7 +2,8 @@
  * Live supervision of a bot's own session, as a worker's attempt is supervised: one observation per tool call a turn
  * executes (`ProgressObservationWindow`), judged by the same coordinator and supervisor (`createSupervision`), with the
  * session's own turn as the levers. A steer reaches the running turn at its next model step ("queue"), or interrupts it
- * and opens the next turn on the directive ("now"); a stop ends the turn. A verdict that settles after its turn ended is
+ * and opens the next turn on the directive ("now"); a stop ends the turn and holds the goal it served (`stopSessionTurn`,
+ * `supervision_stop:`), which the owner's next words resume. A verdict that settles after its turn ended is
  * stale and applies nothing. A turn is the one `observeSessionTurns` draws (an automatic retry's attempts are the same
  * turn, observed in one window): the host has it observe the session's turns (`started`, `ended`), feeds the events inside
  * a turn in (`observe`) and stops it when the session closes.
@@ -12,9 +13,10 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { createSupervision } from "../agent-session-composition.ts";
 import type { AgentSessionEvent } from "../agent-session-contracts.ts";
+import { HELD_GOAL_STOP_PREFIXES } from "../goals/goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
-import type { SessionTurnObserver } from "../session-turn-boundary.ts";
+import { type SessionTurnObserver, stopSessionTurn } from "../session-turn-boundary.ts";
 import { assistantOutputTail, ProgressObservationWindow } from "../supervision/progress-observation-window.ts";
 import type { WorkerSupervisionCoordinator } from "../supervision/worker-supervision-coordinator.ts";
 
@@ -33,6 +35,9 @@ type SupervisedSession = Pick<
 	| "getDecisionLedger"
 	| "sendCustomMessage"
 	| "abort"
+	| "selfCompactionHandoff"
+	| "getGoalStateSnapshot"
+	| "saveGoalStateSnapshot"
 >;
 
 export interface BotTurnSupervisionOptions {
@@ -41,6 +46,8 @@ export interface BotTurnSupervisionOptions {
 	readonly role: WorkerRole;
 	readonly cwd: string;
 	warn(message: string): void;
+	/** The hold of the goal a stopped turn served did not save (`stopSessionTurn`). */
+	holdFailed(error: unknown): void;
 }
 
 interface SupervisedTurn {
@@ -78,7 +85,15 @@ export class BotTurnSupervision implements SessionTurnObserver {
 			getSteeringPlane: () => session.steeringPlane,
 			control: {
 				steerWorker: (_agentId, directive, delivery) => this.steer(directive, delivery ?? "queue"),
-				cancelWorker: (_agentId) => session.abort(interfaceText().botTeam.botTurnAbortReasons.systemOneStopped),
+				cancelWorker: (_agentId) =>
+					stopSessionTurn(
+						session,
+						{
+							reason: interfaceText().botTeam.botTurnAbortReasons.systemOneStopped,
+							goalHold: `${HELD_GOAL_STOP_PREFIXES.supervisionStop} System One stopped the turn for not making progress`,
+						},
+						options.holdFailed,
+					),
 			},
 			emit: (event) => {
 				if (event.type === "warning") options.warn(event.message);

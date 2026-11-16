@@ -17,6 +17,7 @@
 
 import type { AgentSession } from "./agent-session.ts";
 import { isInterruptedAssistantStopReason } from "./agent-session-contracts.ts";
+import { stopPersistedGoalFromSystem } from "./goals/goal-lifecycle.ts";
 
 export interface SessionTurnObserver {
 	/** A turn began. */
@@ -76,14 +77,31 @@ export function observeSessionTurns(
 	};
 }
 
+/** A stop of a turn from outside its model: at a bound of the session's, or by its supervision. */
+export interface SessionTurnStop {
+	/** The owner-facing reason the run is aborted with. */
+	readonly reason: string;
+	/** The reason the goal the turn served is held with: a `HELD_GOAL_STOP_PREFIXES` prefix, then English for the model. */
+	readonly goalHold: string;
+}
+
 /**
- * Stops the turn at a bound: its self-compaction handoff ends first (the saved note is released), then the run is
- * aborted with `reason`, so the stop is not a pause a later run of any origin continues under a fresh budget.
+ * Stops the turn at a bound: the goal it served is held first (a running goal is stopped from the system, blocked with
+ * `stop.goalHold`), its self-compaction handoff ends (the saved note is released), then the run is aborted with
+ * `stop.reason`, so the stop is not a pause a later run of any origin continues under a fresh budget. An aborted turn arms
+ * no continuation, so the hold is what keeps the goal from being left running with nothing to continue it: the owner's
+ * next words resume it. A hold that does not save is told through `holdFailed`; the turn is stopped either way.
  */
 export function stopSessionTurn(
-	session: Pick<AgentSession, "abort" | "selfCompactionHandoff">,
-	reason: string,
+	session: Pick<AgentSession, "abort" | "selfCompactionHandoff" | "getGoalStateSnapshot" | "saveGoalStateSnapshot">,
+	stop: SessionTurnStop,
+	holdFailed: (error: unknown) => void,
 ): Promise<void> {
-	session.selfCompactionHandoff.stop(reason);
-	return session.abort(reason);
+	try {
+		stopPersistedGoalFromSystem(session, { status: "blocked", reason: stop.goalHold });
+	} catch (error) {
+		holdFailed(error);
+	}
+	session.selfCompactionHandoff.stop(stop.reason);
+	return session.abort(stop.reason);
 }

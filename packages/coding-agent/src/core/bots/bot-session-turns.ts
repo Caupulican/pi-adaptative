@@ -11,7 +11,6 @@
 import { type AgentMessage, safeErrorMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, type SpendExcess } from "../cost/session-turn-spend-bound.ts";
-import { stopPersistedGoalFromSystem } from "../goals/goal-lifecycle.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
@@ -67,6 +66,8 @@ export function observeBotSessionTurns(
 ): () => void {
 	const { agentId } = ports;
 	const words = () => interfaceText().botTeam;
+	// A stopped turn holds the goal it served (`stopSessionTurn`); a hold that does not save is told in the bot's chat.
+	const holdFailed = (error: unknown) => ports.notify(words().botWarning(agentId, safeErrorMessage(error)));
 	const unsubscribeSpend = boundSessionTurnSpend(session, {
 		openingExceeded: (opening, turnUsd) => ports.openingExceeded(opening, turnUsd),
 		exceeded: (turnUsd, addedUsd) => ports.exceeded(turnUsd, addedUsd),
@@ -79,11 +80,9 @@ export function observeBotSessionTurns(
 				limit.meteredOnly,
 			);
 			ports.notify(reason);
-			holdGoalAtSpendBound(session, spentUsd, limit, (error) =>
-				ports.notify(words().botWarning(agentId, safeErrorMessage(error))),
-			);
 			return reason;
 		},
+		holdFailed,
 	});
 	// A turn is bounded in time as a worker's run is, by the owner's workerDelegation.maxWallClockMs as it is now.
 	const unsubscribeTime = boundSessionTurnTime(session, ports.timers, {
@@ -93,6 +92,7 @@ export function observeBotSessionTurns(
 			ports.notify(reason);
 			return reason;
 		},
+		holdFailed,
 	});
 	// Its tool loop is supervised as a worker's is: churn and System One's progress judgment, over its own turn.
 	const supervision = new BotTurnSupervision(session, {
@@ -100,6 +100,7 @@ export function observeBotSessionTurns(
 		role: ports.role,
 		cwd: ports.cwd,
 		warn: (message) => ports.notify(words().botWarning(agentId, message)),
+		holdFailed,
 	});
 	const unsubscribeEvents = session.subscribe((event) => {
 		supervision.observe(event);
@@ -132,25 +133,4 @@ export function observeBotSessionTurns(
 		unsubscribeEvents();
 		supervision.stop();
 	};
-}
-
-/**
- * The bot's running goal held where its request's spend reached a bound (`blocked`, `spend_bound:`): the turn the bound
- * stops would otherwise leave it running, and every continuation it arms after is stopped at its opening by the same
- * request's spend. No automatic recovery resumes that reason; the owner's next words do (`applyDeliveredOwnerPrompt`), as
- * they open a new request. A goal that does not run is left as it is. A save that fails is told through `failed`; the turn
- * is stopped either way.
- */
-function holdGoalAtSpendBound(
-	session: AgentSession,
-	spentUsd: number,
-	limit: BotSpendCeiling,
-	failed: (error: unknown) => void,
-): void {
-	const reason = `spend_bound: the request this turn served spent $${spentUsd.toFixed(2)} of its $${limit.usd.toFixed(2)} ${limit.bound} bound${limit.meteredOnly ? " on metered models" : ""}`;
-	try {
-		stopPersistedGoalFromSystem(session, { status: "blocked", reason });
-	} catch (error) {
-		failed(error);
-	}
 }

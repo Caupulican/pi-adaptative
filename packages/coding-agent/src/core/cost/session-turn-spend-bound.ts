@@ -23,6 +23,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
+import { HELD_GOAL_STOP_PREFIXES } from "../goals/goal-state.ts";
 import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { observeSessionTurns, stopSessionTurn } from "../session-turn-boundary.ts";
 
@@ -67,6 +68,8 @@ export interface SessionTurnSpendBound<Limit extends SpendLimit> {
 	exceeded(turnUsd: number, addedUsd: number): SpendExcess<Limit> | undefined;
 	/** The spend went past `limit`: the reason its turn is aborted with. */
 	onExceeded(spentUsd: number, limit: Limit): string;
+	/** The hold of the goal the stopped turn served did not save (`stopSessionTurn`). */
+	holdFailed(error: unknown): void;
 }
 
 /** The turn's own spend past `limit`; undefined within it, or when no bound applies. */
@@ -87,7 +90,13 @@ interface SubmissionSpend {
 export function boundSessionTurnSpend<Limit extends SpendLimit>(
 	session: Pick<
 		AgentSession,
-		"subscribe" | "abort" | "selfCompactionHandoff" | "nativeActivity" | "getRecordedCompactionUsd"
+		| "subscribe"
+		| "abort"
+		| "selfCompactionHandoff"
+		| "nativeActivity"
+		| "getRecordedCompactionUsd"
+		| "getGoalStateSnapshot"
+		| "saveGoalStateSnapshot"
 	>,
 	bound: SessionTurnSpendBound<Limit>,
 ): () => void {
@@ -127,7 +136,10 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 		return bound.exceeded(turnUsd, addedUsd);
 	};
 	const enforce = (excess: SpendExcess<Limit> | undefined) => {
-		if (excess) void stopSessionTurn(session, bound.onExceeded(excess.spentUsd, excess.limit));
+		if (!excess) return;
+		const reason = bound.onExceeded(excess.spentUsd, excess.limit);
+		const goalHold = `${HELD_GOAL_STOP_PREFIXES.spendBound} the spend this turn counts reached $${excess.spentUsd.toFixed(2)} of its $${excess.limit.usd.toFixed(2)} bound`;
+		void stopSessionTurn(session, { reason, goalHold }, bound.holdFailed);
 	};
 	const unsubscribeSpend = session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {

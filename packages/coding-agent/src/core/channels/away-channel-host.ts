@@ -33,6 +33,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
+import { safeErrorMessage } from "../../kernel/types.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
@@ -572,6 +573,11 @@ export class AwayChannelHosts {
 				});
 				return `a channel turn away spent past routines.away.maxUsdPerRun ($${perRun.toFixed(2)})`;
 			},
+			holdFailed: (error) =>
+				harnessLog.warn("channels", "the goal of a channel turn away stopped at its spend bound was not held", {
+					channel: name,
+					error: safeErrorMessage(error),
+				}),
 		});
 		const unsubscribeActivity = session.subscribe((event) => {
 			if (event.type === "agent_end") for (const listener of activity) listener();

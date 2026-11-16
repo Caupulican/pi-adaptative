@@ -43,6 +43,25 @@ export const MAX_GOAL_CLARIFICATION_ANSWER_LENGTH = 240;
  */
 export const MAX_CONSUMED_RUNAWAY_SIGNATURES = 16;
 
+/**
+ * The reason prefixes of a goal held by a stop of its session's own work: the owner's stop of a bot, and a turn stopped at
+ * its dollar or time bound or by its supervision. Each is a system stop that no automatic recovery or usage reset resumes
+ * and the owner's next delivered words do; none is a provider failure, so none counts toward `systemFailureStreak`.
+ */
+export const HELD_GOAL_STOP_PREFIXES = {
+	ownerStop: "owner_stop:",
+	spendBound: "spend_bound:",
+	timeBound: "time_bound:",
+	supervisionStop: "supervision_stop:",
+} as const;
+
+/** Whether `reason` is the reason of a goal held by a stop of its session's own work (`HELD_GOAL_STOP_PREFIXES`). */
+export function isHeldGoalStopReason(reason: string | undefined): boolean {
+	return (
+		typeof reason === "string" && Object.values(HELD_GOAL_STOP_PREFIXES).some((prefix) => reason.startsWith(prefix))
+	);
+}
+
 /** A system stop reason produced by a bounded harness guard (runaway/stagnant tool loop). */
 export function isRunawayStopReason(reason: string | undefined): boolean {
 	return (
@@ -1104,7 +1123,8 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				const isNonProviderSystemStop =
 					event.reason.startsWith("goal_tool_unavailable:") ||
 					event.reason.startsWith("provider_turn_limit:") ||
-					isRunawayStopReason(event.reason);
+					isRunawayStopReason(event.reason) ||
+					isHeldGoalStopReason(event.reason);
 				if (!isNonProviderSystemStop) {
 					newState.systemFailureStreak = (state.systemFailureStreak ?? 0) + 1;
 				}
