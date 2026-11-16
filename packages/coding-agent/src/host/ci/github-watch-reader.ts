@@ -7,7 +7,7 @@
  * checkout's repository and CI workflow as the source's own subjects are.
  */
 import type { CiAttemptIdentity, CiSubject } from "../../core/events/host-event-contract.ts";
-import { OWNER_STOP_CLOCK } from "../../core/util/timer-port.ts";
+import { monotonicNow } from "../../core/util/timer-port.ts";
 import type {
 	GithubCreatedRun,
 	GithubPolledSource,
@@ -94,11 +94,11 @@ export class GithubWatchHostReader implements GithubWatchReader {
 	}
 
 	/**
-	 * `instant` (on the system clock, `OWNER_STOP_CLOCK`) on GitHub's own clock: GitHub's time as a response it sends now
-	 * states it (its `Date`, whole seconds), less the time elapsed on the system clock since `instant`. GitHub stamped that
-	 * time at or before the response arrived, so the result is never later than GitHub's time at `instant`: what GitHub
-	 * created after `instant` is never taken for older. Only an elapsed time is read from the system clock, never compared
-	 * with GitHub's.
+	 * `instant` (on the process's monotonic clock, `monotonicNow`) on GitHub's own clock: GitHub's time as a response it
+	 * sends now states it (its `Date`, whole seconds), less the time elapsed on the monotonic clock since `instant`. GitHub
+	 * stamped that time at or before the response arrived, so the result is never later than GitHub's time at `instant`:
+	 * what GitHub created after `instant` is never taken for older. No wall clock of this machine is read, so a jump of the
+	 * system clock moves nothing.
 	 */
 	private async githubInstant(
 		host: string | undefined,
@@ -111,7 +111,7 @@ export class GithubWatchHostReader implements GithubWatchReader {
 			["api", "--include", ...(host === undefined ? [] : ["--hostname", host]), `repos/${name}`],
 			signal,
 		);
-		const elapsed = Math.max(0, OWNER_STOP_CLOCK.now() - instant);
+		const elapsed = Math.max(0, monotonicNow() - instant);
 		const [headers = ""] = response.split(/\r?\n\r?\n/u, 1);
 		const stated = /^date:[ \t]*(.+?)[ \t]*\r?$/imu.exec(headers)?.[1];
 		const githubNow = stated === undefined ? Number.NaN : Date.parse(stated);

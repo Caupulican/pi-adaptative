@@ -276,10 +276,10 @@ export interface GithubWatchReader {
 	failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined>;
 	/**
 	 * The runs of one repository (`repo` absent: the checkout's) GitHub created since `since`, the newest first, at most one
-	 * listing's worth; `narrow` keeps one workflow's, one branch's or one event's. `since` is an instant on the system clock
-	 * (`OWNER_STOP_CLOCK`, epoch ms); the reader places it on GitHub's own clock ({@link GithubWatchReader} implementations
-	 * read GitHub's time from its response), so the system clock is never compared with GitHub's creation times, and a run
-	 * created after `since` is never left out.
+	 * listing's worth; `narrow` keeps one workflow's, one branch's or one event's. `since` is an instant on the process's
+	 * monotonic clock (`monotonicNow`); the reader places it on GitHub's own clock (GitHub's time read from its response,
+	 * less the monotonic time elapsed since), so no clock of this machine is compared with GitHub's creation times, and a
+	 * run created after `since` is never left out.
 	 */
 	runsCreatedSince(
 		repo: string | undefined,
@@ -288,7 +288,7 @@ export interface GithubWatchReader {
 		signal: AbortSignal,
 	): Promise<readonly GithubCreatedRun[]>;
 	/**
-	 * Whether GitHub created the release of `tag` before `since` (a system clock instant, placed on GitHub's clock as
+	 * Whether GitHub created the release of `tag` before `since` (a monotonic instant, placed on GitHub's clock as
 	 * {@link runsCreatedSince} places it); false while there is none.
 	 */
 	releasedBefore(repo: string | undefined, tag: string, since: number, signal: AbortSignal): Promise<boolean>;

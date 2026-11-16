@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
-import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
+import { monotonicNow, type TimerPort } from "../util/timer-port.ts";
 import { NO_CI_SOURCE, NO_READER } from "./github-watch-poller.ts";
 import {
 	describeGithubWatchSource,
@@ -118,7 +118,7 @@ interface StartedCall {
 	/** Set when the call starts in a session that holds watches. */
 	readonly context?: AutoArmContext;
 	/**
-	 * When the call began, on the system clock (`OWNER_STOP_CLOCK`): the reader of GitHub places it on GitHub's own clock
+	 * When the call began, on the process's monotonic clock (`monotonicNow`): the reader of GitHub places it on GitHub's clock
 	 * (`GithubWatchReader.runsCreatedSince`), so a run or release GitHub created before it was not started by the call.
 	 */
 	readonly startedAt: number;
@@ -350,7 +350,7 @@ export class WatchAutoArm {
 			this.started.set(toolCallId, {
 				...call,
 				context: port.armingContext(),
-				startedAt: OWNER_STOP_CLOCK.now(),
+				startedAt: monotonicNow(),
 			});
 	}
 

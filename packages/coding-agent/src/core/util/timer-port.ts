@@ -125,3 +125,11 @@ export const SYSTEM_TIMER_SOURCE: TimerSource = { port: () => SYSTEM_TIMER_PORT,
  * one clock both read is the system clock; a watch's deadline and samples stay on the `routines` port.
  */
 export const OWNER_STOP_CLOCK: TimerPort = SYSTEM_TIMER_PORT;
+
+/**
+ * Milliseconds on the process's monotonic clock (`performance.now()`): a time elapsed between two of its readings is not
+ * moved by a jump of the system clock. Its instants mean nothing outside the process that read them.
+ */
+export function monotonicNow(): number {
+	return performance.now();
+}
