@@ -60,7 +60,7 @@ const OVER_USAGE = priced(6000, 600, 1.5);
 /** The root's worker bound: a bot's request is held to it, and only the fourth reply passes it. */
 const CEILING_USD = 1;
 /** The stop the product tells the owner in the bot's chat (text-en/bot-team.ts `botTurnOverBudget`), whole. */
-const OVER_BOUND = `Bot ${SPENDER}: its turn was stopped at the spend bound ($${OVER_USAGE.cost.total.toFixed(2)} spent on this request, its workers included; workerDelegation.maxUsd is $${CEILING_USD.toFixed(2)}).`;
+const OVER_BOUND = `Bot ${SPENDER}: its turn was stopped at the spend bound ($${OVER_USAGE.cost.total.toFixed(2)} spent on metered models on this request, its workers included; workerDelegation.maxUsd on metered spend is $${CEILING_USD.toFixed(2)}).`;
 
 /** The `through` of every charge mark in the bot's own transcript, oldest first. */
 function chargeMarks(world: HarnessWorld): unknown[] {

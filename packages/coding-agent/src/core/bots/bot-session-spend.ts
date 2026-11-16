@@ -7,7 +7,9 @@
  *
  * A ceiling counts the spend it is set on: one on all spend counts the window's whole spend, a metered-only one the part
  * of it made on metered models (the bot's own on its model, which a pinned bot never leaves, and each worker's on its
- * attempt's). A subscription bot's turns are held to the ceilings on all spend only; its metered workers' runs to both.
+ * attempt's). The bot's turns are held to every ceiling on metered spend alone (`botSpendCeilingsOn`): the owner's cost
+ * rule holds API spend at its dollar bound and lets a subscription's spend run while its plan's usage windows have room,
+ * waiting for their reset once they do not.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -44,11 +46,13 @@ function botSpendCeilings(
 }
 
 /**
- * The ceilings that hold spend made on `model`: every one on all spend, and the metered-only ones when that spend is
- * metered. A model the registry does not know (undefined) is held as metered spend, which is never laxer. A subscription
- * model that declares no price is held by none: its spend cannot be priced, and its usage windows hold it, as they hold
- * the bot's workers on such a model (`RunCostBound.unpriced` "unbounded"). A metered one keeps every ceiling: real dollars
- * are spent, so a ceiling that applies refuses it (`BotSessionHost.modelRefusal`), as it refuses the root's workers.
+ * The ceilings that hold the bot's spend when its session runs on `model`: every one, each on metered spend alone, by the
+ * owner's cost rule (a dollar bound holds API spend; a subscription's spend runs while its plan's usage windows have room
+ * and waits for their reset, never for a dollar bound). So a subscription bot's turns are held only by what its metered
+ * workers spent in the request, and a metered bot's by its own spend and theirs. A model the registry does not know
+ * (undefined) is held as metered spend, which is never laxer. A subscription model that declares no price is held by none,
+ * as its usage windows hold the bot's workers on such a model (`RunCostBound.unpriced` "unbounded"). A metered one that
+ * declares no price is refused while a ceiling holds it (`BotSessionHost.modelRefusal`), as it refuses the root's workers.
  */
 export function botSpendCeilingsOn(
 	root: readonly BotSpendCeiling[],
@@ -56,9 +60,10 @@ export function botSpendCeilingsOn(
 	model: Model<Api> | undefined,
 	registry: ModelRegistry,
 ): BotSpendCeiling[] {
-	const metered = isMeteredSpend(model, registry);
-	if (model?.costDefaulted && !metered) return [];
-	return botSpendCeilings(root, spendBudget).filter((ceiling) => metered || !ceiling.meteredOnly);
+	if (model?.costDefaulted && !isMeteredSpend(model, registry)) return [];
+	return botSpendCeilings(root, spendBudget).map((ceiling) =>
+		ceiling.meteredOnly ? ceiling : { ...ceiling, meteredOnly: true },
+	);
 }
 
 /** What a bot session's spend reads from its host. */

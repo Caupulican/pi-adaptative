@@ -23,7 +23,8 @@ import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 /**
  * One dollar ceiling over a bot's spend per request, with the setting that sets it (the owner's worker bound, the main
  * session's, or the bot's profile's): on all of it, or (`meteredOnly`) on the part of it made on metered models, which a
- * subscription's spend never reaches (its limit is its plan's usage windows).
+ * subscription's spend never reaches (its limit is its plan's usage windows). A bot's turns are held to every ceiling on
+ * metered spend alone (`botSpendCeilingsOn`).
  */
 export interface BotSpendCeiling {
 	readonly usd: number;

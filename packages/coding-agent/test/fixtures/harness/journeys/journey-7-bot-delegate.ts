@@ -113,7 +113,7 @@ const BOUNDED_WORKER_USAGE = priced(3000, 300, 0.75);
 /** The bot's priced answer to its worker's handoff: with the worker's spend, it takes the request past the bound. */
 const BOUNDED_ANSWER_USAGE = priced(2000, 200, 0.5);
 /** The stop the product tells the owner in the bot's chat (text-en/bot-team.ts `botTurnOverBudget`), whole. */
-const OVER_BOUND = `Bot ${BOUNDED_DELEGATOR}: its turn was stopped at the spend bound ($${(BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total).toFixed(2)} spent on this request, its workers included; workerDelegation.maxUsd is $${WORKER_BOUND_USD.toFixed(2)}).`;
+const OVER_BOUND = `Bot ${BOUNDED_DELEGATOR}: its turn was stopped at the spend bound ($${(BOUNDED_WORKER_USAGE.cost.total + BOUNDED_ANSWER_USAGE.cost.total).toFixed(2)} spent on metered models on this request, its workers included; workerDelegation.maxUsd on metered spend is $${WORKER_BOUND_USD.toFixed(2)}).`;
 
 /** The stable agent id a `delegate start` result names, read out of the result the bot's next request carries. */
 function startedAgentId(request: ScriptedRequest): string {

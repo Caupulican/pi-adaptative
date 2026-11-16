@@ -53,9 +53,12 @@ each outside input it serves (your message, a message its inbox took, a watch's 
 serving it, the handoff turns its workers' results open and those workers' runs (a plan's steps included, however much
 later each is released, and the turns its plan's updates open) share its dollar ceilings, each when set:
 `workerDelegation.maxUsd`, the main session's own ceiling and a profile's `maxCostUsd` on all of the window's spend, and
-the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models. A
-turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes a ceiling that
-holds the bot's model, and a turn a worker's handoff opens into a window already past one is stopped before its first
+the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models.
+The bot's turns are held to every one of them on metered (API) spend alone: a subscription's spend runs on while its
+plan's usage windows have room and waits for their reset, never for a dollar bound, so a subscription bot's turn is
+stopped only by what its metered workers spent in the request. A turn is stopped once the window's metered spend (its own
+and its workers', from the delegation ledger) passes a ceiling, its running goal is held there (`blocked`,
+`spend_bound:`) until your next words, and a turn a worker's handoff opens into a window already past one is stopped before its first
 request; the window's workers share each ceiling less what the bot's turns spent in the window on the
 spend it counts (a metered worker the metered-only ones too, so a subscription bot's own turns never use up the metered
 ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
