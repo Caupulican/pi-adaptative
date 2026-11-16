@@ -112,6 +112,17 @@ type StopNoteTranscript = Pick<SessionManager, "appendCustomEntry" | "isEntryDur
 export const BOT_STOP_UNNOTED_MARKER_PREFIX = "bot-stop-unnoted:";
 
 /**
+ * When a routine watch of a bot's session was armed, read on the clock its stop is dated on (`OWNER_STOP_CLOCK`). Only an
+ * earlier build armed one there: this build arms a session's own waits into its watch ledger, on that clock, and saves no
+ * routine watch for a bot's session (its session holds no `routine` tool, and `task_watch` arms into the ledger). That
+ * build stamped `createdAt` on its `routines` clock, which every shipped build ran on the system clock, the one
+ * `OWNER_STOP_CLOCK` reads, so the stamp keeps its meaning and the stop compares it on one clock.
+ */
+function routineWatchArmedAt(routine: Pick<PersistentRoutineDefinition, "createdAt">): number {
+	return Date.parse(routine.createdAt);
+}
+
+/**
  * What bot `agentId`'s session `sessionId` armed or was fired for before the owner's stop made at `stop.at`, ended by it:
  * every watch the session holds that was armed at or before then is deleted (`deleteRoutine`, which also cancels its runs
  * not yet dispatched), and every result it has not taken that was fired for it at or before then, or fired since by one of
@@ -136,7 +147,7 @@ function endWatchesBeforeStop(
 	const store = ports.watches();
 	const now = ports.now();
 	const armedBefore = (routine: Pick<PersistentRoutineDefinition, "schedule" | "createdAt">) =>
-		isWatchSchedule(routine.schedule) && Date.parse(routine.createdAt) <= stop.at;
+		isWatchSchedule(routine.schedule) && routineWatchArmedAt(routine) <= stop.at;
 	let [ended, settled] = [0, 0];
 	try {
 		// The session's watch ledger first: what it armed by the stop ends, and the wakes owed it are settled, a wake its
