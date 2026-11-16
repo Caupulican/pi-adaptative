@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Changed
+
+- Admitted the reviewed Claude Code `2.1.326` image and packaged its CLI identity. The OAuth client, endpoints, and six active inference scopes are unchanged. The image's own production config registers `user:privacy_consents:write`; Pi does not add that scope.
+- Admitted the reviewed AGY `1.5.9` image and packaged its CLI identity. Consumer OAuth, the redirect, the token host, and the Carbon and Hydrogen catalog aliases are unchanged.
+- Packaged Grok CLI identity is `1.0.77`, the installed stable-channel image. The reviewed `1.0.85` image stays admitted. The ordinary-consumer client, its ten scopes, and the separate Team scope set are unchanged.
+- The Codex client pin is `0.171.0-alpha.9` at checkout `b08fd8a6f175b932b9abd0df68b1fc5ba7674ea9`. The Codex catalogue slugs are unchanged, and the generated model catalog was refreshed from the current provider listings.
+
 ## [0.104.66] - 2026-11-16
 
 ## [0.104.65] - 2026-11-15
