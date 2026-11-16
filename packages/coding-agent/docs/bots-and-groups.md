@@ -180,6 +180,25 @@ unfinished goal as the operator bar marks the root's (`◎`, with `satisfied/tot
 accent while it runs and warning while it waits), read from the loaded session in the process hosting the bot and from the
 bot's saved session file in every other, and the mark follows each change of the goal.
 
+A bot's unfinished goal continues on its own, as the root's does, where the settings its session opens with let a goal
+continue (`goalAutoContinue`). A closed bot whose saved session holds a goal its load would take up (a running goal, or
+one a stop the system's own recovery resumes held) is owed work: the process that finds it unhosted opens its session in
+the directory it worked in, and the session's own continuation carries the goal on until it settles. A goal a usage limit
+stopped waits for the usage reset instead; one the owner's stop paused waits for the owner. A session that closed holding
+a goal it had taken up is not opened again for that goal, only for another goal or a later change of it. When the spend of
+the request a bot's turn serves reaches one of its dollar bounds, the turn stops and its running goal is held (`blocked`,
+reason `spend_bound:`): no automatic recovery resumes it, and the owner's next words, which open a new request, do.
+
+Where a bot's goal is read:
+
+| Reader | What it reads | Why |
+| --- | --- | --- |
+| `BotSessionHost.goalOf`, `BotRemoteView.savedGoalOf` | the loaded session's goal, else the saved session file's | the roster, `/bot list`, the selector, the chat badge and the Chats & Teams pane |
+| `SavedSessionLedger` (`bot-owed-ledgers.ts`) | the saved session file of a closed bot | its usage wait, whether its goal is owed, and the goal it closed holding |
+| `bot-stop.ts` | the loaded session's goal, or the closed transcript's | the owner's stop pauses it |
+| the session's goal controller | its own goal | continuation, and its restore when the session loads |
+| `bot-session-turns.ts` | the loaded session's goal | the hold at a spend bound |
+
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is
 on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a

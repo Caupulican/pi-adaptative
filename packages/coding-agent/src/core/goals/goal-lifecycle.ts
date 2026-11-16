@@ -152,6 +152,29 @@ export function planSystemGoalResume(
 	return resumed.ok ? resumed.state : undefined;
 }
 
+/**
+ * Whether a session restored holding `goal` takes it up on its own (`restoreAfterResume`): it runs, or a system stop the
+ * system's own recovery resumes holds it (`planSystemGoalResume`, source `"system"`). A goal a usage or rate limit stopped
+ * waits for the usage reset instead (`goalUsageStop`), which the caller reads first.
+ */
+export function goalResumesOnRestore(goal: GoalState, now: string): boolean {
+	return isGoalExecutionActive(goal.status) || planSystemGoalResume(goal, now, "system") !== undefined;
+}
+
+/**
+ * A system stop of the persisted goal while it runs (`stopGoalFromSystem`), saved against the revision it was read at;
+ * undefined when no goal runs.
+ */
+export function stopPersistedGoalFromSystem(
+	host: PersistedGoalStateHost,
+	stop: GoalSystemStop,
+	now = new Date().toISOString(),
+): GoalActionResult | undefined {
+	const current = host.getGoalStateSnapshot();
+	if (!current || !isGoalExecutionActive(current.status)) return undefined;
+	return persistResult(host, current, stopGoalFromSystem(current, stop, now));
+}
+
 /** A runaway signature resumes once and never once the consumed set is full; a provider failure once per streak. */
 function isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean {
 	if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {

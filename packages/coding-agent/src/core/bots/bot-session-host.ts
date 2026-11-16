@@ -87,12 +87,13 @@ import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
+import type { SavedUsageResumeRules } from "./bot-owed-ledgers.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRelease } from "./bot-release.ts";
 import { BotRemoteView, remoteHostActive, savedSessionFile } from "./bot-remote-view.ts";
 import { BotSessionAdmission } from "./bot-session-admission.ts";
 import { type BotSessionEntry, BotSessionLoader } from "./bot-session-load.ts";
-import { BotOwedWork, owesWatchWork, type SavedUsageResumeRules } from "./bot-session-owed-work.ts";
+import { BotOwedWork, owesWatchWork } from "./bot-session-owed-work.ts";
 import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
@@ -326,6 +327,14 @@ export class BotSessionHost {
 				senderIn: (cwd) => ports.senderIn(cwd),
 				open: (agentId, sender) => this.open(agentId, sender),
 				usageRules: () => ports.usageRules(),
+				goalAutoContinue: (sender) => {
+					const settings = sender.settings();
+					try {
+						return settings.settings.getAutonomySettings().goalAutoContinue;
+					} finally {
+						settings.release();
+					}
+				},
 				stopPorts: () => this.stopPorts(),
 			},
 			keeps.unrecorded,

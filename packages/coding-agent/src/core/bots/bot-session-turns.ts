@@ -8,9 +8,10 @@
  * (`settle`). The host composes them once per loaded session and ends them all with the returned unsubscribe.
  */
 
-import type { AgentMessage } from "../../kernel/types.ts";
+import { type AgentMessage, safeErrorMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, type SpendExcess } from "../cost/session-turn-spend-bound.ts";
+import { stopPersistedGoalFromSystem } from "../goals/goal-lifecycle.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
@@ -77,6 +78,9 @@ export function observeBotSessionTurns(
 				limit.meteredOnly,
 			);
 			ports.notify(reason);
+			holdGoalAtSpendBound(session, spentUsd, limit, (error) =>
+				ports.notify(words().botWarning(agentId, safeErrorMessage(error))),
+			);
 			return reason;
 		},
 	});
@@ -127,4 +131,25 @@ export function observeBotSessionTurns(
 		unsubscribeEvents();
 		supervision.stop();
 	};
+}
+
+/**
+ * The bot's running goal held where its request's spend reached a bound (`blocked`, `spend_bound:`): the turn the bound
+ * stops would otherwise leave it running, and every continuation it arms after is stopped at its opening by the same
+ * request's spend. No automatic recovery resumes that reason; the owner's next words do (`applyDeliveredOwnerPrompt`), as
+ * they open a new request. A goal that does not run is left as it is. A save that fails is told through `failed`; the turn
+ * is stopped either way.
+ */
+function holdGoalAtSpendBound(
+	session: AgentSession,
+	spentUsd: number,
+	limit: BotSpendCeiling,
+	failed: (error: unknown) => void,
+): void {
+	const reason = `spend_bound: the request this turn served spent $${spentUsd.toFixed(2)} of its $${limit.usd.toFixed(2)} ${limit.bound} bound${limit.meteredOnly ? " on metered models" : ""}`;
+	try {
+		stopPersistedGoalFromSystem(session, { status: "blocked", reason });
+	} catch (error) {
+		failed(error);
+	}
 }
