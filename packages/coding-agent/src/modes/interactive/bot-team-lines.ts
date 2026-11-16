@@ -7,6 +7,7 @@
 
 import type { BotOperatorMessageDispatchResult } from "../../core/delegation/bot-operator-message-options.ts";
 import type { PersistentBotView, PersistentTeamRecord } from "../../core/delegation/persistent-bot-team-store.ts";
+import { goalProgressMark } from "../../core/goals/goal-progress.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import { describeRoutineProgress, routineProgressLine } from "../../core/routines/routine-progress.ts";
@@ -23,8 +24,9 @@ export function formatBotList(bots: readonly PersistentBotView[]): string {
 			const unread = (bot.unreadCount ?? 0) > 0 ? words.unread(bot.unreadCount ?? 0) : "";
 			const scheduled = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
 			const watching = (bot.watchCount ?? 0) > 0 ? ` · ${botWatchCount(bot.watchCount ?? 0)}` : "";
+			const goal = bot.goal ? ` · ${goalProgressMark(bot.goal)}` : "";
 			const role = `${bot.leader ? words.leaderMark : ""}${bot.remote ? words.remoteMark(REMOTE_MARK) : ""}`;
-			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}${watching}`;
+			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}${watching}${goal}`;
 		})
 		.join("\n");
 }

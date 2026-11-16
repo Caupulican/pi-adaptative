@@ -173,6 +173,13 @@ never does), and retiring the bot drops its watches. The roster shows each bot's
 words (`watching n`; the ring `◌n` only where the row has no room), read from the store and the watch ledgers beside its
 session files in every session.
 
+A bot's own session owns a goal as a root session does: it holds the goal tools (`goal`, `create_goal`, `get_goal`,
+`update_goal`, a read-only bot too, since the goal is a record of its own transcript), and a goal's requirement check runs
+as its own shell would run the command. The roster, `/bot list`, the bot and team selector and the bot's chat badge mark an
+unfinished goal as the operator bar marks the root's (`◎`, with `satisfied/total` once it has requirements; in the roster,
+accent while it runs and warning while it waits), read from the loaded session in the process hosting the bot and from the
+bot's saved session file in every other, and the mark follows each change of the goal.
+
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is
 on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a

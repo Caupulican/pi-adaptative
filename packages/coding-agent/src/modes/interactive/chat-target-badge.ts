@@ -1,6 +1,7 @@
 /**
  * The badge a chat title or switch chip shows for the chat target it names: the root chat, a bot with the state it is
- * in, or a team with how many bots it holds. The words come from the catalogue at draw time.
+ * in and the unfinished goal its own session holds (marked as the operator bar marks the root's), or a team with how many
+ * bots it holds. The words come from the catalogue at draw time.
  */
 
 import type {
@@ -8,6 +9,7 @@ import type {
 	PersistentBotView,
 	PersistentTeamRecord,
 } from "../../core/delegation/persistent-bot-team-store.ts";
+import { goalProgressMark } from "../../core/goals/goal-progress.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 
 export function formatActiveChatTargetBadge(
@@ -22,7 +24,8 @@ export function formatActiveChatTargetBadge(
 		case "bot": {
 			const bot = bots?.find((candidate) => candidate.agentId === target.agentId);
 			if (bot) {
-				return text.chat.botBadge(target.agentId, text.common.botState(bot.state));
+				const goal = bot.goal ? ` · ${goalProgressMark(bot.goal)}` : "";
+				return `${text.chat.botBadge(target.agentId, text.common.botState(bot.state))}${goal}`;
 			}
 			return text.chat.botBadgeOnly(target.agentId);
 		}

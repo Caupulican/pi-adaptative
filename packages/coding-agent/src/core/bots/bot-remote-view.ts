@@ -1,12 +1,14 @@
 /**
  * What a bot session host reads of the bots it does not run: the host that runs one elsewhere (another process, or
- * another host in this one) and the state it publishes, the bot's saved session, and the conversation its home holds.
+ * another host in this one) and the state it publishes, the bot's saved session, and the conversation and goal its home
+ * holds.
  * The watch over the bot homes (`watchBotHomes`) keeps these fresh and tells the host when a bot changed; while no watch
  * runs, each read goes to disk. The host that runs a bot answers for it from memory and never asks here. The host takes a
  * bot's lock here too: the hold each take finds is what the view judges a later change of the lock against, so a host's
  * own take and release of a lock never reads as another host's.
  */
 import { statSync } from "node:fs";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd } from "../../kernel/session/session-file-reading.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
@@ -16,6 +18,8 @@ import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName, botHostLockFile } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import type { GoalState } from "../goals/goal-state.ts";
+import { getLatestGoalStateSnapshot } from "../goals/session-goal-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { sessionStorageRootsOfFile } from "../orchestration-homes.ts";
 import { type HostLockResult, takeProcessLock } from "../remote/host-lock.ts";
@@ -131,6 +135,11 @@ export class BotRemoteView {
 	private transcriptCache:
 		| { agentId: string; file: string; mtimeMs: number; size: number; messages: AgentMessage[] }
 		| undefined;
+	/** The goal each bot's saved session file holds, with the file state it was read at. */
+	private readonly goals = new Map<
+		string,
+		{ file: string; mtimeMs: number; size: number; goal: GoalState | undefined }
+	>();
 	private homeWatch: (() => void) | undefined;
 	/** The home watch failed: other hosts' changes are read from disk each time instead. */
 	private homeWatchFailed = false;
@@ -308,6 +317,34 @@ export class BotRemoteView {
 	}
 
 	/**
+	 * The goal the bot's saved session holds last (`savedSessionOf`), read without opening the file for writing and read
+	 * again only once the file changed. Undefined when the bot has no session of its own yet or its session holds no goal.
+	 * A file that cannot be read is logged once for its state and read again once it changed: the roster draws what reads
+	 * (as `liveWatches` counts no watches of a home that does not read), and the bot's chat, which reads the same file,
+	 * reports the failure to the owner.
+	 */
+	savedGoalOf(agentId: string): GoalState | undefined {
+		const saved = this.savedSessionOf(agentId);
+		if (!saved) return undefined;
+		const stat = statSync(saved.file, { throwIfNoEntry: false });
+		if (!stat) return undefined;
+		// Taken before the read: a write landing during it leaves a size or time the next ask finds changed.
+		const state = { file: saved.file, mtimeMs: stat.mtimeMs, size: stat.size };
+		const cached = this.goals.get(agentId);
+		if (cached?.file === state.file && cached.mtimeMs === state.mtimeMs && cached.size === state.size)
+			return cached.goal;
+		let goal: GoalState | undefined;
+		try {
+			goal = readSessionSnapshot(saved.file, this.ports.agentDir(), getLatestGoalStateSnapshot);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			harnessLog.warn("bots", "a bot's saved goal was not read", { agentId, file: saved.file, reason });
+		}
+		this.goals.set(agentId, { ...state, goal });
+		return goal;
+	}
+
+	/**
 	 * A host that was killed publishes nothing, whatever it said last (running, queued or idle): while the view holds any
 	 * host, each is judged alive again, and one that is gone is read again from its home (another may hold the bot now)
 	 * and announced as a host change, so its watches are taken up.
@@ -344,5 +381,6 @@ export class BotRemoteView {
 		this.saved.clear();
 		this.holds.clear();
 		this.transcriptCache = undefined;
+		this.goals.clear();
 	}
 }

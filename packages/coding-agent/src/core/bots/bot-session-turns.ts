@@ -105,6 +105,7 @@ export function observeBotSessionTurns(
 			event.type === "agent_start" ||
 			event.type === "agent_end" ||
 			event.type === "queue_update" ||
+			event.type === "goal_state_changed" ||
 			(event.type === "message_end" && event.message.role === "assistant")
 		)
 			ports.settle();

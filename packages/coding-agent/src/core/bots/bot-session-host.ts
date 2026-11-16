@@ -48,6 +48,7 @@ import type {
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
+import { type GoalProgress, unfinishedGoalProgress } from "../goals/goal-progress.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
@@ -959,6 +960,12 @@ export class BotSessionHost {
 		const ends = [live.firstExpiresAt, own?.firstExpiresAt].filter((end): end is number => end !== undefined);
 		if (ends.length > 0) this.watchExpiry.note(agentId, Math.min(...ends));
 		return live.count + (own?.live ?? 0);
+	}
+
+	/** The bot's unfinished goal: its loaded session's here, else the one its home saved last, which another process may run. */
+	goalOf(agentId: string): GoalProgress | undefined {
+		const entry = this.entries.get(agentId);
+		return unfinishedGoalProgress(entry ? entry.session.getGoalStateSnapshot() : this.view.savedGoalOf(agentId));
 	}
 
 	/**

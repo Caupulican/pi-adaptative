@@ -31,6 +31,7 @@ import {
 	REPO_READ_TOOL_NAME,
 	WRITE_TOOL_NAMES,
 } from "../delegation/worker-execution-policy.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationThinkingLevel, RiskBudget, WorkerRole } from "../orchestration/contracts.ts";
 import { costCeilingUsd } from "../orchestration/risk-budget.ts";
@@ -71,10 +72,17 @@ export interface BotSessionDefinition {
 }
 
 /**
+ * The goal tools a bot's session holds as a root does: its goal is a record of its own session (the transcript in its home),
+ * so a read-only bot keeps them as it keeps `task_watch`; a requirement check is admitted as the session's own shell is
+ * (`goals/session-requirement-check.ts`).
+ */
+const BOT_SESSION_GOAL_TOOL_NAMES: readonly string[] = [LEGACY_GOAL_TOOL_NAME, ...GOAL_LIFECYCLE_TOOL_NAMES];
+
+/**
  * The tools of a bot of its own: the read tools, System One's tool (as a worker holds it; it is registered only while
- * System One is on), `task_watch` for its own waits, `self_compact` for its own context, `bot_mail` for the other bots and
- * the director tools (`delegate`, `assign`, `plan`) for its own workers always, the file and process tools only when the
- * bot may write.
+ * System One is on), `task_watch` for its own waits, `self_compact` for its own context, `bot_mail` for the other bots,
+ * the goal tools for its own goal and the director tools (`delegate`, `assign`, `plan`) for its own workers always, the
+ * file and process tools only when the bot may write.
  */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
@@ -88,6 +96,7 @@ export function botSessionToolNames(canWrite: boolean): string[] {
 		TASK_WATCH_TOOL_NAME,
 		SELF_COMPACT_TOOL_NAME,
 		BOT_MAIL_TOOL_NAME,
+		...BOT_SESSION_GOAL_TOOL_NAMES,
 		...BOT_DIRECTOR_TOOL_NAMES,
 	];
 	return canWrite
@@ -154,6 +163,7 @@ const SESSION_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 	TASK_WATCH_TOOL_NAME,
 	SELF_COMPACT_TOOL_NAME,
 	BOT_MAIL_TOOL_NAME,
+	...BOT_SESSION_GOAL_TOOL_NAMES,
 	...BOT_DIRECTOR_TOOL_NAMES,
 ]);
 
@@ -188,15 +198,21 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	// session bounds its turns by cost alone.
 	const workerLimits = WORKER_COUNTED_LIMITS.filter((field) => profile.budget[field] !== undefined);
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
-	// It arms its own waits as a worker's host does, compacts its own context and mails the other bots (`bot-mail.ts`: the
-	// words reach them as no owner's), outside the granted surface. The worker
+	// It arms its own waits as a worker's host does, compacts its own context, mails the other bots (`bot-mail.ts`: the
+	// words reach them as no owner's) and owns its goal as a root does, outside the granted surface. The worker
 	// ceiling the plan was compiled under forbids the director tools, so they come from the profile itself: a profile that
 	// names any of them directs its own workers, held to its own ceiling. They are one unit (`assign` runs `delegate`, `plan`
 	// runs its steps on workers through the same fleet, and the director role, the delegation gate and worker control key on
 	// `delegate`), so naming one holds all three.
 	const named = mapToolNamesForPlatform(profile.toolNames);
 	const director = BOT_DIRECTOR_TOOL_NAMES.some((name) => named.includes(name)) ? BOT_DIRECTOR_TOOL_NAMES : [];
-	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME, BOT_MAIL_TOOL_NAME, ...director];
+	const own = [
+		TASK_WATCH_TOOL_NAME,
+		SELF_COMPACT_TOOL_NAME,
+		BOT_MAIL_TOOL_NAME,
+		...BOT_SESSION_GOAL_TOOL_NAMES,
+		...director,
+	];
 	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
 	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
 	// when its spend is metered, `maxCostUsd` alone on a subscription. The profile's own ceilings are kept whole: each spend

@@ -8,7 +8,8 @@ import {
 	type SessionCostSummary,
 	type TaskExecutionMetrics,
 } from "../../../core/cost/cost-summary.ts";
-import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
+import { goalProgressMark, unfinishedGoalProgress } from "../../../core/goals/goal-progress.ts";
+import type { GoalState } from "../../../core/goals/goal-state.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
@@ -275,10 +276,9 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
-	const goal = source.getGoalState?.();
-	if (goal && isGoalUnfinishedStatus(goal.status)) {
-		const satisfied = goal.requirements.filter((requirement) => requirement.status === "satisfied").length;
-		const mark = goal.requirements.length > 0 ? `◎ ${satisfied}/${goal.requirements.length}` : "◎";
+	const goal = unfinishedGoalProgress(source.getGoalState?.());
+	if (goal) {
+		const mark = goalProgressMark(goal);
 		segments.push({
 			id: "goal",
 			label: operator.goal,
@@ -286,7 +286,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			compact: mark,
 			// Kept as long as a red CI: an unfinished goal is what the whole session is working toward.
 			dropOrder: 50,
-			tone: isGoalExecutionActive(goal.status) ? "accent" : "warning",
+			tone: goal.executing ? "accent" : "warning",
 			bare: true,
 		});
 	}

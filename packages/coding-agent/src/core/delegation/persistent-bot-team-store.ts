@@ -96,7 +96,13 @@ import {
 	parseTeamMessage,
 	parseTeamRecord,
 } from "./persistent-bot-team-codecs.ts";
-import { botLiveState, compareBotViews, teamIdsOf, workerLaneByAgentId } from "./persistent-bot-view-state.ts";
+import {
+	botLiveState,
+	compareBotViews,
+	type PersistentBotView,
+	teamIdsOf,
+	workerLaneByAgentId,
+} from "./persistent-bot-view-state.ts";
 import {
 	claimDueRoutineOccurrences,
 	clearRoutineAwayRefusals,
@@ -151,14 +157,7 @@ export type ActiveChatTarget =
 /** What a bot-and-team update touched: `"all"` for a store change, otherwise the agents whose lane state changed. */
 export type BotTeamChange = "all" | readonly string[];
 
-export type PersistentBotLiveState =
-	| "running"
-	| "queued"
-	| "idle"
-	| "awaiting_parent"
-	| "failed"
-	| "retired"
-	| "offline";
+export type { PersistentBotLiveState, PersistentBotView } from "./persistent-bot-view-state.ts";
 
 export interface PersistentBotRecord {
 	readonly agentId: string;
@@ -187,38 +186,6 @@ export interface PersistentBotRecord {
 	readonly lastReadAt?: number;
 	/** The latest notice the bot's own session raised for the owner (`bots/bot-notices.ts`); never in a prompt. */
 	readonly lastNotice?: BotNoticeMark;
-}
-
-export interface PersistentBotView {
-	/** A bot alias: always a valid bot ID. Managed lanes (`collaboration:<job>:<agent>`) are not bots and are never projected. */
-	readonly agentId: string;
-	readonly displayName: string;
-	readonly description?: string;
-	readonly provider: string;
-	readonly modelId: string;
-	readonly modelRef: string;
-	readonly thinkingLevel?: string;
-	readonly soul?: string;
-	readonly profileId?: string;
-	readonly leader?: boolean;
-	readonly createdBy?: string;
-	readonly remote?: boolean;
-	readonly state: PersistentBotLiveState;
-	readonly currentTaskId?: string;
-	readonly currentSummary?: string;
-	readonly teamIds: readonly string[];
-	readonly persistent: boolean;
-	readonly controllable: boolean;
-	readonly updatedAt: string;
-	readonly lastTranscriptRef?: string;
-	readonly lastSummary?: string;
-	readonly lastMessageAt?: number;
-	readonly lastReadAt?: number;
-	readonly unreadCount?: number;
-	readonly routineCount?: number;
-	/** The live watches the bot's own session holds, wherever it is hosted; the roster sets it, the store does not. */
-	readonly watchCount?: number;
-	readonly memoryFilePath?: string;
 }
 
 export interface PersistentTeamRecord {

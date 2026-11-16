@@ -4,6 +4,7 @@ import type {
 	PersistentBotView,
 	PersistentTeamRecord,
 } from "../../../core/delegation/persistent-bot-team-store.ts";
+import { goalProgressMark } from "../../../core/goals/goal-progress.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { botStateMark, botWatchCount } from "./bot-state-mark.ts";
@@ -112,6 +113,7 @@ export class BotTeamSelectorComponent extends Container {
 				const unread = (bot.unreadCount ?? 0) > 0 ? text.unread(bot.unreadCount ?? 0) : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
 				const watches = (bot.watchCount ?? 0) > 0 ? ` · ${botWatchCount(bot.watchCount ?? 0)}` : "";
+				const goal = bot.goal ? ` · ${goalProgressMark(bot.goal)}` : "";
 				const summaryOrDesc = bot.currentSummary
 					? text.descriptionSuffix(bot.currentSummary)
 					: bot.description
@@ -120,7 +122,7 @@ export class BotTeamSelectorComponent extends Container {
 				return {
 					value: `bot:${bot.agentId}`,
 					label: text.botItem(isCurrent ? "✓ " : `${glyph} `, bot.agentId),
-					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${text.state(bot.state)}${unread}${schedules}${watches}${bot.teamIds.length ? text.botTeams(bot.teamIds.join(",")) : ""}${summaryOrDesc}`,
+					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${text.state(bot.state)}${unread}${schedules}${watches}${goal}${bot.teamIds.length ? text.botTeams(bot.teamIds.join(",")) : ""}${summaryOrDesc}`,
 				};
 			}),
 		];

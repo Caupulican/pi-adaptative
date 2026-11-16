@@ -11,6 +11,7 @@ import type {
 	PersistentBotView,
 	PersistentTeamRecord,
 } from "../../../core/delegation/persistent-bot-team-store.ts";
+import { goalProgressMark } from "../../../core/goals/goal-progress.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { theme } from "../../../presentation/theme-model.ts";
@@ -113,8 +114,12 @@ export function drawChatRosterPane(input: ChatRosterPaneInput): ChatRosterPaneDr
 		const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 		const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
 		const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", text.panes.roster.leader)}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} ${text.panes.roster.remote}`)}` : ""}`;
+		// The goal its own session holds, drawn as the operator bar draws the root's: accent while it runs, warning while it waits.
+		const goalBadge = bot.goal
+			? ` ${theme.fg(bot.goal.executing ? "accent" : "warning", goalProgressMark(bot.goal))}`
+			: "";
 		const row = (watchBadge: string) =>
-			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}`;
+			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}${goalBadge}`;
 		// Watches are passive state, drawn quiet: "watching n" where the row has room, a bare ring only where it has not.
 		const watches = bot.watchCount ?? 0;
 		const labelled = row(watches > 0 ? ` ${theme.fg("muted", botWatchCount(watches))}` : "");

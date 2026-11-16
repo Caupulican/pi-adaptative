@@ -1,16 +1,55 @@
 /**
  * What the roster shows of a bot's run, derived from the worker lanes and the live worker agents a session holds: the lane
  * that speaks for each bot (a running one, else a queued one, else the latest finished), the live state its view carries,
- * the groups it is in and the roster's order. Pure: the bot store's view projection (`projectBotViews`) reads them.
+ * the groups it is in and the roster's order, and the view type the projection (`projectBotViews`) builds and the roster
+ * completes with what a bot's own session holds. Pure: the bot store's view projection reads them.
  */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type {
-	PersistentBotLiveState,
-	PersistentBotRecord,
-	PersistentBotView,
-	PersistentTeamRecord,
-} from "./persistent-bot-team-store.ts";
+import type { GoalProgress } from "../goals/goal-progress.ts";
+import type { PersistentBotRecord, PersistentTeamRecord } from "./persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
+
+export type PersistentBotLiveState =
+	| "running"
+	| "queued"
+	| "idle"
+	| "awaiting_parent"
+	| "failed"
+	| "retired"
+	| "offline";
+
+export interface PersistentBotView {
+	/** A bot alias: always a valid bot ID. Managed lanes (`collaboration:<job>:<agent>`) are not bots and are never projected. */
+	readonly agentId: string;
+	readonly displayName: string;
+	readonly description?: string;
+	readonly provider: string;
+	readonly modelId: string;
+	readonly modelRef: string;
+	readonly thinkingLevel?: string;
+	readonly soul?: string;
+	readonly profileId?: string;
+	readonly leader?: boolean;
+	readonly createdBy?: string;
+	readonly remote?: boolean;
+	readonly state: PersistentBotLiveState;
+	readonly currentTaskId?: string;
+	readonly currentSummary?: string;
+	readonly teamIds: readonly string[];
+	readonly persistent: boolean;
+	readonly controllable: boolean;
+	readonly updatedAt: string;
+	readonly lastTranscriptRef?: string;
+	readonly lastSummary?: string;
+	readonly lastMessageAt?: number;
+	readonly lastReadAt?: number;
+	readonly unreadCount?: number;
+	readonly routineCount?: number;
+	/** What the bot's own session holds wherever it is hosted (its live watches, its unfinished goal); the roster sets both. */
+	readonly watchCount?: number;
+	readonly goal?: GoalProgress;
+	readonly memoryFilePath?: string;
+}
 
 /** The worker lane that speaks for each bot (keyed by its agent id, else its lane id). */
 export function workerLaneByAgentId(laneRecords: readonly LaneRecord[]): Map<string, LaneRecord> {
