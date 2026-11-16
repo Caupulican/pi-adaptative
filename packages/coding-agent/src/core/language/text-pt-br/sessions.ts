@@ -57,6 +57,8 @@ export const SESSIONS = {
 			`Uma execução ausente que passou para um modelo cobrado por uso não pôde ser reservada no limite de gasto ausente (${cause}): ${path}. As requisições cobradas dela são recusadas.`,
 		turnNotWritten: (channel: string, path: string, cause: string) =>
 			`Canal ${channel} ausente: um turno não pôde ser reservado no limite de gasto ausente para passar a um modelo cobrado por uso (${cause}): ${path}. Ele não passa para esse modelo.`,
+		turnsUnread: (channel: string, cause: string) =>
+			`Canal ${channel} ausente: os turnos que uma passagem a um modelo cobrado por uso reserva no limite de gasto ausente não puderam ser lidos (${cause}). A sessão dele não passa para um modelo cobrado por uso até eles serem lidos.`,
 	},
 	retention: {
 		ownerFilesUnlisted:

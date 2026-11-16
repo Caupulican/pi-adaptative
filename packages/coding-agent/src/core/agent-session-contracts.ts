@@ -293,6 +293,11 @@ export interface OwnerChannelSubmission {
 	/** The input ended without being delivered (withdrawn, held, cancelled or refused). */
 	readonly onUndelivered?: () => void;
 	/**
+	 * The submission took the session's foreground as its own turn: what its preparation does from here (an opening talker
+	 * adopted, a model moved) is this turn's, before it is accepted. Never called for an input queued behind another run.
+	 */
+	readonly onOwnTurn?: () => void;
+	/**
 	 * Present on a delivery offered under `ownerAuthority: "full"`: the channel's liveness answer, asked at submission and
 	 * again at delivery. While it answers true the words are also owner policy and owner rules, as typed words are.
 	 */

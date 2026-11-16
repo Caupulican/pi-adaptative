@@ -937,9 +937,8 @@ export class PromptSubmissionController {
 					return;
 				}
 			}
-			// This submission would run as its own turn now. Only an input still pending here may: one the
-			// owner took back, cleared or that changed context meanwhile never runs. Ownership moves to
-			// the turn without cancelling it.
+			// This submission runs as its own turn now; only an input still pending here may (one taken back, cleared or
+			// whose context changed never runs). Ownership moves to the turn uncancelled; an owner channel hears of it.
 			if (lifecycle.queued) {
 				const promoted = this.deps.pendingQueue.promote(lifecycle.queued);
 				this.deps.emitQueueUpdate();
@@ -949,6 +948,7 @@ export class PromptSubmissionController {
 				return;
 			}
 			lifecycle.ownsForeground();
+			ownerChannel?.onOwnTurn?.();
 			// The input was accepted in this history: no navigation rewrites it while its turn is prepared.
 			if (lifecycle.input && submission.lease) this.deps.foregroundRecovery.beginTurnPreparation(submission.lease);
 			this.foregroundPromptLeaseValue = submission.lease;

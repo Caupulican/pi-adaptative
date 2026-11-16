@@ -8,8 +8,8 @@
  * inert-extension warnings and profile-denied-extension count; everything else is read through deps.
  */
 
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { Agent, ThinkingLevel } from "../kernel/index.ts";
-import type { SessionManager } from "../kernel/node.ts";
 import {
 	type ExtensionImportAuthority,
 	isDefaultOnBundledExtension,
@@ -43,7 +43,8 @@ export interface ProfileFilterControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	getCwd(): string;
 	getAgent(): Agent;
-	getSessionManager(): SessionManager;
+	/** The session moves to a model through the one model-apply path (`ModelSelectionController.applyModel`). */
+	applyModel(model: Model<Api>): void;
 	/** Construction-time tool allow-set (undefined = no allow-list gate). */
 	getAllowedToolNames(): Set<string> | undefined;
 	/** Construction-time tool exclude-set. */
@@ -286,13 +287,12 @@ export class ProfileFilterController {
 			const current = this.deps.getAgent().state.model;
 			const next = nextModel;
 			if (!current || current.provider !== next.provider || current.id !== next.id) {
-				// Mirror the startup/cycle path: set the model directly (no auth gate, no settings
-				// persist) so re-applying the profile model behaves like initial resolution rather
-				// than a runtime model switch. No model_select emit here — reload rebuilds the
-				// extension runtime and emits session_start("reload") right after, and the UI
-				// re-renders from session.model.
-				this.deps.getAgent().state.model = next;
-				this.deps.getSessionManager().appendModelChange(next.provider, next.id);
+				// Mirror the startup/cycle path: apply the model directly (no auth gate, no settings
+				// persist; recorded, and a metered one charged on the hosts' gates) so re-applying the
+				// profile model behaves like initial resolution rather than a runtime model switch. No
+				// model_select emit here — reload rebuilds the extension runtime and emits
+				// session_start("reload") right after, and the UI re-renders from session.model.
+				this.deps.applyModel(next);
 				modelChanged = true;
 			}
 		}

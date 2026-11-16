@@ -1629,7 +1629,7 @@ export class SessionChannels {
 			composeOwnerBatch(name, messages),
 			this.ownerLive(name, senderDigest, policy),
 			false,
-			(accepted) => {
+			(accepted, run) => {
 				runtime.offering = false;
 				if (!accepted) {
 					this.unmarkOffer(name, batchId, sessionId);
@@ -1640,7 +1640,7 @@ export class SessionChannels {
 				}
 				const now = this.now();
 				const base = this.acceptedBatch(batchId, sessionId, latest, delivered, true, now);
-				const quota = ownerDollarsApply(this.ownerQuota(policy)) ? {} : { quota: true as const };
+				const quota = ownerDollarsApply(this.ownerQuota(policy)) || run.metered ? {} : { quota: true as const };
 				this.recordAccepted(name, { ...base, owner: true, senderDigest, ...quota }, now);
 				return true;
 			},
@@ -1658,14 +1658,14 @@ export class SessionChannels {
 		text: string,
 		live: () => boolean,
 		approval: false | Pick<OwnerDraftView, "requestEntryId">,
-		onAccepted: (accepted: boolean) => boolean,
+		onAccepted: (accepted: boolean, run: OwnerRun) => boolean,
 	): void {
 		const delivery = this.deps.ownerDelivery;
+		const run: OwnerRun = { name, live, accepted: false, stopped: false };
 		if (!delivery) {
-			onAccepted(false);
+			onAccepted(false, run);
 			return;
 		}
-		const run: OwnerRun = { name, live, accepted: false, stopped: false };
 		this.ownerRuns.set(origin.ref, run);
 		// A stop ends the ref's authority for good: a still-queued batch, guarded calls that raced the abort and later runs
 		// that inherit the ref are refused at the edge.
@@ -1677,7 +1677,7 @@ export class SessionChannels {
 			const fields = { channel: name, ref: origin.ref, approval: approval !== false };
 			if (accepted) harnessLog.info("channels", "an owner turn started", fields);
 			else harnessLog.warn("channels", "an owner turn was not accepted", fields);
-			if (!onAccepted(accepted)) {
+			if (!onAccepted(accepted, run)) {
 				this.ownerRuns.delete(origin.ref);
 				return;
 			}
@@ -2178,7 +2178,7 @@ export class SessionChannels {
 			approvalTurnText(name, view),
 			this.ownerLive(name, by.senderDigest, policy),
 			view,
-			(accepted) => {
+			(accepted, run) => {
 				if (!accepted) {
 					reply(
 						`No turn started for draft ${view.id}; the approval lapsed. Send approve ${view.id} to try once more while it is held.`,
@@ -2191,7 +2191,7 @@ export class SessionChannels {
 					owner: true,
 					senderDigest: by.senderDigest,
 					approval: view.id,
-					...(ownerDollarsApply(this.ownerQuota(policy)) ? {} : { quota: true as const }),
+					...(ownerDollarsApply(this.ownerQuota(policy)) || run.metered ? {} : { quota: true as const }),
 				};
 				try {
 					this.journal(name).update(now, (state) => {

@@ -2324,7 +2324,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			getCwd: () => this._cwd,
 			getAgent: () => this.agent,
-			getSessionManager: () => this.sessionManager,
+			applyModel: (model) => this._modelSelection.applyModel(model),
 			getAllowedToolNames: () => this._allowedToolNames,
 			getExcludedToolNames: () => this._excludedToolNames,
 			getToolProfileFilter: () => this._toolProfileFilter,

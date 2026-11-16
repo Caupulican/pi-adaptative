@@ -115,7 +115,7 @@ export class ModelSelectionController {
 
 		const persistSettings = options.persistSettings ?? true;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this._applyModel(model);
+		this.applyModel(model);
 		if (persistSettings) {
 			this.deps.getSettingsManager().setDefaultModelAndProvider(model.provider, model.id);
 		}
@@ -129,11 +129,15 @@ export class ModelSelectionController {
 		await this._warnIfManualModelChoiceIsRisky(model);
 	}
 
-	/** The session moves to `model`: recorded on its branch, and a metered one charged on the hosts' gates (`chargeMove`). */
-	private _applyModel(model: Model<Api>): void {
+	/**
+	 * The session moves to `model`, the one path every applied move takes: a metered one is charged on the hosts' gates
+	 * first (`chargeMove`, which reads what it charges before the model changes and is never refused), then it is set and
+	 * recorded on the branch.
+	 */
+	applyModel(model: Model<Api>): void {
+		this.deps.modelAccess?.().chargeMove(model);
 		this.deps.getAgent().state.model = model;
 		this.deps.getSessionManager().appendModelChange(model.provider, model.id);
-		this.deps.modelAccess?.().chargeMove(model);
 	}
 
 	private _resyncToolSurfaceForModel(assertCurrent?: () => void): void {
@@ -228,7 +232,7 @@ export class ModelSelectionController {
 		const next = scopedModels[nextIndex];
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 
-		this._applyModel(next.model);
+		this.applyModel(next.model);
 		this.deps.getSettingsManager().setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		// Apply thinking level.
@@ -259,7 +263,7 @@ export class ModelSelectionController {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this._applyModel(nextModel);
+		this.applyModel(nextModel);
 		this.deps.getSettingsManager().setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		// Re-clamp thinking level for new model's capabilities

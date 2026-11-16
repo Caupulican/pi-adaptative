@@ -61,8 +61,8 @@ export interface OwnerChannelDelivery {
 	 */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void, onStarted: () => void): () => void;
 	/**
-	 * Whether the turn `ref` opened holds the session's foreground: its run is in progress, or it was accepted as the
-	 * session's own next turn and is being prepared (an owner turn queued behind another run has not started).
+	 * Whether the turn `ref` opened holds the session's foreground: its run is in progress, or its submission took the
+	 * foreground as its own turn and is preparing it, before or after it is accepted (one queued behind another run has not).
 	 */
 	holdsForeground(ref: string): boolean;
 	/**

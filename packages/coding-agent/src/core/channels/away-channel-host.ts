@@ -65,8 +65,10 @@ import { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import {
 	type AwayChannel,
+	type AwaySubscriptionTurns,
 	awayChannels,
 	readAwayChannelCharges,
+	reserveAwayChannelOffers,
 	unreservedSubscriptionTurns,
 } from "./away-channels.ts";
 import { ChannelJournal } from "./channel-journal.ts";
@@ -91,6 +93,12 @@ function isWithin(parent: string, child: string): boolean {
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** A failure's kind, told once each: a system error by its code (its message names the file it met), else its name. */
+function errorCause(error: unknown): string {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return typeof code === "string" ? code : error instanceof Error ? error.name : "thrown";
 }
 
 /** Whether the channel can carry the owner's words: they run in the daemon's phone session, not the child session. */
@@ -242,31 +250,51 @@ export class AwayChannelHosts {
 
 	/**
 	 * The hold on a child session's moves to metered models: its subscription turns away reserve nothing on the away
-	 * bound, so a failover to a metered model first reserves each its full per-run bound, as a run away's attempt is
-	 * (`reserveAwayChannelTurns`), and is held off metered models while the day has no room for them; a charged move
-	 * (an explicit model choice) reserves them whatever the room.
+	 * bound, so a move to a metered model first reserves each its full per-run bound, as a run away's attempt is
+	 * (`reserveAwayChannelTurns`), the turn offered to it and not accepted yet included (`reserveAwayChannelOffers`), and
+	 * is held off metered models while the day has no room for them; a charged move (an explicit model choice) reserves
+	 * them whatever the room. Read before the session moves: a journal or a bound that does not read means no room, told
+	 * once per channel and cause until a read succeeds.
 	 */
 	private meteredMoves(name: string, sessionManager: SessionManager): MeteredMoveGate {
-		const unreserved = () => unreservedSubscriptionTurns(this.input.agentDir, name, sessionManager.getSessionId());
-		const fits = (keys: readonly string[], nowMs: number) =>
-			keys.length === 0 || this.awayRoom(nowMs).fits(keys.length - 1);
+		const read = (nowMs: number): { readonly turns: AwaySubscriptionTurns; readonly fits: boolean } | undefined => {
+			const unread = `unread:${name}:`;
+			// A journal that does not parse was set aside: which turns it held is unknown.
+			let cause = "invalid";
+			try {
+				const turns = unreservedSubscriptionTurns(this.input.agentDir, name, sessionManager.getSessionId());
+				if (turns) {
+					const count = turns.keys.length + turns.offers.length;
+					const fits = count === 0 || this.awayRoom(nowMs).fits(count - 1);
+					for (const key of this.reported.keys()) if (key.startsWith(unread)) this.reported.delete(key);
+					return { turns, fits };
+				}
+			} catch (error) {
+				cause = errorCause(error);
+			}
+			if (!this.reported.has(unread + cause))
+				this.report(unread + cause, interfaceText().sessions.awayMeteredRuns.turnsUnread(name, cause));
+			return undefined;
+		};
 		return {
-			fits: () => fits(unreserved(), this.now()),
+			fits: () => read(this.now())?.fits === true,
 			reserve: (mode = "admit") => {
 				const nowMs = this.now();
-				const keys = unreserved();
-				if (mode === "admit" && !fits(keys, nowMs)) return false;
-				const reserved = reserveAwayChannelTurns({
-					agentDir: this.input.agentDir,
-					keys,
-					occurrences: [...this.input.routineOccurrences()],
-					nowMs,
-					notWritten: (path, cause) =>
-						this.report(
-							`reserve:${name}`,
-							interfaceText().sessions.awayMeteredRuns.turnNotWritten(name, path, cause),
-						),
-				});
+				const held = read(nowMs);
+				if (!held || (mode === "admit" && !held.fits)) return false;
+				const { keys, offers } = held.turns;
+				const notWritten = (path: string, cause: string) =>
+					this.report(
+						`reserve:${name}`,
+						interfaceText().sessions.awayMeteredRuns.turnNotWritten(name, path, cause),
+					);
+				const occurrences = [...this.input.routineOccurrences()];
+				const { agentDir } = this.input;
+				const sessionId = sessionManager.getSessionId();
+				const reserved =
+					reserveAwayChannelTurns({ agentDir, keys, occurrences, nowMs, notWritten }) &&
+					(offers.length === 0 ||
+						reserveAwayChannelOffers({ agentDir, name, sessionId, batches: offers, nowMs, notWritten }));
 				if (reserved) this.reported.delete(`reserve:${name}`);
 				return reserved;
 			},

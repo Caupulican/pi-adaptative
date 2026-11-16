@@ -69,7 +69,11 @@ interface OwnerChannelRun {
 	readonly full: boolean;
 	/** An accepted approval delivery whose entry has not landed on the branch yet. */
 	approvalPending: boolean;
-	/** Accepted as the session's own next turn and its run not begun: the moves its preparation makes (a routed swap) are its. */
+	/**
+	 * Took the session's foreground as its own turn (`OwnerChannelSubmission.onOwnTurn`) and its run not begun, accepted or
+	 * not yet: the moves its preparation makes (an opening talker, a routed swap) are its. Cleared at its run's first
+	 * message and when its submission ends.
+	 */
 	preparing: boolean;
 }
 
@@ -269,11 +273,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			if (answered) return;
 			answered = true;
 			if (!accepted) drop();
-			else {
-				if (approval && !delivered) run.approvalPending = true;
-				// A delivery accepted while no run is in progress is the session's own next turn; one queued behind a run is not.
-				run.preparing = !this.getForeground().turnOrigin.isActive();
-			}
+			else if (approval && !delivered) run.approvalPending = true;
 			onAccepted(accepted);
 		};
 		const settleDelivered = (): void => {
@@ -290,9 +290,17 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 					...(approval && approval.requestEntryId !== undefined ? { answers: approval.requestEntryId } : {}),
 					onDelivered: settleDelivered,
 					onUndelivered: drop,
+					// From here its preparation holds the foreground; a delivery queued behind a run never takes it.
+					onOwnTurn: () => {
+						run.preparing = true;
+					},
 					...(run.full ? { full: () => answersLive(live) } : {}),
 				},
 				preflightResult: (success) => answer(success),
+			})
+			.finally(() => {
+				// Its submission ended (its turn ran, or it ended before one): it prepares nothing any more.
+				run.preparing = false;
 			})
 			.then(
 				() => answer(false),
@@ -335,7 +343,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		return isRemoteOwnerOrigin(origin) && origin?.ref !== undefined ? this.runs.get(origin.ref) : undefined;
 	}
 
-	/** Whether the turn `ref` opened holds the foreground: its run is in progress, or it is being prepared to run next. */
+	/** Whether the turn `ref` opened holds the foreground: its run is in progress, or it is being prepared as its own turn. */
 	holdsForeground(ref: string): boolean {
 		return this.isRunning(ref) || this.runs.get(ref)?.preparing === true;
 	}
