@@ -181,8 +181,15 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	// The bot's own session runs System One as the root does. Its first message starts a turn that calls no tool, so its
 	// words are never judged; the second, written while that turn runs, is a steer judged in full when it is queued: the
 	// owner-policy questions alone, since every edge class is granted, no rule is written and no optional tool is offered.
-	// No group member is a session, and no answer names a claim kind, so nothing else is asked.
-	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-owner-messages", BOT_SESSION_JUDGMENTS);
+	// No group member is a session, and no answer names a claim kind, so nothing else is asked. The held bot's second
+	// message (`leftoverInInbox`) is routed after its first turn, which called no tool and left its words queued: the
+	// backlog screen reads them before that turn is routed (`carries_0`), and a question asking how large the cache is
+	// asks to understand something and instructs nothing, so it is set aside and not classified in full.
+	if (world.systemOne.enabled)
+		world.systemOne.enterPhase("j7-owner-messages", {
+			...BOT_SESSION_JUDGMENTS,
+			carries_0: { kind: "noul", probability: 0.97 },
+		});
 
 	// One bot, two owner messages: the second is written while the first turn is held at its request.
 	const first = await session.sendOperatorMessageToBot(READER, DIRECT_ONE);

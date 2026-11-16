@@ -97,7 +97,10 @@ function storeHolds(session: AgentSession, routineId: string): boolean {
  * Leg: the owner's stop ends the watches a bot armed before it, and a bot cancels a watch it armed. The bot arms a watch on
  * a file that never appears; the owner stops it, and the stop deletes that watch, the owner told how many it ended. Then the
  * owner's next words have the bot arm another watch, which the stop made before it leaves, and cancel it with
- * `task_watch`'s `cancel` action; the roster's count follows each.
+ * `task_watch`'s `cancel` action; the roster's count follows each. The stop ends the bot's work, not its conversation:
+ * those next words start a turn on the conversation it kept ("followed_up"). The store's routine revision counter moves
+ * on every save of any routine and on nothing else (the stop's delete and the cancel included), so the watch armed after
+ * the stop is the store's second save, revision 2.
  */
 async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const { trace } = world;
@@ -216,9 +219,9 @@ async function stopEndsOwnWatches(world: HarnessWorld, session: AgentSession): P
 		},
 		"a watch armed after the owner's stop stays until the bot cancels it with task_watch's cancel action",
 	).toEqual({
-		sent: "started",
+		sent: "followed_up",
 		results: [
-			[false, JSON.stringify({ routineId: LATER_WATCH_ID, revision: 1, armed: true })],
+			[false, JSON.stringify({ routineId: LATER_WATCH_ID, revision: 2, armed: true })],
 			[false, JSON.stringify({ routineId: LATER_WATCH_ID, cancelled: true })],
 		],
 		laterHeld: true,
@@ -341,7 +344,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		holdsRoutine: false,
 		holdsSelfCompact: true,
 		refused: [true, true],
-		accepted: [false, { routineId: WATCH_ID, revision: 1, armed: true }],
+		// The store's revision counter moved at the stop leg's two watches and the refused watch saves nothing: the third save.
+		accepted: [false, { routineId: WATCH_ID, revision: 3, armed: true }],
 		watches: 1,
 	});
 
