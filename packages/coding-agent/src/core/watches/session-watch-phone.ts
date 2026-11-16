@@ -1,23 +1,28 @@
 /**
  * A session watch's result as the owner's phone hears it (`OwnerPush.tell`) when its armer asked for that (`tellOwner`):
- * one sentence in the interface language, `Watch "<purpose>": <outcome>.`, keyed by the wake it tells of, so each firing,
- * end or failing streak is told once however often its delivery is tried.
+ * one sentence in the interface language, `Watch "<purpose, or what it waits on>": <outcome>.`, or `Watch: <outcome>.` when
+ * the outcome already names what it waited on (a GitHub source's result, armed with no purpose), keyed by the wake it
+ * tells of, so each firing, end or failing streak is told once however often its delivery is tried.
  */
 import type { InterfaceText } from "../language/interface-text.ts";
 import { describeWatchFired, watchFiredLine } from "../routines/watch-contract.ts";
-import {
-	describeGithubWatchResultForOwner,
-	describeSessionWatchSource,
-	isGithubWatchSource,
-} from "./github-watch-source.ts";
+import { describeGithubWatchResult, describeSessionWatchSource, isGithubWatchSource } from "./github-watch-source.ts";
 import type { SessionWatchRecord, SessionWatchWake } from "./session-watch-ledger.ts";
 
 /** How much of a watch's purpose a phone sentence carries. */
 const PHONE_PURPOSE_CHARS = 160;
 
-/** The one sentence a watch's result is told in: the words of the interface language passed in. */
-export function watchResultPhoneText(words: InterfaceText["chat"]["watch"], purpose: string, outcome: string): string {
-	const said = purpose.length > PHONE_PURPOSE_CHARS ? `${purpose.slice(0, PHONE_PURPOSE_CHARS - 1)}…` : purpose;
+/**
+ * The one sentence a watch's result is told in: the words of the interface language passed in, and what the watch is
+ * about unless the outcome names it already.
+ */
+export function watchResultPhoneText(
+	words: InterfaceText["chat"]["watch"],
+	subject: string | undefined,
+	outcome: string,
+): string {
+	if (subject === undefined) return `${words.phone.lead}: ${outcome}.`;
+	const said = subject.length > PHONE_PURPOSE_CHARS ? `${subject.slice(0, PHONE_PURPOSE_CHARS - 1)}…` : subject;
 	return `${words.phone.lead} "${said}": ${outcome}.`;
 }
 
@@ -34,15 +39,18 @@ export function sessionWatchPhoneText(
 ): string {
 	const { condition } = record;
 	const subject = record.purpose ?? describeSessionWatchSource(condition, words);
-	let outcome: string;
-	if (wake.kind === "timed-out") outcome = words.phone.timedOut;
-	else if (wake.kind === "failing") outcome = words.phone.failing(wake.failing?.failures ?? 0);
-	else if (isGithubWatchSource(condition)) {
+	if (wake.kind === "timed-out") return watchResultPhoneText(words, subject, words.phone.timedOut);
+	if (wake.kind === "failing")
+		return watchResultPhoneText(words, subject, words.phone.failing(wake.failing?.failures ?? 0));
+	if (isGithubWatchSource(condition)) {
 		if (!record.result) throw new Error(`Watch ${record.watchId} has no recorded result.`);
-		outcome = describeGithubWatchResultForOwner(condition, record.result, words.github);
-	} else {
-		if (!record.event) throw new Error(`Watch ${record.watchId} has no recorded firing.`);
-		outcome = describeWatchFired(watchFiredLine(record.event), words.fired);
+		// The result names what the watch waited on: only a purpose is said beside it, never the subject twice.
+		return watchResultPhoneText(
+			words,
+			record.purpose,
+			describeGithubWatchResult(condition, record.result, words.github),
+		);
 	}
-	return watchResultPhoneText(words, subject, outcome);
+	if (!record.event) throw new Error(`Watch ${record.watchId} has no recorded firing.`);
+	return watchResultPhoneText(words, subject, describeWatchFired(watchFiredLine(record.event), words.fired));
 }

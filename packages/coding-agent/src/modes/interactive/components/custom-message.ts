@@ -21,7 +21,7 @@ import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { describeWatchFired, parseWatchFiredLine } from "../../../core/routines/watch-contract.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
-import { describeGithubWatchResultForOwner, parseGithubWatchWake } from "../../../core/watches/github-watch-source.ts";
+import { describeGithubWatchResult, parseGithubWatchWake } from "../../../core/watches/github-watch-source.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
 import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
@@ -436,7 +436,7 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 	// as English words.
 	const github = parseGithubWatchWake(details.github);
 	const cause = github
-		? describeGithubWatchResultForOwner(github.source, github.result, interfaceText().chat.watch.github)
+		? describeGithubWatchResult(github.source, github.result, interfaceText().chat.watch.github)
 		: fired
 			? describeFired(fired)
 			: typeof details.cause === "string"

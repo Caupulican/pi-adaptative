@@ -8,13 +8,14 @@
  */
 import type { CiAttemptIdentity, CiSubject } from "../../core/events/host-event-contract.ts";
 import { monotonicNow } from "../../core/util/timer-port.ts";
-import type {
-	GithubCreatedRun,
-	GithubPolledSource,
-	GithubRunNarrowing,
-	GithubWatchReader,
-	GithubWatchReading,
-	GithubWatchResult,
+import {
+	type GithubCreatedRun,
+	type GithubPolledSource,
+	type GithubRunNarrowing,
+	type GithubWatchReader,
+	type GithubWatchReading,
+	type GithubWatchResult,
+	RELEASE_STATUS,
 } from "../../core/watches/github-watch-source.ts";
 import type { CiCommandPort, CiRepository } from "./ci-provider.ts";
 import { GithubActionsCiProvider } from "./github-actions-ci-provider.ts";
@@ -327,12 +328,12 @@ export class GithubWatchHostReader implements GithubWatchReader {
 /** A release as a watch reads it: published, a draft, or not there yet. */
 function releaseResult(release: Record<string, unknown> | undefined): GithubWatchResult {
 	const observedAt = Date.now();
-	if (!release) return { state: "pending", status: "not published", observedAt };
-	if (release.draft === true) return { state: "pending", status: "draft", observedAt };
+	if (!release) return { state: "pending", status: RELEASE_STATUS.missing, observedAt };
+	if (release.draft === true) return { state: "pending", status: RELEASE_STATUS.draft, observedAt };
 	const url = word(release.html_url);
 	return {
 		state: "done",
-		status: release.prerelease === true ? "published as a prerelease" : "published",
+		status: release.prerelease === true ? RELEASE_STATUS.prerelease : RELEASE_STATUS.published,
 		...(url === undefined ? {} : { url }),
 		observedAt,
 	};

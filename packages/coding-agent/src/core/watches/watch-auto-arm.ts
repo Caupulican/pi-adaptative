@@ -18,6 +18,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { englishText } from "../language/interface-text.ts";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
 import { monotonicNow, type TimerPort } from "../util/timer-port.ts";
@@ -68,7 +69,6 @@ const LEADING_WRAPPERS = new Set(["sudo", "command", "exec", "nohup", "time", "n
 /** One arming the host makes for the session. */
 export interface AutoWatchRequest {
 	readonly watchId: string;
-	readonly purpose: string;
 	readonly onFire: string;
 	readonly condition: GithubWatchSource;
 	readonly expiresAt: number;
@@ -314,12 +314,9 @@ function watchIdOf(source: GithubWatchSource): string {
 	return `auto-release-${shortHash(githubWatchSubject(source))}`;
 }
 
-function purposeOf(source: GithubWatchSource, armer: AutoArmContext["armer"]): string {
-	const subject = describeGithubWatchSource(source);
-	const who = armer.kind === "worker" ? "this worker" : "this session";
-	if (source.type === "ci") return `${subject}, pushed by ${who}`;
-	if (source.type === "github_run") return `${subject}, started by ${who}`;
-	return `${subject}, whose tag ${who} pushed`;
+/** What a source waits on, in the words of the note the armer reads. */
+function subjectOf(source: GithubWatchSource): string {
+	return describeGithubWatchSource(source, englishText().chat.watch.github);
 }
 
 const ON_FIRE =
@@ -418,7 +415,6 @@ export class WatchAutoArm {
 				await port.arm(
 					{
 						watchId,
-						purpose: purposeOf(source, context.armer),
 						onFire: ON_FIRE,
 						condition: source,
 						expiresAt: port.timers.now() + deadlineMs,
@@ -426,11 +422,9 @@ export class WatchAutoArm {
 					},
 					context,
 				);
-				armed.push(
-					`${watchId} on ${describeGithubWatchSource(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes)`,
-				);
+				armed.push(`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes)`);
 			} catch (error) {
-				missed.push(`${describeGithubWatchSource(source)}: ${errorText(error)}`);
+				missed.push(`${subjectOf(source)}: ${errorText(error)}`);
 			}
 		}
 		return { armed, missed };
@@ -536,8 +530,7 @@ export class WatchAutoArm {
 			if (planned.size < MAX_SUBJECTS_PER_CALL && !planned.has(subject))
 				planned.set(subject, { source, deadlineMs });
 		};
-		const leave = (source: GithubWatchSource, why: string) =>
-			unwatched.push(`${describeGithubWatchSource(source)} (${why})`);
+		const leave = (source: GithubWatchSource, why: string) => unwatched.push(`${subjectOf(source)} (${why})`);
 		const followsCi = port.followsCi();
 		const reader = port.github();
 		const signal = AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS);

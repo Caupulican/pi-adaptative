@@ -205,59 +205,55 @@ export function parseGithubWatchWake(
 	}
 }
 
-/** What a typed source waits on, in the model's words. */
-export function describeGithubWatchSource(source: GithubWatchSource): string {
-	if (source.type === "github_run") return `GitHub run ${source.runId} of ${source.repo}`;
-	if (source.type === "ci") return `the CI of commit ${source.sha.slice(0, 12)}`;
-	return `release ${source.tag}${source.repo === undefined ? "" : ` of ${source.repo}`}`;
-}
+/** The leading characters of a commit's sha a sentence names it by, in the model's and the owner's words alike. */
+const SHORT_SHA_CHARS = 12;
 
-/** What a done result says, in the model's words: the run's conclusion and failed job, or the published release. */
-export function describeGithubWatchResult(source: GithubWatchSource, result: GithubWatchResult): string {
-	const subject = describeGithubWatchSource(source);
-	if (source.type === "release") return `${subject} is ${result.status}`;
-	const job =
-		result.failedJob !== undefined
-			? ` (failed job: ${result.failedJob})`
-			: result.failedJobUnread !== undefined
-				? ` (its failed job could not be read: ${result.failedJobUnread})`
-				: "";
-	return `${subject} ${result.status}${result.conclusion === undefined ? "" : ` with ${result.conclusion}`}${job}`;
-}
+/** A release's state in the reader's words (`GithubWatchResult.status`), which the sentences below read back. */
+export const RELEASE_STATUS = {
+	missing: "not published",
+	draft: "draft",
+	published: "published",
+	prerelease: "published as a prerelease",
+} as const;
 
-/** What a typed source waits on, in the owner's words (the interface language). */
-export function describeGithubWatchSourceForOwner(
-	source: GithubWatchSource,
-	words: InterfaceText["chat"]["watch"]["github"],
-): string {
+type GithubWatchWords = InterfaceText["chat"]["watch"]["github"];
+
+/**
+ * What a typed source waits on, in `words`: the model's (`englishText()`) or the owner's (`interfaceText()`), one
+ * sentence for both.
+ */
+export function describeGithubWatchSource(source: GithubWatchSource, words: GithubWatchWords): string {
 	if (source.type === "github_run") return words.run(source.runId, source.repo);
-	if (source.type === "ci") return words.ci(source.sha.slice(0, 7));
-	return words.release(source.tag);
+	if (source.type === "ci") return words.ci(source.sha.slice(0, SHORT_SHA_CHARS));
+	return words.release(source.tag, source.repo);
 }
 
-/** What a session watch waits on, a condition or a typed source, in the owner's words. */
+/** What a session watch waits on, a condition or a typed source, in `words`. */
 export function describeSessionWatchSource(
 	source: WatchCondition | GithubWatchSource,
 	words: InterfaceText["chat"]["watch"],
 ): string {
 	return isGithubWatchSource(source)
-		? describeGithubWatchSourceForOwner(source, words.github)
+		? describeGithubWatchSource(source, words.github)
 		: describeWatchCondition(source, words);
 }
 
-/** What a done result says, in the owner's words: the run's conclusion and failed job, or the published release. */
-export function describeGithubWatchResultForOwner(
+/**
+ * What a done result says, in `words`: the run's conclusion and first failed job (or why that job could not be read), or
+ * the published release.
+ */
+export function describeGithubWatchResult(
 	source: GithubWatchSource,
 	result: GithubWatchResult,
-	words: InterfaceText["chat"]["watch"]["github"],
+	words: GithubWatchWords,
 ): string {
-	const subject = describeGithubWatchSourceForOwner(source, words);
-	if (source.type === "release") return words.released(subject);
+	const subject = describeGithubWatchSource(source, words);
+	if (source.type === "release") return words.released(subject, result.status === RELEASE_STATUS.prerelease);
 	return words.runEnded(
 		subject,
 		result.conclusion ?? result.status,
 		result.failedJob,
-		result.failedJob === undefined && result.failedJobUnread !== undefined,
+		result.failedJob === undefined ? result.failedJobUnread : undefined,
 	);
 }
 

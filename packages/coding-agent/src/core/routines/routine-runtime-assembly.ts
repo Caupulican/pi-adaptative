@@ -287,10 +287,6 @@ export class RoutineRuntimeAssembly {
 		};
 	}
 
-	/**
-	 * The port the host arms waits through after a caller's own calls (`watch-auto-arm.ts`): this session's watches, read
-	 * through the host's GitHub link, each telling the owner its result on the phone besides waking its armer.
-	 */
 	/** The open requirement of the session's goal a watch is armed for; any other id is the caller's mistake. */
 	private goalRequirement(requirementId: string): SessionWatchRequirement {
 		const goal = this.deps.getGoalStateSnapshot();
@@ -300,6 +296,10 @@ export class RoutineRuntimeAssembly {
 		return { goalId: goal.goalId, requirementId };
 	}
 
+	/**
+	 * The port the host arms waits through after a caller's own calls (`watch-auto-arm.ts`): this session's watches, read
+	 * through the host's GitHub link, each telling the owner its result on the phone besides waking its armer.
+	 */
 	private autoWatchPort(
 		sessionWatches: SessionWatchService,
 		timers: TimerPort,

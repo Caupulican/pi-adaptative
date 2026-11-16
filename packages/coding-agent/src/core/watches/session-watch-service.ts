@@ -22,7 +22,7 @@ import { isDeepStrictEqual } from "node:util";
 import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
 import type { GoalBoundWatch } from "../goals/goal-continuation-controller.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { englishText, interfaceText } from "../language/interface-text.ts";
 import {
 	MAX_AGENT_ARMED_WATCHES,
 	MAX_AGENT_WATCH_HORIZON_MS,
@@ -269,7 +269,7 @@ export function sessionWatchWakeDetails(record: SessionWatchRecord, wake: Sessio
 			routineId: record.watchId,
 			outcome: "succeeded",
 			wake: true,
-			cause: describeGithubWatchResult(record.condition, record.result),
+			cause: describeGithubWatchResult(record.condition, record.result, englishText().chat.watch.github),
 			github: { source: record.condition, result: record.result },
 			oneShotWatch: true,
 			...served,
@@ -324,7 +324,7 @@ function view(record: SessionWatchRecord): SessionWatchView {
 		...(github && done
 			? {
 					result: {
-						cause: describeGithubWatchResult(github, done),
+						cause: describeGithubWatchResult(github, done, englishText().chat.watch.github),
 						observedAt: new Date(done.observedAt).toISOString(),
 					},
 				}

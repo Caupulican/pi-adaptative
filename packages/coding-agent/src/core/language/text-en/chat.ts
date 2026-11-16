@@ -98,11 +98,17 @@ export const CHAT = {
 		github: {
 			run: (runId: number, repo: string) => `GitHub run ${runId} of ${repo}`,
 			ci: (sha: string) => `the CI of commit ${sha}`,
-			release: (tag: string) => `release ${tag}`,
-			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed (or that it could not be read). */
-			runEnded: (subject: string, conclusion: string, failedJob: string | undefined, jobUnread: boolean) =>
-				`${subject} finished: ${conclusion}${failedJob !== undefined ? ` (failed job: ${failedJob})` : jobUnread ? " (its failed job could not be read)" : ""}`,
-			released: (subject: string) => `${subject} was published`,
+			release: (tag: string, repo: string | undefined) => `release ${tag}${repo === undefined ? "" : ` of ${repo}`}`,
+			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed (or why it could not be read). */
+			runEnded: (
+				subject: string,
+				conclusion: string,
+				failedJob: string | undefined,
+				jobUnread: string | undefined,
+			) =>
+				`${subject} finished: ${conclusion}${failedJob !== undefined ? ` (failed job: ${failedJob})` : jobUnread !== undefined ? ` (its failed job could not be read: ${jobUnread})` : ""}`,
+			released: (subject: string, prerelease: boolean) =>
+				`${subject} was published${prerelease ? " as a prerelease" : ""}`,
 		},
 		/** A watch's result told on the owner's phone (`watchResultPhoneText`): its lead word and the outcomes besides a firing. */
 		phone: {

@@ -531,12 +531,12 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		const armed = sessionLedgerWatches(ledgerDirectory()).find((watch) => watch.watchId === watchId);
 		expect(armed, "the host armed one watch on the pushed commit's CI, told to the owner").toMatchObject({
 			condition: { type: "ci", sha },
-			purpose: `the CI of commit ${sha.slice(0, 12)}, pushed by this session`,
 			onFire: AUTO_WATCH_ON_FIRE,
 			armedBy: { kind: "auto" },
 			tellOwner: true,
 			status: "live",
 		});
+		expect(armed?.purpose, "the host's arming saves no purpose: its note and wake name the source").toBeUndefined();
 		expect(
 			manager
 				.getEntries()
@@ -548,11 +548,8 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		// GitHub completes the run: the watch fires, its wake opens a turn and the phone hears the result once.
 		const woke = scriptGithubWatchWake(world, "ci-watch", {
 			watchId,
-			cause: `the CI of commit ${sha.slice(0, 12)} completed with success`,
-			planLines: [
-				`Purpose: the CI of commit ${sha.slice(0, 12)}, pushed by this session`,
-				`On fire: ${AUTO_WATCH_ON_FIRE}`,
-			],
+			cause: `the CI of commit ${sha.slice(0, 12)} finished: success`,
+			planLines: [AUTO_WATCH_ON_FIRE],
 			source: { type: "ci", sha },
 			result: {
 				state: "done",
@@ -583,7 +580,7 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 			"the watch's result is recorded for the phone",
 			world.io.waitForMutation(() => watchPushes().length > 0),
 		);
-		const phoneText = `Watch "the CI of commit ${sha.slice(0, 12)}, pushed by this session": the CI of commit ${sha.slice(0, 7)} finished: success.`;
+		const phoneText = `Watch: the CI of commit ${sha.slice(0, 12)} finished: success.`;
 		await withDeadline(
 			trace,
 			"the watch's result reaches the phone",
