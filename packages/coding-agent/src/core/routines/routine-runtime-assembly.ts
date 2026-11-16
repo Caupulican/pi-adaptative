@@ -35,6 +35,7 @@ import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
 import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
 import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
+import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
 import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
@@ -107,6 +108,8 @@ export interface RoutineRuntime {
 	readonly githubWatchPoller: GithubWatchPoller;
 	/** The session's own watches as its `watch` tool (and a bot's own `task_watch`) reach them. */
 	readonly watchPort: SessionWatchPort;
+	/** The session's watches as the host arms them after its own calls: an `auto` armer that tells the owner each result. */
+	readonly autoWatches: WatchAutoArmPort;
 	stop(): Promise<void>;
 }
 
@@ -711,6 +714,13 @@ export class RoutineRuntimeAssembly {
 			},
 			now: () => routineTimers.now(),
 		};
+		const autoWatches: WatchAutoArmPort = {
+			followsCi: () => this.host.githubWatches().followsCi,
+			armedOn: (source) => sessionWatches.armedOn(source),
+			arm: (watch) =>
+				sessionWatches.arm({ ...watch, armedBy: { kind: "auto", authority: authority() }, tellOwner: true }),
+			now: () => routineTimers.now(),
+		};
 		return {
 			scheduler,
 			session,
@@ -720,6 +730,7 @@ export class RoutineRuntimeAssembly {
 			sessionWatchMonitor,
 			githubWatchPoller,
 			watchPort,
+			autoWatches,
 			stop,
 		};
 	}

@@ -20,6 +20,7 @@ import type { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import type { MemoryController } from "./memory-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import type { DeliveryState } from "./operator-projection/session-operator-projection.ts";
@@ -31,6 +32,7 @@ import type { SkillVaultController } from "./skill-vault.ts";
 import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import type { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
+import { WATCH_AUTO_ARM_CUSTOM_TYPE, WatchAutoArm, type WatchAutoArmPort } from "./watches/watch-auto-arm.ts";
 
 export interface AgentSessionEventsPorts {
 	agent(): Agent;
@@ -64,14 +66,34 @@ export interface AgentSessionEventsPorts {
 	setDeliveryState(state: DeliveryState): void;
 	refreshForegroundEnvelope(): void;
 	recordCacheObservation(message: AssistantMessage): void;
+	/** The session's watches as the host arms them after its own calls; undefined where it holds none. */
+	autoWatches(): WatchAutoArmPort | undefined;
 }
 
 export class AgentSessionEvents {
 	turnIndex = 0;
 	private readonly ports: AgentSessionEventsPorts;
+	/** Arms the session's waits on what its calls start outside it (a push's CI, a dispatched run, a release). */
+	private readonly autoWatches: WatchAutoArm;
 
 	constructor(ports: AgentSessionEventsPorts) {
 		this.ports = ports;
+		this.autoWatches = new WatchAutoArm({
+			port: () => ports.autoWatches(),
+			cwd: () => ports.cwd(),
+			note: (text) =>
+				ports
+					.durableCustomMessageTurns()
+					.enqueue({ customType: WATCH_AUTO_ARM_CUSTOM_TYPE, content: text, display: false, details: undefined }),
+			failed: (error) =>
+				this.emit({
+					type: "warning",
+					message: interfaceText().chat.watch.autoArmFailed(
+						error instanceof Error ? error.message : String(error),
+					),
+				}),
+			disposed: () => ports.disposed(),
+		});
 	}
 
 	emit(event: AgentSessionEvent): void {
@@ -114,6 +136,7 @@ export class AgentSessionEvents {
 			this.ports.skillVault().noteActivity();
 		}
 		if (event.type === "tool_execution_start") {
+			this.autoWatches.noteStart(event.toolCallId, event.toolName, event.args);
 			this.ports
 				.skillVault()
 				.noteWorkPaths(
@@ -125,6 +148,7 @@ export class AgentSessionEvents {
 					),
 				);
 		}
+		if (event.type === "tool_execution_end") this.autoWatches.noteEnd(event.toolCallId, event.result);
 		if (event.type === "tool_execution_end" && event.isError) {
 			this.ports.toolRecoveryLogger().recordToolExecutionFailure({
 				provider: this.ports.model()?.provider,

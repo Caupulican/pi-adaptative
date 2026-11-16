@@ -101,6 +101,8 @@ export const CHAT = {
 			timedOut: "chegou ao prazo sem resultado",
 			failing: (failures: number) => `não pôde ser verificado ${failures} vezes seguidas; continua tentando`,
 		},
+		autoArmFailed: (reason: string) =>
+			`Os monitoramentos do trabalho externo de uma chamada de ferramenta não foram armados ou não foram informados: ${reason}`,
 	},
 	daemonBuildRunning: (build: string | undefined) =>
 		build === undefined ? "build sem identificação (um build anterior)" : `build ${build}`,

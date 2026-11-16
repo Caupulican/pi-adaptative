@@ -114,6 +114,7 @@ import { TASK_STEPS_STATE_CUSTOM_TYPE } from "./tasks/session-task-state.ts";
 import { TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE } from "./tasks/task-directory-context.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
+import { WATCH_AUTO_ARM_CUSTOM_TYPE } from "./watches/watch-auto-arm.ts";
 import { WORK_UNIT_CUSTOM_TYPE, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
 
 export type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
@@ -286,6 +287,7 @@ function customTurnOrigin(customType: string, wrapped: unknown): TurnOriginRecor
 			return authorship === undefined ? { v: 1, k: "host-event" } : { v: 1, k: "host-event", thirdParty: true };
 		}
 		case HARNESS_NOTICE_CUSTOM_TYPE:
+		case WATCH_AUTO_ARM_CUSTOM_TYPE:
 			return { v: 1, k: "harness" };
 		case ROUTINE_COMPLETION_TYPE:
 			return details && typeof details === "object" && Reflect.get(details, "thirdParty") === true
@@ -377,6 +379,7 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		PLAN_UPDATE_CUSTOM_TYPE,
 		HOST_EVENT_CUSTOM_TYPE,
 		HARNESS_NOTICE_CUSTOM_TYPE,
+		WATCH_AUTO_ARM_CUSTOM_TYPE,
 		PROACTIVE_NOTE_CUSTOM_TYPE,
 		PROACTIVITY_FEEDBACK_CUSTOM_TYPE,
 		ACT_AHEAD_CUSTOM_TYPE,

@@ -126,7 +126,6 @@ import {
 	getWorkerClaimSnapshotForAttempt,
 	getWorkerClaimSnapshots,
 } from "./delegation/session-worker-claim.ts";
-import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createWorkerEdgePolicy } from "./delegation/worker-edge-policy.ts";
 import { createWorkerMemoryAccess } from "./delegation/worker-memory-access.ts";
@@ -597,7 +596,8 @@ export class AgentSession {
 		emitQueueUpdate: () => this._emitQueueUpdate(),
 		setDeliveryState: (state) => this.setDeliveryState(state),
 		refreshForegroundEnvelope: () => this._refreshForegroundEnvelope(),
-		recordCacheObservation: (message) => this._recordCacheObservation(message),
+		recordCacheObservation: (message) => this._cache.recordObservation(message),
+		autoWatches: () => this._backgroundLanes.ownWatches().auto(),
 	});
 	private readonly _modelAccess = new AgentSessionModelAccess({
 		foregroundRecovery: () => this._foregroundRecovery,
@@ -3237,15 +3237,6 @@ export class AgentSession {
 	/** Compaction call-site delegation to {@link ContextPipeline.buildCompactionPreDigest}. */
 	private _buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
 		return this._pipeline.buildCompactionPreDigest((type, data) => this.sessionManager.appendCustomEntry(type, data));
-	}
-
-	/**
-	 * One cache observation per provider response (see CacheObservationRecorder), joined to the request
-	 * snapshot that opened it, so the cache-survival estimator can learn each lane's cache lifetime.
-	 * Best effort: a ledger that cannot be written never affects the turn.
-	 */
-	private _recordCacheObservation(message: AssistantMessage, conversation?: WorkerResponseObservation): void {
-		this._cache.recordObservation(message, conversation);
 	}
 
 	private _guardCacheSurface(snapshot?: SessionRequestSnapshotInput, conversation?: string): void {

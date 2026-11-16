@@ -10,6 +10,7 @@ import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notificat
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolCallFacts } from "../tool-capability-policy.ts";
 import type { SessionWatchView } from "../watches/session-watch-service.ts";
+import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import { createWatchTool } from "../watches/watch-tool.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routine-intake.ts";
@@ -52,6 +53,8 @@ export class SessionRoutines {
 		 */
 		endArmedByStop: (stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } =>
 			this.loaded()?.sessionWatches.endArmedByStop(stopAt, carried) ?? { ended: 0, settled: 0 },
+		/** The session's watches as the host arms them after its own calls (`watch-auto-arm.ts`); none until the runtime is built. */
+		auto: (): WatchAutoArmPort | undefined => this.runtime?.autoWatches,
 		subscribe: (listener: () => void): (() => void) => {
 			this.watchListeners.add(listener);
 			return () => this.watchListeners.delete(listener);

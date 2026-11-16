@@ -110,6 +110,9 @@ export const CHAT = {
 			timedOut: "reached its deadline without a result",
 			failing: (failures: number) => `could not be checked ${failures} times in a row; it keeps trying`,
 		},
+		/** The host's own arming of watches after a tool call (a push, a dispatched run, a release script) failed. */
+		autoArmFailed: (reason: string) =>
+			`Watches for the outside work of a tool call were not armed or not reported: ${reason}`,
 	},
 	/** The daemon's build beside the session's: what runs, and what this session runs. */
 	daemonBuildRunning: (build: string | undefined) =>
