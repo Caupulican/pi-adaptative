@@ -1,7 +1,8 @@
 /**
  * The detached bot daemon: queues due persistent bot and team routines across TUI restarts, runs the routines of
- * closed sessions away (`AwayRoutineSupervisor`), and serves the channels the owner named an `awayCwd` for while no
- * session is open (`AwayChannelHosts`), on the same away spend bound.
+ * closed sessions away (`AwayRoutineSupervisor`), serves the channels the owner named an `awayCwd` for while no
+ * session is open (`AwayChannelHosts`), and hosts the bots owed work that no root session takes (`bot-daemon-host.ts`),
+ * all on the same away spend bound.
  *
  * A session claims the daemon lease with a fresh token, then launches `pi --bot-daemon <agentDir> <token>` through
  * the stable self-launch target. Sessions do this by themselves: on start while an enabled routine exists, and when a
@@ -34,12 +35,14 @@ import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
+import { type BotDaemonHost, startBotDaemonHost } from "../bots/bot-daemon-host.ts";
 import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
-import { awayChannelChargesReader } from "../channels/away-channels.ts";
+
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
+import { readAwayCharges } from "../routines/away-spend-charges.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { repeatEvery, SYSTEM_TIMER_SOURCE, type TimerSource } from "../util/timer-port.ts";
 import {
@@ -57,7 +60,8 @@ import {
 } from "./bot-team-routine-helpers.ts";
 import { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
-const DAEMON_TICK_MS = 10_000;
+/** The renewal interval of the daemon's lease on the routines clock; each tick also reloads its settings. */
+export const DAEMON_TICK_MS = 10_000;
 /** Reports waiting for a contended lease lock; older ones are dropped first. */
 const MAX_PENDING_REPORTS = 20;
 
@@ -147,8 +151,27 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	store = routineStore;
 	// The away bounds are the owner's global settings; no project's settings reach a daemon serving every project.
 	const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
-	// One reader for the routine supervisor and the channel hosts, so a failed read is told once per cause.
-	const awayChannelCharges = awayChannelChargesReader(agentDir, report);
+	// The bots owed work while no root session takes them (`bot-daemon-host.ts`), hosted only with the credentials to run them.
+	const { authStorage, modelRegistry } = input;
+	let bots: BotDaemonHost | undefined;
+	const botHosting =
+		authStorage && modelRegistry
+			? startBotDaemonHost({
+					agentDir,
+					store: routineStore,
+					authStorage,
+					modelRegistry,
+					timers,
+					settings,
+					report,
+				}).then((started) => {
+					bots = started;
+				})
+			: Promise.resolve();
+	botHosting.catch(fail);
+	// Everything else on the away bound: the channels' turns and the bots' spend, their working turns included.
+	const awayCharges = () =>
+		bots?.awayCharges(clock.now()) ?? readAwayCharges(agentDir, settings.getRoutineAwaySettings(), clock.now());
 	const supervisor = new AwayRoutineSupervisor({
 		store: routineStore,
 		agentDir,
@@ -160,7 +183,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
 		...(input.eventSources ? { eventSources: input.eventSources } : {}),
 		ciEvents: () => settings.getProactivitySettings().ciEvents,
-		otherAwayCharges: () => awayChannelCharges(settings.getRoutineAwaySettings().maxUsdPerRun, clock.now()),
+		otherAwayCharges: awayCharges,
 	});
 	const channelProviders = input.channelProviders;
 	const channelHosts = channelProviders
@@ -171,7 +194,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				...(input.machineFacts ? { machineFacts: input.machineFacts } : {}),
 				providers: channelProviders,
 				routineOccurrences: () => routineStore.listRoutineOccurrences(),
-				awayChannelCharges,
+				otherAwayCharges: awayCharges,
 				report,
 				...(input.authStorage ? { authStorage: input.authStorage } : {}),
 				...(input.modelRegistry ? { modelRegistry: input.modelRegistry } : {}),
@@ -182,6 +205,8 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	// The settings reload a tick started; it never rejects (a failure stops the daemon) and a stop joins it.
 	let reloading: Promise<void> | undefined;
 	let credentialStamp = credentialFilesStamp(agentDir);
+	// A credential change the bots' account listing has not read yet (a tick whose reload was still running skipped it).
+	let botCredentialsChanged = false;
 
 	const stop = (end?: Omit<BotDaemonEnd, "at">): Promise<number> => {
 		stopping ??= (async () => {
@@ -202,6 +227,14 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			} catch (error) {
 				code = 1;
 				ended = { reason: "failed", detail: `the channel hosts did not close: ${errorText(error)}` };
+			}
+			try {
+				// A start still running ends first; one that failed has hosted nothing.
+				await botHosting.catch(() => undefined);
+				await bots?.stop();
+			} catch (error) {
+				code = 1;
+				ended = { reason: "failed", detail: `the bot sessions did not close: ${errorText(error)}` };
 			}
 			flushReports();
 			// Without an end the lease is no longer this daemon's: whoever holds or released it owns the record.
@@ -239,6 +272,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		// An owner's credential or model change applies to the next request of every hosted parent.
 		const stamp = credentialFilesStamp(agentDir);
 		if (stamp !== credentialStamp) {
+			botCredentialsChanged = true;
 			credentialStamp = stamp;
 			input.authStorage?.reload();
 			input.modelRegistry?.refresh();
@@ -251,6 +285,13 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				if (stopping) return;
 				supervisor.wake();
 				channelHosts?.sync(credentialStamp);
+				const credentials = botCredentialsChanged;
+				botCredentialsChanged = false;
+				return bots
+					?.refresh(credentials)
+					.catch((error: unknown) =>
+						report(`Bot hosting: the bots' sources were not read again: ${errorText(error)}`),
+					);
 			}, fail)
 			.finally(() => {
 				reloading = undefined;

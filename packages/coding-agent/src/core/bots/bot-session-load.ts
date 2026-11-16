@@ -21,7 +21,7 @@ import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
 import { ensureBotHome } from "./bot-home.ts";
-import { BotHostStateWriter, readRemoteBotHost } from "./bot-host-state.ts";
+import { type BotHostKind, BotHostStateWriter, readRemoteBotHost } from "./bot-host-state.ts";
 import { BotSessionHeldError } from "./bot-inbox-send.ts";
 import { botNoticeLine } from "./bot-notices.ts";
 import { storeFailure } from "./bot-open-retry.ts";
@@ -85,6 +85,8 @@ export interface BotSessionLoadPorts {
 	idleTimers(): TimerPort;
 	/** The root's dollar ceilings over spend (`BotSessionHostPorts.spendCeilings`). */
 	spendCeilings(): readonly BotSpendCeiling[];
+	/** What kind of process hosts the bots (`BotSessionHostPorts.hostKind`). */
+	hostKind(): BotHostKind;
 	warn(message: string): void;
 	/** What defines the bot's session and whether its model may run now. */
 	readonly admission: BotSessionAdmission;
@@ -229,6 +231,7 @@ export class BotSessionLoader {
 					},
 				},
 			});
+			const hostSessionId = sender.hostSessionId();
 			const entry: BotSessionEntry = {
 				agentId,
 				session,
@@ -237,8 +240,8 @@ export class BotSessionLoader {
 				releaseSettings: settings.release,
 				stateWriter: new BotHostStateWriter(agentDir, {
 					agentId,
-					hostKind: "session",
-					hostSessionId: sender.hostSessionId(),
+					hostKind: this.ports.hostKind(),
+					...(hostSessionId !== undefined ? { hostSessionId } : {}),
 					botSessionId: session.sessionId,
 					holder: this.holder,
 				}),

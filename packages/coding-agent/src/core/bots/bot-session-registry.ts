@@ -18,6 +18,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
 import { LinkedSessionNotices } from "./bot-link-notices.ts";
+import { publishBotRootHost } from "./bot-root-hosts.ts";
 import {
 	type BotHostProcessKeeps,
 	type BotSender,
@@ -29,8 +30,10 @@ import { UnrecordedBotStops } from "./bot-stop.ts";
 
 /** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */
 export interface BotSessionRootPorts
-	extends Omit<BotSessionHostPorts, "sender" | "senderIn">,
-		Omit<BotSender, "settings" | "chargesHeld"> {
+	extends Omit<BotSessionHostPorts, "sender" | "senderIn" | "leavesTo">,
+		Omit<BotSender, "settings" | "chargesHeld" | "compileProfile"> {
+	/** A root session always compiles a profile (`BotSender.compileProfile`). */
+	compileProfile: NonNullable<BotSender["compileProfile"]>;
 	/** The root's settings manager: a bot's settings read the same storage and follow the changes it announces. */
 	settingsManager(): SettingsManager;
 	/** Where this root keeps the charges of a bot's spend: its session files and itself (`botChargesHeld`). */
@@ -103,6 +106,11 @@ export interface BotSessionAttachment {
 	readonly delivery: BotSessionDelivery;
 	/** Observes the bots' session changes while this root stays attached (see `BotSessionHost.subscribe`). */
 	subscribe(listener: (change: readonly string[]) => void): () => void;
+	/**
+	 * Opens the bots owed work that no process takes (`BotSessionHost.openOwed`), recording this root as one hosting bots
+	 * (`publishBotRootHost`): the daemon leaves the bots that work in its directory to it until it detaches.
+	 */
+	hostOwed(): void;
 	/** Detaches the root; the last root's detach stops the host and resolves once its sessions closed. */
 	detach(): Promise<void>;
 }
@@ -205,6 +213,7 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 		modelRefusal: (record, model) => root().modelRefusal(record, model),
 		spendCeilings: () => root().spendCeilings(),
 		usageRules: () => root().usageRules(),
+		hostKind: () => root().hostKind(),
 	};
 }
 
@@ -237,8 +246,21 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 	const sender = senderOf(attached, ports);
 	const listeners = new Set<() => void>();
 	let detached = false;
+	let unpublish: (() => void) | undefined;
 	return {
 		host,
+		hostOwed() {
+			if (detached) return;
+			try {
+				unpublish ??= publishBotRootHost(ports.agentDir(), ports.cwd());
+			} catch (error) {
+				// Unrecorded, the daemon keeps the bots it hosts: this root's messages reach them through their inboxes.
+				ports.warn(
+					interfaceText().botTeam.botRootHostNotRecorded(error instanceof Error ? error.message : String(error)),
+				);
+			}
+			host.openOwed();
+		},
 		delivery: {
 			deliver: (agentId, message, options, origin) => host.deliver(agentId, message, options, origin, sender),
 			noteHistoryRun: (agentId, parentSessionId, runtime) => host.noteHistoryRun(agentId, parentSessionId, runtime),
@@ -255,6 +277,7 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		async detach() {
 			if (detached) return;
 			detached = true;
+			unpublish?.();
 			for (const unsubscribe of listeners) unsubscribe();
 			listeners.clear();
 			for (const follower of followers) {
@@ -277,6 +300,29 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 				// A child's host keeps its own: the stops it still holds go to its process and agent directory's, recorded
 				// there again and at the quit of a runtime of that directory, not lost with the host.
 				if (!root) keepsFor(key, true).unrecorded.adopt(attached.keeps.unrecorded);
+			}
+		},
+	};
+}
+
+/**
+ * A host with no root session, for the bot daemon: its own (no root attaches to it), with what it keeps of its own; the
+ * owner's stops it still holds unrecorded when it stops are recorded one last time and what is told of them goes to
+ * `ports.warn`.
+ */
+export function rootlessBotSessionHost(ports: BotSessionHostPorts): {
+	readonly host: BotSessionHost;
+	stop(): Promise<void>;
+} {
+	const keeps = keepsFor(resolve(ports.agentDir()), false);
+	const host = new BotSessionHost(ports, keeps);
+	return {
+		host,
+		stop: async () => {
+			try {
+				await host.stop();
+			} finally {
+				for (const told of keeps.unrecorded.recordAtQuit()) ports.warn(told);
 			}
 		},
 	};

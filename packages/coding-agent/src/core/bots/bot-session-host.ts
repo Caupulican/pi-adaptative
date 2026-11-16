@@ -66,7 +66,7 @@ import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
-import type { BotSessionState } from "./bot-host-state.ts";
+import type { BotHostKind, BotSessionState } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
 	type BotInboxMessage,
@@ -80,7 +80,7 @@ import {
 	tellUnreadableInboxRecord,
 } from "./bot-inbox.ts";
 import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
-import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
+import { type BotInboxFrom, BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
 import { BotLoadedStops } from "./bot-loaded-stops.ts";
 import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
@@ -144,6 +144,13 @@ export interface BotSessionHostPorts {
 	spendCeilings(): readonly BotSpendCeiling[];
 	/** What reads when a closed bot's saved session continues what a usage limit stopped (`savedUsageResumeAt`). */
 	usageRules(): SavedUsageResumeRules;
+	/** What kind of process hosts the bots: a root session's, or the bot daemon's (`host-state.json`). */
+	hostKind(): BotHostKind;
+	/**
+	 * Whether a root session of another process that hosts bots works in `cwd`: this host (the daemon's) leaves the bots
+	 * that work there to it, opening none for that directory and closing an idle one (`leaveIdleToRoots`). Absent: none is left.
+	 */
+	leavesTo?(cwd: string): boolean;
 }
 
 /**
@@ -154,15 +161,18 @@ export interface BotSessionHostPorts {
  */
 export interface BotSender {
 	cwd(): string;
-	/** What a bot made from a profile compiles to for this root, by the resolution a fresh worker of it takes (`bot-session-compile.ts`). */
-	compileProfile(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
+	/**
+	 * What a bot made from a profile compiles to for this root, by the resolution a fresh worker of it takes
+	 * (`bot-session-compile.ts`); absent with no root session (the daemon), where such a bot waits for one.
+	 */
+	compileProfile?(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
 	/**
 	 * A settings manager of the bot's own over the storage this root reads (`SettingsManager.sibling`), reading again each
 	 * change an attached root's manager makes until `release`.
 	 */
 	settings(): { readonly settings: SettingsManager; release(): void };
-	/** The pi session that hosts the bot, named to the owner of a message another process sends it. */
-	hostSessionId(): string;
+	/** The pi session that hosts the bot, named to the owner of a message another process sends it; none in the daemon. */
+	hostSessionId(): string | undefined;
 	/** Whether that session keeps a session file (none with `--no-session` or an in-memory SDK session). */
 	hostKeepsFile(): boolean;
 	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
@@ -182,6 +192,12 @@ export interface BotSender {
 	 * the session written to; returns the unsubscribe.
 	 */
 	chargesPersisted(listener: (rootSessionId: string, reportIds: readonly string[]) => void): () => void;
+}
+
+/** Who a message or stop written to a bot's inbox came from: the sender's directory, and its session when it has one. */
+function inboxSender(sender: BotSender): BotInboxFrom {
+	const sessionId = sender.hostSessionId();
+	return { ...(sessionId !== undefined ? { sessionId } : {}), cwd: sender.cwd() };
 }
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
@@ -318,6 +334,7 @@ export class BotSessionHost {
 				admissionTimers: () => ports.timers().port("provider-admission"),
 				retake: (agentId) => this.retakeRefused(agentId),
 				takeInbox: (agentId) => this.takeInbox(agentId),
+				leavesTo: (cwd) => ports.leavesTo?.(cwd) === true,
 				sender: () => ports.sender(),
 				senderIn: (cwd) => ports.senderIn(cwd),
 				open: (agentId, sender) => this.open(agentId, sender),
@@ -385,6 +402,7 @@ export class BotSessionHost {
 				timers: () => ports.timers(),
 				idleTimers: () => this.idleTimers(),
 				spendCeilings: () => ports.spendCeilings(),
+				hostKind: () => ports.hostKind(),
 				warn: (message) => ports.warn(message),
 				admission: this.admission,
 				owed: this.owed,
@@ -573,7 +591,7 @@ export class BotSessionHost {
 				agentId,
 				message,
 				{ mode, showsWaits },
-				{ sessionId: sender.hostSessionId(), cwd: sender.cwd() },
+				inboxSender(sender),
 				origin,
 			);
 		}
@@ -594,8 +612,7 @@ export class BotSessionHost {
 				? botInboxOwnerWordsWaiting(agentDir, agentId)
 				: returned || botInboxWaiting(agentDir, agentId) || this.isBusy(entry);
 		if (!behindStop && !waits) return this.give(entry, message, mode, origin);
-		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
-		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop, origin);
+		const result = queueInBotInbox(agentDir, agentId, message, mode, inboxSender(sender), entry.modelRef, behindStop, origin);
 		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
 		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
@@ -712,7 +729,10 @@ export class BotSessionHost {
 		const { profileId } = record;
 		if (!botMayRunAsSession(record)) return false;
 		if (profileId === undefined) return true;
-		const compiled = this.senderFor(record.agentId, sender).compileProfile({ ...record, profileId });
+		// With no root to compile it (the daemon), it stays on the session path and waits for one (`botProfileNeedsRoot`).
+		const root = this.senderFor(record.agentId, sender);
+		if (!root.compileProfile) return true;
+		const compiled = root.compileProfile({ ...record, profileId });
 		return !compiled.ok || profileBotSession(compiled).route === "session";
 	}
 
@@ -924,10 +944,37 @@ export class BotSessionHost {
 	openOwed(): void {
 		this.owed.sweepInboxes();
 		this.releases.recoverOwed();
+		this.askOwed();
+	}
+
+	/** Asks every bot whether its session is owed work that no process takes (`BotOwedWork.unhosted`). */
+	askOwed(): void {
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
 		this.view.watch();
 		for (const bot of bots) this.owed.unhosted(bot.agentId);
+	}
+
+	/**
+	 * Closes each loaded bot a root session now takes (`BotSessionHostPorts.leavesTo` its directory) once nothing holds it
+	 * here: no turn or input, no worker running, and nothing waiting in its inbox. What it is still owed opens it there.
+	 */
+	leaveIdleToRoots(): void {
+		const agentDir = this.ports.agentDir();
+		for (const entry of [...this.entries.values()]) {
+			if (!this.ports.leavesTo?.(entry.builtFor.cwd()) || this.holdsLoaded(entry)) continue;
+			if (botInboxWaiting(agentDir, entry.agentId) || botInboxStopWaiting(agentDir, entry.agentId)) continue;
+			void this.close(entry.agentId).catch((error: unknown) =>
+				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
+			);
+		}
+	}
+
+	/** The loaded sessions working now (a turn, input or a worker), with their models: whose spend may still grow. */
+	working(): { readonly agentId: string; readonly model: Model<Api> | undefined }[] {
+		return [...this.entries.values()].flatMap((entry) =>
+			this.holdsLoaded(entry) ? [{ agentId: entry.agentId, model: entry.session.model }] : [],
+		);
 	}
 
 	/** A turn ended with words: they are the bot's summary in the roster, and its time marks the chat as unread. */
@@ -993,7 +1040,7 @@ export class BotSessionHost {
 		const record = this.ports.store().getBot(agentId);
 		if (!entry && (!record || record.retired || !this.runsAsSession(record))) return { stopped: false };
 		const sender = this.ports.sender();
-		const from = { pid: process.pid, sessionId: sender.hostSessionId(), cwd: sender.cwd() };
+		const from = { pid: process.pid, ...inboxSender(sender) };
 		if (!entry) {
 			// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
 			const host = this.owed.ownerStopped(agentId, from);

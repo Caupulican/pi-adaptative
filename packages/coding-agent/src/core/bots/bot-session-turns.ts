@@ -21,12 +21,13 @@ import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
 /**
  * One dollar ceiling over a bot's spend per request, with the setting that sets it (the owner's worker bound, the main
- * session's, or the bot's profile's), on the part of it made on metered models, as every dollar ceiling counts by the
- * owner's cost rule (`costCeilingUsd`): a subscription's spend never reaches it, its plan's usage windows hold it.
+ * session's, the bot's profile's, or the away bound of one run while the daemon hosts the bot), on the part of it made on
+ * metered models, as every dollar ceiling counts by the owner's cost rule (`costCeilingUsd`): a subscription's spend never
+ * reaches it, its plan's usage windows hold it.
  */
 export interface BotSpendCeiling {
 	readonly usd: number;
-	readonly bound: "worker" | "session" | "profile";
+	readonly bound: "worker" | "session" | "profile" | "away";
 }
 
 /** What the per-turn owners read from, and tell, the bot's host. */

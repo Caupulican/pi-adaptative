@@ -105,6 +105,8 @@ export const MODEL_ID = {
 	mailReader: "worker-b",
 	/** The owner's bot that keeps a goal of its own and continues it on its own; its soul tells it apart on the shared model. */
 	goalBot: "worker-c",
+	/** The owner's bot the detached daemon hosts while no root session is open; its soul tells it apart on the shared model. */
+	awayBot: "worker-c",
 } as const;
 
 /** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
@@ -169,6 +171,7 @@ export const TRACK = {
 	mailWorker: "j7-mail-worker",
 	mailReader: "j7-mail-reader",
 	goalBot: "j7-goal-bot",
+	awayBot: "j7-away-bot",
 } as const;
 
 /**
@@ -485,8 +488,8 @@ export function botNoticeTexts(world: HarnessWorld, agentId: string): string[] {
 }
 
 /** The text of every file of the bot's own `sessions/` directory: the conversation as the bot's session wrote it. */
-export function botSessionFilesText(world: HarnessWorld, agentId: string): string {
-	const directory = botSessionsDir(world.agentDir, agentId);
+export function botSessionFilesText(world: HarnessWorld, agentId: string, agentDir = world.agentDir): string {
+	const directory = botSessionsDir(agentDir, agentId);
 	if (!existsSync(directory)) return "";
 	return readdirSync(directory)
 		.filter((name) => name.endsWith(".jsonl"))

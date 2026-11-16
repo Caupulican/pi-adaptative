@@ -118,6 +118,25 @@ const ACCOUNT_CHECKS: Readonly<
 	},
 };
 
+/** What a catalog reads of the model registry: its models, which have auth, and each one's request credential. */
+export interface AccountModelRegistry {
+	getAll(): readonly Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	getApiKeyAndHeaders(model: Model<Api>): Promise<({ ok: true } & RequestAuth) | { ok: false }>;
+}
+
+/** The catalog of the accounts a model registry holds credentials for, asked with each model's own request credential. */
+export function accountModelCatalogOf(registry: AccountModelRegistry): AccountModelCatalog {
+	return new AccountModelCatalog({
+		getModels: () => registry.getAll(),
+		hasConfiguredAuth: (model) => registry.hasConfiguredAuth(model),
+		getRequestAuth: async (model) => {
+			const auth = await registry.getApiKeyAndHeaders(model);
+			return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
+		},
+	});
+}
+
 export class AccountModelCatalog {
 	private readonly deps: AccountModelCatalogDeps;
 	private states = new Map<string, ProviderAccountState>();

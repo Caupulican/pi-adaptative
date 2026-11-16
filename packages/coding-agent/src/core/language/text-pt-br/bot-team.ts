@@ -73,6 +73,10 @@ export const BOT_TEAM = {
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
+	botRootHostNotRecorded: (reason: string) =>
+		`Bots: esta sessão não conseguiu registrar que hospeda bots (${reason}); o daemon de bots continua hospedando os bots que tem, e suas mensagens chegam a eles pelas caixas de entrada.`,
+	botProfileNeedsRoot: (agentId: string, profileId: string) =>
+		`O bot ${agentId} é feito do perfil ${profileId}, que só uma sessão aberta resolve; as esperas e mensagens dele aguardam até uma sessão abrir onde ele trabalha.`,
 	botModelMoved: (agentId: string, running: string, defined: string) =>
 		`Bot ${agentId}: a sessão dele está em ${running}, não em ${defined}, o modelo em que o bot é definido, então esta execução não foi iniciada.`,
 	botModelUnusable: (modelRef: string, cause: string) =>
@@ -291,6 +295,8 @@ export const BOT_TEAM = {
 	botHistoryRunUnreadable: (reason: string) =>
 		`Histórico dos bots: uma conversa anterior não pôde ser lida (${reason}).`,
 	botModelNotAllowed: (modelRef: string) => `sua política de modelos não permite ${modelRef}`,
+	botAwaySpendExhausted:
+		"o gasto cobrado por uso permitido enquanto nenhuma sessão está aberta (routines.away.maxUsdPerDay) não tem espaço para outro turno nas últimas 24 horas",
 	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
 		`${modelRef} é cobrado por chave de API e você não o escolheu para workers enquanto há modelos de assinatura disponíveis; use um modelo de assinatura como ${alternatives.join(", ")}, ou adicione ${provider} a workerDelegation.routeProviders`,
 	botSessionsClosing: (agentId: string) =>
@@ -300,8 +306,8 @@ export const BOT_TEAM = {
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
-		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos com cobrança por uso neste pedido, com os workers dele; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : "o limite de gasto da autonomia desta sessão"} sobre o gasto cobrado por uso é $${limitUsd}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile" | "away") =>
+		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos com cobrança por uso neste pedido, com os workers dele; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : bound === "away" ? "o limite de uma execução enquanto nenhuma sessão está aberta (routines.away.maxUsdPerRun)" : "o limite de gasto da autonomia desta sessão"} sobre o gasto cobrado por uso é $${limitUsd}).`,
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: o turno foi interrompido no limite de tempo (workerDelegation.maxWallClockMs é ${limitSeconds} s).`,
 	botRecordChangeNotApplied: (agentId: string, reason: string) =>

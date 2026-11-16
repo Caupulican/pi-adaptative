@@ -127,8 +127,8 @@ export interface AwayChannelHostsInput {
 	readonly providers: AwayChannelProviderFactory;
 	/** The routine runs away charged on the same bound. */
 	routineOccurrences(): Iterable<RoutineOccurrence>;
-	/** The channel turns' charges on the same bound (`awayChannelChargesReader`, which tells a failed read once per cause). */
-	awayChannelCharges(maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead;
+	/** What else is charged to the same bound now: every channel's turns away and the bots' spend (`readAwayCharges`). */
+	otherAwayCharges(nowMs: number): RoutineAwayChargesRead;
 	readonly authStorage?: AuthStorage;
 	readonly modelRegistry?: ModelRegistry;
 	/** Diagnostics; this host reports each cause once until it clears. */
@@ -230,7 +230,7 @@ export class AwayChannelHosts {
 			{
 				maxUsdPerRun: away.maxUsdPerRun,
 				maxUsdPerDay: away.maxUsdPerDay,
-				otherCharges: this.input.awayChannelCharges(away.maxUsdPerRun, nowMs),
+				otherCharges: this.input.otherAwayCharges(nowMs),
 				spendsMetered: (definition) =>
 					awayRunMetered(definition.executionSnapshot?.savedIntent, this.input.modelRegistry),
 				reservedMetered: awayMeteredRunReserved(this.input.agentDir),

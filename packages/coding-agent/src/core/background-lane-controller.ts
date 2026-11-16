@@ -38,7 +38,8 @@ import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./
 import { BotRoster } from "./bots/bot-roster.ts";
 import { attachBotSessions } from "./bots/bot-session-ports.ts";
 import { RootBots } from "./bots/root-bots.ts";
-import { type AwayChannelStatus, readAwayChannelCharges, readAwayChannelStatus } from "./channels/away-channels.ts";
+import { type AwayChannelStatus, readAwayChannelStatus } from "./channels/away-channels.ts";
+import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { createLaneSessionChannels } from "./channels/lane-session-channels.ts";
 import type { SessionChannels } from "./channels/session-channels.ts";
@@ -183,6 +184,7 @@ import { ResearchLaneController } from "./research/research-lane-controller.ts";
 import { awayMeteredRunReserved } from "./routines/away-metered-runs.ts";
 import { awayRunMetered } from "./routines/away-routine-admission.ts";
 import { AwayService } from "./routines/away-service.ts";
+import { readAwayCharges } from "./routines/away-spend-charges.ts";
 import type { RoutineScope } from "./routines/routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routines/routine-intake.ts";
 import { RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
@@ -1477,8 +1479,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this.channels.start();
 		if (standing.answersForCheckout && !this.deps.isDisposed()) this._getActAhead().start();
 		this._getRetention().scheduleFromIdle();
-		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
-		if (standing.ownsProcessSingletons && !this._channelsHostedByDaemon) this._botHost.host.openOwed();
+		// Bot sessions owed work a closed process left are opened here (the daemon leaves them); its phone session hosts none.
+		if (standing.ownsProcessSingletons && !this._channelsHostedByDaemon) this._botHost.hostOwed();
 		if (standing.managesBots) this._rootBots.replies.start();
 	}
 
@@ -1650,8 +1652,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			channelStates: () => this.channels.getStates(),
 			channelJournals: () => this.channels.readJournalSummaries(),
-			awayChannelCharges: (maxUsdPerRun, nowMs) =>
-				readAwayChannelCharges(this.deps.getAgentDir(), maxUsdPerRun, nowMs),
+			awayCharges: (away, nowMs) => readAwayCharges(this.deps.getAgentDir(), away, nowMs),
 			awayRunMetered: (definition) =>
 				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.getModelRegistry()),
 			awayRunReserved: (dispatchKey) => awayMeteredRunReserved(this.deps.getAgentDir())(dispatchKey),

@@ -113,8 +113,8 @@ export interface BotTurnAccountingPorts {
 	chargesHeld(sessionId: string, instance: string, since: number): Promise<BotChargesHeld>;
 	/** Calls `listener` with the charges the answering root's file holds as each of its writes lands; returns the unsubscribe. */
 	chargesPersisted(listener: (rootSessionId: string, reportIds: readonly string[]) => void): () => void;
-	/** The session of the root the bot answers now. */
-	rootSessionId(): string;
+	/** The session of the root the bot answers now; none when no root session hosts it (the daemon, whose ledger holds its charges). */
+	rootSessionId(): string | undefined;
 	/**
 	 * Whether the root the bot answers now keeps a session file: one that keeps none (`--no-session`, an in-memory SDK
 	 * session) holds a charge as it holds its own spend, only while it lives: the charge is settled when it takes it.
@@ -181,14 +181,14 @@ export class BotTurnAccounting {
 	/** After a failed read-back: no new one starts before this time (ms since the epoch). */
 	private recoverAfter = 0;
 	/** The pending charges a root holds unwritten, by report id, with that root's session. */
-	private readonly awaiting = new Map<string, string>();
+	private readonly awaiting = new Map<string, string | undefined>();
 	/**
 	 * The root each charge this process fixed answered when it was fixed, by report id: a root that keeps no file settles
 	 * only the charges fixed while it answers (in memory alone; a charge left from before stays for a root with a file).
 	 */
-	private readonly fixedFor = new Map<string, string>();
+	private readonly fixedFor = new Map<string, string | undefined>();
 	/** The root whose writes are watched for the awaited charges, and the unsubscribe. */
-	private watching: { readonly root: string; readonly stop: () => void } | undefined;
+	private watching: { readonly root: string | undefined; readonly stop: () => void } | undefined;
 	/** How far the root's files hold this session's charges past its transcript's last mark: marked at the turn's end. */
 	private unmarked: { readonly sessionId: string; readonly instance: string; readonly through: Usage } | undefined;
 	/** A charge was not recorded and the owner was told; told again only after a charge reaches the root. */

@@ -110,6 +110,9 @@ export class BotSessionAdmission {
 		if (!botMayRunAsSession(record)) return "worker";
 		const { profileId } = record;
 		if (profileId === undefined) return ownBotSession(record, sender.cwd(), this.ports.modelRegistry());
+		// A profile is compiled only by a root session's resolution: with none (the daemon), the bot waits for one.
+		if (!sender.compileProfile)
+			throw new BotOwnerError(interfaceText().botTeam.botProfileNeedsRoot(record.agentId, profileId));
 		const compiled = sender.compileProfile({ ...record, profileId });
 		if (!compiled.ok)
 			throw new BotOwnerError((text) =>

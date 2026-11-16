@@ -39,6 +39,7 @@ import {
 } from "../proactivity/proactivity-controller.ts";
 import { proofSheetsAwaitingReview } from "../proof/review-gauge.ts";
 import type { AwayServiceInspection } from "../routines/away-service.ts";
+import type { AwaySpendBounds } from "../routines/away-spend-charges.ts";
 import {
 	type RoutineAwayChargesRead,
 	type RoutineAwayChargesUnread,
@@ -465,8 +466,11 @@ export interface AutonomyStatusSources {
 	};
 	channelStates(): readonly ChannelStateView[];
 	channelJournals(): readonly ChannelJournalSummary[];
-	/** The channel turns the daemon delivered away, as charges on the away spend bound (journal reads), or why they did not read. */
-	awayChannelCharges(maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead;
+	/**
+	 * What else is charged to the away spend bound besides the routines' runs: the channel turns the daemon delivered away
+	 * and the metered spend of the bots it hosted (`readAwayCharges`).
+	 */
+	awayCharges(away: AwaySpendBounds, nowMs: number): RoutineAwayChargesRead;
 	/** Whether a run away of the definition spends metered dollars (`awayRunMetered`), so the bound charges it. */
 	awayRunMetered(definition: RoutineAwaySpendDefinition): boolean;
 	/** Whether a run away was reserved on the bound after its admission (`awayMeteredRunReserved`); absent: none was. */
@@ -646,7 +650,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				: unavailable("service_routine_store", "the routine store is not loaded, so the service is not read");
 			const daemon = store.getDaemonStatus(nowMs);
 			const away = settings.getRoutineAwaySettings();
-			const otherCharges = sources.awayChannelCharges(away.maxUsdPerRun, nowMs);
+			const otherCharges = sources.awayCharges(away, nowMs);
 			const resetChargesUntil = "unread" in otherCharges ? [] : (otherCharges.dayAllowanceUntil ?? []);
 			const spend = routineAwaySpendRoom(
 				store.listRoutineOccurrences(),

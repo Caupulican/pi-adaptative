@@ -354,6 +354,22 @@ export function botOwedReleasesDir(agentDir: string): string {
 	return stateFile(agentDir, "bots", "owed-releases");
 }
 
+/**
+ * `<agentDir>/state/bots/away-charges.json` -- what the turns of the bots the daemon hosts spent, charged to the away
+ * spend bound (`bots/bot-away-charges.ts`).
+ */
+export function botAwayChargesFile(agentDir: string): string {
+	return stateFile(agentDir, "bots", "away-charges.json");
+}
+
+/**
+ * `<agentDir>/state/bots/root-hosts` -- one record per root session hosting bots in a live process, which the daemon
+ * leaves those bots to (`bots/bot-root-hosts.ts`).
+ */
+export function botRootHostsDir(agentDir: string): string {
+	return stateFile(agentDir, "bots", "root-hosts");
+}
+
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
 export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");

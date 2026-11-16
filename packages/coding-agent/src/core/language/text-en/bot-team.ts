@@ -66,6 +66,12 @@ export const BOT_TEAM = {
 	/** A bot made from a profile cannot run as the worker admission compiles that profile now. */
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`Bot ${agentId} was not started: its profile ${profileId} does not admit it now (${reason}). Fix the profile or the worker policy, then message it again.`,
+	/** A root session could not record that it hosts bots: the daemon keeps hosting the bots it holds. */
+	botRootHostNotRecorded: (reason: string) =>
+		`Bots: this session could not record that it hosts bots (${reason}); the bot daemon keeps hosting the bots it holds, and your messages reach them through their inboxes.`,
+	/** A bot made from a profile has no root session to compile its profile (the daemon hosts the bots): it waits for one. */
+	botProfileNeedsRoot: (agentId: string, profileId: string) =>
+		`Bot ${agentId} is made from the profile ${profileId}, which only an open session resolves; its watches and messages wait until a session opens where it works.`,
 	botModelMoved: (agentId: string, running: string, defined: string) =>
 		`Bot ${agentId}: its session is on ${running}, not on ${defined}, the model the bot is defined on, so this run was not started.`,
 	/** The bot's own model cannot run now (`cause`: out of quota, refused or unlisted for the account). */
@@ -353,6 +359,9 @@ export const BOT_TEAM = {
 	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
 	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
 	botModelNotAllowed: (modelRef: string) => `your model policy does not allow ${modelRef}`,
+	/** A bot on a metered model hosted while no session is open: the away bound of a day has no room for one more turn. */
+	botAwaySpendExhausted:
+		"the metered spend allowed while no session is open (routines.away.maxUsdPerDay) has no room for another turn in the last 24 hours",
 	/** A bot a root or a leader made runs on an API-key model the owner did not choose while subscription models are usable. */
 	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
 		`${modelRef} is paid by API key and you have not chosen it for workers while subscription models are usable; use a subscription model such as ${alternatives.join(", ")}, or add ${provider} to workerDelegation.routeProviders`,
@@ -370,8 +379,8 @@ export const BOT_TEAM = {
 	 * A turn went past the spend bound and was stopped; `bound` names the one that applied (the lowest passed), which holds
 	 * metered spend only, as `spentUsd` counts it.
 	 */
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
-		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent on metered models on this request, its workers included; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : "this session's autonomy spend bound"} on metered spend is $${limitUsd}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile" | "away") =>
+		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent on metered models on this request, its workers included; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : bound === "away" ? "the bound of one run while no session is open (routines.away.maxUsdPerRun)" : "this session's autonomy spend bound"} on metered spend is $${limitUsd}).`,
 	/** A turn ran past the owner's time bound on a worker's run, and was stopped. */
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,

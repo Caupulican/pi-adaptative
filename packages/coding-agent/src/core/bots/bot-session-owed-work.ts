@@ -154,6 +154,8 @@ export interface BotOwedWorkPorts {
 	retake(agentId: string): void;
 	/** Takes the inbox of a bot the host runs. */
 	takeInbox(agentId: string): void;
+	/** Whether a root session of another process works in `cwd` and opens the bot there (`BotSessionHostPorts.leavesTo`). */
+	leavesTo(cwd: string): boolean;
 	/** The root attached last, and an attached root working in `cwd`. */
 	sender(): BotSender;
 	senderIn(cwd: string): BotSender | undefined;
@@ -794,6 +796,8 @@ export class BotOwedWork {
 			return;
 		}
 		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
+		// A root session of another process working in one of those directories opens it there: it is left to that root.
+		if (cwds.some((cwd) => ports.leavesTo(cwd))) return;
 		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
 		// a profile's where its profile compiles to for that root.
 		let sender: BotSender | undefined;

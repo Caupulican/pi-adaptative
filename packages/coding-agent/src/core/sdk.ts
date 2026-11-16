@@ -57,7 +57,7 @@ import type { IntegrityExtension } from "./hooks/index.ts";
 import { configureHarnessLog } from "./log/configure-harness-log.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
-import { AccountModelCatalog } from "./model-router/account-models.ts";
+import { accountModelCatalogOf } from "./model-router/account-models.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { observeDeliveryAdmission } from "./objective-execution/delivery-intent.ts";
@@ -736,14 +736,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// The session's one usage owner, recovered before any paid work. It exists whether or not System One is bound,
 		// so pending usage from an earlier run is never left unreplayed.
 		// Which models the owner's accounts offer, read by the provider path below; constructing it starts no work.
-		const accountModels = new AccountModelCatalog({
-			getModels: () => modelRegistry.getAll(),
-			hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
-			getRequestAuth: async (model) => {
-				const auth = await modelRegistry.getApiKeyAndHeaders(model);
-				return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
-			},
-		});
+		const accountModels = accountModelCatalogOf(modelRegistry);
 		const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
 		const semanticUsage = sessionSemanticUsageOf(sessionManager, timers.port("semantic-usage"));
 		let constructed: AgentSession | undefined;

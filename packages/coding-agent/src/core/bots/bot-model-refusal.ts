@@ -8,13 +8,15 @@ import { type BotFailureWords, BotOwnerError } from "./bot-owner-error.ts";
 
 /**
  * Which rule refuses the bot's model: the host reports it unusable (its own cause), the subscription rule holds it to a
- * metered model, the session's model policy does not allow it, or a dollar bound applies to a metered model with no price.
+ * metered model, the session's model policy does not allow it, a dollar bound applies to a metered model with no price,
+ * or the day's away bound has no room for a metered turn of a bot hosted while no session is open.
  */
 export type BotModelRefusalCause =
 	| OrchestrationModelUnusableCause
 	| "model_metered"
 	| "model_not_allowed"
-	| "model_unpriced";
+	| "model_unpriced"
+	| "away_spend_exhausted";
 
 /** Why a bot's model may not run now: the rule as a code, the owner's words for it, and when that ends when it is known. */
 export interface BotModelRefusal {

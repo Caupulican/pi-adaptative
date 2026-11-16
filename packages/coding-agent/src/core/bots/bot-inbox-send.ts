@@ -26,6 +26,12 @@ export class BotSessionHeldError extends BotOwnerError {
 	override readonly name = "BotSessionHeldError";
 }
 
+/** Where the owner's words were sent from: the sender's directory, and its pi session when it has one (none in the daemon). */
+export interface BotInboxFrom {
+	readonly sessionId?: string;
+	readonly cwd: string;
+}
+
 /** What a send to another host reads and asks of the sending host. */
 export interface BotInboxSendPorts {
 	readonly agentDir: string;
@@ -54,7 +60,7 @@ export function queueInBotInbox(
 	agentId: string,
 	message: string,
 	mode: BotOperatorMessageOptions["mode"],
-	from: { readonly sessionId: string; readonly cwd: string },
+	from: BotInboxFrom,
 	modelRef: string,
 	behindStop: boolean,
 	origin: BotDeliveryOrigin,
@@ -75,14 +81,14 @@ function enqueueWords(
 	agentId: string,
 	message: string,
 	mode: BotOperatorMessageOptions["mode"],
-	from: { readonly sessionId: string; readonly cwd: string },
+	from: BotInboxFrom,
 	origin: BotDeliveryOrigin,
 ): ReturnType<typeof enqueueBotInbox> {
 	return enqueueBotInbox(agentDir, {
 		agentId,
 		text: message,
 		...(mode !== undefined ? { mode } : {}),
-		from: { pid: process.pid, sessionId: from.sessionId, cwd: from.cwd },
+		from: { pid: process.pid, ...(from.sessionId !== undefined ? { sessionId: from.sessionId } : {}), cwd: from.cwd },
 		// The clock a stop of the bot is dated on, which decides whether these words came before it.
 		at: OWNER_STOP_CLOCK.now(),
 		...(origin !== "owner" ? { origin } : {}),
@@ -95,7 +101,7 @@ export async function sendToBotHost(
 	agentId: string,
 	message: string,
 	{ mode, showsWaits = false }: BotDeliveryOptions,
-	from: { readonly sessionId: string; readonly cwd: string },
+	from: BotInboxFrom,
 	origin: BotDeliveryOrigin,
 ): Promise<BotOperatorMessageDispatchResult> {
 	const { agentDir, holder } = ports;
