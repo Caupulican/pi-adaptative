@@ -1352,7 +1352,11 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 	const allowanceListeners = new Set<(accountKey: string) => void>();
 	let allowance:
 		| { readonly kind: "room"; readonly usedPercent: number }
-		| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string } = {
+		| {
+				readonly kind: "exhausted";
+				readonly usedPercent: number;
+				readonly cause: { readonly kind: "window"; readonly usedPercent: number };
+		  } = {
 		kind: "room",
 		usedPercent: 40,
 	};
@@ -1491,7 +1495,7 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 		world.provider.enqueue("root", {
 			...exhaustedStep,
 			check: (request) => {
-				allowance = { kind: "exhausted", usedPercent: 96, reason: "a usage window is at 96%" };
+				allowance = { kind: "exhausted", usedPercent: 96, cause: { kind: "window", usedPercent: 96 } };
 				for (const listener of [...allowanceListeners]) listener(session.model?.provider ?? "");
 				exhaustedStep.check?.(request);
 			},

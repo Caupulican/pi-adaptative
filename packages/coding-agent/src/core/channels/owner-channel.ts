@@ -9,6 +9,7 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import { englishText, type InterfaceText } from "../language/interface-text.ts";
+import { allowanceCauseText } from "../provider-admission/subscription-allowance.ts";
 import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -209,6 +210,18 @@ export interface OwnerRoom {
 	readonly oldestUntil?: number;
 }
 
+/** Whether `turns` more per-turn charges fit the owner pool's day bound beside `usedMicros`; none fit while the pool is off. */
+function turnsFit(usedMicros: number, turns: number, policy: ResolvedChannelPolicy): boolean {
+	return (
+		policy.ownerMaxUsdPerDay > 0 &&
+		usedMicros + turns * awaySpendMicros(policy.ownerMaxUsdPerTurn) <= awaySpendMicros(policy.ownerMaxUsdPerDay)
+	);
+}
+
+function heldMicros(charges: readonly OwnerChannelCharge[]): number {
+	return charges.reduce((sum, charge) => sum + charge.micros, 0);
+}
+
 export function ownerRoom(
 	channel: string,
 	state: Pick<ChannelJournalState, "batches" | "pending">,
@@ -217,14 +230,25 @@ export function ownerRoom(
 	unmetered = false,
 ): OwnerRoom {
 	const charges = ownerChannelCharges(channel, state, policy, now, unmetered);
-	const usedMicros = charges.reduce((sum, charge) => sum + charge.micros, 0);
+	const usedMicros = heldMicros(charges);
 	// Spend that is not metered lifts the daily dollar bound, never the off switch (`ownerMaxUsdPerDay: 0` starts none).
-	const fits =
-		policy.ownerMaxUsdPerDay > 0 &&
-		(unmetered ||
-			usedMicros + awaySpendMicros(policy.ownerMaxUsdPerTurn) <= awaySpendMicros(policy.ownerMaxUsdPerDay));
+	const fits = unmetered ? policy.ownerMaxUsdPerDay > 0 : turnsFit(usedMicros, 1, policy);
 	const oldestUntil = charges.length > 0 ? Math.min(...charges.map((charge) => charge.until)) : undefined;
 	return { usedUsd: usedMicros / 1_000_000, fits, ...(oldestUntil !== undefined ? { oldestUntil } : {}) };
+}
+
+/**
+ * Whether the owner pool has room to reserve `turns` owner turns accepted on a subscription (`quota`) that move to a
+ * metered model: each is then charged its per-turn bound (`ownerBatchCharge`) beside what the pool holds.
+ */
+export function ownerMoveFits(
+	channel: string,
+	state: Pick<ChannelJournalState, "batches" | "pending">,
+	policy: ResolvedChannelPolicy,
+	now: number,
+	turns: number,
+): boolean {
+	return turnsFit(heldMicros(ownerChannelCharges(channel, state, policy, now)), turns, policy);
 }
 
 /**
@@ -244,10 +268,10 @@ export function readOwnerQuota(
 		quota = delivery?.quotaAllowance?.(ownerQuotaLine(policy));
 	} catch (error) {
 		unread(error instanceof Error ? error.message : String(error));
-		return { kind: "unknown", reason: "the subscription usage could not be read", subscription: false };
+		return { kind: "unknown", cause: "readFailed", subscription: false };
 	}
 	unread(undefined);
-	return quota ?? { kind: "unknown", reason: "this session reads no subscription usage", subscription: false };
+	return quota ?? { kind: "unknown", cause: "noReader", subscription: false };
 }
 
 /**
@@ -264,9 +288,6 @@ export function ownerQuotaLine(policy: Pick<ResolvedChannelPolicy, "ownerQuotaMa
 	return policy.ownerQuotaMaxUsedPercent > 0 ? policy.ownerQuotaMaxUsedPercent : 100;
 }
 
-/** The owner pool's words, in one catalogue: the interface's for the owner's chat, English for a model or a record. */
-export type OwnerPoolWords = InterfaceText["notices"]["channels"]["owner"];
-
 /** An instant the owner is told, as ISO text; undefined stays unknown. */
 export function toldInstant(ms: number | undefined): string | undefined {
 	return ms === undefined ? undefined : new Date(ms).toISOString();
@@ -278,33 +299,35 @@ export function ownerUsageLine(name: string, policy: Pick<ResolvedChannelPolicy,
 }
 
 /**
- * That a subscription login's usage reached the owner's line, in `words`: with what the reading reports and its reset
- * while it is exhausted, the line alone otherwise (a turn stopped at it whose next reading has room again).
+ * That a subscription login's usage reached the owner's line, in `text`'s words: with what the reading reports
+ * (`allowanceCauseText`) and its reset while it is exhausted, the line alone otherwise (a turn stopped at it whose next
+ * reading has room again).
  */
 export function ownerUsageReached(
-	words: OwnerPoolWords,
+	text: InterfaceText,
 	name: string,
 	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
 	quota: OwnerQuotaAllowance,
 ): string {
 	const exhausted = quota.kind === "exhausted" ? quota : undefined;
 	const { key, percent } = ownerUsageLine(name, policy);
-	const detail = [...(exhausted ? [exhausted.reason] : []), `${key} ${percent}%`].join("; ");
-	return words.usageReached("bound", detail, toldInstant(exhausted?.retryAt));
+	const cause = exhausted ? [allowanceCauseText(text.notices.subscriptionUsage, exhausted.cause)] : [];
+	const detail = [...cause, `${key} ${percent}%`].join("; ");
+	return text.notices.channels.owner.usageReached("bound", detail, toldInstant(exhausted?.retryAt));
 }
 
 /**
- * Why a subscription login's owner turns are held now, in `words`, or undefined: its usage windows are exhausted at the
- * owner's line. No new turn starts and a running one stops; the owner's messages wait, and the pass at the reset the
- * account reports (`retryAt`) or the next event delivers them.
+ * Why a subscription login's owner turns are held now, in `text`'s words, or undefined: its usage windows are exhausted
+ * at the owner's line. No new turn starts and a running one stops; the owner's messages wait, and the pass at the reset
+ * the account reports (`retryAt`) or the next event delivers them.
  */
 export function ownerQuotaWait(
-	words: OwnerPoolWords,
+	text: InterfaceText,
 	name: string,
 	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
 	quota: OwnerQuotaAllowance,
 ): string | undefined {
-	return quota.kind === "exhausted" ? ownerUsageReached(words, name, policy, quota) : undefined;
+	return quota.kind === "exhausted" ? ownerUsageReached(text, name, policy, quota) : undefined;
 }
 
 /**
@@ -324,9 +347,14 @@ export function turnUsageHold(
 		return undefined;
 	}
 	if (quota?.kind !== "exhausted") return undefined;
+	// A channel's hold reason is the model's notice detail and the journal's record: English.
+	const words = englishText().notices;
 	return {
-		// A channel's hold reason is the model's notice detail and the journal's record: English.
-		reason: englishText().notices.channels.owner.usageReached("limit", quota.reason, toldInstant(quota.retryAt)),
+		reason: words.channels.owner.usageReached(
+			"limit",
+			allowanceCauseText(words.subscriptionUsage, quota.cause),
+			toldInstant(quota.retryAt),
+		),
 		...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}),
 	};
 }

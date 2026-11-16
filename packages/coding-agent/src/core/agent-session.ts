@@ -3095,9 +3095,9 @@ export class AgentSession {
 		return this._edgeIntent.isModelAllowed(model);
 	}
 
-	/** Holds this session's moves to metered models to its host's gate (`MeteredMoveGate`); undefined lifts the hold. */
-	holdMeteredMoves(gate: MeteredMoveGate | undefined): void {
-		this._modelAccess.meteredMoves = gate;
+	/** Holds this session's moves to metered models to a host's gate (`MeteredMoveGate`) until the returned release. */
+	holdMeteredMoves(gate: MeteredMoveGate): () => void {
+		return this._modelAccess.holdMeteredMoves(gate);
 	}
 
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {

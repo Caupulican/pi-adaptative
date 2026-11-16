@@ -8,6 +8,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "../channels/channel-policy.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { resolveProviderAccountKey } from "./account-key.ts";
@@ -24,16 +25,39 @@ import {
 /** How old a snapshot may be and still decide; past it the allowance is unknown (no usage window holds the work). */
 export const SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS = 5 * 60_000;
 
+/** The words a reading's cause is told in: one catalogue's `notices.subscriptionUsage`. */
+export type SubscriptionUsageWords = InterfaceText["notices"]["subscriptionUsage"];
+
+/** Why an allowance is exhausted: a live usage window at the line (its highest percent), or the provider's own limit in its words. */
+export type AllowanceExhaustedCause =
+	| { readonly kind: "window"; readonly usedPercent: number }
+	| { readonly kind: "limit"; readonly detail: string };
+
+/** Why no reading decides an allowance (`unknown`), as the catalogue names it. */
+export type AllowanceUnknownCause = Exclude<keyof SubscriptionUsageWords, "window">;
+
 export type SubscriptionAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
 	| {
 			readonly kind: "exhausted";
 			readonly usedPercent: number;
-			readonly reason: string;
+			readonly cause: AllowanceExhaustedCause;
 			/** When every exhausted window resets, if the account reports all of them; the allowance reopens then. */
 			readonly retryAt?: number;
 	  }
-	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
+	| { readonly kind: "unknown"; readonly cause: AllowanceUnknownCause; readonly subscription: boolean };
+
+/**
+ * A reading's cause in `words`: the catalogue's sentence for a window at its line or a missing, stale or unread reading;
+ * the provider's own limit text verbatim (no catalogue words it).
+ */
+export function allowanceCauseText(
+	words: SubscriptionUsageWords,
+	cause: AllowanceExhaustedCause | AllowanceUnknownCause,
+): string {
+	if (typeof cause === "string") return words[cause];
+	return cause.kind === "window" ? words.window(Math.round(cause.usedPercent)) : cause.detail;
+}
 
 /**
  * The ordered exits over one usage snapshot: a missing or stale reading is unknown; a window whose reset time has passed
@@ -46,25 +70,28 @@ export function decideSubscriptionAllowance(
 	now: number,
 	maxUsedPercent: number,
 ): SubscriptionAllowance {
-	if (!snapshot) return { kind: "unknown", reason: "no usage reading yet", subscription: true };
+	if (!snapshot) return { kind: "unknown", cause: "noReading", subscription: true };
 	if (now - snapshot.observedAt > SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS)
-		return { kind: "unknown", reason: "the usage reading is stale", subscription: true };
-	if (snapshot.windows.length === 0)
-		return { kind: "unknown", reason: "the account reports no usage window", subscription: true };
+		return { kind: "unknown", cause: "stale", subscription: true };
+	if (snapshot.windows.length === 0) return { kind: "unknown", cause: "noWindow", subscription: true };
 	const live = snapshot.windows.filter((window) => window.resetsAt === undefined || window.resetsAt > now);
-	if (live.length === 0)
-		return { kind: "unknown", reason: "every usage window reset after the reading", subscription: true };
+	if (live.length === 0) return { kind: "unknown", cause: "windowsReset", subscription: true };
 	const usedPercent = Math.max(...live.map((window) => window.usedPercent));
 	const full = live.filter((window) => window.usedPercent >= maxUsedPercent);
-	if (snapshot.limitReached) return exhausted(usedPercent, snapshot.limitReached, full.length > 0 ? full : live);
-	if (full.length > 0) return exhausted(usedPercent, `a usage window is at ${Math.round(usedPercent)}%`, full);
+	if (snapshot.limitReached)
+		return exhausted(usedPercent, { kind: "limit", detail: snapshot.limitReached }, full.length > 0 ? full : live);
+	if (full.length > 0) return exhausted(usedPercent, { kind: "window", usedPercent }, full);
 	return { kind: "room", usedPercent };
 }
 
-function exhausted(usedPercent: number, reason: string, windows: readonly UsageWindow[]): SubscriptionAllowance {
+function exhausted(
+	usedPercent: number,
+	cause: AllowanceExhaustedCause,
+	windows: readonly UsageWindow[],
+): SubscriptionAllowance {
 	const resets = windows.map((window) => window.resetsAt);
 	const retryAt = resets.every((at) => at !== undefined) ? Math.max(...(resets as number[])) : undefined;
-	return { kind: "exhausted", usedPercent, reason, ...(retryAt !== undefined ? { retryAt } : {}) };
+	return { kind: "exhausted", usedPercent, cause, ...(retryAt !== undefined ? { retryAt } : {}) };
 }
 
 /** What the owner channel and the cost guard ask: the allowance of a model's subscription (the running model when none is named). */
@@ -186,12 +213,11 @@ export class SubscriptionAllowanceReader implements SubscriptionAllowancePort {
 		const model = forModel ?? this.deps.getModel();
 		const registry = this.deps.getRegistry();
 		if (!model || isMeteredSpend(model, registry))
-			return { kind: "unknown", reason: "the model is not a subscription login", subscription: false };
+			return { kind: "unknown", cause: "notSubscription", subscription: false };
 		const account = this.accountFor(model);
-		if (!account) return { kind: "unknown", reason: "the account is not signed in", subscription: true };
+		if (!account) return { kind: "unknown", cause: "notSignedIn", subscription: true };
 		const state = this.deps.monitor.state(account, registry);
-		if (state.kind === "unsupported")
-			return { kind: "unknown", reason: "the provider reports no usage", subscription: true };
+		if (state.kind === "unsupported") return { kind: "unknown", cause: "unsupported", subscription: true };
 		const snapshot = snapshotOf(state);
 		void this.deps.monitor
 			.refresh([account], registry, { currentAccountKey: this.deps.currentAccountKey })

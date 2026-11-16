@@ -8,11 +8,13 @@
 import type { ChannelSenderIds } from "../gateways/channel-provider.ts";
 import { type HarnessNotice, type WordedNotice, wordedNotice } from "../harness-notice.ts";
 import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
+import { allowanceCauseText } from "../provider-admission/subscription-allowance.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
 import { type ChannelAwayUntold, heldCount } from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
 import { type OwnerRoom, ownerQuotaWait, ownerUsageLine, ownerUsageReached, toldInstant } from "./owner-channel.ts";
-import type { OwnerQuotaAllowance } from "./owner-channel-types.ts";
+import type { OwnerQuotaAllowance, OwnerWaitingView } from "./owner-channel-types.ts";
+import { waitingStatusLine } from "./owner-waiting-notices.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
 const MAX_NAMED_AWAY_DRAFTS = 3;
@@ -41,8 +43,9 @@ export function ownerHeldPush(
 	room: OwnerRoom,
 	quota: OwnerQuotaAllowance,
 ): { readonly key: string; readonly text: string } | undefined {
-	const words = interfaceText().notices.channels.owner;
-	const wait = policy.ownerMaxUsdPerDay > 0 ? ownerQuotaWait(words, name, policy, quota) : undefined;
+	const text = interfaceText();
+	const words = text.notices.channels.owner;
+	const wait = policy.ownerMaxUsdPerDay > 0 ? ownerQuotaWait(text, name, policy, quota) : undefined;
 	if (wait && quota.kind === "exhausted")
 		return { key: `quota:${quota.retryAt ?? "open"}`, text: words.heldPush(words.turnsPaused(wait), false) };
 	if (room.fits) return undefined;
@@ -70,13 +73,14 @@ export function ownerStopPush(
 	quota: (policy: ResolvedChannelPolicy) => OwnerQuotaAllowance,
 	emergencyStopEngaged: boolean,
 ): string | undefined {
-	const words = interfaceText().notices.channels.owner;
+	const text = interfaceText();
+	const words = text.notices.channels.owner;
 	const cause =
 		why === "bound"
 			? policy && words.turnBound(name, policy.ownerMaxUsdPerTurn)
 			: why === "quota"
 				? policy
-					? ownerUsageReached(words, name, policy, quota(policy))
+					? ownerUsageReached(text, name, policy, quota(policy))
 					: words.usageReached("bound", undefined, undefined)
 				: why === "authority" && emergencyStopEngaged
 					? words.emergencyStop
@@ -88,17 +92,92 @@ export function ownerStopPush(
  * The status line for the subscription allowance, in the interface language (none when the model is no subscription
  * login, whose metered spend the dollar bounds hold): what holds its turns now, and why.
  */
-export function quotaStatusLine(
+function quotaStatusLine(
+	text: InterfaceText,
 	name: string,
 	policy: ResolvedChannelPolicy,
 	quota: OwnerQuotaAllowance,
 ): string | undefined {
-	const words = interfaceText().notices.channels.owner;
+	const words = text.notices.channels.owner;
 	const line = ownerUsageLine(name, policy);
 	if (quota.kind === "room")
 		return words.usageStatus({ kind: "room", usedPercent: Math.round(quota.usedPercent), ...line });
-	if (quota.kind === "exhausted") return words.usageStatus({ kind: "exhausted", reason: quota.reason, ...line });
-	return quota.subscription ? words.usageStatus({ kind: "unread", reason: quota.reason }) : undefined;
+	const reason = allowanceCauseText(text.notices.subscriptionUsage, quota.cause);
+	if (quota.kind === "exhausted") return words.usageStatus({ kind: "exhausted", reason, ...line });
+	return quota.subscription ? words.usageStatus({ kind: "unread", reason }) : undefined;
+}
+
+/** A sentence told in each catalogue's words: English for the model and the journal, the interface language for the owner. */
+export type Worded = (text: InterfaceText) => string;
+
+/** What decides whether an owner turn of a channel may start, each read only once the checks before it pass. */
+export interface OwnerTurnFacts {
+	/** The channel carries owner authority in this session. */
+	readonly authority: boolean;
+	emergencyStop(): boolean;
+	quota(): OwnerQuotaAllowance;
+	room(quota: OwnerQuotaAllowance): OwnerRoom;
+}
+
+/**
+ * Why no owner turn of a channel may start now (`Worded`), or undefined when one may, by the first that holds: owner
+ * authority is off in this session, the emergency stop, the owner pool switched off, the subscription's usage at the
+ * owner's line, the pool's day bound.
+ */
+export function ownerRefusalWords(
+	name: string,
+	policy: ResolvedChannelPolicy,
+	facts: OwnerTurnFacts,
+): Worded | undefined {
+	if (!facts.authority) return (text) => text.notices.channels.owner.authorityOff;
+	if (facts.emergencyStop()) return (text) => text.notices.channels.owner.emergencyStop;
+	if (policy.ownerMaxUsdPerDay === 0) return (text) => text.notices.channels.owner.turnsOffCause(name);
+	const quota = facts.quota();
+	if (quota.kind === "exhausted")
+		return (text) => text.notices.channels.owner.usageWait(ownerUsageReached(text, name, policy, quota));
+	const room = facts.room(quota);
+	return room.fits
+		? undefined
+		: (text) => text.notices.channels.owner.daySpend(name, room.usedUsd, policy.ownerMaxUsdPerDay);
+}
+
+/** What the `status` reply reads of a channel's owner pool, its turns, its held drafts and the calls waiting on the owner. */
+export interface OwnerStatusFacts {
+	readonly room: OwnerRoom;
+	readonly refusal: Worded | undefined;
+	readonly quota: OwnerQuotaAllowance;
+	readonly running: boolean;
+	readonly waiting: number;
+	/** The held drafts in scope: id, class labels, and whether this chat was shown it. */
+	readonly drafts: readonly { readonly id: string; readonly classes: string; readonly shown: boolean }[];
+	/** The calls waiting on the owner in the hosting session; undefined when none could be read. */
+	readonly calls: OwnerWaitingView | undefined;
+	/** Pushes held back under `ownerPushPerHour` since the last status. */
+	readonly suppressed: number;
+}
+
+/** The `status` reply in the interface language, one line each; the drafts past `maxDrafts` are counted. */
+export function ownerStatusReply(
+	name: string,
+	policy: ResolvedChannelPolicy,
+	facts: OwnerStatusFacts,
+	maxDrafts: number,
+): string {
+	const text = interfaceText();
+	const words = text.notices.channels.owner;
+	const listed = facts.drafts
+		.slice(0, maxDrafts)
+		.map((draft) => words.heldDraft(draft.id, draft.classes, draft.shown));
+	const quotaLine = quotaStatusLine(text, name, policy, facts.quota);
+	const waitingLine = waitingStatusLine(words, facts.calls);
+	return [
+		words.statusSpend(facts.room.usedUsd, policy.ownerMaxUsdPerDay, policy.ownerMaxUsdPerTurn, facts.refusal?.(text)),
+		...(quotaLine === undefined ? [] : [quotaLine]),
+		words.statusTurns(facts.running, facts.waiting),
+		words.statusHeld(listed, facts.drafts.length - listed.length),
+		...(waitingLine === undefined ? [] : [waitingLine]),
+		...(facts.suppressed > 0 ? [words.statusSuppressed(facts.suppressed, name)] : []),
+	].join("\n");
 }
 
 /**
@@ -109,7 +188,7 @@ export function channelStateNotice(
 	name: string,
 	state: string,
 	detail: string | undefined,
-	facts: { readonly connectionLost: boolean; readonly builtIn: boolean },
+	facts: { readonly connectionLost: boolean; readonly builtIn: boolean; readonly worded?: Worded },
 ): HarnessNotice | undefined {
 	const reason = `${name}:${state}:${detail ?? ""}`;
 	switch (state) {
@@ -126,7 +205,8 @@ export function channelStateNotice(
 					: words.notices.channels.startFailed(name, detail, facts.builtIn),
 			);
 		case "capped":
-			return wordedNotice(reason, (words) => words.notices.channels.capped(name, detail));
+			// A detail worded in the catalogues (the owner pool's) is told in each reader's language; another is the record's.
+			return wordedNotice(reason, (words) => words.notices.channels.capped(name, facts.worded?.(words) ?? detail));
 		default:
 			return undefined;
 	}

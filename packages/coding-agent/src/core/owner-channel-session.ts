@@ -12,6 +12,7 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import type { AgentEvent } from "../kernel/types.ts";
 import type { PromptOptions } from "./agent-session-contracts.ts";
+import type { MeteredMoveGate } from "./agent-session-model-access.ts";
 import { createOwnerDraftDecisions } from "./autonomy/owner-draft-decisions.ts";
 import type {
 	OwnerChannelControl,
@@ -44,6 +45,8 @@ export interface OwnerChannelSessionHost {
 	emitHostWarning(message: string): void;
 	/** Whose spend is metered (`isMeteredSpend`): an owner turn's dollar bound counts that spend alone. */
 	readonly modelRegistry: ModelBilling & { find(provider: string, modelId: string): Model<Api> | undefined };
+	/** Holds the session's moves to metered models to a host's gate until the returned release (`AgentSession`). */
+	holdMeteredMoves(gate: MeteredMoveGate): () => void;
 }
 
 /** What the owner channel reads and writes of the session's store: its branch, its identity and its custom entries. */
@@ -169,6 +172,10 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 
 	quotaAllowance(maxUsedPercent: number): OwnerQuotaAllowance {
 		return this.readQuotaAllowance(maxUsedPercent);
+	}
+
+	holdMeteredMoves(gate: MeteredMoveGate): () => void {
+		return this.host.holdMeteredMoves(gate);
 	}
 
 	/**

@@ -6,9 +6,11 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "../../channels/channel-policy.ts";
-import type {
-	SubscriptionAllowance,
-	SubscriptionAllowancePort,
+import { englishText } from "../../language/interface-text.ts";
+import {
+	allowanceCauseText,
+	type SubscriptionAllowance,
+	type SubscriptionAllowancePort,
 } from "../../provider-admission/subscription-allowance.ts";
 import type { RoomTerm } from "../fleet-types.ts";
 
@@ -53,6 +55,7 @@ export function allowanceRoomTerm(reading: AllowanceReading): RoomTerm {
 		room: 0,
 		waitKey,
 		...(allowance.retryAt !== undefined ? { retryAt: allowance.retryAt } : {}),
-		detail: `the subscription allowance is used up (${allowance.reason})${allowance.retryAt !== undefined ? `; it reopens at ${new Date(allowance.retryAt).toISOString()}` : ""}`,
+		// A room term's detail is a record and a model's line: English.
+		detail: `the subscription allowance is used up (${allowanceCauseText(englishText().notices.subscriptionUsage, allowance.cause)})${allowance.retryAt !== undefined ? `; it reopens at ${new Date(allowance.retryAt).toISOString()}` : ""}`,
 	};
 }

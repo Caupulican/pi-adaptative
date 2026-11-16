@@ -267,6 +267,19 @@ export const NOTICES = {
 	heldDraftsFull: (origin: string, max: number) =>
 		`Retidas, não executadas: ações pedidas por ${origin}; ${max} ações retidas já esperam por você, então nenhuma outra é registrada. Elas rodam se você mesmo pedir.`,
 
+	subscriptionUsage: {
+		window: (percent: number) => `uma janela de uso está em ${percent}%`,
+		noReading: "ainda não há leitura de uso",
+		stale: "a leitura de uso está desatualizada",
+		noWindow: "a conta não informa nenhuma janela de uso",
+		windowsReset: "todas as janelas de uso foram renovadas depois da leitura",
+		notSubscription: "o modelo não é um login de assinatura",
+		notSignedIn: "a conta não está conectada",
+		unsupported: "o provedor não informa o uso",
+		readFailed: "o uso da assinatura não pôde ser lido",
+		noReader: "esta sessão não lê o uso da assinatura",
+	},
+
 	channels: {
 		notConfigured: (name: string) =>
 			`O canal ${name} está registrado, mas não foi iniciado: não há política channels.${name} nas configurações globais nem nas do perfil do diretório.`,
@@ -343,6 +356,37 @@ export const NOTICES = {
 						: `Uso da assinatura: ${reading.reason}; os limites em dólar não se aplicam.`,
 			usageUnread: (cause: string) =>
 				`Canais do dono: o uso da assinatura não pôde ser lido (${cause}); os turnos do dono ficam presos aos limites em dólar até que ele seja lido.`,
+			authorityOff: "a autoridade do dono está desligada para este canal nesta sessão",
+			sendersUnlisted: (name: string) =>
+				`as mensagens do dono esperam: o remetente delas não está verificado ou não está mais em channels.${name}.ownerSenders`,
+			turnsOffCause: (name: string) => `os turnos do dono estão desligados (channels.${name}.ownerMaxUsdPerDay é 0)`,
+			statusSpend: (usedUsd: number, dayUsd: number, turnUsd: number, refusal: string | undefined) =>
+				`Gasto do dono: $${usedUsd.toFixed(2)} de $${dayUsd.toFixed(2)} em 24 horas, $${turnUsd.toFixed(2)} por turno${refusal ? `; nenhum turno novo: ${refusal}` : ""}.`,
+			statusTurns: (running: boolean, waiting: number) =>
+				`${running ? "Um turno está rodando." : "Nenhum turno está rodando."} ${waiting} mensagem(ns) esperam.`,
+			statusHeld: (listed: readonly string[], more: number) =>
+				listed.length > 0
+					? `Retidas: ${listed.join("; ")}${more > 0 ? `; e mais ${more}` : ""}.`
+					: "Nenhuma ação retida deste chat.",
+			heldDraft: (id: string, classes: string, shown: boolean) =>
+				`${id} (${classes}${shown ? "" : ", ainda não mostrada"})`,
+			statusSuppressed: (count: number, name: string) =>
+				`${count} atualização(ões) não foram enviadas por causa de channels.${name}.ownerPushPerHour.`,
+			waitingOn: (space: string, calls: readonly string[], more: number) =>
+				`Esperando por você em ${space}: ${calls.join("; ")}${more > 0 ? `; e mais ${more}` : ""}`,
+			unnamedSpace: "uma sessão",
+			hiddenCall: "uma chamada que só você pode decidir (o texto dela aparece apenas no terminal)",
+			atRest: (phase: string, space: string, minutes: number, waiting: number) => {
+				const waits = waiting === 0 ? "" : ` ${waiting} chamada(s) esperam por você.`;
+				if (phase === "done") return `Concluído em ${space} após ${minutes} min: o objetivo está completo.${waits}`;
+				if (phase === "blocked")
+					return `Parado em ${space} após ${minutes} min: o objetivo está bloqueado.${waits}`;
+				if (phase === "waiting_user")
+					return `Parado em ${space} após ${minutes} min: uma pergunta espera por você no terminal.${waits}`;
+				return `Em repouso em ${space} após ${minutes} min de trabalho.${waits}`;
+			},
+			moveNotReserved: (name: string, cause: string) =>
+				`Canal ${name}: a passagem de um turno do dono para um modelo cobrado por uso não foi reservada no limite do dono (${cause}); o turno fica no modelo dele.`,
 		},
 	},
 

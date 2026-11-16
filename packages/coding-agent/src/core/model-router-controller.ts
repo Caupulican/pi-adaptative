@@ -87,6 +87,7 @@ import {
 	type FitnessGatedSurface,
 	type FitnessGateVerdict,
 } from "./model-router/fitness-gate.ts";
+import { type ForegroundRouteSnapshot, foregroundRouteSourceFor } from "./model-router/foreground-route.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import {
@@ -155,38 +156,7 @@ export function formatModelRouterModel(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-/** Who owns the model that is executing the foreground turn right now. */
-export type ForegroundRouteSource =
-	| "direct"
-	| "manual"
-	| "model_router"
-	| "model_router_hmoe"
-	| "model_router_system_one"
-	| "model_router_retry";
-
-/**
- * Bounded live view of foreground routing for the operator POV. `rootModel` is the persistent
- * session model; `activeModel` is what is actually executing. They differ only while a routed turn
- * has swapped the model, and `switched` says so explicitly so a display never has to compare ids.
- */
-export interface ForegroundRouteSnapshot {
-	readonly rootModel: string | null;
-	readonly activeModel: string | null;
-	readonly source: ForegroundRouteSource;
-	readonly tier: "cheap" | "medium" | "expensive" | null;
-	readonly risk: string | null;
-	readonly reasonCode: string | null;
-	readonly switched: boolean;
-}
-
-/** Route source for a decision, from the persisted selection provenance and retry flag. */
-function foregroundRouteSourceFor(decision: RouteDecision, retry: boolean): ForegroundRouteSource {
-	if (retry) return "model_router_retry";
-	if (decision.selection === "hmoe") return "model_router_hmoe";
-	if (decision.selection === "system_one") return "model_router_system_one";
-	if (decision.selection === "auto") return "model_router";
-	return "manual";
-}
+export type { ForegroundRouteSnapshot, ForegroundRouteSource } from "./model-router/foreground-route.ts";
 
 /** Facts no routing choice may override: an image needs image input, the context must fit the window. */
 function fitsTurnFacts(model: Model<Api>, facts: { hasImages: boolean; contextTokens: number }): boolean {
@@ -324,6 +294,8 @@ export class ModelRouterController {
 	private _lastExpertSelectionFailure?: string;
 	/** Per-invocation sequence so two judge calls on identical text are two ledger entries. */
 	private _lastModelRouterIntent?: ModelRouterIntent;
+	/** The session's admission of a move to another model (`admitMoves`); none: every swap is admitted. */
+	private _admitsMove?: (model: Model<Api>) => boolean;
 	/** The routed turn currently executing, with the root model it swapped away from. */
 	private _activeRoutedTurn?: {
 		rootModel: Model<Api> | undefined;
@@ -1413,6 +1385,14 @@ export class ModelRouterController {
 		return lines.join("\n");
 	}
 
+	/**
+	 * Admits each routed swap and each refused routed model's replacement through the session's holds on moves to metered
+	 * models (`AgentSessionModelAccess.admitMove`): a metered model is reserved on them before its first request.
+	 */
+	admitMoves(admits: (model: Model<Api>) => boolean): void {
+		this._admitsMove = admits;
+	}
+
 	/** Whether a routed turn is running on `model` right now (its swap is still installed). */
 	isRoutedTurnOn(model: Model<Api>): boolean {
 		const active = this._activeRoutedTurn;
@@ -1434,7 +1414,8 @@ export class ModelRouterController {
 			candidate !== undefined &&
 			isModelInRouterPool(this.deps.getCandidatePool(), candidate) &&
 			!modelsAreEqual(candidate, refused) &&
-			this._hasAccess(candidate);
+			this._hasAccess(candidate) &&
+			this._admitsMove?.(candidate) !== false;
 		const next =
 			tier === "cheap" || tier === "medium" || tier === "expensive"
 				? this.resolveConfiguredTierModel(tier)
@@ -1481,6 +1462,20 @@ export class ModelRouterController {
 		if (!isModelInRouterPool(this.deps.getCandidatePool(), routedModel)) {
 			throw new Error(
 				`Routed model ${formatModelRouterModel(routedModel)} is outside the current favorite candidate pool.`,
+			);
+		}
+		// A swap to a metered model is admitted first (`admitMoves`); one a hold refuses runs on the session model.
+		if (this._admitsMove?.(routedModel) === false) {
+			harnessLog.warn("router", "a routed turn stays on the session model: its metered move is held", () => ({
+				model: formatModelRouterModel(routedModel),
+			}));
+			return this.runRoutedTurn(
+				messages,
+				undefined,
+				undefined,
+				persistDecision,
+				continueFromCanonicalHistory,
+				signal,
 			);
 		}
 

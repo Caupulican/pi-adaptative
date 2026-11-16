@@ -298,6 +298,23 @@ export const NOTICES = {
 		`Held, not run: actions asked by ${origin}; ${max} held actions already wait for you, so no more are recorded. They run if you ask for them yourself.`,
 
 	/**
+	 * Why a subscription's usage reading decides what it does (`SubscriptionAllowance`'s cause, `allowanceCauseText`): a
+	 * usage window at the line, or why no reading decides. A limit the provider reports is told in its own words.
+	 */
+	subscriptionUsage: {
+		window: (percent: number) => `a usage window is at ${percent}%`,
+		noReading: "no usage reading yet",
+		stale: "the usage reading is stale",
+		noWindow: "the account reports no usage window",
+		windowsReset: "every usage window reset after the reading",
+		notSubscription: "the model is not a subscription login",
+		notSignedIn: "the account is not signed in",
+		unsupported: "the provider reports no usage",
+		readFailed: "the subscription usage could not be read",
+		noReader: "this session reads no subscription usage",
+	},
+
+	/**
 	 * A channel's notices (`owner-notice-text.ts`, `session-channels.ts`): its state, a held sender, a gap, a reply that
 	 * did not happen and what the daemon's host left. `detail` and a draft's `reason` are the transport's or the record's
 	 * own words, handed in whole.
@@ -395,6 +412,46 @@ export const NOTICES = {
 			/** A reading of the subscription's usage failed: owner turns are held to the dollar bounds until one reads. */
 			usageUnread: (cause: string) =>
 				`Owner channels: the subscription usage could not be read (${cause}); owner turns are held to the dollar bounds until it reads.`,
+			/** Why no owner turn may start: owner authority is off in this session. */
+			authorityOff: "owner authority is off for this channel in this session",
+			/** Why owner messages wait with no other hold: no sender of theirs is verified and listed now. */
+			sendersUnlisted: (name: string) =>
+				`owner messages wait: their sender is not verified or no longer in channels.${name}.ownerSenders`,
+			/** Why no owner turn may start: the owner pool's day bound is 0. */
+			turnsOffCause: (name: string) => `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`,
+			/** The `status` reply's spend line; `refusal` why no new turn starts, if none may. */
+			statusSpend: (usedUsd: number, dayUsd: number, turnUsd: number, refusal: string | undefined) =>
+				`Owner spend: $${usedUsd.toFixed(2)} of $${dayUsd.toFixed(2)} in 24 hours, $${turnUsd.toFixed(2)} per turn${refusal ? `; no new turn: ${refusal}` : ""}.`,
+			statusTurns: (running: boolean, waiting: number) =>
+				`${running ? "A turn is running." : "No turn is running."} ${waiting} message(s) wait.`,
+			/** The held drafts the `status` reply lists (`heldDraft` each), with how many more are held. */
+			statusHeld: (listed: readonly string[], more: number) =>
+				listed.length > 0
+					? `Held: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`
+					: "No held action from this chat.",
+			heldDraft: (id: string, classes: string, shown: boolean) =>
+				`${id} (${classes}${shown ? "" : ", not shown yet"})`,
+			statusSuppressed: (count: number, name: string) =>
+				`${count} update(s) were not pushed under channels.${name}.ownerPushPerHour.`,
+			/** The calls waiting on the owner in the hosting session (`space` its directory): a push, and a `status` line. */
+			waitingOn: (space: string, calls: readonly string[], more: number) =>
+				`Waiting on you in ${space}: ${calls.join("; ")}${more > 0 ? `; and ${more} more` : ""}`,
+			/** A directory whose name is not sent (`waitingOn`, `atRest`). */
+			unnamedSpace: "a session",
+			/** A waiting call whose text is not sent. */
+			hiddenCall: "a call only you can decide (its text is shown at the terminal only)",
+			/** A session at rest after `minutes` of work, by why it rests; `waiting` the calls that wait on the owner there. */
+			atRest: (phase: string, space: string, minutes: number, waiting: number) => {
+				const waits = waiting === 0 ? "" : ` ${waiting} call(s) wait on you.`;
+				if (phase === "done") return `Finished in ${space} after ${minutes} min: the goal is complete.${waits}`;
+				if (phase === "blocked") return `Stopped in ${space} after ${minutes} min: the goal is blocked.${waits}`;
+				if (phase === "waiting_user")
+					return `Stopped in ${space} after ${minutes} min: a question waits for you at the terminal.${waits}`;
+				return `At rest in ${space} after ${minutes} min of work.${waits}`;
+			},
+			/** An owner turn's move to a metered model was not reserved on its owner pool: the turn stays on its model. */
+			moveNotReserved: (name: string, cause: string) =>
+				`Channel ${name}: an owner turn's move to a metered model was not reserved on its owner pool (${cause}); the turn stays on its model.`,
 		},
 	},
 

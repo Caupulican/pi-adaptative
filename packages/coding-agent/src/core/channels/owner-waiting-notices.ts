@@ -14,6 +14,7 @@
  */
 
 import { basename } from "node:path";
+import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { oneLine, truncateWithEllipsis } from "../provider-tool-text.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -45,23 +46,25 @@ function noticeKey(sessionId: string, call: OwnerWaitingCall): string {
 	return `waiting:${digest(sessionId).slice(0, 12)}:${call.key}${call.since === undefined ? "" : `:${call.since}`}`;
 }
 
+/** The owner chat's words: the interface language's `notices.channels.owner`. */
+type OwnerWords = InterfaceText["notices"]["channels"]["owner"];
+
 /** The directory a session works in, as a chat names it; a name that looks like it holds a secret is not sent. */
-function spaceName(cwd: string): string {
+function spaceName(words: OwnerWords, cwd: string): string {
 	const named = truncateWithEllipsis(oneLine(basename(cwd)), SPACE_MAX_CHARS);
-	return named === "" || hasMaskableSecretText(named) ? "a session" : named;
+	return named === "" || hasMaskableSecretText(named) ? words.unnamedSpace : named;
 }
 
 /** A waiting call's one line, as a chat is told it; a line that looks like it holds a secret is not sent. */
-function callLine(call: OwnerWaitingCall): string {
+function callLine(words: OwnerWords, call: OwnerWaitingCall): string {
 	const what = oneLine(call.what);
-	return what === "" || hasMaskableSecretText(what)
-		? "a call only you can decide (its text is shown at the terminal only)"
-		: what;
+	return what === "" || hasMaskableSecretText(what) ? words.hiddenCall : what;
 }
 
-/** The notice of one waiting call: the directory its session works in and the call's one line. */
+/** The notice of one waiting call, in the interface language: the directory its session works in and the call's one line. */
 export function waitingNoticeText(cwd: string, call: OwnerWaitingCall): string {
-	return `Waiting on you in ${spaceName(cwd)}: ${callLine(call)}`;
+	const words = interfaceText().notices.channels.owner;
+	return words.waitingOn(spaceName(words, cwd), [callLine(words, call)], 0);
 }
 
 /** The push key of a session come to rest after a stretch of work. */
@@ -71,27 +74,16 @@ function restKey(sessionId: string, restAt: number): string {
 
 /** The notice of a session at rest after `workedMs` of work: why it rests, and how many calls wait on the owner there. */
 export function restNoticeText(view: OwnerWaitingView, workedMs: number): string {
-	const space = spaceName(view.cwd);
+	const words = interfaceText().notices.channels.owner;
 	const minutes = Math.max(1, Math.floor(workedMs / 60_000));
-	const waits = view.calls.length === 0 ? "" : ` ${view.calls.length} call(s) wait on you.`;
-	switch (view.work.phase) {
-		case "done":
-			return `Finished in ${space} after ${minutes} min: the goal is complete.${waits}`;
-		case "blocked":
-			return `Stopped in ${space} after ${minutes} min: the goal is blocked.${waits}`;
-		case "waiting_user":
-			return `Stopped in ${space} after ${minutes} min: a question waits for you at the terminal.${waits}`;
-		default:
-			return `At rest in ${space} after ${minutes} min of work.${waits}`;
-	}
+	return words.atRest(view.work.phase, spaceName(words, view.cwd), minutes, view.calls.length);
 }
 
-/** The `status` line of the calls waiting on the owner in the hosting session; none while nothing waits. */
-export function waitingStatusLine(view: OwnerWaitingView | undefined): string | undefined {
+/** The `status` line of the calls waiting on the owner in the hosting session, in `words`; none while nothing waits. */
+export function waitingStatusLine(words: OwnerWords, view: OwnerWaitingView | undefined): string | undefined {
 	if (view === undefined || view.calls.length === 0) return undefined;
-	const listed = view.calls.slice(0, MAX_STATUS_CALLS).map(callLine);
-	const more = view.calls.length - listed.length;
-	return `Waiting on you in ${spaceName(view.cwd)}: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}`;
+	const listed = view.calls.slice(0, MAX_STATUS_CALLS).map((call) => callLine(words, call));
+	return words.waitingOn(spaceName(words, view.cwd), listed, view.calls.length - listed.length);
 }
 
 export class OwnerWaitingNotices {

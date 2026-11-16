@@ -941,7 +941,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 			} catch {
 				reading = {
 					accountKey: model.provider,
-					allowance: { kind: "unknown", reason: "the allowance read failed", subscription: true },
+					allowance: { kind: "unknown", cause: "readFailed", subscription: true },
 				};
 			}
 			pass.allowance.set(modelKey, reading);

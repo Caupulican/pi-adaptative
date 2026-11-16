@@ -6,7 +6,9 @@
  */
 
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import type { MeteredMoveGate } from "../agent-session-model-access.ts";
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import type { SubscriptionAllowance } from "../provider-admission/subscription-allowance.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 
 /** The longest rendering of a held call a phone message carries; a call that does not fit is released at the terminal. */
@@ -61,17 +63,21 @@ export interface OwnerChannelDelivery {
 	 * model or one whose billing is unknown, which the dollar bounds hold (`ownerDollarsApply`, `readOwnerQuota`).
 	 */
 	quotaAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
+	/**
+	 * Holds the session's moves to metered (API) models to the owner pool's gate until the returned release: an owner turn
+	 * accepted on a subscription charges the pool nothing until it moves (`owner-metered-moves.ts`). Absent: not held.
+	 */
+	holdMeteredMoves?(gate: MeteredMoveGate): () => void;
 	/** Aborts the run that `ref` opened. */
 	abortRun(ref: string): void;
 }
 
-/** What the subscription's own usage limits allow now (`SubscriptionAllowance`): decided in code from the account's reported windows. */
-export type OwnerQuotaAllowance =
-	| { readonly kind: "room"; readonly usedPercent: number }
-	/** `retryAt`: when every exhausted window resets, if the account reports all of them. */
-	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string; readonly retryAt?: number }
-	/** `subscription`: the model is a subscription login (so the status says why no reading decides); false when the dollar bounds hold. */
-	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
+/**
+ * What the subscription's own usage limits allow now (`SubscriptionAllowance`): decided in code from the account's reported
+ * windows. An unknown reading's `subscription`: the model is a subscription login (so the status says why no reading
+ * decides); false when the dollar bounds hold.
+ */
+export type OwnerQuotaAllowance = SubscriptionAllowance;
 
 /** The model-free control words an owner message can be, recognized before any model turn. */
 export type OwnerControl =

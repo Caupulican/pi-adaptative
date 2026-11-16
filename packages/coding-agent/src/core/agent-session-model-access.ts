@@ -51,8 +51,8 @@ export class AgentSessionModelAccess {
 	private readonly ports: AgentSessionModelAccessPorts;
 	/** The session never leaves its model (`pinnedModel`): an unusable model is its host's to refuse, never replaced. */
 	pinned = false;
-	/** The host's hold on moves to metered models (`MeteredMoveGate`); none: they are not held. */
-	meteredMoves: MeteredMoveGate | undefined;
+	/** The hosts' holds on moves to metered models (`MeteredMoveGate`); none: they are not held. */
+	private readonly meteredMoves = new Set<MeteredMoveGate>();
 
 	constructor(ports: AgentSessionModelAccessPorts) {
 		this.ports = ports;
@@ -179,6 +179,8 @@ export class AgentSessionModelAccess {
 	async adoptTalker(model: Model<Api>, decision: RouteDecision): Promise<void> {
 		const current = this.ports.model();
 		if (!current || current.provider !== model.provider || current.id !== model.id) {
+			// A held move to a metered talker leaves the conversation on the session model, its route not adopted.
+			if (!this.admitMove(model)) return;
 			await this.ports.modelSelection().setModel(model, { persistSettings: false });
 		}
 		if (decision.thinkingLevel) {
@@ -190,10 +192,32 @@ export class AgentSessionModelAccess {
 		this.ports.modelRouter().recordOpeningRoute(decision, model);
 	}
 
-	/** Whether a move of the work to `model` is held: it is metered and the host's gate has no room for it now. */
+	/**
+	 * Holds the work's moves to metered models to `gate` too, until the returned release (each host holds its own: the
+	 * daemon's away bound, an owner channel's pool). A routed turn's swaps are admitted here as well (`admitMove`).
+	 */
+	holdMeteredMoves(gate: MeteredMoveGate): () => void {
+		this.meteredMoves.add(gate);
+		this.ports.modelRouter().admitMoves((model) => this.admitMove(model));
+		return () => {
+			this.meteredMoves.delete(gate);
+		};
+	}
+
+	/** Whether a move of the work to `model` is held: it is metered and a host's gate has no room for it now. */
 	private moveHeld(model: Model<Api>): boolean {
-		const gate = this.meteredMoves;
-		return gate !== undefined && isMeteredSpend(model, this.ports.modelRegistry()) && !gate.fits();
+		return isMeteredSpend(model, this.ports.modelRegistry()) && [...this.meteredMoves].some((gate) => !gate.fits());
+	}
+
+	/**
+	 * Admits a move of the work to `model` before its first request: a metered one is reserved on each host's gate
+	 * (`MeteredMoveGate.reserve`), and one a gate refuses does not move (a gate that reserved before keeps it, the
+	 * stricter reading). Every move to another model passes here: a failover, an opening's talker, a routed turn's swap.
+	 */
+	admitMove(model: Model<Api>): boolean {
+		if (!isMeteredSpend(model, this.ports.modelRegistry())) return true;
+		for (const gate of this.meteredMoves) if (!gate.reserve()) return false;
+		return true;
 	}
 
 	/** Where work goes when `failed` ran out of quota (`resolveQuotaFallbackModel`): never a model whose move is held. */
@@ -207,15 +231,14 @@ export class AgentSessionModelAccess {
 
 	/**
 	 * A quota failover moves the session to `hop`: a routed turn's model stays inside that turn (as an unsupported model's
-	 * does), and a pinned session stays on its model. A move to a metered model is reserved on the host's gate first
-	 * (`MeteredMoveGate.reserve`); one it refuses leaves the work where it is. Returns where the work continues, or undefined.
+	 * does; the router admits the model it picks), and a pinned session stays on its model. A move to a metered model is
+	 * admitted first (`admitMove`); one a gate refuses leaves the work where it is. Returns where the work continues.
 	 */
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined {
 		if (this.pinned) return undefined;
-		const gate = this.meteredMoves;
-		if (gate && isMeteredSpend(hop, this.ports.modelRegistry()) && !gate.reserve()) return undefined;
 		if (this.ports.modelRouter().isRoutedTurnOn(failed))
 			return this.ports.modelRouter().replaceRefusedRoutedModel(failed, hop);
+		if (!this.admitMove(hop)) return undefined;
 		this.ports.agent().state.model = hop;
 		this.ports.sessionManager().appendModelChange(hop.provider, hop.id);
 		this.moveTalker(hop, `${failed.provider}/${failed.id} out of quota`);
