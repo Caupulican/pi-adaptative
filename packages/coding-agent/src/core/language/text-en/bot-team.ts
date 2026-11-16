@@ -69,9 +69,6 @@ export const BOT_TEAM = {
 	/** The bot daemon's charge file did not parse: it was set aside, so its charges no longer count. */
 	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
 		`Bots: the record of what bots spent while no session was open (${file}) did not read (${reason}); it was set aside as ${to}, and the spend it held no longer counts toward routines.away.maxUsdPerDay.`,
-	/** The bot daemon's charge file does not read: the away day bound has no room until it does. */
-	botAwayChargesUnreadable: (file: string, reason: string) =>
-		`Bots: the record of what bots spent while no session was open (${file}) does not read (${reason}); until it reads, routines.away.maxUsdPerDay has no room, so metered routines, channel turns and bot turns wait while you are away. It is read again at every check.`,
 	/** A root's record that it hosts bots could not be removed as it closed; the daemon leaves its directory to it until its process ends. */
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: this session could not remove its record that it hosts bots (${reason}); the bot daemon leaves the bots of this directory to it until this process ends.`,

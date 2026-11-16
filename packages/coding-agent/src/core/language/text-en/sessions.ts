@@ -45,9 +45,18 @@ export const SESSIONS = {
 		/** A channel turn away on a subscription could not be reserved before moving to a metered model, so it does not move. */
 		turnNotWritten: (channel: string, path: string, cause: string) =>
 			`Channel ${channel} away: a turn could not be reserved on the away spend bound to move to a metered model (${cause}): ${path}. It does not move to that model.`,
-		/** The channel turns' charges on the away bound did not read (`cause`: an error code or error name): the bound has no room until they read. */
-		chargesUnread: (path: string, cause: string) =>
-			`The channel turns charged on the away spend bound could not be read (${cause}): ${path}. Until they read, routines.away.maxUsdPerDay has no room: no metered run or channel turn away starts. They are read again at each pass.`,
+		/**
+		 * Charges on the away bound did not read (`readAwayCharges`): `charges` names whose (`chargeRecords`), `path` the file
+		 * or directory, `cause` an error code or name, or the reason the bots' record does not read. The bound has no room until
+		 * they read.
+		 */
+		chargesUnread: (charges: string, path: string, cause: string) =>
+			`Could not read ${charges} (${cause}): ${path}. Until these charges read, routines.away.maxUsdPerDay has no room: no metered run, channel turn or bot turn away starts. They are read again at each check.`,
+		/** Whose charges on the away bound `chargesUnread` names. */
+		chargeRecords: {
+			channelTurns: "the channel turns charged on the away spend bound",
+			botSpend: "what bots spent while no session was open, charged on the away spend bound",
+		},
 		/** A channel journal that did not parse was set aside (its reset): its unknown turns charge the whole day bound until `until`, a day after it. */
 		journalReset: (path: string, until: string) =>
 			`The channel journal ${path} did not parse, so it was set aside (kept beside it for inspection) and a fresh one started. Which turns away it held is unknown, so they are charged as the whole routines.away.maxUsdPerDay until ${until}: no metered run or channel turn away starts before then.`,

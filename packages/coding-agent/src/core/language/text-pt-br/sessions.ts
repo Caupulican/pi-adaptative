@@ -57,8 +57,12 @@ export const SESSIONS = {
 			`Uma execução ausente que passou para um modelo cobrado por uso não pôde ser reservada no limite de gasto ausente (${cause}): ${path}. As requisições cobradas dela são recusadas.`,
 		turnNotWritten: (channel: string, path: string, cause: string) =>
 			`Canal ${channel} ausente: um turno não pôde ser reservado no limite de gasto ausente para passar a um modelo cobrado por uso (${cause}): ${path}. Ele não passa para esse modelo.`,
-		chargesUnread: (path: string, cause: string) =>
-			`Os turnos de canal cobrados no limite de gasto ausente não puderam ser lidos (${cause}): ${path}. Até serem lidos, routines.away.maxUsdPerDay não tem espaço: nenhuma execução ou turno de canal ausente cobrado por uso começa. Eles são lidos de novo a cada passada.`,
+		chargesUnread: (charges: string, path: string, cause: string) =>
+			`Não foi possível ler ${charges} (${cause}): ${path}. Até essas cobranças serem lidas, routines.away.maxUsdPerDay não tem espaço: nenhuma execução, turno de canal ou turno de bot ausente cobrado por uso começa. Elas são lidas de novo a cada verificação.`,
+		chargeRecords: {
+			channelTurns: "os turnos de canal cobrados no limite de gasto ausente",
+			botSpend: "o que os bots gastaram sem sessão aberta, cobrado no limite de gasto ausente",
+		},
 		journalReset: (path: string, until: string) =>
 			`O diário de canal ${path} não pôde ser interpretado, então foi posto de lado (guardado ao lado dele para inspeção) e um novo começou. Quais turnos ausentes ele guardava é desconhecido, então eles são cobrados como o routines.away.maxUsdPerDay inteiro até ${until}: antes disso nenhuma execução ou turno de canal ausente cobrado por uso começa.`,
 		turnsUnread: (channel: string, cause: string) =>

@@ -75,8 +75,6 @@ export const BOT_TEAM = {
 		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
 	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
 		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pôde ser lido (${reason}); foi posto de lado como ${to}, e o gasto que ele guardava não conta mais para routines.away.maxUsdPerDay.`,
-	botAwayChargesUnreadable: (file: string, reason: string) =>
-		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pode ser lido (${reason}); até ser lido, routines.away.maxUsdPerDay não tem espaço, então rotinas, turnos de canal e turnos de bots cobrados por uso esperam enquanto você está fora. Ele é lido de novo a cada verificação.`,
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: esta sessão não conseguiu remover o registro de que hospeda bots (${reason}); o daemon de bots deixa os bots deste diretório para ela até este processo terminar.`,
 	botRootHostDeadNotRemoved: (file: string, reason: string) =>

@@ -20,7 +20,11 @@ import { estimateContextPromptTokens } from "./models/perf-profile.ts";
 export interface CostGuardControllerDeps {
 	getSettings(): CostGuardSettings;
 	getCompactionReserveTokens(): number;
-	getSpawnedUsageCost(): number;
+	/**
+	 * The metered (API) part of the session's background spend so far (`SessionAnalytics.getSpawnedMeteredUsd`): the guard
+	 * holds metered spend alone, as every dollar ceiling does; a subscription's spend is held by its usage windows.
+	 */
+	getSpawnedMeteredUsd(): number;
 	/** Whether spend on `model` is not metered (`isMeteredSpend`): a subscription's usage windows hold it, never this guard. */
 	isUnmeteredSubscription(model: Model<Api>): boolean;
 }
@@ -34,9 +38,9 @@ export class CostGuardController {
 		this.deps = deps;
 	}
 
-	/** Snapshot cumulative spawned spend before any work in a new foreground turn begins. */
+	/** Snapshot the cumulative metered background spend before any work in a new foreground turn begins. */
 	beginForegroundTurn(): void {
-		this.turnBaselineUsd = this.deps.getSpawnedUsageCost();
+		this.turnBaselineUsd = this.deps.getSpawnedMeteredUsd();
 	}
 
 	/** Latest decision for the host UI. Disabled settings hide and invalidate prior projections. */
@@ -58,7 +62,7 @@ export class CostGuardController {
 	/**
 	 * Resolve cost policy after routing/context conversion reveals the real request. This projection
 	 * is not an output cap; warning mode preserves capability and downgrade changes only this request.
-	 * Background spend is turn-local: cumulative spawned usage minus the baseline captured by
+	 * Background spend is turn-local and metered: cumulative metered background spend minus the baseline captured by
 	 * {@link beginForegroundTurn}. Per-lane dollar caps remain independent. Best-effort: never throws.
 	 */
 	resolveRequestReasoning(
@@ -89,7 +93,7 @@ export class CostGuardController {
 			});
 			// A dedup/rollup correction may move the cumulative total backward transiently; it must never
 			// turn background spend negative or lower the request projection.
-			const cumulativeBackgroundUsd = Math.max(0, this.deps.getSpawnedUsageCost() - this.turnBaselineUsd);
+			const cumulativeBackgroundUsd = Math.max(0, this.deps.getSpawnedMeteredUsd() - this.turnBaselineUsd);
 			const decision = evaluateCostGuard(estUsd, guard, cumulativeBackgroundUsd);
 			this.lastDecision = decision;
 			if (!decision.over || guard.action !== "downgrade" || reasoning === undefined) return reasoning;

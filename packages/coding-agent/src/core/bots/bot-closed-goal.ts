@@ -44,7 +44,11 @@ export class BotClosedGoals {
 
 	/**
 	 * Whether the bot's session closed holding goal `goal` of its file instance `instance`. Throws when its mark does not
-	 * read or parse.
+	 * read or parse. A mark of another goal or instance is left as it is, replaced or removed by the bot's next close: it
+	 * holds nothing back now or later, since a goal's key (its id and revision) and a file's instance (its header's creation
+	 * time) never come back, and reading it costs what reading a current one does; removing it here would race the close
+	 * of a process that takes the bot between this read and the removal (the reader holds no lock on the bot's home), and
+	 * could remove the mark that close just wrote, opening the bot again for the goal its continuation ended without.
 	 */
 	holds(agentId: string, instance: string, goal: string): boolean {
 		const mark = this.unwritten.has(agentId) ? this.unwritten.get(agentId) : this.read(agentId);

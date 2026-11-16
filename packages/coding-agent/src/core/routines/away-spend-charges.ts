@@ -81,10 +81,12 @@ export function readAwayCharges(
 	const key = `${read.unread.path}\u0000${read.unread.cause}`;
 	if (told.unread !== key) {
 		told.unread = key;
+		const words = text.sessions.awayMeteredRuns;
 		tell(
 			"unread" in channels
-				? text.sessions.awayMeteredRuns.chargesUnread(read.unread.path, read.unread.cause)
-				: text.botTeam.botAwayChargesUnreadable(
+				? words.chargesUnread(words.chargeRecords.channelTurns, read.unread.path, read.unread.cause)
+				: words.chargesUnread(
+						words.chargeRecords.botSpend,
 						read.unread.path,
 						"unreadable" in bots ? bots.unreadable : read.unread.cause,
 					),

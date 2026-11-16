@@ -47,10 +47,13 @@ import {
 	formatDailyUsageBreakdown,
 	getLocalDayWindow,
 } from "./cost/daily-usage.ts";
+import { meteredUsageShare } from "./cost/metered-usage-share.ts";
+import type { SpendBilling } from "./cost/request-spend-budget.ts";
 import type { SemanticUsageProjection } from "./cost/semantic-usage-delivery.ts";
 import { SessionAccountingHistory } from "./cost/session-accounting-history.ts";
 import {
 	aggregateCumulativeUsageFromSessionEntries,
+	isBackgroundShare,
 	type MeteredUsageShare,
 	meteredCumulativeUsd,
 } from "./cost/session-usage.ts";
@@ -70,6 +73,7 @@ import {
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
 import { resolveSessionEntryIndex } from "./session-entry-index.ts";
 import { writeJsonLinesSync } from "./session-jsonl-writer.ts";
 import type { SpawnedUsageOptions } from "./spawned-usage.ts";
@@ -578,6 +582,30 @@ export class SessionAnalytics {
 		const pending = this.deps.getPendingSemanticUsage();
 		const totals = projectPendingSemanticCost(this.getCurrentSessionCostTotals(), pending.reports, pending.overflow);
 		return { cost: totals.subagentCost, reports: totals.subagentReports };
+	}
+
+	/**
+	 * The metered (API) part of the background spend {@link getSpawnedUsage} totals (spawned reports, usage receipts, history
+	 * summaries and their journal's overflow, held reports included), in dollars, read share by share as every dollar
+	 * ceiling reads spend (`meteredUsageShare`): `billing` the models' billing, `workers` the session's worker attempts.
+	 */
+	getSpawnedMeteredUsd(
+		billing: SpendBilling,
+		workers: { getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined },
+	): number {
+		const metered = meteredUsageShare({
+			billing,
+			sessionId: this.deps.getSessionManager().getSessionId(),
+			snapshot: workers.getTaskRuntimeSnapshot(),
+			ownModel: this.deps.getModel(),
+		});
+		const pending = this.deps.getPendingSemanticUsage();
+		return meteredCumulativeUsd(
+			this.getAccountingEntries(),
+			(usage, share) => (isBackgroundShare(share) ? metered(usage, share) : 0),
+			pending.reports,
+			pending.overflow?.usage,
+		);
 	}
 
 	getCostSummary(now = new Date()): SessionCostSummary {

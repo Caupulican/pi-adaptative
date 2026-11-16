@@ -94,6 +94,16 @@ export type CumulativeUsageShare =
 	/** Paid history spend the bounded journal had no room for. */
 	| { readonly kind: "overflow" };
 
+/**
+ * Whether a share is background spend, as the current session's cost totals class it (`subagentCost`, what
+ * `SessionAnalytics.getSpawnedUsage` reads): a spawned report, a usage receipt, a history summary's System One report and
+ * the paid history spend its journal had no room for; not the session's own entries or its other System One reports.
+ */
+export function isBackgroundShare(share: CumulativeUsageShare): boolean {
+	if (share.kind === "direct") return false;
+	return share.kind !== "semantic" || share.report.route === "history_summary";
+}
+
 /** The dollars of `usage`, one share of a session's cumulative usage (`share`), that are metered spend (`isMeteredSpend`). */
 export type MeteredUsageShare = (usage: Usage, share: CumulativeUsageShare) => number;
 

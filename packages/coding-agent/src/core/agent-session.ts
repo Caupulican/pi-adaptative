@@ -1123,7 +1123,7 @@ export class AgentSession {
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),
 			getCompactionReserveTokens: () => this.settingsManager.getCompactionReserveTokens(),
-			getSpawnedUsageCost: () => this.getSpawnedUsage().cost,
+			getSpawnedMeteredUsd: () => this._analytics.getSpawnedMeteredUsd(this._modelRegistry, this._backgroundLanes),
 			// A subscription costs no marginal dollars while the account has allowance (or reports none); past it, extra usage is money.
 			isUnmeteredSubscription: (model) => !isMeteredSpend(model, this._modelRegistry),
 		});

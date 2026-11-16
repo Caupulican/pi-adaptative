@@ -15,22 +15,16 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { receiptCountsAgainstDollars } from "../cost/request-spend-budget.ts";
+import { attemptModel, meteredUsageShare } from "../cost/metered-usage-share.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
-import { isUsage, type MeteredUsageShare } from "../cost/session-usage.ts";
+import type { MeteredUsageShare } from "../cost/session-usage.ts";
 import { AWAY_DAY_BOUND_REFUSALS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
-import { workerUsageReportIdPrefix } from "../delegation/worker-usage-receipt-delivery.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { costCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
-import {
-	type AttemptRuntimeState,
-	attemptModelBinding,
-	type TaskRuntimeProjection,
-} from "../orchestration/task-runtime-state.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
 import type { BotSessionTurnPorts, BotSpendCeiling } from "./bot-session-turns.ts";
@@ -86,18 +80,6 @@ export interface BotSessionSpendPorts {
 	meteredRunHold(runId: string): AwayMeteredRunHold | undefined;
 }
 
-/** The attempt a worker's usage report id names (`workerUsageReportIdPrefix`), among `attempts` keyed by that prefix. */
-function attemptOfReport(
-	attempts: ReadonlyMap<string, AttemptRuntimeState>,
-	reportId: string,
-): AttemptRuntimeState | undefined {
-	for (let at = reportId.indexOf(":"); at >= 0; at = reportId.indexOf(":", at + 1)) {
-		const attempt = attempts.get(reportId.slice(0, at + 1));
-		if (attempt) return attempt;
-	}
-	return undefined;
-}
-
 /** One loaded bot session's spend (see the module comment). */
 export class BotSessionSpend {
 	private readonly agentId: string;
@@ -131,7 +113,7 @@ export class BotSessionSpend {
 		});
 		this.windows = new BotSpendWindows(this.ledger, transcript, {
 			snapshot: () => ports.snapshot(),
-			attemptMetered: (attempt) => isMeteredSpend(this.attemptModel(attempt), registry),
+			attemptMetered: (attempt) => isMeteredSpend(attemptModel(attempt, registry), registry),
 			now: () => ports.now(),
 		});
 	}
@@ -139,12 +121,6 @@ export class BotSessionSpend {
 	/** The ceilings over the bot's spend per request. */
 	private ceilings(): BotSpendCeiling[] {
 		return botSpendCeilings(this.ports.rootCeilings(), this.definition.spendBudget);
-	}
-
-	/** The model an attempt runs on (else the one its contract binds); undefined when the registry does not know it. */
-	private attemptModel(attempt: AttemptRuntimeState): Model<Api> | undefined {
-		const binding = attemptModelBinding(attempt);
-		return binding && this.registry.find(binding.provider, binding.modelId);
 	}
 
 	/**
@@ -188,58 +164,14 @@ export class BotSessionSpend {
 		return this.windows.meteredRuns(isMeteredSpend(this.definition.model, this.registry));
 	}
 
-	/**
-	 * How much of each share of the session's recorded spend is metered (`isMeteredSpend`, the rule the windows and the
-	 * ceilings read), fixed into each charge: a response by the model it names, a summary by the models its components
-	 * name (what names none, the bot's own model); a worker's usage receipt by the model its attempt runs on (`attemptModel`), else the one it
-	 * names; a spawned or System One report by the models it names; what names none (a baseline, a receipt with no model,
-	 * the journal's overflow) as metered spend, which is never laxer. Read once per charge, over the projection as it is then.
-	 */
+	/** The session's metered reading (`meteredUsageShare`), over its workers and the bot's pinned model as they are now. */
 	private meteredShare(): MeteredUsageShare {
-		const sessionId = this.transcript.getSessionId();
-		const attempts = new Map<string, AttemptRuntimeState>();
-		for (const attempt of Object.values(this.ports.snapshot()?.attempts ?? {}))
-			attempts.set(workerUsageReportIdPrefix(sessionId, attempt.attemptId), attempt);
-		const own = isMeteredSpend(this.definition.model, this.registry);
-		const named = (spend: { readonly provider?: string; readonly model?: string }, otherwise: boolean): boolean =>
-			spend.provider !== undefined && spend.model !== undefined
-				? receiptCountsAgainstDollars({ provider: spend.provider, model: spend.model }, this.registry)
-				: otherwise;
-		// The parts of `usd` its recorded components show spent on a subscription (each whole: naming its model, its usage a
-		// usage record) are not metered; the rest is, so a component that does not read is never laxer.
-		const lessSubscription = (usd: number, components: unknown): number => {
-			if (!Array.isArray(components)) return usd;
-			let subscription = 0;
-			for (const part of components)
-				if (
-					isPlainRecord(part) &&
-					typeof part.provider === "string" &&
-					typeof part.model === "string" &&
-					isUsage(part.usage) &&
-					!named({ provider: part.provider, model: part.model }, true)
-				)
-					subscription += part.usage.cost.total;
-			return Math.max(0, usd - subscription);
-		};
-		return (usage, share) => {
-			if (share.kind === "semantic") return named(share.report, true) ? usage.cost.total : 0;
-			if (share.kind === "direct") {
-				const { entry } = share;
-				if (entry.type === "message")
-					return named(entry.message.role === "assistant" ? entry.message : {}, own) ? usage.cost.total : 0;
-				if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usageComponents !== undefined)
-					return lessSubscription(usage.cost.total, entry.usageComponents);
-				return own ? usage.cost.total : 0;
-			}
-			if (share.kind !== "spawned") return usage.cost.total;
-			const { report } = share;
-			// A report that fixed its metered part (a bot's charge) counts it, at most the part of it counted here.
-			if (typeof report.meteredUsd === "number") return Math.min(usage.cost.total, Math.max(0, report.meteredUsd));
-			if (report.usageComponents) return lessSubscription(usage.cost.total, report.usageComponents);
-			const attempt = report.reportId === undefined ? undefined : attemptOfReport(attempts, report.reportId);
-			const metered = attempt ? isMeteredSpend(this.attemptModel(attempt), this.registry) : named(report, true);
-			return metered ? usage.cost.total : 0;
-		};
+		return meteredUsageShare({
+			billing: this.registry,
+			sessionId: this.transcript.getSessionId(),
+			snapshot: this.ports.snapshot(),
+			ownModel: this.definition.model,
+		});
 	}
 
 	/** The bounds the bot's turns are held to and the spend they count toward them: the request's, its workers' included. */
