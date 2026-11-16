@@ -8,6 +8,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { WorkerRequest } from "../autonomy/contracts.ts";
 import { EMPTY_ATTEMPT_USAGE, projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { SharedCapabilityBudget } from "../orchestration/capability-gateway.ts";
 import type {
@@ -78,6 +79,16 @@ export interface RequestCostBoundsDeps {
 export interface MovableAttemptBudget extends SharedCapabilityBudget {
 	/** Composes the attempt's budget again on the model its start failed over to. */
 	moveTo(model: Model<Api>, snapshot: TaskRuntimeProjection): void;
+	/** The dollar ceiling the attempt's own spend is held to on the model it runs on now (`costCeilingUsd` of its grant). */
+	ceilingUsd(): number | undefined;
+}
+
+/** The request with the attempt's own dollar ceiling (`MovableAttemptBudget.ceilingUsd`) on it and on its envelope. */
+export function withAttemptCostCeiling(request: WorkerRequest, maxUsd: number | undefined): WorkerRequest {
+	const { maxEstimatedUsd: _request, ...rest } = request;
+	const { maxEstimatedUsd: _envelope, ...envelope } = request.envelope;
+	const ceiling = maxUsd === undefined ? {} : { maxEstimatedUsd: maxUsd };
+	return { ...rest, envelope: { ...envelope, ...ceiling }, ...ceiling };
 }
 
 export class RequestCostBounds {
@@ -194,6 +205,7 @@ export class RequestCostBounds {
 	 */
 	composeMovable(input: AttemptBudgetInput): MovableAttemptBudget {
 		let current = this.compose(input);
+		let model = input.model;
 		return {
 			assertBudgetAvailable: (subject) => current.assertBudgetAvailable(subject),
 			getAttemptUsage: () => current.getAttemptUsage(),
@@ -202,9 +214,11 @@ export class RequestCostBounds {
 			remainingContextTokens: () => current.remainingContextTokens(),
 			reserveProviderBudget: (requestedMaxTokens, subject, signal, request) =>
 				current.reserveProviderBudget(requestedMaxTokens, subject, signal, request),
-			moveTo: (model, snapshot) => {
+			moveTo: (next, snapshot) => {
+				model = next;
 				current = this.compose({ ...input, model, snapshot });
 			},
+			ceilingUsd: () => this.costCeilingUsd(input.grantBudget, model),
 		};
 	}
 
@@ -261,6 +275,7 @@ export class RequestCostBounds {
 				attemptId,
 				budget: { maxCostUsd: bound.maxCostUsd },
 				pricesRequests: true,
+				...(bound.refusalReasons ? { refusalReasons: bound.refusalReasons } : {}),
 				seeds,
 				initialUsage,
 			}),

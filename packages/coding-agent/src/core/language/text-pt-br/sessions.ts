@@ -50,6 +50,12 @@ export const SESSIONS = {
 	},
 	awayFleetQueueSetAside: (path: string) =>
 		`Um arquivo de fila deixado por uma sessão anterior foi separado, não adotado: ${path}.`,
+	awayMeteredRuns: {
+		unreadable: (path: string, cause: string) =>
+			`O registro das execuções ausentes reservadas no limite de gasto ausente não pôde ser lido (${cause}): ${path}. Cada execução ausente é cobrada pelo routines.away.maxUsdPerRun inteiro até ele ser lido de novo; ele é lido de novo na próxima passada.`,
+		notWritten: (path: string, cause: string) =>
+			`Uma execução ausente que passou para um modelo cobrado por uso não pôde ser reservada no limite de gasto ausente (${cause}): ${path}. As requisições cobradas dela são recusadas.`,
+	},
 	retention: {
 		ownerFilesUnlisted:
 			"Seus arquivos de sessão não puderam ser listados, então os pacotes de sessão antigos das suas sessões não são limpos até poderem (uma remoção já começada ainda termina), e o trabalho de rotinas das sessões apagadas não é resolvido.",

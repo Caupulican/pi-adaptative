@@ -84,6 +84,7 @@ import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import type { BudgetRefusalReasons } from "./budget-reason-codes.ts";
 import type { WorkerResponseObservation, WorkerToolSelection } from "./worker-attempt-executor.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import type { WorkerCeiling } from "./worker-parent-ceiling.ts";
@@ -199,6 +200,8 @@ export interface RunCostBound {
 	readonly maxCostUsd?: number;
 	/** Whether an attempt of the same snapshot is one of the run's (its spend seeds the run's budgets); asking starts nothing. */
 	includes(attempt: AttemptRuntimeState): boolean;
+	/** The codes a refusal of this bound reports; absent, a run's (`RUN_BUDGET_REFUSAL_REASONS`). */
+	readonly refusalReasons?: BudgetRefusalReasons;
 }
 
 /** The decisions a worker run consults: model availability, System One judges, context planning, memory, skills, edges. */
@@ -349,6 +352,17 @@ export interface ParentExecutionPolicy {
 		snapshot: TaskRuntimeProjection,
 		metered: boolean,
 	): RunCostBound | undefined;
+	/**
+	 * Present on a host whose wider spend bound a run may not fit: why `model` is held off now for the run `attempt`
+	 * serves (a run away admitted reserving nothing is held off metered models while the away day bound has no room for
+	 * it: `away_day_spend_bound_full`). The attempt's model resolution skips it as it skips an exhausted candidate, so a
+	 * failover does not move to it and the worker waits on its own model. Undefined: not held.
+	 */
+	runModelHold?(
+		attempt: AttemptRuntimeState,
+		snapshot: TaskRuntimeProjection,
+		model: Model<Api>,
+	): OrchestrationModelUnusableCause | undefined;
 	/**
 	 * Present on a host whose workers must read inside one directory (a parent opened away: the parent's own): every
 	 * worker's read scope is that directory, whatever its profile or the edge mode, and a read-only worker's shell reads

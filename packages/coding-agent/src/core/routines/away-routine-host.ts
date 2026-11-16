@@ -21,10 +21,11 @@
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
-import { configFile } from "../agent-paths.ts";
+import { awayMeteredRunsFile, configFile } from "../agent-paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { AwayParentWriteRefusal } from "../delegation/away-parent-writes.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { orchestrationHomeOfSession } from "../orchestration-homes.ts";
@@ -32,7 +33,13 @@ import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { ResolvedRoutineAwaySettings } from "../settings/settings-schema.ts";
 import { alarmAt, type TimerSource, type WallAlarm } from "../util/timer-port.ts";
 import { AwayEventFeed, AwayEventFeedUnavailable, type AwayEventSourceFactory } from "./away-event-feed.ts";
-import { awayMeteredRunReserved, reserveAwayMeteredRun } from "./away-metered-runs.ts";
+import {
+	type AwayMeteredRunInput,
+	awayMeteredRunFits,
+	awayMeteredRunReserved,
+	reserveAwayMeteredRun,
+	settleAwayMeteredRuns,
+} from "./away-metered-runs.ts";
 import { type AwayParentContext, AwayParentUnavailable, openAwayParentContext } from "./away-parent-context.ts";
 import {
 	AWAY_LEASES_UNREADABLE_REASON,
@@ -157,6 +164,14 @@ async function openAwayRoutineHost(args: {
 					occurrence.executor === "away" && occurrence.dispatchKey ? [occurrence.dispatchKey] : [],
 				),
 		);
+	// What deciding a run's metered spend on the away day bound reads, as the store and the bound stand now.
+	const meteredRun = (dispatchKey: string): AwayMeteredRunInput => ({
+		agentDir: deps.agentDir,
+		dispatchKey,
+		occurrences: deps.store.listRoutineOccurrences(),
+		gate: args.gate(),
+		nowMs: deps.timers.port("routines").now(),
+	});
 	const context = await openAwayParentContext({
 		agentDir: deps.agentDir,
 		parentSessionId,
@@ -167,13 +182,10 @@ async function openAwayRoutineHost(args: {
 		awayDispatchKeys,
 		reserveMeteredRun: (dispatchKey) =>
 			reserveAwayMeteredRun({
-				agentDir: deps.agentDir,
-				dispatchKey,
-				occurrences: deps.store.listRoutineOccurrences(),
-				gate: args.gate(),
-				nowMs: deps.timers.port("routines").now(),
-				report: args.report,
+				...meteredRun(dispatchKey),
+				notWritten: (path, cause) => args.report(interfaceText().sessions.awayMeteredRuns.notWritten(path, cause)),
 			}),
+		meteredRunFits: (dispatchKey) => awayMeteredRunFits(meteredRun(dispatchKey)),
 		report: args.report,
 		...(deps.authStorage ? { authStorage: deps.authStorage } : {}),
 		...(deps.modelRegistry ? { modelRegistry: deps.modelRegistry } : {}),
@@ -334,6 +346,18 @@ export class AwayRoutineSupervisor {
 		}
 		const nowMs = clock.now();
 		const occurrences = store.listRoutineOccurrences();
+		// The reservations of runs away that moved to metered models: stale keys dropped, a file that does not read told
+		// once per cause (every run away counts as reserved until it reads again, on a later pass).
+		const meteredRuns = settleAwayMeteredRuns(this.deps.agentDir, occurrences, nowMs);
+		if (meteredRuns.unreadable === undefined) this.reported.delete("away-metered-runs");
+		else
+			this.reportOnce(
+				"away-metered-runs",
+				interfaceText().sessions.awayMeteredRuns.unreadable(
+					awayMeteredRunsFile(this.deps.agentDir),
+					meteredRuns.unreadable,
+				),
+			);
 		// Recomputed after every host's claim: one parent's admitted runs can leave no room for the next parent. A run
 		// that spends no metered dollars needs no room.
 		const spendGate = this.gate();

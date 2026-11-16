@@ -9,7 +9,6 @@ import {
 	decodeExecutionContext,
 	type ExecutionContext,
 } from "../../kernel/index.ts";
-import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
@@ -165,7 +164,7 @@ import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import type { ParentExecutionContext } from "./parent-execution-context.ts";
-import { RequestCostBounds, type RequestCostBoundsDeps } from "./request-cost-bounds.ts";
+import { RequestCostBounds, type RequestCostBoundsDeps, withAttemptCostCeiling } from "./request-cost-bounds.ts";
 import {
 	type SanitizedContextForkMessage,
 	type SanitizedContextForkMode,
@@ -227,14 +226,7 @@ import {
 	type WorkerConversationRoots,
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
-import {
-	isOAuthCredentialUnusableText,
-	WorkerCredentialHealth,
-	type WorkerModelMove,
-	type WorkerModelMoveReason,
-	WorkerStartSettlement,
-	workerModelMoveReason,
-} from "./worker-credential-health.ts";
+import { WorkerCredentialHealth, type WorkerModelMove, WorkerStartSettlement } from "./worker-credential-health.ts";
 import {
 	carriesOwnOrigin,
 	parseWorkerDelegationAuthorityRequest,
@@ -288,6 +280,7 @@ import {
 } from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
+import { WorkerModelFailover } from "./worker-model-failover.ts";
 import {
 	contractGrantsChildren,
 	type NestedWorkerStart,
@@ -503,6 +496,17 @@ export class WorkerDelegationController {
 		getProviderDisplayName: (provider) =>
 			BUILT_IN_PROVIDER_DISPLAY_NAMES[provider] ?? this.deps.getModelRegistry().getProviderDisplayName(provider),
 		observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read) ?? false,
+	});
+	/** Where a worker moves when its model cannot take work, past unfit candidates and those its run is held off. */
+	private readonly modelFailover = new WorkerModelFailover({
+		resolver: () => this.getWorkerProfileResolver(),
+		activeAttempt: (laneId) => this.lifecycle.getActiveAttempt(laneId),
+		snapshot: () => this.lifecycle.getTaskRuntimeSnapshot(),
+		unfitFor: (attemptId) => this.fitRoute.unfitFor(attemptId),
+		credentialHealth: this.credentialHealth,
+		runModelHold: (attempt, snapshot, model) => this.deps.runModelHold?.(attempt, snapshot, model),
+		markModelExhausted: (model, retryAfterMs) => this.deps.markModelExhausted?.(model, retryAfterMs),
+		warn: (message) => this.safeWarn(message),
 	});
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
@@ -1645,55 +1649,6 @@ export class WorkerDelegationController {
 		);
 	}
 
-	/**
-	 * A worker whose model cannot take work: out of quota, refused for the account, or its credential unusable. A
-	 * model-level failure is marked exhausted where every routing decision reads it (the same registry root's billing
-	 * failover writes). An expired login that cannot be refreshed is the provider's and is read live from the credential
-	 * store, which already skips every model on it until the owner signs in again, so it marks nothing that would
-	 * outlive the new login and tells the owner once. Returns why the worker moved and the model it resolved to, when its
-	 * contract carries ordered fallbacks and its retry resolves to a different model; undefined when it did not move.
-	 */
-	private failOverQuotaExhaustion(
-		laneId: string,
-		outcome: { reasonCode: string; reasonDetail?: string },
-		model: Model<Api>,
-	): { readonly reason: WorkerModelMoveReason; readonly resolved: ResolvedWorkerProfile } | undefined {
-		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return undefined;
-		const classified = classifyFailure({ message: outcome.reasonDetail, provider: model.provider });
-		const loginExpired = this.credentialHealth.loginExpired(model.provider);
-		const oauthCredentialUnusable = loginExpired || isOAuthCredentialUnusableText(outcome.reasonDetail);
-		if (
-			classified.reason !== "billing_or_quota" &&
-			classified.reason !== "model_unsupported" &&
-			classified.reason !== "auth" &&
-			!oauthCredentialUnusable
-		) {
-			return undefined;
-		}
-		if (!loginExpired) this.deps.markModelExhausted?.(model, classified.retryAfterMs);
-		// One resolution: unfit candidates are skipped, and a retry on the running model is not a move.
-		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
-		const contract = attempt?.dispatch.executionContract;
-		const next =
-			attempt && contract?.worker.profile.modelPolicy.mode === "ordered-fallback"
-				? this.getWorkerProfileResolver().resolveContract(
-						contract.worker,
-						this.fitRoute.unfitFor(attempt.attemptId),
-					)
-				: undefined;
-		const nextModel = next?.ok ? next.resolved.model : undefined;
-		const moved = nextModel !== undefined && (nextModel.provider !== model.provider || nextModel.id !== model.id);
-		if (loginExpired) this.credentialHealth.tellLoginExpired(model, moved);
-		if (!moved || !next?.ok || !nextModel) return undefined;
-		const reason = workerModelMoveReason(loginExpired, classified.reason);
-		this.safeWarn(
-			reason === "quota_exhausted"
-				? `Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${nextModel.provider}/${nextModel.id}.`
-				: `Worker ${laneId} model ${model.provider}/${model.id} unavailable (${oauthCredentialUnusable ? "auth" : classified.reason}); retrying on ${nextModel.provider}/${nextModel.id}.`,
-		);
-		return { reason, resolved: next.resolved };
-	}
-
 	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
 	private authorityBase(): Pick<
 		WorkerAuthorityResolutionInput,
@@ -2018,10 +1973,7 @@ export class WorkerDelegationController {
 		let baseShipment: ResolvedWorkerProfile | undefined;
 		let basePreset: ResolvedWorkerProfilePreset | undefined;
 		if (pinnedContract) {
-			const pinned = this.getWorkerProfileResolver().resolveContract(
-				pinnedContract.worker,
-				admittedAttempt ? this.fitRoute.unfitFor(admittedAttempt.attemptId) : undefined,
-			);
+			const pinned = this.modelFailover.resolveContract(pinnedContract.worker, admittedAttempt);
 			if (!pinned.ok) return { ok: false, skipReason: pinned.reason };
 			baseShipment = pinned.resolved;
 		} else if (reuseContract) {
@@ -5235,7 +5187,6 @@ export class WorkerDelegationController {
 			// The shutdown barrier still owns this admission and releases its reservation strictly.
 			return { started: true, record: lifecycle.getRecord(startedRecord.laneId) ?? startedRecord };
 		}
-		const maxUsd = this.costBounds.costCeilingUsd(grant.budget, model);
 		const executionPolicy = orchestrationProfile.executionPolicy;
 		const agentBinding = lifecycle.getAgent(agentId);
 		if (!agentBinding) {
@@ -5530,30 +5481,31 @@ export class WorkerDelegationController {
 			executionPlan.writeEnabled &&
 			toolSurface.gateway !== undefined &&
 			toolSurface.allowedTools.some((name) => name === "write" || name === "edit");
-		const workerRequest: WorkerRequest = {
-			id: startedRecord.laneId,
-			instructions,
-			route: {
-				tier: "cheap",
-				risk: writeGranted ? "scoped-write" : "read-only",
-				confidence: 1,
-				reasonCode: "profile_worker",
-				reasons: [writeGranted ? "Path-scoped worker delegation" : "Read-only worker delegation"],
-			},
-			envelope: laneCapabilityEnvelope({
-				id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
-				profileId: orchestrationProfile.profileId,
-				capabilities: grant.capabilities,
-				...(writeGranted ? { writePaths: grant.writePaths } : {}),
-				deniedPaths: grant.deniedPaths,
-				allowedTools: toolSurface.allowedTools,
-				deniedTools: toolSurface.deniedTools,
-				...(maxUsd !== undefined ? { maxUsd } : {}),
+		let workerRequest: WorkerRequest = withAttemptCostCeiling(
+			{
+				id: startedRecord.laneId,
+				instructions,
+				route: {
+					tier: "cheap",
+					risk: writeGranted ? "scoped-write" : "read-only",
+					confidence: 1,
+					reasonCode: "profile_worker",
+					reasons: [writeGranted ? "Path-scoped worker delegation" : "Read-only worker delegation"],
+				},
+				envelope: laneCapabilityEnvelope({
+					id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
+					profileId: orchestrationProfile.profileId,
+					capabilities: grant.capabilities,
+					...(writeGranted ? { writePaths: grant.writePaths } : {}),
+					deniedPaths: grant.deniedPaths,
+					allowedTools: toolSurface.allowedTools,
+					deniedTools: toolSurface.deniedTools,
+					createdAt: new Date().toISOString(),
+				}),
 				createdAt: new Date().toISOString(),
-			}),
-			...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
-			createdAt: new Date().toISOString(),
-		};
+			},
+			sharedBudget.ceilingUsd(),
+		);
 		// Worker delegation START. Routing/scope codes + budget only — never the instructions text.
 		this.deps.emitAutonomyTelemetry({
 			type: AUTONOMY_TELEMETRY_EVENT_TYPES.workerRequest,
@@ -5884,7 +5836,7 @@ export class WorkerDelegationController {
 				if (!recoveredTerminal) {
 					let requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
 					while (!requestAuth.ok) {
-						const failover = this.failOverQuotaExhaustion(
+						const failover = this.modelFailover.failOver(
 							startedRecord.laneId,
 							{ reasonCode: "completion_error", reasonDetail: requestAuth.error },
 							model,
@@ -5902,6 +5854,7 @@ export class WorkerDelegationController {
 						laneMemoryCapacity = buildLaneMemoryCapacity(model);
 						lifecycle.recordRunningModel(startedRecord.laneId, modelBinding);
 						sharedBudget.moveTo(model, lifecycle.getTaskRuntimeSnapshot());
+						workerRequest = withAttemptCostCeiling(workerRequest, sharedBudget.ceilingUsd());
 						executor = buildExecutor();
 						registerInFlightLedger();
 						requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
@@ -5973,7 +5926,7 @@ export class WorkerDelegationController {
 					!this.deps.isDisposed() &&
 					!workerSignal.aborted
 				) {
-					const failover = this.failOverQuotaExhaustion(startedRecord.laneId, rawOutcome, model);
+					const failover = this.modelFailover.failOver(startedRecord.laneId, rawOutcome, model);
 					if (failover) {
 						model = failover.resolved.model;
 						modelBinding = failover.resolved.modelBinding;

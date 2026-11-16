@@ -229,13 +229,15 @@ export class WorkerProfileResolver {
 	resolveContract(
 		contract: WorkerProfileExecutionContract,
 		skipModelRefs?: ReadonlySet<string>,
+		/** Why a model is held off for the attempt's run (`ParentExecutionPolicy.runModelHold`); read before the host's cause. */
+		runHold?: (model: Model<Api>) => OrchestrationModelUnusableCause | undefined,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		// Admission already fixed this contract. Live host controls may revoke execution, but mutable
 		// profile files cannot retroactively redefine the model, resources, or authority snapshot.
 		// A routed worker's contract carries its routing order as an ordered-fallback policy: the first
 		// candidate not exhausted is where it runs, so a quota failure moves it on retry. A fixed policy
 		// runs on the admitted binding or not at all.
-		const unusableCause = (model: Model<Api>) => this.options.modelUnusableCause(model);
+		const unusableCause = (model: Model<Api>) => runHold?.(model) ?? this.options.modelUnusableCause(model);
 		// A queued route judged unfit on some candidates resolves past them (`skipModelRefs`); the resolved profile keeps
 		// the contract's full candidate list, so only the resolution sees the remaining order.
 		const candidates = contract.profile.modelPolicy.candidates;

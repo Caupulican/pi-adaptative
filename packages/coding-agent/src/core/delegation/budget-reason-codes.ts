@@ -28,6 +28,15 @@ export const RUN_BUDGET_REFUSAL_REASONS = {
 	exhausted: "worker_run_cost_budget_exhausted",
 } as const satisfies BudgetRefusalReasons;
 
+/**
+ * The refusal codes of a run away's metered attempt that the away day spend bound (`routines.away.maxUsdPerDay`) has no
+ * room for: its run was admitted reserving nothing and could not be reserved when the attempt started metered.
+ */
+export const AWAY_DAY_BUDGET_REFUSAL_REASONS = {
+	unpriced: "worker_run_model_unpriced",
+	exhausted: "worker_away_day_budget_exhausted",
+} as const satisfies BudgetRefusalReasons;
+
 /** The refusal codes of a budgeted delegation (`charter.envelope.budgetUsd`): the leader controller closes on them. */
 export const DELEGATION_BUDGET_REFUSAL_REASONS = {
 	unpriced: "worker_delegation_model_unpriced",
@@ -54,6 +63,7 @@ export const BUDGET_EXHAUSTED_REASON_CODES: ReadonlySet<string> = new Set([
 	"attempt_budget_exhausted",
 	...Object.values(WORKER_TREE_BUDGET_REASON_CODES),
 	RUN_BUDGET_REFUSAL_REASONS.exhausted,
+	AWAY_DAY_BUDGET_REFUSAL_REASONS.exhausted,
 	DELEGATION_BUDGET_REFUSAL_REASONS.exhausted,
 	...GRANT_BUDGET_REASON_CODES,
 	CLAIM_COST_BUDGET_REASON_CODE,

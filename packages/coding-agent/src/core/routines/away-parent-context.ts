@@ -36,6 +36,7 @@ import { edgeRecordsOnBranch, sessionEdgeGrants, standingEdgeGrants } from "../a
 import { AuthStorage } from "../auth-storage.ts";
 import { ExhaustedProviderRegistry, expiryFromRetryAfter } from "../billing-failover-controller.ts";
 import { AwayParentWriteRefusal, createAwayParentWrites } from "../delegation/away-parent-writes.ts";
+import { AWAY_DAY_BUDGET_REFUSAL_REASONS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionSettingsSource } from "../delegation/parent-execution-context.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
@@ -58,6 +59,7 @@ import {
 import { branchPoolPolicyReader, ModelPoolPolicyView } from "../model-router/owner-model-policy.ts";
 import { isLocalOrManagedRouterModel } from "../model-router/tool-escalation.ts";
 import { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import {
 	type AttemptRuntimeState,
 	attemptAwaitsDispatch,
@@ -90,6 +92,12 @@ export interface AwayParentContextInput {
 	 * (`reserveAwayMeteredRun`): a run admitted as a subscription run reserved nothing. False: the bound has no room.
 	 */
 	reserveMeteredRun(dispatchKey: string): boolean;
+	/**
+	 * Whether the run of this dispatch key may spend metered dollars now (`awayMeteredRunFits`): it is charged as a
+	 * metered run already, or the away day bound has room to reserve it. While it may not, its attempts are held off
+	 * metered models (`runModelHold`).
+	 */
+	meteredRunFits(dispatchKey: string): boolean;
 	/** The host's diagnostics: warnings, closing warnings and every write it cannot record. */
 	report(message: string): void;
 	/** Shared credential owners, when the caller already has them; otherwise built as the SDK builds them. */
@@ -376,12 +384,26 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			if (runId === undefined) return undefined;
 			const includes = (candidate: AttemptRuntimeState) => awayRunKey(candidate, snapshot) === runId;
 			// A metered attempt's run is reserved on the away day bound before it spends (a subscription run that failed over
-			// is reserved here). With no room its metered requests are refused under a zero bound of their own, which leaves
+			// is reserved here; `runModelHold` keeps it off metered models while there is no room). Room gone since its model
+			// was resolved refuses its metered requests under a zero bound of the day bound's own, which names it and leaves
 			// the run's bound as it was for an attempt that starts once room returns.
 			if (metered && !input.reserveMeteredRun(runId))
-				return { runId: `${runId}:unreserved`, maxCostUsd: 0, includes };
+				return {
+					runId: `away-day-bound:${runId}`,
+					maxCostUsd: 0,
+					includes,
+					refusalReasons: AWAY_DAY_BUDGET_REFUSAL_REASONS,
+				};
 			// A run away holds its metered spend to its bound; a metered attempt on a model with no price is refused.
 			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
+		};
+		// A run admitted reserving nothing is held off metered models while the away day bound has no room for it, so a
+		// failover does not move it there: it waits on its own model for the usage reset.
+		const runModelHold = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection, model: Model<Api>) => {
+			const runId = awayRunKey(attempt, snapshot);
+			if (runId === undefined || !isMeteredSpend(model, modelRegistry) || input.meteredRunFits(runId))
+				return undefined;
+			return "away_day_spend_bound_full" as const;
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		// The file an earlier build named this controller's fleet queue metadata by is its own only when its ledger claims
@@ -444,6 +466,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				runsAttempt,
 				runsControlMessage: (controlMessageId) => awayRunKeyOf(controlMessageId) !== undefined,
 				runCostBound,
+				runModelHold,
 				workerReadRoot: () => cwd,
 				// The parent opened away is the owner's session: it lends its workers the owner's reach, bounded by the read root.
 				workerCeiling: () => "unbounded",
