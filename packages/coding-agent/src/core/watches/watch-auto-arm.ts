@@ -2,8 +2,10 @@
  * The host's own arming of the session's waits on what its tool calls start outside it: a `git push` from the session's
  * checkout arms a `ci` watch on each commit it pushed (while the host's CI source follows the checkout), a pushed version
  * tag a `release` watch, and a `gh workflow run` or a release script (`npm run release*` and its pnpm, yarn and bun
- * forms) a `github_run` watch on each Actions run URL its output names. Each is armed once per subject (a subject the
- * session already watches, whoever armed it, is left alone), under the authority of the turn whose call it followed, and
+ * forms) a `github_run` watch on each Actions run URL its output names (a run or a release only while the host offers its
+ * reader of GitHub). Each is armed once per subject (a subject the session already watches, whoever armed it, is left
+ * alone), under the authority of the turn the call ran in and charged to the entry it was made at (both read when the call
+ * started), and
  * tells its result on the owner's phone besides waking the session. What was armed, and what could not be (the session's
  * watch slots are full), is told to the model in one note per call, steered into the running turn.
  *
@@ -14,7 +16,9 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
+import type { TurnAuthority } from "../turn-origin.ts";
 import { describeGithubWatchSource, type GithubWatchSource, githubWatchSubject } from "./github-watch-source.ts";
+import type { SessionWatchServed } from "./session-watch-ledger.ts";
 import type { SessionWatchView } from "./session-watch-service.ts";
 
 /** The note telling the model which watches the host armed after one of its calls; the host's own words. */
@@ -50,12 +54,25 @@ export interface AutoWatchRequest {
 	readonly parentToolName: string;
 }
 
+/**
+ * Whom an arming answers to, read when the call starts: the authority of the turn the call runs in and the transcript
+ * entry it was made at (its wakes are charged to that entry's spend window), so a call read only at its background
+ * terminal still arms for the turn that made it.
+ */
+export interface AutoArmContext {
+	readonly authority: TurnAuthority;
+	readonly served?: SessionWatchServed;
+}
+
 /** The session's watches as the host arms them (`SessionWatchService` under an `auto` armer that tells the owner). */
 export interface WatchAutoArmPort {
 	/** Whether the host's CI source follows the session's checkout, which a `ci` watch is read from. */
 	followsCi(): boolean;
+	/** Whether the host offers its reader of GitHub, which a run or a release watch is read through. */
+	readsGithub(): boolean;
+	armingContext(): AutoArmContext;
 	armedOn(source: GithubWatchSource): SessionWatchView | undefined;
-	arm(request: AutoWatchRequest): Promise<SessionWatchView>;
+	arm(request: AutoWatchRequest, context: AutoArmContext): Promise<SessionWatchView>;
 	now(): number;
 }
 
@@ -73,6 +90,8 @@ export interface WatchAutoArmDeps {
 /** What a call may start outside the session that a watch can wait on. */
 interface StartedCall {
 	readonly toolName: string;
+	/** Set when the call starts in a session that holds watches. */
+	readonly context?: AutoArmContext;
 	readonly pushes: boolean;
 	readonly dispatches: boolean;
 	readonly releases: boolean;
@@ -252,7 +271,8 @@ export class WatchAutoArm {
 	/** A tool call starts: one that may start outside work is remembered until it ends. */
 	noteStart(toolCallId: string, toolName: string, args: unknown): void {
 		const call = classifyStartedCall(toolName, args);
-		if (call) this.started.set(toolCallId, call);
+		const port = call && this.deps.port();
+		if (call && port) this.started.set(toolCallId, { ...call, context: port.armingContext() });
 	}
 
 	/**
@@ -281,7 +301,8 @@ export class WatchAutoArm {
 
 	private async armFor(call: StartedCall, output: string): Promise<void> {
 		const port = this.deps.port();
-		if (!port || this.deps.disposed()) return;
+		const { context } = call;
+		if (!port || !context || this.deps.disposed()) return;
 		const planned = await this.plan(call, output, port);
 		const armed: string[] = [];
 		const missed: string[] = [];
@@ -289,14 +310,17 @@ export class WatchAutoArm {
 			if (port.armedOn(source)) continue;
 			const watchId = watchIdOf(source);
 			try {
-				await port.arm({
-					watchId,
-					purpose: purposeOf(source),
-					onFire: ON_FIRE,
-					condition: source,
-					expiresAt: port.now() + deadlineMs,
-					parentToolName: call.toolName,
-				});
+				await port.arm(
+					{
+						watchId,
+						purpose: purposeOf(source),
+						onFire: ON_FIRE,
+						condition: source,
+						expiresAt: port.now() + deadlineMs,
+						parentToolName: call.toolName,
+					},
+					context,
+				);
 				armed.push(
 					`${watchId} on ${describeGithubWatchSource(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes)`,
 				);
@@ -322,7 +346,11 @@ export class WatchAutoArm {
 		await this.deps.note(lines.join("\n"));
 	}
 
-	/** The subjects a call's output names, at most {@link MAX_SUBJECTS_PER_CALL}, each once. */
+	/**
+	 * The subjects a call's output names, at most {@link MAX_SUBJECTS_PER_CALL}, each once: a commit's CI only while the CI
+	 * source follows the checkout, a run or a release only while the host offers its reader of GitHub, so no watch is armed
+	 * that nothing can read.
+	 */
 	private async plan(call: StartedCall, output: string, port: WatchAutoArmPort): Promise<PlannedWatch[]> {
 		const planned = new Map<string, PlannedWatch>();
 		const add = (source: GithubWatchSource, deadlineMs: number) => {
@@ -330,19 +358,20 @@ export class WatchAutoArm {
 			if (planned.size < MAX_SUBJECTS_PER_CALL && !planned.has(subject))
 				planned.set(subject, { source, deadlineMs });
 		};
-		if (call.pushes || call.releases) {
-			const followsCi = port.followsCi();
+		const followsCi = port.followsCi();
+		const readsGithub = port.readsGithub();
+		if (call.pushes || call.releases)
 			for (const ref of pushedRefs(output)) {
 				if (ref.kind === "tag") {
-					if (VERSION_TAG.test(ref.tag)) add({ type: "release", tag: ref.tag }, RELEASE_DEADLINE_MS);
+					if (readsGithub && VERSION_TAG.test(ref.tag))
+						add({ type: "release", tag: ref.tag }, RELEASE_DEADLINE_MS);
 					continue;
 				}
 				if (!followsCi) continue;
 				const sha = await resolveCommit(this.deps.cwd(), ref.revision);
 				if (sha) add({ type: "ci", sha }, CI_DEADLINE_MS);
 			}
-		}
-		if (call.dispatches || call.releases)
+		if (readsGithub && (call.dispatches || call.releases))
 			for (const { repo, runId } of actionRunsNamed(output))
 				add({ type: "github_run", repo, runId }, call.releases ? RELEASE_DEADLINE_MS : DISPATCHED_RUN_DEADLINE_MS);
 		return [...planned.values()];

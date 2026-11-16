@@ -57,6 +57,11 @@ export class GithubWatchLink {
 		return this.reader;
 	}
 
+	/** Whether the host offers its reader of GitHub now. */
+	get readsGithub(): boolean {
+		return this.reader !== undefined;
+	}
+
 	get followsCi(): boolean {
 		return this.ciFollowers > 0;
 	}

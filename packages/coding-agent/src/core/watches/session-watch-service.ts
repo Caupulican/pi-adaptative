@@ -118,6 +118,8 @@ export interface SessionWatchArmRequest {
 	readonly armedBy: SessionWatchArmer;
 	/** Tell the owner each result on the phone besides the armer's wake. */
 	readonly tellOwner?: boolean;
+	/** The entry the arming answers to, when read before the arming (the host's for a call it read later); else the session's latest. */
+	readonly served?: SessionWatchServed;
 	/**
 	 * The session's tool call that arms it: a command's or page's check is admitted by the session's gate as its sub-call.
 	 * A worker's arming has none, since the worker's own gate admitted the check before it asked.
@@ -436,7 +438,7 @@ export class SessionWatchService implements WatchObservationStore {
 						signal,
 					);
 		// A worker's wakes go to its runtime and are charged to its own run, not to the session entry it was armed at.
-		const served = request.armedBy.kind === "worker" ? undefined : this.deps.armingEntry();
+		const served = request.armedBy.kind === "worker" ? undefined : (request.served ?? this.deps.armingEntry());
 		let record: SessionWatchRecord;
 		try {
 			// Built through the ledger's own codec, so no arming writes a record a reload would set aside.

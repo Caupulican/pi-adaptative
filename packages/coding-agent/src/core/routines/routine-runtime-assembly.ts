@@ -33,7 +33,11 @@ import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
 import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
-import { SessionWatchLedger, sessionWatchLedgerPath } from "../watches/session-watch-ledger.ts";
+import {
+	SessionWatchLedger,
+	type SessionWatchServed,
+	sessionWatchLedgerPath,
+} from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
 import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
@@ -365,6 +369,13 @@ export class RoutineRuntimeAssembly {
 			);
 	}
 
+	/** The transcript entry an arming happens at, which its watch's wakes are charged to; undefined with none. */
+	private armingEntry(): SessionWatchServed | undefined {
+		const current = this.deps.getSessionManager();
+		const leafId = current.getLeafId();
+		return leafId === null ? undefined : { sessionId: current.getSessionId(), leafId };
+	}
+
 	/**
 	 * The session's own watches over its ledger beside the session's transcript (in memory while it has none). Routine
 	 * watches an earlier build armed without the owner's words hold slots of the same bound; a bot's own session counts every
@@ -416,11 +427,7 @@ export class RoutineRuntimeAssembly {
 				return receipt === "settled" ? "settled" : "delivered";
 			},
 			wakeWorker: (runtimeId, text, key) => wakeWorkerRuntime(this.workerWakeHost(), runtimeId, text, key),
-			armingEntry: () => {
-				const current = this.deps.getSessionManager();
-				const leafId = current.getLeafId();
-				return leafId === null ? undefined : { sessionId: current.getSessionId(), leafId };
-			},
+			armingEntry: () => this.armingEntry(),
 			warnOwner: warn,
 			tellOwner: (key, text) => this.host.tellOwner(key, text),
 			isDisposed: () => this.deps.isDisposed(),
@@ -716,9 +723,19 @@ export class RoutineRuntimeAssembly {
 		};
 		const autoWatches: WatchAutoArmPort = {
 			followsCi: () => this.host.githubWatches().followsCi,
+			readsGithub: () => this.host.githubWatches().readsGithub,
+			armingContext: () => {
+				const served = this.armingEntry();
+				return { authority: authority(), ...(served === undefined ? {} : { served }) };
+			},
 			armedOn: (source) => sessionWatches.armedOn(source),
-			arm: (watch) =>
-				sessionWatches.arm({ ...watch, armedBy: { kind: "auto", authority: authority() }, tellOwner: true }),
+			arm: (watch, { authority: armedUnder, served }) =>
+				sessionWatches.arm({
+					...watch,
+					armedBy: { kind: "auto", authority: armedUnder },
+					tellOwner: true,
+					...(served === undefined ? {} : { served }),
+				}),
 			now: () => routineTimers.now(),
 		};
 		return {
