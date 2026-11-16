@@ -39,7 +39,6 @@ import { BotRoster } from "./bots/bot-roster.ts";
 import { attachBotSessions } from "./bots/bot-session-ports.ts";
 import { RootBots } from "./bots/root-bots.ts";
 import { type AwayChannelStatus, readAwayChannelStatus } from "./channels/away-channels.ts";
-import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { createLaneSessionChannels } from "./channels/lane-session-channels.ts";
 import type { SessionChannels } from "./channels/session-channels.ts";
@@ -397,7 +396,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			channelsHostedByDaemon: () => this._channelsHostedByDaemon,
 			ownsHostDuties: () => deps.standing.ownsHostDuties,
 			awayService: () => this.getAwayService(),
-			botsOwed: () => this._botHost.host.botsOwed(),
+			botsOwed: (goalsContinue) => this._botHost.host.botsOwed(goalsContinue),
 			warn: (message) => this._safeWarn(message),
 		});
 		this._routines = new SessionRoutines({
@@ -1623,10 +1622,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		harnessNotices: AutonomyStatusSources["harnessNotices"],
 		memory: AutonomyStatusSources["memory"],
 	): Promise<SessionAutonomyStatus> {
-		const nowMs = this.deps.getTimers().port("routines").now();
 		const getEdgeGrants = this.deps.getEdgeGrants;
 		return readSessionAutonomyStatus({
-			nowMs,
+			nowMs: this.deps.getTimers().port("routines").now(),
 			sessionId: this.deps.getSessionId(),
 			holdsRoutines: this.deps.routineScope() !== undefined,
 			sessionManager: this.deps.getSessionManager(),
@@ -1657,6 +1655,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.getModelRegistry()),
 			awayRunReserved: (dispatchKey) => awayMeteredRunReserved(this.deps.getAgentDir())(dispatchKey),
 			awayChannels: () => this.readAwayChannelStatus(),
+			daemonBotsOwed: () => this._daemonKeeper.botsOwedStatus(),
 			awayService: this._botTeamStore ? () => this.getAwayService().inspect() : undefined,
 			harnessNotices,
 			memory,

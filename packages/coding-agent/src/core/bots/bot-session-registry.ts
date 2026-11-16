@@ -21,13 +21,8 @@ import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
 import { LinkedSessionNotices } from "./bot-link-notices.ts";
 import { publishBotRootHost } from "./bot-root-hosts.ts";
-import {
-	type BotHostProcessKeeps,
-	type BotSender,
-	type BotSessionDelivery,
-	BotSessionHost,
-	type BotSessionHostPorts,
-} from "./bot-session-host.ts";
+import { type BotSessionDelivery, BotSessionHost } from "./bot-session-host.ts";
+import type { BotHostProcessKeeps, BotSender, BotSessionHostPorts } from "./bot-session-host-ports.ts";
 import { UnrecordedBotStops } from "./bot-stop.ts";
 
 /** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */

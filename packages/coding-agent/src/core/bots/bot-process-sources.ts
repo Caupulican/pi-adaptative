@@ -35,7 +35,9 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { accountModelCatalogOf } from "../model-router/account-models.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { openSubscriptionAllowance } from "../provider-admission/subscription-allowance.ts";
-import { awaySpendMicros, type RoutineAwayCharge, routineAwaySpendRoom } from "../routines/routine-contract.ts";
+import { awayMeteredRunReserved } from "../routines/away-metered-runs.ts";
+import { awayRunMetered } from "../routines/away-routine-admission.ts";
+import { awaySpendMicros, type RoutineAwayCharge, routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import type { TimerSource } from "../util/timer-port.ts";
@@ -44,7 +46,7 @@ import { botAwayChargesReach, recordBotAwayCharge } from "./bot-away-charges.ts"
 import { botChargesHeld } from "./bot-charges-held.ts";
 import { type BotModelFacts, botModelRefusal, sharedExhaustions } from "./bot-model-admission.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
-import type { BotSender, BotSessionHostPorts } from "./bot-session-host.ts";
+import type { BotSender, BotSessionHostPorts } from "./bot-session-host-ports.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
 
 export interface BotProcessSourcesInput {
@@ -122,13 +124,16 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 				maxUsdPerRun: away.maxUsdPerRun,
 				maxUsdPerDay: away.maxUsdPerDay,
 				otherCharges: input.otherAwayCharges(nowMs, record.agentId),
+				// The routines' runs away are charged as every host of the bound charges them: metered runs and reserved ones.
+				spendsMetered: (definition) => awayRunMetered(definition.executionSnapshot?.savedIntent, modelRegistry),
+				reservedMetered: awayMeteredRunReserved(agentDir),
 			},
 			nowMs,
 		);
 		if (room.fits(0)) return undefined;
 		return {
 			cause: "away_spend_exhausted",
-			reason: interfaceText().botTeam.botAwaySpendExhausted,
+			words: (text) => text.botTeam.botAwaySpendExhausted,
 			...(room.exit !== undefined ? { clearsAt: room.exit } : {}),
 		};
 	};

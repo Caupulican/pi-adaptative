@@ -397,7 +397,12 @@ export const BOT_TEAM = {
 	 * A turn went past the spend bound and was stopped; `bound` names the one that applied (the lowest passed), which holds
 	 * metered spend only, as `spentUsd` counts it.
 	 */
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile" | "away") =>
+	botTurnOverBudget: (
+		agentId: string,
+		spentUsd: string,
+		limitUsd: string,
+		bound: "worker" | "session" | "profile" | "away",
+	) =>
 		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent on metered models on this request, its workers included; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : bound === "away" ? "the bound of one run while no session is open (routines.away.maxUsdPerRun)" : "this session's autonomy spend bound"} on metered spend is $${limitUsd}).`,
 	/** A turn ran past the owner's time bound on a worker's run, and was stopped. */
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>

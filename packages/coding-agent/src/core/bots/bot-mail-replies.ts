@@ -36,7 +36,7 @@ import {
 	MAX_BOT_MAIL_HOPS,
 	parseBotMailAddress,
 } from "./bot-mail.ts";
-import type { BotSender } from "./bot-session-host.ts";
+import type { BotSender } from "./bot-session-host-ports.ts";
 import type { BotSessionEntry } from "./bot-session-load.ts";
 import { type RootBotReply, sendRootBotReply } from "./root-bot-replies.ts";
 

@@ -18,7 +18,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import { botAwayChargesFile } from "../agent-paths.ts";
 import { isUsage } from "../cost/session-usage.ts";
 import { usageReach } from "../cost/usage-delta.ts";
-import { ROUTINE_AWAY_SPEND_WINDOW_MS, type RoutineAwayCharge } from "../routines/routine-contract.ts";
+import { ROUTINE_AWAY_SPEND_WINDOW_MS, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { errorText } from "./bot-error-text.ts";

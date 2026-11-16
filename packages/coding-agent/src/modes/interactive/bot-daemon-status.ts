@@ -5,7 +5,11 @@
  */
 
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
-import { describeDaemonBuild, OWN_DAEMON_BUILD } from "../../core/delegation/bot-team-routine-helpers.ts";
+import {
+	describeDaemonBotsOwed,
+	describeDaemonBuild,
+	OWN_DAEMON_BUILD,
+} from "../../core/delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotDaemonStatus } from "../../core/delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
@@ -29,13 +33,7 @@ export function describeBotDaemonStatusLines(status: PersistentBotDaemonStatus, 
 		status.running
 			? `${words.daemonRunning(status.pid, describeDaemonBuild(status.build, OWN_DAEMON_BUILD, interfaceText().chat), counts)}${legacyNote}`
 			: `${words.daemonStopped(counts)}${endNote}${legacyNote}`,
-		...(status.botsOwed === undefined
-			? []
-			: [
-					"count" in status.botsOwed
-						? words.daemonBotsOwed(status.botsOwed.count, status.botsOwed.awayOn)
-						: words.daemonBotsOwedUnread(status.botsOwed.unread),
-				]),
+		...(status.botsOwed === undefined ? [] : [describeDaemonBotsOwed(status.botsOwed, words)]),
 		...status.awayRefusals.map((refusal) => words.daemonRefused(refusal.routineId, refusal.reason)),
 		...status.reports.slice(-5).map((report) => `${new Date(report.at).toISOString()} ${report.message}`),
 	];

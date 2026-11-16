@@ -37,7 +37,7 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { BOT_MAIL_TOOL_NAME } from "../tools/bot-mail-tool-name.ts";
 import { agentMailTurnOrigin, entryTurnOrigin, isOutsideInputKind, latestDecisiveEntry } from "../turn-origin.ts";
 import { botFailureForModel } from "./bot-owner-error.ts";
-import type { BotSender } from "./bot-session-host.ts";
+import type { BotSender } from "./bot-session-host-ports.ts";
 
 /** The longest chain of mails: a mail or a reply past it is never sent. */
 export const MAX_BOT_MAIL_HOPS = MAX_TURN_ORIGIN_HOP;

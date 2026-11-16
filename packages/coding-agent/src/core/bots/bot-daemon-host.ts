@@ -18,7 +18,7 @@ import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-s
 import type { ModelRegistry } from "../model-registry.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-contract.ts";
+import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";

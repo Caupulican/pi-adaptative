@@ -15,13 +15,20 @@ import { awayChannels, awayChannelsKey } from "../channels/away-channels.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { AwayService } from "../routines/away-service.ts";
 import { getSessionRole } from "../session-role.ts";
+import { resolveAutonomySettings } from "../settings/autonomy-edge-settings.ts";
 import { resolveRoutineAwaySettings } from "../settings/proactivity-lane-settings.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { recordWatchCommandBase } from "../watches/watch-command-base.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./bot-daemon-launch.ts";
 import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./bot-daemon-stop.ts";
-import { DAEMON_STALE_MS, daemonRecheckAt, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./bot-team-routine-helpers.ts";
+import {
+	DAEMON_STALE_MS,
+	type DaemonBotsOwed,
+	daemonRecheckAt,
+	isOlderDaemonBuild,
+	OWN_DAEMON_BUILD,
+} from "./bot-team-routine-helpers.ts";
 import type { PersistentBotDaemonStatus, PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
 /** What the keeper reads from its root session; every port is read when used, never at construction. */
@@ -46,7 +53,7 @@ export interface BotDaemonKeeperPorts {
 	 * How many bots no process hosts are owed work the daemon takes up (`BotSessionHost.botsOwed`), read from the host the
 	 * session attached to; throws when the bots do not list.
 	 */
-	botsOwed(): number;
+	botsOwed(goalsContinue: boolean): number;
 	warn(message: string): void;
 }
 
@@ -156,14 +163,18 @@ export class BotDaemonKeeper {
 	status(): PersistentBotDaemonStatus {
 		const store = this.ports.store();
 		store.reload();
-		const awayOn = this.awayOn();
-		let botsOwed: PersistentBotDaemonStatus["botsOwed"];
-		try {
-			botsOwed = { awayOn, count: this.ports.botsOwed() };
-		} catch (error) {
-			botsOwed = { awayOn, unread: error instanceof Error ? error.message : String(error) };
-		}
+		const botsOwed = this.botsOwedStatus();
 		return { ...store.getDaemonStatus(this.ports.clock().now()), botsOwed };
+	}
+
+	/** The bots owed work no process hosts, counted as the daemon takes them up (`awayBots`), or why they did not count. */
+	botsOwedStatus(): DaemonBotsOwed {
+		const awayOn = this.awayOn();
+		try {
+			return { awayOn, count: this.ports.botsOwed(this.goalsContinue()) };
+		} catch (error) {
+			return { awayOn, unread: error instanceof Error ? error.message : String(error) };
+		}
 	}
 
 	/** Ends the re-ensure alarm: the session is closing. */
@@ -254,7 +265,7 @@ export class BotDaemonKeeper {
 	 * waits for a session opening where they work.
 	 */
 	private awayBots(): number {
-		const owed = this.ports.botsOwed();
+		const owed = this.ports.botsOwed(this.goalsContinue());
 		if (this.awayOn()) {
 			this.awayOffTold = false;
 			return owed;
@@ -270,6 +281,14 @@ export class BotDaemonKeeper {
 	 */
 	private awayOn(): boolean {
 		return resolveRoutineAwaySettings(this.ports.settings().getGlobalSettings()).enabled;
+	}
+
+	/**
+	 * Whether the daemon continues a bot's unfinished goal on its own (`autonomy.goalAutoContinue`), read as it reads it,
+	 * from the owner's global settings alone: a bot owed only its goal is counted for it only then.
+	 */
+	private goalsContinue(): boolean {
+		return resolveAutonomySettings(this.ports.settings().getGlobalSettings()).goalAutoContinue;
 	}
 
 	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */

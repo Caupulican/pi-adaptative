@@ -1,6 +1,6 @@
 /** The `/status` text of a {@link SessionAutonomyStatus}: one block per section, an unavailable one with its reason. */
 
-import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
+import { describeDaemonBotsOwed, describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { AutonomyStatusBlockKey } from "../language/text-en/autonomy-status.ts";
@@ -168,6 +168,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				activeRoutines: value.activeRoutines,
 				dueRoutines: value.dueRoutines,
 			}),
+			describeDaemonBotsOwed(value.botsOwed, interfaceText().botTeam),
 			words.awayDaemon.settings({
 				enabled: value.settings.enabled,
 				spent: "unread" in value.spent ? { unread: value.spent.unread } : { amount: money(value.spent.usd) },

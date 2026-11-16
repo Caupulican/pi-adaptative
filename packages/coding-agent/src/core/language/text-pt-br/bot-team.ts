@@ -318,7 +318,12 @@ export const BOT_TEAM = {
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile" | "away") =>
+	botTurnOverBudget: (
+		agentId: string,
+		spentUsd: string,
+		limitUsd: string,
+		bound: "worker" | "session" | "profile" | "away",
+	) =>
 		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos com cobrança por uso neste pedido, com os workers dele; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : bound === "away" ? "o limite de uma execução enquanto nenhuma sessão está aberta (routines.away.maxUsdPerRun)" : "o limite de gasto da autonomia desta sessão"} sobre o gasto cobrado por uso é $${limitUsd}).`,
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: o turno foi interrompido no limite de tempo (workerDelegation.maxWallClockMs é ${limitSeconds} s).`,

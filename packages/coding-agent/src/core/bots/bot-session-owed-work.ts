@@ -35,7 +35,6 @@ import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError }
 import { BotOpenRetries, botOpenFailure, cappedFailure, storeFailure } from "./bot-open-retry.ts";
 import {
 	type BundleRead,
-	type BundleRead,
 	botSessionHome,
 	type SavedSessionFacts,
 	SavedSessionLedger,
@@ -46,7 +45,7 @@ import {
 } from "./bot-owed-ledgers.ts";
 import { remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
 import { readBotRootHostPlaces } from "./bot-root-hosts.ts";
-import type { BotSender } from "./bot-session-host.ts";
+import type { BotSender } from "./bot-session-host-ports.ts";
 import {
 	applyUnhostedBotStop,
 	type BotStopPorts,
@@ -779,15 +778,17 @@ export class BotOwedWork {
 	 * working where a root session hosting bots works, this host's own while it runs (`senderIn`) or another process's
 	 * (`readBotRootHostPlaces`), which opens it there; one only a root opens (made from a profile, `botProfileNeedsRoot`). A bot whose files do not read counts by what read,
 	 * and the owner is told once per cause. It reads the host's records, not whether the host runs, so a root's detach reads
-	 * it after its host let its bots go (`BotSessionHostPorts.botsLetGo`).
+	 * it after its host let its bots go (`BotSessionHostPorts.botsLetGo`). `goalsContinue`: whether the daemon continues
+	 * an unfinished goal on its own (`autonomy.goalAutoContinue` in the owner's global settings, the only ones it reads); a
+	 * bot owed only its goal counts while it does.
 	 */
-	owedCount(): number {
+	owedCount(goalsContinue: boolean): number {
 		const { ports } = this;
 		const places = readBotRootHostPlaces(ports.agentDir());
 		let count = 0;
 		for (const { agentId } of ports.store().listBots())
 			try {
-				if (this.owesDaemon(agentId, places)) count++;
+				if (this.owesDaemon(agentId, places, goalsContinue)) count++;
 			} catch (error) {
 				this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
 			}
@@ -795,7 +796,7 @@ export class BotOwedWork {
 	}
 
 	/** Whether the daemon takes the bot up for work it is owed ({@link owedCount}); `places`: where roots host bots. */
-	private owesDaemon(agentId: string, places: ReadonlySet<string>): boolean {
+	private owesDaemon(agentId: string, places: ReadonlySet<string>, goalsContinue: boolean): boolean {
 		const { ports } = this;
 		if (ports.hostedHere(agentId) || this.asking.has(agentId) || ports.heldElsewhere(agentId)) return false;
 		const record = ports.store().getBot(agentId);
@@ -806,9 +807,10 @@ export class BotOwedWork {
 			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute),
 		);
 		const later =
-			worked !== undefined &&
-			(owed.workersDueAt !== undefined || this.usageResumeAt(agentId, worked) !== undefined);
-		if (!owesNow(owed) && !later) return false;
+			worked !== undefined && (owed.workersDueAt !== undefined || this.usageResumeAt(agentId, worked) !== undefined);
+		// A goal alone is continued only where goals continue on their own, as the daemon's ask opens it (`askOpen`).
+		const owedNow = owesNow(owed) && (goalsContinue || !owesOnlyGoal(owed));
+		if (!owedNow && !later) return false;
 		// A root hosting bots opens those working where it works: one of this host's own while it runs, another's (`places`).
 		const cwds = [...(worked ? [worked.cwd] : []), ...owed.waiting.map((item) => item.message.from.cwd)];
 		return !cwds.some(

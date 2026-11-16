@@ -11,7 +11,7 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import type { ModelRegistry } from "../model-registry.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
-import type { BotSender } from "./bot-session-host.ts";
+import type { BotSender } from "./bot-session-host-ports.ts";
 import {
 	type BotSessionDefinition,
 	botMayRunAsSession,
@@ -112,7 +112,7 @@ export class BotSessionAdmission {
 		if (profileId === undefined) return ownBotSession(record, sender.cwd(), this.ports.modelRegistry());
 		// A profile is compiled only by a root session's resolution: with none (the daemon), the bot waits for one.
 		if (!sender.compileProfile)
-			throw new BotOwnerError(interfaceText().botTeam.botProfileNeedsRoot(record.agentId, profileId));
+			throw new BotOwnerError((text) => text.botTeam.botProfileNeedsRoot(record.agentId, profileId));
 		const compiled = sender.compileProfile({ ...record, profileId });
 		if (!compiled.ok)
 			throw new BotOwnerError((text) =>

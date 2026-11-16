@@ -17,7 +17,7 @@ import type { AwayChannelStatus } from "../channels/away-channels.ts";
 import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import type { SpendBilling } from "../cost/request-spend-budget.ts";
-import { OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";
+import { type DaemonBotsOwed, OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { HostEventConnectionView } from "../events/host-event-contract.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
@@ -174,6 +174,8 @@ export interface AwayDaemonStatusView {
 	readonly lastTickAt?: number;
 	readonly activeRoutines: number;
 	readonly dueRoutines: number;
+	/** The bots owed work no process hosts, counted as the daemon takes them up, or why they did not count. */
+	readonly botsOwed: DaemonBotsOwed;
 	readonly awayRefusals: BoundedList<{ readonly routineId: string; readonly reason: string; readonly at: number }>;
 	readonly lastEnd?: {
 		readonly reason: "released" | "signal" | "failed";
@@ -477,6 +479,8 @@ export interface AutonomyStatusSources {
 	awayRunReserved?(dispatchKey: string): boolean;
 	/** The channels served while no session is open, from the global settings and the journals. */
 	awayChannels(): readonly AwayChannelStatus[];
+	/** The bots owed work no process hosts, as `/bot daemon status` counts them (`BotDaemonKeeper.botsOwedStatus`). */
+	daemonBotsOwed(): DaemonBotsOwed;
 	/** The always-on service's filesystem read; undefined while the routine store it reads is not loaded. */
 	readonly awayService: (() => AwayServiceInspection) | undefined;
 	readonly harnessNotices: Pick<HarnessNoticeController, "observedStates">;
@@ -671,6 +675,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 				...(daemon.lastTickAt !== undefined ? { lastTickAt: daemon.lastTickAt } : {}),
 				activeRoutines: daemon.activeRoutines,
 				dueRoutines: daemon.dueRoutines,
+				botsOwed: sources.daemonBotsOwed(),
 				awayRefusals: bounded(
 					daemon.awayRefusals.map((refusal) => ({ ...refusal, reason: text(refusal.reason) ?? "" })),
 				),

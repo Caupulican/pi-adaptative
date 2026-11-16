@@ -66,6 +66,9 @@ export interface LegacyBotDaemonClaim {
 	readonly lastHeartbeatAt?: number;
 }
 
+/** The bots owed work no process hosts and whether the daemon takes them up (`awayOn`), or why they did not count. */
+export type DaemonBotsOwed = { readonly awayOn: boolean } & ({ readonly count: number } | { readonly unread: string });
+
 export interface PersistentBotDaemonStatus {
 	/** The current lease is held: claimed or renewed within the stale window, its daemon not proven gone. */
 	readonly running: boolean;
@@ -87,7 +90,7 @@ export interface PersistentBotDaemonStatus {
 	 * not be counted (`unread`): read by the root session that keeps the daemon (`BotDaemonKeeper.status`), never from
 	 * the lease.
 	 */
-	readonly botsOwed?: { readonly awayOn: boolean } & ({ readonly count: number } | { readonly unread: string });
+	readonly botsOwed?: DaemonBotsOwed;
 	/** Enabled routines whose due run could not run away, with why; each runs when its session opens. */
 	readonly awayRefusals: readonly { readonly routineId: string; readonly reason: string; readonly at: number }[];
 	/** The latest daemon's own reports (refusals, open failures, diagnostics), oldest first and bounded. */
@@ -293,6 +296,14 @@ export function describeDaemonBuild(
 ): string {
 	const running = words.daemonBuildRunning(build);
 	return build === sessionBuild ? running : words.daemonBuildSession(running, sessionBuild);
+}
+
+/** The line `/bot daemon status` and `/status` show for the bots owed work no session hosts, in the words passed. */
+export function describeDaemonBotsOwed(
+	owed: DaemonBotsOwed,
+	words: Pick<InterfaceText["botTeam"], "daemonBotsOwed" | "daemonBotsOwedUnread">,
+): string {
+	return "count" in owed ? words.daemonBotsOwed(owed.count, owed.awayOn) : words.daemonBotsOwedUnread(owed.unread);
 }
 
 /** The daemon a newer build's claim took the lease from: it exits on observing the new lease. */

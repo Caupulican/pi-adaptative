@@ -28,7 +28,7 @@ import { storeFailure } from "./bot-open-retry.ts";
 import type { BotRemoteView } from "./bot-remote-view.ts";
 import type { BotSessionAdmission } from "./bot-session-admission.ts";
 import { createBotAgentSession } from "./bot-session-build.ts";
-import type { BotSender } from "./bot-session-host.ts";
+import type { BotSender } from "./bot-session-host-ports.ts";
 import { openHostedBotSession } from "./bot-session-open.ts";
 import { type BotOwedWork, cancelOtherSessionsWatches } from "./bot-session-owed-work.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";

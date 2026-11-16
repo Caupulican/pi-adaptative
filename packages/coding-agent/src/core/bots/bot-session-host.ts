@@ -35,38 +35,32 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
 	BotDeliveryOptions,
 	BotDeliveryOrigin,
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
-import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
-import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import { type GoalProgress, unfinishedGoalProgress } from "../goals/goal-progress.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { ModelRegistry } from "../model-registry.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
-import type { SettingsManager } from "../settings-manager.ts";
-import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { createBotMailToolDefinition } from "../tools/bot-mail.ts";
 import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
-import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/timer-port.ts";
+import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
-import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText, inOwnerWords, logBotsFailure } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
-import type { BotHostKind, BotSessionState } from "./bot-host-state.ts";
+import type { BotSessionState } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
 	type BotInboxMessage,
@@ -80,25 +74,27 @@ import {
 	tellUnreadableInboxRecord,
 } from "./bot-inbox.ts";
 import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
-import { type BotInboxFrom, BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
-import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
+import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
+import { stopOperation } from "./bot-link-notices.ts";
 import { BotLoadedStops } from "./bot-loaded-stops.ts";
 import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
 import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
-import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
-import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
-import type { SavedUsageResumeRules } from "./bot-owed-ledgers.ts";
+import { botOpenFailure } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { BotRelease } from "./bot-release.ts";
 import { BotRemoteView, remoteHostActive, savedSessionFile } from "./bot-remote-view.ts";
 import { BotSessionAdmission } from "./bot-session-admission.ts";
+import {
+	type BotHostProcessKeeps,
+	type BotSender,
+	type BotSessionHostPorts,
+	inboxSender,
+} from "./bot-session-host-ports.ts";
 import { type BotSessionEntry, BotSessionLoader } from "./bot-session-load.ts";
 import { BotOwedWork, owesWatchWork } from "./bot-session-owed-work.ts";
 import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
-import type { BotSpendCeiling } from "./bot-session-turns.ts";
-import type { BotChargeReport } from "./bot-spend-ledger.ts";
-import { endUnrecordedStopWork, type UnrecordedBotStops, writeOwnerStop } from "./bot-stop.ts";
+import { endUnrecordedStopWork, writeOwnerStop } from "./bot-stop.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -106,103 +102,7 @@ export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
 /** How long a message waits for an earlier session of its bot, or the stop of the host this one replaced, to end. */
 export const BOT_SESSION_CLOSE_WAIT_MS = 30 * 1000;
 
-/**
- * What a process keeps for an agent directory across the bot session hosts that replace one another there
- * (`bot-session-registry.ts`: a new, resumed or forked root session stops the old host before the next one starts).
- */
-export interface BotHostProcessKeeps {
-	/** The owner's stops the process could not record. */
-	readonly unrecorded: UnrecordedBotStops;
-	/** What the owner was told of the work a stop or a release left behind a symbolic link. */
-	readonly links: LinkedSessionNotices;
-	/** Why each bot's session state was told as kept in the owner's home (`BotSessionLoadPorts.toldNotMoved`). */
-	readonly notMoved: Set<string>;
-}
-
 export type { BotSessionState };
-
-/** What the host reads from and asks of the coordinator. */
-export interface BotSessionHostPorts {
-	agentDir(): string;
-	/** The root session a bot works for when no delivery names one (a wake, a stop): the one attached last. */
-	sender(): BotSender;
-	/** An attached root session working in `cwd`, which a bot whose session worked there is opened again for. */
-	senderIn(cwd: string): BotSender | undefined;
-	store(): PersistentBotTeamStore;
-	modelRegistry(): ModelRegistry;
-	/** The main session's System One as it is now: a bot's session follows it at each use, as the main session runs it. */
-	systemOne(): SystemOneHostSource;
-	timers(): TimerSource;
-	/** An owner-facing warning that no bot turn's sender owns (a session that did not close cleanly, a lost watch). */
-	warn(message: string): void;
-	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
-	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
-	/**
-	 * The root's dollar ceilings over metered spend, as a worker's budget holds it: the owner's worker bound and the main
-	 * session's autonomy ceiling (`costCeilingUsd`); empty when none is set.
-	 */
-	spendCeilings(): readonly BotSpendCeiling[];
-	/** What reads when a closed bot's saved session continues what a usage limit stopped (`savedUsageResumeAt`). */
-	usageRules(): SavedUsageResumeRules;
-	/** What kind of process hosts the bots: a root session's, or the bot daemon's (`host-state.json`). */
-	hostKind(): BotHostKind;
-	/**
-	 * Whether a root session of another process that hosts bots works in `cwd`: this host (the daemon's) leaves the bots
-	 * that work there to it, opening none for that directory and closing an idle one (`leaveIdleToRoots`). Absent: none is left.
-	 */
-	leavesTo?(cwd: string): boolean;
-	/** Bots let go, for the daemon (`botsOwed`): another host released them, or (`detaching`) the last root left. */
-	botsLetGo?(detaching: boolean): void;
-}
-
-/**
- * The root session a bot's message came from: the owner's project directory a bot it loads works in, what a bot made from
- * a profile compiles to and the settings a bot reads there, the pi session named as its host, and where its turns' spend
- * goes. Once that root detaches, the root attached last answers. What the bot's own session raises for the owner goes to
- * the bot's chat instead (`bot-notices.ts`).
- */
-export interface BotSender {
-	cwd(): string;
-	/**
-	 * What a bot made from a profile compiles to for this root, by the resolution a fresh worker of it takes
-	 * (`bot-session-compile.ts`); absent with no root session (the daemon), where such a bot waits for one.
-	 */
-	compileProfile?(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
-	/**
-	 * A settings manager of the bot's own over the storage this root reads (`SettingsManager.sibling`), reading again each
-	 * change an attached root's manager makes until `release`.
-	 */
-	settings(): { readonly settings: SettingsManager; release(): void };
-	/** The pi session that hosts the bot, named to the owner of a message another process sends it; none in the daemon. */
-	hostSessionId(): string | undefined;
-	/** Whether that session keeps a session file (none with `--no-session` or an in-memory SDK session). */
-	hostKeepsFile(): boolean;
-	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
-	warn(message: string): void;
-	/** The environment a watched command of the bot's session starts from (`commandBase`); absent: its process's. */
-	watchCommandBase?(): NodeJS.ProcessEnv;
-	/**
-	 * Delivers a charge of the bot's spend to the root session's cost view, once per `reportId`: `persisted` once the
-	 * root's file holds it.
-	 */
-	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
-	/**
-	 * How far the root sessions of the process hold the charges of file instance `instance` of bot session `sessionId` in
-	 * the files changed since `since`, and the charges they hold unwritten (`botChargesHeld`).
-	 */
-	chargesHeld(sessionId: string, instance: string, since: number): Promise<BotChargesHeld>;
-	/**
-	 * Calls `listener` with the bot charges (their report ids) the root session's file holds, as each write lands, with
-	 * the session written to; returns the unsubscribe.
-	 */
-	chargesPersisted(listener: (rootSessionId: string, reportIds: readonly string[]) => void): () => void;
-}
-
-/** Who a message or stop written to a bot's inbox came from: the sender's directory, and its session when it has one. */
-function inboxSender(sender: BotSender): BotInboxFrom {
-	const sessionId = sender.hostSessionId();
-	return { ...(sessionId !== undefined ? { sessionId } : {}), cwd: sender.cwd() };
-}
 
 /** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
 export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun" | "runsAsSession"> {
@@ -620,7 +520,16 @@ export class BotSessionHost {
 				? botInboxOwnerWordsWaiting(agentDir, agentId)
 				: returned || botInboxWaiting(agentDir, agentId) || this.isBusy(entry);
 		if (!behindStop && !waits) return this.give(entry, message, mode, origin);
-		const result = queueInBotInbox(agentDir, agentId, message, mode, inboxSender(sender), entry.modelRef, behindStop, origin);
+		const result = queueInBotInbox(
+			agentDir,
+			agentId,
+			message,
+			mode,
+			inboxSender(sender),
+			entry.modelRef,
+			behindStop,
+			origin,
+		);
 		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
 		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
@@ -981,8 +890,8 @@ export class BotSessionHost {
 	}
 
 	/** How many bots no process hosts are owed work the bot daemon takes up (`BotOwedWork.owedCount`). */
-	botsOwed(): number {
-		return this.owed.owedCount();
+	botsOwed(goalsContinue: boolean): number {
+		return this.owed.owedCount(goalsContinue);
 	}
 
 	/** Asks every bot whether its session is owed work that no process takes (`BotOwedWork.unhosted`). */
