@@ -186,10 +186,12 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			});
 	};
 	startBots();
-	// Everything else on the away bound: the channels' turns and the bots' spend, their working turns included.
+	// Everything else on the away bound: the channels' turns and the bots' spend, their working turns included, through the
+	// one reader of the process (`readAwayCharges`), which sets aside a channel journal that does not parse and tells each
+	// failed read and reset once.
 	const awayCharges = () =>
 		bots?.awayCharges(clock.now()) ??
-		readAwayCharges(agentDir, settings.getRoutineAwaySettings(), clock.now(), report);
+		readAwayCharges(agentDir, settings.getRoutineAwaySettings(), clock.now(), report, { setsAside: true });
 	const supervisor = new AwayRoutineSupervisor({
 		store: routineStore,
 		agentDir,

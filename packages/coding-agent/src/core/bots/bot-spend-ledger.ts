@@ -62,8 +62,9 @@ export interface BotChargeReport {
 	readonly recordedAt: string;
 	/**
 	 * The part of the charge's cost that is metered spend, in dollars, fixed with its range (`BotTurnAccounting`): what a
-	 * dollar bound counts of it (the daemon's away bound). Absent on a charge an earlier build fixed, or one taken back from
-	 * a root's unwritten entries: such a charge is counted as its own model's spend.
+	 * dollar bound counts of it (the daemon's away bound), carried in the root's report and taken back with it from a root's
+	 * unwritten entries. Absent on a charge an earlier build fixed (or took back): such a charge is counted as its own
+	 * model's spend.
 	 */
 	readonly meteredUsd?: number;
 }

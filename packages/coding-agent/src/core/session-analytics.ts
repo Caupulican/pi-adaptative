@@ -462,6 +462,7 @@ export class SessionAnalytics {
 			from: opts?.from,
 			through: opts?.through,
 			recordedAt: opts?.recordedAt,
+			meteredUsd: opts?.meteredUsd,
 			reportId,
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);

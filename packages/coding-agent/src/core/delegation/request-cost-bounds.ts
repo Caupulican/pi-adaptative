@@ -19,6 +19,7 @@ import type {
 } from "../orchestration/contracts.ts";
 import { costCeilingUsd, isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptModelBinding } from "../orchestration/task-runtime-state.ts";
 import { DELEGATION_BUDGET_REFUSAL_REASONS } from "./budget-reason-codes.ts";
 import {
 	delegationAttempts,
@@ -47,7 +48,7 @@ export function isMeteredAttemptSpend(
 	findModel: (binding: OrchestrationModelBinding) => Model<Api> | undefined,
 	billing: ModelBilling,
 ): boolean {
-	const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+	const binding = attemptModelBinding(attempt);
 	return isMeteredSpend(binding && findModel(binding), billing);
 }
 

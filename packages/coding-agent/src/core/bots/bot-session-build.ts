@@ -39,11 +39,14 @@ export interface BotAgentSessionInput {
 	systemOne(): SystemOneHostSource;
 	readonly timers: TimerSource;
 	/**
-	 * What its host decides: each run's admission, its notices, its closing warnings, its workers' run bound and, in the
-	 * bot daemon, the environment its watched commands start from.
+	 * What its host decides: each run's admission, its notices, its closing warnings, its workers' run bound and the models
+	 * their runs are held off and, in the bot daemon, the environment its watched commands start from.
 	 */
 	readonly host: Required<
-		Pick<CreateAgentSessionOptions, "admitRun" | "ownerNoticeLine" | "onClosingWarnings" | "workerRunCostBound">
+		Pick<
+			CreateAgentSessionOptions,
+			"admitRun" | "ownerNoticeLine" | "onClosingWarnings" | "workerRunCostBound" | "workerRunModelHold"
+		>
 	> &
 		Pick<CreateAgentSessionOptions, "watchCommandBase">;
 }

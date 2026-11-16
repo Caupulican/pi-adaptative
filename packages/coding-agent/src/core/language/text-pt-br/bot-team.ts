@@ -76,7 +76,7 @@ export const BOT_TEAM = {
 	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
 		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pôde ser lido (${reason}); foi posto de lado como ${to}, e o gasto que ele guardava não conta mais para routines.away.maxUsdPerDay.`,
 	botAwayChargesUnreadable: (file: string, reason: string) =>
-		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pode ser lido (${reason}); até ser lido, todo o routines.away.maxUsdPerDay conta como gasto, então rotinas, canais e bots esperam enquanto você está fora. Ele é lido de novo a cada verificação.`,
+		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pode ser lido (${reason}); até ser lido, routines.away.maxUsdPerDay não tem espaço, então rotinas, turnos de canal e turnos de bots cobrados por uso esperam enquanto você está fora. Ele é lido de novo a cada verificação.`,
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: esta sessão não conseguiu remover o registro de que hospeda bots (${reason}); o daemon de bots deixa os bots deste diretório para ela até este processo terminar.`,
 	botRootHostDeadNotRemoved: (file: string, reason: string) =>
@@ -160,6 +160,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a parada do dono foi registrada, mas as paradas anteriores que ela substitui não puderam ser listadas ou removidas (${reason}); elas são tomadas junto com ela.`,
 	botSweepFailed: (agentId: string, reason: string, again: string) =>
 		`Bot ${agentId}: os arquivos dele não puderam ser lidos (${reason}); ${again}.`,
+	botClosedGoalNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o objetivo inacabado com que a sessão dele fechou não pôde ser registrado na casa dele (${reason}); este processo não abre o bot de novo por esse objetivo, e um processo que começar depois o abre uma vez por ele.`,
 	botReadAgain: {
 		everyMinute: "eles são lidos de novo a cada minuto",
 		nextChangeOrMinute: "eles são lidos de novo na próxima mudança dele e a cada minuto",
@@ -313,6 +315,8 @@ export const BOT_TEAM = {
 	botModelNotAllowed: (modelRef: string) => `sua política de modelos não permite ${modelRef}`,
 	botAwaySpendExhausted:
 		"o gasto cobrado por uso permitido enquanto nenhuma sessão está aberta (routines.away.maxUsdPerDay) não tem espaço para outro turno nas últimas 24 horas",
+	botAwaySpendUnread:
+		"o que foi cobrado do gasto por uso permitido enquanto nenhuma sessão está aberta (routines.away.maxUsdPerDay) não pode ser lido, então ele não tem espaço para outro turno até ser lido de novo",
 	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
 		`${modelRef} é cobrado por chave de API e você não o escolheu para workers enquanto há modelos de assinatura disponíveis; use um modelo de assinatura como ${alternatives.join(", ")}, ou adicione ${provider} a workerDelegation.routeProviders`,
 	botSessionsClosing: (agentId: string) =>

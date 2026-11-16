@@ -18,13 +18,18 @@ import type { AgentSession } from "../agent-session.ts";
 import { receiptCountsAgainstDollars } from "../cost/request-spend-budget.ts";
 import type { SpendExcess } from "../cost/session-turn-spend-bound.ts";
 import { isUsage, type MeteredUsageShare } from "../cost/session-usage.ts";
-import { AWAY_DAY_BUDGET_REFUSAL_REASONS } from "../delegation/budget-reason-codes.ts";
+import { AWAY_DAY_BOUND_REFUSALS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionPolicy } from "../delegation/parent-execution-context.ts";
 import { workerUsageReportIdPrefix } from "../delegation/worker-usage-receipt-delivery.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { costCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import {
+	type AttemptRuntimeState,
+	attemptModelBinding,
+	type TaskRuntimeProjection,
+} from "../orchestration/task-runtime-state.ts";
+import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotHome } from "./bot-home.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
@@ -74,10 +79,11 @@ export interface BotSessionSpendPorts {
 	/** An owner-facing warning (a spend record that could not be read or written). */
 	warn(message: string): void;
 	/**
-	 * Whether the metered worker run `runId` of the bot fits the host's wider spend bound now, its own reservation aside
-	 * (`BotSessionHostPorts.meteredRunFits`: the daemon's away day bound); true where no such bound holds the bot's workers.
+	 * Why the metered worker run `runId` of the bot does not fit the host's wider spend bound now, its own reservation aside
+	 * (`BotSessionHostPorts.meteredRunHold`: the daemon's away day bound has no room, `full`, or its charges do not read,
+	 * `unread`); undefined when it fits, or where no such bound holds the bot's workers.
 	 */
-	meteredRunFits(runId: string): boolean;
+	meteredRunHold(runId: string): AwayMeteredRunHold | undefined;
 }
 
 /** The attempt a worker's usage report id names (`workerUsageReportIdPrefix`), among `attempts` keyed by that prefix. */
@@ -137,28 +143,41 @@ export class BotSessionSpend {
 
 	/** The model an attempt runs on (else the one its contract binds); undefined when the registry does not know it. */
 	private attemptModel(attempt: AttemptRuntimeState): Model<Api> | undefined {
-		const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+		const binding = attemptModelBinding(attempt);
 		return binding && this.registry.find(binding.provider, binding.modelId);
 	}
 
 	/**
 	 * A worker's run shares the bound of the request it serves with the request's other workers: the lowest ceiling less
 	 * what the bot's turns spent in that window on metered models (`BotSpendWindows.runCostBound`). With no ceiling set,
-	 * none; a subscription worker is held by its usage windows. A metered attempt whose run the host's wider bound has no
-	 * room for (`meteredRunFits`: the daemon's away day bound) is refused its metered requests under a zero bound of that
-	 * bound's own, which names it and leaves the run's bound as it was for an attempt that starts once room returns; the
-	 * bot's subscription work is not held by it.
+	 * none; a subscription worker is held by its usage windows. A metered attempt whose run the host's wider bound holds
+	 * (`meteredRunHold`: the daemon's away day bound) is refused its metered requests under a zero bound of that bound's
+	 * own, which names why (no room, or charges that do not read) and leaves the run's bound as it was for an attempt that
+	 * starts once the hold ends; the bot's subscription work is not held by it.
 	 */
 	readonly workerRunCostBound: NonNullable<ParentExecutionPolicy["runCostBound"]> = (attempt, snapshot, metered) => {
 		const bound = this.windows.runCostBound(attempt, snapshot, this.ceilings());
 		const runId = bound?.runId ?? this.windows.meteredRunOf(attempt, snapshot);
-		if (!metered || this.ports.meteredRunFits(runId)) return bound;
+		const hold = metered ? this.ports.meteredRunHold(runId) : undefined;
+		if (hold === undefined) return bound;
 		return {
-			runId: `away-day-bound:${runId}`,
+			...AWAY_DAY_BOUND_REFUSALS[hold](runId),
 			maxCostUsd: 0,
 			includes: bound?.includes ?? ((candidate) => candidate.attemptId === attempt.attemptId),
-			refusalReasons: AWAY_DAY_BUDGET_REFUSAL_REASONS,
 		};
+	};
+
+	/**
+	 * Why `model` is held off for the run a worker attempt serves (`ParentExecutionPolicy.runModelHold`): a metered model
+	 * while the host's wider bound holds that run (`meteredRunHold`), so a subscription worker that fails over does not move
+	 * to a metered model the bound would refuse, and waits on its own model for its usage reset; a model that is not
+	 * metered is never held here. Asking counts nothing and opens no window.
+	 */
+	readonly workerRunModelHold: NonNullable<ParentExecutionPolicy["runModelHold"]> = (attempt, snapshot, model) => {
+		if (!isMeteredSpend(model, this.registry)) return undefined;
+		const hold = this.ports.meteredRunHold(this.windows.meteredRunOf(attempt, snapshot));
+		if (hold === undefined) return undefined;
+		return hold === "unread" ? "away_day_spend_bound_unread" : "away_day_spend_bound_full";
 	};
 
 	/**
@@ -214,6 +233,8 @@ export class BotSessionSpend {
 			}
 			if (share.kind !== "spawned") return usage.cost.total;
 			const { report } = share;
+			// A report that fixed its metered part (a bot's charge) counts it, at most the part of it counted here.
+			if (typeof report.meteredUsd === "number") return Math.min(usage.cost.total, Math.max(0, report.meteredUsd));
 			if (report.usageComponents) return lessSubscription(usage.cost.total, report.usageComponents);
 			const attempt = report.reportId === undefined ? undefined : attemptOfReport(attempts, report.reportId);
 			const metered = attempt ? isMeteredSpend(this.attemptModel(attempt), this.registry) : named(report, true);

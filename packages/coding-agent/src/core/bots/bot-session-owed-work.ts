@@ -27,6 +27,7 @@ import {
 	type WallAlarm,
 } from "../util/timer-port.ts";
 import { readSessionWatchWork } from "../watches/session-watch-ledger.ts";
+import { BotClosedGoals } from "./bot-closed-goal.ts";
 import { botFailureCause, botFailureText, logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeSessionIds } from "./bot-home.ts";
 import type { RemoteBotHost } from "./bot-host-state.ts";
@@ -257,12 +258,8 @@ export class BotOwedWork {
 	private readonly workerWork = new WorkerWorkLedger();
 	/** What each closed bot's saved session file holds of a usage stop and a goal, read once per file identity. */
 	private readonly savedSessions = new SavedSessionLedger();
-	/**
-	 * The goal (`SavedGoal.key`) each bot's session held when it last closed here (`closed`): its load took the goal up and
-	 * its continuation ended without it, so that goal does not open the session again; another goal or a later revision of
-	 * it does. Kept in this process only: a process that starts opens such a bot once.
-	 */
-	private readonly closedGoals = new Map<string, string>();
+	/** The goal each bot's session held when it last closed (`closed`), kept in its home. */
+	private readonly closedGoals: BotClosedGoals;
 	/** The root hosts' records as the daemon's count reads them ({@link owedCount}), read through this host's warnings. */
 	private rootHosts: BotRootHostReader | undefined;
 	/** The alarm at the time a bot's saved session continues what a usage limit stopped (`armOwedAt`). */
@@ -290,6 +287,7 @@ export class BotOwedWork {
 	constructor(ports: BotOwedWorkPorts, unrecorded: UnrecordedBotStops) {
 		this.ports = ports;
 		this.unrecorded = unrecorded;
+		this.closedGoals = new BotClosedGoals(() => ports.agentDir());
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
@@ -354,8 +352,8 @@ export class BotOwedWork {
 	 * The bot's session closed here, its bundle's writes done: the items the bundle holds to deliver now are what the session
 	 * could not deliver while it ran (a receipt or an end an owner that only a live session registers holds, a parent write
 	 * whose import keeps failing), so it opens the session for none of them; only an item not among them does. The goal its
-	 * file holds now is one its continuation ended without (`closedGoals`), so it does not open the session again either. Kept
-	 * in this process only: a process that starts opens such a bot once.
+	 * file holds now is one its continuation ended without (`BotClosedGoals`, kept in its home), so it does not open the
+	 * session again either, here or in a process that starts later; a mark its home refused is told once per cause.
 	 */
 	closed(agentId: string): void {
 		const { ports } = this;
@@ -373,9 +371,17 @@ export class BotOwedWork {
 		const read = saved?.id === undefined ? undefined : this.workerFacts(agentId, saved.id);
 		if (read?.kind === "facts") this.offered.set(agentId, new Set(read.facts.deliveryItems));
 		else this.offered.delete(agentId);
-		const goal = this.savedFacts(agentId, saved)?.goal;
-		if (goal) this.closedGoals.set(agentId, goal.key);
-		else this.closedGoals.delete(agentId);
+		const facts = this.savedFacts(agentId, saved);
+		try {
+			// A session refused since its last admitted run did not end its continuation: its goal stays owed, held back while
+			// the same cause refuses (`stillRefused`), and its earlier mark stays as it was.
+			if (!this.refusals.has(agentId))
+				this.closedGoals.mark(agentId, facts?.goal && { instance: facts.instance, goal: facts.goal.key });
+		} catch (error) {
+			this.tellFailedOnce(agentId, error, (cause) =>
+				interfaceText().botTeam.botClosedGoalNotWritten(agentId, cause),
+			);
+		}
 		this.unhosted(agentId, saved);
 	}
 
@@ -457,11 +463,12 @@ export class BotOwedWork {
 
 	/**
 	 * Whether the goal the bot's saved session holds opens it: one its load takes up (`SavedGoal.resumes`), unless its
-	 * session closed here holding that goal (`closedGoals`). `unreadable`: the saved session did not read.
+	 * session closed holding that goal (`closedGoals`). `unreadable`: the saved session did not read. Throws when the
+	 * closed goal's mark does not read.
 	 */
 	private goalOwed(agentId: string, saved: SavedBotSession, unreadable: () => void): boolean {
-		const goal = this.savedFacts(agentId, saved, unreadable)?.goal;
-		return goal?.resumes === true && this.closedGoals.get(agentId) !== goal.key;
+		const facts = this.savedFacts(agentId, saved, unreadable);
+		return facts?.goal?.resumes === true && !this.closedGoals.holds(agentId, facts.instance, facts.goal.key);
 	}
 
 	/** The owner is told what of the bot's session store did not read (`storeFailure`). */
@@ -483,7 +490,7 @@ export class BotOwedWork {
 		this.sweepTold.delete(agentId);
 		this.wakes.forget(agentId);
 		this.savedSessions.forget(agentId);
-		this.closedGoals.delete(agentId);
+		this.closedGoals.forget(agentId);
 		this.forgetRefusal(agentId);
 		this.failedOpens.delete(agentId);
 		this.openRetries.forget(agentId);
@@ -631,11 +638,16 @@ export class BotOwedWork {
 	 * clean again.
 	 */
 	tellAskFailed(agentId: string, error: unknown, again: string): void {
+		this.tellFailedOnce(agentId, error, (cause) => interfaceText().botTeam.botSweepFailed(agentId, cause, again));
+	}
+
+	/** The owner is told `words` of the bot's failure once per cause, until its files read clean. */
+	private tellFailedOnce(agentId: string, error: unknown, words: (cause: string) => string): void {
 		const cause = botFailureText(agentId, error);
 		const told = this.sweepTold.get(agentId) ?? new Set<string>();
 		this.sweepTold.set(agentId, told);
 		if (told.has(cause)) return;
-		this.ports.warn(interfaceText().botTeam.botSweepFailed(agentId, cause, again));
+		this.ports.warn(words(cause));
 		told.add(cause);
 	}
 
@@ -893,12 +905,18 @@ export class BotOwedWork {
 		// An unfinished goal its load takes up continues it, where the settings it opens with let a goal continue on its own
 		// (read once its root is known): owed only by a session that ran, and held back by the owner's stop as its workers are.
 		// A saved session that did not read is told by `savedFacts` once per cause, and leaves what it is owed unread.
-		const goal =
-			worked !== undefined &&
-			!stopWaiting &&
-			this.goalOwed(agentId, worked, () => {
-				unread = true;
-			});
+		let goal = false;
+		try {
+			goal =
+				worked !== undefined &&
+				!stopWaiting &&
+				this.goalOwed(agentId, worked, () => {
+					unread = true;
+				});
+		} catch (error) {
+			// Its closed goal's mark did not read.
+			fail(error);
+		}
 		let unrun = "";
 		try {
 			// The file, only when nothing else owes.
@@ -973,7 +991,7 @@ export class BotOwedWork {
 		// workers and its usage wait open nothing until a host takes the stop (opened for anything else, it takes it first).
 		// A read that fails leaves the rest of what it is owed, and the owner is told why.
 		const owed = this.owedTerms(agentId, worked, stop?.waits === true, notResumed);
-		const { watching, workers, usage, goal, waiting } = owed;
+		const { watching, workers, usage, waiting } = owed;
 		this.armRetry(agentId, owed.workersDueAt);
 		// Owed nothing it could read: an attempt armed for an earlier failure is not needed; one armed for this ask's reads is.
 		// With nothing told in this ask its waits cleared, and what was told of them is forgotten.
@@ -1015,8 +1033,8 @@ export class BotOwedWork {
 			owedNothing();
 			return;
 		}
-		if (this.stillRefused(agentId, record, sender, !watching && !workers && !usage && !goal && waiting.length === 0))
-			return;
+		// A goal's continuation is a run: a refused run holds it back as it holds the wakes.
+		if (this.stillRefused(agentId, record, sender, !watching && !workers && !usage && waiting.length === 0)) return;
 		const key = ports.currentKey(record, sender);
 		// What waits in the inbox, read here too when the bot is owed its watches (the listing above skipped it then).
 		const inbox = (watching ? ports.waiting(agentId) : waiting).map((item) => item.file).join("\n");

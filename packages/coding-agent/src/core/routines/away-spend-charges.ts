@@ -1,11 +1,16 @@
 /**
  * What is charged to the away spend bound (`routines.away.maxUsdPerDay`) besides the routines' runs away: every channel's
  * turns while no session was open (`away-channels.ts`) and the metered spend of the bots the daemon hosted
- * (`bot-away-charges.ts`). One reader for every host and view of the bound, so none admits or shows less than another.
- * Bot charges that cannot be read count as the whole day's bound until they read again: spend that cannot be read is no
- * room. Each read reads them again, and the owner is told once per cause (`tell`: a root's warning, the daemon's lease
- * report) while they do not read. A bot charge file that does not parse is set aside by the read that meets it, which
- * tells the owner once.
+ * (`bot-away-charges.ts`). The one reader for every host and view of the bound, so none admits or shows less than another:
+ * charges that do not read are `unread` with their path and cause (`RoutineAwayChargesRead`), and the bound has no room
+ * until they read again (`routineAwaySpendRoom`); a channel journal reset within the last day charges the whole day bound
+ * (`dayAllowanceUntil`). The owner is told once per process and agent directory (`tell`: a root's warning, the daemon's
+ * lease report): a failed read once per path and cause, until one reads again; each reset that charges the bound once, until
+ * its charge ends (held in memory: a restarted daemon tells it again); a bot charge file that did not parse, which the read
+ * that meets it sets aside, once.
+ * With `setsAside` (the daemon, which hosts the channels away) a channel journal that does not parse is set aside where
+ * it is read (`readAwayChannelCharges` with its `resets`); without it (a root's status, which writes nothing to a journal
+ * a serving session or the daemon owns) such a journal reads as `unread` until one of them sets it aside.
  */
 
 import { resolve } from "node:path";
@@ -13,7 +18,7 @@ import { botAwayChargesFile } from "../agent-paths.ts";
 import { readBotAwayCharges } from "../bots/bot-away-charges.ts";
 import { readAwayChannelCharges } from "../channels/away-channels.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "./routine-away-spend.ts";
+import type { RoutineAwayChargesRead } from "./routine-away-spend.ts";
 
 /** The away bounds the charges are read under. */
 export interface AwaySpendBounds {
@@ -22,11 +27,16 @@ export interface AwaySpendBounds {
 }
 
 /**
- * Per agent directory, the cause this process told of its bot charges not reading (a file system code, not the message,
- * which can name a timestamped set-aside destination): one owner per agent directory, told by whichever of the process's
- * readers meets a cause first, and forgotten once they read again, so a new cause is told.
+ * What this process told of an agent directory's charges: the failed read (path and cause) and the resets, by journal and
+ * gap, each until its charge ends (a reset dated ahead of this clock ends later at each read).
  */
-const toldUnreadable = new Map<string, string>();
+interface AwayChargesTold {
+	unread?: string;
+	readonly resets: Map<string, number>;
+}
+
+/** Per agent directory (resolved): one telling for every reader of the process. */
+const toldByPlace = new Map<string, AwayChargesTold>();
 
 /** The charges on the away spend bound now other than the routines' runs (see the module comment). */
 export function readAwayCharges(
@@ -34,20 +44,51 @@ export function readAwayCharges(
 	away: AwaySpendBounds,
 	nowMs: number,
 	tell: (message: string) => void,
-): RoutineAwayCharge[] {
-	const words = interfaceText().botTeam;
-	const bots = readBotAwayCharges(agentDir, nowMs);
+	options: { readonly setsAside?: boolean } = {},
+): RoutineAwayChargesRead {
 	const place = resolve(agentDir);
-	if ("unreadable" in bots) {
-		if (toldUnreadable.get(place) !== bots.cause)
-			tell(words.botAwayChargesUnreadable(botAwayChargesFile(agentDir), bots.unreadable));
-		toldUnreadable.set(place, bots.cause);
-	} else {
-		toldUnreadable.delete(place);
-		if (bots.setAside) tell(words.botAwayChargesSetAside(bots.setAside.file, bots.setAside.to, bots.setAside.reason));
+	const told = toldByPlace.get(place) ?? { resets: new Map<string, number>() };
+	toldByPlace.set(place, told);
+	for (const [key, until] of told.resets) if (until <= nowMs) told.resets.delete(key);
+	const text = interfaceText();
+	const channels = readAwayChannelCharges(
+		agentDir,
+		away.maxUsdPerRun,
+		nowMs,
+		options.setsAside
+			? (path, until, gapId) => {
+					const key = `${path}#${gapId}`;
+					if (told.resets.has(key)) return;
+					told.resets.set(key, until);
+					const at = text.reports.formats.dateTime(new Date(until).toISOString());
+					tell(text.sessions.awayMeteredRuns.journalReset(path, at));
+				}
+			: undefined,
+	);
+	const bots = readBotAwayCharges(agentDir, nowMs);
+	if ("setAside" in bots && bots.setAside)
+		tell(text.botTeam.botAwayChargesSetAside(bots.setAside.file, bots.setAside.to, bots.setAside.reason));
+	const read: RoutineAwayChargesRead =
+		"unread" in channels
+			? channels
+			: "unreadable" in bots
+				? { unread: { path: botAwayChargesFile(agentDir), cause: bots.cause } }
+				: { ...channels, charges: [...channels.charges, ...bots.charges] };
+	if (!("unread" in read)) {
+		told.unread = undefined;
+		return read;
 	}
-	return [
-		...readAwayChannelCharges(agentDir, away.maxUsdPerRun, nowMs),
-		...("charges" in bots ? bots.charges : [{ micros: awaySpendMicros(away.maxUsdPerDay) }]),
-	];
+	const key = `${read.unread.path}\u0000${read.unread.cause}`;
+	if (told.unread !== key) {
+		told.unread = key;
+		tell(
+			"unread" in channels
+				? text.sessions.awayMeteredRuns.chargesUnread(read.unread.path, read.unread.cause)
+				: text.botTeam.botAwayChargesUnreadable(
+						read.unread.path,
+						"unreadable" in bots ? bots.unreadable : read.unread.cause,
+					),
+		);
+	}
+	return read;
 }

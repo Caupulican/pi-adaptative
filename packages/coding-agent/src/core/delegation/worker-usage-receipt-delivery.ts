@@ -3,6 +3,7 @@ import type { SpawnedUsageReceiptDisposition, SpawnedUsageReceiptOptions } from 
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
+import { attemptModelBinding } from "../orchestration/task-runtime-state.ts";
 import { ReceiptDeliveryLoop } from "./receipt-delivery-loop.ts";
 
 /**
@@ -60,6 +61,9 @@ export class WorkerUsageReceiptDelivery {
 			for (const receipt of receipts) {
 				if (!this.loop.active) return;
 				try {
+					// The model the attempt runs on as the receipt is delivered, a failover's included: its spend is classified by
+					// it (metered or not) after the attempt is pruned. A receipt delivered again names the model of its first record.
+					const binding = receipt.kind === "baseline" ? undefined : attemptModelBinding(attempt);
 					const reportId =
 						receipt.kind === "baseline"
 							? `worker:${this.deps.parentSessionId}:${attempt.taskId}`
@@ -69,12 +73,7 @@ export class WorkerUsageReceiptDelivery {
 						reportId,
 						label: "worker-delegation",
 						...(objectiveId?.startsWith("goal:") ? { goalId: objectiveId.slice("goal:".length) } : {}),
-						...(receipt.kind !== "baseline" && attempt.dispatch.executionContract
-							? {
-									provider: attempt.dispatch.executionContract.worker.modelBinding.provider,
-									model: attempt.dispatch.executionContract.worker.modelBinding.modelId,
-								}
-							: {}),
+						...(binding ? { provider: binding.provider, model: binding.modelId } : {}),
 					});
 					if (disposition === "foreign_session") return;
 					// Never pass an unconfirmed baseline: its legacy report could already cover later usage.

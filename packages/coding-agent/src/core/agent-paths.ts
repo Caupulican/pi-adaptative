@@ -25,7 +25,8 @@
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
  *   bots/<id>/                         one bot's home: profile.json, sessions/, session.json, -- botHomeDir
- *                                      host.lock, host-state.json, history.json, typesafe-reviews/ (read only),
+ *                                      host.lock, host-state.json, history.json, closed-goal.json,
+ *                                      typesafe-reviews/ (read only),
  *                                      orchestration/ (its sessions' orchestration home)
  *   state/orchestration/              the owner's orchestration home                         -- ownerOrchestrationHome
  *     bot-replies/                    bots' answers to the orchestrator's asks, per session  -- rootBotRepliesDir
@@ -315,6 +316,14 @@ export function botHomeHostStateFile(homeDir: string): string {
 /** `<agentDir>/bots/<id>/history.json` -- the bot's earlier worker conversations, by reference (never copies). */
 export function botHistoryFile(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "history.json");
+}
+
+/**
+ * `<agentDir>/bots/<id>/closed-goal.json` -- the goal the bot's session held when it last closed, which does not open it
+ * again (`bots/bot-closed-goal.ts`).
+ */
+export function botClosedGoalFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "closed-goal.json");
 }
 
 /** `<agentDir>/bots/<id>/inbox` -- the owner's messages to a bot another process hosts, one file each (`bots/bot-inbox.ts`). */

@@ -312,7 +312,7 @@ export class BotSessionHost {
 				idleTimers: () => this.idleTimers(),
 				spendCeilings: () => ports.spendCeilings(),
 				hostKind: () => ports.hostKind(),
-				meteredRunFits: (agentId, runId) => ports.meteredRunFits?.(agentId, runId) !== false,
+				meteredRunHold: (agentId, runId) => ports.meteredRunHold?.(agentId, runId),
 				warn: (message) => ports.warn(message),
 				admission: this.admission,
 				owed: this.owed,

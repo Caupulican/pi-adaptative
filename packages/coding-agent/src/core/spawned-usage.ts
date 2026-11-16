@@ -20,6 +20,8 @@ export interface SpawnedUsageOptions {
 	through?: Usage;
 	/** When the report was first recorded (`SpawnedUsageReport.recordedAt`). */
 	recordedAt?: string;
+	/** The metered part of the report's cost (`SpawnedUsageReport.meteredUsd`). */
+	meteredUsd?: number;
 }
 
 export interface SpawnedUsageReporter {

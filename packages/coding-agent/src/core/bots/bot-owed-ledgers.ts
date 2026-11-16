@@ -19,6 +19,7 @@ import { readTaskRuntimeProjection } from "../orchestration/task-runtime-reader.
 import { botSessionStorageRoots } from "../orchestration-homes.ts";
 import { goalUsageStop, type RestoredUsageRules, restoredUsageStop } from "../usage-reset-resume.ts";
 import { latestUsageWake, type UsageWakeRecord } from "../usage-wake-record.ts";
+import { botSessionInstance } from "./bot-charge-mark.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { fileIdentity } from "./bot-home-records.ts";
 import { readSessionSnapshot } from "./bot-remote-view.ts";
@@ -65,12 +66,14 @@ export interface SavedGoal {
 }
 
 /**
- * What a bot's owed work reads of its saved session file: the usage stop its load waits on (`usage`, undefined when it
+ * What a bot's owed work reads of its saved session file: its instance, the usage stop its load waits on (`usage`, undefined when it
  * holds none), and its latest goal (`goal`, undefined when it holds none). A goal a usage or rate limit stopped waits for
  * the reset, not for the load (`goalUsageStop`); any other the load takes up when it runs or the system's own recovery
  * resumes it (`goalResumesOnRestore`). Reads the whole file.
  */
 export interface SavedSessionFacts {
+	/** The session file's instance (`botSessionInstance`): a file created again under the same session id is another. */
+	readonly instance: string;
 	readonly usage: SavedUsageStop | undefined;
 	readonly goal: SavedGoal | undefined;
 }
@@ -83,6 +86,7 @@ function readSavedSessionFacts(file: string, agentDir: string): SavedSessionFact
 		const usageStopped = latestGoal !== undefined && goalUsageStop(latestGoal) !== undefined;
 		const goal = usageStopped ? latestGoal : undefined;
 		return {
+			instance: botSessionInstance(view),
 			usage: lastMessage || goal ? { lastMessage, goal, wake: latestUsageWake(view) } : undefined,
 			goal: latestGoal && {
 				key: `${latestGoal.goalId}@${latestGoal.revision ?? 0}`,

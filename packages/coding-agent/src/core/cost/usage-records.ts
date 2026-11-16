@@ -64,6 +64,12 @@ export interface SpawnedUsageReport {
 	 * bot's charge, delivered again to the root that answers after a reopen): the day it counts on, in every file.
 	 */
 	recordedAt?: string;
+	/**
+	 * The part of the report's cost that is metered spend, in dollars, fixed when it was charged (a bot's charge,
+	 * `BotChargeReport.meteredUsd`): its source may run on a subscription while its workers spend metered, so its model does
+	 * not say it. Absent on a report that names its spend by its model alone, and on one an earlier build recorded.
+	 */
+	meteredUsd?: number;
 	/** Stable idempotency identity for retry-safe ingestion. */
 	reportId?: string;
 }

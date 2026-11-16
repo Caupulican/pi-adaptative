@@ -176,6 +176,12 @@ export interface AgentSessionConfig {
 	 */
 	workerRunCostBound?: ParentExecutionPolicy["runCostBound"];
 	/**
+	 * Why the host holds a model off for the run a worker of the session serves (`ParentExecutionPolicy.runModelHold`): the
+	 * bot daemon holds a bot's workers off metered models while its away day bound holds their run, so a failover does not
+	 * move one there and it waits on its own model for its usage reset. Absent, no run is held off a model by its host.
+	 */
+	workerRunModelHold?: ParentExecutionPolicy["runModelHold"];
+	/**
 	 * The environment the session's watched commands start from (`watch-command-base.ts`): a bot's session the daemon hosts
 	 * reads the one a root session recorded for its directory. Absent, the process's own.
 	 */
@@ -269,6 +275,29 @@ export interface AgentSessionConfig {
 	shellOperations?: BashOperations;
 	/** Interposition on each worker terminal delivery to this session (see CreateAgentSessionOptions). */
 	workerTerminalDelivery?: WorkerTerminalDeliveryInterposer;
+}
+
+/**
+ * What a session's host decides for it (`createAgentSession` takes them and passes them on as they are): `admitRun`
+ * refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices; `workerRunCostBound` bounds each run of the
+ * session's workers and `workerRunModelHold` holds models off for one; `watchCommandBase` is the environment its watched
+ * commands start from; `onClosingWarnings` receives the warnings it holds as it closes.
+ */
+export type SessionHostOptions = Pick<
+	AgentSessionConfig,
+	| "admitRun"
+	| "ownerNoticeLine"
+	| "workerRunCostBound"
+	| "workerRunModelHold"
+	| "watchCommandBase"
+	| "onClosingWarnings"
+>;
+
+/** The host's options of `options`, and only those, for the session's config. */
+export function sessionHostOptions(options: SessionHostOptions): SessionHostOptions {
+	const { admitRun, ownerNoticeLine, workerRunCostBound, workerRunModelHold, watchCommandBase, onClosingWarnings } =
+		options;
+	return { admitRun, ownerNoticeLine, workerRunCostBound, workerRunModelHold, watchCommandBase, onClosingWarnings };
 }
 
 export interface ExtensionBindings {

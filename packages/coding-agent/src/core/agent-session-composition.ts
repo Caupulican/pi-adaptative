@@ -919,14 +919,16 @@ export function createGoalProofWrites(deps: {
 
 /**
  * What the lane controller takes of the session's host from its config: the bot whose own session this is (undefined for
- * any other), its workers' run bound and the environment its watched commands start from.
+ * any other), its workers' run bound, the models their runs are held off and the environment its watched commands start
+ * from.
  */
 export function sessionHostLaneDeps(
 	config: AgentSessionConfig,
-): Pick<BackgroundLaneControllerDeps, "botAgentId" | "runCostBound" | "watchCommandBase"> {
+): Pick<BackgroundLaneControllerDeps, "botAgentId" | "runCostBound" | "runModelHold" | "watchCommandBase"> {
 	return {
 		botAgentId: config.standing.kind === "bot" ? config.standing.agentId : undefined,
 		runCostBound: config.workerRunCostBound,
+		runModelHold: config.workerRunModelHold,
 		watchCommandBase: config.watchCommandBase,
 	};
 }

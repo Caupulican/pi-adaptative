@@ -69,9 +69,9 @@ export const BOT_TEAM = {
 	/** The bot daemon's charge file did not parse: it was set aside, so its charges no longer count. */
 	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
 		`Bots: the record of what bots spent while no session was open (${file}) did not read (${reason}); it was set aside as ${to}, and the spend it held no longer counts toward routines.away.maxUsdPerDay.`,
-	/** The bot daemon's charge file does not read: the whole away day's bound counts as spent until it does. */
+	/** The bot daemon's charge file does not read: the away day bound has no room until it does. */
 	botAwayChargesUnreadable: (file: string, reason: string) =>
-		`Bots: the record of what bots spent while no session was open (${file}) does not read (${reason}); until it reads, all of routines.away.maxUsdPerDay counts as spent, so routines, channels and bots wait while you are away. It is read again at every check.`,
+		`Bots: the record of what bots spent while no session was open (${file}) does not read (${reason}); until it reads, routines.away.maxUsdPerDay has no room, so metered routines, channel turns and bot turns wait while you are away. It is read again at every check.`,
 	/** A root's record that it hosts bots could not be removed as it closed; the daemon leaves its directory to it until its process ends. */
 	botRootHostNotRemoved: (reason: string) =>
 		`Bots: this session could not remove its record that it hosts bots (${reason}); the bot daemon leaves the bots of this directory to it until this process ends.`,
@@ -198,6 +198,12 @@ export const BOT_TEAM = {
 	 */
 	botSweepFailed: (agentId: string, reason: string, again: string) =>
 		`Bot ${agentId}: its files could not be read (${reason}); ${again}.`,
+	/**
+	 * The unfinished goal a closed bot's session held could not be recorded in its home (`bots/bot-closed-goal.ts`): this
+	 * process holds it, and a process that starts later opens the bot for it once.
+	 */
+	botClosedGoalNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the unfinished goal its session closed with could not be recorded in its home (${reason}); this process does not open the bot for that goal again, and a process that starts later opens it for that goal once.`,
 	botReadAgain: {
 		everyMinute: "they are read again every minute",
 		nextChangeOrMinute: "they are read again at its next change and every minute",
@@ -386,6 +392,9 @@ export const BOT_TEAM = {
 	/** A bot on a metered model hosted while no session is open: the away bound of a day has no room for one more turn. */
 	botAwaySpendExhausted:
 		"the metered spend allowed while no session is open (routines.away.maxUsdPerDay) has no room for another turn in the last 24 hours",
+	/** The same bound's charges do not read (a channel journal, the channels directory or the bots' charge record). */
+	botAwaySpendUnread:
+		"what was charged to the metered spend allowed while no session is open (routines.away.maxUsdPerDay) cannot be read, so it has no room for another turn until it reads again",
 	/** A bot a root or a leader made runs on an API-key model the owner did not choose while subscription models are usable. */
 	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
 		`${modelRef} is paid by API key and you have not chosen it for workers while subscription models are usable; use a subscription model such as ${alternatives.join(", ")}, or add ${provider} to workerDelegation.routeProviders`,

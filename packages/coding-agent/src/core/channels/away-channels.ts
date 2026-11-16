@@ -7,14 +7,12 @@
 
 import { readdirSync } from "node:fs";
 import { channelsDir } from "../agent-paths.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { awayChannelTurnKey, awayMeteredReservations } from "../routines/away-metered-runs.ts";
 import {
 	awaySpendMicros,
 	type RoutineAwayCharge,
 	type RoutineAwayChargesRead,
-	type RoutineAwayChargesUnread,
 } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
@@ -161,39 +159,6 @@ export function readAwayChannelCharges(
 		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
 	return dayAllowanceUntil.length > 0 ? { charges, dayAllowanceUntil } : { charges };
-}
-
-/**
- * The daemon's one reader of its channel turns' charges, for every gate that decides on the away bound with them (the
- * routine supervisor's claims, the channel hosts' turns and moves): it sets aside a journal that does not parse, and
- * tells each reset that charges the bound's whole day allowance once while the daemon runs (the told set is held in
- * memory: a restarted daemon tells it again), whoever set its journal aside (this reader or the update of a session
- * serving the channel); a read that fails is told once per cause, until one reads again.
- */
-export function awayChannelChargesReader(
-	agentDir: string,
-	tell: (message: string) => void,
-): (maxUsdPerRun: number, nowMs: number) => RoutineAwayChargesRead {
-	let told: RoutineAwayChargesUnread | undefined;
-	// The resets told, by journal and gap, until their charge ends (a reset dated ahead of this clock ends later each read).
-	const toldResets = new Map<string, number>();
-	return (maxUsdPerRun, nowMs) => {
-		for (const [key, until] of toldResets) if (until <= nowMs) toldResets.delete(key);
-		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path, until, gapId) => {
-			const key = `${path}#${gapId}`;
-			if (toldResets.has(key)) return;
-			toldResets.set(key, until);
-			const text = interfaceText();
-			const at = text.reports.formats.dateTime(new Date(until).toISOString());
-			tell(text.sessions.awayMeteredRuns.journalReset(path, at));
-		});
-		if (!("unread" in read)) told = undefined;
-		else if (told?.cause !== read.unread.cause) {
-			told = read.unread;
-			tell(interfaceText().sessions.awayMeteredRuns.chargesUnread(read.unread.path, read.unread.cause));
-		}
-		return read;
-	};
 }
 
 /** What a move of a session away to a metered model reserves first on the away bound, for one channel. */

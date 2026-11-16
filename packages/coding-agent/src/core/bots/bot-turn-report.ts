@@ -394,7 +394,7 @@ export class BotTurnAccounting {
 			if (report.sessionId === sessionId && report.instance === instance)
 				through = usageReach(through, report.through);
 		const taken: BotCharge[] = [];
-		for (const { usage, reportId, provider, model, from, through: end, recordedAt } of held.unwritten) {
+		for (const { usage, reportId, provider, model, from, through: end, recordedAt, meteredUsd } of held.unwritten) {
 			through = usageReach(through, end);
 			if (keptIds.has(reportId)) continue;
 			taken.push({
@@ -409,6 +409,7 @@ export class BotTurnAccounting {
 					from,
 					through: end,
 					recordedAt,
+					...(meteredUsd !== undefined ? { meteredUsd } : {}),
 				},
 			});
 		}

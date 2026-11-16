@@ -36,12 +36,7 @@ import { edgeRecordsOnBranch, sessionEdgeGrants, standingEdgeGrants } from "../a
 import { AuthStorage } from "../auth-storage.ts";
 import { ExhaustedProviderRegistry, expiryFromRetryAfter } from "../billing-failover-controller.ts";
 import { AwayParentWriteRefusal, createAwayParentWrites } from "../delegation/away-parent-writes.ts";
-import {
-	AWAY_DAY_BUDGET_REFUSAL_REASONS,
-	AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS,
-	AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS,
-	type BudgetRefusalReasons,
-} from "../delegation/budget-reason-codes.ts";
+import { AWAY_DAY_BOUND_REFUSALS } from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionSettingsSource } from "../delegation/parent-execution-context.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
@@ -80,27 +75,6 @@ import { SettingsManager } from "../settings-manager.ts";
 import { createSessionOperationGate } from "../system-one/operation-gate-wiring.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import type { AwayMeteredRunHold, AwayMeteredRunRefusal } from "./away-metered-runs.ts";
-
-/**
- * The zero bound a metered attempt of a run away is refused under when its run was not reserved on the away day bound, by
- * why: each names its own aggregate and refusal codes, so the worker reads which cause stopped it.
- */
-const AWAY_DAY_BOUND_REFUSALS: Readonly<
-	Record<
-		AwayMeteredRunRefusal,
-		(runId: string) => { readonly runId: string; readonly refusalReasons: BudgetRefusalReasons }
-	>
-> = {
-	full: (runId) => ({ runId: `away-day-bound:${runId}`, refusalReasons: AWAY_DAY_BUDGET_REFUSAL_REASONS }),
-	unread: (runId) => ({
-		runId: `away-day-bound-unread:${runId}`,
-		refusalReasons: AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS,
-	}),
-	unwritten: (runId) => ({
-		runId: `away-day-bound-unwritten:${runId}`,
-		refusalReasons: AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS,
-	}),
-};
 
 export interface AwayParentContextInput {
 	readonly agentDir: string;

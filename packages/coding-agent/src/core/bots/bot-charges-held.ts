@@ -78,6 +78,8 @@ export interface UnwrittenBotCharge {
 	readonly from: Usage;
 	readonly through: Usage;
 	readonly recordedAt: string;
+	/** The charge's metered part, as the root's entry holds it (`SpawnedUsageReport.meteredUsd`). */
+	readonly meteredUsd?: number;
 }
 
 /** A root's session file or directory the read-back could not read, and why. */
@@ -208,11 +210,13 @@ function rangeOf(data: Record<string, unknown>): Usage | undefined {
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by, its instance included. */
 function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
 	if (typeof data.sourceInstance !== "string") return undefined;
-	const { usage, reportId, provider, model, from, through, recordedAt } = data;
+	const { usage, reportId, provider, model, from, through, recordedAt, meteredUsd } = data;
 	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;
 	if (typeof recordedAt !== "string") return undefined;
-	return { usage, reportId, provider, model, from, through, recordedAt };
+	// A metered part that does not read is left out: the charge then counts as its model's spend, as an earlier build's does.
+	const metered = typeof meteredUsd === "number" && Number.isFinite(meteredUsd) && meteredUsd >= 0;
+	return { usage, reportId, provider, model, from, through, recordedAt, ...(metered ? { meteredUsd } : {}) };
 }
 
 /**

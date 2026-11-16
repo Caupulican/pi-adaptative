@@ -29,7 +29,8 @@ import {
 } from "./adaptive/index.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
 import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
-import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
+import { AgentSession } from "./agent-session.ts";
+import { type SessionHostOptions, sessionHostOptions } from "./agent-session-contracts.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import type { CapabilityEnvelope } from "./autonomy/contracts.ts";
@@ -116,16 +117,8 @@ import type { BashOperations } from "./tools/schemas/bash.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
-/**
- * `admitRun` refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices; `workerRunCostBound` bounds each run
- * of the session's workers; `watchCommandBase` is the environment its watched commands start from; `onClosingWarnings`
- * receives the warnings it holds as it closes (see `AgentSessionConfig`).
- */
-export interface CreateAgentSessionOptions
-	extends Pick<
-		AgentSessionConfig,
-		"admitRun" | "ownerNoticeLine" | "workerRunCostBound" | "watchCommandBase" | "onClosingWarnings"
-	> {
+/** What a session is created with; its host's own decisions are `SessionHostOptions`. */
+export interface CreateAgentSessionOptions extends SessionHostOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: the session manager's (its storage roots), else ~/.pi/agent; never another. */
@@ -834,11 +827,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			bundleTransferred = true;
 			const session = new AgentSession({
 				agent,
-				onClosingWarnings: options.onClosingWarnings,
-				admitRun: options.admitRun,
-				ownerNoticeLine: options.ownerNoticeLine,
-				workerRunCostBound: options.workerRunCostBound,
-				watchCommandBase: options.watchCommandBase,
+				...sessionHostOptions(options),
 				sessionManager,
 				bundleLease,
 				settingsManager,

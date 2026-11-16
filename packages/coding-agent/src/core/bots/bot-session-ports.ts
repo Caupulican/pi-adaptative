@@ -104,6 +104,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				from: structuredClone(report.from),
 				through: structuredClone(report.through),
 				recordedAt: report.recordedAt,
+				meteredUsd: report.meteredUsd,
 			}),
 		// Where its charges are read back: the session files of every project (or the custom session directory) and the live
 		// session's entries, each held once it holds it for good.

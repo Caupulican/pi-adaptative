@@ -18,7 +18,11 @@ import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
+import {
+	awaySpendMicros,
+	type RoutineAwayCharge,
+	type RoutineAwayChargesRead,
+} from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
@@ -38,8 +42,11 @@ export interface BotDaemonHostInput {
 }
 
 export interface BotDaemonHost {
-	/** What is charged to the away spend bound now besides the routines' runs: channels, bots' charges and turns working. */
-	awayCharges(nowMs: number): RoutineAwayCharge[];
+	/**
+	 * What is charged to the away spend bound now besides the routines' runs: channels, bots' charges and turns working; or
+	 * why they do not read (`readAwayCharges`).
+	 */
+	awayCharges(nowMs: number): RoutineAwayChargesRead;
 	/**
 	 * After the daemon's settings reload: the bots' settings and System One read again (the account listing too when
 	 * `credentials` changed), the roots read again, the idle bots a root takes closed, and every bot asked again when a
@@ -86,10 +93,13 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 			return [...held].map(() => ({ micros: perRun }));
 		});
 	};
-	const charges = (nowMs: number, aside: BotAwayRunAside | undefined): RoutineAwayCharge[] => [
-		...readAwayCharges(agentDir, settings.getRoutineAwaySettings(), nowMs, input.report),
-		...working(aside),
-	];
+	// What does not read is passed on as it is (no room until it reads); a reset's whole day allowance stays beside the rest.
+	const charges = (nowMs: number, aside: BotAwayRunAside | undefined): RoutineAwayChargesRead => {
+		const read = readAwayCharges(agentDir, settings.getRoutineAwaySettings(), nowMs, input.report, {
+			setsAside: true,
+		});
+		return "unread" in read ? read : { ...read, charges: [...read.charges, ...working(aside)] };
+	};
 	const sources = botProcessSources({
 		...input,
 		otherAwayCharges: (nowMs, aside) => charges(nowMs, aside),

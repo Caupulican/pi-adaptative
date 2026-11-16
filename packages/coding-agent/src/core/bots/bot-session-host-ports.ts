@@ -9,6 +9,7 @@ import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-recei
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import type { TimerSource } from "../util/timer-port.ts";
@@ -62,10 +63,11 @@ export interface BotSessionHostPorts {
 	hostKind(): BotHostKind;
 	/**
 	 * Present on a host whose wider spend bound holds the bots' metered workers (the daemon's away day bound,
-	 * `routines.away.maxUsdPerDay`): whether the metered run `runId` of bot `agentId` (`BotMeteredRuns`) fits it now, its
-	 * own reservation aside. Absent: none holds them.
+	 * `routines.away.maxUsdPerDay`): why the metered run `runId` of bot `agentId` (`BotMeteredRuns`) does not fit it now,
+	 * its own reservation aside (`full`: no room; `unread`: charges on it do not read); undefined when it fits. Absent:
+	 * none holds them.
 	 */
-	meteredRunFits?(agentId: string, runId: string): boolean;
+	meteredRunHold?(agentId: string, runId: string): AwayMeteredRunHold | undefined;
 	/**
 	 * Whether a root session of another process that hosts bots works in `cwd`: this host (the daemon's) leaves the bots
 	 * that work there to it, opening none for that directory and closing an idle one (`leaveIdleToRoots`). Absent: none is left.

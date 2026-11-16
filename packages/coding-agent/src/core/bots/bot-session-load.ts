@@ -15,6 +15,7 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { HostLock } from "../remote/host-lock.ts";
+import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -90,8 +91,8 @@ export interface BotSessionLoadPorts {
 	spendCeilings(): readonly BotSpendCeiling[];
 	/** What kind of process hosts the bots (`BotSessionHostPorts.hostKind`). */
 	hostKind(): BotHostKind;
-	/** Whether a metered worker run of the bot fits the host's wider spend bound now (`BotSessionHostPorts.meteredRunFits`). */
-	meteredRunFits(agentId: string, runId: string): boolean;
+	/** Why a metered worker run of the bot does not fit the host's wider spend bound now (`BotSessionHostPorts.meteredRunHold`). */
+	meteredRunHold(agentId: string, runId: string): AwayMeteredRunHold | undefined;
 	warn(message: string): void;
 	/** What defines the bot's session and whether its model may run now. */
 	readonly admission: BotSessionAdmission;
@@ -198,7 +199,7 @@ export class BotSessionLoader {
 				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
 				now: () => this.ports.idleTimers().now(),
 				warn: (message) => this.ports.warn(message),
-				meteredRunFits: (runId) => this.ports.meteredRunFits(agentId, runId),
+				meteredRunHold: (runId) => this.ports.meteredRunHold(agentId, runId),
 			});
 			session = await createBotAgentSession({
 				agentId,
@@ -215,6 +216,7 @@ export class BotSessionLoader {
 				timers: this.ports.timers(),
 				host: {
 					workerRunCostBound: spend.workerRunCostBound,
+					workerRunModelHold: spend.workerRunModelHold,
 					// The bot daemon's watched commands start from the environment a root recorded where the bot works.
 					watchCommandBase: sender.watchCommandBase,
 					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.

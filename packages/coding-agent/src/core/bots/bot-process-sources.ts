@@ -11,9 +11,11 @@
  *   Metered spend is held per request to `workerDelegation.maxUsd` and to the away bound of one run
  *   (`routines.away.maxUsdPerRun`, bound "away"), and a metered turn is refused (`away_spend_exhausted`) while the day's
  *   away bound (`routines.away.maxUsdPerDay`), which the daemon's routines and channels share, has no room for one more
- *   run; the refusal ends when the oldest charge leaves the 24-hour window. A metered worker run of a bot, whatever the
- *   bot's own model, starts its metered requests only with that room (`meteredRunFits`), else they are refused as the
- *   day bound's. What a bot spent is charged once per report id to the daemon's ledger (`bot-away-charges.ts`), its
+ *   run, the refusal ending when the oldest charge leaves the 24-hour window, and refused (`away_spend_unread`) while
+ *   charges on that bound do not read, until they read again. A metered worker run of a bot, whatever the bot's own
+ *   model, starts its metered requests only with that room (`meteredRunHold`), else they are refused as the day bound's,
+ *   naming which of the two holds it, and a failover does not move a worker to a metered model the bound holds: it waits on
+ *   its own model for its usage reset. What a bot spent is charged once per report id to the daemon's ledger (`bot-away-charges.ts`), its
  *   metered part (each share by its own model, `BotChargeReport.meteredUsd`) counted on that bound, not to a session's
  *   cost view.
  * - System One: on as a session started with no choice resolves it (off in settings, or with no key never configured, is
@@ -37,9 +39,9 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { accountModelCatalogOf } from "../model-router/account-models.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { openSubscriptionAllowance } from "../provider-admission/subscription-allowance.ts";
-import { awayMeteredRunReserved } from "../routines/away-metered-runs.ts";
+import { type AwayMeteredRunHold, awayMeteredRunReserved } from "../routines/away-metered-runs.ts";
 import { awayRunMetered } from "../routines/away-routine-admission.ts";
-import { awaySpendMicros, type RoutineAwayCharge, routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
+import { awaySpendMicros, type RoutineAwayChargesRead, routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import type { TimerSource } from "../util/timer-port.ts";
@@ -74,9 +76,10 @@ export interface BotProcessSourcesInput {
 	report(message: string): void;
 	/**
 	 * What else is charged to the away bound now besides the routines' runs: the channels' turns, the bots' recorded
-	 * charges, and the metered runs of the bots working now (each at the bound of one run), but the one `aside` names.
+	 * charges, and the metered runs of the bots working now (each at the bound of one run), but the one `aside` names; or
+	 * why they do not read (`readAwayCharges`), when the bound has no room.
 	 */
-	otherAwayCharges(nowMs: number, aside: BotAwayRunAside): readonly RoutineAwayCharge[];
+	otherAwayCharges(nowMs: number, aside: BotAwayRunAside): RoutineAwayChargesRead;
 	/** Whether the host leaves the bots working in `cwd` to another (`BotSessionHostPorts.leavesTo`). */
 	leavesTo(cwd: string): boolean;
 }
@@ -143,11 +146,21 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 		);
 	};
 
-	/** A metered turn of `record` refused while the day's away bound has no room for one more run, until the oldest charge leaves it. */
+	/** Why the day's away bound holds the run `aside` names: no room for one more run (`full`), or charges that do not read. */
+	const awayHold = (aside: BotAwayRunAside): AwayMeteredRunHold | undefined => {
+		const room = awayRoom(aside);
+		return room.fits(0) ? undefined : room.unread ? "unread" : "full";
+	};
+
+	/**
+	 * A metered turn of `record` refused while the day's away bound has no room for one more run, until the oldest charge
+	 * leaves it, or while charges on it do not read (no known end: taken up again as such a refusal is).
+	 */
 	const awayRoomRefusal = (record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined => {
 		if (!isMeteredSpend(model, modelRegistry)) return undefined;
 		const room = awayRoom({ agentId: record.agentId });
 		if (room.fits(0)) return undefined;
+		if (room.unread) return { cause: "away_spend_unread", words: (text) => text.botTeam.botAwaySpendUnread };
 		return {
 			cause: "away_spend_exhausted",
 			words: (text) => text.botTeam.botAwaySpendExhausted,
@@ -233,7 +246,7 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 		warn: (message) => input.report(message),
 		modelRefusal: (record, model) => botModelRefusal(facts, record, model) ?? awayRoomRefusal(record, model),
 		// A bot's metered worker run starts only with room for one more run on the day's away bound, as its metered turn does.
-		meteredRunFits: (agentId, runId) => awayRoom({ agentId, runId }).fits(0),
+		meteredRunHold: (agentId, runId) => awayHold({ agentId, runId }),
 		spendCeilings: () => {
 			const ceilings: BotSpendCeiling[] = [
 				{ usd: settings.getWorkerDelegationSettings().maxUsd, bound: "worker" },

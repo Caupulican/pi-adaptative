@@ -6,6 +6,7 @@
  */
 
 import type { GatewayDecisionCode } from "../orchestration/capability-gateway.ts";
+import type { AwayMeteredRunRefusal } from "../routines/away-metered-runs.ts";
 import type { WorkerTreeBudgetField } from "./worker-tree-budget-coordinator.ts";
 
 export const WORKER_TREE_BUDGET_REASON_CODES: Readonly<Record<WorkerTreeBudgetField, string>> = {
@@ -54,15 +55,36 @@ export const AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS = {
 } as const satisfies BudgetRefusalReasons;
 
 /**
- * The refusal codes of such an attempt while the away day spend bound's charges do not read (a channel journal or the
- * channels directory): whether it has room is unknown, so the run could not be reserved.
+ * The refusal codes of such an attempt while the away day spend bound's charges do not read (a channel journal, the
+ * channels directory or the bots' charge record): whether it has room is unknown, so the run could not be reserved.
  */
 export const AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS = {
 	unpriced: "worker_run_model_unpriced",
 	exhausted: "worker_away_day_budget_unread",
 	noRoom:
-		"The away day spend bound (routines.away.maxUsdPerDay) cannot be read: the channel turns charged on it could not be read (the daemon's report names the file), so whether it has room is unknown and this run's metered spend was not reserved.",
+		"The away day spend bound (routines.away.maxUsdPerDay) cannot be read: charges on it (a channel journal, the channels directory or the bots' charge record) could not be read (the daemon's report names the file), so whether it has room is unknown and this run's metered spend was not reserved.",
 } as const satisfies BudgetRefusalReasons;
+
+/**
+ * The zero bound a metered attempt of a run away (or of a daemon-hosted bot's worker) is refused under when its run was
+ * not reserved on the away day bound, by why: each names its own aggregate and refusal codes, so the worker reads which cause stopped it.
+ */
+export const AWAY_DAY_BOUND_REFUSALS: Readonly<
+	Record<
+		AwayMeteredRunRefusal,
+		(runId: string) => { readonly runId: string; readonly refusalReasons: BudgetRefusalReasons }
+	>
+> = {
+	full: (runId) => ({ runId: `away-day-bound:${runId}`, refusalReasons: AWAY_DAY_BUDGET_REFUSAL_REASONS }),
+	unread: (runId) => ({
+		runId: `away-day-bound-unread:${runId}`,
+		refusalReasons: AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS,
+	}),
+	unwritten: (runId) => ({
+		runId: `away-day-bound-unwritten:${runId}`,
+		refusalReasons: AWAY_DAY_BUDGET_UNWRITTEN_REFUSAL_REASONS,
+	}),
+};
 
 /** The refusal codes of a budgeted delegation (`charter.envelope.budgetUsd`): the leader controller closes on them. */
 export const DELEGATION_BUDGET_REFUSAL_REASONS = {

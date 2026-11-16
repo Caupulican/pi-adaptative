@@ -21,7 +21,10 @@ export type SpawnedUsageReceiptDisposition = "persisted" | "pending" | "foreign_
 /**
  * Whether the recorded report `data` is this receipt. A receipt that charges a range (`from` and `through`) is the same
  * charge as a report of the same source (its session and file instance), range and usage, whatever model or date it was recorded with: a range fixed again
- * after the source's model changed is still the one charge. Any other matches on every field it records.
+ * after the source's model changed is still the one charge. Any other matches on every field it records but the model it
+ * names: a receipt delivered again after its source moved model (a worker's failover), or one an earlier build recorded
+ * under the model its worker was assigned, is still the one charge, and the record keeps the model it named first. The
+ * metered part a report fixed (`meteredUsd`) is not its identity either.
  */
 function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: SpawnedUsageReceiptOptions): boolean {
 	if (
@@ -39,8 +42,6 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		return false;
 	if (options.from !== undefined && options.through !== undefined) return true;
 	return (
-		(data.provider === undefined || data.provider === options.provider) &&
-		(data.model === undefined || data.model === options.model) &&
 		(data.goalId === undefined || data.goalId === options.goalId) &&
 		isDeepStrictEqual(data.usageComponents, options.usageComponents)
 	);

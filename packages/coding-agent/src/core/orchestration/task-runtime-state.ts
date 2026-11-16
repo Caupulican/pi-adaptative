@@ -333,3 +333,10 @@ export function attemptTurnOrigin(
 ): TurnOriginRecord | undefined {
 	return attempt.admittedTurnOrigin ?? attempt.dispatch.turnOrigin;
 }
+
+/** The model the attempt runs on (`runningModel`, set when it moved off its contract's first binding), else that binding. */
+export function attemptModelBinding(
+	attempt: Pick<AttemptRuntimeState, "runningModel" | "dispatch">,
+): OrchestrationModelBinding | undefined {
+	return attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+}
