@@ -61,6 +61,7 @@ import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import { BOT_MEMORY_BLOCK_HEADER } from "./bot-chat-text.ts";
+import { groupRoomSections, readGroupRoom } from "./bot-group-room.ts";
 import { type BotMemoryRuntime, botMemoryClosingWords } from "./bot-memory-closing.ts";
 import { appendBoundedFile, createMemoryHeader } from "./bot-memory-files.ts";
 import { assertBotId, isBotId } from "./bot-runtime-bindings.ts";
@@ -2171,33 +2172,9 @@ export class PersistentBotTeamStore {
 				!selectedTeam.memberAgentIds.includes(normId))
 		)
 			throw new Error("Bot is not a member of this group generation.");
-		const memberTeams: PersistentTeamRecord[] = [];
-		const teamMemoryExcerpts: string[] = [];
-		const allRecentTeamMessages: PersistentTeamMessage[] = [];
-
-		for (const team of this.teams.values()) {
-			if (team.teamId === teamId) {
-				memberTeams.push(team);
-				const teamPath = this.getTeamMemoryFilePath(team.teamId);
-				memoryFiles.push(teamPath);
-				if (existsSync(teamPath)) {
-					try {
-						const teamContent = readFileSync(teamPath, "utf8").trim();
-						const excerpt = teamContent.length > 1200 ? teamContent.slice(-1200) : teamContent;
-						teamMemoryExcerpts.push(`### Team Blackboard [${team.teamId}]:\n${excerpt}`);
-					} catch {
-						// Ignore unreadable team memory file
-					}
-				}
-				const msgs = this.listTeamMessages(team.teamId)
-					.filter((message) => message.teamIncarnationId === teamIncarnation(team))
-					.slice(-5);
-				allRecentTeamMessages.push(...msgs);
-			}
-		}
-
-		allRecentTeamMessages.sort((a, b) => a.timestamp - b.timestamp);
-		const recent5TeamMsgs = allRecentTeamMessages.slice(-5);
+		const memberTeams = selectedTeam ? [selectedTeam] : [];
+		if (selectedTeam) memoryFiles.push(this.getTeamMemoryFilePath(selectedTeam.teamId));
+		const room = selectedTeam ? readGroupRoom(this, selectedTeam) : undefined;
 
 		const lines: string[] = [
 			BOT_MEMORY_BLOCK_HEADER,
@@ -2223,21 +2200,7 @@ export class PersistentBotTeamStore {
 			lines.push(`\n#### Your Memory Blackboard Excerpt:\n${botExcerpt}`);
 		}
 
-		if (teamMemoryExcerpts.length > 0) {
-			lines.push(`\n#### Team Blackboards:\n${teamMemoryExcerpts.join("\n\n")}`);
-		}
-
-		if (recent5TeamMsgs.length > 0) {
-			lines.push(
-				"\n#### Recent Team Activity:\n" +
-					recent5TeamMsgs
-						.map((m) => {
-							const sender = m.sender.kind === "bot" ? m.sender.agentId : m.sender.kind;
-							return `- [${new Date(m.timestamp).toISOString()}] **${sender}**: ${m.text}`;
-						})
-						.join("\n"),
-			);
-		}
+		if (room) lines.push(...groupRoomSections(room));
 
 		lines.push(botMemoryClosingWords(runtime));
 

@@ -16,6 +16,7 @@ import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orc
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { agentMailTurnOrigin } from "../turn-origin.ts";
 import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
+import { groupMailRoomBlock, readGroupRoom } from "./bot-group-room.ts";
 import type {
 	BotDeliveryOrigin,
 	BotOperatorMessageDispatchResult,
@@ -99,7 +100,8 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 function sessionWords(
 	context: BotRuntimeContext,
 	message: string,
-	options: BotOperatorMessageOptions | undefined,
+	options: GroupMemberMessageOptions | undefined,
+	room: () => string,
 ): { readonly message: string; readonly origin: BotDeliveryOrigin } | undefined {
 	if (
 		options?.fromRoot ||
@@ -121,8 +123,19 @@ function sessionWords(
 		shown: message,
 		thirdParty: options?.fromRoutine?.thirdParty === true,
 	});
-	return { message: botMailPrompt(group, 1, message, false), origin };
+	// The group's room (its blackboard and recent activity) follows the words, as a worker's start carries it.
+	const block = room();
+	const prompt = botMailPrompt(group, 1, message, false);
+	return { message: block.length > 0 ? `${prompt}${BOT_MEMORY_BLOCK_SEPARATOR}${block}` : prompt, origin };
 }
+
+/** A send to one bot, and for a group member the group, its incarnation and the group's message it delivers. */
+type GroupMemberMessageOptions = BotOperatorMessageOptions & {
+	teamId?: string;
+	teamIncarnationId?: string;
+	/** The group's message this send delivers: the room the member reads leaves it out, since it is the mail itself. */
+	teamMessageId?: string;
+};
 
 /** Dispatches operator messages to bots and groups, one send at a time per bot generation. */
 export class BotOperatorDispatch {
@@ -146,7 +159,7 @@ export class BotOperatorDispatch {
 	async sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: BotOperatorMessageOptions & { teamId?: string; teamIncarnationId?: string },
+		options?: GroupMemberMessageOptions,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		assertBotId(normId);
@@ -202,7 +215,7 @@ export class BotOperatorDispatch {
 	private async dispatchOperatorMessageToBot(
 		context: BotRuntimeContext,
 		message: string,
-		options: BotOperatorMessageOptions | undefined,
+		options: GroupMemberMessageOptions | undefined,
 		assertCurrentBranch: () => void,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId: normId, teamId, teamIncarnationId } = context;
@@ -228,7 +241,11 @@ export class BotOperatorDispatch {
 		}
 		// The owner's word, a group's message and a routine's prompt to a bot with a session of its own never need the worker
 		// runtime: they are that session's turn, the owner's or under their own origin.
-		const words = ownerDirect ? { message, origin: "owner" as const } : sessionWords(context, message, options);
+		const room = () => {
+			const team = teamId === undefined ? undefined : store.getTeam(teamId);
+			return team ? groupMailRoomBlock(readGroupRoom(store, team, options?.teamMessageId)) : "";
+		};
+		const words = ownerDirect ? { message, origin: "owner" as const } : sessionWords(context, message, options, room);
 		if (words) {
 			let sessionBot = store.ensureBotForDispatch(
 				normId,
@@ -473,6 +490,7 @@ export class BotOperatorDispatch {
 				const botResult = await this.sendOperatorMessageToBot(memberId, contentForBots, {
 					teamId,
 					teamIncarnationId: teamIncarnation(team),
+					teamMessageId: messageId,
 					...(routine ? { fromRoutine: routine } : {}),
 				});
 				assertContext();

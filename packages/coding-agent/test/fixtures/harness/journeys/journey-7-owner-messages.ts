@@ -120,6 +120,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		secondCarried: false,
 		order: [] as number[],
 		teamOneBodies: [] as string[],
+		mentionRoom: undefined as { room: boolean; peerAnswer: boolean; mentionInRoom: boolean } | undefined,
 		teamTwoCount: 0,
 	};
 
@@ -166,6 +167,11 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			name: "j7-team-one-second",
 			check: (request) => {
 				seen.teamOneBodies.push(carries(request, TEAM_MENTION_BODY) ? "mention" : "group");
+				seen.mentionRoom = {
+					room: carries(request, "### The group's room"),
+					peerAnswer: carries(request, "It is two."),
+					mentionInRoom: carries(request, `**operator**: ${TEAM_MENTION}`),
+				};
 			},
 			reply: { content: [{ type: "text", text: "It is still three." }] },
 		},
@@ -308,6 +314,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		seen.teamOneBodies,
 		"both members read the group message, and only the mentioned one reads the mention, without its address",
 	).toEqual(["group", "mention"]);
+	expect(
+		seen.mentionRoom,
+		"the mention carries the group's room as a worker's start does: the other member's answer from the group's log, never the mention itself",
+	).toEqual({ room: true, peerAnswer: true, mentionInRoom: false });
 
 	// A mention of a bot the group does not hold is refused before any delivery or write.
 	const storedBefore = teamMessages(session, TEAM).length;

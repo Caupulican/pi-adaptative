@@ -552,8 +552,10 @@ acquired an agent binding is not a retained session. Retiring a worker removes i
 session counts but preserves its task records and transcript. A bot that runs as a worker reuses its
 existing direct or group runtime for later messages; different groups remain separate conversations. A bot that answers in
 a session of its own takes every message in that one session, a group's message included: its group turns sit beside its
-direct chat, each labelled with the group's room, and a group's message carries neither the group's blackboard nor its
-recent activity, which a worker's start carried, so a member reads the other members' answers only in the group's log.
+direct chat, each labelled with the group's room, and a group's message carries the room as a worker's start does: the
+end of the group's blackboard and the group's latest messages in its current incarnation (the message itself left out),
+read when the message is sent. The blackboard lies outside the bot's workspace, so it reads it there and a line of its
+answer is added to it when its turn ends.
 
 For a member that runs as a worker, group replies and automatic memory updates belong only to their originating group, and
 group prompts exclude direct-chat summaries, the shared bot blackboard and other groups' history. Older unscoped

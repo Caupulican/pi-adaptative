@@ -1,7 +1,8 @@
 /**
  * The words that close a bot's memory block, for the runtime that runs the bot (`BotMemoryRuntime`): each names only what
  * that runtime holds and does. A worker reports at its end and can inspect the root's chat with `zoom`; a bot's own
- * session holds no `zoom` and no team blackboard, and a line from each of its finished turns is added to its blackboard.
+ * session holds no `zoom`, reads a group's blackboard only in that group's mail (`bot-group-room.ts`), and a line from
+ * each of its finished turns is added to its blackboard.
  */
 
 /** What runs a bot whose memory block is composed. */
