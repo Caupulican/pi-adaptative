@@ -440,7 +440,9 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 		});
 		api.deliver(ownerLegUpdate(1, OWNER_ID, phoneWords));
 		await withDeadline(trace, "the CI watch leg's phone turn", phoneAnswered.promise);
-		await session.agent.waitForIdle();
+		// The phone turn's submission settles after its run (its channel batch, the owner pool's charge): the owner's
+		// terminal prompt below starts its own turn only once the foreground is free, as the other channel legs wait.
+		await withDeadline(trace, "the CI watch leg's phone turn settles", session.waitForForegroundIdle());
 		await withDeadline(trace, "the phone turn's answer reaches the chat", api.untilSent(1));
 
 		// The CI source of the checkout, as the session's CI resource opens it.
