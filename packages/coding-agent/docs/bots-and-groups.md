@@ -192,6 +192,16 @@ a goal it had taken up is not opened again for that goal, only for another goal 
 the request a bot's turn serves reaches one of its dollar bounds, the turn stops and its running goal is held (`blocked`,
 reason `spend_bound:`): no automatic recovery resumes it, and the owner's next words, which open a new request, do.
 
+A bot's own session runs the proactive review the main session runs (the research lane stays the main session's): once
+it has been idle for `proactivity.idleDelayMs` after `proactivity.minOwnerTurnsBetweenRuns` new owner turns, a review
+of its conversation with you and its goal may raise notes, which reach its session as a parent input (a turn of its own
+within `proactivity.maxTurnWakesPerDay`, else with your next message), so what it does with them reaches you in its
+chat. The review reads none of your memory: a bot's session holds none of it. Its caps are its own: the rolling-day
+`proactivity.maxUsdPerDay` and `maxTurnWakesPerDay` count the bot's own sessions (its home is their usage scope), and
+the owner turns since its last review are counted from its transcript's record of that review's spend, so a session
+loaded again (after each idle close) does not review again without new owner turns; `maxRunsPerSession` counts the
+reviews of one load.
+
 Where a bot's goal is read:
 
 | Reader | What it reads | Why |
@@ -200,6 +210,7 @@ Where a bot's goal is read:
 | `SavedSessionLedger` (`bot-owed-ledgers.ts`) | the saved session file of a closed bot | its usage wait, whether its goal is owed, and the goal it closed holding |
 | `bot-stop.ts` | the loaded session's goal, or the closed transcript's | the owner's stop pauses it |
 | the session's goal controller | its own goal | continuation, and its restore when the session loads |
+| the proactive review (`proactivity-controller.ts`) | the loaded session's goal | the summary the review weighs, and whether its result is still current |
 | `bot-session-turns.ts` | the loaded session's goal | the hold at a spend bound |
 
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that

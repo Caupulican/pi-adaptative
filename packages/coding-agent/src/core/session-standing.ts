@@ -60,8 +60,14 @@ export interface SessionCapabilities {
 	 * its plan executor included, and is never hosted in a worker process (`resolveSessionStanding`).
 	 */
 	readonly directsWorkers: boolean;
-	/** Runs the proactive lanes: proactive review and the research lane. */
-	readonly runsProactiveLanes: boolean;
+	/**
+	 * Runs the proactive review of its own conversation and goal (`proactivity-controller.ts`). A bot's review reads none
+	 * of the owner's memory (it holds neither `readsOwnerMemory` nor `ownsMemoryWrites`, so its review context is empty),
+	 * and its rolling-day spend and wake bounds count its own sessions alone (their usage scope is its home).
+	 */
+	readonly runsProactiveReview: boolean;
+	/** Runs the research lane: idle research on the owner's work (`research-lane-controller.ts`). */
+	readonly runsResearchLane: boolean;
 	/** Carries the owner's work from survey to delivery: the work lifecycle prompt and its rule. */
 	readonly ownsWorkLifecycle: boolean;
 	/** Compacts its own context by a note it writes: `self_compact`, and the self-monitoring lines that ask for the note. */
@@ -107,7 +113,8 @@ const FLAGS: Readonly<Record<FlagCapability, Row>> = {
 	answersForCheckout: [true, false, false, false],
 	managesBots: [true, false, false, false],
 	directsWorkers: [true, false, true, false],
-	runsProactiveLanes: [true, false, false, false],
+	runsProactiveReview: [true, false, true, false],
+	runsResearchLane: [true, false, false, false],
 	ownsWorkLifecycle: [true, false, false, false],
 	compactsOwnContext: [true, false, true, false],
 	holdsOwnDoubts: [true, false, false, false],

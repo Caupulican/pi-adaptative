@@ -3,6 +3,7 @@ import { type Static, Type } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
 import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../cost/usage-records.ts";
 import { isOwnerSpokenInputId } from "../owner-input-ledger.ts";
 import { messageContentText } from "../util/message-content-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -185,10 +186,32 @@ function conversationEntries(entries: readonly SessionEntry[]): EntryText[] {
 
 /** Inputs the owner spoke on the active branch: a hidden internal turn has no input id, and a peer's message has an extension one. */
 export function countOwnerTurns(entries: readonly SessionEntry[]): number {
-	return entries.filter(
-		(entry) =>
-			entry.type === "message" && entry.ownerInputId !== undefined && isOwnerSpokenInputId(entry.ownerInputId),
-	).length;
+	return entries.filter(isOwnerTurn).length;
+}
+
+function isOwnerTurn(entry: SessionEntry): boolean {
+	return entry.type === "message" && entry.ownerInputId !== undefined && isOwnerSpokenInputId(entry.ownerInputId);
+}
+
+/**
+ * The owner turns on the branch before the last proactive review that spent on it (its last `proactivity` usage record),
+ * 0 when none did: the review's own durable mark, read where the session was loaded again since. A review's records land
+ * while no message is added (a new message discards it), so the count is the one the review started at.
+ */
+export function ownerTurnsAtLastReview(entries: readonly SessionEntry[]): number {
+	let turns = 0;
+	let atReview = 0;
+	for (const entry of entries) {
+		if (isOwnerTurn(entry)) turns++;
+		else if (
+			entry.type === "custom" &&
+			entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE &&
+			isPlainRecord(entry.data) &&
+			entry.data.route === "proactivity"
+		)
+			atReview = turns;
+	}
+	return atReview;
 }
 
 /** Digests of notes already delivered on this branch, and the newest few as text for the review. */

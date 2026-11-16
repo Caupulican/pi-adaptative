@@ -98,7 +98,8 @@ export interface BackgroundLaneControllerDeps
 		| "answersForCheckout"
 		| "managesBots"
 		| "directsWorkers"
-		| "runsProactiveLanes"
+		| "runsProactiveReview"
+		| "runsResearchLane"
 		| "lendsOwnerReach"
 	>;
 	/** The session's confinement: with its tools and envelope, the ceiling it holds its workers to (`worker-parent-ceiling.ts`). */

@@ -40,7 +40,7 @@ export interface ResearchLaneControllerSettingsSource {
 
 export interface ResearchLaneControllerDeps extends WorkerCeilingSource {
 	isDisposed(): boolean;
-	readonly standing: Pick<SessionCapabilities, "runsProactiveLanes" | "lendsOwnerReach">;
+	readonly standing: Pick<SessionCapabilities, "runsResearchLane" | "lendsOwnerReach">;
 	getSessionId(): string;
 	getCwd(): string;
 	getAgentDir(): string;
@@ -129,7 +129,7 @@ export class ResearchLaneController {
 	}
 
 	scheduleFromIdle(): void {
-		if (this._isRunning || this._aborted || this.deps.isDisposed() || !this.deps.standing.runsProactiveLanes) return;
+		if (this._isRunning || this._aborted || this.deps.isDisposed() || !this.deps.standing.runsResearchLane) return;
 		const settingsManager = this.deps.getSettingsManager();
 		const research = settingsManager.getResearchLaneSettings();
 		const { mode } = settingsManager.getAutonomySettings();
