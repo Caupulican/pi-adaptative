@@ -9,7 +9,7 @@ import type { CompactionResult, CompactionSettings } from "../kernel/compaction/
 import { messageRevision } from "../kernel/message-revision.ts";
 import type { CustomMessage } from "../kernel/messages.ts";
 import { classifyFailure } from "../kernel/reliability/index.ts";
-import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "../kernel/types.ts";
 import {
 	createVerificationDismissalDetails,
@@ -237,7 +237,7 @@ import {
 	type RepositoryWorkEvidenceScope,
 } from "./objective-execution/repository-mutation-observer.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import type { CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
+import type { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import type { DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
@@ -1503,7 +1503,7 @@ export class AgentSession {
 			getCompactionTriggerTokens: () => this._compactionSupport.getHardTriggerTokens(),
 			estimateLineageRemainingRequests: () =>
 				this._cache.knowledge.lineage(this.sessionId, this._foregroundLineage(), Date.now()),
-			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
+			recordCacheDecision: (decision) => this._cache.recordDecision(decision),
 			sanctionCacheBreak: (kind, reason, target) => {
 				const model = this.model;
 				this._cache.custody.sanction(
@@ -1532,7 +1532,10 @@ export class AgentSession {
 			canRetrieveTextArtifacts: () => this._runtimeBuilder.getRegisteredTool("artifact_retrieve") !== undefined,
 			getMutationScope: () => this.mutationScope,
 			getMutationAnnouncer: () => this._shellSessionKey,
-			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
+			notifyTerminal: (records, wakeParent) => {
+				this._agentEvents.noteToolTerminals(records);
+				return this._terminalHandoffs.notifyTools(records, wakeParent);
+			},
 			emit: (event) => this._emit(event),
 			onRunningTasksChanged: () => this._notifySystemSwitchAvailability(),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -1620,7 +1623,7 @@ export class AgentSession {
 			},
 			getLastSentRequest: () => this._cache.lastSentRequest,
 			getCacheEconomics: (model, now) => this._cache.compactionEconomics(model, now),
-			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
+			recordCacheDecision: (decision) => this._cache.recordDecision(decision),
 			recordCompactionOutcome: (outcome) => this._cache.recordCompactionOutcome(outcome),
 		});
 		this._selfCompaction = new SelfCompactionController({
@@ -1909,7 +1912,7 @@ export class AgentSession {
 				}
 				this.ownerSystemPrompt.observeRequest(context.systemPrompt ?? "", model);
 				this._foregroundRecovery.toolManifests.offerRoot(sourceContext.tools, this._runtimeBuilder);
-				this._guardCacheSurface();
+				this._cache.guardSurface();
 				this._toolSelection.observeProviderRequest(
 					requestId,
 					formatModelRouterModel(model),
@@ -3237,14 +3240,6 @@ export class AgentSession {
 	/** Compaction call-site delegation to {@link ContextPipeline.buildCompactionPreDigest}. */
 	private _buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
 		return this._pipeline.buildCompactionPreDigest((type, data) => this.sessionManager.appendCustomEntry(type, data));
-	}
-
-	private _guardCacheSurface(snapshot?: SessionRequestSnapshotInput, conversation?: string): void {
-		this._cache.guardSurface(snapshot, conversation);
-	}
-
-	private _recordCacheDecision(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void {
-		this._cache.recordDecision(decision);
 	}
 
 	private _refreshAfterCompaction(): void {

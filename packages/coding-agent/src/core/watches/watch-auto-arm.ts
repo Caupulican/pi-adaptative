@@ -7,7 +7,8 @@
  * tells its result on the owner's phone besides waking the session. What was armed, and what could not be (the session's
  * watch slots are full), is told to the model in one note per call, steered into the running turn.
  *
- * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once.
+ * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once. A call
+ * handed off to the background is read when its task reaches its terminal, from the task's output.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -208,6 +209,17 @@ function resultText(result: unknown): string {
 		.join("\n");
 }
 
+/** The stub a call handed off to the background ends with (`BackgroundToolTaskController.handoff`): its task, running. */
+function isBackgroundHandoff(result: unknown): boolean {
+	const details = result && typeof result === "object" ? Reflect.get(result, "details") : undefined;
+	return (
+		details !== null &&
+		typeof details === "object" &&
+		typeof Reflect.get(details, "taskId") === "string" &&
+		Reflect.get(details, "status") === "running"
+	);
+}
+
 function shortHash(text: string): string {
 	return createHash("sha256").update(text).digest("hex").slice(0, 12);
 }
@@ -243,12 +255,23 @@ export class WatchAutoArm {
 		if (call) this.started.set(toolCallId, call);
 	}
 
-	/** A tool call ended: what its output says it started is armed after the arms of the calls that ended before it. */
+	/**
+	 * A tool call ended: what its output says it started is armed after the arms of the calls that ended before it. A call
+	 * handed off to the background ended with a stub; it is read at its terminal instead ({@link noteTerminal}).
+	 */
 	noteEnd(toolCallId: string, result: unknown): void {
+		if (!isBackgroundHandoff(result)) this.armAfter(toolCallId, resultText(result));
+	}
+
+	/** A call handed off to the background reached its terminal with `output`. */
+	noteTerminal(toolCallId: string, output: string): void {
+		this.armAfter(toolCallId, output);
+	}
+
+	private armAfter(toolCallId: string, output: string): void {
 		const call = this.started.get(toolCallId);
 		if (!call) return;
 		this.started.delete(toolCallId);
-		const output = resultText(result);
 		this.queue = this.queue
 			.then(() => this.armFor(call, output))
 			.catch((error: unknown) => {

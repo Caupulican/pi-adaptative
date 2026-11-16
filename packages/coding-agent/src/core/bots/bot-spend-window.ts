@@ -28,6 +28,7 @@ import { ACTIVE_ATTEMPT_STATUSES } from "../delegation/delegation-spend.ts";
 import type { RunCostBound } from "../delegation/parent-execution-context.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { ROUTINE_COMPLETION_TYPE } from "../routines/routine-parent-input.ts";
 import { entryTurnOrigin, isOutsideInputKind, turnOriginOf } from "../turn-origin.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { BotSpendCeiling } from "./bot-session-turns.ts";
@@ -64,6 +65,15 @@ function entryDetails(entry: SessionEntry): unknown {
 		? entry.details
 		: entry.type === "message" && entry.message.role === "custom"
 			? entry.message.details
+			: undefined;
+}
+
+/** The custom type of a custom message an entry holds; undefined for any other entry. */
+function entryCustomType(entry: SessionEntry): string | undefined {
+	return entry.type === "custom_message"
+		? entry.customType
+		: entry.type === "message" && entry.message.role === "custom"
+			? entry.message.customType
 			: undefined;
 }
 
@@ -220,7 +230,7 @@ export class BotSpendWindows {
 			const kind = turnOriginOf(message)?.k;
 			if (kind !== undefined && isOutsideInputKind(kind)) {
 				windowId =
-					kind === "routine" && message.role === "custom"
+					message.role === "custom" && message.customType === ROUTINE_COMPLETION_TYPE
 						? this.windowOfServed(servedInput(message.details), snapshot, 0)?.windowId
 						: undefined;
 				if (windowId === undefined) return { usd: 0, meteredUsd: 0 };
@@ -331,7 +341,7 @@ export class BotSpendWindows {
 			if (kind !== undefined && isOutsideInputKind(kind)) {
 				// A watch's wake belongs to the window of the entry it was armed at; any other outside input opens its own.
 				const armedAt =
-					kind === "routine" && depth < 8
+					entryCustomType(entry) === ROUTINE_COMPLETION_TYPE && depth < 8
 						? this.windowOfServed(servedInput(entryDetails(entry)), snapshot, depth)
 						: undefined;
 				windowId = armedAt?.windowId ?? this.windowIdOf(entry.id);

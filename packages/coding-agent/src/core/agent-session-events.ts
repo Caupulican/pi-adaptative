@@ -346,6 +346,11 @@ export class AgentSessionEvents {
 		}
 	}
 
+	/** Background tool calls that reached their terminal: a handed-off call's output is read for the waits it started. */
+	noteToolTerminals(records: readonly { readonly toolCallId: string; readonly output?: string }[]): void {
+		for (const record of records) this.autoWatches.noteTerminal(record.toolCallId, record.output ?? "");
+	}
+
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		return this.ports.foregroundRecovery().willRetryAfterAgentEnd(event);
 	}
