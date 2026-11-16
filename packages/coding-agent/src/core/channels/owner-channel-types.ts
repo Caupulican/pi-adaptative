@@ -67,7 +67,7 @@ export interface OwnerChannelDelivery {
 	 * Holds the session's moves to metered (API) models to the owner pool's gate until the returned release: an owner turn
 	 * accepted on a subscription charges the pool nothing until it moves (`owner-metered-moves.ts`). Absent: not held.
 	 */
-	holdMeteredMoves?(gate: MeteredMoveGate): () => void;
+	holdMeteredMoves(gate: MeteredMoveGate): () => void;
 	/** Aborts the run that `ref` opened. */
 	abortRun(ref: string): void;
 }

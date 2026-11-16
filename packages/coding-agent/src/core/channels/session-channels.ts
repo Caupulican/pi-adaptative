@@ -598,7 +598,7 @@ export class SessionChannels {
 		// Engaged, the pass stops the owner runs (the kill switches); lifted, it offers the owner messages that waited.
 		if (this.deps.subscribeEmergencyStop)
 			this.unsubscribes.push(this.deps.subscribeEmergencyStop(() => this.onActivity()));
-		const releaseMoves = this.deps.ownerDelivery?.holdMeteredMoves?.(this.ownerMoves);
+		const releaseMoves = this.deps.ownerDelivery?.holdMeteredMoves(this.ownerMoves);
 		if (releaseMoves) this.unsubscribes.push(releaseMoves);
 		this.syncOwnerSubscription();
 		this.syncBuiltIns();
