@@ -6,9 +6,11 @@
  *   no longer open is released, as nothing waits on it any more;
  * - the metered spend those bots' turns made answering each goal's mail, which the goal's budget counts, kept while the
  *   goal's objective is in the session's store;
- * - the hop of each bot's reply handed to a worker's mailbox, kept until the worker turn the reply started or joined has
- *   ended, or that worker is gone: a mail that turn sends continues the reply's chain (`hopAfter`), in a goal or not,
- *   so a worker and a bot answering each other stop at `MAX_BOT_MAIL_HOPS`.
+ * - the hop of each bot's reply handed to a worker's mailbox, kept while the reply is being handed on, while the worker
+ *   turn it started or joined runs, and while the mailbox holds it unread (it may yet start or join one), until that worker
+ *   is gone (`replyTurnOver`): a mail that turn sends continues the reply's chain (`hopAfter`), in a goal or not, so a
+ *   worker and a bot answering each other stop at `MAX_BOT_MAIL_HOPS`. A reply its mailbox read, refused or forgot with
+ *   no turn of it running is released with it.
  *
  * It is a file of its own with its own version, which no older build lists (they list a session directory by `.jsonl`)
  * and the orchestration store never holds, so mail takes nothing of a goal's evidence bound. The one process hosting the
@@ -207,7 +209,7 @@ export interface WorkerMailLedgerDeps {
 	now(): number;
 	/** Tells the owner, in the owner's language. */
 	warn(message: string): void;
-	/** Whether the worker turn a reply started or joined has ended, or its worker is gone (`replyTurnOver`). */
+	/** Whether no turn of the worker reads the reply's hop any more, nor can (`replyTurnOver`). */
 	replyTurnOver(turn: ReplyTurn): boolean;
 }
 
@@ -216,6 +218,8 @@ export class WorkerMailLedger {
 	private readonly deps: WorkerMailLedgerDeps;
 	private loaded: { readonly sessionId: string; writable: boolean; state: WorkerMailState } | undefined;
 	private readonly listeners = new Set<() => void>();
+	/** The replies being handed on in this process (`replyHanded` to `replyLeft`): kept before the mailbox holds them. */
+	private readonly handing = new Set<string>();
 
 	constructor(deps: WorkerMailLedgerDeps) {
 		this.deps = deps;
@@ -312,8 +316,12 @@ export class WorkerMailLedger {
 		}));
 	}
 
-	/** Records, before it is handed on, the hop of a reply a worker's mailbox takes under `messageId`. */
+	/**
+	 * Records, before it is handed on, the hop of a reply a worker's mailbox takes under `messageId`; it is kept as being
+	 * handed on until `replyLeft`.
+	 */
 	replyHanded(reply: Omit<ReplyTurn, "attemptId">): void {
+		this.handing.add(reply.messageId);
 		this.change((state) => {
 			const held = state.replies.find((entry) => entry.messageId === reply.messageId);
 			if (held?.hop === reply.hop && held.worker === reply.worker) return state;
@@ -336,6 +344,15 @@ export class WorkerMailLedger {
 	/** The reply `messageId` reached no worker turn (its worker ended): no turn continues its chain. */
 	replyDropped(messageId: string): void {
 		this.change((state) => ({ ...state, replies: state.replies.filter((entry) => entry.messageId !== messageId) }));
+	}
+
+	/**
+	 * The hand-on of the reply `messageId` returned, taken or not: its hop is kept from now on only while a turn of the
+	 * worker can read it (`replyTurnOver`), so a reply the mailbox did not take is released here.
+	 */
+	replyLeft(messageId: string): void {
+		if (!this.handing.delete(messageId)) return;
+		this.change((state) => state);
 	}
 
 	private state(): WorkerMailState {
@@ -378,11 +395,19 @@ export class WorkerMailLedger {
 		return { sessionId, writable: true, state: EMPTY };
 	}
 
-	/** Takes the next state once written, the replies whose turn is over left out; nothing is written for no change. */
+	/**
+	 * Takes the next state once written, the replies whose turn is over left out (one being handed on is kept); nothing is
+	 * written for no change.
+	 */
 	private change(next: (state: WorkerMailState) => WorkerMailState): void {
 		const current = this.state();
 		const proposed = next(current);
-		const state = { ...proposed, replies: proposed.replies.filter((reply) => !this.deps.replyTurnOver(reply)) };
+		const state = {
+			...proposed,
+			replies: proposed.replies.filter(
+				(reply) => this.handing.has(reply.messageId) || !this.deps.replyTurnOver(reply),
+			),
+		};
 		if (JSON.stringify(state) === JSON.stringify(current)) return;
 		const loaded = this.loaded;
 		const sessionFile = loaded?.writable ? this.deps.sessionFile() : undefined;

@@ -99,7 +99,8 @@ export class LeaderController {
 	private mailRecheckAt: number | undefined;
 	/** The mail of this process's workers being sent now: recorded on its goal, not yet in the bot's inbox. */
 	private readonly mailsInFlight = new Set<string>();
-	private running: Promise<void> | undefined;
+	/** A reconcile pass runs: set before its first step, which may change the store or the mail synchronously. */
+	private running = false;
 	private again = false;
 	/** Deliveries this process saw land; the session's parent-input ledger is the durable answer. */
 	private readonly delivered = new Set<string>();
@@ -456,20 +457,26 @@ export class LeaderController {
 			this.again = true;
 			return;
 		}
-		this.running = (async () => {
-			try {
-				do {
-					this.again = false;
-					await this.reconcile();
-				} while (this.again && !this.disposed);
-			} catch (error) {
-				harnessLog.warn("leaders", "a leader reconcile pass failed", () => ({
-					error: error instanceof Error ? error.message : String(error),
-				}));
-			} finally {
-				this.running = undefined;
-			}
-		})();
+		// Taken before the pass starts: its synchronous first steps (the mail kept for the goals, the notices acknowledged in
+		// the store) tell this controller's own listeners at once, whose trigger then asks for one more pass, not a second.
+		this.running = true;
+		void this.reconcileUntilSettled();
+	}
+
+	/** Runs passes while one more is asked for; `running` is cleared however it ends. */
+	private async reconcileUntilSettled(): Promise<void> {
+		try {
+			do {
+				this.again = false;
+				await this.reconcile();
+			} while (this.again && !this.disposed);
+		} catch (error) {
+			harnessLog.warn("leaders", "a leader reconcile pass failed", () => ({
+				error: error instanceof Error ? error.message : String(error),
+			}));
+		} finally {
+			this.running = false;
+		}
 	}
 
 	private async reconcile(): Promise<void> {

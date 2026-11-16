@@ -6,10 +6,12 @@
  * does. A worker's mail to such a bot (`workerMail`) is answered the same way, and the reply is handed to that worker's
  * mailbox (`toWorker`), or to this session when the worker has ended. The session keeps its workers' mail
  * (`WorkerMailLedger`): each goal's mail, which holds the goal open until its reply is handed on, and the hop of each
- * reply handed to a worker, which the mail of the worker turn it starts or joins continues. A refusal of the ask reaches
- * the orchestrator's model in English (`botFailureForModel`).
+ * reply handed to a worker, which the mail of the worker turn it starts or joins continues, kept while the worker's mailbox
+ * holds the reply unread or a turn of it runs. A refusal of the ask reaches the orchestrator's model in English
+ * (`botFailureForModel`).
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { BotToolPort } from "../delegation/bot-creation.ts";
@@ -19,6 +21,7 @@ import type { LeaderController } from "../delegation/leader-controller.ts";
 import {
 	type SessionRootWorkerAgentMessageOptions,
 	type WorkerAgentControlPort,
+	WorkerAgentMailbox,
 	type WorkerAgentView,
 	workerAgentMessageId,
 } from "../delegation/worker-agent-control.ts";
@@ -77,7 +80,8 @@ export class RootBots {
 			sessionFile: () => deps.getSessionManager().getSessionFile(),
 			now: () => deps.getTimers().port("orchestration").now(),
 			warn,
-			replyTurnOver: (turn) => replyTurnOver(ports.snapshot(), turn),
+			replyTurnOver: (turn) =>
+				replyTurnOver(ports.snapshot(), turn, () => this.replyUnread(deps, turn.worker, turn.messageId)),
 		});
 		this.replies = new RootBotReplies({
 			agentDir: () => deps.getAgentDir(),
@@ -132,20 +136,49 @@ export class RootBots {
 		const idempotencyKey = botReplyMessageKey(reply.replyId);
 		const messageId = workerAgentMessageId(this.sessionId(), idempotencyKey);
 		this.workerMail.replyHanded({ messageId, worker: runtime, hop: reply.hop });
-		const result = this.ports.followUp(runtime, reply.text, {
-			idempotencyKey,
-			agentWords: reply.thirdParty ? { turnOrigin: thirdPartyReplyOrigin(reply) } : {},
-			...(goal !== undefined ? { delegationObjectiveId: goal } : {}),
-		});
-		if (result.messageId) {
-			const running = result.steering ? this.ports.snapshot().agents[runtime]?.activeAttemptId : undefined;
-			if (running !== undefined) this.workerMail.replyJoined(messageId, running);
-			return "taken";
+		try {
+			const result = this.ports.followUp(runtime, reply.text, {
+				idempotencyKey,
+				agentWords: reply.thirdParty ? { turnOrigin: thirdPartyReplyOrigin(reply) } : {},
+				...(goal !== undefined ? { delegationObjectiveId: goal } : {}),
+			});
+			if (result.messageId) {
+				const running = result.steering ? this.ports.snapshot().agents[runtime]?.activeAttemptId : undefined;
+				if (running !== undefined) this.workerMail.replyJoined(messageId, running);
+				return "taken";
+			}
+			if (result.skipReason?.startsWith("agent_")) {
+				this.workerMail.replyDropped(messageId);
+				return "ended";
+			}
+			throw new Error(`worker ${runtime} did not take it: ${result.skipReason ?? "no reason given"}`);
+		} finally {
+			// Taken or not, the reply's hop now lives as long as a turn of the worker can read it.
+			this.workerMail.replyLeft(messageId);
 		}
-		if (result.skipReason?.startsWith("agent_")) {
-			this.workerMail.replyDropped(messageId);
-			return "ended";
+	}
+
+	/**
+	 * Whether the worker's mailbox holds the reply's message unread, read without a claim as the retention pass reads it. A
+	 * mailbox that does not read holds it: what became of the message is unknown, so its hop is kept (until the worker is
+	 * gone) rather than lost to a turn that may still read it.
+	 */
+	private replyUnread(deps: BackgroundLaneControllerDeps, worker: string, messageId: string): boolean {
+		try {
+			const message = new WorkerAgentMailbox({
+				agentDir: deps.getAgentDir(),
+				orchestrationHome: deps.getOrchestrationHome(),
+				parentSessionId: this.sessionId(),
+				agentId: worker,
+			}).getMessage(messageId);
+			return message !== undefined && message.deliveredAt === undefined && message.failedAt === undefined;
+		} catch (error) {
+			harnessLog.warn("bots", "a worker's mailbox did not read; the hop of a reply handed to it is kept", () => ({
+				worker,
+				messageId,
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			return true;
 		}
-		throw new Error(`worker ${runtime} did not take it: ${result.skipReason ?? "no reason given"}`);
 	}
 }

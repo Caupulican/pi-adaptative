@@ -12,7 +12,11 @@ import { existsSync, type FSWatcher, mkdirSync, renameSync, statSync, unlinkSync
 import { basename, join } from "node:path";
 import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readBoundedDirectoryNamesSync, readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
+import {
+	BoundedReadError,
+	readBoundedDirectoryNamesSync,
+	readOptionalBoundedTextFileSync,
+} from "../util/bounded-file.ts";
 import { KeyedSignal } from "../util/keyed-signal.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -134,11 +138,32 @@ const REASON_MAX_CHARS = 512;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 4096;
 const FILE_SUFFIX = ".json";
+/** The latest time an ISO string can name, the longest one a timestamp reads as. */
+const LONGEST_TIME = new Date(8.64e15).toISOString();
 
 /** Wakes, in this process, whoever waits on a recipient file; keyed by its path. */
 const inboxChanges = new KeyedSignal();
 /** One directory watcher per inbox directory in this process, shared by its subscribers. */
 const directoryWatchers = new Map<string, { watcher: FSWatcher | null; references: number }>();
+
+/** What a recipient file holds, as it is written and as its reader bounds it (`MAX_FILE_BYTES`). */
+function fileText(state: InboxState): string {
+	return `${JSON.stringify(state)}\n`;
+}
+
+/**
+ * The most one held entry can add to its file when it settles, whichever way: its receipt with the longest reason and the
+ * record of its expiry, every character of them written as long as JSON writes one (six bytes, `\u0000`), and one more
+ * digit of its failed collections.
+ */
+function settleReserveBytes(limits: InboxLimits): number {
+	const longest = (chars: number) => "\u0000".repeat(chars);
+	const identity = { id: "x".repeat(128), sender: longest(IDENTITY_MAX_CHARS), createdAt: LONGEST_TIME };
+	const receipt = { ...identity, bodyDigest: "0".repeat(64), settledAt: LONGEST_TIME, outcome: "delivered" };
+	const expired = { ...identity, expiredAt: LONGEST_TIME };
+	const added = `${JSON.stringify({ ...receipt, reason: longest(REASON_MAX_CHARS) })},${JSON.stringify(expired)},`;
+	return Buffer.byteLength(added, "utf8") + String(limits.maxAttempts).length;
+}
 
 function digestOf(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
@@ -326,15 +351,22 @@ export class MessageInbox {
 	private readonly label: string;
 	private readonly limits: InboxLimits;
 	private readonly now: () => number;
+	/** Room each held entry keeps in its file for its settling (`settleReserveBytes`). */
+	private readonly settleReserve: number;
 
 	constructor(options: MessageInboxOptions) {
 		this.dir = options.dir;
 		this.label = options.label;
 		this.limits = { ...DEFAULT_INBOX_LIMITS, ...options.limits };
 		this.now = options.now ?? Date.now;
+		this.settleReserve = settleReserveBytes(this.limits);
 	}
 
-	/** Holds `input` for its recipient. Retrying the same sender and id is idempotent. */
+	/**
+	 * Holds `input` for its recipient. Retrying the same sender and id is idempotent. A message is refused as `full` when
+	 * its file, as written, with room kept for each held entry to settle, would pass the bound its reader holds it to:
+	 * a body measured raw can write several times longer, and a file past that bound never reads again.
+	 */
 	enqueue(input: InboxEnqueueInput): InboxEnqueueResult {
 		const id = messageId(input.id);
 		const sender = identityText(input.sender, "sender");
@@ -390,7 +422,13 @@ export class MessageInbox {
 				createdAt: new Date(nowMs).toISOString(),
 				attempts: 0,
 			};
-			return { ...state, entries: [...state.entries, held] };
+			const next = { ...state, entries: [...state.entries, held] };
+			const written = Buffer.byteLength(fileText(next), "utf8") + next.entries.length * this.settleReserve;
+			if (written > MAX_FILE_BYTES) {
+				result = { status: "full", reason: "this recipient's held messages reached their size bound" };
+				return state;
+			}
+			return next;
 		});
 		return result;
 	}
@@ -533,7 +571,15 @@ export class MessageInbox {
 
 	private readIfPresent(recipient: string): InboxState | undefined {
 		const file = this.fileFor(recipient);
-		const raw = readOptionalBoundedTextFileSync(file, MAX_FILE_BYTES, this.label);
+		let raw: string | undefined;
+		try {
+			raw = readOptionalBoundedTextFileSync(file, MAX_FILE_BYTES, this.label);
+		} catch (error) {
+			// A file past the bound its writers keep (an earlier build bounded the bodies alone) is no inbox this build reads.
+			if (error instanceof BoundedReadError && error.reason === "limit")
+				throw new InboxCorruptError(this.label, file, error.message);
+			throw error;
+		}
 		if (raw === undefined) return undefined;
 		try {
 			return parseState(raw, recipient, this.limits);
@@ -558,9 +604,9 @@ export class MessageInbox {
 				}
 				return;
 			}
-			const encoded = JSON.stringify(next);
-			if (encoded === JSON.stringify(current)) return;
-			writeFileAtomicSync(file, `${encoded}\n`, { mode: 0o600 });
+			const encoded = fileText(next);
+			if (encoded === fileText(current)) return;
+			writeFileAtomicSync(file, encoded, { mode: 0o600 });
 			changed = true;
 		});
 		if (changed) inboxChanges.notify(file);
