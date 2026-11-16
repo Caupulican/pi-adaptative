@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import { englishText } from "../language/interface-text.ts";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
-import { monotonicNow, type TimerPort } from "../util/timer-port.ts";
+import { monotonicNow, OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { NO_CI_SOURCE, NO_READER } from "./github-watch-poller.ts";
 import {
 	describeGithubWatchSource,
@@ -73,6 +73,8 @@ export interface AutoWatchRequest {
 	readonly condition: GithubWatchSource;
 	readonly expiresAt: number;
 	readonly parentToolName: string;
+	/** When the call it follows began, on `OWNER_STOP_CLOCK`: an owner's stop made since refuses the arming. */
+	readonly callStartedAt: number;
 }
 
 /**
@@ -122,6 +124,8 @@ interface StartedCall {
 	 * (`GithubWatchReader.runsCreatedSince`), so a run or release GitHub created before it was not started by the call.
 	 */
 	readonly startedAt: number;
+	/** When the call began on `OWNER_STOP_CLOCK`, the clock an owner's stop is dated on: what it started after a stop is not armed. */
+	readonly stopClockStartedAt: number;
 	readonly pushes: boolean;
 	readonly dispatches: readonly DispatchedWorkflow[];
 	readonly releases: boolean;
@@ -215,7 +219,10 @@ function runsReleaseScript(tokens: readonly string[]): boolean {
 }
 
 /** What a call starting now may start outside the session; undefined for a call that starts nothing a watch reads. */
-export function classifyStartedCall(toolName: string, args: unknown): Omit<StartedCall, "startedAt"> | undefined {
+export function classifyStartedCall(
+	toolName: string,
+	args: unknown,
+): Omit<StartedCall, "startedAt" | "stopClockStartedAt"> | undefined {
 	const segments = commandSegments(toolName, args).map(invoked);
 	const call = {
 		toolName,
@@ -348,6 +355,7 @@ export class WatchAutoArm {
 				...call,
 				context: port.armingContext(),
 				startedAt: monotonicNow(),
+				stopClockStartedAt: OWNER_STOP_CLOCK.now(),
 			});
 	}
 
@@ -419,6 +427,7 @@ export class WatchAutoArm {
 						condition: source,
 						expiresAt: port.timers.now() + deadlineMs,
 						parentToolName: call.toolName,
+						callStartedAt: call.stopClockStartedAt,
 					},
 					context,
 				);

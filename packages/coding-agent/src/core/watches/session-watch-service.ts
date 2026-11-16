@@ -121,6 +121,11 @@ export interface SessionWatchArmRequest {
 	readonly armedBy: SessionWatchArmer;
 	/** Tell the owner each result on the phone besides the armer's wake. */
 	readonly tellOwner?: boolean;
+	/**
+	 * When the call the host arms this after began, on `OWNER_STOP_CLOCK` (the host's own arming, `watch-auto-arm.ts`): an
+	 * owner's stop made at or after then refuses it, since the stop ended the work that call belongs to.
+	 */
+	readonly callStartedAt?: number;
 	/** The goal requirement the watch waits for: the goal's continuation waits on it while it is live. */
 	readonly forRequirement?: SessionWatchRequirement;
 	/** The entry the arming answers to, when read before the arming (the host's for a call it read later); else the session's latest. */
@@ -345,6 +350,8 @@ export class SessionWatchService implements WatchObservationStore {
 	private unsubscribeWorkers: (() => void) | undefined;
 	/** The reason last warned for a wake that could not be delivered, so one failing delivery warns once. */
 	private lastDeliveryFault: string | undefined;
+	/** The latest instant an owner's stop was applied at here, on `OWNER_STOP_CLOCK`: no call begun by then is armed after. */
+	private latestStopAt: number | undefined;
 
 	constructor(deps: SessionWatchServiceDeps) {
 		this.deps = deps;
@@ -405,6 +412,9 @@ export class SessionWatchService implements WatchObservationStore {
 	 * ({@link endWatchesArmedByStop}). A failure throws, with the ledger as it was.
 	 */
 	endArmedByStop(stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } {
+		// Recorded before the ledger is touched: the owner stopped at `stopAt` whether or not the write succeeds, and a call
+		// begun by then arms nothing after it either way.
+		this.latestStopAt = Math.max(this.latestStopAt ?? stopAt, stopAt);
 		const outcome = this.deps.ledger.endArmedByStop(stopAt, carried);
 		this.followEndTimes();
 		return outcome;
@@ -518,6 +528,12 @@ export class SessionWatchService implements WatchObservationStore {
 		const hours = MAX_AGENT_WATCH_HORIZON_MS / 3_600_000;
 		if (request.expiresAt <= nowMs || request.expiresAt > nowMs + MAX_AGENT_WATCH_HORIZON_MS)
 			throw new Error(`A watch's deadline must be after now and at most ${hours} hours ahead.`);
+		if (
+			request.callStartedAt !== undefined &&
+			this.latestStopAt !== undefined &&
+			request.callStartedAt <= this.latestStopAt
+		)
+			throw new Error("the owner's stop ended the work of the call that started it, which began before the stop");
 		const live = this.deps.ledger.list().filter((record) => isLiveSessionWatch(record, nowMs));
 		if (live.some((record) => record.watchId === request.watchId))
 			throw new Error(`Watch ${request.watchId} is already armed; cancel it first or arm under another id.`);
