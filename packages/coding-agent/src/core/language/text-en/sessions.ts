@@ -48,9 +48,9 @@ export const SESSIONS = {
 		/** The channel turns' charges on the away bound did not read (`cause`: an error code or error name): the bound has no room until they read. */
 		chargesUnread: (path: string, cause: string) =>
 			`The channel turns charged on the away spend bound could not be read (${cause}): ${path}. Until they read, routines.away.maxUsdPerDay has no room: no metered run or channel turn away starts. They are read again at each pass.`,
-		/** A channel journal that did not parse was set aside by the away bound's read: its unknown turns charge the whole day bound for a day. */
-		journalSetAside: (path: string) =>
-			`The channel journal ${path} did not parse, so it was set aside beside it (kept for inspection) and a fresh one started. Which turns away it held is unknown, so they are charged as the whole routines.away.maxUsdPerDay for 24 hours from now: until then no metered run or channel turn away starts.`,
+		/** A channel journal that did not parse was set aside (its reset): its unknown turns charge the whole day bound until `until`, a day after it. */
+		journalReset: (path: string, until: string) =>
+			`The channel journal ${path} did not parse, so it was set aside (kept beside it for inspection) and a fresh one started. Which turns away it held is unknown, so they are charged as the whole routines.away.maxUsdPerDay until ${until}: no metered run or channel turn away starts before then.`,
 		/** The turns a move to a metered model reserves, or the away bound's room, did not read: the session does not move. */
 		turnsUnread: (channel: string, cause: string) =>
 			`Channel ${channel} away: the turns a move to a metered model reserves on the away spend bound could not be read (${cause}). Its session does not move to a metered model until they read.`,

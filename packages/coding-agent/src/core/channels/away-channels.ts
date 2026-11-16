@@ -114,15 +114,16 @@ export function failureCause(error: unknown): string {
  * `unread` with its path and cause. A journal set aside within the last day because it did not parse (its `reset` gap,
  * whoever set it aside) held turns no one can count, any of them a turn away: it charges the bound's whole day
  * allowance until a day after its reset (`dayAllowanceUntil`), since every charge it held ended by then.
- * With `setAside`, a journal that does not parse is set aside here under its lock (`readSettingAside`), served or
- * not, and `setAside` is told its path; a set-aside that fails is `unread` with its cause. Without it (a read that
- * writes nothing: the status), such a journal is `unread` (`invalid`) until a reader or an update sets it aside.
+ * With `resets` (the daemon's reader), a journal that does not parse is set aside here under its lock
+ * (`readSettingAside`), served or not, a set-aside that fails being `unread` with its cause, and `resets` is told each
+ * journal whose reset gap charges the bound, at every read, with when that charge ends. Without it (a read that writes
+ * nothing: the status), such a journal is `unread` (`invalid`) until a reader or an update sets it aside.
  */
 export function readAwayChannelCharges(
 	agentDir: string,
 	maxUsdPerRun: number,
 	nowMs: number,
-	setAside?: (path: string) => void,
+	resets?: (path: string, until: number) => void,
 ): RoutineAwayChargesRead {
 	const dir = channelsDir(agentDir);
 	let files: string[];
@@ -141,16 +142,17 @@ export function readAwayChannelCharges(
 		const journal = new ChannelJournal(agentDir, name);
 		let read: ReturnType<ChannelJournal["read"]>;
 		try {
-			read = setAside ? journal.readSettingAside(nowMs) : journal.read();
+			read = resets ? journal.readSettingAside(nowMs) : journal.read();
 		} catch (error) {
 			return { unread: { path: journal.path, cause: failureCause(error) } };
 		}
-		if (read.reset) {
-			if (!setAside) return { unread: { path: journal.path, cause: "invalid" } };
-			setAside(journal.path);
-		}
+		if (read.reset && !resets) return { unread: { path: journal.path, cause: "invalid" } };
 		const state = read.result;
-		for (const gap of state.gaps) if (chargesAwayBound(gap, nowMs)) dayAllowanceUntil.push(gap.at + DAY_MS);
+		for (const gap of state.gaps) {
+			if (!chargesAwayBound(gap, nowMs)) continue;
+			dayAllowanceUntil.push(gap.at + DAY_MS);
+			resets?.(journal.path, gap.at + DAY_MS);
+		}
 		for (const batch of state.batches) {
 			const charge = channelAwayCharge(name, batch, maxUsdPerRun, reservedMetered, nowMs);
 			if (charge) charges.push(charge);
@@ -162,19 +164,27 @@ export function readAwayChannelCharges(
 
 /**
  * The daemon's one reader of its channel turns' charges, for every gate that decides on the away bound with them (the
- * routine supervisor's claims, the channel hosts' turns and moves): it sets aside a journal that does not parse, told
- * once as it happens (the next read finds the fresh journal), and a read that fails is told once per cause, until one
- * reads again.
+ * routine supervisor's claims, the channel hosts' turns and moves): it sets aside a journal that does not parse, and
+ * tells each reset that charges the bound's whole day allowance once, whoever set its journal aside (this reader or the
+ * update of a session serving the channel); a read that fails is told once per cause, until one reads again.
  */
 export function awayChannelChargesReader(
 	agentDir: string,
 	tell: (message: string) => void,
 ): (maxUsdPerRun: number, nowMs: number) => RoutineAwayChargesRead {
 	let told: RoutineAwayChargesUnread | undefined;
+	// The resets told, by journal and end of their charge, until that charge ends.
+	const toldResets = new Map<string, number>();
 	return (maxUsdPerRun, nowMs) => {
-		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path) =>
-			tell(interfaceText().sessions.awayMeteredRuns.journalSetAside(path)),
-		);
+		for (const [key, until] of toldResets) if (until <= nowMs) toldResets.delete(key);
+		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path, until) => {
+			const key = `${path}@${until}`;
+			if (toldResets.has(key)) return;
+			toldResets.set(key, until);
+			const text = interfaceText();
+			const at = text.reports.formats.dateTime(new Date(until).toISOString());
+			tell(text.sessions.awayMeteredRuns.journalReset(path, at));
+		});
 		if (!("unread" in read)) told = undefined;
 		else if (told?.cause !== read.unread.cause) {
 			told = read.unread;

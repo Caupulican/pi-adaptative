@@ -16,10 +16,14 @@ export const WORKER_TREE_BUDGET_REASON_CODES: Readonly<Record<WorkerTreeBudgetFi
 	maxAttempts: "worker_tree_attempt_budget_exhausted",
 };
 
-/** The refusal codes a priced aggregate reports: an unpriced model, and a remainder its request cannot fit. */
+/**
+ * The refusal codes a priced aggregate reports: an unpriced model, and a remainder its request cannot fit; `noRoom`, when
+ * present, says why that remainder is what it is, after the refusal's own sentence (English: the worker reads it).
+ */
 export interface BudgetRefusalReasons {
 	readonly unpriced: string;
 	readonly exhausted: string;
+	readonly noRoom?: string;
 }
 
 /** The refusal codes of a run's cost bound (`ParentExecutionPolicy.runCostBound`). */
@@ -35,6 +39,8 @@ export const RUN_BUDGET_REFUSAL_REASONS = {
 export const AWAY_DAY_BUDGET_REFUSAL_REASONS = {
 	unpriced: "worker_run_model_unpriced",
 	exhausted: "worker_away_day_budget_exhausted",
+	noRoom:
+		"The away day spend bound (routines.away.maxUsdPerDay) had no room to reserve this run's metered spend, or the reservation could not be written.",
 } as const satisfies BudgetRefusalReasons;
 
 /**
@@ -44,6 +50,8 @@ export const AWAY_DAY_BUDGET_REFUSAL_REASONS = {
 export const AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS = {
 	unpriced: "worker_run_model_unpriced",
 	exhausted: "worker_away_day_budget_unread",
+	noRoom:
+		"The away day spend bound (routines.away.maxUsdPerDay) cannot be read: the channel turns charged on it could not be read (the daemon's report names the file), so whether it has room is unknown and this run's metered spend was not reserved.",
 } as const satisfies BudgetRefusalReasons;
 
 /** The refusal codes of a budgeted delegation (`charter.envelope.budgetUsd`): the leader controller closes on them. */

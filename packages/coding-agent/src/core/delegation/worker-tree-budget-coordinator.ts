@@ -451,7 +451,7 @@ export class WorkerTreeBudgetCoordinator {
 			throw new WorkerRunCostRefusal(
 				state.treeKey,
 				reasons.exhausted,
-				`The remaining cost bound ${token} ($${remainingUsd.toFixed(4)}) cannot cover ${waiter.subject}: its input alone (about ${inputTokens} tokens) costs more.`,
+				`The remaining cost bound ${token} ($${remainingUsd.toFixed(4)}) cannot cover ${waiter.subject}: its input alone (about ${inputTokens} tokens) costs more.${reasons.noRoom ? ` ${reasons.noRoom}` : ""}`,
 			);
 		}
 		const maxTokens = Math.min(requestedTokens, affordable);
