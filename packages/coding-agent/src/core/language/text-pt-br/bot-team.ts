@@ -274,7 +274,7 @@ export const BOT_TEAM = {
 			? `O registro das mensagens dos workers desta sessão aos bots (${file}) não foi lido e não pôde ser separado (${reason ?? "desconhecido"}); as mensagens ficam só na memória.`
 			: `O registro das mensagens dos workers desta sessão aos bots não foi lido e foi separado como ${aside}; os objetivos deixam de esperar pelas mensagens que ele tinha, e o gasto que ele contava não é mais contado.`,
 	workerMailLedgerUnwritten: (reason: string) =>
-		`O registro das mensagens dos workers desta sessão aos bots não pôde ser gravado depois que a resposta de um bot foi entregue a um worker (${reason}); a resposta foi entregue, e o registro é gravado de novo na próxima mudança.`,
+		`O registro das mensagens dos workers desta sessão aos bots não pôde ser gravado depois que a resposta de um bot foi oferecida a um worker (${reason}); isso não muda se o worker recebeu a resposta, e o registro é gravado de novo na próxima mudança.`,
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: o estado de orquestração da sessão dele está tanto na casa dele quanto na da sessão principal; ele usa o da casa dele, e a cópia da sessão principal fica sem uso em ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>

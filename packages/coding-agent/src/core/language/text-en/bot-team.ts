@@ -345,7 +345,7 @@ export const BOT_TEAM = {
 			? `The record of this session's workers' mail to bots (${file}) did not read and could not be set aside (${reason ?? "unknown"}); the mail is kept in memory only.`
 			: `The record of this session's workers' mail to bots did not read and was set aside as ${aside}; goals stop waiting for the mail it held, and the spend it counted is no longer counted.`,
 	workerMailLedgerUnwritten: (reason: string) =>
-		`The record of this session's workers' mail to bots could not be written after a bot's reply was handed to a worker (${reason}); the reply was handed on, and the record is written again at its next change.`,
+		`The record of this session's workers' mail to bots could not be written after a bot's reply was offered to a worker (${reason}); this does not change whether the worker took the reply, and the record is written again at its next change.`,
 	botSessionStateInBothHomes: (agentId: string, ownerBundle: string) =>
 		`Bot ${agentId}: its session's orchestration state is in both its own home and the main session's; it uses its own, and the main session's copy stays unused at ${ownerBundle}.`,
 	botSessionStateKeptForWorkers: (agentId: string) =>
