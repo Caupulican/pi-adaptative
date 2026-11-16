@@ -351,7 +351,7 @@ export class SessionWatchService implements WatchObservationStore {
 	}
 
 	/** Whether an owner's stop applied here ended the work of a call begun at `callStartedAt` (on `OWNER_STOP_CLOCK`). */
-	private stopEnded(callStartedAt: number): boolean {
+	stopEnded(callStartedAt: number): boolean {
 		return this.latestStopAt !== undefined && callStartedAt <= this.latestStopAt;
 	}
 

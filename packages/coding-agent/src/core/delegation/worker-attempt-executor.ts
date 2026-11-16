@@ -193,6 +193,7 @@ export interface WorkerAttemptExecutorOptions {
 		| "changeHostEventSubscriptions"
 		| "takeLaneHalt"
 		| "deliveredLaneHalt"
+		| "deadLetterUntakenMessage"
 	>;
 	applyActions?(actions: readonly WorkerAction[], actionJournal?: WorkerActionJournal): AppliedActionsReport;
 	warn(message: string): void;
@@ -368,10 +369,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
 	const attemptStartedAt = Date.now();
-	/**
-	 * Where this attempt's own messages begin, set when it runs: a reused specialist's earlier tasks are
-	 * not this attempt's output.
-	 */
+	/** Where this attempt's messages begin, set when it runs: a reused specialist's earlier tasks are not its own. */
 	let attemptTranscriptStart = 0;
 	const commandReceipts: WorkerCommandReceipt[] = [];
 	const reportHandshake = options.reportHandshake !== false;

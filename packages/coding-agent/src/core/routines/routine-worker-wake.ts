@@ -35,11 +35,12 @@ export function workerUnreachableLine(runtimeId: string, reason: string): string
 
 /**
  * The line a session reads before a note of the host's about a worker's own calls that asks for action (a subject left
- * unwatched) and came after the worker's attempt had ended: the worker takes no more notes in that attempt, since one would
- * start it a new task, so the note is the session's to act on or pass on.
+ * unwatched) and that the worker did not take: the arming finished after its attempt stopped reading its mailbox, the
+ * attempt ended before taking the note, or its runtime did not take it. A runtime whose attempt ended takes no more notes,
+ * since one would start it a new task, so the note is the session's to act on or pass on.
  */
-export function workerAttemptEndedLine(runtimeId: string): string {
-	return `Worker ${runtimeId}'s attempt had ended when the host finished arming watches for its calls, so this reaches you instead: act on it, or pass it to the worker yourself.`;
+export function workerUntakenNoteLine(runtimeId: string): string {
+	return `Worker ${runtimeId} did not take this note of the host's about its calls (its attempt had ended, or it could not take it), so it reaches you instead: act on it, or pass it to the worker yourself.`;
 }
 
 /** Sends one wake; `key` makes a redelivery the same message. */

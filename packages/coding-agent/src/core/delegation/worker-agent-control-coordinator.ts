@@ -21,12 +21,7 @@ import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { agentThirdPartyOrigin } from "../orchestration/agent-turn-basis.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
-import {
-	type AgentBindingContract,
-	MAX_ORCHESTRATION_COLLECTION_LENGTH,
-	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	type WorkerResultContract,
-} from "../orchestration/contracts.ts";
+import type { AgentBindingContract, WorkerResultContract } from "../orchestration/contracts.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
@@ -74,6 +69,7 @@ import {
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
+import { canonicalWorkerAgentIds } from "./worker-agent-id-set.ts";
 import { rejectGenericReplyOptions } from "./worker-agent-message-options.ts";
 import { WORKER_WAIT_DEFAULT_MS, WorkerAgentWaiter } from "./worker-agent-wait.ts";
 import {
@@ -506,7 +502,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentBroadcastOptions,
 	): WorkerAgentBroadcastResult {
 		this.requireControl();
-		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker broadcast");
+		const canonicalAgentIds = canonicalWorkerAgentIds(agentIds, "Worker broadcast");
 		const recipients = canonicalAgentIds.map((agentId) => ({
 			agentId,
 			idempotencyKey: workerAgentBroadcastTargetIdempotencyKey(options.idempotencyKey, agentId),
@@ -1305,6 +1301,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 	}
 
+	/**
+	 * Fails the ordinary task message `messageId` while it waits in `agentId`'s mailbox untaken, so publishing the terminal
+	 * of the attempt it was sent to does not start it as a new task (the host's notes to a worker whose attempt ended).
+	 * One its transcript carries was taken, and is acknowledged instead. Whether this call failed it.
+	 */
+	deadLetterUntakenMessage(agentId: string, messageId: string, reason: string): boolean {
+		const agent = this.requireKnownAgent(agentId);
+		const mailbox = this.getMailbox(agent.agentId);
+		const message = mailbox.pendingTaskBearing().find((pending) => pending.messageId === messageId);
+		if (!message || this.taskReconciler.reconcileTaskBearingTranscriptDelivery(agent, message)) return false;
+		return mailbox.deadLetterOrdinaryTask(messageId, reason);
+	}
+
 	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentLaneResolution | undefined {
 		const { attempt } = this.controlledAgentAttempt(agentId, scope);
 		return attempt ? { laneId: attempt.taskId, status: attempt.status } : undefined;
@@ -1440,7 +1449,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgents"]> {
 		this.requireControl();
 		if (mode !== "any" && mode !== "all") throw new TypeError("Worker wait mode must be 'any' or 'all'.");
-		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker wait");
+		const canonicalAgentIds = canonicalWorkerAgentIds(agentIds, "Worker wait");
 		return this.agentWaiter.waitForAgents(canonicalAgentIds, mode, timeoutMs, scope, signal);
 	}
 
@@ -1685,28 +1694,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!this.options.isControlAvailable()) {
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
 		}
-	}
-
-	private canonicalAgentIdSet(agentIds: readonly string[], label: string): string[] {
-		if (!Array.isArray(agentIds) || agentIds.length < 1 || agentIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH) {
-			throw new TypeError(
-				`${label} agent ids must contain from 1 through ${MAX_ORCHESTRATION_COLLECTION_LENGTH} entries.`,
-			);
-		}
-		const canonicalAgentIds: string[] = [];
-		const seenAgentIds = new Set<string>();
-		for (const agentId of agentIds) {
-			if (typeof agentId !== "string") throw new TypeError("Logical worker agent id is required.");
-			const canonicalAgentId = agentId.trim();
-			if (!canonicalAgentId) throw new TypeError("Logical worker agent id is required.");
-			if (canonicalAgentId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
-				throw new TypeError(`Logical worker agent id exceeds ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters.`);
-			}
-			if (seenAgentIds.has(canonicalAgentId)) continue;
-			seenAgentIds.add(canonicalAgentId);
-			canonicalAgentIds.push(canonicalAgentId);
-		}
-		return canonicalAgentIds;
 	}
 
 	private requireKnownAgent(agentId: string): AgentBindingContract {

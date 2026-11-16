@@ -13,11 +13,12 @@
  * it, so a worker is woken by its own watch though the session waits on the same subject. Each tells its result on the
  * owner's phone besides waking its armer, the result told once however many watches wait on its subject (a commit's CI
  * armed though its triggers did not settle a run tells its timeout to the armer only: the owner was promised no result). A call that
- * began before an owner's stop arms nothing after the stop, and an arming the stop refuses tells nothing of that call
- * ({@link OwnerStopArmingRefusal}): the stop is the owner's decision, not a subject the armer must act on. What was armed,
- * what is still looked for and what was not armed (and why: nothing reads it, it was there before the call, the slots are
- * full) is told to the armer in one note per call, its lines split by whether they ask anything of the armer
- * ({@link WatchAutoArmNote}).
+ * began before an owner's stop arms nothing after the stop, and nothing of that call is told to anyone once the stop
+ * applied, whether the stop refused an arming ({@link OwnerStopArmingRefusal}) or came while the call's arming was in
+ * flight ({@link WatchAutoArmPort.stopEnded}): the stop is the owner's decision, not a subject the armer must act on.
+ * What was armed, what is still looked for and what was not armed (and why: nothing reads it, it was there before the
+ * call, the slots are full) is told to the armer in one note per call, its lines split by whether they ask anything of
+ * the armer ({@link WatchAutoArmNote}).
  *
  * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once; a read of
  * GitHub that waits for a run to be listed waits outside that order. A session's call handed off to the background is read
@@ -120,6 +121,8 @@ export interface WatchAutoArmPort {
 	readonly timers: TimerPort;
 	/** Aborted once the session's watches stop (the session disposes): every read of GitHub an arming makes ends with it. */
 	readonly closing: AbortSignal;
+	/** Whether an owner's stop applied in the session ended the work of a call begun at `callStartedAt` (`OWNER_STOP_CLOCK`). */
+	stopEnded(callStartedAt: number): boolean;
 }
 
 /**
@@ -456,13 +459,19 @@ export class WatchAutoArm {
 	/** Runs one arming step for `call` after the ones before it; a failure is the owner's to hear, never the queue's end. */
 	private enqueue(call: StartedCall, step: () => Promise<void>): void {
 		this.queue = this.queue.then(step).catch((error: unknown) => {
-			if (!this.closed(this.deps.port())) this.deps.failed(error, call.stopClockStartedAt);
+			if (!this.silenced(call)) this.deps.failed(error, call.stopClockStartedAt);
 		});
 	}
 
 	/** Whether the armer is gone or the session's watches stopped: what a read ended by that says is no one's to hear. */
 	private closed(port: WatchAutoArmPort | undefined): boolean {
 		return this.deps.disposed() || port?.closing.aborted === true;
+	}
+
+	/** Whether nothing of `call` is told: its armer is gone, the watches stopped, or an owner's stop ended its work. */
+	private silenced(call: StartedCall): boolean {
+		const port = this.deps.port();
+		return this.closed(port) || port?.stopEnded(call.stopClockStartedAt) === true;
 	}
 
 	private async armFor(call: StartedCall, output: string): Promise<void> {
@@ -542,11 +551,14 @@ export class WatchAutoArm {
 			: [`The host armed no watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`];
 	}
 
-	/** Tells the armer the note on `call`, without holding the arms of later calls: it may land only at a later boundary. */
+	/**
+	 * Tells the armer the note on `call`, without holding the arms of later calls: it may land only at a later boundary.
+	 * Nothing is told of a call an owner's stop ended, whichever armer made it.
+	 */
 	private tell(call: StartedCall, note: WatchAutoArmNote): void {
-		if (note.informational.length === 0 && note.action.length === 0) return;
+		if ((note.informational.length === 0 && note.action.length === 0) || this.silenced(call)) return;
 		void this.deps.note(note, call.stopClockStartedAt).catch((error: unknown) => {
-			if (!this.closed(this.deps.port())) this.deps.failed(error, call.stopClockStartedAt);
+			if (!this.silenced(call)) this.deps.failed(error, call.stopClockStartedAt);
 		});
 	}
 

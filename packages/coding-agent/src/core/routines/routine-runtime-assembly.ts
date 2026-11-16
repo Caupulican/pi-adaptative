@@ -92,8 +92,8 @@ import {
 	WORKER_WAKE_RETRY_MS,
 	type WorkerWakeHost,
 	wakeWorkerRuntime,
-	workerAttemptEndedLine,
 	workerUnreachableLine,
+	workerUntakenNoteLine,
 } from "./routine-worker-wake.ts";
 import type { TaskWatchPort } from "./task-watch-tool.ts";
 import { WatchAdmission } from "./watch-admission.ts";
@@ -288,15 +288,16 @@ export class RoutineRuntimeAssembly {
 			},
 			// Called only until the worker's attempt run ends (`followOwnCalls`' settle), so the note goes to that attempt's loop
 			// rather than to an idle runtime, where it would start a new task; a runtime that does not take it now still hears
-			// each armed watch's result when it fires.
+			// each armed watch's result when it fires, and what the note asked for action goes to the session instead.
 			noteWorker: (worker, text, key) => {
-				wakeWorkerRuntime(this.workerWakeHost(), worker.runtimeId, text, key);
+				const wake = wakeWorkerRuntime(this.workerWakeHost(), worker.runtimeId, text, key);
+				return wake.kind === "sent" ? wake.messageId : undefined;
 			},
 			// Delivered by the session's watches as their wakes are, under the same guard of an owner's stop of the bot.
 			noteSessionForWorker: (worker, text, key, callStartedAt) =>
 				runtime()?.sessionWatches.noteSession(
 					key,
-					`${workerAttemptEndedLine(worker.runtimeId)}\n${text}`,
+					`${workerUntakenNoteLine(worker.runtimeId)}\n${text}`,
 					callStartedAt,
 				),
 		};
@@ -333,6 +334,7 @@ export class RoutineRuntimeAssembly {
 					tellOwner: true,
 					...(served === undefined ? {} : { served }),
 				}),
+			stopEnded: (callStartedAt) => sessionWatches.stopEnded(callStartedAt),
 			timers,
 			closing,
 		};

@@ -67,9 +67,11 @@ export interface TaskWatchPort {
 	autoArm(worker: WorkerWatchAuthority): WatchAutoArmPort | undefined;
 	/**
 	 * Tells the worker runtime a note of the host's (what it armed for the worker), once per key; only while the worker's
-	 * attempt runs, since a runtime whose attempt ended would start a new task for it.
+	 * attempt runs, since a runtime whose attempt ended would start a new task for it. Returns the id of the message
+	 * queued to the worker's mailbox, which the host fails if the attempt ends without taking it; undefined when the
+	 * runtime did not take the note.
 	 */
-	noteWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
+	noteWorker(worker: WorkerWatchAuthority, text: string, key: string): string | undefined;
 	/**
 	 * Tells the session root a note of the host's about the worker's calls that asks for action (a subject left unwatched)
 	 * and came after the worker's attempt stopped reading its mailbox, as a wake of the session led by whose calls it
