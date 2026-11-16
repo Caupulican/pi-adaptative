@@ -69,6 +69,8 @@ interface OwnerChannelRun {
 	readonly full: boolean;
 	/** An accepted approval delivery whose entry has not landed on the branch yet. */
 	approvalPending: boolean;
+	/** Accepted as the session's own next turn and its run not begun: the moves its preparation makes (a routed swap) are its. */
+	preparing: boolean;
 }
 
 export class OwnerChannelSession implements OwnerChannelDelivery {
@@ -165,6 +167,8 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			// The run's first message to end (the owner's words it took in) is seen before its first response is requested.
 			if (!started) {
 				started = true;
+				const kept = this.runs.get(ref);
+				if (kept) kept.preparing = false;
 				onStarted();
 			}
 			if (event.message.role !== "assistant") return;
@@ -265,7 +269,11 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			if (answered) return;
 			answered = true;
 			if (!accepted) drop();
-			else if (approval && !delivered) run.approvalPending = true;
+			else {
+				if (approval && !delivered) run.approvalPending = true;
+				// A delivery accepted while no run is in progress is the session's own next turn; one queued behind a run is not.
+				run.preparing = !this.getForeground().turnOrigin.isActive();
+			}
 			onAccepted(accepted);
 		};
 		const settleDelivered = (): void => {
@@ -316,6 +324,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			senderDigest: origin.senderDigest,
 			full: origin.full === true,
 			approvalPending: false,
+			preparing: false,
 		};
 		this.runs.set(origin.ref, run);
 		return run;
@@ -326,8 +335,13 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		return isRemoteOwnerOrigin(origin) && origin?.ref !== undefined ? this.runs.get(origin.ref) : undefined;
 	}
 
+	/** Whether the turn `ref` opened holds the foreground: its run is in progress, or it is being prepared to run next. */
+	holdsForeground(ref: string): boolean {
+		return this.isRunning(ref) || this.runs.get(ref)?.preparing === true;
+	}
+
 	/** Whether the foreground run in progress is the one the batch `ref` decided. */
-	isRunning(ref: string): boolean {
+	private isRunning(ref: string): boolean {
 		const turnOrigin = this.getForeground().turnOrigin;
 		const origin = turnOrigin.origin();
 		return turnOrigin.isActive() && isRemoteOwnerOrigin(origin) && origin?.ref === ref;

@@ -404,7 +404,7 @@ export class SessionChannels {
 			policy: (name) => this.policy(name),
 			journal: (name) => this.journal(name),
 			sessionId: () => this.sessionId(),
-			started: (ref) => this.deps.ownerDelivery?.isRunning(ref) === true,
+			started: (ref) => this.deps.ownerDelivery?.holdsForeground(ref) === true,
 			now: () => this.now(),
 			warn: (message) => deps.warn(message),
 		});

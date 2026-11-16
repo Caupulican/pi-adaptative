@@ -33,7 +33,7 @@ export interface OwnerMeteredMovePorts {
 	policy(name: string): ResolvedChannelPolicy | undefined;
 	journal(name: string): ChannelJournal;
 	sessionId(): string;
-	/** Whether the turn `ref` opened is the session's run in progress now (`OwnerChannelDelivery.isRunning`). */
+	/** Whether the turn `ref` opened holds the session's foreground now (`OwnerChannelDelivery.holdsForeground`). */
 	started(ref: string): boolean;
 	now(): number;
 	warn(message: string): void;
@@ -44,7 +44,7 @@ type MoveDecision = "fits" | MeteredMoveMode;
 
 export class OwnerMeteredMoves implements MeteredMoveGate {
 	private readonly ports: OwnerMeteredMovePorts;
-	/** The channels and causes a move was not reserved or charged for, told once each until the channel's next one is. */
+	/** The channels and cause kinds a move was not reserved or charged for, told once each until the channel's next one is. */
 	private readonly told = new Set<string>();
 
 	constructor(ports: OwnerMeteredMovePorts) {
@@ -117,11 +117,12 @@ export class OwnerMeteredMoves implements MeteredMoveGate {
 		try {
 			read = journal.read();
 		} catch (error) {
-			this.tell(name, error instanceof Error ? error.message : String(error), charge);
+			this.tellFailure(name, error, charge);
 			return undefined;
 		}
 		if (!read.reset) return read.result;
-		this.tell(name, interfaceText().notices.channels.owner.journalUnparsable, charge);
+		const unparsable = interfaceText().notices.channels.owner.journalUnparsable;
+		this.tell(name, "unparsable", unparsable, charge);
 		return undefined;
 	}
 
@@ -146,17 +147,26 @@ export class OwnerMeteredMoves implements MeteredMoveGate {
 				return true;
 			});
 			// A journal that stopped parsing since it was read was moved aside: the turns it held are not reserved.
-			if (written.reset) this.tell(name, interfaceText().notices.channels.owner.journalUnparsable, charge);
+			if (written.reset)
+				this.tell(name, "unparsable", interfaceText().notices.channels.owner.journalUnparsable, charge);
 			else if (written.result) this.clearTold(name);
 			return written.result && !written.reset;
 		} catch (error) {
-			this.tell(name, error instanceof Error ? error.message : String(error), charge);
+			this.tellFailure(name, error, charge);
 			return false;
 		}
 	}
 
-	private tell(name: string, cause: string, charge: boolean): void {
-		const key = `${name}\n${cause}`;
+	/** A read or write that threw, told once per cause: a system error by its code (its message names the file it met). */
+	private tellFailure(name: string, error: unknown, charge: boolean): void {
+		const code = (error as NodeJS.ErrnoException | undefined)?.code;
+		const kind = typeof code === "string" ? code : error instanceof Error ? error.name : "thrown";
+		this.tell(name, kind, error instanceof Error ? error.message : String(error), charge);
+	}
+
+	/** Tells that a move was not reserved (or not charged) on channel `name` for `cause`, once per channel and `kind`. */
+	private tell(name: string, kind: string, cause: string, charge: boolean): void {
+		const key = `${name}\n${kind}`;
 		if (this.told.has(key)) return;
 		this.told.add(key);
 		const words = interfaceText().notices.channels.owner;

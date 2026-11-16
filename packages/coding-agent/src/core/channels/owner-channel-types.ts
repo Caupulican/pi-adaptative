@@ -60,8 +60,11 @@ export interface OwnerChannelDelivery {
 	 * is the session's run in progress (before its first response is requested); returns the unsubscribe.
 	 */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void, onStarted: () => void): () => void;
-	/** Whether the session's run in progress is the one `ref` opened (an owner turn queued behind another has not started). */
-	isRunning(ref: string): boolean;
+	/**
+	 * Whether the turn `ref` opened holds the session's foreground: its run is in progress, or it was accepted as the
+	 * session's own next turn and is being prepared (an owner turn queued behind another run has not started).
+	 */
+	holdsForeground(ref: string): boolean;
 	/**
 	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
 	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent or throws) is a metered
