@@ -69,8 +69,9 @@ function planWaitTiming(
 
 /**
  * A watch bound to one of the goal's requirements (the `watch` tool's `forRequirement`), as the session's watch ledger holds
- * it: the latest armed for that requirement. Live while it still waits before its end time, with what is left of that wait
- * in milliseconds on the routines clock its end time is on; else how it ended.
+ * it: the latest armed for that requirement. Live while it still waits, with what is left of that wait in milliseconds on
+ * the routines clock its end time is on (before its end time, until that time; a GitHub watch past it awaiting its last
+ * read, until that read is due to settle, or one read interval); else how it ended.
  */
 export interface GoalBoundWatch {
 	readonly requirementId: string;

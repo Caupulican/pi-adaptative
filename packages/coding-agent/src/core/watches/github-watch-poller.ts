@@ -218,8 +218,8 @@ export class GithubWatchPoller {
 
 	/**
 	 * One pass over the watches. The next read is armed however the pass ends: a pass that throws (a ledger write that
-	 * failed) is warned where every failed pass is (`request`), and the watches it left unread, those it was to read now
-	 * and those past their end time, are read again one read interval later, so no failure stops the reads and none spins.
+	 * failed) is warned where every failed pass is (`request`) and runs again one read interval later, the watches it was
+	 * to read now being due then too, so no failure stops the reads and none spins.
 	 */
 	private async run(): Promise<void> {
 		const nowMs = this.deps.timers.now();
@@ -235,7 +235,8 @@ export class GithubWatchPoller {
 		// Marked before any read: what this pass is to read now is next read an interval on, whether or not the pass ends.
 		const due = clocked.filter((watch) => (this.nextRead.get(watch.incarnationId) ?? 0) <= nowMs);
 		for (const watch of due) this.nextRead.set(watch.incarnationId, nowMs + GITHUB_WATCH_POLL_MS);
-		let waits = atDeadline.map(() => nowMs + GITHUB_WATCH_POLL_MS);
+		let waits: number[] = [];
+		let passed = false;
 		try {
 			// A result the CI source collected reaches a watch past its end time too, which carries it to its deadline read.
 			const ciCollected = watches.filter((watch) => watch.source.type === "ci" && followed);
@@ -252,8 +253,10 @@ export class GithubWatchPoller {
 				else this.failed(watch, NO_CI_SOURCE);
 			}
 			await this.readPolled(polled);
+			passed = true;
 		} finally {
-			this.followNextRead(clocked, waits);
+			// A pass that threw is read again one interval on, whatever it held (a deadline read, a failed job, a CI result).
+			this.followNextRead(clocked, passed ? waits : [...waits, nowMs + GITHUB_WATCH_POLL_MS]);
 		}
 	}
 

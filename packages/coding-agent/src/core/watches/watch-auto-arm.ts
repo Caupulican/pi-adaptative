@@ -434,15 +434,22 @@ export class WatchAutoArm {
 	/** Runs one arming step after the ones before it; a failure is the owner's to hear, never the queue's end. */
 	private enqueue(step: () => Promise<void>): void {
 		this.queue = this.queue.then(step).catch((error: unknown) => {
-			if (!this.deps.disposed()) this.deps.failed(error);
+			if (!this.closed(this.deps.port())) this.deps.failed(error);
 		});
+	}
+
+	/** Whether the armer is gone or the session's watches stopped: what a read ended by that says is no one's to hear. */
+	private closed(port: WatchAutoArmPort | undefined): boolean {
+		return this.deps.disposed() || port?.closing.aborted === true;
 	}
 
 	private async armFor(call: StartedCall, output: string): Promise<void> {
 		const port = this.deps.port();
 		const { context } = call;
-		if (!port || !context || this.deps.disposed()) return;
+		if (!port || !context || this.closed(port)) return;
 		const plan = await this.plan(call, output, port);
+		// A read the close ended is no subject left unwatched: nothing is armed or told after it.
+		if (this.closed(port)) return;
 		const { armed, missed } = await this.armPlanned(plan.planned, call, port, context);
 		this.tell([
 			...(armed.length === 0
@@ -490,7 +497,7 @@ export class WatchAutoArm {
 					context,
 				);
 				armed.push(
-					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}; so its timeout is told to you, not the owner`})`,
+					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}; so its timeout is told to you, not the owner, unless CI came to a result by then`})`,
 				);
 			} catch (error) {
 				missed.push(`${subjectOf(source)}: ${errorText(error)}`);
@@ -509,7 +516,7 @@ export class WatchAutoArm {
 	private tell(lines: readonly string[]): void {
 		if (lines.length === 0) return;
 		void this.deps.note(lines.join("\n")).catch((error: unknown) => {
-			if (!this.deps.disposed()) this.deps.failed(error);
+			if (!this.closed(this.deps.port())) this.deps.failed(error);
 		});
 	}
 
@@ -521,7 +528,7 @@ export class WatchAutoArm {
 	private followDispatch(call: StartedCall, dispatch: DispatchedWorkflow, attempt: number): void {
 		const port = this.deps.port();
 		const delay = DISPATCH_LISTING_DELAYS_MS[attempt];
-		if (!port || delay === undefined || this.deps.disposed()) return;
+		if (!port || delay === undefined || this.closed(port)) return;
 		port.timers.setTimeout(() => {
 			void this.listDispatched(call, dispatch, attempt);
 		}, delay);
@@ -530,7 +537,7 @@ export class WatchAutoArm {
 	private async listDispatched(call: StartedCall, dispatch: DispatchedWorkflow, attempt: number): Promise<void> {
 		const port = this.deps.port();
 		const reader = port?.github();
-		if (!port || this.deps.disposed()) return;
+		if (!port || this.closed(port)) return;
 		const last = attempt + 1 >= DISPATCH_LISTING_DELAYS_MS.length;
 		let runs: readonly GithubCreatedRun[];
 		try {
@@ -546,14 +553,14 @@ export class WatchAutoArm {
 				AbortSignal.any([AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS), port.closing]),
 			);
 		} catch (error) {
-			if (this.deps.disposed()) return;
+			if (this.closed(port)) return;
 			if (!last) this.followDispatch(call, dispatch, attempt + 1);
 			else this.tell(this.missedLines([`the run of ${dispatchText(dispatch)}: ${errorText(error)}`]));
 			return;
 		}
 		this.enqueue(async () => {
 			const { context } = call;
-			if (!context || this.deps.disposed()) return;
+			if (!context || this.closed(port)) return;
 			const run = [...runs]
 				.sort((a, b) => a.createdAt - b.createdAt || a.runId - b.runId)
 				.map((entry): GithubWatchSource => ({ type: "github_run", repo: entry.repo, runId: entry.runId }))
