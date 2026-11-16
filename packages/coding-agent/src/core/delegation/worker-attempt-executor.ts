@@ -45,6 +45,7 @@ import type {
 	WorkerTranscriptMessage,
 } from "./worker-conversation-store.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
+import { readWorkerFollowUp } from "./worker-follow-up-read.ts";
 import { createWorkerHostTools, WORKER_HOST_TOOL_NAMES } from "./worker-host-tools.ts";
 import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
@@ -1313,26 +1314,25 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										// The parent's halt: taken once, at the next request boundary.
 										getHaltRequest: () => options.agentControl.takeLaneHalt(options.laneId),
-										getFollowUpMessages: async (followUpState): Promise<AgentMessage[]> => {
-											try {
-												signal.throwIfAborted();
-												const messages = options.agentControl.mailboxMessagesForConversation(
-													options.agentId,
-													options.conversation,
-													true,
-												);
-												await checkParentMessages(messages, signal);
-												signal.throwIfAborted();
-												const accepted = admitMailboxMessages(messages);
-												// The parent's messages come first. Otherwise a worker about to stop is asked for a
-												// checkable report, once, and never when the run has no provider budget left for it.
-												if (accepted.length > 0 || !reportHandshake) return accepted;
-												return reportFollowUp(followUpState);
-											} catch (error) {
+										// The loop's last read of the mailbox settles the host's notes in the same step.
+										getFollowUpMessages: (followUpState): Promise<AgentMessage[]> =>
+											readWorkerFollowUp({
+												signal,
+												read: () =>
+													options.agentControl.mailboxMessagesForConversation(
+														options.agentId,
+														options.conversation,
+														true,
+													),
+												check: (messages) => checkParentMessages(messages, signal),
+												admit: admitMailboxMessages,
+												// Asked once, and never when the run has no provider budget left for it.
+												report: () => (reportHandshake ? reportFollowUp(followUpState) : []),
+												settle: hostTools.settle,
+											}).catch((error: unknown) => {
 												retainCallbackFailure(error);
 												throw error;
-											}
-										},
+											}),
 										// The same per-request projection root gets: the conversation's own retention
 										// compaction, then context GC packing what went stale, priced on this lane.
 										...(retentionPolicy || options.planRequest || options.knowledgeBroker?.projectKnowledge
@@ -1580,7 +1580,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				}));
 				throw error;
 			} finally {
-				// The worker's loop ended: before its terminal is recorded, the host's later notes stop going to it.
+				// Settled already when the loop read its mailbox last; an abnormal end settles here, before the terminal.
 				hostTools.settle();
 				stopUsageClock();
 				for (const signal of usageSignals) signal.removeEventListener("abort", stopUsageClock);

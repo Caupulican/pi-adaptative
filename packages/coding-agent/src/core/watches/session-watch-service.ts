@@ -70,6 +70,7 @@ import {
 	isGithubWatchSource,
 	owesFailedJobRead,
 } from "./github-watch-source.ts";
+import { OwnerStopArmingRefusal } from "./owner-stop-refusal.ts";
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
@@ -186,12 +187,12 @@ export interface SessionWatchServiceDeps {
 	/**
 	 * Wakes the session with one parent input (steer mode); resolves once it is durable. `owed` is read under the
 	 * transcript's lock right before the append: a wake no longer owed (the owner's stop settled it meanwhile) appends
-	 * nothing and resolves `"settled"`.
+	 * nothing and resolves `"settled"`. A host note ({@link SessionWatchService.noteSession}) carries no details.
 	 */
 	deliverToSession(
 		deliveryId: string,
 		content: string,
-		details: Readonly<Record<string, unknown>>,
+		details: Readonly<Record<string, unknown>> | undefined,
 		owed: () => boolean,
 	): Promise<"delivered" | "settled">;
 	wakeWorker(runtimeId: string, text: string, key: string): WorkerWake;
@@ -257,6 +258,8 @@ export class SessionWatchService implements WatchObservationStore {
 	private lastDeliveryFault: string | undefined;
 	/** The latest instant an owner's stop was applied at here, on `OWNER_STOP_CLOCK`: no call begun by then is armed after. */
 	private latestStopAt: number | undefined;
+	/** The host's notes owed the session ({@link noteSession}), by delivery id, with when the call each follows began. */
+	private readonly notes = new Map<string, { readonly content: string; readonly callStartedAt: number }>();
 	/**
 	 * The typed watches past their end time waiting for their deadline read, by incarnation: since when (routines clock) and
 	 * whether that read settled. In memory: a reopen reads each again, as the end time passed while nothing read it.
@@ -332,6 +335,24 @@ export class SessionWatchService implements WatchObservationStore {
 		const outcome = this.deps.ledger.endArmedByStop(stopAt, carried);
 		this.followEndTimes();
 		return outcome;
+	}
+
+	/**
+	 * Tells the session a note of the host's that asks for action: what it left unwatched for a worker's calls once the
+	 * worker stopped reading its mailbox (`worker-host-tools.ts`). Delivered after the owed wakes and as they are: never
+	 * appended while an owner's stop of the bot waits to be taken (tried again until it is), and no longer owed once a stop
+	 * applied here ended the work of the call it follows (begun at `callStartedAt`, on `OWNER_STOP_CLOCK`). In memory, as
+	 * the note was before: a restart does not tell it.
+	 */
+	noteSession(deliveryId: string, content: string, callStartedAt: number): void {
+		if (!this.active) return;
+		this.notes.set(deliveryId, { content, callStartedAt });
+		this.drain();
+	}
+
+	/** Whether an owner's stop applied here ended the work of a call begun at `callStartedAt` (on `OWNER_STOP_CLOCK`). */
+	private stopEnded(callStartedAt: number): boolean {
+		return this.latestStopAt !== undefined && callStartedAt <= this.latestStopAt;
 	}
 
 	/** Watch `watchId` when `caller` holds it; absent to it otherwise, as a watch never armed is. */
@@ -444,12 +465,8 @@ export class SessionWatchService implements WatchObservationStore {
 		const hours = MAX_AGENT_WATCH_HORIZON_MS / 3_600_000;
 		if (request.expiresAt <= nowMs || request.expiresAt > nowMs + MAX_AGENT_WATCH_HORIZON_MS)
 			throw new Error(`A watch's deadline must be after now and at most ${hours} hours ahead.`);
-		if (
-			request.callStartedAt !== undefined &&
-			this.latestStopAt !== undefined &&
-			request.callStartedAt <= this.latestStopAt
-		)
-			throw new Error("the owner's stop ended the work of the call that started it, which began before the stop");
+		if (request.callStartedAt !== undefined && this.stopEnded(request.callStartedAt))
+			throw new OwnerStopArmingRefusal();
 		// A watch past its end time waiting for its deadline read still holds its id and its slot, and cancel ends it.
 		const live = this.deps.ledger.list().filter((record) => this.armed(record, nowMs));
 		if (live.some((record) => record.watchId === request.watchId))
@@ -1025,12 +1042,33 @@ export class SessionWatchService implements WatchObservationStore {
 					this.lastDeliveryFault = undefined;
 				} catch (error) {
 					retry = true;
-					const reason = error instanceof Error ? error.message : String(error);
-					if (reason !== this.lastDeliveryFault) this.warn(error);
-					this.lastDeliveryFault = reason;
+					this.deliveryFault(error);
 				}
 			}
+		for (const [deliveryId, note] of this.notes) {
+			if (!this.active) break;
+			try {
+				await this.deps.deliverToSession(
+					deliveryId,
+					note.content,
+					undefined,
+					() => !this.stopEnded(note.callStartedAt),
+				);
+				this.notes.delete(deliveryId);
+				this.lastDeliveryFault = undefined;
+			} catch (error) {
+				retry = true;
+				this.deliveryFault(error);
+			}
+		}
 		if (retry) this.retryLater();
+	}
+
+	/** Warns a delivery that failed, once while the same reason repeats. */
+	private deliveryFault(error: unknown): void {
+		const reason = error instanceof Error ? error.message : String(error);
+		if (reason !== this.lastDeliveryFault) this.warn(error);
+		this.lastDeliveryFault = reason;
 	}
 
 	/**

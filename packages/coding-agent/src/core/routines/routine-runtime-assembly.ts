@@ -292,16 +292,13 @@ export class RoutineRuntimeAssembly {
 			noteWorker: (worker, text, key) => {
 				wakeWorkerRuntime(this.workerWakeHost(), worker.runtimeId, text, key);
 			},
-			noteSessionForWorker: (worker, text, key) => {
-				const content = `${workerAttemptEndedLine(worker.runtimeId)}\n${text}`;
-				this.deps
-					.deliverParentInput(this.sessionWake(key, content, undefined))
-					.catch((error: unknown) =>
-						this.host.warn(
-							`What the host could not watch for worker ${worker.runtimeId}'s calls could not be told to the session: ${error instanceof Error ? error.message : String(error)}`,
-						),
-					);
-			},
+			// Delivered by the session's watches as their wakes are, under the same guard of an owner's stop of the bot.
+			noteSessionForWorker: (worker, text, key, callStartedAt) =>
+				runtime()?.sessionWatches.noteSession(
+					key,
+					`${workerAttemptEndedLine(worker.runtimeId)}\n${text}`,
+					callStartedAt,
+				),
 		};
 	}
 

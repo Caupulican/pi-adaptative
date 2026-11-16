@@ -13,9 +13,11 @@
  * it, so a worker is woken by its own watch though the session waits on the same subject. Each tells its result on the
  * owner's phone besides waking its armer, the result told once however many watches wait on its subject (a commit's CI
  * armed though its triggers did not settle a run tells its timeout to the armer only: the owner was promised no result). A call that
- * began before an owner's stop arms nothing after the stop. What was armed, what is still looked for and what was not
- * armed (and why: nothing reads it, it was there before the call, the slots are full, the owner stopped the work) is told
- * to the armer in one note per call, its lines split by whether they ask anything of the armer ({@link WatchAutoArmNote}).
+ * began before an owner's stop arms nothing after the stop, and an arming the stop refuses tells nothing of that call
+ * ({@link OwnerStopArmingRefusal}): the stop is the owner's decision, not a subject the armer must act on. What was armed,
+ * what is still looked for and what was not armed (and why: nothing reads it, it was there before the call, the slots are
+ * full) is told to the armer in one note per call, its lines split by whether they ask anything of the armer
+ * ({@link WatchAutoArmNote}).
  *
  * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once; a read of
  * GitHub that waits for a run to be listed waits outside that order. A session's call handed off to the background is read
@@ -38,6 +40,7 @@ import {
 	type GithubWatchSource,
 	githubWatchSubject,
 } from "./github-watch-source.ts";
+import { OwnerStopArmingRefusal } from "./owner-stop-refusal.ts";
 import type { SessionWatchArmer, SessionWatchServed } from "./session-watch-ledger.ts";
 import type { SessionWatchView } from "./session-watch-service.ts";
 
@@ -139,10 +142,13 @@ export interface WatchAutoArmDeps {
 	/** Undefined where the session holds no watches (before its routine runtime is built, or a session without one). */
 	port(): WatchAutoArmPort | undefined;
 	cwd(): string;
-	/** Tells the armer the model-facing note (never an empty one); resolves once it is durable. */
-	note(note: WatchAutoArmNote): Promise<void>;
-	/** Arming or its note failed while the session is not disposed: the owner is told. */
-	failed(error: unknown): void;
+	/**
+	 * Tells the armer the model-facing note (never an empty one) about the call begun at `callStartedAt` (on
+	 * `OWNER_STOP_CLOCK`); resolves once it is durable.
+	 */
+	note(note: WatchAutoArmNote, callStartedAt: number): Promise<void>;
+	/** Arming for the call begun at `callStartedAt`, or its note, failed while the session is not disposed: the owner is told. */
+	failed(error: unknown, callStartedAt: number): void;
 	disposed(): boolean;
 }
 
@@ -444,13 +450,13 @@ export class WatchAutoArm {
 		const call = this.started.get(toolCallId);
 		if (!call) return;
 		this.started.delete(toolCallId);
-		this.enqueue(() => this.armFor(call, output));
+		this.enqueue(call, () => this.armFor(call, output));
 	}
 
-	/** Runs one arming step after the ones before it; a failure is the owner's to hear, never the queue's end. */
-	private enqueue(step: () => Promise<void>): void {
+	/** Runs one arming step for `call` after the ones before it; a failure is the owner's to hear, never the queue's end. */
+	private enqueue(call: StartedCall, step: () => Promise<void>): void {
 		this.queue = this.queue.then(step).catch((error: unknown) => {
-			if (!this.closed(this.deps.port())) this.deps.failed(error);
+			if (!this.closed(this.deps.port())) this.deps.failed(error, call.stopClockStartedAt);
 		});
 	}
 
@@ -466,10 +472,10 @@ export class WatchAutoArm {
 		const plan = await this.plan(call, output, port);
 		// A read the close ended is no subject left unwatched: nothing is armed or told after it.
 		if (this.closed(port)) return;
-		const { armed, missed } = await this.armPlanned(plan.planned, call, port, context);
+		const { armed, missed, stopped } = await this.armPlanned(plan.planned, call, port, context);
 		// A close during the arming ends its arms as failures: they are no subjects left unwatched, and no one hears them.
-		if (this.closed(port)) return;
-		this.tell({
+		if (stopped || this.closed(port)) return;
+		this.tell(call, {
 			informational: [
 				...(armed.length === 0
 					? []
@@ -499,7 +505,7 @@ export class WatchAutoArm {
 		call: StartedCall,
 		port: WatchAutoArmPort,
 		context: AutoArmContext,
-	): Promise<{ armed: string[]; missed: string[] }> {
+	): Promise<{ armed: string[]; missed: string[]; stopped?: true }> {
 		const armed: string[] = [];
 		const missed: string[] = [];
 		for (const { source, deadlineMs, caveat } of planned) {
@@ -522,6 +528,8 @@ export class WatchAutoArm {
 					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}; so its timeout is told to you, not the owner, unless CI came to a result by then`})`,
 				);
 			} catch (error) {
+				// The owner's stop ended the call's work: what it armed before ends with it, and nothing of it is told.
+				if (error instanceof OwnerStopArmingRefusal) return { armed: [], missed: [], stopped: true };
 				missed.push(`${subjectOf(source)}: ${errorText(error)}`);
 			}
 		}
@@ -534,11 +542,11 @@ export class WatchAutoArm {
 			: [`The host armed no watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`];
 	}
 
-	/** Tells the armer the note, without holding the arms of later calls: the note may land only at a later boundary. */
-	private tell(note: WatchAutoArmNote): void {
+	/** Tells the armer the note on `call`, without holding the arms of later calls: it may land only at a later boundary. */
+	private tell(call: StartedCall, note: WatchAutoArmNote): void {
 		if (note.informational.length === 0 && note.action.length === 0) return;
-		void this.deps.note(note).catch((error: unknown) => {
-			if (!this.closed(this.deps.port())) this.deps.failed(error);
+		void this.deps.note(note, call.stopClockStartedAt).catch((error: unknown) => {
+			if (!this.closed(this.deps.port())) this.deps.failed(error, call.stopClockStartedAt);
 		});
 	}
 
@@ -578,13 +586,13 @@ export class WatchAutoArm {
 			if (this.closed(port)) return;
 			if (!last) this.followDispatch(call, dispatch, attempt + 1);
 			else
-				this.tell({
+				this.tell(call, {
 					informational: [],
 					action: this.missedLines([`the run of ${dispatchText(dispatch)}: ${errorText(error)}`]),
 				});
 			return;
 		}
-		this.enqueue(async () => {
+		this.enqueue(call, async () => {
 			const { context } = call;
 			if (!context || this.closed(port)) return;
 			const run = [...runs]
@@ -594,7 +602,7 @@ export class WatchAutoArm {
 			if (!run) {
 				if (!last) this.followDispatch(call, dispatch, attempt + 1);
 				else
-					this.tell({
+					this.tell(call, {
 						informational: [],
 						action: this.missedLines([
 							`the run of ${dispatchText(dispatch)}: GitHub listed none created since your ${call.toolName} call began`,
@@ -602,14 +610,14 @@ export class WatchAutoArm {
 					});
 				return;
 			}
-			const { armed, missed } = await this.armPlanned(
+			const { armed, missed, stopped } = await this.armPlanned(
 				[{ source: run, deadlineMs: DISPATCHED_RUN_DEADLINE_MS }],
 				call,
 				port,
 				context,
 			);
-			if (this.closed(port)) return;
-			this.tell({
+			if (stopped || this.closed(port)) return;
+			this.tell(call, {
 				informational:
 					armed.length === 0
 						? []

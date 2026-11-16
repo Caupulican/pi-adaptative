@@ -72,9 +72,12 @@ export interface TaskWatchPort {
 	noteWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
 	/**
 	 * Tells the session root a note of the host's about the worker's calls that asks for action (a subject left unwatched)
-	 * and came after the worker's attempt ended, as a wake of the session led by whose calls it follows; once per key.
+	 * and came after the worker's attempt stopped reading its mailbox, as a wake of the session led by whose calls it
+	 * follows; once per key. Delivered as a watch's wake is, under the owner's stop of a bot: never while one waits to be
+	 * taken, and not at all once a stop applied in the session ended the work of the call it follows (begun at
+	 * `callStartedAt`, on `OWNER_STOP_CLOCK`).
 	 */
-	noteSessionForWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
+	noteSessionForWorker(worker: WorkerWatchAuthority, text: string, key: string, callStartedAt: number): void;
 }
 
 /** The worker the tool arms for: its runtime id, its lane's scope and its own gate, which judges the call a check would make. */
