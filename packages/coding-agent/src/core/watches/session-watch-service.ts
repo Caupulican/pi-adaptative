@@ -254,8 +254,8 @@ export class SessionWatchService implements WatchObservationStore {
 	private draining: Promise<void> | undefined;
 	private drainAgain = false;
 	private unsubscribeWorkers: (() => void) | undefined;
-	/** The reason last warned for a wake that could not be delivered, so one failing delivery warns once. */
-	private lastDeliveryFault: string | undefined;
+	/** The reason last warned for each delivery that could not be made in the last pass, by delivery id, so each failing delivery warns once per reason. */
+	private deliveryFaults = new Map<string, string>();
 	/** The latest instant an owner's stop was applied at here, on `OWNER_STOP_CLOCK`: no call begun by then is armed after. */
 	private latestStopAt: number | undefined;
 	/** The host's notes owed the session ({@link noteSession}), by delivery id, with when the call each follows began. */
@@ -1028,6 +1028,8 @@ export class SessionWatchService implements WatchObservationStore {
 
 	private async deliverOwed(): Promise<void> {
 		let retry = false;
+		// Only the deliveries still failing carry their warned reason to the next pass.
+		const faults = new Map<string, string>();
 		for (const record of this.deps.ledger.list())
 			for (const wake of record.wakes) {
 				// A failed attempt's wake is told with its failed job, or why that could not be read, once the read ends.
@@ -1036,13 +1038,14 @@ export class SessionWatchService implements WatchObservationStore {
 					const outcome = await this.deliver(record, wake);
 					if (outcome === "later") {
 						retry = true;
+						const warned = this.deliveryFaults.get(wake.deliveryId);
+						if (warned !== undefined) faults.set(wake.deliveryId, warned);
 						continue;
 					}
 					if (outcome === "delivered") this.markDelivered(record.watchId, wake.deliveryId);
-					this.lastDeliveryFault = undefined;
 				} catch (error) {
 					retry = true;
-					this.deliveryFault(error);
+					this.deliveryFault(wake.deliveryId, error, faults);
 				}
 			}
 		for (const [deliveryId, note] of this.notes) {
@@ -1055,20 +1058,20 @@ export class SessionWatchService implements WatchObservationStore {
 					() => !this.stopEnded(note.callStartedAt),
 				);
 				this.notes.delete(deliveryId);
-				this.lastDeliveryFault = undefined;
 			} catch (error) {
 				retry = true;
-				this.deliveryFault(error);
+				this.deliveryFault(deliveryId, error, faults);
 			}
 		}
+		this.deliveryFaults = faults;
 		if (retry) this.retryLater();
 	}
 
-	/** Warns a delivery that failed, once while the same reason repeats. */
-	private deliveryFault(error: unknown): void {
+	/** Warns a delivery that failed, once while the same reason repeats for that delivery, and keeps the reason for the next pass. */
+	private deliveryFault(deliveryId: string, error: unknown, faults: Map<string, string>): void {
 		const reason = error instanceof Error ? error.message : String(error);
-		if (reason !== this.lastDeliveryFault) this.warn(error);
-		this.lastDeliveryFault = reason;
+		if (reason !== this.deliveryFaults.get(deliveryId)) this.warn(error);
+		faults.set(deliveryId, reason);
 	}
 
 	/**
