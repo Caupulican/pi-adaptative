@@ -41,6 +41,7 @@ import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/a
 
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { applyInterfaceLanguage, bindInterfaceLanguage } from "../language/language-binding.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
@@ -87,6 +88,12 @@ function credentialFilesStamp(agentDir: string): string {
 
 export interface BotDaemonInput {
 	readonly agentDir: string;
+	/**
+	 * The environment the owner's `language` setting reads when it is `auto`: given (the daemon's process), what the daemon
+	 * writes for the owner (its reports, the bots' notices) follows that setting from its global settings, read again at
+	 * each reload (`bindInterfaceLanguage`); absent, the process's interface language is left as it is.
+	 */
+	readonly languageEnv?: Readonly<Record<string, string | undefined>>;
 	/** The lease token the starting session claimed and passed in argv: the daemon's identity. */
 	readonly token: string;
 	/** The daemon's clock and alarms: the lease renewal and the away supervisor run on the `routines` port. */
@@ -153,6 +160,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	store = routineStore;
 	// The away bounds are the owner's global settings; no project's settings reach a daemon serving every project.
 	const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
+	const unbindLanguage = input.languageEnv ? bindInterfaceLanguage(settings, input.languageEnv) : () => {};
 	// The bots owed work while no root session takes them (`bot-daemon-host.ts`), hosted only with the credentials to run
 	// them. Hosting them is a duty beside the routines and channels, never their end: a start that fails is reported once per
 	// cause and tried again at the next tick.
@@ -232,6 +240,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	const stop = (end?: Omit<BotDaemonEnd, "at">): Promise<number> => {
 		stopping ??= (async () => {
 			ticker.stop();
+			unbindLanguage();
 			watcher?.close();
 			watcher = undefined;
 			let code = end?.reason === "failed" ? 1 : 0;
@@ -397,6 +406,8 @@ async function runServiceBotDaemon(agentDir: string, options: BotDaemonCommandOp
 			// The claim replaced the failed end, and the daemon launched with a token gets no previous end: the failure
 			// becomes its first report, as on POSIX.
 			if (launch.token !== undefined && launch.previousEnd?.reason === "failed") {
+				// Written for the owner in the language of the owner's global settings, as the daemon writes its own.
+				applyInterfaceLanguage(SettingsManager.create(agentDir, agentDir, { projectTrusted: false }), process.env);
 				try {
 					store.recordDaemonReports(launch.token, [
 						{ at: clock.now(), message: previousDaemonFailureReport(launch.previousEnd) },
@@ -443,6 +454,7 @@ function runClaimedBotDaemon(
 		build: OWN_DAEMON_BUILD,
 		authStorage,
 		modelRegistry,
+		languageEnv: process.env,
 		...(options.eventSources ? { eventSources: options.eventSources } : {}),
 		...(options.channelProviders ? { channelProviders: options.channelProviders } : {}),
 		...(options.previousEnd ? { previousEnd: options.previousEnd } : {}),

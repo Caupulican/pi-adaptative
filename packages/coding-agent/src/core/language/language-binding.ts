@@ -1,7 +1,7 @@
 /**
- * Gives the interface the language of the settings. Only a process that draws a screen for a person calls this: the
- * interactive mode binds it, and a screen drawn before a session exists applies it once. Print, JSON and RPC modes, and
- * the workers they run, never do, so every catalogue text they produce is English, like everything a model reads.
+ * Gives the interface the language of the settings. Only a process that writes for a person calls this: the interactive
+ * mode binds it, the bot daemon binds it for the reports it writes for the owner, and a screen drawn before a session
+ * exists applies it once. Print, JSON and RPC modes, and the workers they run, never do, so every catalogue text they produce is English, like everything a model reads.
  *
  * Binding sets the language the moment it runs, so the first frame is already drawn in it, and sets it again on every
  * settings change, so a running interface follows the setting at once. The words the terminal library draws itself come

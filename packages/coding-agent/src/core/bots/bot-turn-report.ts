@@ -358,6 +358,12 @@ export class BotTurnAccounting {
 					if (this.closed) return;
 					if (this.session.sessionId !== sessionId || this.instance() !== instance || !this.ledger.readable())
 						return;
+					// A lost record of the daemon's charges floors the watermark at what the session had recorded by then: a
+					// history not loaded yet would read that short and charge its ranges again, so the read-back waits for it.
+					if (held.lostBefore !== undefined && !this.session.getDurableCumulativeUsage().settled) {
+						this.recoverAfter = Date.now() + RECOVERY_RETRY_MS;
+						return;
+					}
 					if (!this.adopt(sessionId, instance, held)) return;
 					// Told only once the watermark it lowered is adopted: a read-back dropped changes nothing.
 					const newly = held.unread.filter(({ key }) => !this.unreadTold.has(key));
