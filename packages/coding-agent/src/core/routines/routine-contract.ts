@@ -837,8 +837,8 @@ export function awaySpendMicros(usd: number): number {
  * - admitted and not finished (claimed, dispatching, running): its full per-run bound, until it finishes or returns to
  *   pending (which drops `executor`);
  * - uncertain: its full per-run bound, until resolved, or the spend window after the journal's uncertain retention;
- * - finished after dispatch: its settled spend (its full per-run bound when unread), for the spend window after it
- *   finished;
+ * - finished after dispatch: its settled metered (API) spend (its full per-run bound when unread), for the spend window
+ *   after it finished;
  * - finished without dispatch (cancelled before it started): nothing.
  */
 function routineAwayCharge(

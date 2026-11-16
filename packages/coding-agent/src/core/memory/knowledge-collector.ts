@@ -390,14 +390,14 @@ export class KnowledgeCollector {
 			settings.knowledgeMaxSourcesPerPass > 0 &&
 			settings.knowledgeMaxSourcesPerPass <= 32 &&
 			(cap === undefined || (Number.isFinite(cap) && cap >= 0));
-		// An unpriced model is refused by every bounded completion, so collection never starts on it.
+		// An unpriced metered model is refused by every bounded completion, so collection never starts on it.
 		const reason: KnowledgeCollectionInactiveReason | undefined = !settings.enabled
 			? "disabled"
 			: !valid
 				? "invalid_settings"
 				: !model
 					? "no_model"
-					: model.costDefaulted
+					: model.costDefaulted && countsAgainstDollars(model, this.deps.billing)
 						? "model_unpriced"
 						: engine?.capabilities().requestBudget !== true
 							? "no_engine"

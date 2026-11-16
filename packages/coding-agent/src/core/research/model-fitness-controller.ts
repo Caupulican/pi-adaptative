@@ -64,6 +64,8 @@ export class ModelFitnessController {
 				const spent = createEmptyUsage();
 				const report = await runModelFitnessProbe({
 					trials: args.trials,
+					// The probe's dollar cap holds metered (API) spend alone (`isMeteredSpend`).
+					...(this.models.isMeteredSpend(resolved) ? { maxUsd: 1 } : {}),
 					redactDiagnostic: (text) =>
 						redactCredentialValues(text, this.deps.getModelRegistry().getKnownCredentialValues()),
 					signal: this.abortController.signal,

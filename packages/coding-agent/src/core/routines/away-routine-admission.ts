@@ -9,6 +9,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "../capability-contract.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
+import { isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 
 /**
  * Capabilities that observe without changing anything a run away could not answer for. Excluded on purpose:
@@ -39,15 +40,16 @@ export const AWAY_NO_SESSION_FILE_REASON =
 export const AWAY_LEASES_UNREADABLE_REASON =
 	"its session's lease registry cannot be read, so nothing proves the session closed; it waits for the session to open.";
 
-/** The models a run away would call, as the host's model registry resolves them. */
-export interface AwayModelSource {
+/** The models a run away would call, as the host's model registry resolves them, and whose spend is metered. */
+export interface AwayModelSource extends ModelBilling {
 	find(provider: string, modelId: string): Model<Api> | undefined;
 }
 
 /**
  * Why this saved run cannot run away, or undefined when it can. With `models`, a run whose pinned worker or verifier
- * model has no declared prices is refused too: every request away is priced against the per-run bound, so such a
- * run would be refused at its first request after its claim.
+ * model is unknown, or is metered (`isMeteredSpend`) with no declared prices, is refused too: every metered request
+ * away is priced against the per-run bound, so such a run would be refused at its first request after its claim. A
+ * subscription model's requests are held by its usage windows, not priced, so a missing price does not hold it.
  */
 export function awayRunRefusal(intent: WorkerSavedIntent, models?: AwayModelSource): string | undefined {
 	const contract = intent.executionContract;
@@ -71,7 +73,7 @@ export function awayRunRefusal(intent: WorkerSavedIntent, models?: AwayModelSour
 	if (models)
 		for (const { modelBinding } of profiles) {
 			const model = models.find(modelBinding.provider, modelBinding.modelId);
-			if (!model || model.costDefaulted)
+			if (!model || (model.costDefaulted && isMeteredSpend(model, models)))
 				return `its pinned model ${modelBinding.provider}/${modelBinding.modelId} is unknown here or has no declared prices, so its spend cannot be bounded away; it waits for the session to open.`;
 		}
 	return undefined;

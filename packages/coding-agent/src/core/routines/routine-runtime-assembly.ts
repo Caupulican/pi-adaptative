@@ -109,7 +109,10 @@ export interface RoutineRuntime {
 
 /** What the assembly reads from and asks of the coordinator: the worker runtime, the lifecycle and the operator sends. */
 export interface RoutineAssemblyHost {
-	workerController(): Pick<WorkerDelegationController, "startSavedIntent" | "captureSavedIntent" | "getAgentControl">;
+	workerController(): Pick<
+		WorkerDelegationController,
+		"startSavedIntent" | "captureSavedIntent" | "getAgentControl" | "attemptIsMetered"
+	>;
 	workerLifecycle(): WorkerLifecycle;
 	parentWriteHolds(): ReadonlySet<string>;
 	landRecordedParentWrites(lifecycle: WorkerLifecycle): void;
@@ -424,6 +427,7 @@ export class RoutineRuntimeAssembly {
 				return this.host.workerLifecycle().getTaskRuntimeSnapshot();
 			},
 			start: (input, signal) => this.host.workerController().startSavedIntent(input, signal),
+			isMeteredAttempt: (attempt) => this.host.workerController().attemptIsMetered(attempt),
 		});
 		const scheduler = new RoutineSchedulerController({
 			store,
@@ -602,6 +606,7 @@ export class RoutineRuntimeAssembly {
 						model: () => this.host.resolveLaneModel(undefined),
 						systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
 						usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
+						billing: this.deps.getModelRegistry(),
 						// The same selection the intake makes: a bound System One judges, otherwise the lane model does.
 						maxEstimatedUsd: () =>
 							envelopeCeilingUsd(

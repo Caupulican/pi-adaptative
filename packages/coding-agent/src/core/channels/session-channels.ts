@@ -40,7 +40,7 @@ import {
 import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
-import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
+import { type AwayChannelServing, awayHostUnmetered, type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { type BatchBranchSource, type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -80,10 +80,12 @@ import {
 	listedOwnerDigests,
 	ownerAdmission,
 	ownerAuthority,
+	ownerDollarsApply,
 	ownerLiveCheck,
 	ownerRoom,
 	ownerSenderDigest,
 	policyFingerprint,
+	readOwnerQuota,
 	senderListed,
 } from "./owner-channel.ts";
 import type {
@@ -171,6 +173,7 @@ function clearOffer(entry: ChannelPendingMessage): void {
 	entry.offeredAt = undefined;
 	entry.offeredBatch = undefined;
 	entry.offeredAway = undefined;
+	entry.offeredUnmetered = undefined;
 }
 
 /** What the delivery pass found in the journal for this session. */
@@ -299,7 +302,7 @@ export interface SessionChannelsDeps extends SessionChannelsOwnerDeps, Pick<Batc
 	 * session does and yields to one at once, marks its batches and drafts `away`, and delivers a turn only while
 	 * `capReason` (the away spend bound) gives no reason to wait.
 	 */
-	away?: { capReason(now: number): string | undefined };
+	away?: AwayChannelServing;
 }
 
 interface ChannelRuntime {
@@ -449,24 +452,9 @@ export class SessionChannels {
 		}
 	}
 
-	/**
-	 * What the subscription the session's model runs on allows now, for the owner pool's dollar bounds: the single reading
-	 * every decision below uses. Unknown (no reading, not a subscription login, the bypass off, a throw) keeps the bounds.
-	 */
+	/** What the owner pool's bounds read of the session's model now (`readOwnerQuota`): the one reading every decision below uses. */
 	private ownerQuota(policy: ResolvedChannelPolicy): OwnerQuotaAllowance {
-		if (policy.ownerQuotaMaxUsedPercent <= 0)
-			return { kind: "unknown", reason: "the subscription bypass is off", subscription: false };
-		try {
-			return (
-				this.deps.ownerDelivery?.quotaAllowance?.(policy.ownerQuotaMaxUsedPercent) ?? {
-					kind: "unknown",
-					reason: "this session reads no subscription usage",
-					subscription: false,
-				}
-			);
-		} catch {
-			return { kind: "unknown", reason: "the subscription usage could not be read", subscription: true };
-		}
+		return readOwnerQuota(this.deps.ownerDelivery, policy);
 	}
 
 	/** Why no owner turn of the channel may start now; undefined when one may. Reads the journal state it is given. */
@@ -474,7 +462,7 @@ export class SessionChannels {
 		if (!this.ownerPolicy(name)) return "owner authority is off for this channel in this session";
 		if (this.emergencyStopEngaged()) return "the emergency stop is engaged";
 		if (policy.ownerMaxUsdPerDay === 0) return `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`;
-		const room = ownerRoom(name, state, policy, now, this.ownerQuota(policy).kind === "room");
+		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy)));
 		return room.fits
 			? undefined
 			: `$${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours`;
@@ -1158,7 +1146,7 @@ export class SessionChannels {
 				for (const batch of state.batches) if (batch.owner !== true) consider(batch.acceptedAt + DAY_MS);
 				const policy = this.policy(name);
 				if (policy && this.ownerPolicy(name))
-					consider(ownerRoom(name, state, policy, now, this.ownerQuota(policy).kind === "room").oldestUntil);
+					consider(ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy))).oldestUntil);
 			} catch (error) {
 				harnessLog.warn("channels", "a channel journal could not be read for its expiry wake", {
 					channel: name,
@@ -1425,6 +1413,7 @@ export class SessionChannels {
 			entry.offeredAt = now;
 			entry.offeredBatch = batchId;
 			entry.offeredAway = this.deps.away ? true : undefined;
+			entry.offeredUnmetered = awayHostUnmetered(this.deps.away) ? true : undefined;
 		}
 		return { kind: "deliver", batch: structuredClone(batch), batchId, owner };
 	}
@@ -1479,7 +1468,7 @@ export class SessionChannels {
 			(entry) => entry.owner === true && entry.kind === "message" && entry.offeredTo === undefined,
 		);
 		if (!this.ownerPolicy(name) || !held) return;
-		const room = ownerRoom(name, state, policy, now, this.ownerQuota(policy).kind === "room");
+		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy)));
 		if (room.fits) return;
 		const text =
 			policy.ownerMaxUsdPerDay === 0
@@ -1520,6 +1509,7 @@ export class SessionChannels {
 			acceptedAt: now,
 			state: "accepted",
 			...(this.deps.away ? { away: true as const } : {}),
+			...(awayHostUnmetered(this.deps.away) ? { quota: true as const } : {}),
 		};
 	}
 
@@ -1633,7 +1623,7 @@ export class SessionChannels {
 				}
 				const now = this.now();
 				const base = this.acceptedBatch(batchId, sessionId, latest, delivered, true, now);
-				const quota = this.ownerQuota(policy).kind === "room" ? { quota: true as const } : {};
+				const quota = ownerDollarsApply(this.ownerQuota(policy)) ? {} : { quota: true as const };
 				this.recordAccepted(name, { ...base, owner: true, senderDigest, ...quota }, now);
 				return true;
 			},
@@ -1716,10 +1706,12 @@ export class SessionChannels {
 			return;
 		}
 		const policy = this.policy(run.name);
-		// Past the per-turn dollar bound a turn goes on only while the subscription has room; an exhausted one is told apart.
-		const quota = policy && usd >= policy.ownerMaxUsdPerTurn ? this.ownerQuota(policy) : undefined;
-		if (!policy || (quota && quota.kind !== "room"))
-			this.stopOwnerRun(ref, run, quota?.kind === "exhausted" ? "quota" : "bound");
+		// Metered spend stops past the per-turn dollar bound (`usd` counts it alone); a subscription's turn stops once its
+		// usage windows are exhausted, at any spend.
+		const quota = policy && this.ownerQuota(policy);
+		if (!policy || !quota) this.stopOwnerRun(ref, run, "bound");
+		else if (ownerDollarsApply(quota) ? usd >= policy.ownerMaxUsdPerTurn : quota.kind === "exhausted")
+			this.stopOwnerRun(ref, run, ownerDollarsApply(quota) ? "bound" : "quota");
 		else if (!run.live()) this.stopOwnerRun(ref, run, "authority");
 	}
 
@@ -2185,7 +2177,7 @@ export class SessionChannels {
 					owner: true,
 					senderDigest: by.senderDigest,
 					approval: view.id,
-					...(this.ownerQuota(policy).kind === "room" ? { quota: true as const } : {}),
+					...(ownerDollarsApply(this.ownerQuota(policy)) ? {} : { quota: true as const }),
 				};
 				try {
 					this.journal(name).update(now, (state) => {
@@ -2212,7 +2204,7 @@ export class SessionChannels {
 		const now = this.now();
 		const state = this.journal(name).read().result;
 		const quota = this.ownerQuota(policy);
-		const room = ownerRoom(name, state, policy, now, quota.kind === "room");
+		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(quota));
 		const refusal = this.ownerTurnRefusal(name, policy, state, now);
 		const waiting = state.pending.filter(
 			(entry) => entry.owner === true && entry.conversationKey === conversationKey,
@@ -2363,7 +2355,7 @@ export class SessionChannels {
 				...(policy.ownerSenders.length > 0
 					? {
 							ownerSpendUsd: {
-								used: ownerRoom(name, state, policy, now, quota.kind === "room").usedUsd,
+								used: ownerRoom(name, state, policy, now, !ownerDollarsApply(quota)).usedUsd,
 								max: policy.ownerMaxUsdPerDay,
 							},
 							...(quota.kind === "room" ? { ownerQuotaUsedPercent: quota.usedPercent } : {}),

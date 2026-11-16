@@ -54,9 +54,10 @@ export function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): s
 
 /**
  * What one channel turn the daemon delivered charges the away spend bound, for 24 hours after it was accepted: its
- * recorded spend once answered, and the larger of its full per-run bound and its recorded spend while it runs or when
- * it ended without an answer (a turn is stopped only after a message took it past the bound, and a turn settled by
- * another session has no recorded spend).
+ * recorded metered (API) spend once answered, and the larger of its full per-run bound and its recorded spend while it
+ * runs or when it ended without an answer (a turn is stopped only after a message took it past the bound, and a turn
+ * settled by another session has no recorded spend). A turn served on a subscription (`quota`) reserves no per-run
+ * bound: its usage windows hold it, never dollars.
  */
 function channelAwayCharge(
 	batch: ChannelBatchRecord,
@@ -68,17 +69,21 @@ function channelAwayCharge(
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= nowMs) return undefined;
 	const usd = batch.usd ?? 0;
-	const charged = batch.state === "accepted" || batch.state === "unanswered" ? Math.max(maxUsdPerRun, usd) : usd;
+	const reserved = batch.quota === true ? 0 : maxUsdPerRun;
+	const charged = batch.state === "accepted" || batch.state === "unanswered" ? Math.max(reserved, usd) : usd;
 	return { micros: awaySpendMicros(charged), until };
 }
 
 /**
  * What the daemon's offers not yet accepted charge: each offered batch its full per-run bound, from the offer on, so
- * no other claim takes the room the turn is about to use. An offer that is accepted becomes its batch's charge.
+ * no other claim takes the room the turn is about to use; an offer by a host whose model is not metered reserves
+ * nothing (`offeredUnmetered`). An offer that is accepted becomes its batch's charge.
  */
 function offerAwayCharges(pending: readonly ChannelPendingMessage[], maxUsdPerRun: number, nowMs: number) {
 	const charges: RoutineAwayCharge[] = [];
-	for (const offeredAt of pendingOfferTimes(pending, (entry) => entry.offeredAway === true && entry.owner !== true)) {
+	const reserves = (entry: ChannelPendingMessage) =>
+		entry.offeredAway === true && entry.offeredUnmetered !== true && entry.owner !== true;
+	for (const offeredAt of pendingOfferTimes(pending, reserves)) {
 		const until = offeredAt + DAY_MS;
 		if (until > nowMs) charges.push({ micros: awaySpendMicros(maxUsdPerRun), until });
 	}
@@ -108,6 +113,23 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
 	return charges;
+}
+
+/** What the channels core asks of the daemon's host while it serves a channel away (`SessionChannelsDeps.away`). */
+export interface AwayChannelServing {
+	/** The away spend bound's reason to deliver no turn now. */
+	capReason(now: number): string | undefined;
+	/** Whether the host's turns spend metered (API) dollars (`isMeteredSpend`); absent: they do. */
+	spendsMetered?(): boolean;
+}
+
+/** The daemon's host runs on a model whose spend is not metered: its turns away reserve none of the away bound. */
+export function awayHostUnmetered(away: AwayChannelServing | undefined): boolean {
+	try {
+		return away?.spendsMetered?.() === false;
+	} catch {
+		return false;
+	}
 }
 
 export type ChannelServedBy = "this session" | "the daemon" | "another session" | "nobody";

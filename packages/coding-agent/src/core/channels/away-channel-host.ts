@@ -658,7 +658,10 @@ export class AwayChannelHosts {
 			// The same ports the open session's channels run on: a polling transport's waits and the expiry wake.
 			timers: this.input.timers.port("channel-poll"),
 			wakeTimers: this.input.timers.port("channel-expiry"),
-			away: { capReason: (nowMs) => this.capReason(nowMs) },
+			away: {
+				capReason: (nowMs) => this.capReason(nowMs),
+				spendsMetered: () => isMeteredSpend(session.model, session.modelRegistry),
+			},
 		});
 		const host: AwayChannelHost = {
 			name,

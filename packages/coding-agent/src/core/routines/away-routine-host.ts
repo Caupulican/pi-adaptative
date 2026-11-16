@@ -179,6 +179,7 @@ async function openAwayRoutineHost(args: {
 		const worker = new RoutineWorkerExecutor({
 			getSnapshot: () => context.lifecycle.getTaskRuntimeSnapshot(),
 			start: (input, signal) => context.workers.startSavedIntent(input, signal),
+			isMeteredAttempt: (attempt) => context.workers.attemptIsMetered(attempt),
 		});
 		const contextListeners = new Set<() => void>();
 		const scheduler = new RoutineSchedulerController({

@@ -34,7 +34,7 @@ const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
  * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
  * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
  */
-/** The status line for the subscription allowance (none when the model is no subscription login): whether the dollar bounds apply now, and why. */
+/** The status line for the subscription allowance (none when the model is no subscription login, whose metered spend the dollar bounds hold): what holds its turns now, and why. */
 export function quotaStatusLine(
 	name: string,
 	policy: ResolvedChannelPolicy,
@@ -44,8 +44,8 @@ export function quotaStatusLine(
 	if (quota.kind === "room")
 		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${policy.ownerQuotaMaxUsedPercent}% (${key}); the dollar bounds do not apply.`;
 	if (quota.kind === "exhausted")
-		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); the dollar bounds apply.`;
-	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds apply.` : undefined;
+		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); an owner turn stops until its usage resets.`;
+	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds do not apply.` : undefined;
 }
 
 /**

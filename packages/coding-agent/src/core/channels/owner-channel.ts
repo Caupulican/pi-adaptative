@@ -20,6 +20,7 @@ import {
 } from "./channel-journal.ts";
 import type { InboundChannelEvent } from "./channel-message.ts";
 import { type ChannelPolicyResolution, isOwnerChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
+import type { OwnerChannelDelivery, OwnerQuotaAllowance } from "./owner-channel-types.ts";
 
 /** Whether `senderId` is one of `ids`, both put in the transport's one comparable form. */
 export function senderListed(
@@ -176,25 +177,25 @@ function ownerOfferCharges(
 
 /**
  * The owner pool's charges of one channel: its owner turns and owner offers of the last 24 hours. A turn accepted while
- * the subscription had room (`quota`) charges nothing; while it has room now (`quotaRoom`) an offer reserves nothing.
+ * its spend was not metered (`quota`) charges nothing; while it is not metered now (`unmetered`) an offer reserves nothing.
  */
 export function ownerChannelCharges(
 	channel: string,
 	state: Pick<ChannelJournalState, "batches" | "pending">,
 	policy: Pick<ResolvedChannelPolicy, "ownerMaxUsdPerTurn">,
 	now: number,
-	quotaRoom = false,
+	unmetered = false,
 ): OwnerChannelCharge[] {
 	const charges: OwnerChannelCharge[] = [];
 	for (const batch of state.batches) {
 		const charge = ownerBatchCharge(channel, batch, policy.ownerMaxUsdPerTurn, now);
 		if (charge) charges.push(charge);
 	}
-	if (!quotaRoom) charges.push(...ownerOfferCharges(channel, state.pending, policy.ownerMaxUsdPerTurn, now));
+	if (!unmetered) charges.push(...ownerOfferCharges(channel, state.pending, policy.ownerMaxUsdPerTurn, now));
 	return charges;
 }
 
-/** The owner pool of a channel now: what it holds, and whether another turn fits (`quotaRoom`: the subscription has allowance); when not, when room returns. */
+/** The owner pool of a channel now: what it holds, and whether another turn fits (`unmetered`: `ownerDollarsApply` is false); when not, when room returns. */
 export interface OwnerRoom {
 	readonly usedUsd: number;
 	readonly fits: boolean;
@@ -207,15 +208,48 @@ export function ownerRoom(
 	state: Pick<ChannelJournalState, "batches" | "pending">,
 	policy: ResolvedChannelPolicy,
 	now: number,
-	quotaRoom = false,
+	unmetered = false,
 ): OwnerRoom {
-	const charges = ownerChannelCharges(channel, state, policy, now, quotaRoom);
+	const charges = ownerChannelCharges(channel, state, policy, now, unmetered);
 	const usedMicros = charges.reduce((sum, charge) => sum + charge.micros, 0);
-	// The subscription's room lifts the daily dollar bound, never the off switch (`ownerMaxUsdPerDay: 0` starts none).
+	// Spend that is not metered lifts the daily dollar bound, never the off switch (`ownerMaxUsdPerDay: 0` starts none).
 	const fits =
 		policy.ownerMaxUsdPerDay > 0 &&
-		(quotaRoom ||
+		(unmetered ||
 			usedMicros + awaySpendMicros(policy.ownerMaxUsdPerTurn) <= awaySpendMicros(policy.ownerMaxUsdPerDay));
 	const oldestUntil = charges.length > 0 ? Math.min(...charges.map((charge) => charge.until)) : undefined;
 	return { usedUsd: usedMicros / 1_000_000, fits, ...(oldestUntil !== undefined ? { oldestUntil } : {}) };
+}
+
+/**
+ * What the owner pool's bounds read of the session's model now: its subscription's allowance at the line
+ * `ownerQuotaMaxUsedPercent` draws (100% when it is 0), or `unknown` with `subscription: false` for a model that is no
+ * subscription login (`SubscriptionAllowanceReader` decides that by `isMeteredSpend`). A delivery that reads no usage
+ * reports a metered model, so the dollar bounds keep holding it.
+ */
+export function readOwnerQuota(
+	delivery: Pick<OwnerChannelDelivery, "quotaAllowance"> | undefined,
+	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
+): OwnerQuotaAllowance {
+	const line = policy.ownerQuotaMaxUsedPercent > 0 ? policy.ownerQuotaMaxUsedPercent : 100;
+	try {
+		return (
+			delivery?.quotaAllowance?.(line) ?? {
+				kind: "unknown",
+				reason: "this session reads no subscription usage",
+				subscription: false,
+			}
+		);
+	} catch {
+		return { kind: "unknown", reason: "the subscription usage could not be read", subscription: true };
+	}
+}
+
+/**
+ * Whether the owner pool's dollar bounds hold the spend of the reading's model: metered (API) spend alone, by the owner's
+ * cost rule. A subscription login is held by its usage windows instead: its turns run while they have room or cannot
+ * be read, and a turn stops once they are exhausted.
+ */
+export function ownerDollarsApply(quota: OwnerQuotaAllowance): boolean {
+	return quota.kind === "unknown" && !quota.subscription;
 }

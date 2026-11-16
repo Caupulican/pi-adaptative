@@ -63,6 +63,11 @@ export interface ModelFitnessOptions {
 	redactDiagnostic?: (text: string) => string;
 	/** Injected clock for latency measurement (test seam). Defaults to Date.now. */
 	now?: () => number;
+	/**
+	 * Each research and worker probe's dollar cap, on metered (API) spend: absent for a model on a subscription, whose
+	 * plan's usage windows hold it, so no probe of it ends `budget_exhausted` on dollars.
+	 */
+	maxUsd?: number;
 }
 
 export interface FitnessFailureDiagnostic {
@@ -239,11 +244,11 @@ function parseToolCall(text: string): boolean {
 	);
 }
 
-function fitnessEnvelope(): CapabilityEnvelope {
+function fitnessEnvelope(maxUsd: number | undefined): CapabilityEnvelope {
 	return {
 		id: "model-fitness-probe",
 		capabilities: ["research.execute", "filesystem.read", "memory.query"],
-		maxEstimatedUsd: 1,
+		...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
 		createdAt: new Date().toISOString(),
 	};
 }
@@ -348,8 +353,8 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 				"- Find what retry/backoff conventions the codebase already uses",
 				"- Identify which call sites would adopt the helper",
 			].join("\n"),
-			envelope: fitnessEnvelope(),
-			maxUsd: 1,
+			envelope: fitnessEnvelope(options.maxUsd),
+			...(options.maxUsd !== undefined ? { maxUsd: options.maxUsd } : {}),
 			maxSources: 8,
 			maxFindings: 5,
 			maxWallClockMs,
@@ -373,10 +378,14 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 				instructions:
 					"Summarize in two sentences what a capability envelope is: a declared set of allowed tools, paths, and capability names that bounds what a delegated worker may do.",
 				route: { tier: "cheap", risk: "read-only", confidence: 1, reasonCode: "fitness_probe", reasons: [] },
-				envelope: { id: `fitness-env-${i}`, capabilities: ["filesystem.read"], maxEstimatedUsd: 1 },
-				maxEstimatedUsd: 1,
+				envelope: {
+					id: `fitness-env-${i}`,
+					capabilities: ["filesystem.read"],
+					...(options.maxUsd !== undefined ? { maxEstimatedUsd: options.maxUsd } : {}),
+				},
+				...(options.maxUsd !== undefined ? { maxEstimatedUsd: options.maxUsd } : {}),
 			},
-			maxUsd: 1,
+			...(options.maxUsd !== undefined ? { maxUsd: options.maxUsd } : {}),
 			maxWallClockMs,
 			usageReportId: `fitness:${i}`,
 			signal: options.signal,

@@ -10,7 +10,13 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { claimThenEffect } from "../../kernel/outbox.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
-import { RequestSpendBudget } from "../cost/request-spend-budget.ts";
+import {
+	countsAgainstDollars,
+	RequestSpendBudget,
+	receiptCountsAgainstDollars,
+	referenceCountsAgainstDollars,
+	type SpendBilling,
+} from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine.ts";
 import { StructuredLlmDecisionEngine } from "../decision/engines/structured-llm-engine.ts";
@@ -201,6 +207,11 @@ export interface RoutineIntakeDeps {
 	systemOne(): SemanticDecisionEngine | undefined;
 	usageOwner(): SessionSemanticUsageDelivery;
 	maxEstimatedUsd(): number | undefined;
+	/**
+	 * The model registry's billing: the intake's dollar limits then count metered (API) spend only, and a subscription's
+	 * intake is held by its usage windows instead; every spend counts without it.
+	 */
+	readonly billing?: SpendBilling;
 	isForegroundBusy(): boolean;
 	/** Foreground activity: every change that can end a busy foreground. */
 	subscribeActivity(listener: () => void): () => void;
@@ -306,8 +317,7 @@ export class RoutineIntake {
 			state: config.reason ? "inactive" : "active",
 			...(config.reason ? { reason: config.reason } : {}),
 			...(config.engine ? { judge: `${config.engine.id} (${config.engine.model})` } : {}),
-			spentUsd: this.deps.usageOwner().spending(ROUTINE_INTAKE_OPERATION_PREFIX, ROUTINE_INTAKE_OPERATION_PREFIX)
-				.totalUsd,
+			spentUsd: this.spending(ROUTINE_INTAKE_OPERATION_PREFIX).totalUsd,
 			sessionMaxUsd: ROUTINE_INTAKE_SESSION_MAX_USD,
 			...(this.last ? { last: this.last } : {}),
 		};
@@ -319,15 +329,15 @@ export class RoutineIntake {
 			if (host) return { reason: host };
 			const model = this.deps.model();
 			if (!model) return { reason: "no_model" };
-			// An unpriced model is refused by every bounded completion, so intake never starts on it.
-			if (model.costDefaulted) return { reason: "model_unpriced", model };
+			// An unpriced metered model is refused by every bounded completion, so intake never starts on it.
+			if (model.costDefaulted && countsAgainstDollars(model, this.deps.billing))
+				return { reason: "model_unpriced", model };
 			const engine = this.engine(model);
 			if (engine.capabilities().requestBudget !== true) return { reason: "no_engine", model };
-			const spending = this.deps
-				.usageOwner()
-				.spending(ROUTINE_INTAKE_OPERATION_PREFIX, ROUTINE_INTAKE_OPERATION_PREFIX);
+			const spending = this.spending(ROUTINE_INTAKE_OPERATION_PREFIX);
 			if (spending.unresolved) return { reason: "accounting_unresolved", model, engine };
 			if (
+				this.spendsMetered(model, engine) &&
 				Math.min(
 					ROUTINE_INTAKE_SESSION_MAX_USD - spending.totalUsd,
 					this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
@@ -338,6 +348,26 @@ export class RoutineIntake {
 		} catch {
 			return { reason: "no_engine" };
 		}
+	}
+
+	/** The session's intake spending under `operationId`, as its dollar limits count it: metered spend only with `billing`. */
+	private spending(operationId: string) {
+		const billing = this.deps.billing;
+		return this.deps
+			.usageOwner()
+			.spending(
+				ROUTINE_INTAKE_OPERATION_PREFIX,
+				operationId,
+				billing && ((spend) => receiptCountsAgainstDollars(spend, billing)),
+			);
+	}
+
+	/** Whether the intake's requests spend metered dollars: extraction on its model, or the engine's judgments. */
+	private spendsMetered(model: Model<Api>, engine: SemanticDecisionEngine): boolean {
+		return (
+			countsAgainstDollars(model, this.deps.billing) ||
+			referenceCountsAgainstDollars(engine.model, this.deps.billing)
+		);
 	}
 
 	/** One selection, re-read on every pass: a bound System One always judges; otherwise the session model does. */
@@ -585,7 +615,7 @@ export class RoutineIntake {
 	): Promise<void> {
 		let batch = opened;
 		const usageOwner = this.deps.usageOwner();
-		const spending = usageOwner.spending(ROUTINE_INTAKE_OPERATION_PREFIX, batch.operationId);
+		const spending = this.spending(batch.operationId);
 		// A response still settling wakes the pass again through the spending subscription.
 		if (spending.unresolved) return;
 		const remaining = Math.min(
@@ -593,7 +623,7 @@ export class RoutineIntake {
 			ROUTINE_INTAKE_SESSION_MAX_USD - spending.totalUsd,
 			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
 		);
-		if (remaining <= 0) {
+		if (remaining <= 0 && this.spendsMetered(model, engine)) {
 			harnessLog.warn("routines", "an intake pass ran out of spending allowance", {
 				sources: batch.sourceIds.length,
 			});
@@ -601,7 +631,7 @@ export class RoutineIntake {
 			return;
 		}
 		const request: IntakeRequestOptions = {
-			budget: new RequestSpendBudget(remaining),
+			budget: new RequestSpendBudget(Math.max(0, remaining), undefined, this.deps.billing),
 			origin: { ...usageOwner.captureOrigin(), operationId: batch.operationId },
 		};
 		if (!batch.requests) {

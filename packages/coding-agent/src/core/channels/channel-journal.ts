@@ -63,6 +63,11 @@ export interface ChannelPendingMessage {
 	/** Offered by the daemon while no session was open: the offer charges the away spend bound until accepted. */
 	offeredAway?: true;
 	/**
+	 * That offer's host runs on a model whose spend is not metered (a subscription login), so the offer reserves no
+	 * dollars of the away bound. An earlier build ignores the field and reserves the per-run bound.
+	 */
+	offeredUnmetered?: true;
+	/**
 	 * Admitted as the owner's words (`ownerAdmission`): offered only as an owner turn, never in a third party's batch; one
 	 * whose authority lapsed waits and expires. An earlier build ignores the field and delivers it as a third party's.
 	 */
@@ -86,7 +91,11 @@ export interface ChannelBatchRecord {
 	readonly away?: true;
 	/** An owner turn: it charges the channel's owner pool, never the away bound or the channel's third-party bounds. */
 	readonly owner?: true;
-	/** Accepted while the subscription's usage had room (`ownerQuotaMaxUsedPercent`): it charges no dollars to the owner pool. */
+	/**
+	 * Accepted while its spend was not metered (a subscription login, `ownerDollarsApply` false for an owner turn, the
+	 * daemon's host model for a turn away): it charges no dollars to the owner pool, and a turn away reserves no per-run
+	 * bound of the away bound, only its recorded metered spend. An earlier build reserves that bound for a turn away.
+	 */
 	readonly quota?: true;
 	/** The owner sender's digest (`ownerSenderDigest`): the answer goes back only while that sender is still listed. */
 	readonly senderDigest?: string;
@@ -253,6 +262,7 @@ function isPending(value: unknown): value is ChannelPendingMessage {
 		(value.offeredAt === undefined || isTime(value.offeredAt)) &&
 		(value.offeredBatch === undefined || isString(value.offeredBatch)) &&
 		(value.offeredAway === undefined || value.offeredAway === true) &&
+		(value.offeredUnmetered === undefined || value.offeredUnmetered === true) &&
 		(value.owner === undefined || value.owner === true)
 	);
 }

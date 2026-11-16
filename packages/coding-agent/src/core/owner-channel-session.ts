@@ -7,6 +7,7 @@
  * holds no authority.
  */
 
+import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import type { AgentEvent } from "../kernel/types.ts";
@@ -22,6 +23,7 @@ import type {
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
+import { isMeteredSpend, type ModelBilling } from "./orchestration/risk-budget.ts";
 import type { OwnerDecisionItem } from "./owner-decisions/owner-decision-queue.ts";
 import { isRemoteOwnerOrigin } from "./turn-origin.ts";
 
@@ -40,6 +42,8 @@ export interface OwnerChannelSessionHost {
 	/** The session's canonical work state: whether it works now, and why it rests when it does not. */
 	getSessionWorkState(): OwnerSessionWork;
 	emitHostWarning(message: string): void;
+	/** Whose spend is metered (`isMeteredSpend`): an owner turn's dollar bound counts that spend alone. */
+	readonly modelRegistry: ModelBilling & { find(provider: string, modelId: string): Model<Api> | undefined };
 }
 
 /** What the owner channel reads and writes of the session's store: its branch, its identity and its custom entries. */
@@ -154,7 +158,11 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		let usd = 0;
 		return this.host.agent.subscribe((event) => {
 			if (event.type !== "message_end" || event.message.role !== "assistant" || !this.runOpenedBy(ref)) return;
-			usd += event.message.usage?.cost?.total ?? 0;
+			// Only metered (API) spend is held by dollars; every response is still reported, so a subscription's turn is
+			// asked about its usage windows at each.
+			const registry = this.host.modelRegistry;
+			const { provider, model } = event.message;
+			if (isMeteredSpend(registry.find(provider, model), registry)) usd += event.message.usage?.cost?.total ?? 0;
 			onUsd(usd);
 		});
 	}

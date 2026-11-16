@@ -1,13 +1,14 @@
 /**
  * Whether a subscription login still has allowance, read from the account usage the provider reports (`AccountUsageMonitor`):
- * the owner channel lets a turn run past its dollar ceilings while the subscription's own limits (a 5 hour window, a
- * weekly one, whatever the account reports) have room. The decision is code over the snapshot's facts; nothing here asks a
+ * a subscription's work is held by its own limits (a 5 hour window, a weekly one, whatever the account reports), never by
+ * dollars, which hold metered (API) spend alone. The decision is code over the snapshot's facts; nothing here asks a
  * model. Credits and on-demand balances are money, so they never count as allowance: only the usage windows and the
  * provider's own limit flags do.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "../channels/channel-policy.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { resolveProviderAccountKey } from "./account-key.ts";
 import { AccountUsageMonitor } from "./account-usage-monitor.ts";
@@ -20,7 +21,7 @@ import {
 	type UsageWindow,
 } from "./usage-overview.ts";
 
-/** How old a snapshot may be and still decide; past it the allowance is unknown (the dollar ceilings apply). */
+/** How old a snapshot may be and still decide; past it the allowance is unknown (no usage window holds the work). */
 export const SUBSCRIPTION_ALLOWANCE_MAX_AGE_MS = 5 * 60_000;
 
 export type SubscriptionAllowance =
@@ -85,7 +86,7 @@ export function hasAllowance(
 	model: Model<Api>,
 ): boolean {
 	return (
-		registry.isUsingSubscription(model) &&
+		!isMeteredSpend(model, registry) &&
 		allowance.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind !== "exhausted"
 	);
 }
@@ -184,7 +185,7 @@ export class SubscriptionAllowanceReader implements SubscriptionAllowancePort {
 	read(maxUsedPercent: number, forModel?: Model<Api>): SubscriptionAllowance {
 		const model = forModel ?? this.deps.getModel();
 		const registry = this.deps.getRegistry();
-		if (!model || !registry.isUsingSubscription(model))
+		if (!model || isMeteredSpend(model, registry))
 			return { kind: "unknown", reason: "the model is not a subscription login", subscription: false };
 		const account = this.accountFor(model);
 		if (!account) return { kind: "unknown", reason: "the account is not signed in", subscription: true };

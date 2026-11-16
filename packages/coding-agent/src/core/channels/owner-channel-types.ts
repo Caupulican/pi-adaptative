@@ -53,11 +53,12 @@ export interface OwnerChannelDelivery {
 		onAccepted: (accepted: boolean) => void,
 		requestEntryId: string | undefined,
 	): void;
-	/** Reports the cost of the run that `ref` opened as it grows; returns the unsubscribe. */
+	/** Reports the metered (API) cost of the run that `ref` opened at each of its responses; returns the unsubscribe. */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
 	/**
 	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
-	 * is below `maxUsedPercent`. Unknown (also when this member is absent) leaves the dollar bounds in force.
+	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent) is a metered model,
+	 * which the dollar bounds hold (`ownerDollarsApply`).
 	 */
 	quotaAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
 	/** Aborts the run that `ref` opened. */

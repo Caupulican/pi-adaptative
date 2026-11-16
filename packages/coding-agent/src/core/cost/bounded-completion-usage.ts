@@ -29,12 +29,13 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 	/** Replanning is read-only here: only dispatched requests consume the allowance. */
 	preflight(request: RequestPreflightContext): { maxTokens: number } {
 		this.responses.assertAvailable();
-		if (request.model.costDefaulted)
+		// Spend that is not metered has no dollars to fit into: its plan's usage windows hold it.
+		const remainingUsd = this.spending.remainingUsdFor(request.model);
+		// Only a model a dollar bound holds must declare its price: a subscription model without one runs on its windows.
+		if (request.model.costDefaulted && remainingUsd !== undefined)
 			throw new RequestSpendRefusal("The selected model has no declared price for a bounded completion.");
 		const inputTokens = estimateProviderRequestTokens(request.context, request.model);
 		const maxOutputTokens = Math.min(request.maxTokens ?? request.model.maxTokens, request.model.maxTokens);
-		// Spend that is not metered has no dollars to fit into: its plan's usage windows hold it.
-		const remainingUsd = this.spending.remainingUsdFor(request.model);
 		const maxTokens =
 			remainingUsd === undefined
 				? maxOutputTokens
@@ -60,7 +61,7 @@ export class BoundedCompletionUsage implements ProviderResponseObserver {
 	/** Each physical request owns its identity and reserved receipt slot until real settlement. */
 	begin(model: Model<Api>, signal?: AbortSignal): ProviderResponseTicket {
 		if (
-			model.costDefaulted ||
+			(model.costDefaulted && this.spending.remainingUsdFor(model) !== undefined) ||
 			model.provider !== this.admittedModel?.provider ||
 			model.id !== this.admittedModel.model
 		)

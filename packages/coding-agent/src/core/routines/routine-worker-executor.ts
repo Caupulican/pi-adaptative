@@ -29,6 +29,8 @@ export interface RoutineWorkerState {
 
 interface RoutineWorkerExecutorDeps {
 	getSnapshot(): TaskRuntimeProjection;
+	/** Whether an attempt's spend is metered (`WorkerDelegationController.attemptIsMetered`): a run away settles that alone. */
+	isMeteredAttempt(attempt: AttemptRuntimeState): boolean;
 	start(
 		input: RoutineWorkerRequest & { assertAdmission: () => void },
 		signal: AbortSignal,
@@ -103,7 +105,8 @@ export class RoutineWorkerExecutor {
 	}
 
 	/**
-	 * What the run's attempts (subject retries and their reviewers) spent, from their canonical ledger usage. Undefined,
+	 * What the run's attempts (subject retries and their reviewers) spent in metered (API) dollars, from their canonical
+	 * ledger usage: a subscription's attempts are held by its usage windows, never by the away bound's dollars. Undefined,
 	 * so the caller keeps charging the full bound, when an attempt can still run (queued, leased, running, suspended),
 	 * has no canonical usage accounting, or the run's identity conflicts.
 	 */
@@ -114,7 +117,7 @@ export class RoutineWorkerExecutor {
 			for (const attemptId of this.notificationAttemptIds(request)) {
 				const attempt = snapshot.attempts[attemptId];
 				if (!attempt?.usageAccounting || LIVE_ATTEMPT_STATUSES.has(attempt.status)) return undefined;
-				costUsd += attempt.usageAccounting.total.costUsd;
+				if (this.deps.isMeteredAttempt(attempt)) costUsd += attempt.usageAccounting.total.costUsd;
 			}
 			return costUsd;
 		} catch {
