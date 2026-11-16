@@ -543,11 +543,14 @@ to admission checks; the gatherer does not bypass them by creating another sessi
 
 The Workplan pane groups worker tasks by their agent identity. A terminal native task that never
 acquired an agent binding is not a retained session. Retiring a worker removes it from retained
-session counts but preserves its task records and transcript. A bot's later messages reuse its
-existing direct or group runtime; different groups remain separate conversations.
+session counts but preserves its task records and transcript. A bot that runs as a worker reuses its
+existing direct or group runtime for later messages; different groups remain separate conversations. A bot that answers in
+a session of its own takes every message in that one session, a group's message included: its group turns sit beside its
+direct chat, each labelled with the group's room, and a group's message carries neither the group's blackboard nor its
+recent activity, which a worker's start carried, so a member reads the other members' answers only in the group's log.
 
-Group replies and automatic memory updates belong only to their originating group. Group prompts
-exclude direct-chat summaries, the shared bot blackboard and other groups' history. Older unscoped
+For a member that runs as a worker, group replies and automatic memory updates belong only to their originating group, and
+group prompts exclude direct-chat summaries, the shared bot blackboard and other groups' history. Older unscoped
 history remains available for root inspection and is not automatically imported into new group
 conversations.
 

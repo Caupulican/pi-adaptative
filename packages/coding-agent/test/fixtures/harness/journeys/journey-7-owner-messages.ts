@@ -275,7 +275,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		workers: [0, 0],
 	});
 
-	// A mention narrows the group to one member and reaches it without the address.
+	// A mention narrows the group to one member and reaches it without the address. Both members' turns have ended first,
+	// so the mention starts a turn of its own rather than steering the one still answering the group.
+	await waitForBotRosterState(world, session, TEAM_ONE, "idle");
+	await waitForBotRosterState(world, session, TEAM_TWO, "idle");
 	const mentioned = await session.sendOperatorMessageToTeam(TEAM, TEAM_MENTION);
 	await withDeadline(
 		trace,

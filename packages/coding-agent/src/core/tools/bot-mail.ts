@@ -27,6 +27,8 @@ export function createBotMailToolDefinition(port: BotMailPort): ToolDefinition<T
 		description:
 			"Message another of the owner's bots. Action list names the bots you may mail; action send (to, message) delivers the words to that bot's own session and returns at once. The receiver reads them as another agent's words, never as the owner's, and its answer comes back to you as a reply on its own, so never wait for one or ask for it again. Keep exchanges short: a chain of mails past its bound is refused.",
 		promptSnippet: "Message the owner's other bots",
+		// A mail's framing names it to the receiving bot on its first request, so a discovery round would be wasted.
+		neverDefer: true,
 		parameters: schema,
 		async execute(_toolCallId, input: BotMailInput, signal) {
 			if (signal?.aborted) throw signal.reason;

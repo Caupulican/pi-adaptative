@@ -116,7 +116,8 @@ function sessionWords(
 	const origin = agentMailTurnOrigin({
 		from: botMailAddressText(group),
 		hop: 1,
-		ref: botMailRef(randomUUID()),
+		// A routine's occurrence names its mail, so an occurrence delivered again runs one turn of each member.
+		ref: botMailRef(options?.fromRoutine?.ref ?? randomUUID()),
 		shown: message,
 		thirdParty: options?.fromRoutine?.thirdParty === true,
 	});
