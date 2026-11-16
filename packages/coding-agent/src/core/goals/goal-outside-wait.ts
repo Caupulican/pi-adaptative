@@ -4,9 +4,9 @@
  * follow it with a watch bound to the requirement instead of spending passes on it. Code decides the facts (an active goal,
  * an open requirement no watch was ever bound to, a bound engine, no live watch at decision time); System One answers the
  * one semantic question code cannot, with an evidence-sufficiency question beside it. The judgment is taken when one of the
- * session's own watches ends, off the turn, once per goal, requirement and requirement text, and kept for the session's
- * life; the goal's runtime snapshot reads the saved answers (`GoalWatchFacts.waitsOutside`), so the continuation decision
- * stays synchronous. Nothing is written to the goal's state. With System One off or out, only bound watches count.
+ * session's own watches ends, off the turn, once per goal, requirement and requirement text, and saved in the session's
+ * watch ledger, which a restart reads back; the goal's runtime snapshot reads the saved answers
+ * (`GoalWatchFacts.waitsOutside`), so the continuation decision stays synchronous. Nothing is written to the goal's state. With System One off or out, only bound watches count.
  */
 import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -15,6 +15,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { ACCEPT_ABSENCE_AT, ACCEPT_AT, noulProbability } from "../system-one/answer-acceptance.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "../system-one/operation-classifier.ts";
 import { noteDecisionTrace } from "../system-one/semantic-evaluation-ledger.ts";
+import type { RequirementWaitAnswer, SessionRequirementJudgment } from "../watches/session-watch-ledger.ts";
 import { type GoalState, isGoalExecutionActive, type Requirement } from "./goal-state.ts";
 
 /** How long one judgment may take before it counts as an outage; it runs off the turn, so it delays no one. */
@@ -39,9 +40,9 @@ export const GOAL_OUTSIDE_WAIT_PROGRAM = {
 } as const;
 
 /** Why a requirement was or was not taken to wait on outside state, in the order the exits are tried. */
-type GoalOutsideWaitExit = "unasked" | "evidence_insufficient" | "waits_outside" | "within_session" | "open";
+type GoalOutsideWaitExit = "unasked" | RequirementWaitAnswer;
 
-const DRIVING_QUESTIONS: Readonly<Record<Exclude<GoalOutsideWaitExit, "unasked">, readonly string[]>> = {
+const DRIVING_QUESTIONS: Readonly<Record<RequirementWaitAnswer, readonly string[]>> = {
 	evidence_insufficient: ["requirement_evidence_sufficient"],
 	waits_outside: ["waits_on_outside_state", "requirement_evidence_sufficient"],
 	within_session: ["waits_on_outside_state", "requirement_evidence_sufficient"],
@@ -55,6 +56,12 @@ export interface GoalOutsideWaitPorts {
 	goal(): GoalState | undefined;
 	/** The requirements of `goalId` a watch was ever bound to: their link answers the question, so they are not asked. */
 	linked(goalId: string): ReadonlySet<string>;
+	/** The answers the session saved (its watch ledger), a restart's included. */
+	saved(): readonly SessionRequirementJudgment[];
+	/** Saves an answer in place of an earlier one to its question; a failure to write is the ledger's to report. */
+	save(judgment: SessionRequirementJudgment): void;
+	/** The time an answer is stamped with. */
+	now(): number;
 	warn(message: string): void;
 	isDisposed(): boolean;
 }
@@ -68,8 +75,6 @@ function questionKey(goalId: string, requirement: Requirement): string {
 
 export class GoalOutsideWait {
 	private readonly ports: GoalOutsideWaitPorts;
-	/** The answers taken, by question key. */
-	private readonly answers = new Map<string, GoalOutsideWaitExit>();
 	/** The pass in flight; a watch that ends during it asks for one more pass after it. */
 	private pass: Promise<void> | undefined;
 	private passAgain = false;
@@ -101,11 +106,17 @@ export class GoalOutsideWait {
 
 	/** The open requirements of `state` judged, at p >= 0.90 on sufficient evidence, to wait on outside state. */
 	waitsOutside(state: GoalState): string[] {
+		const answers = this.answers();
 		return state.requirements.flatMap((requirement) =>
-			requirement.status === "open" && this.answers.get(questionKey(state.goalId, requirement)) === "waits_outside"
+			requirement.status === "open" && answers.get(questionKey(state.goalId, requirement)) === "waits_outside"
 				? [requirement.id]
 				: [],
 		);
+	}
+
+	/** The saved answers, by question. */
+	private answers(): Map<string, RequirementWaitAnswer> {
+		return new Map(this.ports.saved().map((judgment) => [judgment.question, judgment.answer]));
 	}
 
 	/** Stops the pass in flight and joins it; none starts after. */
@@ -120,11 +131,12 @@ export class GoalOutsideWait {
 		const engine = this.ports.engine();
 		if (!goal || !engine || !isGoalExecutionActive(goal.status)) return undefined;
 		const linked = this.ports.linked(goal.goalId);
+		const answers = this.answers();
 		const requirements = goal.requirements.filter(
 			(requirement) =>
 				requirement.status === "open" &&
 				!linked.has(requirement.id) &&
-				!this.answers.has(questionKey(goal.goalId, requirement)),
+				!answers.has(questionKey(goal.goalId, requirement)),
 		);
 		return requirements.length > 0 ? { engine, goalId: goal.goalId, requirements } : undefined;
 	}
@@ -135,7 +147,14 @@ export class GoalOutsideWait {
 		for (const requirement of asked.requirements) {
 			if (this.closing.signal.aborted || this.ports.isDisposed()) return;
 			const exit = await this.judge(asked.engine, requirement);
-			if (exit !== "unasked") this.answers.set(questionKey(asked.goalId, requirement), exit);
+			if (exit !== "unasked")
+				this.ports.save({
+					goalId: asked.goalId,
+					requirementId: requirement.id,
+					question: questionKey(asked.goalId, requirement),
+					answer: exit,
+					at: this.ports.now(),
+				});
 		}
 	}
 

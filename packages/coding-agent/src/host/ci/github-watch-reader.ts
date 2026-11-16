@@ -7,6 +7,7 @@
  * checkout's repository and CI workflow as the source's own subjects are.
  */
 import type { CiAttemptIdentity, CiSubject } from "../../core/events/host-event-contract.ts";
+import { OWNER_STOP_CLOCK } from "../../core/util/timer-port.ts";
 import type {
 	GithubCreatedRun,
 	GithubPolledSource,
@@ -92,6 +93,32 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		return { host: checkout?.host, name };
 	}
 
+	/**
+	 * `instant` (on the system clock, `OWNER_STOP_CLOCK`) on GitHub's own clock: GitHub's time as a response it sends now
+	 * states it (its `Date`, whole seconds), less the time elapsed on the system clock since `instant`. GitHub stamped that
+	 * time at or before the response arrived, so the result is never later than GitHub's time at `instant`: what GitHub
+	 * created after `instant` is never taken for older. Only an elapsed time is read from the system clock, never compared
+	 * with GitHub's.
+	 */
+	private async githubInstant(
+		host: string | undefined,
+		name: string,
+		instant: number,
+		signal: AbortSignal,
+	): Promise<number> {
+		const response = await this.port.run(
+			"gh",
+			["api", "--include", ...(host === undefined ? [] : ["--hostname", host]), `repos/${name}`],
+			signal,
+		);
+		const elapsed = Math.max(0, OWNER_STOP_CLOCK.now() - instant);
+		const [headers = ""] = response.split(/\r?\n\r?\n/u, 1);
+		const stated = /^date:[ \t]*(.+?)[ \t]*\r?$/imu.exec(headers)?.[1];
+		const githubNow = stated === undefined ? Number.NaN : Date.parse(stated);
+		if (!Number.isFinite(githubNow)) throw new Error("GitHub's response stated no time.");
+		return Math.floor((githubNow - elapsed) / 1_000) * 1_000;
+	}
+
 	async runsCreatedSince(
 		repo: string | undefined,
 		since: number,
@@ -99,10 +126,11 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		signal: AbortSignal,
 	): Promise<readonly GithubCreatedRun[]> {
 		const { host, name } = await this.repository(repo, signal);
+		const githubSince = await this.githubInstant(host, name, since, signal);
 		const query = new URLSearchParams({
 			per_page: String(MAX_LISTED),
 			// GitHub's own search syntax over its creation time, whose timestamps are whole seconds.
-			created: `>=${new Date(since).toISOString().replace(/\.\d{3}Z$/u, "Z")}`,
+			created: `>=${new Date(githubSince).toISOString().replace(/\.\d{3}Z$/u, "Z")}`,
 			...(narrow.branch === undefined ? {} : { branch: narrow.branch }),
 			...(narrow.event === undefined ? {} : { event: narrow.event }),
 		});
@@ -142,16 +170,17 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		return match.id;
 	}
 
-	async releaseCreatedAt(repo: string | undefined, tag: string, signal: AbortSignal): Promise<number | undefined> {
+	async releasedBefore(repo: string | undefined, tag: string, since: number, signal: AbortSignal): Promise<boolean> {
 		const { host, name } = await this.repository(repo, signal);
+		const githubSince = await this.githubInstant(host, name, since, signal);
 		const release = listed(
 			await this.api(host, `repos/${name}/releases?per_page=${MAX_LISTED}`, signal),
 			"releases",
 		).find((entry) => entry.tag_name === tag);
-		if (!release) return undefined;
+		if (!release) return false;
 		const createdAt = Date.parse(String(release.created_at));
 		if (!Number.isFinite(createdAt)) throw new Error("Invalid GitHub release.");
-		return createdAt;
+		return createdAt < githubSince;
 	}
 
 	async observe(
@@ -208,28 +237,47 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		if (!status || typeof runId !== "number" || typeof runAttempt !== "number")
 			throw new Error("Invalid GitHub run.");
 		const conclusion = status === "completed" ? word(run.conclusion) : undefined;
-		const failedJob =
-			conclusion === "failure"
-				? listed(
-						await this.api(
-							host,
-							`repos/${name}/actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=${MAX_LISTED}`,
-							signal,
-						),
-						"jobs",
-					).find((job) => job.conclusion === "failure")?.name
-				: undefined;
+		const job = conclusion === "failure" ? await this.failedJobOf(host, name, runId, runAttempt, signal) : {};
 		const url = word(run.html_url);
 		return {
 			state: status === "completed" ? "done" : "pending",
 			status,
 			...(conclusion === undefined ? {} : { conclusion }),
-			...(typeof failedJob === "string" && failedJob.length > 0 ? { failedJob } : {}),
+			...job,
 			...(url === undefined ? {} : { url }),
 			runId,
 			runAttempt,
 			observedAt: Date.now(),
 		};
+	}
+
+	/**
+	 * The first failed job of a failed attempt, or why it could not be read: the run's own status and conclusion read
+	 * without it, so a failed read of its jobs is said in the result, never a failed reading of the run.
+	 */
+	private async failedJobOf(
+		host: string | undefined,
+		name: string,
+		runId: number,
+		runAttempt: number,
+		signal: AbortSignal,
+	): Promise<Pick<GithubWatchResult, "failedJob" | "failedJobUnread">> {
+		let jobs: Record<string, unknown>[];
+		try {
+			jobs = listed(
+				await this.api(
+					host,
+					`repos/${name}/actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=${MAX_LISTED}`,
+					signal,
+				),
+				"jobs",
+			);
+		} catch (error) {
+			signal.throwIfAborted();
+			return { failedJobUnread: error instanceof Error ? error.message : String(error) };
+		}
+		const failedJob = jobs.find((job) => job.conclusion === "failure")?.name;
+		return typeof failedJob === "string" && failedJob.length > 0 ? { failedJob } : {};
 	}
 
 	async failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined> {

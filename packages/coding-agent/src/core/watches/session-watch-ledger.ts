@@ -8,7 +8,8 @@
  *
  * The codec is strict: a record this build cannot read (another kind, a newer field) is set aside and written back as it
  * was, never dropped or rewritten; a file a newer build wrote is never overwritten (this build keeps its own watches in
- * memory); a file that is not a ledger at all is moved aside under a name of its own. Ended watches are kept until seven
+ * memory); a file that is not a ledger at all is moved aside under a name of its own. Beside the watches it keeps System
+ * One's answers about the session's goal requirements that the goal's continuation decides by (`judgments`). Ended watches are kept until seven
  * days after the session last closed, and at most {@link MAX_ENDED_SESSION_WATCHES} of them; one whose wake is not
  * delivered yet is always kept. A session with no transcript file keeps its ledger in memory.
  */
@@ -154,6 +155,41 @@ function parseRequirement(value: unknown): SessionWatchRequirement {
 	return {
 		goalId: boundedRoutineText(value.goalId, MAX_ID_CHARS, "goal"),
 		requirementId: boundedRoutineText(value.requirementId, MAX_ID_CHARS, "requirement"),
+	};
+}
+
+/**
+ * How System One answered whether an open requirement of the session's goal waits on state outside the session
+ * (`goals/goal-outside-wait.ts`): established yes on sufficient evidence, established no, neither, or too little said to tell.
+ */
+export const REQUIREMENT_WAIT_ANSWERS = ["waits_outside", "within_session", "open", "evidence_insufficient"] as const;
+export type RequirementWaitAnswer = (typeof REQUIREMENT_WAIT_ANSWERS)[number];
+
+/** Most requirement judgments a ledger keeps; the newest are kept, and an evicted question is asked again. */
+const MAX_REQUIREMENT_JUDGMENTS = 64;
+
+/**
+ * One answer System One gave about a requirement of the session's goal, kept beside the watches it decides by so a restart
+ * reads it back instead of asking again. `question` names the goal, the requirement and its words judged (a digest), so
+ * changed words are a new question.
+ */
+export interface SessionRequirementJudgment {
+	readonly goalId: string;
+	readonly requirementId: string;
+	readonly question: string;
+	readonly answer: RequirementWaitAnswer;
+	readonly at: number;
+}
+
+function parseRequirementJudgment(value: unknown): SessionRequirementJudgment {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["goalId", "requirementId", "question", "answer", "at"]))
+		throw new TypeError("Requirement judgment is invalid.");
+	return {
+		goalId: boundedRoutineText(value.goalId, MAX_ID_CHARS, "goal"),
+		requirementId: boundedRoutineText(value.requirementId, MAX_ID_CHARS, "requirement"),
+		question: boundedRoutineText(value.question, MAX_ID_CHARS, "question"),
+		answer: oneOf(value.answer, REQUIREMENT_WAIT_ANSWERS, "answer"),
+		at: instant(value.at),
 	};
 }
 
@@ -469,6 +505,7 @@ export class SessionWatchLedger {
 	private readonly deps: SessionWatchLedgerDeps;
 	private records: readonly SessionWatchRecord[] = [];
 	private setAside: readonly unknown[] = [];
+	private judgments: readonly SessionRequirementJudgment[] = [];
 	private closedAt: number | undefined;
 	/** False when a newer build wrote the file: its watches stay its own, and this build's are kept in memory. */
 	private writable = true;
@@ -512,6 +549,7 @@ export class SessionWatchLedger {
 			parsed.sessionId !== this.deps.sessionId ||
 			!Array.isArray(parsed.watches) ||
 			(parsed.setAside !== undefined && !Array.isArray(parsed.setAside)) ||
+			(parsed.judgments !== undefined && !Array.isArray(parsed.judgments)) ||
 			(parsed.closedAt !== undefined &&
 				(typeof parsed.closedAt !== "number" || !Number.isSafeInteger(parsed.closedAt)))
 		) {
@@ -543,6 +581,14 @@ export class SessionWatchLedger {
 		}
 		this.closedAt = typeof parsed.closedAt === "number" ? parsed.closedAt : undefined;
 		this.records = records;
+		// A judgment this build cannot read is a question asked again, never a watch's state: it is not kept.
+		this.judgments = (Array.isArray(parsed.judgments) ? parsed.judgments : []).flatMap((entry: unknown) => {
+			try {
+				return [parseRequirementJudgment(entry)];
+			} catch {
+				return [];
+			}
+		});
 		this.setAside = setAside.slice(-MAX_SET_ASIDE);
 	}
 
@@ -552,6 +598,22 @@ export class SessionWatchLedger {
 
 	get(watchId: string): SessionWatchRecord | undefined {
 		return this.records.find((record) => record.watchId === watchId);
+	}
+
+	/** The requirement judgments the session saved, oldest first. */
+	requirementJudgments(): readonly SessionRequirementJudgment[] {
+		return this.judgments;
+	}
+
+	/**
+	 * Keeps `judgment` in place of an earlier answer to its question, the newest {@link MAX_REQUIREMENT_JUDGMENTS} kept; a
+	 * write that fails leaves the ledger as it was and throws. No watch changed, so listeners are not told.
+	 */
+	saveRequirementJudgment(judgment: SessionRequirementJudgment): void {
+		const judgments = [...this.judgments.filter((entry) => entry.question !== judgment.question), judgment].slice(
+			-MAX_REQUIREMENT_JUDGMENTS,
+		);
+		this.write(this.records, this.closedAt, judgments, false);
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -580,7 +642,12 @@ export class SessionWatchLedger {
 		this.write(retained(this.records, closedAt, closedAt), closedAt);
 	}
 
-	private write(records: readonly SessionWatchRecord[], closedAt: number | undefined): void {
+	private write(
+		records: readonly SessionWatchRecord[],
+		closedAt: number | undefined,
+		judgments = this.judgments,
+		notify = true,
+	): void {
 		const path = this.writable ? this.deps.path() : undefined;
 		if (path !== undefined)
 			writeFileAtomicSync(
@@ -591,10 +658,12 @@ export class SessionWatchLedger {
 					...(closedAt === undefined ? {} : { closedAt }),
 					watches: records,
 					...(this.setAside.length === 0 ? {} : { setAside: this.setAside }),
+					...(judgments.length === 0 ? {} : { judgments }),
 				})}\n`,
 			);
 		this.records = records;
 		this.closedAt = closedAt;
-		for (const listener of [...this.listeners]) listener();
+		this.judgments = judgments;
+		if (notify) for (const listener of [...this.listeners]) listener();
 	}
 }

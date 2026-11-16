@@ -71,6 +71,7 @@ import {
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
+	type SessionRequirementJudgment,
 	type SessionWatchArmer,
 	type SessionWatchLedger,
 	type SessionWatchRecord,
@@ -577,6 +578,20 @@ export class SessionWatchService implements WatchObservationStore {
 				? { requirementId, watchId, status, remainingMs: expiresAt - nowMs }
 				: { requirementId, watchId, status: status === "live" ? "timed-out" : status },
 		);
+	}
+
+	/** System One's answers about the session's goal requirements, as the ledger keeps them across restarts. */
+	requirementJudgments(): readonly SessionRequirementJudgment[] {
+		return this.deps.ledger.requirementJudgments();
+	}
+
+	/** Keeps an answer about a goal requirement; one that cannot be written is warned and asked again after a restart. */
+	saveRequirementJudgment(judgment: SessionRequirementJudgment): void {
+		try {
+			this.deps.ledger.saveRequirementJudgment(judgment);
+		} catch (error) {
+			this.warn(error);
+		}
 	}
 
 	/** Whether a watch the session armed for itself, not a worker's, still waits. */

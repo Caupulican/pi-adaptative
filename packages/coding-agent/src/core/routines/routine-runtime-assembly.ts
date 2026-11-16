@@ -653,6 +653,9 @@ export class RoutineRuntimeAssembly {
 			engine: () => this.deps.systemOne.semanticDecisionEngine(),
 			goal: () => this.deps.getGoalStateSnapshot(),
 			linked: (goalId) => new Set(sessionWatches.boundTo(goalId).map((watch) => watch.requirementId)),
+			saved: () => sessionWatches.requirementJudgments(),
+			save: (judgment) => sessionWatches.saveRequirementJudgment(judgment),
+			now: () => routineTimers.now(),
 			warn: (message) => this.host.warn(message),
 			isDisposed: () => this.deps.isDisposed(),
 		});

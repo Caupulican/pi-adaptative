@@ -118,8 +118,8 @@ interface StartedCall {
 	/** Set when the call starts in a session that holds watches. */
 	readonly context?: AutoArmContext;
 	/**
-	 * When the call began, on the system clock GitHub's own creation times are compared with, cut to the whole second
-	 * GitHub keeps: a run or release created before it was not started by the call.
+	 * When the call began, on the system clock (`OWNER_STOP_CLOCK`): the reader of GitHub places it on GitHub's own clock
+	 * (`GithubWatchReader.runsCreatedSince`), so a run or release GitHub created before it was not started by the call.
 	 */
 	readonly startedAt: number;
 	readonly pushes: boolean;
@@ -350,7 +350,7 @@ export class WatchAutoArm {
 			this.started.set(toolCallId, {
 				...call,
 				context: port.armingContext(),
-				startedAt: Math.floor(OWNER_STOP_CLOCK.now() / 1_000) * 1_000,
+				startedAt: OWNER_STOP_CLOCK.now(),
 			});
 	}
 
@@ -551,8 +551,7 @@ export class WatchAutoArm {
 						continue;
 					}
 					try {
-						const createdAt = await reader.releaseCreatedAt(undefined, ref.tag, signal);
-						if (createdAt !== undefined && createdAt < call.startedAt)
+						if (await reader.releasedBefore(undefined, ref.tag, call.startedAt, signal))
 							leave(source, "it was published before your call began");
 						else add(source, RELEASE_DEADLINE_MS);
 					} catch (error) {

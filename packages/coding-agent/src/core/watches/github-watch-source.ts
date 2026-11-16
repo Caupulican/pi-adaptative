@@ -275,9 +275,11 @@ export interface GithubWatchReader {
 	/** The first failed job of a failed CI attempt. */
 	failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined>;
 	/**
-	 * The runs of one repository (`repo` absent: the checkout's) GitHub created at or after `since` (epoch ms; GitHub keeps
-	 * whole seconds), the newest first, at most one listing's worth; `narrow` keeps one workflow's, one branch's or one
-	 * event's.
+	 * The runs of one repository (`repo` absent: the checkout's) GitHub created since `since`, the newest first, at most one
+	 * listing's worth; `narrow` keeps one workflow's, one branch's or one event's. `since` is an instant on the system clock
+	 * (`OWNER_STOP_CLOCK`, epoch ms); the reader places it on GitHub's own clock ({@link GithubWatchReader} implementations
+	 * read GitHub's time from its response), so the system clock is never compared with GitHub's creation times, and a run
+	 * created after `since` is never left out.
 	 */
 	runsCreatedSince(
 		repo: string | undefined,
@@ -285,8 +287,11 @@ export interface GithubWatchReader {
 		narrow: GithubRunNarrowing,
 		signal: AbortSignal,
 	): Promise<readonly GithubCreatedRun[]>;
-	/** When GitHub created the release of `tag` (epoch ms), or undefined while there is none. */
-	releaseCreatedAt(repo: string | undefined, tag: string, signal: AbortSignal): Promise<number | undefined>;
+	/**
+	 * Whether GitHub created the release of `tag` before `since` (a system clock instant, placed on GitHub's clock as
+	 * {@link runsCreatedSince} places it); false while there is none.
+	 */
+	releasedBefore(repo: string | undefined, tag: string, since: number, signal: AbortSignal): Promise<boolean>;
 }
 
 /** What a listing of runs keeps: a workflow (its id, file name or display name), a branch or tag, an event. */
@@ -296,7 +301,7 @@ export interface GithubRunNarrowing {
 	readonly event?: "workflow_dispatch";
 }
 
-/** A run GitHub created, with its repository (owner/name) and creation time (epoch ms). */
+/** A run GitHub created, with its repository (owner/name) and creation time (epoch ms, on GitHub's clock). */
 export interface GithubCreatedRun {
 	readonly repo: string;
 	readonly runId: number;

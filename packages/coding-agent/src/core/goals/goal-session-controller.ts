@@ -1311,8 +1311,8 @@ export class GoalSessionController {
 		if (!this.stopActiveGoal("blocked", reason, refusedBy)) return;
 
 		// Background work running for this goal: a classified recoverable stop (a bounded guard or a
-		// transient provider failure within its streak allowance) resumes in place so those workers
-		// finish against an active goal. Any other reason (auth, unknown, unsupported model) stays
+		// transient provider failure within its streak allowance) resumes in place so that work (a
+		// worker, a tool task, a bound watch's wait) ends against an active goal. Any other reason (auth, unknown, unsupported model) stays
 		// blocked for the owner, whose next prompt resumes a system stop: unclassified failures never
 		// retry automatically.
 		if (inFlight) {

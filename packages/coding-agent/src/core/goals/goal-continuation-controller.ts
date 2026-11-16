@@ -80,7 +80,7 @@ export interface GoalBoundWatch {
 }
 
 /** The latest bound watch of each open requirement: those still waiting, and those that ended while it is open. */
-function boundWatchesOf(
+export function boundWatchesOf(
 	state: GoalState,
 	watches: readonly GoalBoundWatch[] | undefined,
 ): { live: GoalBoundWatch[]; ended: GoalBoundWatch[] } {

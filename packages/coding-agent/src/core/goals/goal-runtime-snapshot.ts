@@ -16,6 +16,7 @@ import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts"
 import type { OpenTaskStepProjection } from "../tasks/task-projection.ts";
 import type { GoalAutoContinueState } from "./goal-auto-continue-state.ts";
 import {
+	boundWatchesOf,
 	evaluateGoalContinuation,
 	type GoalBoundWatch,
 	type GoalContinuationDecision,
@@ -143,10 +144,13 @@ export function goalRuntimeFactsOf(
 /** An attempt that carries its retry while it waits for it and once it runs again after it. */
 const RETRY_IN_FLIGHT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>(["suspended", "leased", "running"]);
 
-/** Whether work dispatched for `state` still runs: a worker bound to one of its requirements, or a background tool task of the goal. */
+/**
+ * Whether work dispatched for `state` still runs: a worker bound to one of its requirements, a background tool task of the
+ * goal, or a live watch bound to one of its open requirements (the same bound watches the continuation waits on).
+ */
 export function goalHasInFlightWork(
 	state: GoalState,
-	{ laneRecords = [], backgroundToolTasks = [] }: GoalRuntimeFacts,
+	{ laneRecords = [], backgroundToolTasks = [], watches }: GoalRuntimeFacts,
 ): boolean {
 	const inFlightLanes = new Set(
 		laneRecords
@@ -154,6 +158,7 @@ export function goalHasInFlightWork(
 			.map((r) => r.laneId),
 	);
 	if (state.requirements.some((r) => r.boundLaneId !== undefined && inFlightLanes.has(r.boundLaneId))) return true;
+	if (watches && boundWatchesOf(state, watches.boundTo(state.goalId)).live.length > 0) return true;
 	return backgroundToolTasks.some((t) => t.goalId === state.goalId && t.status === "running");
 }
 
