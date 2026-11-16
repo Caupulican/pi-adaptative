@@ -28,6 +28,8 @@ import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-deli
 import { monotonicNow, OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { NO_CI_SOURCE, NO_READER } from "./github-watch-poller.ts";
 import {
+	type CiPushTriggers,
+	type CiPushVerdict,
 	describeGithubWatchSource,
 	type GithubCreatedRun,
 	type GithubWatchReader,
@@ -93,8 +95,11 @@ export interface AutoArmContext {
 
 /** The session's watches as the host arms them (`SessionWatchService`, for the session or a worker, telling the owner). */
 export interface WatchAutoArmPort {
-	/** Whether the host's CI source follows the session's checkout, which a `ci` watch is read from. */
-	followsCi(): boolean;
+	/**
+	 * How the host reads whether the checkout's CI workflow runs for a push, while its CI source follows the checkout (a
+	 * `ci` watch is read from that source); undefined while it does not.
+	 */
+	ciTriggers(): CiPushTriggers | undefined;
 	/**
 	 * The host's reader of GitHub while it offers one: a run or a release watch is read through it, and what a call started
 	 * is told apart through it from what was there before the call.
@@ -146,12 +151,18 @@ export interface DispatchedWorkflow {
 interface PlannedWatch {
 	readonly source: GithubWatchSource;
 	readonly deadlineMs: number;
+	/** Why the watch may never see a result: CI was not known to run for the commit when it was armed. */
+	readonly caveat?: string;
 }
 
-/** What a call's output was read as: the watches to arm, the subjects armed nowhere and why, the dispatches looked for. */
+/**
+ * What a call's output was read as: the watches to arm, the subjects armed nowhere and why, the pushed commits CI does
+ * not run for, the dispatches looked for.
+ */
 interface CallPlan {
 	readonly planned: readonly PlannedWatch[];
 	readonly unwatched: readonly string[];
+	readonly noCi: readonly string[];
 	readonly dispatched: readonly DispatchedWorkflow[];
 }
 
@@ -244,7 +255,7 @@ export function classifyStartedCall(
 /** One ref a push updated: a version tag it created, or the revision a branch now points at. */
 type PushedRef =
 	| { readonly kind: "tag"; readonly tag: string }
-	| { readonly kind: "commit"; readonly revision: string };
+	| { readonly kind: "commit"; readonly revision: string; readonly destination: string };
 
 /** The refs `git push`'s report says it created or updated; rejected, deleted and up-to-date refs are none. */
 export function pushedRefs(output: string): PushedRef[] {
@@ -262,7 +273,7 @@ export function pushedRefs(output: string): PushedRef[] {
 			continue;
 		}
 		const revision = newSha ?? source.split(":")[0] ?? "";
-		if (REVISION.test(revision) && !revision.includes("..")) refs.push({ kind: "commit", revision });
+		if (REVISION.test(revision) && !revision.includes("..")) refs.push({ kind: "commit", revision, destination });
 	}
 	return refs;
 }
@@ -314,6 +325,23 @@ function isBackgroundHandoff(result: unknown): boolean {
 		typeof Reflect.get(details, "taskId") === "string" &&
 		Reflect.get(details, "status") === "running"
 	);
+}
+
+/** Whether CI runs for a pushed commit; a reading cut short (the plan's bound) is not known. */
+async function ciRunsFor(
+	triggers: CiPushTriggers,
+	sha: string,
+	ref: string,
+	signal: AbortSignal,
+): Promise<CiPushVerdict> {
+	try {
+		return await triggers.runsOnPush({ sha, ref }, signal);
+	} catch (error) {
+		return {
+			verdict: "unknown",
+			why: `whether its workflow runs for the push could not be read: ${errorText(error)}`,
+		};
+	}
 }
 
 function shortHash(text: string): string {
@@ -421,6 +449,11 @@ export class WatchAutoArm {
 				: [
 						`Your ${call.toolName} call named no run it started, so the host is asking GitHub for the run of ${plan.dispatched.map(dispatchText).join("; ")} created since the call began, for up to two minutes, and arms a watch on it once listed; you are told then.`,
 					]),
+			...(plan.noCi.length === 0
+				? []
+				: [
+						`CI does not run for ${plan.noCi.join("; ")}, so the host armed no watch on it; arm one yourself if a run of it starts later (a pull request you open, a dispatch).`,
+					]),
 			...this.missedLines([...plan.unwatched, ...missed]),
 		]);
 		for (const dispatch of plan.dispatched) this.followDispatch(call, dispatch, 0);
@@ -434,7 +467,7 @@ export class WatchAutoArm {
 	): Promise<{ armed: string[]; missed: string[] }> {
 		const armed: string[] = [];
 		const missed: string[] = [];
-		for (const { source, deadlineMs } of planned) {
+		for (const { source, deadlineMs, caveat } of planned) {
 			if (port.armedOn(source, context.armer)) continue;
 			const watchId = watchIdOf(source, context.armer);
 			try {
@@ -449,7 +482,9 @@ export class WatchAutoArm {
 					},
 					context,
 				);
-				armed.push(`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes)`);
+				armed.push(
+					`${watchId} on ${subjectOf(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes${caveat === undefined ? "" : `; CI may not run for it: ${caveat}`})`,
+				);
 			} catch (error) {
 				missed.push(`${subjectOf(source)}: ${errorText(error)}`);
 			}
@@ -545,20 +580,22 @@ export class WatchAutoArm {
 
 	/**
 	 * The subjects a call's output names, at most {@link MAX_SUBJECTS_PER_CALL}, each once: a commit's CI only while the CI
-	 * source follows the checkout, a run or a release only while the host offers its reader of GitHub, so no watch is armed
-	 * that nothing can read; a run only when GitHub created it after the call began, a tag's release only when none existed
-	 * before it. Every subject left out is named with why.
+	 * source follows the checkout and unless its workflow's triggers settle that it does not run for the push, a run or a
+	 * release only while the host offers its reader of GitHub, so no watch is armed that nothing can read or that cannot
+	 * fire; a run only when GitHub created it after the call began, a tag's release only when none existed before it.
+	 * Every subject left out is named with why, and a commit CI was not known to run for is armed with why.
 	 */
 	private async plan(call: StartedCall, output: string, port: WatchAutoArmPort): Promise<CallPlan> {
 		const planned = new Map<string, PlannedWatch>();
 		const unwatched: string[] = [];
-		const add = (source: GithubWatchSource, deadlineMs: number) => {
+		const noCi: string[] = [];
+		const add = (source: GithubWatchSource, deadlineMs: number, caveat?: string) => {
 			const subject = githubWatchSubject(source);
 			if (planned.size < MAX_SUBJECTS_PER_CALL && !planned.has(subject))
-				planned.set(subject, { source, deadlineMs });
+				planned.set(subject, { source, deadlineMs, ...(caveat === undefined ? {} : { caveat }) });
 		};
 		const leave = (source: GithubWatchSource, why: string) => unwatched.push(`${subjectOf(source)} (${why})`);
-		const followsCi = port.followsCi();
+		const ciTriggers = port.ciTriggers();
 		const reader = port.github();
 		const signal = AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS);
 		if (call.pushes || call.releases)
@@ -581,8 +618,14 @@ export class WatchAutoArm {
 				}
 				const sha = await resolveCommit(this.deps.cwd(), ref.revision);
 				if (!sha) continue;
-				if (followsCi) add({ type: "ci", sha }, CI_DEADLINE_MS);
-				else leave({ type: "ci", sha }, NO_CI_SOURCE);
+				const source: GithubWatchSource = { type: "ci", sha };
+				if (!ciTriggers) {
+					leave(source, NO_CI_SOURCE);
+					continue;
+				}
+				const runs = await ciRunsFor(ciTriggers, sha, ref.destination, signal);
+				if (runs.verdict === "none") noCi.push(`${subjectOf(source)} (${runs.why})`);
+				else add(source, CI_DEADLINE_MS, runs.verdict === "unknown" ? runs.why : undefined);
 			}
 		const named = call.dispatches.length > 0 || call.releases ? actionRunsNamed(output) : [];
 		const deadlineMs = call.releases ? RELEASE_DEADLINE_MS : DISPATCHED_RUN_DEADLINE_MS;
@@ -612,6 +655,6 @@ export class WatchAutoArm {
 		const dispatched = named.length === 0 ? call.dispatches : [];
 		if (!reader)
 			for (const dispatch of dispatched) unwatched.push(`the run of ${dispatchText(dispatch)} (${NO_READER})`);
-		return { planned: [...planned.values()], unwatched, dispatched: reader ? dispatched : [] };
+		return { planned: [...planned.values()], unwatched, noCi, dispatched: reader ? dispatched : [] };
 	}
 }

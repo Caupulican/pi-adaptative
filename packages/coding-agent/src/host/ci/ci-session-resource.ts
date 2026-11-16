@@ -6,6 +6,7 @@ import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.t
 import { HostEventSessionResource } from "../host-event-session-resource.ts";
 import { createCiHostRuntime } from "./ci-host-event-source.ts";
 import { type CiGitPaths, readCiStatusView, resolveCiGitPathsAsync } from "./ci-status-record.ts";
+import { CiWorkflowTriggers } from "./ci-workflow-triggers.ts";
 import { createCiCommandPort } from "./github-actions-ci-provider.ts";
 import { GithubWatchHostReader } from "./github-watch-reader.ts";
 
@@ -33,7 +34,8 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 				signal.addEventListener("abort", () => this.setPaths(undefined), { once: true });
 				// The session's typed GitHub watches read GitHub from its working directory while this resource runs.
 				const watches = session.backgroundLanes.githubWatches;
-				const reader = new GithubWatchHostReader(createCiCommandPort(active.sessionManager.getCwd(), onDiagnostic));
+				const commands = createCiCommandPort(active.sessionManager.getCwd(), onDiagnostic);
+				const reader = new GithubWatchHostReader(commands);
 				signal.addEventListener("abort", watches.provideReader(reader), { once: true });
 				// `proactivity.ciEvents: false` stops CI discovery (git reads and GitHub calls) for host events.
 				if (!paths || !active.services.settingsManager.getProactivitySettings().ciEvents) return [];
@@ -67,7 +69,8 @@ export class CiSessionResource implements AgentSessionRuntimeResource, CiStatusS
 				if (!runtime) return [];
 				const unsubscribe = runtime.subscribeStatus(() => this.notify());
 				signal.addEventListener("abort", unsubscribe, { once: true });
-				signal.addEventListener("abort", watches.followCi(), { once: true });
+				// The host arms a pushed commit's `ci` watch only when the workflow's triggers do not rule its run out.
+				signal.addEventListener("abort", watches.followCi(new CiWorkflowTriggers(commands)), { once: true });
 				return [runtime.source];
 			},
 		});

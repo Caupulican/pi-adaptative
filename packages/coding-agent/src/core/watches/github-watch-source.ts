@@ -257,6 +257,21 @@ export function describeGithubWatchResult(
 	);
 }
 
+/**
+ * Whether the checkout's CI workflow runs for a pushed commit: `none` only when the workflow's triggers settle it,
+ * `unknown` (with why) when they do not or could not be read.
+ */
+export type CiPushVerdict =
+	| { readonly verdict: "runs" }
+	| { readonly verdict: "none"; readonly why: string }
+	| { readonly verdict: "unknown"; readonly why: string };
+
+/** The host's reading of the CI workflow's triggers at a pushed commit (`host/ci/ci-workflow-triggers.ts`). */
+export interface CiPushTriggers {
+	/** `ref` is the destination ref the push updated, as `git push` reports it. Rejects only when `signal` aborts. */
+	runsOnPush(push: { readonly sha: string; readonly ref: string }, signal: AbortSignal): Promise<CiPushVerdict>;
+}
+
 /** Read access to GitHub for the session's typed watches; the host supplies it (core never starts a process). */
 export interface GithubWatchReader {
 	/**

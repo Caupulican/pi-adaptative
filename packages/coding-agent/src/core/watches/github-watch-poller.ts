@@ -10,7 +10,12 @@
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
 import type { RoutineHostEventFeed } from "../routines/routine-contract.ts";
 import type { TimerPort } from "../util/timer-port.ts";
-import type { GithubPolledSource, GithubWatchReader, GithubWatchSource } from "./github-watch-source.ts";
+import type {
+	CiPushTriggers,
+	GithubPolledSource,
+	GithubWatchReader,
+	GithubWatchSource,
+} from "./github-watch-source.ts";
 import type { SessionWatchService } from "./session-watch-service.ts";
 
 /** How often a run or a release a session waits on is read. */
@@ -20,12 +25,12 @@ export const GITHUB_WATCH_FAILING_AFTER = 5;
 
 /**
  * The host's side of a session's typed watches: the reader of GitHub it offers while its CI resource runs, whether the
- * checkout's CI source runs (a `ci` watch is read from it), and the commits the session's `ci` watches wait on, which
- * that source collects. Listeners hear every change of any of them.
+ * checkout's CI source runs (a `ci` watch is read from it) with the reading of its workflow's triggers, and the commits
+ * the session's `ci` watches wait on, which that source collects. Listeners hear every change of any of them.
  */
 export class GithubWatchLink {
 	private reader: GithubWatchReader | undefined;
-	private ciFollowers = 0;
+	private readonly ciFollowers: CiPushTriggers[] = [];
 	private commits: () => readonly string[] = () => [];
 	private readonly listeners = new Set<() => void>();
 
@@ -40,15 +45,18 @@ export class GithubWatchLink {
 		};
 	}
 
-	/** The checkout's CI source runs, so a `ci` watch's commit is collected; the returned function ends that. */
-	followCi(): () => void {
-		this.ciFollowers++;
+	/**
+	 * The checkout's CI source runs, so a `ci` watch's commit is collected, and `triggers` tells whether its workflow runs
+	 * for a push; the returned function ends that.
+	 */
+	followCi(triggers: CiPushTriggers): () => void {
+		const follower = { runsOnPush: triggers.runsOnPush.bind(triggers) };
+		this.ciFollowers.push(follower);
 		this.changed();
-		let ended = false;
 		return () => {
-			if (ended) return;
-			ended = true;
-			this.ciFollowers--;
+			const index = this.ciFollowers.indexOf(follower);
+			if (index < 0) return;
+			this.ciFollowers.splice(index, 1);
 			this.changed();
 		};
 	}
@@ -63,7 +71,12 @@ export class GithubWatchLink {
 	}
 
 	get followsCi(): boolean {
-		return this.ciFollowers > 0;
+		return this.ciFollowers.length > 0;
+	}
+
+	/** Whether the followed CI workflow runs for a push, while the CI source follows the checkout. */
+	get ciTriggers(): CiPushTriggers | undefined {
+		return this.ciFollowers.at(-1);
 	}
 
 	/** The commits the session's live `ci` watches wait on, for the CI source to collect as subjects of its own. */

@@ -306,7 +306,7 @@ export class RoutineRuntimeAssembly {
 		armingContext: () => AutoArmContext,
 	): WatchAutoArmPort {
 		return {
-			followsCi: () => this.host.githubWatches().followsCi,
+			ciTriggers: () => this.host.githubWatches().ciTriggers,
 			github: () => this.host.githubWatches().current,
 			armingContext,
 			armedOn: (source, armer) => sessionWatches.armedOn(source, armer),

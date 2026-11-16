@@ -463,7 +463,14 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 			},
 		});
 		if (!source) throw new Error("The CI source of the CI watch leg did not open.");
-		const unfollow = watches.followCi();
+		// The workflow's triggers run it for this push; what the host asks of them is checked once the watch is armed.
+		const triggerReads: { readonly sha: string; readonly ref: string }[] = [];
+		const unfollow = watches.followCi({
+			runsOnPush: async (push) => {
+				triggerReads.push(push);
+				return { verdict: "runs" };
+			},
+		});
 		const binding = new AbortController();
 		await source.source.start(lanes.openHostEventSession(binding.signal).sink);
 		trace.mark("root", "telegram-ci-watch.following");
@@ -538,6 +545,9 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 			status: "live",
 		});
 		expect(armed?.purpose, "the host's arming saves no purpose: its note and wake name the source").toBeUndefined();
+		expect(triggerReads, "the host asked whether CI runs for the pushed commit on its branch").toEqual([
+			{ sha, ref: "main" },
+		]);
 		expect(
 			manager
 				.getEntries()
