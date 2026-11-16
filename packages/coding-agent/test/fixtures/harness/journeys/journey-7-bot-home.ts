@@ -654,6 +654,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<strin
 					? "notApplied"
 					: warning,
 		);
+	let retryDue: number[];
 	try {
 		session.stopPersistentBot(KEEPER);
 		expect(
@@ -668,18 +669,23 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<strin
 			coveredWaits: true,
 			warnings: ["notApplied", "link"],
 		});
+		// The pass the stop started ends after its failed take settles: until then a drain only asks it to read again, which
+		// a pass that ended on a failed take does not, so the retry is fired once that pass is gone. The take still fails
+		// meanwhile: the bot-home watch's batch is gathered on the wall clock, and one falling due in this wait (an inbox
+		// change of the step before, such as its drain's removal of the answered message) drains the inbox, which takes the
+		// stop again. Failing, that take arms the one retry again, a step further; cleared before it, it would apply the stop
+		// and leave no retry to fire.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		// The take's retry is the alarm the failed takes armed on the host's clock, within the backoff's longest step.
+		retryDue = world.timers
+			.armedSnapshot("bot-sessions")
+			.filter((alarm) => !sessionAlarmsBefore.has(alarm.handle) && alarm.remainingMs <= BOT_OPEN_RETRY_MAX_MS)
+			.map((alarm) => alarm.remainingMs);
+		expect(retryDue.length, "the failed take armed one retry on the host's clock").toBe(1);
 	} finally {
 		stuck.clear();
 	}
-	// The pass the stop started ends after its failed take settles: until then a drain only asks it to read again, which a
-	// pass that ended on a failed take does not, so the retry is fired once that pass is gone.
-	await new Promise<void>((resolve) => setImmediate(resolve));
-	// The take's retry is the alarm the failed takes armed on the host's clock, within the backoff's longest step.
-	const retryDue = world.timers
-		.armedSnapshot("bot-sessions")
-		.filter((alarm) => !sessionAlarmsBefore.has(alarm.handle) && alarm.remainingMs <= BOT_OPEN_RETRY_MAX_MS)
-		.map((alarm) => alarm.remainingMs);
-	expect(retryDue.length, "the failed take armed one retry on the host's clock").toBe(1);
+	// Cleared and fired with nothing awaited between: no other drain takes the stop before its retry does.
 	const applied = world.io.waitForMutation(
 		() => !botInboxStopWaiting(world.agentDir, KEEPER) && !botInboxWaiting(world.agentDir, KEEPER),
 	);
