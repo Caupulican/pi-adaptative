@@ -8,7 +8,7 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-contract.ts";
+import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelBatchRecord,
@@ -19,8 +19,13 @@ import {
 	pendingOfferTimes,
 } from "./channel-journal.ts";
 import type { InboundChannelEvent } from "./channel-message.ts";
-import { type ChannelPolicyResolution, isOwnerChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
-import type { OwnerChannelDelivery, OwnerQuotaAllowance } from "./owner-channel-types.ts";
+import {
+	type ChannelPolicyResolution,
+	DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT,
+	isOwnerChannelName,
+	type ResolvedChannelPolicy,
+} from "./channel-policy.ts";
+import type { OwnerChannelDelivery, OwnerQuotaAllowance, SessionChannelsOwnerDeps } from "./owner-channel-types.ts";
 
 /** Whether `senderId` is one of `ids`, both put in the transport's one comparable form. */
 export function senderListed(
@@ -271,4 +276,28 @@ export function ownerQuotaWait(
 	if (quota.kind !== "exhausted") return undefined;
 	const reset = quota.retryAt !== undefined ? `; it resets at ${new Date(quota.retryAt).toISOString()}` : "";
 	return `the subscription's usage reached its bound (${quota.reason}; channels.${name}.ownerQuotaMaxUsedPercent ${ownerQuotaLine(policy)}%)${reset}`;
+}
+
+/**
+ * Why a third party's turn waits: the serving session's own subscription (the model the turn runs on) reports its usage
+ * at the line workers wait at (`DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT`) or at the provider's limit, past which a turn is
+ * refused or billed as extra usage; it waits for the reset the account reports, or the next
+ * channel pass with room. None for a metered model (the channel's dollar bounds hold it) or a reading that fails (the
+ * provider's refusal then holds it).
+ */
+export function turnUsageHold(
+	source: Pick<SessionChannelsOwnerDeps, "turnAllowance">,
+): { readonly reason: string; readonly retryAt?: number } | undefined {
+	let quota: OwnerQuotaAllowance | undefined;
+	try {
+		quota = source.turnAllowance?.(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT);
+	} catch {
+		return undefined;
+	}
+	if (quota?.kind !== "exhausted") return undefined;
+	const reset = quota.retryAt !== undefined ? `; it resets at ${new Date(quota.retryAt).toISOString()}` : "";
+	return {
+		reason: `the subscription's usage reached its limit (${quota.reason})${reset}`,
+		...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}),
+	};
 }

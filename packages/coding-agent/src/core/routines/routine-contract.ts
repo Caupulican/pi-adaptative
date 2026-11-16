@@ -26,6 +26,11 @@ import {
 } from "../events/host-event-kinds.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import { type RoutineAwayClaimGate, routineAwayCharge, routineAwayCharged } from "./routine-away-spend.ts";
+
+/** Read here by the journeys that bound runs away; the bound itself lives in `routine-away-spend.ts`. */
+export { routineAwaySpendRoom } from "./routine-away-spend.ts";
+
 import {
 	canonicalCalendarCron,
 	canonicalCalendarTimeZone,
@@ -798,9 +803,6 @@ export interface RoutineOccurrence {
 	readonly progressUntrusted?: true;
 }
 
-/** The rolling window of the away spend bound. */
-export const ROUTINE_AWAY_SPEND_WINDOW_MS = 24 * 60 * 60 * 1000;
-
 /** Why a due run was not run away for lack of room under the away spend bound. */
 export const ROUTINE_AWAY_SPEND_REFUSAL =
 	"the away spend bound (routines.away.maxUsdPerDay) has no room for another run in the last 24 hours; this run waits for its session to open.";
@@ -808,88 +810,6 @@ export const ROUTINE_AWAY_SPEND_REFUSAL =
 /** Why a due slot was not run away while an earlier run away of its routine is not yet delivered. */
 export const ROUTINE_AWAY_HELD_REASON =
 	"an earlier run away of it has not been delivered to its session yet, so later slots wait for the session to open and its next run's missed count covers them.";
-
-/** One charge on the away spend bound, in micro-dollars, until when (undefined: until the store that made it changes). */
-export interface RoutineAwayCharge {
-	readonly micros: number;
-	readonly until?: number;
-}
-
-/** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
-export interface RoutineAwayClaimGate {
-	readonly maxUsdPerRun: number;
-	readonly maxUsdPerDay: number;
-	/**
-	 * What else the daemon spent away on the same bound: its channel turns while no session was open
-	 * (`away-channels.ts`). Read by the daemon just before the claim, in the one process that makes every away charge.
-	 */
-	readonly otherCharges?: readonly RoutineAwayCharge[];
-}
-
-/** Whole micro-dollars: the bound's sums and comparisons are exact. */
-export function awaySpendMicros(usd: number): number {
-	return Math.round(usd * 1_000_000);
-}
-
-/**
- * What one run away charges the away spend bound now, in micro-dollars, and until when (undefined: until it changes).
- * Admission, not creation, starts the charge, so a run is charged at any age:
- * - admitted and not finished (claimed, dispatching, running): its full per-run bound, until it finishes or returns to
- *   pending (which drops `executor`);
- * - uncertain: its full per-run bound, until resolved, or the spend window after the journal's uncertain retention;
- * - finished after dispatch: its settled metered (API) spend (its full per-run bound when unread), for the spend window
- *   after it finished;
- * - finished without dispatch (cancelled before it started): nothing.
- */
-function routineAwayCharge(
-	item: RoutineOccurrence,
-	maxUsdPerRun: number,
-	nowMs: number,
-): RoutineAwayCharge | undefined {
-	if (item.executor !== "away") return undefined;
-	if (item.phase === "uncertain") {
-		const until = item.updatedAt + ROUTINE_UNCERTAIN_RETENTION_MS + ROUTINE_AWAY_SPEND_WINDOW_MS;
-		return until > nowMs ? { micros: awaySpendMicros(maxUsdPerRun), until } : undefined;
-	}
-	if (item.phase !== "terminal") return { micros: awaySpendMicros(maxUsdPerRun) };
-	if (!item.dispatchKey) return undefined;
-	const until = (item.awaySettlement?.at ?? item.updatedAt) + ROUTINE_AWAY_SPEND_WINDOW_MS;
-	if (until <= nowMs) return undefined;
-	return { micros: awaySpendMicros(item.awaySettlement?.costUsd ?? maxUsdPerRun), until };
-}
-
-/** Whether the run away is still charged the away spend bound, so the journal keeps it. */
-export function routineAwayCharged(item: RoutineOccurrence, nowMs: number): boolean {
-	return routineAwayCharge(item, 0, nowMs) !== undefined;
-}
-
-/**
- * The away spend bound's state: whether one more run fits (`charged + maxUsdPerRun <= maxUsdPerDay`, exact in
- * micro-dollars) and, when it does not, the earliest instant a charge ends by time (undefined when every charge ends
- * only by a store change: a run finishing or returning to pending, or a channel turn away settling). The gate's
- * `otherCharges` count like runs.
- */
-export function routineAwaySpendRoom(
-	occurrences: Iterable<RoutineOccurrence>,
-	gate: RoutineAwayClaimGate,
-	nowMs: number,
-): { readonly chargedMicros: number; readonly fits: (extraRuns: number) => boolean; readonly exit?: number } {
-	let chargedMicros = 0;
-	let exit: number | undefined;
-	const routineCharges = [...occurrences].map((item) => routineAwayCharge(item, gate.maxUsdPerRun, nowMs));
-	for (const charge of [...routineCharges, ...(gate.otherCharges ?? [])]) {
-		if (!charge) continue;
-		chargedMicros += charge.micros;
-		if (charge.until !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, charge.until);
-	}
-	const perRun = awaySpendMicros(gate.maxUsdPerRun);
-	const perDay = awaySpendMicros(gate.maxUsdPerDay);
-	return {
-		chargedMicros,
-		fits: (extraRuns) => chargedMicros + (extraRuns + 1) * perRun <= perDay,
-		...(exit === undefined ? {} : { exit }),
-	};
-}
 
 /**
  * Whether an away claim holds the routine's next slot: a run away of this incarnation is unfinished, or its result is
@@ -988,7 +908,7 @@ export function routineJournalRoom(
 		if (routineJournalRemovable(item, nowMs)) return { room: true };
 		const settledAt = routineOccurrenceSettled(item, nowMs) ? nowMs : routineSettlesAt(item, nowMs);
 		if (settledAt === undefined) continue;
-		const charge = routineAwayCharge(item, 0, nowMs);
+		const charge = routineAwayCharge(item, { maxUsdPerRun: 0 }, nowMs);
 		if (charge && charge.until === undefined) continue;
 		const at = Math.max(settledAt, charge?.until ?? settledAt);
 		if (at > nowMs) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, at);

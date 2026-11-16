@@ -38,17 +38,21 @@ import {
 	AWAY_NO_SESSION_FILE_REASON,
 	AWAY_OFF_BRANCH_REASON,
 	AWAY_UNPINNED_REASON,
+	awayRunMetered,
 	awayRunRefusal,
 } from "./away-routine-admission.ts";
+import {
+	type RoutineAwayCharge,
+	type RoutineAwayClaimGate,
+	routineAwayRunMetered,
+	routineAwaySpendRoom,
+} from "./routine-away-spend.ts";
 import {
 	ROUTINE_AWAY_HELD_REASON,
 	ROUTINE_AWAY_SPEND_REFUSAL,
 	RoutineAdmissionRefused,
-	type RoutineAwayCharge,
-	type RoutineAwayClaimGate,
 	type RoutineOccurrence,
 	routineAwayHeld,
-	routineAwaySpendRoom,
 	routineEnded,
 	routineJournalRoom,
 	routineJournalShare,
@@ -320,8 +324,10 @@ export class AwayRoutineSupervisor {
 		}
 		const nowMs = clock.now();
 		const occurrences = store.listRoutineOccurrences();
-		// Recomputed after every host's claim: one parent's admitted runs can leave no room for the next parent.
-		let room = routineAwaySpendRoom(occurrences, this.gate(), nowMs).fits(0);
+		// Recomputed after every host's claim: one parent's admitted runs can leave no room for the next parent. A run
+		// that spends no metered dollars needs no room.
+		const spendGate = this.gate();
+		let room = routineAwaySpendRoom(occurrences, spendGate, nowMs).fits(0);
 		// A model price change can lift a refusal a parent's file stamp does not show.
 		const modelsStamp = fileStamp(configFile(this.deps.agentDir, "models.json"));
 		const parents = new Map<string, ParentWork>();
@@ -384,7 +390,7 @@ export class AwayRoutineSupervisor {
 				});
 				continue;
 			}
-			if (!room) {
+			if (!room && routineAwayRunMetered(spendGate, routine)) {
 				waitingForRoom = true;
 				entry.refusals.push({
 					routineId: routine.routineId,
@@ -443,7 +449,7 @@ export class AwayRoutineSupervisor {
 			)
 				continue;
 			// A run not yet charged is admitted only under the spend bound; the claim records the refusal on its routine.
-			if (!room) {
+			if (!room && routineAwayRunMetered(spendGate, occurrence.definition)) {
 				waitingForRoom = true;
 				continue;
 			}
@@ -749,6 +755,8 @@ export class AwayRoutineSupervisor {
 			maxUsdPerRun: settings.maxUsdPerRun,
 			maxUsdPerDay: settings.maxUsdPerDay,
 			...(otherCharges ? { otherCharges } : {}),
+			spendsMetered: (definition) =>
+				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.modelRegistry),
 		};
 	}
 

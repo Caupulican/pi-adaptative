@@ -88,6 +88,7 @@ import {
 	policyFingerprint,
 	readOwnerQuota,
 	senderListed,
+	turnUsageHold,
 } from "./owner-channel.ts";
 import type {
 	OwnerChannelControl,
@@ -1148,6 +1149,7 @@ export class SessionChannels {
 				const state = this.journal(name).read().result;
 				for (const entry of state.pending) consider(entry.admittedAt + PENDING_EXPIRY_MS);
 				if (runtime.state !== "capped") continue;
+				consider(turnUsageHold(this.deps)?.retryAt);
 				for (const batch of state.batches) if (batch.owner !== true) consider(batch.acceptedAt + DAY_MS);
 				const policy = this.policy(name);
 				const quota = policy && this.ownerPolicy(name) ? this.ownerQuota(policy) : undefined;
@@ -1331,7 +1333,7 @@ export class SessionChannels {
 			return `$${usd.toFixed(2)} of metered (API) spend in the last 24 hours reaches channels.${name}.maxUsdPerDay`;
 		if (state.drafts.filter(isDraftOpen).length >= MAX_PENDING_DRAFTS)
 			return `${MAX_PENDING_DRAFTS} reply drafts wait for the owner (channel_reply)`;
-		return undefined;
+		return turnUsageHold(this.deps)?.reason;
 	}
 
 	/**

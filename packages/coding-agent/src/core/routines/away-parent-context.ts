@@ -44,6 +44,7 @@ import { selectedWorkerAttempt } from "../delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { readGoalMailSpentUsd } from "../delegation/worker-mail-ledger.ts";
 import { WorkerNotificationCoordinator } from "../delegation/worker-notification-coordinator.ts";
+import { subscriptionAllowancePort } from "../fleet/capacity/allowance-room.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { awayFleetQueueKey, settleEarlierAwayFleetQueue } from "../fleet/fleet-queue-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -65,6 +66,7 @@ import {
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 import { followedOrchestrationHome, sessionHomeNow, sessionHomes } from "../orchestration-homes.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
+import { createSubscriptionAllowanceReader } from "../provider-admission/subscription-allowance.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
@@ -284,6 +286,12 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const exhausted = new ExhaustedProviderRegistry(join(providerAdmissionDir(agentDir), "exhausted"), () =>
 			admissionClock.now(),
 		);
+		// A run's subscription is held by its usage windows, as in the session: its workers wait at the fleet's line.
+		const allowance = createSubscriptionAllowanceReader({
+			getRegistry: () => modelRegistry,
+			getModel: () => undefined,
+			now: () => admissionClock.now(),
+		});
 		// The same grants the session reads: a standing-only read is the owner's typed grants and `edge.thirdPartyAllow`.
 		const edgeGrantDeps = {
 			getEdgeRecords: () => edgeRecordsOnBranch(readerNow()),
@@ -397,6 +405,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getModelRegistry: () => modelRegistry,
 				getTimers: () => input.timers,
 				readMachine: input.machineFacts,
+				fleetAllowance: subscriptionAllowancePort(() => allowance),
 				modelUnusableCause: (model) =>
 					exhausted.isExhausted(`${model.provider}/${model.id}`) ? "model_quota_exhausted" : undefined,
 				markModelExhausted: (model, retryAfterMs) =>

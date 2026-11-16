@@ -46,6 +46,20 @@ export interface AwayModelSource extends ModelBilling {
 }
 
 /**
+ * Whether a run away of this saved intent spends metered (API) dollars (`isMeteredSpend`): its pinned worker or verifier
+ * model is unknown here or metered, or nothing pins its models (no intent or no model registry). Only such a run is
+ * charged the away spend bound's per-run reservation; a subscription run is held by its usage windows.
+ */
+export function awayRunMetered(intent: WorkerSavedIntent | undefined, models: AwayModelSource | undefined): boolean {
+	if (!intent || !models) return true;
+	const contract = intent.executionContract;
+	const profiles = contract.verifier ? [contract.worker, contract.verifier] : [contract.worker];
+	return profiles.some(({ modelBinding }) =>
+		isMeteredSpend(models.find(modelBinding.provider, modelBinding.modelId), models),
+	);
+}
+
+/**
  * Why this saved run cannot run away, or undefined when it can. With `models`, a run whose pinned worker or verifier
  * model is unknown, or is metered (`isMeteredSpend`) with no declared prices, is refused too: every metered request
  * away is priced against the per-run bound, so such a run would be refused at its first request after its claim. A

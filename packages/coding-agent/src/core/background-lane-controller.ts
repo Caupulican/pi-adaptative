@@ -181,6 +181,7 @@ import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController } from "./research/research-lane-controller.ts";
+import { awayRunMetered } from "./routines/away-routine-admission.ts";
 import { AwayService } from "./routines/away-service.ts";
 import type { RoutineScope } from "./routines/routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routines/routine-intake.ts";
@@ -1685,6 +1686,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			channelJournals: () => this.channels.readJournalSummaries(),
 			awayChannelCharges: (maxUsdPerRun, nowMs) =>
 				readAwayChannelCharges(this.deps.getAgentDir(), maxUsdPerRun, nowMs),
+			awayRunMetered: (definition) =>
+				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.getModelRegistry()),
 			awayChannels: () => this.readAwayChannelStatus(),
 			awayService: this._botTeamStore ? () => this.getAwayService().inspect() : undefined,
 			harnessNotices,

@@ -52,7 +52,9 @@ import {
 import { isProcessAlive } from "../process-liveness.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
-import { type RoutineOccurrence, routineAwaySpendRoom } from "../routines/routine-contract.ts";
+import { awayRunMetered } from "../routines/away-routine-admission.ts";
+import { routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
+import type { RoutineOccurrence } from "../routines/routine-contract.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
@@ -214,6 +216,8 @@ export class AwayChannelHosts {
 				maxUsdPerRun: away.maxUsdPerRun,
 				maxUsdPerDay: away.maxUsdPerDay,
 				otherCharges: readAwayChannelCharges(this.input.agentDir, away.maxUsdPerRun, nowMs),
+				spendsMetered: (definition) =>
+					awayRunMetered(definition.executionSnapshot?.savedIntent, this.input.modelRegistry),
 			},
 			nowMs,
 		);
@@ -605,6 +609,8 @@ export class AwayChannelHosts {
 		const channelsHost = new SessionChannels({
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
+			// A third party's turn runs in the child session, on its model.
+			turnAllowance: (maxUsedPercent) => session.ownerChannel.quotaAllowance(maxUsedPercent),
 			// The owner's words run in the phone session; a third party's in the child session, as before.
 			...(owner
 				? {

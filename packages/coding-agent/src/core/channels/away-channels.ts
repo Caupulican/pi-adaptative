@@ -7,7 +7,7 @@
 import { readdirSync } from "node:fs";
 import { channelsDir } from "../agent-paths.ts";
 import { isProcessAlive } from "../process-liveness.ts";
-import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-contract.ts";
+import { awaySpendMicros, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import {
 	type ChannelBatchRecord,

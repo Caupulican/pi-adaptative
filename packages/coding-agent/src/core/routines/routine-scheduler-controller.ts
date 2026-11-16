@@ -10,6 +10,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { boundedRedactedDiagnosticText, cleanRedactBound } from "../security/secret-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { AWAY_OFF_BRANCH_REASON, AWAY_UNPINNED_REASON } from "./away-routine-admission.ts";
+import type { RoutineAwayClaimGate } from "./routine-away-spend.ts";
 import {
 	decideRoutineEvents,
 	MAX_ROUTINE_OCCURRENCES,
@@ -17,7 +18,6 @@ import {
 	ROUTINE_JOURNAL_SHARE,
 	ROUTINE_UNFINISHED_PHASES,
 	RoutineAdmissionRefused,
-	type RoutineAwayClaimGate,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
 	type RoutineEventAnchor,

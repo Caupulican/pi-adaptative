@@ -177,4 +177,9 @@ export interface SessionChannelsOwnerDeps {
 	 * change is seen at the channels core's next pass.
 	 */
 	subscribeEmergencyStop?(listener: () => void): () => void;
+	/**
+	 * The subscription allowance, at a line, of the session a third party's turn runs in (its own model); third-party
+	 * messages wait while it is exhausted at the line workers wait at (`turnUsageHold`). Absent: only the provider's refusal holds them.
+	 */
+	turnAllowance?(maxUsedPercent: number): OwnerQuotaAllowance;
 }

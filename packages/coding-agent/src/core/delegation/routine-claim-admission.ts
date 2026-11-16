@@ -14,6 +14,11 @@ import {
 	MAX_CALENDAR_MISSED_COUNT,
 } from "../routines/calendar-schedule.ts";
 import {
+	type RoutineAwaySpendDefinition,
+	routineAwayRunMetered,
+	routineAwaySpendRoom,
+} from "../routines/routine-away-spend.ts";
+import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
 	decideRoutineEvents,
@@ -33,7 +38,6 @@ import {
 	type RoutineOccurrenceClaimInput,
 	rebasedRoutineCursor,
 	routineAwayHeld,
-	routineAwaySpendRoom,
 	routineCursorAfter,
 	routineEnded,
 	routineEventKey,
@@ -102,7 +106,7 @@ export function admitClockRoutine(
 	stored: RoutineDefinitionView,
 	input: RoutineOccurrenceClaimInput,
 	output: RoutineOccurrence[],
-	admitRun: () => boolean,
+	admitRun: (definition: RoutineDefinitionView) => boolean,
 ): {
 	readonly changed: boolean;
 	readonly journalFull: boolean;
@@ -227,7 +231,7 @@ export function admitClockRoutine(
 	// Away, one run per routine waits for its session at a time: later slots stay due and fold into its missed count.
 	if (input.away && routineAwayHeld(state.occurrences.values(), routine, input.nowMs))
 		return { changed, journalFull: false, held: true };
-	if (!admitRun()) return { changed, journalFull: false, refused: true };
+	if (!admitRun(stored)) return { changed, journalFull: false, refused: true };
 	const created = createClaimedOccurrence(
 		state,
 		routine,
@@ -461,8 +465,9 @@ export function claimDueRoutineOccurrences(
 	let awayAdmitted = 0;
 	const awayRefused: string[] = [];
 	const awayHeld: string[] = [];
-	const admitAway = (): boolean => {
-		if (!awayRoom) return true;
+	// A run that spends no metered dollars reserves nothing on the bound, so it is admitted without room.
+	const admitAway = (definition: RoutineAwaySpendDefinition): boolean => {
+		if (!awayRoom || !away || !routineAwayRunMetered(away, definition)) return true;
 		if (!awayRoom.fits(awayAdmitted)) return false;
 		awayAdmitted++;
 		return true;
@@ -513,7 +518,7 @@ export function claimDueRoutineOccurrences(
 			continue;
 		}
 		// An away run reclaimed is already charged; any other one is admitted under the bound.
-		if (occurrence.executor !== "away" && !admitAway()) {
+		if (occurrence.executor !== "away" && !admitAway(occurrence.definition)) {
 			refuseAway(occurrence.routineId, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
 			continue;
 		}

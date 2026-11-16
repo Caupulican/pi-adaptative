@@ -24,6 +24,7 @@ export type LaneSessionChannelsDeps = Pick<
 	| "standing"
 	| "refreshToolRegistry"
 	| "getTimers"
+	| "subscriptionAllowance"
 >;
 
 /** The channels core of a session's background lanes; `warn` never throws. */
@@ -40,6 +41,8 @@ export function createLaneSessionChannels(
 		sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
 		...(deps.ownerChannel ? { ownerDelivery: deps.ownerChannel } : {}),
 		ownerControl: () => deps.ownerChannel?.control(),
+		// A third party's turn runs in this session, on its model.
+		turnAllowance: (maxUsedPercent) => deps.subscriptionAllowance.read(maxUsedPercent),
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(deps.getAgentDir()),
 		subscribeEmergencyStop: (listener) => subscribeEmergencyStop(deps.getAgentDir(), listener),
 		observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,

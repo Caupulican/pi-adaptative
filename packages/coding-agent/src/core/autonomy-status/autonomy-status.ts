@@ -40,11 +40,14 @@ import {
 import { proofSheetsAwaitingReview } from "../proof/review-gauge.ts";
 import type { AwayServiceInspection } from "../routines/away-service.ts";
 import {
-	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineAwayCharge,
+	type RoutineAwaySpendDefinition,
+	routineAwaySpendRoom,
+} from "../routines/routine-away-spend.ts";
+import {
+	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineDefinitionView,
 	type RoutineOccurrence,
-	routineAwaySpendRoom,
 	routineEnded,
 	routineOpensAt,
 } from "../routines/routine-contract.ts";
@@ -456,6 +459,8 @@ export interface AutonomyStatusSources {
 	channelJournals(): readonly ChannelJournalSummary[];
 	/** The channel turns the daemon delivered away, as charges on the away spend bound (journal reads). */
 	awayChannelCharges(maxUsdPerRun: number, nowMs: number): readonly RoutineAwayCharge[];
+	/** Whether a run away of the definition spends metered dollars (`awayRunMetered`), so the bound charges it. */
+	awayRunMetered(definition: RoutineAwaySpendDefinition): boolean;
 	/** The channels served while no session is open, from the global settings and the journals. */
 	awayChannels(): readonly AwayChannelStatus[];
 	/** The always-on service's filesystem read; undefined while the routine store it reads is not loaded. */
@@ -633,7 +638,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			const away = settings.getRoutineAwaySettings();
 			const spend = routineAwaySpendRoom(
 				store.listRoutineOccurrences(),
-				{ ...away, otherCharges: sources.awayChannelCharges(away.maxUsdPerRun, nowMs) },
+				{
+					...away,
+					otherCharges: sources.awayChannelCharges(away.maxUsdPerRun, nowMs),
+					spendsMetered: (definition) => sources.awayRunMetered(definition),
+				},
 				nowMs,
 			);
 			return available({

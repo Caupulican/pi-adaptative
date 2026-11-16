@@ -142,7 +142,7 @@ The same rules apply to every run that carries a third party's words: a pi-chat 
 
 ### Bounds
 
-Before delivering, the channel checks its bounds over the last 24 hours: `maxWakesPerDay` turns, `maxUsdPerDay` spend (the metered (API) usage of the turns the channel started; spend on a subscription model is not counted, its plan's usage windows hold it), and 32 reply drafts waiting for the owner. Past a bound the channel holds its waiting messages and tells the owner once, naming the setting; it delivers again once the bound clears.
+Before delivering, the channel checks its bounds over the last 24 hours: `maxWakesPerDay` turns, `maxUsdPerDay` spend (the metered (API) usage of the turns the channel started; spend on a subscription model is not counted, its plan's usage windows hold it), and 32 reply drafts waiting for the owner. While the subscription of the session that runs a third party's turn (the daemon's child session away) reports its usage at 95% (the line workers wait at) or the provider's limit, the channel holds those messages too, until the reset the account reports or the next channel pass whose reading has room. Past a bound the channel holds its waiting messages and tells the owner once, naming the setting or the usage limit; it delivers again once the bound clears.
 
 ## Replies
 
