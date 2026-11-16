@@ -747,7 +747,9 @@ async function runScopedStopStep(world: HarnessWorld, session: AgentSession): Pr
 			"a stop recorded late ends the work there was when it was made: the first worker, cancelled with its end delivered at once, while the worker and the turn begun after it run on, and the owner is told nothing of the bot",
 		).toEqual({
 			firstSent: "started",
-			laterSent: "followed_up",
+			// The first worker still runs, so the bot's session works ("running" on the roster): the owner's words are sent
+			// while it works, and with no turn running they start the bot's second turn.
+			laterSent: "steered",
 			scope: { kind: "scoped", attempts: [firstAttempt], plans: [] },
 			firstEnd: "aborted",
 			first: { status: "cancelled", end: "delivered" },
