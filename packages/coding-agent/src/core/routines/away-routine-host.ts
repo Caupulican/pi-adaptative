@@ -32,6 +32,7 @@ import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { ResolvedRoutineAwaySettings } from "../settings/settings-schema.ts";
 import { alarmAt, type TimerSource, type WallAlarm } from "../util/timer-port.ts";
 import { AwayEventFeed, AwayEventFeedUnavailable, type AwayEventSourceFactory } from "./away-event-feed.ts";
+import { awayMeteredRunReserved, reserveAwayMeteredRun } from "./away-metered-runs.ts";
 import { type AwayParentContext, AwayParentUnavailable, openAwayParentContext } from "./away-parent-context.ts";
 import {
 	AWAY_LEASES_UNREADABLE_REASON,
@@ -164,6 +165,15 @@ async function openAwayRoutineHost(args: {
 		machineFacts: deps.machineFacts,
 		maxUsdPerRun: () => deps.settings().maxUsdPerRun,
 		awayDispatchKeys,
+		reserveMeteredRun: (dispatchKey) =>
+			reserveAwayMeteredRun({
+				agentDir: deps.agentDir,
+				dispatchKey,
+				occurrences: deps.store.listRoutineOccurrences(),
+				gate: args.gate(),
+				nowMs: deps.timers.port("routines").now(),
+				report: args.report,
+			}),
 		report: args.report,
 		...(deps.authStorage ? { authStorage: deps.authStorage } : {}),
 		...(deps.modelRegistry ? { modelRegistry: deps.modelRegistry } : {}),
@@ -757,6 +767,7 @@ export class AwayRoutineSupervisor {
 			...(otherCharges ? { otherCharges } : {}),
 			spendsMetered: (definition) =>
 				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.modelRegistry),
+			reservedMetered: awayMeteredRunReserved(this.deps.agentDir),
 		};
 	}
 

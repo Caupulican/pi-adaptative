@@ -484,6 +484,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 													observedAtMs: () => observedAtMs,
 													admitPhysical: () =>
 														this.deps.spend.attempt(accountingKey, admittedToken, metered),
+													metered,
 												},
 											);
 											return {

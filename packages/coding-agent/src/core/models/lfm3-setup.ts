@@ -13,6 +13,7 @@ import { resolveCliModel, resolveProfileModelSettings } from "../model-resolver.
 import { resolveRouterCandidatePool } from "../model-router/candidate-pool.ts";
 import { evaluateSurfaceFitness } from "../model-router/fitness-gate.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { ownerSessionStorageRoots } from "../orchestration/session-bundle-lifecycle.ts";
 import { type Lfm3FitnessModality, runLfm3ModalityFitness } from "../research/lfm3-modality-fitness.ts";
 import { isProbeAllFailed, projectModelFitnessReport } from "../research/model-fitness.ts";
@@ -378,7 +379,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 							thinkingLevel: summarySettings.thinkingLevel,
 							allowExternalSummaryEgress: false,
 						},
-						{ resolveModel: resolveSummary },
+						{ resolveModel: resolveSummary, isMeteredSpend: (model) => isMeteredSpend(model, registry) },
 					).ok,
 			);
 			if (!primary)
@@ -418,6 +419,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 				const continuousChat = readContinuousChatSettings(effective);
 				const validatedSummary = validateContinuousChatSummaryModel(continuousChat, {
 					resolveModel: resolveSummary,
+					isMeteredSpend: (model) => isMeteredSpend(model, registry),
 				});
 				if (!validatedSummary.ok)
 					throw new Error(`History summary model is not usable: ${validatedSummary.reason}`);

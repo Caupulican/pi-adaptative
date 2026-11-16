@@ -461,6 +461,8 @@ export interface AutonomyStatusSources {
 	awayChannelCharges(maxUsdPerRun: number, nowMs: number): readonly RoutineAwayCharge[];
 	/** Whether a run away of the definition spends metered dollars (`awayRunMetered`), so the bound charges it. */
 	awayRunMetered(definition: RoutineAwaySpendDefinition): boolean;
+	/** Whether a run away was reserved on the bound after its admission (`awayMeteredRunReserved`); absent: none was. */
+	awayRunReserved?(dispatchKey: string): boolean;
 	/** The channels served while no session is open, from the global settings and the journals. */
 	awayChannels(): readonly AwayChannelStatus[];
 	/** The always-on service's filesystem read; undefined while the routine store it reads is not loaded. */
@@ -642,6 +644,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 					...away,
 					otherCharges: sources.awayChannelCharges(away.maxUsdPerRun, nowMs),
 					spendsMetered: (definition) => sources.awayRunMetered(definition),
+					...(sources.awayRunReserved ? { reservedMetered: sources.awayRunReserved } : {}),
 				},
 				nowMs,
 			);

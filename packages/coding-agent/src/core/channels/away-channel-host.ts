@@ -52,6 +52,7 @@ import {
 import { isProcessAlive } from "../process-liveness.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
+import { awayMeteredRunReserved } from "../routines/away-metered-runs.ts";
 import { awayRunMetered } from "../routines/away-routine-admission.ts";
 import { routineAwaySpendRoom } from "../routines/routine-away-spend.ts";
 import type { RoutineOccurrence } from "../routines/routine-contract.ts";
@@ -218,6 +219,7 @@ export class AwayChannelHosts {
 				otherCharges: readAwayChannelCharges(this.input.agentDir, away.maxUsdPerRun, nowMs),
 				spendsMetered: (definition) =>
 					awayRunMetered(definition.executionSnapshot?.savedIntent, this.input.modelRegistry),
+				reservedMetered: awayMeteredRunReserved(this.input.agentDir),
 			},
 			nowMs,
 		);

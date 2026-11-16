@@ -80,7 +80,10 @@ export type ContinuousChatSummaryModelResolution =
  */
 export function validateContinuousChatSummaryModel(
 	settings: Pick<ContinuousChatSettings, "summaryModel" | "thinkingLevel" | "allowExternalSummaryEgress">,
-	deps: Pick<TranscriptSummarizerDeps, "resolveModel">,
+	deps: Pick<TranscriptSummarizerDeps, "resolveModel"> & {
+		/** Whether spend on a model is metered (`isMeteredSpend`); absent: every model's is. */
+		isMeteredSpend?(model: Model<Api>): boolean;
+	},
 ): ContinuousChatSummaryModelResolution {
 	if (settings.summaryModel === undefined) {
 		return {
@@ -97,7 +100,8 @@ export function validateContinuousChatSummaryModel(
 		};
 	}
 	const reference = `${model.provider}/${model.id}`;
-	if (model.costDefaulted) {
+	// The daily dollar limit, which needs the price, holds metered (API) summaries alone.
+	if (model.costDefaulted && deps.isMeteredSpend?.(model) !== false) {
 		return {
 			ok: false,
 			reason: `The ICM chat's summary model ${reference} has no declared price: configure its input, output and cache prices, including explicit zero prices if applicable.`,

@@ -197,7 +197,7 @@ import {
 	resolveContinuousChatTurnStart,
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
-import { ContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
+import { sessionContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
 import { knowledgeSessionHooks } from "./memory/knowledge-announcement.ts";
 import { MemoryController, type MemoryOperatorPort } from "./memory-controller.ts";
 import {
@@ -1415,10 +1415,11 @@ export class AgentSession {
 					usage: () => this._semanticUsage,
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
-					spend: new ContinuousChatSpendMeter(
+					spend: sessionContinuousChatSpendMeter(
 						continuousChatSpendFile(this._agentDir),
 						() => readContinuousChatSettings(this.settingsManager).maxUsdPerDay,
 						config.timers.port("continuous-chat"),
+						this._modelRegistry,
 					),
 					summary: () =>
 						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), historyModels),

@@ -85,6 +85,11 @@ export interface AwayParentContextInput {
 	maxUsdPerRun(): number;
 	/** The parent's routine runs this host may run: the dispatch keys of its away occurrences. */
 	awayDispatchKeys(): ReadonlySet<string>;
+	/**
+	 * Reserves the run of this dispatch key on the away spend bound as a metered attempt of it starts
+	 * (`reserveAwayMeteredRun`): a run admitted as a subscription run reserved nothing. False: the bound has no room.
+	 */
+	reserveMeteredRun(dispatchKey: string): boolean;
 	/** The host's diagnostics: warnings, closing warnings and every write it cannot record. */
 	report(message: string): void;
 	/** Shared credential owners, when the caller already has them; otherwise built as the SDK builds them. */
@@ -366,10 +371,15 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		const runsAttempt = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): boolean =>
 			awayRunKey(attempt, snapshot) !== undefined;
 		// One run's subject, retries and verifier share the run's spend bound, as the away spend gate reserves it.
-		const runCostBound = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection) => {
+		const runCostBound = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection, metered: boolean) => {
 			const runId = awayRunKey(attempt, snapshot);
 			if (runId === undefined) return undefined;
 			const includes = (candidate: AttemptRuntimeState) => awayRunKey(candidate, snapshot) === runId;
+			// A metered attempt's run is reserved on the away day bound before it spends (a subscription run that failed over
+			// is reserved here). With no room its metered requests are refused under a zero bound of their own, which leaves
+			// the run's bound as it was for an attempt that starts once room returns.
+			if (metered && !input.reserveMeteredRun(runId))
+				return { runId: `${runId}:unreserved`, maxCostUsd: 0, includes };
 			// A run away holds its metered spend to its bound; a metered attempt on a model with no price is refused.
 			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
 		};

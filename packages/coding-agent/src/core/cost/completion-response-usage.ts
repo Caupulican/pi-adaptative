@@ -74,11 +74,20 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 		model: Model<Api>,
 		signal?: AbortSignal,
 		onSettlement?: (settlement: CompletionAccountingSettlement) => void,
-		summaryAccounting?: { receiptId: string; observedAtMs(): number | undefined; admitPhysical(): void },
+		summaryAccounting?: {
+			receiptId: string;
+			observedAtMs(): number | undefined;
+			admitPhysical(): void;
+			/**
+			 * Whether the summary's spend is metered (API): only then is its daily dollar limit, and so a declared price, needed.
+			 * Absent: it is.
+			 */
+			readonly metered?: boolean;
+		},
 	): ProviderResponseTicket {
 		signal?.throwIfAborted();
 		this.assertAvailable();
-		if (summaryAccounting && model.costDefaulted)
+		if (summaryAccounting !== undefined && summaryAccounting.metered !== false && model.costDefaulted)
 			throw new CompletionAccountingAdmissionError(new Error("Summary model has no declared price."));
 		const receiptId = summaryAccounting?.receiptId ?? randomUUID();
 		const provider = model.provider;

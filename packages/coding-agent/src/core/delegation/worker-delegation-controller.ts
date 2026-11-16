@@ -5242,7 +5242,7 @@ export class WorkerDelegationController {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
-		const sharedBudget = this.costBounds.compose({
+		const sharedBudget = this.costBounds.composeMovable({
 			attemptId: durableHandle.attemptId,
 			initialUsage,
 			snapshot: lifecycle.getTaskRuntimeSnapshot(),
@@ -5878,10 +5878,9 @@ export class WorkerDelegationController {
 				leaseHeartbeat.start();
 				// The lane's registration records which worker owns it (a no-op when the cwd is no lane, or another worker's).
 				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
-				// Resolve credentials before repository observation. A rejected or expired account must
-				// fail admission without paying for a checkout-wide snapshot first. The executor resolves
-				// again at the actual provider boundary so refreshed credentials are never pinned here.
-				// The start result waits for this point (startSettlement), so it names the model the worker runs on.
+				// Resolve credentials before repository observation: a rejected or expired account fails admission without
+				// paying for a checkout-wide snapshot first. The executor resolves again at the provider boundary, so refreshed
+				// credentials are never pinned here. The start result waits for this point (startSettlement), naming the model.
 				if (!recoveredTerminal) {
 					let requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
 					while (!requestAuth.ok) {
@@ -5902,6 +5901,7 @@ export class WorkerDelegationController {
 						retentionPolicy = buildRetentionPolicy(model);
 						laneMemoryCapacity = buildLaneMemoryCapacity(model);
 						lifecycle.recordRunningModel(startedRecord.laneId, modelBinding);
+						sharedBudget.moveTo(model, lifecycle.getTaskRuntimeSnapshot());
 						executor = buildExecutor();
 						registerInFlightLedger();
 						requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);

@@ -20,6 +20,7 @@ import {
 	writeFileAtomicSync,
 } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import { receiptCountsAgainstDollars, type SpendBilling } from "./request-spend-budget.ts";
 import {
 	normalizedHeaderTimestamp,
 	type SemanticUsageLedgerIdentity,
@@ -113,6 +114,9 @@ export type SummarySpendReceiptRead =
 			readonly costUsd: number;
 			readonly observedAtMs: number;
 			readonly summarySpendPending: boolean;
+			/** The model the receipt's summary ran on, as the receipt names it; a read that names none is counted as metered. */
+			readonly provider?: string;
+			readonly model?: string;
 	  }
 	| { readonly kind: "unresolved" | "missing" | "unknown"; readonly reason?: string };
 
@@ -593,6 +597,7 @@ function summarySpendState(
 	document: JournalDocument | undefined,
 	identity: SemanticUsageLedgerIdentity,
 	receiptId: string,
+	billing?: SpendBilling,
 ): SummarySpendReceiptRead {
 	if (!document) return { kind: "missing" };
 	if (document.conflicts.some((conflict) => conflict.reportId === receiptId))
@@ -608,12 +613,17 @@ function summarySpendState(
 			typeof record.summarySpendPending !== "boolean"
 		)
 			return { kind: "unknown", reason: "receipt_identity_mismatch" };
-		if (payload.priceKnown !== true) return { kind: "unknown", reason: "summary_price_unavailable" };
+		// An unpriced summary's dollars are unproven: only one on a model whose spend is not metered (`billing`) is read,
+		// since no dollar limit counts it.
+		if (payload.priceKnown !== true && (billing === undefined || receiptCountsAgainstDollars(payload, billing)))
+			return { kind: "unknown", reason: "summary_price_unavailable" };
 		return {
 			kind: "known",
 			costUsd: payload.usage.cost.total,
 			observedAtMs: payload.summaryAccounting.observedAtMs,
 			summarySpendPending: record.summarySpendPending,
+			provider: payload.provider,
+			model: payload.model,
 		};
 	}
 	const unresolved = document.unresolved?.find((request) => request.requestId === receiptId);
@@ -627,15 +637,19 @@ function summarySpendState(
 	return { kind: "missing" };
 }
 
-/** Read one meter-bound summary receipt without changing or quarantining the sidecar. */
+/**
+ * Read one meter-bound summary receipt without changing or quarantining the sidecar. With `billing`, a receipt of a
+ * model without declared prices whose spend is not metered is read too (its daily limit does not count it).
+ */
 export function readSummarySpendReceipt(
 	identity: SemanticUsageLedgerIdentity,
 	receiptId: string,
+	billing?: SpendBilling,
 ): SummarySpendReceiptRead {
 	const slot = journalSlotOf(identity);
 	if (!slot || !isReceiptText(receiptId)) return { kind: "unknown", reason: "identity_unavailable" };
 	try {
-		return summarySpendState(readJournal(slot), identity, receiptId);
+		return summarySpendState(readJournal(slot), identity, receiptId, billing);
 	} catch (error) {
 		return {
 			kind: "unknown",
@@ -777,14 +791,18 @@ export function requestSummarySpendRecovery(identity: SemanticUsageLedgerIdentit
 }
 
 /** Acknowledge the exact shared-meter token, retaining the receipt until canonical row confirmation also exists. */
-export function acknowledgeSummarySpend(identity: SemanticUsageLedgerIdentity, receiptId: string): void {
+export function acknowledgeSummarySpend(
+	identity: SemanticUsageLedgerIdentity,
+	receiptId: string,
+	billing?: SpendBilling,
+): void {
 	const slot = journalSlotOf(identity);
 	if (!slot || !isReceiptText(receiptId)) {
 		throw new SemanticUsageJournalError("corrupt", "summary spend acknowledgment has no valid session identity");
 	}
 	updateJournalStrict(slot, (current) => {
 		if (!current) return undefined;
-		const state = summarySpendState(current, identity, receiptId);
+		const state = summarySpendState(current, identity, receiptId, billing);
 		if (state.kind === "missing") return current;
 		if (state.kind !== "known") {
 			throw new SemanticUsageJournalError("corrupt", "summary spend acknowledgment does not match a known receipt");

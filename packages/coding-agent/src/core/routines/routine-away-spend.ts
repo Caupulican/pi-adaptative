@@ -33,6 +33,11 @@ export interface RoutineAwayClaimGate {
 	 * charged its full per-run bound. A run that does not reserves nothing on the bound: its plan's usage windows hold it.
 	 */
 	spendsMetered?(definition: RoutineAwaySpendDefinition): boolean;
+	/**
+	 * Whether the run away of this dispatch key was reserved on the bound after its admission (`reserveAwayMeteredRun`: an
+	 * attempt of it started on a metered model); such a run is charged as a metered one. Absent: none was.
+	 */
+	reservedMetered?(dispatchKey: string): boolean;
 }
 
 /** What a run's metered kind is read from: its routine's pinned execution snapshot. */
@@ -44,6 +49,17 @@ export function routineAwayRunMetered(
 	definition: RoutineAwaySpendDefinition,
 ): boolean {
 	return gate.spendsMetered?.(definition) !== false;
+}
+
+/** Whether a run away is charged the bound's per-run reservation: its definition spends metered, or it was reserved. */
+export function routineAwayOccurrenceMetered(
+	gate: Pick<RoutineAwayClaimGate, "spendsMetered" | "reservedMetered">,
+	item: Pick<RoutineOccurrence, "definition" | "dispatchKey">,
+): boolean {
+	return (
+		routineAwayRunMetered(gate, item.definition) ||
+		(item.dispatchKey !== undefined && gate.reservedMetered?.(item.dispatchKey) === true)
+	);
 }
 
 /** Whole micro-dollars: the bound's sums and comparisons are exact. */
@@ -60,15 +76,16 @@ export function awaySpendMicros(usd: number): number {
  * - finished after dispatch: its settled metered (API) spend (its full per-run bound when unread), for the spend window
  *   after it finished;
  * - finished without dispatch (cancelled before it started): nothing.
- * A run that spends no metered dollars (`routineAwayRunMetered`) is charged nothing in place of its per-run bound.
+ * A run that spends no metered dollars (`routineAwayOccurrenceMetered`: its definition is not metered and it was not
+ * reserved after its admission) is charged nothing in place of its per-run bound.
  */
 export function routineAwayCharge(
 	item: RoutineOccurrence,
-	gate: Pick<RoutineAwayClaimGate, "maxUsdPerRun" | "spendsMetered">,
+	gate: Pick<RoutineAwayClaimGate, "maxUsdPerRun" | "spendsMetered" | "reservedMetered">,
 	nowMs: number,
 ): RoutineAwayCharge | undefined {
 	if (item.executor !== "away") return undefined;
-	const maxUsdPerRun = routineAwayRunMetered(gate, item.definition) ? gate.maxUsdPerRun : 0;
+	const maxUsdPerRun = routineAwayOccurrenceMetered(gate, item) ? gate.maxUsdPerRun : 0;
 	if (item.phase === "uncertain") {
 		const until = item.updatedAt + ROUTINE_UNCERTAIN_RETENTION_MS + ROUTINE_AWAY_SPEND_WINDOW_MS;
 		return until > nowMs ? { micros: awaySpendMicros(maxUsdPerRun), until } : undefined;

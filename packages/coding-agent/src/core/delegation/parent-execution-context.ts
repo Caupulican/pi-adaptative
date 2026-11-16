@@ -341,9 +341,14 @@ export interface ParentExecutionPolicy {
 	 * (subject, retries and verifier; the bound `includes` them) shares one budget of `maxCostUsd` over the run's metered
 	 * spend, priced before each provider request on top of the attempt's own agent tree budget. A subscription attempt is
 	 * not held to it: its plan's usage windows are. Absent, undefined for an attempt, or no ceiling set, only the agent tree
-	 * budget applies in its place.
+	 * budget applies in its place. `metered`: whether the attempt spends metered dollars on the model it starts on (or its
+	 * start fails over to), so a host whose wider bound reserves runs reserves this one before it spends.
 	 */
-	runCostBound?(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): RunCostBound | undefined;
+	runCostBound?(
+		attempt: AttemptRuntimeState,
+		snapshot: TaskRuntimeProjection,
+		metered: boolean,
+	): RunCostBound | undefined;
 	/**
 	 * Present on a host whose workers must read inside one directory (a parent opened away: the parent's own): every
 	 * worker's read scope is that directory, whatever its profile or the edge mode, and a read-only worker's shell reads

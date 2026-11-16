@@ -359,6 +359,14 @@ export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");
 }
 
+/**
+ * `<agentDir>/state/bots/away-metered-runs.json` -- the runs away reserved on the away spend bound after their admission
+ * (`routines/away-metered-runs.ts`).
+ */
+export function awayMeteredRunsFile(agentDir: string): string {
+	return stateFile(agentDir, "bots", "away-metered-runs.json");
+}
+
 /** `<agentDir>/state/soul/write` -- the advisory lock every harness mutation of `soul.md` and its accounting takes. */
 export function soulLockFile(agentDir: string): string {
 	return stateFile(agentDir, "soul", "write");

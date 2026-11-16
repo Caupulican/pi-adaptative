@@ -55,7 +55,7 @@ export interface AttemptBudgetInput {
 	readonly attemptId: string;
 	readonly initialUsage: AttemptUsageSnapshot;
 	readonly snapshot: TaskRuntimeProjection;
-	/** The model the attempt runs on now; a failover move composes again on the next. */
+	/** The model the attempt runs on now; a failover at its start composes again (`composeMovable`), a retry at its own. */
 	readonly model: Model<Api>;
 	readonly agent: { readonly agentId: string; readonly rootAgentId: string };
 	readonly attemptTaskId: string;
@@ -72,6 +72,12 @@ export interface RequestCostBoundsDeps {
 	readonly findModel: (binding: OrchestrationModelBinding) => Model<Api> | undefined;
 	/** The spend bots answering in sessions of their own made for a goal's mail, kept beside the session's store. */
 	readonly goalMailSpentUsd: GoalMailSpend;
+}
+
+/** An attempt's budget (`RequestCostBounds.composeMovable`) that follows a model move before its first request. */
+export interface MovableAttemptBudget extends SharedCapabilityBudget {
+	/** Composes the attempt's budget again on the model its start failed over to. */
+	moveTo(model: Model<Api>, snapshot: TaskRuntimeProjection): void;
 }
 
 export class RequestCostBounds {
@@ -182,6 +188,27 @@ export class RequestCostBounds {
 	}
 
 	/**
+	 * `compose`, for an attempt whose start may fail over to another model before its first provider request (its
+	 * credential did not resolve): `moveTo` composes it again on that model, so a move from a subscription model to a
+	 * metered one is held by the metered bounds, and its run reserved on the host's wider bound, before it spends.
+	 */
+	composeMovable(input: AttemptBudgetInput): MovableAttemptBudget {
+		let current = this.compose(input);
+		return {
+			assertBudgetAvailable: (subject) => current.assertBudgetAvailable(subject),
+			getAttemptUsage: () => current.getAttemptUsage(),
+			recordAttemptUsage: (usage, accounting) => current.recordAttemptUsage(usage, accounting),
+			remainingTokens: () => current.remainingTokens(),
+			remainingContextTokens: () => current.remainingContextTokens(),
+			reserveProviderBudget: (requestedMaxTokens, subject, signal, request) =>
+				current.reserveProviderBudget(requestedMaxTokens, subject, signal, request),
+			moveTo: (model, snapshot) => {
+				current = this.compose({ ...input, model, snapshot });
+			},
+		};
+	}
+
+	/**
 	 * The tree's metered spend held to its dollar ceiling (`costCeilingUsd`): only metered attempts seed it, and each request
 	 * of a metered attempt is priced against it before it is sent. Undefined when the tree sets no dollar ceiling.
 	 */
@@ -218,8 +245,9 @@ export class RequestCostBounds {
 		snapshot: TaskRuntimeProjection,
 		metered: boolean,
 	): SharedCapabilityBudget[] {
-		// Asked for every attempt: the host counts the attempt to its run as it answers (`BotSpendWindows.runCostBound`).
-		const bound = attempt ? this.deps.runCostBound?.(attempt, snapshot) : undefined;
+		// Asked for every attempt: the host counts the attempt to its run as it answers (`BotSpendWindows.runCostBound`), and
+		// reserves a metered attempt's run on a wider bound of its own (a run away's day bound).
+		const bound = attempt ? this.deps.runCostBound?.(attempt, snapshot, metered) : undefined;
 		if (!metered || bound?.maxCostUsd === undefined) return [];
 		const seeds = Object.values(snapshot.attempts)
 			.filter((candidate) => bound.includes(candidate) && this.isMeteredAttempt(candidate))

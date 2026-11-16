@@ -11,6 +11,7 @@ import { DEFAULT_RETRY_POLICY } from "../../kernel/reliability/retry.ts";
 import { isSessionIdentity } from "../../kernel/session/session-identity.ts";
 import { readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
 import type { FaultableFs } from "../../kernel/storage/faultable-fs.ts";
+import { receiptCountsAgainstDollars, type SpendBilling } from "../cost/request-spend-budget.ts";
 import {
 	acknowledgeSummarySpend,
 	cancelUndispatchedSummarySpend,
@@ -154,6 +155,8 @@ export class ContinuousChatSpendMeter {
 	private readonly owners: ContinuousChatSpendOwnerPort;
 	private readonly fs: FaultableFs | undefined;
 	private readonly journal: ContinuousChatSpendJournalPort;
+	/** The model registry a recovered receipt's model is read by; without it every recovered charge is metered. */
+	private readonly billing: SpendBilling | undefined;
 	constructor(
 		file: string,
 		maxUsdPerDay: () => number,
@@ -166,6 +169,7 @@ export class ContinuousChatSpendMeter {
 			cancelUndispatched: cancelUndispatchedSummarySpend,
 			requestRecovery: requestSummarySpendRecovery,
 		},
+		billing?: SpendBilling,
 	) {
 		this.file = file;
 		this.maxUsdPerDay = maxUsdPerDay;
@@ -173,6 +177,7 @@ export class ContinuousChatSpendMeter {
 		this.owners = owners;
 		this.fs = fs;
 		this.journal = journal;
+		this.billing = billing;
 	}
 	private today(): string {
 		return new Date(this.timers.now()).toISOString().slice(0, 10);
@@ -283,7 +288,7 @@ export class ContinuousChatSpendMeter {
 	/**
 	 * Counts one measured summary charge on its day. `metered` is false for a summary on a subscription model: its plan's
 	 * usage windows hold it, so the daily dollar total does not count it. A charge recovered from a receipt after its
-	 * process died has no model here and is counted as metered.
+	 * process died is read by the model its receipt names (`recoveredMetered`).
 	 */
 	private addMeasured(state: SpendState, costUsd: number, observedAtMs: number, metered = true): void {
 		if (!Number.isFinite(costUsd) || costUsd < 0 || !isObservationTime(observedAtMs))
@@ -330,6 +335,20 @@ export class ContinuousChatSpendMeter {
 		if (circuit.status === "unknown") throw new ContinuousChatAccountingUnresolved();
 		if (this.owners.judge(circuit.owner) !== "dead") return DEFAULT_RETRY_POLICY.baseDelayMs;
 		throw new ContinuousChatAccountingUnresolved();
+	}
+
+	/**
+	 * Whether a recovered receipt's charge is metered: by the model it names (`receiptCountsAgainstDollars`); a receipt
+	 * that names none, or a meter given no billing, counts it as metered.
+	 */
+	private recoveredMetered(receipt: { readonly provider?: string; readonly model?: string }): boolean {
+		const { provider, model } = receipt;
+		return (
+			this.billing === undefined ||
+			provider === undefined ||
+			model === undefined ||
+			receiptCountsAgainstDollars({ provider, model }, this.billing)
+		);
 	}
 
 	/** Reconcile the exact settlement receipt, or every outstanding receipt before account-wide admission. */
@@ -381,7 +400,7 @@ export class ContinuousChatSpendMeter {
 			for (const { key, circuit } of candidates) {
 				if (circuit.status === "flight" || circuit.status === "unknown") {
 					if (!circuit.identity) continue;
-					const receipt = this.journal.read(circuit.identity, circuit.token);
+					const receipt = this.journal.read(circuit.identity, circuit.token, this.billing);
 					if (receipt.kind !== "known" || !receipt.summarySpendPending) {
 						if (
 							receipt.kind === "unresolved" &&
@@ -400,7 +419,7 @@ export class ContinuousChatSpendMeter {
 							JSON.stringify(current.identity) !== JSON.stringify(circuit.identity)
 						)
 							return;
-						this.addMeasured(state, receipt.costUsd, receipt.observedAtMs);
+						this.addMeasured(state, receipt.costUsd, receipt.observedAtMs, this.recoveredMetered(receipt));
 						state.circuits[key] = {
 							status: "held",
 							token: current.token,
@@ -418,7 +437,7 @@ export class ContinuousChatSpendMeter {
 				}
 				const pending = circuit.pendingAck;
 				if (!pending) continue;
-				const receipt = this.journal.read(pending.identity, circuit.token);
+				const receipt = this.journal.read(pending.identity, circuit.token, this.billing);
 				if (receipt.kind === "unresolved") this.journal.requestRecovery(pending.identity, circuit.token);
 				if (receipt.kind === "unknown" || receipt.kind === "unresolved") continue;
 				if (
@@ -443,7 +462,7 @@ export class ContinuousChatSpendMeter {
 					return true;
 				});
 				if (!admitted) continue;
-				this.journal.acknowledge(pending.identity, circuit.token);
+				this.journal.acknowledge(pending.identity, circuit.token, this.billing);
 				this.locked((state) => {
 					const current = state.circuits[key];
 					if (
@@ -627,4 +646,14 @@ export class ContinuousChatSpendMeter {
 		// Only this token's unfinished receipt/ACK belongs to the adapter's retained storage retry.
 		if (needsReceiptReconciliation) this.reconcile({ key, token });
 	}
+}
+
+/** A session's meter: the shared journal and process owners, with the model registry its recovered receipts are read by. */
+export function sessionContinuousChatSpendMeter(
+	file: string,
+	maxUsdPerDay: () => number,
+	timers: TimerPort,
+	billing: SpendBilling,
+): ContinuousChatSpendMeter {
+	return new ContinuousChatSpendMeter(file, maxUsdPerDay, timers, undefined, undefined, undefined, billing);
 }
