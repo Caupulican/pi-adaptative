@@ -16,15 +16,17 @@ export interface ResolvedOrchestrationModel {
 
 /**
  * Why the host reports a model unusable right now: its quota is exhausted, the owner's account does not offer it, or
- * (`away_day_spend_bound_full`, for one run: `ParentExecutionPolicy.runModelHold`) the run is away, admitted reserving
- * nothing on the away day spend bound, and the bound has no room for the metered spend this model would make.
+ * (for one run: `ParentExecutionPolicy.runModelHold`) the run is away, admitted reserving nothing on the away day spend
+ * bound, and the bound has no room for the metered spend this model would make (`away_day_spend_bound_full`) or its
+ * charges do not read, so whether it has room is unknown (`away_day_spend_bound_unread`).
  */
 export type OrchestrationModelUnusableCause =
 	| "model_quota_exhausted"
 	| "model_account_refused"
 	| "model_account_rejected"
 	| "model_account_unlisted"
-	| "away_day_spend_bound_full";
+	| "away_day_spend_bound_full"
+	| "away_day_spend_bound_unread";
 
 /**
  * A gate a binding failed, named for what that gate tests:

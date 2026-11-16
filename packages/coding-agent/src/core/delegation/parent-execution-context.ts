@@ -355,8 +355,9 @@ export interface ParentExecutionPolicy {
 	/**
 	 * Present on a host whose wider spend bound a run may not fit: why `model` is held off now for the run `attempt`
 	 * serves (a run away admitted reserving nothing is held off metered models while the away day bound has no room for
-	 * it: `away_day_spend_bound_full`). The attempt's model resolution skips it as it skips an exhausted candidate, so a
-	 * failover does not move to it and the worker waits on its own model. Undefined: not held.
+	 * it: `away_day_spend_bound_full`, or `away_day_spend_bound_unread` while its charges do not read). The attempt's
+	 * model resolution skips it as it skips an exhausted candidate, so a failover does not move to it and the worker waits
+	 * on its own model. Undefined: not held.
 	 */
 	runModelHold?(
 		attempt: AttemptRuntimeState,

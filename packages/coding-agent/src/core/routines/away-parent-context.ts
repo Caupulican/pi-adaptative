@@ -36,7 +36,10 @@ import { edgeRecordsOnBranch, sessionEdgeGrants, standingEdgeGrants } from "../a
 import { AuthStorage } from "../auth-storage.ts";
 import { ExhaustedProviderRegistry, expiryFromRetryAfter } from "../billing-failover-controller.ts";
 import { AwayParentWriteRefusal, createAwayParentWrites } from "../delegation/away-parent-writes.ts";
-import { AWAY_DAY_BUDGET_REFUSAL_REASONS } from "../delegation/budget-reason-codes.ts";
+import {
+	AWAY_DAY_BUDGET_REFUSAL_REASONS,
+	AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS,
+} from "../delegation/budget-reason-codes.ts";
 import type { ParentExecutionSettingsSource } from "../delegation/parent-execution-context.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
@@ -74,6 +77,7 @@ import { createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
 import { createSessionOperationGate } from "../system-one/operation-gate-wiring.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import type { AwayMeteredRunHold, AwayMeteredRunRefusal } from "./away-metered-runs.ts";
 
 export interface AwayParentContextInput {
 	readonly agentDir: string;
@@ -89,15 +93,16 @@ export interface AwayParentContextInput {
 	awayDispatchKeys(): ReadonlySet<string>;
 	/**
 	 * Reserves the run of this dispatch key on the away spend bound as a metered attempt of it starts
-	 * (`reserveAwayMeteredRun`): a run admitted as a subscription run reserved nothing. False: the bound has no room.
+	 * (`reserveAwayMeteredRun`): a run admitted as a subscription run reserved nothing. Undefined: reserved; else why
+	 * not (no room, charges on the bound that do not read, or a reservation not written).
 	 */
-	reserveMeteredRun(dispatchKey: string): boolean;
+	reserveMeteredRun(dispatchKey: string): AwayMeteredRunRefusal | undefined;
 	/**
-	 * Whether the run of this dispatch key may spend metered dollars now (`awayMeteredRunFits`): it is charged as a
-	 * metered run already, or the away day bound has room to reserve it. While it may not, its attempts are held off
-	 * metered models (`runModelHold`).
+	 * Why the run of this dispatch key may not spend metered dollars now (`awayMeteredRunHold`); undefined when it may:
+	 * it is charged as a metered run already, or the away day bound has room to reserve it. While it may not, its
+	 * attempts are held off metered models (`runModelHold`).
 	 */
-	meteredRunFits(dispatchKey: string): boolean;
+	meteredRunHold(dispatchKey: string): AwayMeteredRunHold | undefined;
 	/** The host's diagnostics: warnings, closing warnings and every write it cannot record. */
 	report(message: string): void;
 	/** Shared credential owners, when the caller already has them; otherwise built as the SDK builds them. */
@@ -386,8 +391,17 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			// A metered attempt's run is reserved on the away day bound before it spends (a subscription run that failed over
 			// is reserved here; `runModelHold` keeps it off metered models while there is no room). Room gone since its model
 			// was resolved refuses its metered requests under a zero bound of the day bound's own, which names it and leaves
-			// the run's bound as it was for an attempt that starts once room returns.
-			if (metered && !input.reserveMeteredRun(runId))
+			// the run's bound as it was for an attempt that starts once room returns; a day bound whose charges do not read
+			// refuses them under one of its own, which names that cause.
+			const refused = metered ? input.reserveMeteredRun(runId) : undefined;
+			if (refused === "unread")
+				return {
+					runId: `away-day-bound-unread:${runId}`,
+					maxCostUsd: 0,
+					includes,
+					refusalReasons: AWAY_DAY_BUDGET_UNREAD_REFUSAL_REASONS,
+				};
+			if (refused !== undefined)
 				return {
 					runId: `away-day-bound:${runId}`,
 					maxCostUsd: 0,
@@ -397,13 +411,14 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 			// A run away holds its metered spend to its bound; a metered attempt on a model with no price is refused.
 			return { runId, maxCostUsd: input.maxUsdPerRun(), includes };
 		};
-		// A run admitted reserving nothing is held off metered models while the away day bound has no room for it, so a
-		// failover does not move it there: it waits on its own model for the usage reset.
+		// A run admitted reserving nothing is held off metered models while the away day bound has no room for it, or its
+		// charges do not read, so a failover does not move it there: it waits on its own model for the usage reset.
 		const runModelHold = (attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection, model: Model<Api>) => {
 			const runId = awayRunKey(attempt, snapshot);
-			if (runId === undefined || !isMeteredSpend(model, modelRegistry) || input.meteredRunFits(runId))
-				return undefined;
-			return "away_day_spend_bound_full" as const;
+			if (runId === undefined || !isMeteredSpend(model, modelRegistry)) return undefined;
+			const hold = input.meteredRunHold(runId);
+			if (hold === undefined) return undefined;
+			return hold === "unread" ? ("away_day_spend_bound_unread" as const) : ("away_day_spend_bound_full" as const);
 		};
 		const settingsSource = awaySettingsSource(settings, () => input.maxUsdPerRun());
 		// The file an earlier build named this controller's fleet queue metadata by is its own only when its ledger claims

@@ -23,6 +23,7 @@ import {
 	ChannelJournal,
 	type ChannelJournalState,
 	type ChannelPendingMessage,
+	chargesAwayBound,
 	DAY_MS,
 	isDraftOpen,
 	pendingOfferTimes,
@@ -109,10 +110,20 @@ export function failureCause(error: unknown): string {
 /**
  * The charges of every channel journal of the agent directory, a channel no longer configured included: what a turn
  * spent in the last 24 hours counts against the day's bound whether or not its channel is still served away. None
- * when the channels directory does not exist; a directory that does not list, or a journal that does not read or parse
- * (`invalid`: which turns it held is unknown; its next update sets it aside), is `unread` with its path and cause.
+ * when the channels directory does not exist; a directory that does not list, or a journal that does not read, is
+ * `unread` with its path and cause. A journal set aside within the last day because it did not parse (its `reset` gap,
+ * whoever set it aside) held turns no one can count, any of them a turn away: it charges the bound's whole day
+ * allowance until a day after its reset (`dayAllowanceUntil`), since every charge it held ended by then.
+ * With `setAside`, a journal that does not parse is set aside here under its lock (`readSettingAside`), served or
+ * not, and `setAside` is told its path; a set-aside that fails is `unread` with its cause. Without it (a read that
+ * writes nothing: the status), such a journal is `unread` (`invalid`) until a reader or an update sets it aside.
  */
-export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, nowMs: number): RoutineAwayChargesRead {
+export function readAwayChannelCharges(
+	agentDir: string,
+	maxUsdPerRun: number,
+	nowMs: number,
+	setAside?: (path: string) => void,
+): RoutineAwayChargesRead {
 	const dir = channelsDir(agentDir);
 	let files: string[];
 	try {
@@ -122,6 +133,7 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 		return { unread: { path: dir, cause: failureCause(error) } };
 	}
 	const charges: RoutineAwayCharge[] = [];
+	const dayAllowanceUntil: number[] = [];
 	const reservedMetered = awayMeteredReservations(agentDir);
 	for (const file of files) {
 		const name = file.endsWith(".json") ? file.slice(0, -".json".length) : "";
@@ -129,24 +141,29 @@ export function readAwayChannelCharges(agentDir: string, maxUsdPerRun: number, n
 		const journal = new ChannelJournal(agentDir, name);
 		let read: ReturnType<ChannelJournal["read"]>;
 		try {
-			read = journal.read();
+			read = setAside ? journal.readSettingAside(nowMs) : journal.read();
 		} catch (error) {
 			return { unread: { path: journal.path, cause: failureCause(error) } };
 		}
-		if (read.reset) return { unread: { path: journal.path, cause: "invalid" } };
+		if (read.reset) {
+			if (!setAside) return { unread: { path: journal.path, cause: "invalid" } };
+			setAside(journal.path);
+		}
 		const state = read.result;
+		for (const gap of state.gaps) if (chargesAwayBound(gap, nowMs)) dayAllowanceUntil.push(gap.at + DAY_MS);
 		for (const batch of state.batches) {
 			const charge = channelAwayCharge(name, batch, maxUsdPerRun, reservedMetered, nowMs);
 			if (charge) charges.push(charge);
 		}
 		charges.push(...offerAwayCharges(state.pending, maxUsdPerRun, nowMs));
 	}
-	return { charges };
+	return dayAllowanceUntil.length > 0 ? { charges, dayAllowanceUntil } : { charges };
 }
 
 /**
  * The daemon's one reader of its channel turns' charges, for every gate that decides on the away bound with them (the
- * routine supervisor's claims, the channel hosts' turns and moves): a read that fails is told once per cause, until one
+ * routine supervisor's claims, the channel hosts' turns and moves): it sets aside a journal that does not parse, told
+ * once as it happens (the next read finds the fresh journal), and a read that fails is told once per cause, until one
  * reads again.
  */
 export function awayChannelChargesReader(
@@ -155,7 +172,9 @@ export function awayChannelChargesReader(
 ): (maxUsdPerRun: number, nowMs: number) => RoutineAwayChargesRead {
 	let told: RoutineAwayChargesUnread | undefined;
 	return (maxUsdPerRun, nowMs) => {
-		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs);
+		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path) =>
+			tell(interfaceText().sessions.awayMeteredRuns.journalSetAside(path)),
+		);
 		if (!("unread" in read)) told = undefined;
 		else if (told?.cause !== read.unread.cause) {
 			told = read.unread;

@@ -35,7 +35,7 @@ import { alarmAt, type TimerSource, type WallAlarm } from "../util/timer-port.ts
 import { AwayEventFeed, AwayEventFeedUnavailable, type AwayEventSourceFactory } from "./away-event-feed.ts";
 import {
 	type AwayMeteredRunInput,
-	awayMeteredRunFits,
+	awayMeteredRunHold,
 	awayMeteredRunReserved,
 	reserveAwayMeteredRun,
 	settleAwayMeteredRuns,
@@ -188,7 +188,7 @@ async function openAwayRoutineHost(args: {
 				...meteredRun(dispatchKey),
 				notWritten: (path, cause) => args.report(interfaceText().sessions.awayMeteredRuns.notWritten(path, cause)),
 			}),
-		meteredRunFits: (dispatchKey) => awayMeteredRunFits(meteredRun(dispatchKey)),
+		meteredRunHold: (dispatchKey) => awayMeteredRunHold(meteredRun(dispatchKey)),
 		report: args.report,
 		...(deps.authStorage ? { authStorage: deps.authStorage } : {}),
 		...(deps.modelRegistry ? { modelRegistry: deps.modelRegistry } : {}),

@@ -11,7 +11,7 @@ import { renameSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
-import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
+import { BoundedReadError, readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 const JOURNAL_VERSION = 1;
@@ -469,10 +469,14 @@ function prune(state: ChannelJournalState, now: number): void {
 	const settledDrafts = state.drafts.filter((draft) => !isDraftOpen(draft));
 	const dropDrafts = new Set(settledDrafts.slice(0, Math.max(0, state.drafts.length - MAX_DRAFTS)));
 	state.drafts = state.drafts.filter((draft) => !dropDrafts.has(draft));
-	// Told gaps go first, so a long absence keeps what no session told yet.
-	const toldGaps = state.gaps.filter((gap) => gap.told === true);
-	const dropGaps = new Set(toldGaps.slice(0, Math.max(0, state.gaps.length - MAX_GAPS)));
-	state.gaps = state.gaps.filter((gap) => !dropGaps.has(gap)).slice(-MAX_GAPS);
+	// A reset gap younger than a day is kept: it charges the away spend bound until then (`readAwayChannelCharges`).
+	// Of the others, told gaps go first, so a long absence keeps what no session told yet.
+	const bounded = state.gaps.filter((gap) => !chargesAwayBound(gap, now));
+	const toldGaps = bounded.filter((gap) => gap.told === true);
+	const dropTold = new Set(toldGaps.slice(0, Math.max(0, bounded.length - MAX_GAPS)));
+	const kept = bounded.filter((gap) => !dropTold.has(gap));
+	const dropGaps = new Set([...dropTold, ...kept.slice(0, Math.max(0, kept.length - MAX_GAPS))]);
+	state.gaps = state.gaps.filter((gap) => !dropGaps.has(gap));
 	state.onboarding = state.onboarding.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_ONBOARDING);
 	const pushes = state.ownerPushes?.filter((entry) => now - entry.at < SEEN_RETENTION_MS).slice(-MAX_OWNER_PUSHES);
 	state.ownerPushes = pushes && pushes.length > 0 ? pushes : undefined;
@@ -481,6 +485,39 @@ function prune(state: ChannelJournalState, now: number): void {
 	if (state.ownerPushSuppressed === 0) state.ownerPushSuppressed = undefined;
 	const notices = state.ownerNotices?.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_OWNER_NOTICES);
 	state.ownerNotices = notices && notices.length > 0 ? notices : undefined;
+}
+
+/**
+ * Whether the gap is the reset of a journal set aside less than a day before `now`: which turns the file held is unknown,
+ * so it charges the away spend bound until a day after it (`readAwayChannelCharges`).
+ */
+export function chargesAwayBound(gap: Pick<ChannelGapRecord, "reason" | "at">, now: number): boolean {
+	return gap.reason === "reset" && now - gap.at < DAY_MS;
+}
+
+/**
+ * The journal's file as read: absent, parsed (with its text), or unparsable: not a journal, or larger than any journal
+ * this module writes (`MAX_JOURNAL_BYTES`). A read that fails otherwise throws.
+ */
+type JournalFile =
+	| { readonly kind: "absent" }
+	| { readonly kind: "parsed"; readonly text: string; readonly state: ChannelJournalState }
+	| { readonly kind: "unparsable" };
+
+function readJournalFile(path: string): JournalFile {
+	let text: string | undefined;
+	try {
+		text = readOptionalBoundedTextFileSync(path, MAX_JOURNAL_BYTES, "channel journal");
+	} catch (error) {
+		if (error instanceof BoundedReadError && error.reason === "limit") return { kind: "unparsable" };
+		throw error;
+	}
+	if (text === undefined) return { kind: "absent" };
+	try {
+		return { kind: "parsed", text, state: parseState(text) };
+	} catch {
+		return { kind: "unparsable" };
+	}
 }
 
 /** What a journal update observed besides its own result: the file was unreadable and was replaced. */
@@ -499,57 +536,56 @@ export class ChannelJournal {
 	}
 
 	/**
-	 * Read, change and write the journal under its lock. An unreadable file is moved aside (kept for inspection), a
-	 * fresh journal starts with one `reset` gap, and the update reports it. A throw in `change` writes nothing, and so
-	 * does an update that leaves the file's text as it was: every write wakes the watchers of the directory.
+	 * Read, change and write the journal under its lock. An unparsable file (`readJournalFile`) is moved aside (kept for
+	 * inspection), a fresh journal starts with one `reset` gap, and the update reports it. A throw in `change` writes
+	 * nothing, and so does an update that leaves the file's text as it was: every write wakes the watchers of the directory.
 	 */
 	update<T>(now: number, change: (state: ChannelJournalState) => T): ChannelJournalUpdate<T> {
 		return withFileLockSync(this.path, () => {
-			let state: ChannelJournalState;
-			let reset = false;
-			const text = readOptionalBoundedTextFileSync(this.path, MAX_JOURNAL_BYTES, "channel journal");
-			if (text === undefined) state = emptyState();
-			else {
-				try {
-					state = parseState(text);
-				} catch {
-					renameSync(this.path, `${this.path}.unreadable-${now}`);
-					harnessLog.warn("channels", "a channel journal could not be read; it was moved aside", {
-						channel: this.channel,
-					});
-					state = emptyState();
-					state.gaps.push({
-						id: digest(`${this.path}:reset:${now}`).slice(0, 16),
-						reason: "reset",
-						count: 0,
-						at: now,
-					});
-					reset = true;
-				}
-			}
+			const file = readJournalFile(this.path);
+			const reset = file.kind === "unparsable";
+			const state =
+				file.kind === "parsed" ? file.state : file.kind === "unparsable" ? this.setAside(now) : emptyState();
 			const result = change(state);
 			prune(state, now);
 			const next = `${JSON.stringify(state)}\n`;
-			if (next !== text) writeFileAtomicSync(this.path, next);
-			if (text === undefined)
+			if (file.kind !== "parsed" || next !== file.text) writeFileAtomicSync(this.path, next);
+			if (file.kind === "absent")
 				harnessLog.info("channels", "a channel journal was created", { channel: this.channel });
 			return { result, reset };
 		});
 	}
 
 	/**
+	 * Read the journal, setting an unparsable file aside under its lock as an update does (`reset`: this read replaced
+	 * it), for a reader that decides on what it held whether or not its channel is served (the away spend bound: a
+	 * served channel's next update would set it aside, an unserved one's never). A journal that parses is read as
+	 * `read` reads it, without the lock, and nothing is written.
+	 */
+	readSettingAside(now: number): ChannelJournalUpdate<ChannelJournalState> {
+		const read = this.read();
+		return read.reset ? this.update(now, (state) => state) : read;
+	}
+
+	/** Moves the unparsable file aside, kept for inspection, and starts a fresh journal with one `reset` gap. Under the lock. */
+	private setAside(now: number): ChannelJournalState {
+		renameSync(this.path, `${this.path}.unreadable-${now}`);
+		harnessLog.warn("channels", "a channel journal could not be read; it was moved aside", { channel: this.channel });
+		const state = emptyState();
+		state.gaps.push({ id: digest(`${this.path}:reset:${now}`).slice(0, 16), reason: "reset", count: 0, at: now });
+		return state;
+	}
+
+	/**
 	 * A read that writes nothing and takes no lock: every write replaces the file atomically, so a reader sees one whole
-	 * journal. An unreadable file reads as an empty journal with `reset` set; the next update moves it aside and
-	 * records the gap.
+	 * journal. An unparsable file reads as an empty journal with `reset` set; the next update (or `readSettingAside`)
+	 * moves it aside and records the gap.
 	 */
 	read(): ChannelJournalUpdate<ChannelJournalState> {
-		const text = readOptionalBoundedTextFileSync(this.path, MAX_JOURNAL_BYTES, "channel journal");
-		if (text === undefined) return { result: emptyState(), reset: false };
-		try {
-			return { result: parseState(text), reset: false };
-		} catch {
-			return { result: emptyState(), reset: true };
-		}
+		const file = readJournalFile(this.path);
+		return file.kind === "parsed"
+			? { result: file.state, reset: false }
+			: { result: emptyState(), reset: file.kind === "unparsable" };
 	}
 }
 

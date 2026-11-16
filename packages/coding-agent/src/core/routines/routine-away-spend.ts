@@ -26,9 +26,14 @@ export interface RoutineAwayChargesUnread {
 	readonly cause: string;
 }
 
-/** Charges another record holds on the away spend bound, or why they did not read: spend the bound cannot see is no room. */
+/**
+ * Charges another record holds on the away spend bound, or why they did not read: spend the bound cannot see is no room.
+ * `dayAllowanceUntil`: for each record replaced within the last day because it did not parse (a channel journal's
+ * `reset` gap), when a day after its replacement ends. Which charges it held is unknown, and none outlasts that day: each
+ * charges the bound's whole `maxUsdPerDay` until then (`routineAwaySpendRoom`).
+ */
 export type RoutineAwayChargesRead =
-	| { readonly charges: readonly RoutineAwayCharge[] }
+	| { readonly charges: readonly RoutineAwayCharge[]; readonly dayAllowanceUntil?: readonly number[] }
 	| { readonly unread: RoutineAwayChargesUnread };
 
 /** The away spend bound a claim by an away host is admitted under; the store decides it under its lock. */
@@ -129,7 +134,8 @@ export interface RoutineAwaySpendRoom {
  * The away spend bound's state: whether one more metered run fits (`charged + maxUsdPerRun <= maxUsdPerDay`, exact in
  * micro-dollars) and, when it does not, the earliest instant a charge ends by time (undefined when every charge ends
  * only by a store change: a run finishing or returning to pending, or a channel turn away settling). The gate's
- * `otherCharges` count like runs; while they do not read (`unread`) nothing fits, and no time returns the room.
+ * `otherCharges` count like runs, each of their `dayAllowanceUntil` as a charge of the whole `maxUsdPerDay` until then;
+ * while they do not read (`unread`) nothing fits, and no time returns the room.
  */
 export function routineAwaySpendRoom(
 	occurrences: Iterable<RoutineOccurrence>,
@@ -144,13 +150,14 @@ export function routineAwaySpendRoom(
 		for (const charge of routineCharges) chargedMicros += charge?.micros ?? 0;
 		return { chargedMicros, fits: () => false, unread: other.unread };
 	}
-	for (const charge of [...routineCharges, ...(other?.charges ?? [])]) {
+	const perRun = awaySpendMicros(gate.maxUsdPerRun);
+	const perDay = awaySpendMicros(gate.maxUsdPerDay);
+	const dayAllowances = (other?.dayAllowanceUntil ?? []).map((until) => ({ micros: perDay, until }));
+	for (const charge of [...routineCharges, ...(other?.charges ?? []), ...dayAllowances]) {
 		if (!charge) continue;
 		chargedMicros += charge.micros;
 		if (charge.until !== undefined) exit = Math.min(exit ?? Number.POSITIVE_INFINITY, charge.until);
 	}
-	const perRun = awaySpendMicros(gate.maxUsdPerRun);
-	const perDay = awaySpendMicros(gate.maxUsdPerDay);
 	return {
 		chargedMicros,
 		fits: (extraRuns) => chargedMicros + (extraRuns + 1) * perRun <= perDay,

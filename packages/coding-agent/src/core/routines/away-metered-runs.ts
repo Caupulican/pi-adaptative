@@ -1,7 +1,7 @@
 /**
  * The runs and channel turns away reserved on the away spend bound (`routines.away.maxUsdPerDay`) after their admission. A run whose
  * pinned models are subscription logins is admitted reserving nothing (`routineAwayRunMetered`); while the day bound has
- * no room for it, its attempts are held off metered models (`awayMeteredRunFits`), and when an attempt of it starts on a
+ * no room for it, its attempts are held off metered models (`awayMeteredRunHold`), and when an attempt of it starts on a
  * metered model (it failed over while there was room), the daemon reserves the run's full per-run bound here before that
  * attempt's first request, so its metered spend stays inside the day bound. From then on the run is charged as a metered
  * run is (`routineAwayCharge`): its full per-run bound while it runs or is uncertain, then its settled spend, or the
@@ -150,31 +150,45 @@ export interface AwayMeteredRunInput {
 }
 
 /**
- * Whether the run away of `dispatchKey` may spend metered dollars now: it is charged as a metered run already (admitted
- * metered, or reserved by an earlier attempt), or the away day bound has room for one more run. False for a run the
- * store does not hold.
+ * Why the away day bound holds a run away's metered spend: it has no room for one more run (`full`; a run the store
+ * does not hold has none, as nothing could charge it), or charges on it do not read (`unread`: the gate's
+ * `otherCharges`), so whether it has room is unknown.
  */
-export function awayMeteredRunFits(input: AwayMeteredRunInput): boolean {
-	const { dispatchKey, occurrences, nowMs } = input;
-	const run = occurrences.find((item) => item.executor === "away" && item.dispatchKey === dispatchKey);
-	if (!run) return false;
-	const charging = { ...input.gate, reservedMetered: awayMeteredRunReserved(input.agentDir) };
-	return routineAwayOccurrenceMetered(charging, run) || routineAwaySpendRoom(occurrences, charging, nowMs).fits(0);
-}
+export type AwayMeteredRunHold = "full" | "unread";
 
 /**
- * Reserves the run away of `dispatchKey` on the away spend bound as an attempt of it starts on a metered model: true when
- * its metered spend is reserved (now, or already), false when it does not fit (`awayMeteredRunFits`) or the reservation
- * could not be written (`notWritten` tells why). Keys whose run the bound no longer charges are dropped as it writes.
+ * Why the run away of `dispatchKey` may not spend metered dollars now (`AwayMeteredRunHold`); undefined when it may: it
+ * is charged as a metered run already (admitted metered, or reserved by an earlier attempt), or the away day bound has
+ * room for one more run.
+ */
+export function awayMeteredRunHold(input: AwayMeteredRunInput): AwayMeteredRunHold | undefined {
+	const { dispatchKey, occurrences, nowMs } = input;
+	const run = occurrences.find((item) => item.executor === "away" && item.dispatchKey === dispatchKey);
+	if (!run) return "full";
+	const charging = { ...input.gate, reservedMetered: awayMeteredRunReserved(input.agentDir) };
+	if (routineAwayOccurrenceMetered(charging, run)) return undefined;
+	const room = routineAwaySpendRoom(occurrences, charging, nowMs);
+	return room.fits(0) ? undefined : room.unread ? "unread" : "full";
+}
+
+/** Why a metered attempt's run away was not reserved: the day bound holds it (`AwayMeteredRunHold`), or the write failed. */
+export type AwayMeteredRunRefusal = AwayMeteredRunHold | "unwritten";
+
+/**
+ * Reserves the run away of `dispatchKey` on the away spend bound as an attempt of it starts on a metered model:
+ * undefined when its metered spend is reserved (now, or already), else why not: the bound holds it
+ * (`awayMeteredRunHold`), or the reservation could not be written (`unwritten`, `notWritten` telling why). Keys whose
+ * run the bound no longer charges are dropped as it writes.
  */
 export function reserveAwayMeteredRun(
 	input: AwayMeteredRunInput & { notWritten(path: string, cause: string): void },
-): boolean {
+): AwayMeteredRunRefusal | undefined {
 	const { agentDir, dispatchKey, occurrences } = input;
-	if (!awayMeteredRunFits(input)) return false;
+	const hold = awayMeteredRunHold(input);
+	if (hold) return hold;
 	const run = occurrences.find((item) => item.executor === "away" && item.dispatchKey === dispatchKey);
-	if (run && routineAwayOccurrenceMetered(input.gate, run)) return true;
-	return writeReservations(agentDir, [dispatchKey], input, input.notWritten);
+	if (run && routineAwayOccurrenceMetered(input.gate, run)) return undefined;
+	return writeReservations(agentDir, [dispatchKey], input, input.notWritten) ? undefined : "unwritten";
 }
 
 /**
