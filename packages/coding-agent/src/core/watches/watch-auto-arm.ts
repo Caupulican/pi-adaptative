@@ -15,7 +15,9 @@
  * armed though its triggers did not settle a run tells its timeout to the armer only: the owner was promised no result). A call that
  * began before an owner's stop arms nothing after the stop, and nothing of that call is told to anyone once the stop
  * applied, whether the stop refused an arming ({@link OwnerStopArmingRefusal}) or came while the call's arming was in
- * flight ({@link WatchAutoArmPort.stopEnded}): the stop is the owner's decision, not a subject the armer must act on.
+ * flight ({@link WatchAutoArmPort.stopEnded}): the stop is the owner's decision, not a subject the armer must act on. A
+ * session's note told before the stop and not yet taken by a run is taken back from its queue when the stop is applied,
+ * and one told while a stop of the bot waits to be taken is held until it is ({@link SessionAutoWatchPort.tellNote}).
  * What was armed, what is still looked for and what was not armed (and why: nothing reads it, it was there before the
  * call, the slots are full) is told to the armer in one note per call, its lines split by whether they ask anything of
  * the armer ({@link WatchAutoArmNote}).
@@ -30,6 +32,7 @@ import { createHash } from "node:crypto";
 import { englishText } from "../language/interface-text.ts";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
+import type { SteeredMessage } from "../parent-input-steer.ts";
 import { monotonicNow, OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { NO_CI_SOURCE, NO_READER } from "./github-watch-poller.ts";
 import {
@@ -125,6 +128,17 @@ export interface WatchAutoArmPort {
 	stopEnded(callStartedAt: number): boolean;
 }
 
+/** The session's own watches as the host arms them after the session's calls, its notes told through them. */
+export interface SessionAutoWatchPort extends WatchAutoArmPort {
+	/**
+	 * Tells the session the note on its call begun at `callStartedAt`, queued through `steer`
+	 * (`SessionWatchService.tellArmingNote`): held while an owner's stop of the bot waits to be taken, and taken back from
+	 * the session's queue by a stop applied that ends the call's work, since neither the stop's abort nor the next run clears
+	 * that queue. Resolves once durable, or with nothing once a stop took it back or dropped it.
+	 */
+	tellNote(callStartedAt: number, steer: () => SteeredMessage): Promise<void>;
+}
+
 /**
  * One note the host tells an armer after a call, its model-facing lines in two parts: `informational` only reports what
  * the host armed or still looks for and asks nothing of the armer, since each armed watch's own wake names its id and its
@@ -147,7 +161,8 @@ export interface WatchAutoArmDeps {
 	cwd(): string;
 	/**
 	 * Tells the armer the model-facing note (never an empty one) about the call begun at `callStartedAt` (on
-	 * `OWNER_STOP_CLOCK`); resolves once it is durable.
+	 * `OWNER_STOP_CLOCK`); resolves once it is durable, or once an owner's stop that ended the call's work took it back
+	 * or dropped it before any run read it.
 	 */
 	note(note: WatchAutoArmNote, callStartedAt: number): Promise<void>;
 	/** Arming for the call begun at `callStartedAt`, or its note, failed while the session is not disposed: the owner is told. */
@@ -553,7 +568,9 @@ export class WatchAutoArm {
 
 	/**
 	 * Tells the armer the note on `call`, without holding the arms of later calls: it may land only at a later boundary.
-	 * Nothing is told of a call an owner's stop ended, whichever armer made it.
+	 * Nothing is told of a call an owner's stop ended, whichever armer made it: checked here when the note is told, and
+	 * for a note told before the stop, by its armer's own path (the session's takes it back from its queue when the stop
+	 * is applied, `SessionAutoWatchPort.tellNote`; a worker's is its attempt's to read, failed once that stops reading, `worker-host-tools.ts`).
 	 */
 	private tell(call: StartedCall, note: WatchAutoArmNote): void {
 		if ((note.informational.length === 0 && note.action.length === 0) || this.silenced(call)) return;

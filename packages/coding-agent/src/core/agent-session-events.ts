@@ -33,9 +33,9 @@ import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import type { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import {
+	type SessionAutoWatchPort,
 	WATCH_AUTO_ARM_CUSTOM_TYPE,
 	WatchAutoArm,
-	type WatchAutoArmPort,
 	watchAutoArmNoteText,
 } from "./watches/watch-auto-arm.ts";
 
@@ -72,7 +72,7 @@ export interface AgentSessionEventsPorts {
 	refreshForegroundEnvelope(): void;
 	recordCacheObservation(message: AssistantMessage): void;
 	/** The session's watches as the host arms them after its own calls; undefined where it holds none. */
-	autoWatches(): WatchAutoArmPort | undefined;
+	autoWatches(): SessionAutoWatchPort | undefined;
 }
 
 export class AgentSessionEvents {
@@ -86,14 +86,19 @@ export class AgentSessionEvents {
 		this.autoWatches = new WatchAutoArm({
 			port: () => ports.autoWatches(),
 			cwd: () => ports.cwd(),
-			// The session reads the whole note: it is the one working, whatever the note asks of it.
-			note: (note) =>
-				ports.durableCustomMessageTurns().enqueue({
-					customType: WATCH_AUTO_ARM_CUSTOM_TYPE,
-					content: watchAutoArmNoteText(note),
-					display: false,
-					details: undefined,
-				}),
+			// The session reads the whole note: it is the one working, whatever the note asks of it. Told through its watches,
+			// which hold it while an owner's stop of the bot waits and take it back from the queue when a stop ends its call's
+			// work; with none (they stopped) nothing is told, as the arming tells nothing once they close.
+			note: async (note, callStartedAt) => {
+				const steer = () =>
+					ports.durableCustomMessageTurns().steer({
+						customType: WATCH_AUTO_ARM_CUSTOM_TYPE,
+						content: watchAutoArmNoteText(note),
+						display: false,
+						details: undefined,
+					});
+				await ports.autoWatches()?.tellNote(callStartedAt, steer);
+			},
 			failed: (error) =>
 				this.emit({
 					type: "warning",

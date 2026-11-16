@@ -31,6 +31,7 @@ import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
 import type { GoalBoundWatch } from "../goals/goal-continuation-controller.ts";
 import { englishText, interfaceText } from "../language/interface-text.ts";
+import type { SteeredMessage } from "../parent-input-steer.ts";
 import {
 	MAX_AGENT_ARMED_WATCHES,
 	MAX_AGENT_WATCH_HORIZON_MS,
@@ -71,6 +72,7 @@ import {
 	owesFailedJobRead,
 } from "./github-watch-source.ts";
 import { OwnerStopArmingRefusal } from "./owner-stop-refusal.ts";
+import { SessionArmingNotes } from "./session-arming-notes.ts";
 import {
 	isLiveSessionWatch,
 	parseSessionWatchRecord,
@@ -90,6 +92,8 @@ import { sessionWatchDeliveryId, sessionWatchWakeDetails, sessionWatchWakeText }
 
 /** How long a wake that could not be delivered waits before it is tried again. */
 const WATCH_WAKE_RETRY_DELAY_MS = 5_000;
+/** The delivery the session's own arming notes held behind a stop of the bot are warned under. */
+const ARMING_NOTES_DELIVERY = "watch-auto-arm";
 
 /** Who reads or ends a session's watches: a turn of the session, under its authority, or one of its worker runtimes. */
 export type SessionWatchCaller =
@@ -202,6 +206,8 @@ export interface SessionWatchServiceDeps {
 	warnOwner(message: string): void;
 	/** Tells the owner once per key on the phone (`OwnerPush.tell`); absent where no owner channel is hosted. */
 	tellOwner?(key: string, text: string): void;
+	/** Whether an owner's stop of the bot whose session this is waits to be taken; false outside a bot's session. */
+	stopWaiting(): boolean;
 	isDisposed(): boolean;
 	warn(message: string): void;
 }
@@ -260,6 +266,8 @@ export class SessionWatchService implements WatchObservationStore {
 	private latestStopAt: number | undefined;
 	/** The host's notes owed the session ({@link noteSession}), by delivery id, with when the call each follows began. */
 	private readonly notes = new Map<string, { readonly content: string; readonly callStartedAt: number }>();
+	/** The host's notes on the session's own calls, queued to it or held behind a stop ({@link tellArmingNote}). */
+	private readonly armingNotes: SessionArmingNotes;
 	/**
 	 * The typed watches past their end time waiting for their deadline read, by incarnation: since when (routines clock) and
 	 * whether that read settled. In memory: a reopen reads each again, as the end time passed while nothing read it.
@@ -269,6 +277,7 @@ export class SessionWatchService implements WatchObservationStore {
 
 	constructor(deps: SessionWatchServiceDeps) {
 		this.deps = deps;
+		this.armingNotes = new SessionArmingNotes(() => deps.stopWaiting());
 	}
 
 	/** Ends what reached its end time while the session was closed, delivers what is owed, and follows the end times. */
@@ -289,6 +298,7 @@ export class SessionWatchService implements WatchObservationStore {
 		this.unsubscribeWorkers = undefined;
 		this.clearTimer("expiryTimer");
 		this.clearTimer("retryTimer");
+		this.armingNotes.close();
 		await this.draining;
 		this.deps.ledger.close();
 	}
@@ -326,12 +336,14 @@ export class SessionWatchService implements WatchObservationStore {
 	/**
 	 * The owner's stop made at `stopAt` (a bot's): the watches the session armed by then end and the wakes they are owed
 	 * are settled without a turn, a wake its transcript already carries (`carried`) marked by that input
-	 * ({@link endWatchesArmedByStop}). A failure throws, with the ledger as it was.
+	 * ({@link endWatchesArmedByStop}), and the host's notes on the session's calls begun by then that no run took yet are
+	 * taken back from its queue ({@link SessionArmingNotes.endByStop}). A failure throws, with the ledger as it was.
 	 */
 	endArmedByStop(stopAt: number, carried: (deliveryId: string) => boolean): { ended: number; settled: number } {
 		// Recorded before the ledger is touched: the owner stopped at `stopAt` whether or not the write succeeds, and a call
 		// begun by then arms nothing after it either way.
 		this.latestStopAt = Math.max(this.latestStopAt ?? stopAt, stopAt);
+		this.armingNotes.endByStop(stopAt);
 		const outcome = this.deps.ledger.endArmedByStop(stopAt, carried);
 		this.followEndTimes();
 		return outcome;
@@ -348,6 +360,19 @@ export class SessionWatchService implements WatchObservationStore {
 		if (!this.active) return;
 		this.notes.set(deliveryId, { content, callStartedAt });
 		this.drain();
+	}
+
+	/**
+	 * Tells the session the host's note on its own call begun at `callStartedAt` (`watch-auto-arm.ts`) through `steer`
+	 * ({@link SessionArmingNotes}): held while an owner's stop of the bot waits, as a wake is, tried again with the wakes,
+	 * and taken back from the session's queue by a stop applied here that ends the call's work; nothing is told of a call
+	 * such a stop already ended. Resolves once the note is durable, or with nothing once a stop took it back or dropped it.
+	 */
+	tellArmingNote(callStartedAt: number, steer: () => SteeredMessage): Promise<void> {
+		if (this.stopEnded(callStartedAt)) return Promise.resolve();
+		const told = this.armingNotes.tell(callStartedAt, steer);
+		if (this.armingNotes.holding) this.drain();
+		return told;
 	}
 
 	/** Whether an owner's stop applied here ended the work of a call begun at `callStartedAt` (on `OWNER_STOP_CLOCK`). */
@@ -1062,6 +1087,12 @@ export class SessionWatchService implements WatchObservationStore {
 				retry = true;
 				this.deliveryFault(deliveryId, error, faults);
 			}
+		}
+		try {
+			if (this.active && this.armingNotes.release((callStartedAt) => this.stopEnded(callStartedAt))) retry = true;
+		} catch (error) {
+			retry = true;
+			this.deliveryFault(ARMING_NOTES_DELIVERY, error, faults);
 		}
 		this.deliveryFaults = faults;
 		if (retry) this.retryLater();

@@ -43,7 +43,7 @@ import {
 	sessionWatchLedgerPath,
 } from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
-import type { AutoArmContext, WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
+import type { AutoArmContext, SessionAutoWatchPort, WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
 import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
@@ -118,7 +118,7 @@ export interface RoutineRuntime {
 	/** The session's own watches as its `watch` tool (and a bot's own `task_watch`) reach them. */
 	readonly watchPort: SessionWatchPort;
 	/** The session's watches as the host arms them after its own calls: an `auto` armer that tells the owner each result. */
-	readonly autoWatches: WatchAutoArmPort;
+	readonly autoWatches: SessionAutoWatchPort;
 	/** The session's watches as its goal's continuation reads them, with System One's saved judgments of outside waits. */
 	readonly goalWatches: GoalWatchFacts;
 	stop(): Promise<void>;
@@ -463,6 +463,8 @@ export class RoutineRuntimeAssembly {
 		const manager = this.deps.getSessionManager();
 		const timers = this.deps.getTimers().port("routines");
 		const warn = (message: string) => this.host.warn(message);
+		const bot = this.deps.botAgentId;
+		const stopWaiting = () => bot !== undefined && botInboxStopWaiting(this.deps.getAgentDir(), bot);
 		const ledger = new SessionWatchLedger({
 			sessionId,
 			path: () => {
@@ -490,12 +492,11 @@ export class RoutineRuntimeAssembly {
 			subscribeWorkers: (listener) => this.host.subscribeOrchestrationStore(listener),
 			deliverToSession: async (deliveryId, content, details, owed) => {
 				// Appended only while the wake is still owed and no owner's stop of the bot waits, as a routine result is.
-				const bot = this.deps.botAgentId;
 				const receipt = await deliverWhileOwed(
 					this.sessionWake(deliveryId, content, details),
 					(next, options) => this.deps.deliverParentInput(next, options),
 					owed,
-					() => bot !== undefined && botInboxStopWaiting(this.deps.getAgentDir(), bot),
+					stopWaiting,
 				);
 				return receipt === "settled" ? "settled" : "delivered";
 			},
@@ -503,6 +504,7 @@ export class RoutineRuntimeAssembly {
 			armingEntry: () => this.armingEntry(),
 			warnOwner: warn,
 			tellOwner: (key, text) => this.host.tellOwner(key, text),
+			stopWaiting,
 			isDisposed: () => this.deps.isDisposed(),
 			warn,
 		});
@@ -828,10 +830,13 @@ export class RoutineRuntimeAssembly {
 			},
 			now: () => routineTimers.now(),
 		};
-		const autoWatches = this.autoWatchPort(sessionWatches, routineTimers, closing.signal, () => {
-			const served = this.armingEntry();
-			return { armer: { kind: "auto", authority: authority() }, ...(served === undefined ? {} : { served }) };
-		});
+		const autoWatches: SessionAutoWatchPort = {
+			...this.autoWatchPort(sessionWatches, routineTimers, closing.signal, () => {
+				const served = this.armingEntry();
+				return { armer: { kind: "auto", authority: authority() }, ...(served === undefined ? {} : { served }) };
+			}),
+			tellNote: (callStartedAt, steer) => sessionWatches.tellArmingNote(callStartedAt, steer),
+		};
 		return {
 			scheduler,
 			session,

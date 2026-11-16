@@ -120,8 +120,11 @@ export class DurableCustomMessageTurnController {
 		await this.steer(message).accepted;
 	}
 
-	/** Queue a message for the running turn's next model step; it can be taken back until a run consumes it. */
-	private steer<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): SteeredMessage {
+	/**
+	 * Queue a message for the running turn's next model step (an idle session's next run reads it first); the handle takes it
+	 * back until a run consumes it, and its acceptance settles after durable append.
+	 */
+	steer<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): SteeredMessage {
 		const { appMessage, acceptedPromise } = this.prepare(message);
 		const agent = this.deps.steering();
 		try {

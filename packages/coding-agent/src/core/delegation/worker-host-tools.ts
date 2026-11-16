@@ -124,8 +124,14 @@ function followOwnCalls(
 	let notes = 0;
 	const queued: QueuedNote[] = [];
 	// Keyed by the attempt, whose count starts again at one: the same words told in a later attempt are a message of their own.
+	// The worker's and the attempt's ids (a worker's up to 512 characters) are digested, so the key stays inside the 256 a
+	// session's parent input id holds when a note goes to the session; the same note keeps its key on every retry.
+	const attempt = createHash("sha256")
+		.update(JSON.stringify([options.agentId, options.durableHandle.attemptId]))
+		.digest("hex")
+		.slice(0, 32);
 	const key = (text: string) =>
-		`watch-auto-arm:${options.agentId}:${options.durableHandle.attemptId}:${++notes}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+		`watch-auto-arm:${attempt}:${++notes}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
 	const toSession = (action: readonly string[], callStartedAt: number) => {
 		if (action.length === 0) return;
 		const text = action.join("\n");
