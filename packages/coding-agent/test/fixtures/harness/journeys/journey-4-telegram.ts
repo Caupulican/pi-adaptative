@@ -1328,7 +1328,8 @@ interface QuotaLegJournal {
  * `ownerQuotaMaxUsedPercent` a turn that spends $0.06 is not stopped, its answer reaches the chat, it charges the pool
  * nothing (`quota` batch) and `status` says the dollar bounds do not apply and why. A phone turn that the harness settings
  * file write would have refused as typed-only runs under `ownerAuthority: "full"` (the same call is refused in the owner leg).
- * Once the usage is exhausted, the same $0.06 turn is stopped before its tool call and the chat is told which bound did it.
+ * Once the usage is exhausted while a turn runs, the turn is stopped at its response, before its tool call, whatever it spent,
+ * and the chat is told which bound did it.
  */
 export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -1470,27 +1471,31 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 		).toBe("{}\n");
 		trace.mark("root", "telegram-quota.full");
 
-		// Exhausted usage: the same $0.06 turn is stopped before its tool call, naming the subscription.
-		allowance = { kind: "exhausted", usedPercent: 96, reason: "a usage window is at 96%" };
-		for (const listener of [...allowanceListeners]) listener(session.model?.provider ?? "");
+		// Usage exhausted while the turn runs (a turn does not start on exhausted usage: its words wait for the reset): the
+		// $0.06 turn is stopped at its response, before its tool call, naming the subscription.
 		const exhaustedWords = "list what my notes hold";
 		const exhaustedReached = createBarrier();
-		world.provider.enqueue(
-			"root",
-			costly(
-				"tg-quota-exhausted",
-				[
-					{
-						type: "toolCall",
-						id: "tg-quota-memory",
-						name: "memory",
-						arguments: { action: "list", target: "user" },
-					},
-				],
-				exhaustedWords,
-				exhaustedReached,
-			),
+		const exhaustedStep = costly(
+			"tg-quota-exhausted",
+			[
+				{
+					type: "toolCall",
+					id: "tg-quota-memory",
+					name: "memory",
+					arguments: { action: "list", target: "user" },
+				},
+			],
+			exhaustedWords,
+			exhaustedReached,
 		);
+		world.provider.enqueue("root", {
+			...exhaustedStep,
+			check: (request) => {
+				allowance = { kind: "exhausted", usedPercent: 96, reason: "a usage window is at 96%" };
+				for (const listener of [...allowanceListeners]) listener(session.model?.provider ?? "");
+				exhaustedStep.check?.(request);
+			},
+		});
 		api.deliver(ownerLegUpdate(4, OWNER_ID, exhaustedWords));
 		await withDeadline(trace, "the costly turn's provider request", exhaustedReached.promise);
 		await withDeadline(trace, "the subscription bound's push reaches the chat", api.untilSent(4));

@@ -82,6 +82,7 @@ import {
 	ownerAuthority,
 	ownerDollarsApply,
 	ownerLiveCheck,
+	ownerQuotaWait,
 	ownerRoom,
 	ownerSenderDigest,
 	policyFingerprint,
@@ -110,6 +111,7 @@ import {
 	channelAwayNotice,
 	channelStateNotice,
 	nameableSenderId,
+	ownerHeldPush,
 	quotaStatusLine,
 	senderNotice,
 } from "./owner-notice-text.ts";
@@ -462,7 +464,10 @@ export class SessionChannels {
 		if (!this.ownerPolicy(name)) return "owner authority is off for this channel in this session";
 		if (this.emergencyStopEngaged()) return "the emergency stop is engaged";
 		if (policy.ownerMaxUsdPerDay === 0) return `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`;
-		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy)));
+		const quota = this.ownerQuota(policy);
+		const wait = ownerQuotaWait(name, policy, quota);
+		if (wait) return `${wait}, so owner messages wait for its reset`;
+		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(quota));
 		return room.fits
 			? undefined
 			: `$${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours`;
@@ -1145,8 +1150,9 @@ export class SessionChannels {
 				if (runtime.state !== "capped") continue;
 				for (const batch of state.batches) if (batch.owner !== true) consider(batch.acceptedAt + DAY_MS);
 				const policy = this.policy(name);
-				if (policy && this.ownerPolicy(name))
-					consider(ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy))).oldestUntil);
+				const quota = policy && this.ownerPolicy(name) ? this.ownerQuota(policy) : undefined;
+				if (policy && quota) consider(ownerRoom(name, state, policy, now, !ownerDollarsApply(quota)).oldestUntil);
+				if (quota?.kind === "exhausted") consider(quota.retryAt);
 			} catch (error) {
 				harnessLog.warn("channels", "a channel journal could not be read for its expiry wake", {
 					channel: name,
@@ -1468,13 +1474,9 @@ export class SessionChannels {
 			(entry) => entry.owner === true && entry.kind === "message" && entry.offeredTo === undefined,
 		);
 		if (!this.ownerPolicy(name) || !held) return;
-		const room = ownerRoom(name, state, policy, now, !ownerDollarsApply(this.ownerQuota(policy)));
-		if (room.fits) return;
-		const text =
-			policy.ownerMaxUsdPerDay === 0
-				? `Owner turns are off: channels.${name}.ownerMaxUsdPerDay is 0. Your messages wait up to 24 hours; approve needs a turn, deny, status and stop still answer.`
-				: `Owner turns paused: $${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours; the oldest charge leaves the window at ${room.oldestUntil !== undefined ? new Date(room.oldestUntil).toISOString() : "its 24 hours' end"}. Your messages wait up to 24 hours; deny, status and stop still answer.`;
-		void this.ownerPush.push(name, `bound:${room.oldestUntil ?? "off"}`, text);
+		const quota = this.ownerQuota(policy);
+		const push = ownerHeldPush(name, policy, ownerRoom(name, state, policy, now, !ownerDollarsApply(quota)), quota);
+		if (push) void this.ownerPush.push(name, push.key, push.text);
 	}
 
 	/** Free the offer marks of a batch this session did not deliver. */
@@ -1509,7 +1511,6 @@ export class SessionChannels {
 			acceptedAt: now,
 			state: "accepted",
 			...(this.deps.away ? { away: true as const } : {}),
-			...(awayHostUnmetered(this.deps.away) ? { quota: true as const } : {}),
 		};
 	}
 
@@ -1559,11 +1560,10 @@ export class SessionChannels {
 				return;
 			}
 			const now = this.now();
-			this.recordAccepted(
-				name,
-				this.acceptedBatch(batchId, sessionId, latest, delivered, composed.verified, now),
-				now,
-			);
+			// A third party's turn the daemon serves on a subscription reserves none of the away bound (an owner turn's
+			// `quota` is its own pool's reading).
+			const base = this.acceptedBatch(batchId, sessionId, latest, delivered, composed.verified, now);
+			this.recordAccepted(name, awayHostUnmetered(this.deps.away) ? { ...base, quota: true } : base, now);
 		};
 		void this.deps
 			.sendUserMessage(composed.text, {
@@ -1750,14 +1750,14 @@ export class SessionChannels {
 				`stopped:${ref}`,
 				`Stopped: this turn reached its bound (channels.${run.name}.ownerMaxUsdPerTurn, $${policy.ownerMaxUsdPerTurn.toFixed(2)}).`,
 			);
-		if (why === "quota" && policy) {
-			const quota = this.ownerQuota(policy);
+		const quotaWait =
+			why === "quota" && policy ? ownerQuotaWait(run.name, policy, this.ownerQuota(policy)) : undefined;
+		if (why === "quota")
 			void this.ownerPush.push(
 				run.name,
 				`stopped:${ref}`,
-				`Stopped: the subscription's usage reached its bound (${quota.kind === "exhausted" ? quota.reason : "its usage is no longer readable"}; channels.${run.name}.ownerQuotaMaxUsedPercent ${policy.ownerQuotaMaxUsedPercent}%).`,
+				`Stopped: ${quotaWait ?? "the subscription's usage reached its bound"}.`,
 			);
-		}
 		if (why === "authority" && this.emergencyStopEngaged())
 			void this.ownerPush.push(run.name, `stopped:${ref}`, "Stopped: the emergency stop is engaged.");
 		this.scheduleWork();

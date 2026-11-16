@@ -231,10 +231,9 @@ export function readOwnerQuota(
 	delivery: Pick<OwnerChannelDelivery, "quotaAllowance"> | undefined,
 	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
 ): OwnerQuotaAllowance {
-	const line = policy.ownerQuotaMaxUsedPercent > 0 ? policy.ownerQuotaMaxUsedPercent : 100;
 	try {
 		return (
-			delivery?.quotaAllowance?.(line) ?? {
+			delivery?.quotaAllowance?.(ownerQuotaLine(policy)) ?? {
 				kind: "unknown",
 				reason: "this session reads no subscription usage",
 				subscription: false,
@@ -252,4 +251,24 @@ export function readOwnerQuota(
  */
 export function ownerDollarsApply(quota: OwnerQuotaAllowance): boolean {
 	return quota.kind === "unknown" && !quota.subscription;
+}
+
+/** The usage line of a subscription login's owner turns, in percent: `ownerQuotaMaxUsedPercent`, or the provider's own limit (100) when it is 0. */
+export function ownerQuotaLine(policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">): number {
+	return policy.ownerQuotaMaxUsedPercent > 0 ? policy.ownerQuotaMaxUsedPercent : 100;
+}
+
+/**
+ * Why a subscription login's owner turns are held now, or undefined: its usage windows are exhausted at the owner's line.
+ * No new turn starts and a running one stops; the owner's messages wait, and the pass at the reset the account reports
+ * (`retryAt`) or the next event delivers them.
+ */
+export function ownerQuotaWait(
+	name: string,
+	policy: Pick<ResolvedChannelPolicy, "ownerQuotaMaxUsedPercent">,
+	quota: OwnerQuotaAllowance,
+): string | undefined {
+	if (quota.kind !== "exhausted") return undefined;
+	const reset = quota.retryAt !== undefined ? `; it resets at ${new Date(quota.retryAt).toISOString()}` : "";
+	return `the subscription's usage reached its bound (${quota.reason}; channels.${name}.ownerQuotaMaxUsedPercent ${ownerQuotaLine(policy)}%)${reset}`;
 }

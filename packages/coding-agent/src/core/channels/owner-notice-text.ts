@@ -11,6 +11,7 @@ import type { InterfaceText } from "../language/interface-text.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
 import { type ChannelAwayUntold, heldCount } from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
+import { type OwnerRoom, ownerQuotaLine, ownerQuotaWait } from "./owner-channel.ts";
 import type { OwnerQuotaAllowance } from "./owner-channel-types.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
@@ -34,6 +35,28 @@ const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
  * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
  * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
  */
+/**
+ * What the owner's chat is told while owner messages wait: at the subscription's exhausted usage (once per reset), at the
+ * owner pool's off switch or at its day bound (once per oldest charge); none while a turn may start.
+ */
+export function ownerHeldPush(
+	name: string,
+	policy: ResolvedChannelPolicy,
+	room: OwnerRoom,
+	quota: OwnerQuotaAllowance,
+): { readonly key: string; readonly text: string } | undefined {
+	const tail = "Your messages wait up to 24 hours; deny, status and stop still answer.";
+	const wait = policy.ownerMaxUsdPerDay > 0 ? ownerQuotaWait(name, policy, quota) : undefined;
+	if (wait && quota.kind === "exhausted")
+		return { key: `quota:${quota.retryAt ?? "open"}`, text: `Owner turns paused: ${wait}. ${tail}` };
+	if (room.fits) return undefined;
+	const text =
+		policy.ownerMaxUsdPerDay === 0
+			? `Owner turns are off: channels.${name}.ownerMaxUsdPerDay is 0. Your messages wait up to 24 hours; approve needs a turn, deny, status and stop still answer.`
+			: `Owner turns paused: $${room.usedUsd.toFixed(2)} of channels.${name}.ownerMaxUsdPerDay ($${policy.ownerMaxUsdPerDay.toFixed(2)}) is held in the last 24 hours; the oldest charge leaves the window at ${room.oldestUntil !== undefined ? new Date(room.oldestUntil).toISOString() : "its 24 hours' end"}. ${tail}`;
+	return { key: `bound:${room.oldestUntil ?? "off"}`, text };
+}
+
 /** The status line for the subscription allowance (none when the model is no subscription login, whose metered spend the dollar bounds hold): what holds its turns now, and why. */
 export function quotaStatusLine(
 	name: string,
@@ -42,9 +65,9 @@ export function quotaStatusLine(
 ): string | undefined {
 	const key = `channels.${name}.ownerQuotaMaxUsedPercent`;
 	if (quota.kind === "room")
-		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${policy.ownerQuotaMaxUsedPercent}% (${key}); the dollar bounds do not apply.`;
+		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${ownerQuotaLine(policy)}% (${key}); the dollar bounds do not apply.`;
 	if (quota.kind === "exhausted")
-		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); an owner turn stops until its usage resets.`;
+		return `Subscription usage: ${quota.reason} (${key} ${ownerQuotaLine(policy)}%); owner turns wait for its reset.`;
 	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds do not apply.` : undefined;
 }
 

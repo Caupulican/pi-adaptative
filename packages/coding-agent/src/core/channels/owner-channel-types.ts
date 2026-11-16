@@ -68,7 +68,8 @@ export interface OwnerChannelDelivery {
 /** What the subscription's own usage limits allow now (`SubscriptionAllowance`): decided in code from the account's reported windows. */
 export type OwnerQuotaAllowance =
 	| { readonly kind: "room"; readonly usedPercent: number }
-	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string }
+	/** `retryAt`: when every exhausted window resets, if the account reports all of them. */
+	| { readonly kind: "exhausted"; readonly usedPercent: number; readonly reason: string; readonly retryAt?: number }
 	/** `subscription`: the model is a subscription login (so the status says why no reading decides); false when none applies. */
 	| { readonly kind: "unknown"; readonly reason: string; readonly subscription: boolean };
 
