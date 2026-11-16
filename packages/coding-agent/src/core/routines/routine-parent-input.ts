@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
-import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import {
+	MAX_TURN_ORIGIN_SHOWN_CHARS,
+	parseTurnOriginRecord,
+	type TurnOriginRecord,
+} from "../../kernel/turn-origin-stamp.ts";
 import { isCiAttemptEvent } from "../events/host-event-contract.ts";
 import { HOST_EVENT_KINDS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -64,6 +68,28 @@ export function routineTurnOrigin(
 	)
 		return undefined;
 	return { v: 1, k: "host-event", thirdParty: true };
+}
+
+/** The channel a routine's prompt to a bot's own session is recorded as having come by. */
+export const ROUTINE_BOT_CHANNEL = "routine";
+
+/**
+ * The origin a routine's prompt carries into a bot's own session: the routine's (the owner's automation, never the owner's
+ * words), or a third party's host event when its occurrence carried a third party's words (`routineTurnOrigin`). Its
+ * reference is its occurrence's, so an occurrence delivered again runs one turn of the bot's.
+ */
+export function routineBotMessageOrigin(
+	occurrence: Pick<RoutineOccurrence, "occurrenceId" | "trigger" | "progressUntrusted">,
+	prompt: string,
+): TurnOriginRecord {
+	const record = parseTurnOriginRecord({
+		...(routineTurnOrigin(occurrence) ?? { v: 1, k: "routine" }),
+		channel: ROUTINE_BOT_CHANNEL,
+		ref: `routine:${createHash("sha256").update(occurrence.occurrenceId).digest("hex").slice(0, 32)}`,
+		...(prompt.trim().length > 0 ? { shown: prompt.slice(0, MAX_TURN_ORIGIN_SHOWN_CHARS) } : {}),
+	});
+	if (!record) throw new TypeError("A routine's turn origin is invalid.");
+	return record;
 }
 
 /** What the parent reads about the event trigger, outside the worker's evidence: the host's own facts. */

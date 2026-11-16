@@ -77,8 +77,8 @@ const QUITTER_SOUL = "You answer owner questions about the batch size with one s
 /**
  * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its own session (no worker stands
  * for it); a send while that session's turn is held is taken by the same session at its next request boundary, in order,
- * and both messages and the answer are in the bot's own session files. A group send fans out to every member, a
- * mention narrows it to one, and a mention of a bot outside the group is refused before anything is delivered. None of it
+ * and both messages and the answer are in the bot's own session files. A group send fans out to every member, each taking
+ * it in its own session (no worker stands for a member), a mention narrows it to one, and a mention of a bot outside the group is refused before anything is delivered. None of it
  * starts a root turn: the owner talks to the bots, not through the orchestrator. A message to a bot another host holds
  * waits in the bot's inbox, naming that host's session and process, and builds nothing here; once that host gives the bot
  * back, this host takes the message and the bot answers it here, once. A stop of a bot another host holds that the bot's
@@ -181,7 +181,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	// The bot's own session runs System One as the root does. Its first message starts a turn that calls no tool, so its
 	// words are never judged; the second, written while that turn runs, is a steer judged in full when it is queued: the
 	// owner-policy questions alone, since every edge class is granted, no rule is written and no optional tool is offered.
-	// No group member is a session, and no answer names a claim kind, so nothing else is asked. The held bot's second
+	// Each group member answers in a session of its own: a group's message starts a turn there that calls no tool, so it is
+	// never judged either, and no answer names a claim kind, so nothing else is asked. The held bot's second
 	// message (`leftoverInInbox`) is routed after its first turn, which called no tool and left its words queued: the
 	// backlog screen reads them before that turn is routed (`carries_0`), and a question asking how large the cache is
 	// asks to understand something and instructs nothing, so it is set aside and not classified in full.
@@ -190,7 +191,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			...BOT_SESSION_JUDGMENTS,
 			carries_0: { kind: "noul", probability: 0.97 },
 		});
-
 	// One bot, two owner messages: the second is written while the first turn is held at its request.
 	const first = await session.sendOperatorMessageToBot(READER, DIRECT_ONE);
 	await withDeadline(trace, "J7 leg 2: the bot's first turn reached its request", firstTurnReached.promise);
@@ -254,8 +254,10 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			storedText: storedGroup?.text,
 			firstInLog: { sent: logAfterGroup[0]?.sender.kind, text: logAfterGroup[0]?.text },
 			requestsEach: [seen.teamOneBodies.length, seen.teamTwoCount],
+			// Each member takes the group's message in its own session: no worker stands for either.
+			workers: [agentsOn(session, MODEL_ID.teamOne).length, agentsOn(session, MODEL_ID.teamTwo).length],
 		},
-		"a group message with no mention is delivered to both members, one request each, and stored for both before their answers",
+		"a group message with no mention is delivered to both members, one request each in their own sessions, and stored for both before their answers",
 	).toEqual({
 		targets: [TEAM_ONE, TEAM_TWO],
 		deliveries: [
@@ -270,6 +272,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		storedText: TEAM_MESSAGE,
 		firstInLog: { sent: "operator", text: TEAM_MESSAGE },
 		requestsEach: [1, 1],
+		workers: [0, 0],
 	});
 
 	// A mention narrows the group to one member and reaches it without the address.

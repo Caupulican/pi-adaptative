@@ -8,6 +8,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { botInboxStopWaiting } from "../bots/bot-inbox.ts";
@@ -45,6 +46,7 @@ import {
 	ROUTINE_COMPLETION_TYPE,
 	ROUTINE_RESULT_WAKES_HOLD,
 	type RoutineDeliveryReceipt,
+	routineBotMessageOrigin,
 	routineParentInput,
 	routineResultInputIds,
 	routineResultIsQuiet,
@@ -119,7 +121,11 @@ export interface RoutineAssemblyHost {
 		message: string,
 		options: BotOperatorMessageOptions,
 	): Promise<BotOperatorMessageDispatchResult>;
-	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
+	sendOperatorMessageToTeam(
+		teamId: string,
+		message: string,
+		routine: TurnOriginRecord,
+	): Promise<TeamOperatorMessageDispatchResult>;
 	resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined;
 	warn(message: string): void;
 }
@@ -142,15 +148,17 @@ export class RoutineRuntimeAssembly {
 	private async dispatchRoutineMessage(occurrence: RoutineOccurrence): Promise<RoutineMessageResult> {
 		const { target, routineId } = occurrence;
 		const prompt = occurrence.definition.prompt;
+		// A bot that answers in a session of its own takes the prompt there as its turn, under the routine's origin.
+		const origin = routineBotMessageOrigin(occurrence, prompt);
 		if (target.kind === "bot") {
 			const notice = (state: HarnessNotice | "clear") =>
 				this.deps.observeHarnessNotice?.("routine-bot-unreachable", () => ({ scope: routineId, state }));
 			try {
-				const result = await this.host.sendOperatorMessageToBot(target.agentId, prompt, { fromRoutine: true });
+				const result = await this.host.sendOperatorMessageToBot(target.agentId, prompt, { fromRoutine: origin });
 				notice("clear");
 				return {
 					outcome: "succeeded",
-					summary: `Prompt accepted by bot ${target.agentId} (${result.mode}); worker completion is tracked separately.`,
+					summary: `Prompt accepted by bot ${target.agentId} (${result.mode}); the bot's answer is not part of this run.`,
 					facts: { reasonCode: "delivered" },
 				};
 			} catch (error) {
@@ -174,7 +182,7 @@ export class RoutineRuntimeAssembly {
 			}
 		}
 		if (target.kind === "team") {
-			const { deliveries } = await this.host.sendOperatorMessageToTeam(target.teamId, prompt);
+			const { deliveries } = await this.host.sendOperatorMessageToTeam(target.teamId, prompt, origin);
 			const failed = deliveries.filter((delivery) => delivery.outcome === "failed");
 			const why = failed.map((delivery) => `${delivery.agentId}: ${delivery.detail ?? "not delivered"}`).join("; ");
 			if (failed.length === deliveries.length)
@@ -186,7 +194,7 @@ export class RoutineRuntimeAssembly {
 			const accepted = deliveries.length - failed.length;
 			return {
 				outcome: "succeeded",
-				summary: `Prompt accepted for ${accepted} of ${deliveries.length} team deliveries${failed.length > 0 ? ` (not delivered: ${why})` : ""}; worker completion is tracked separately.`,
+				summary: `Prompt accepted for ${accepted} of ${deliveries.length} team deliveries${failed.length > 0 ? ` (not delivered: ${why})` : ""}; the members' answers are not part of this run.`,
 				facts: { reasonCode: "delivered" },
 			};
 		}

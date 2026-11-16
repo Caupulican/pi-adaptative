@@ -242,9 +242,13 @@ worker-path start of a bot adds its own run as it is bound. A process of an olde
 does not add the runs it starts (it has no index to write), so those runs are missing from the chat. The chat shows those earlier conversations in time order with the bot's own session. A chat reads them from disk again only when the index or
 a run transcript it shows changed; otherwise it keeps what it drew.
 
-Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
-conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and machines joined over the
-link. A bot made from a worker profile runs as a session of its own too, on the contract its profile compiles to at every
+A group's message and a routine's prompt to a bot that answers in a session of its own are a turn of that session too,
+under an origin of their own, never as your words: a group's message is stamped as the group's mail (the bot reads that
+it was posted in the group's room, and its answer is appended to the group's log), and a routine's prompt as the
+routine's (a third party's when the routine's trigger carried a third party's words). A routine run ends when the bot's
+session took the prompt; the bot's answer is not part of the run. These still run as workers of the session that sends
+them: the orchestrator's `bot ask`, leaders, the bots a leader made and machines joined over the link (a group's message
+or a routine's prompt to such a bot as well). A bot made from a worker profile runs as a session of its own too, on the contract its profile compiles to at every
 run, by the resolution a fresh worker of it takes (the owner's pin for its role, the bot's model stance, read-only grant
 and soul, the model rules and the execution plan), without a worker run's admission gates (whether the session delegates
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
@@ -258,7 +262,8 @@ tool a session does not hold, or sets a token, wall-clock, attempt or tool-call 
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it
 for the message and for the bot's host alike: a bot whose record leaves the session path (it becomes a leader, a leader's,
 or its profile now needs a worker) has its idle session closed and its watches dropped, and no session of it is opened
-again, so it never answers in two conversations at once. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
+again, so it never answers in two conversations at once. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`); it holds
+`bot_mail` to write to the other bots (see [Bots mail each other](#bots-mail-each-other)). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 
@@ -506,6 +511,28 @@ or advisor authority. A worker of a bot's own session lists no bot or group and 
 Default native worker grants include this broker. An explicit profile or tool list must include
 `bot_message` and `workflow.message`; an already admitted worker does not gain tools retroactively.
 Workers send findings and questions to their parent; the independent advisor serves the root only.
+
+### Bots mail each other
+
+A bot that answers in a session of its own holds `bot_mail`:
+
+- `list` names the bots it may mail: every other bot that answers in a session of its own, not retired and not hosted
+  on another machine.
+- `send` (`to`, `message`) delivers the words to that bot's own session and returns at once. A mail never makes a bot
+  and never brings a retired one back; a mail to the bot itself, to an id no bot has, to a retired bot, to a machine
+  joined over the link or to a bot that runs only as a worker is refused in plain words to the sending bot, as is a mail
+  to a bot whose inbox is full.
+
+The mail is a turn of the receiving bot's own session, never a worker. Its turn is stamped as an agent's mail (`agent-mail`,
+with the sender and its place in the chain): it is never your words, carries no evidence of what you asked, starts no
+goal and grants no authority; what the receiving bot may do is what its own session may do. A mail a third party's words
+reached carries that taint on. The receiver reads who wrote it and answers in plain words: when its turn ends, its last
+words after the mail go back to the sender once, as a reply that is a turn of the sender's own session. A reply is not
+answered again, and a reply sent twice (the receiver's turn ran again after its session reopened) is taken once. A chain
+of mails holds at most 8; a send past that is refused and the bot is told to stop the exchange and report. A mail to a
+bot whose session is not open, or that another process hosts, waits in its inbox as a `.mail.json` record, which a build
+before this one never lists. A bot's chat shows a mail as `alice wrote` (`alice escreveu`), and a group's message as
+yours in that group.
 
 ## History and lifecycle
 

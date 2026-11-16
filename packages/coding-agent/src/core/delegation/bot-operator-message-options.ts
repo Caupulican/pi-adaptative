@@ -7,8 +7,11 @@ export interface BotOperatorMessageOptions {
 	mode?: "follow_up" | "queue" | "start";
 	/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
 	fromRoot?: boolean;
-	/** A scheduled routine sent it: it runs as a worker until routines target a bot's own session. */
-	fromRoutine?: boolean;
+	/**
+	 * A scheduled routine sent it, under this origin (`routineBotMessageOrigin`): a bot that answers in a session of its own
+	 * takes the prompt there as its turn (as a mail from the group, for a group's routine), any other bot as a worker.
+	 */
+	fromRoutine?: TurnOriginRecord;
 	/**
 	 * The owner sent it from the orchestrator's own conversation: a joined machine's answer comes into that
 	 * conversation, since nobody has the machine's chat open to see it arrive.

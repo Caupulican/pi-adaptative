@@ -378,7 +378,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscribeOrchestrationStore: (listener) => this.subscribeOrchestrationStore(listener),
 			sendOperatorMessageToBot: (agentId, message, options) =>
 				this.sendOperatorMessageToBot(agentId, message, options),
-			sendOperatorMessageToTeam: (teamId, message) => this.sendOperatorMessageToTeam(teamId, message),
+			sendOperatorMessageToTeam: (...send) => this._botDispatch.sendOperatorMessageToTeam(...send),
 			resolveLaneModel: (configuredPattern) => this.resolveLaneModel(configuredPattern),
 			warn: (message) => this._safeWarn(message),
 		});
