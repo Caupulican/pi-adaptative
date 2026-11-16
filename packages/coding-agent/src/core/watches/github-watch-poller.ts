@@ -268,15 +268,15 @@ export class GithubWatchPoller {
 		return watches.filter((watch) => !ready.includes(watch));
 	}
 
-	/** A `ci` watch's commit read straight from GitHub, as its deadline read. */
+	/** A `ci` watch's commit read straight from GitHub, as its deadline read, the completed attempt it carries timed again. */
 	private async readCiAtDeadline(watch: LiveGithubWatch, sha: string): Promise<void> {
 		const reader = this.deps.link.current;
 		const reading = reader
-			? await reader.observeCi(sha, this.abort.signal)
+			? await reader.observeCi(sha, watch.carried, this.abort.signal)
 			: ({ ok: false, reason: NO_READER } as const);
 		if (!this.active) return;
 		if (!reading.ok) this.failed(watch, reading.reason);
-		else this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading.result, reading.doneAgoMs);
+		else this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading);
 	}
 
 	/**
@@ -365,7 +365,7 @@ export class GithubWatchPoller {
 						return;
 					}
 					this.streaks.delete(watch.incarnationId);
-					this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading.result, reading.doneAgoMs);
+					this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, reading);
 				});
 			} catch (error) {
 				if (!this.active) return;

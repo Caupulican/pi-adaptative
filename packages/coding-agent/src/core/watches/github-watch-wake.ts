@@ -2,7 +2,8 @@
  * The wakes of a session watch on a typed GitHub source (`github-watch-source.ts`), in the English a model reads: the
  * host's structured reading of GitHub outside the fence (its words, a job's name included, are data, not an instruction),
  * and the plan the armer saved, read as a condition watch's is (`savedPlan`). A result done only after the end time (read
- * by the watch's deadline read) is told in its timed-out wake, with when it was done when GitHub said.
+ * by the watch's deadline read), or a completed attempt the watch kept while a later one was pending, is told in its
+ * timed-out wake, with when it was done when GitHub said.
  */
 import { englishText } from "../language/interface-text.ts";
 import { MAX_ROUTINE_PROMPT_CHARS } from "../routines/routine-contract.ts";
@@ -84,6 +85,9 @@ function githubWatchTimedOutWakeText(
 	return [
 		headline,
 		savedPlan(plan, fenceKey, planChars),
+		...(last?.state === "done"
+			? ["A later run or rerun may have started since: check the current state before acting."]
+			: []),
 		"Decide what to do instead: check the state yourself, arm a later watch, or tell the owner what stayed unresolved. End the turn if nothing waits on it.",
 	].join("\n");
 }

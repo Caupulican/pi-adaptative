@@ -121,6 +121,7 @@ export interface GithubWatchResult {
 	/** The run (and its attempt) the result is of; a release has none. */
 	readonly runId?: number;
 	readonly runAttempt?: number;
+	/** When it was read, on the session's routines clock (stamped by the service, never by the reader). */
 	readonly observedAt: number;
 	/**
 	 * When a done result came about, on the session's routines clock (the clock of its watch's `expiresAt`), when the
@@ -296,8 +297,10 @@ export interface GithubWatchReader {
 	/**
 	 * The CI of a commit read straight from GitHub: the newest run of the checkout's CI workflow on `sha` (pending while
 	 * none is listed). A `ci` watch is read so once its end time passed, since the CI source's stream says no time.
+	 * `carried`, the completed attempt the watch already carries, is read again with its time (`carried` of the
+	 * reading) when the newest run is another attempt, so the watch is judged on when it was done.
 	 */
-	observeCi(sha: string, signal: AbortSignal): Promise<GithubWatchReading>;
+	observeCi(sha: string, carried: GithubRunAttempt | undefined, signal: AbortSignal): Promise<GithubWatchReading>;
 	/** The first failed job of a failed CI attempt. */
 	failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined>;
 	/**
@@ -335,10 +338,74 @@ export interface GithubCreatedRun {
 }
 
 /**
- * One source's reading: what it was seen as, or why it could not be read. `doneAgoMs` is how long before the reading was
- * returned a done result came about, measured on GitHub's clock (its response's `Date` less the result's own time, plus
- * the monotonic time since that response); the service places it on its routines clock as `GithubWatchResult.doneAt`.
+ * What a reader saw of a source, without the times only the session's routines clock gives it: the service stamps when it
+ * was seen (`observedAt`) and places when it was done (`doneAt`), so every result a watch compares is on one clock.
+ */
+export type GithubWatchSeen = Omit<GithubWatchResult, "observedAt" | "doneAt">;
+
+/**
+ * One result a reading saw. `doneAgoMs` is how long before the reading was returned a done result came about, measured on
+ * GitHub's clock (its response's `Date` less the result's own time, plus the monotonic time since that response); the
+ * service places it on its routines clock as `GithubWatchResult.doneAt`.
+ */
+export interface GithubWatchSighting {
+	readonly result: GithubWatchSeen;
+	readonly doneAgoMs?: number;
+}
+
+/** A run's attempt, by its run id and attempt number. */
+export interface GithubRunAttempt {
+	readonly runId: number;
+	readonly runAttempt: number;
+}
+
+/**
+ * One source's reading: what it was seen as, or why it could not be read. `carried` is the completed attempt the watch
+ * already carried, read again with its time by a deadline read that found another attempt current
+ * ({@link GithubWatchReader.observeCi}).
  */
 export type GithubWatchReading =
-	| { readonly ok: true; readonly result: GithubWatchResult; readonly doneAgoMs?: number }
+	| (GithubWatchSighting & { readonly ok: true; readonly carried?: GithubWatchSighting })
 	| { readonly ok: false; readonly reason: string };
+
+/**
+ * What one reading makes of a typed watch ending at `expiresAt` that carries `held` (its last result), read at `nowMs`
+ * on the routines clock: the result it fires on, the one it records, or none new (`unchanged`, the same result as
+ * `held`). A done result fires when it was read before the end time or came about by it. A pending reading never
+ * displaces a completed attempt the watch carries (a rerun that started after it, or a listing that does not show it
+ * yet): the watch keeps it, and fires on it when the reading timed it by the end time (`carried`, the same attempt read
+ * again), so a result done in time is never told as timed out.
+ */
+export function githubReadingOutcome(
+	expiresAt: number,
+	held: GithubWatchResult | undefined,
+	reading: GithubWatchSighting & { readonly carried?: GithubWatchSighting },
+	nowMs: number,
+): { readonly outcome: "fired" | "recorded" | "unchanged"; readonly result: GithubWatchResult } {
+	const placed = ({ result, doneAgoMs }: GithubWatchSighting): GithubWatchResult => {
+		const doneAt = result.state === "done" && doneAgoMs !== undefined ? Math.max(0, nowMs - doneAgoMs) : undefined;
+		return boundedGithubWatchResult({ ...result, observedAt: nowMs, ...(doneAt === undefined ? {} : { doneAt }) });
+	};
+	const byEnd = (result: GithubWatchResult) => result.doneAt !== undefined && result.doneAt <= expiresAt;
+	const current = placed(reading);
+	if (current.state === "done" && (nowMs < expiresAt || byEnd(current))) return { outcome: "fired", result: current };
+	const completed = held?.state === "done" ? held : undefined;
+	const again = reading.carried;
+	const kept =
+		completed &&
+		again?.result.state === "done" &&
+		again.result.runId === completed.runId &&
+		again.result.runAttempt === completed.runAttempt
+			? placed(again)
+			: completed;
+	if (kept && byEnd(kept)) return { outcome: "fired", result: kept };
+	const result = current.state === "pending" && kept ? kept : current;
+	const same =
+		held?.state === result.state &&
+		held.status === result.status &&
+		held.conclusion === result.conclusion &&
+		held.runId === result.runId &&
+		held.runAttempt === result.runAttempt &&
+		held.doneAt === result.doneAt;
+	return { outcome: same ? "unchanged" : "recorded", result };
+}

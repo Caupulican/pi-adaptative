@@ -4,10 +4,11 @@
  * branch filters, the commit message's skip instruction and the open pull requests from the pushed branch. A pull
  * request's run follows another file than the pushed commit's: `pull_request` the workflow of the pull request's merge
  * with its base (`refs/pull/<n>/merge`, read once GitHub merged the pushed commit there, which it does a few seconds after
- * the push), `pull_request_target` its base branch's. `none` is said only when those facts settle it: no push run and
- * no open pull request's workflow running for it, or a skip instruction. A trigger or filter this reader does not judge
- * (paths, another workflow's run, a branch's creation, a deployment), a merge GitHub has not computed (a conflict, or not
- * yet), and a file or listing it cannot read are `unknown`: the host arms its watch as it would for a run.
+ * the push), `pull_request_target` its base branch's; a pull request whose head GitHub found in conflict with its base
+ * runs no `pull_request` workflow. `none` is said only when those facts settle it: no push run and no open pull
+ * request's workflow running for it, or a skip instruction. A trigger or filter this reader does not judge (paths,
+ * another workflow's run, a branch's creation, a deployment), a merge GitHub has not computed yet, and a file or listing
+ * it cannot read are `unknown`: the host arms its watch as it would for a run.
  */
 import { setTimeout as delay } from "node:timers/promises";
 import { parse } from "yaml";
@@ -56,9 +57,15 @@ const SKIPPED = "its commit message asks GitHub to skip the runs of its push and
 const MAX_OPEN_PULL_REQUESTS = 100;
 /** When a pull request's merge ref is read again while GitHub has not merged the pushed commit there yet. */
 const MERGE_REREAD_DELAYS_MS = [2_000, 5_000, 10_000] as const;
-/** The workflow files and merge a pull request's runs follow, in one read of GitHub's GraphQL API. */
-const PULL_REQUEST_WORKFLOWS = `query($owner: String!, $name: String!, $merge: String!, $mergeFile: String!, $baseFile: String!) {
+/** GitHub's `mergeable` state of a pull request whose head conflicts with its base. */
+const CONFLICTING = "CONFLICTING";
+/**
+ * The workflow files and merge a pull request's runs follow, and whether GitHub found its head in conflict with its base,
+ * in one read of GitHub's GraphQL API.
+ */
+const PULL_REQUEST_WORKFLOWS = `query($owner: String!, $name: String!, $number: Int!, $merge: String!, $mergeFile: String!, $baseFile: String!) {
   repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { headRefOid mergeable }
     merge: object(expression: $merge) { ... on Commit { parents(first: 2) { nodes { oid } } } }
     mergeWorkflow: object(expression: $mergeFile) { ... on Blob { text } }
     baseWorkflow: object(expression: $baseFile) { ... on Blob { text } }
@@ -278,7 +285,8 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 	private async pullRequestRuns(pull: OpenPullRequest, sha: string, signal: AbortSignal): Promise<Admits> {
 		const read = await this.pullRequestWorkflows(pull, sha, signal);
 		if ("unknown" in read) return read;
-		const merge = runsFor(read.merge, "pull_request", pull.base);
+		// GitHub runs no `pull_request` workflow for a pull request in conflict with its base.
+		const merge = read.merge === CONFLICTING ? false : runsFor(read.merge, "pull_request", pull.base);
 		const target = runsFor(read.base, "pull_request_target", pull.base);
 		if (merge === true || target === true) return true;
 		if (merge === false && target === false) return false;
@@ -286,12 +294,17 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 		return { unknown: `for pull request #${pull.number}, ${reasons.join(", and ")}` };
 	}
 
-	/** The workflow files of a pull request's merge holding the pushed commit and of its base branch. */
+	/**
+	 * The workflow files of a pull request's merge holding the pushed commit (or that GitHub found the pushed commit in
+	 * conflict with its base, so it holds no such merge) and of its base branch.
+	 */
 	private async pullRequestWorkflows(
 		pull: OpenPullRequest,
 		sha: string,
 		signal: AbortSignal,
-	): Promise<{ readonly merge: WorkflowFile; readonly base: WorkflowFile } | { readonly unknown: string }> {
+	): Promise<
+		{ readonly merge: WorkflowFile | typeof CONFLICTING; readonly base: WorkflowFile } | { readonly unknown: string }
+	> {
 		const merge = `refs/pull/${pull.number}/merge`;
 		for (let attempt = 0; ; attempt += 1) {
 			let repository: Record<string, unknown>;
@@ -306,6 +319,8 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 							"owner={owner}",
 							"-F",
 							"name={repo}",
+							"-F",
+							`number=${pull.number}`,
 							"-f",
 							`merge=${merge}`,
 							"-f",
@@ -332,13 +347,17 @@ export class CiWorkflowTriggers implements CiPushTriggers {
 			const head = nodes.map((node: unknown) => (plainObject(node) ? node.oid : undefined))[1];
 			if (head === sha)
 				return { merge: workflowFile(repository.mergeWorkflow), base: workflowFile(repository.baseWorkflow) };
+			// GitHub's mergeable state is its head's: a conflict settles the pushed commit only while that is its head.
+			const state = plainObject(repository.pullRequest) ? repository.pullRequest : undefined;
+			const isHead = state?.headRefOid === sha;
+			if (isHead && state?.mergeable === CONFLICTING)
+				return { merge: CONFLICTING, base: workflowFile(repository.baseWorkflow) };
 			const wait = MERGE_REREAD_DELAYS_MS[attempt];
 			if (wait === undefined)
 				return {
-					unknown:
-						repository.merge === null
-							? `GitHub holds no merge of pull request #${pull.number} with its base (a conflict, or not computed yet)`
-							: `GitHub has not merged the pushed commit into pull request #${pull.number}'s merge with its base yet`,
+					unknown: isHead
+						? `GitHub has not computed pull request #${pull.number}'s merge with its base at the pushed commit yet`
+						: `GitHub does not show the pushed commit as pull request #${pull.number}'s head`,
 				};
 			await delay(wait, undefined, { signal });
 		}

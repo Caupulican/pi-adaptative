@@ -20,8 +20,9 @@
  * A watch on a typed GitHub source is not ended at its end time until a read of it begun then has settled (its poller's
  * deadline read, `github-watch-poller.ts`): a result GitHub completed by the end time fires it though it was read after
  * (the result's own time, `GithubWatchResult.doneAt`), as one that completed while the session was closed is at its
- * reopen; a read that failed or found it pending or done later ends it as timed out. A condition watch has no such time:
- * its end time ends it with what it last saw.
+ * reopen, as does a completed attempt it carries timed by that read though a later attempt is pending; a read that
+ * failed or found it pending or done later ends it as timed out, telling that attempt. A condition watch has no such
+ * time: its end time ends it with what it last saw.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -64,8 +65,11 @@ import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import {
 	boundedGithubWatchResult,
 	describeGithubWatchResult,
+	type GithubRunAttempt,
 	type GithubWatchResult,
+	type GithubWatchSighting,
 	type GithubWatchSource,
+	githubReadingOutcome,
 	githubWatchSubject,
 	isGithubWatchSource,
 } from "./github-watch-source.ts";
@@ -672,13 +676,14 @@ export class SessionWatchService implements WatchObservationStore {
 
 	/**
 	 * The live watches on a typed GitHub source, for the poller that reads them (`github-watch-poller.ts`), and those past
-	 * their end time whose deadline read is owed, with since when it is owed.
+	 * their end time whose deadline read is owed, with since when it is owed and the completed attempt each carries.
 	 */
 	githubWatches(nowMs: number): readonly {
 		watchId: string;
 		incarnationId: string;
 		source: GithubWatchSource;
 		deadlineReadSince?: number;
+		carried?: GithubRunAttempt;
 	}[] {
 		return this.deps.ledger.list().flatMap((record) => {
 			const { condition, watchId, incarnationId } = record;
@@ -686,7 +691,12 @@ export class SessionWatchService implements WatchObservationStore {
 			if (isLiveSessionWatch(record, nowMs)) return [{ watchId, incarnationId, source: condition }];
 			if (!this.awaitsDeadlineRead(record, nowMs)) return [];
 			const since = this.deadlineReads.get(incarnationId)?.since ?? nowMs;
-			return [{ watchId, incarnationId, source: condition, deadlineReadSince: since }];
+			const { result } = record;
+			const carried =
+				result?.state === "done" && result.runId !== undefined && result.runAttempt !== undefined
+					? { carried: { runId: result.runId, runAttempt: result.runAttempt } }
+					: {};
+			return [{ watchId, incarnationId, source: condition, deadlineReadSince: since, ...carried }];
 		});
 	}
 
@@ -726,16 +736,15 @@ export class SessionWatchService implements WatchObservationStore {
 	}
 
 	/**
-	 * One reading of a typed source: a done one fires the watch in the same write that records the wake it owes, as a
-	 * condition's firing does, when it was read before the end time or came about by it (`doneAgoMs` before the reading,
-	 * placed on the routines clock as `doneAt`); any other is recorded when it changed, and the deadline read that made it
-	 * ends the watch as timed out. A failed attempt a `ci` watch fires on here waits for its failed job, as in claimCi.
+	 * One reading of a typed source, judged by {@link githubReadingOutcome} on the routines clock (which stamps it): a result
+	 * it fires on fires the watch in the same write that records the wake it owes, as a condition's firing does; any other
+	 * is recorded when it changed, and the deadline read that made it ends the watch as timed out, telling what it holds.
+	 * A failed attempt a `ci` watch fires on here waits for its failed job, as in claimCi.
 	 */
 	observeGithub(
 		watchId: string,
 		incarnationId: string,
-		reading: GithubWatchResult,
-		doneAgoMs?: number,
+		reading: GithubWatchSighting & { readonly carried?: GithubWatchSighting },
 	): "stale" | "unchanged" | "recorded" | "fired" {
 		const nowMs = this.deps.timers.now();
 		const record = this.deps.ledger.get(watchId);
@@ -746,22 +755,11 @@ export class SessionWatchService implements WatchObservationStore {
 			!this.armed(record, nowMs)
 		)
 			return "stale";
-		const doneAt = reading.state === "done" && doneAgoMs !== undefined ? Math.max(0, nowMs - doneAgoMs) : undefined;
-		const result = boundedGithubWatchResult({ ...reading, ...(doneAt === undefined ? {} : { doneAt }) });
-		const inTime = nowMs < record.expiresAt || (result.doneAt !== undefined && result.doneAt <= record.expiresAt);
-		if (result.state === "pending" || !inTime) {
-			const last = record.result;
-			if (
-				last?.state === result.state &&
-				last.status === result.status &&
-				last.conclusion === result.conclusion &&
-				last.runId === result.runId &&
-				last.runAttempt === result.runAttempt &&
-				last.doneAt === result.doneAt
-			)
-				return "unchanged";
+		const { outcome, result } = githubReadingOutcome(record.expiresAt, record.result, reading, nowMs);
+		if (outcome === "unchanged") return outcome;
+		if (outcome === "recorded") {
 			this.replace({ ...record, result });
-			return "recorded";
+			return outcome;
 		}
 		const fired: SessionWatchRecord = {
 			...record,

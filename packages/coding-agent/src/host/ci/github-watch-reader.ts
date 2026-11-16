@@ -15,10 +15,12 @@ import { monotonicNow } from "../../core/util/timer-port.ts";
 import {
 	type GithubCreatedRun,
 	type GithubPolledSource,
+	type GithubRunAttempt,
 	type GithubRunNarrowing,
 	type GithubWatchReader,
 	type GithubWatchReading,
 	type GithubWatchResult,
+	type GithubWatchSeen,
 	RELEASE_STATUS,
 } from "../../core/watches/github-watch-source.ts";
 import type { CiCommandPort, CiRepository } from "./ci-provider.ts";
@@ -277,12 +279,16 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		return aged(found);
 	}
 
-	async observeCi(sha: string, signal: AbortSignal): Promise<GithubWatchReading> {
+	async observeCi(
+		sha: string,
+		carried: GithubRunAttempt | undefined,
+		signal: AbortSignal,
+	): Promise<GithubWatchReading> {
 		try {
-			const repository = await this.ci.repository(signal);
+			const { host, nameWithOwner: name, workflowId } = await this.ci.repository(signal);
 			const response = await this.dated(
-				repository.host,
-				`repos/${repository.nameWithOwner}/actions/workflows/${repository.workflowId}/runs?head_sha=${sha}&per_page=${MAX_LISTED}`,
+				host,
+				`repos/${name}/actions/workflows/${workflowId}/runs?head_sha=${sha}&per_page=${MAX_LISTED}`,
 				signal,
 			);
 			// The newest run is the commit's current CI, its latest attempt the run's own status and conclusion.
@@ -290,15 +296,43 @@ export class GithubWatchHostReader implements GithubWatchReader {
 				(found, run) => (found === undefined || Number(run.run_number) > Number(found.run_number) ? run : found),
 				undefined,
 			);
-			if (!newest) return { ok: true, result: { state: "pending", status: NO_RUN, observedAt: Date.now() } };
-			const [reading] = aged([
-				await this.runFound(repository.host, repository.nameWithOwner, newest, response, signal),
-			]);
-			if (!reading) throw new Error("No reading of the commit's CI.");
-			return reading;
+			const current: Found = newest
+				? await this.runFound(host, name, newest, response, signal)
+				: { reading: { ok: true, result: { state: "pending", status: NO_RUN } } };
+			const again =
+				carried === undefined ||
+				(current.reading.ok &&
+					current.reading.result.runId === carried.runId &&
+					current.reading.result.runAttempt === carried.runAttempt)
+					? undefined
+					: await this.attemptFound(host, name, carried, signal);
+			const [reading, carriedReading] = aged(again === undefined ? [current] : [current, again]);
+			if (!reading?.ok) throw new Error("No reading of the commit's CI.");
+			return carriedReading?.ok
+				? { ...reading, carried: { result: carriedReading.result, doneAgoMs: carriedReading.doneAgoMs } }
+				: reading;
 		} catch (error) {
 			signal.throwIfAborted();
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	/**
+	 * One attempt of a run, read on its own with when it completed on the monotonic clock; a read that fails is told as a
+	 * failed reading, which leaves the attempt untimed.
+	 */
+	private async attemptFound(
+		host: string | undefined,
+		name: string,
+		{ runId, runAttempt }: GithubRunAttempt,
+		signal: AbortSignal,
+	): Promise<Found> {
+		try {
+			const response = await this.dated(host, `repos/${name}/actions/runs/${runId}/attempts/${runAttempt}`, signal);
+			return await this.runFound(host, name, record(response.body), response, signal);
+		} catch (error) {
+			signal.throwIfAborted();
+			return { reading: { ok: false, reason: error instanceof Error ? error.message : String(error) } };
 		}
 	}
 
@@ -320,7 +354,7 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		name: string,
 		run: Record<string, unknown>,
 		signal: AbortSignal,
-	): Promise<GithubWatchResult> {
+	): Promise<GithubWatchSeen> {
 		const status = word(run.status);
 		const runId = run.id;
 		const runAttempt = run.run_attempt;
@@ -337,7 +371,6 @@ export class GithubWatchHostReader implements GithubWatchReader {
 			...(url === undefined ? {} : { url }),
 			runId,
 			runAttempt,
-			observedAt: Date.now(),
 		};
 	}
 
@@ -423,15 +456,13 @@ function releaseFound(response: Dated | undefined, releases: readonly Record<str
 }
 
 /** A release as a watch reads it: published, a draft, or not there yet. */
-function releaseResult(release: Record<string, unknown> | undefined): GithubWatchResult {
-	const observedAt = Date.now();
-	if (!release) return { state: "pending", status: RELEASE_STATUS.missing, observedAt };
-	if (release.draft === true) return { state: "pending", status: RELEASE_STATUS.draft, observedAt };
+function releaseResult(release: Record<string, unknown> | undefined): GithubWatchSeen {
+	if (!release) return { state: "pending", status: RELEASE_STATUS.missing };
+	if (release.draft === true) return { state: "pending", status: RELEASE_STATUS.draft };
 	const url = word(release.html_url);
 	return {
 		state: "done",
 		status: release.prerelease === true ? RELEASE_STATUS.prerelease : RELEASE_STATUS.published,
 		...(url === undefined ? {} : { url }),
-		observedAt,
 	};
 }
