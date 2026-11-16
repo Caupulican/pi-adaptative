@@ -25,6 +25,8 @@ import type {
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
+import { GoalOutsideWait } from "../goals/goal-outside-wait.ts";
+import type { GoalWatchFacts } from "../goals/goal-runtime-snapshot.ts";
 import { type HarnessNotice, wordedNotice } from "../harness-notice.ts";
 import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -36,6 +38,7 @@ import type { TimerPort } from "../util/timer-port.ts";
 import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
 import {
 	SessionWatchLedger,
+	type SessionWatchRequirement,
 	type SessionWatchServed,
 	sessionWatchLedgerPath,
 } from "../watches/session-watch-ledger.ts";
@@ -115,6 +118,8 @@ export interface RoutineRuntime {
 	readonly watchPort: SessionWatchPort;
 	/** The session's watches as the host arms them after its own calls: an `auto` armer that tells the owner each result. */
 	readonly autoWatches: WatchAutoArmPort;
+	/** The session's watches as its goal's continuation reads them, with System One's saved judgments of outside waits. */
+	readonly goalWatches: GoalWatchFacts;
 	stop(): Promise<void>;
 }
 
@@ -286,6 +291,15 @@ export class RoutineRuntimeAssembly {
 	 * The port the host arms waits through after a caller's own calls (`watch-auto-arm.ts`): this session's watches, read
 	 * through the host's GitHub link, each telling the owner its result on the phone besides waking its armer.
 	 */
+	/** The open requirement of the session's goal a watch is armed for; any other id is the caller's mistake. */
+	private goalRequirement(requirementId: string): SessionWatchRequirement {
+		const goal = this.deps.getGoalStateSnapshot();
+		const requirement = goal?.requirements.find((entry) => entry.id === requirementId);
+		if (!goal || requirement?.status !== "open")
+			throw new Error(`forRequirement ${requirementId} names no open requirement of the session's goal`);
+		return { goalId: goal.goalId, requirementId };
+	}
+
 	private autoWatchPort(
 		sessionWatches: SessionWatchService,
 		timers: TimerPort,
@@ -635,6 +649,25 @@ export class RoutineRuntimeAssembly {
 		} satisfies WatchCheckAdmitter;
 		const sessionWatches = this.sessionWatches(store, scope, checks);
 		const sessionWatchMonitor = monitorOver(sessionWatches, (failing) => sessionWatches.noteFailing(failing));
+		const outsideWait = new GoalOutsideWait({
+			engine: () => this.deps.systemOne.semanticDecisionEngine(),
+			goal: () => this.deps.getGoalStateSnapshot(),
+			linked: (goalId) => new Set(sessionWatches.boundTo(goalId).map((watch) => watch.requirementId)),
+			warn: (message) => this.host.warn(message),
+			isDisposed: () => this.deps.isDisposed(),
+		});
+		// One of the session's own watches ending is when its goal's open requirements are asked whether they wait outside.
+		let endedSeen = new Set(sessionWatches.endedOwn());
+		const unfollowEnded = sessionWatches.subscribe(() => {
+			const ended = sessionWatches.endedOwn();
+			if (ended.some((incarnationId) => !endedSeen.has(incarnationId))) outsideWait.noteWatchEnded();
+			endedSeen = new Set(ended);
+		});
+		const goalWatches: GoalWatchFacts = {
+			boundTo: (goalId) => sessionWatches.boundTo(goalId),
+			anyLive: () => sessionWatches.ownLive(),
+			waitsOutside: (state) => outsideWait.waitsOutside(state),
+		};
 		const githubWatchPoller = new GithubWatchPoller({
 			watches: sessionWatches,
 			link: this.host.githubWatches(),
@@ -730,7 +763,8 @@ export class RoutineRuntimeAssembly {
 			const completions = [
 				start("stop routine watches", () => watches.dispose()),
 				start("stop session watches", async () => {
-					await Promise.all([sessionWatchMonitor.dispose(), githubWatchPoller.stop()]);
+					unfollowEnded();
+					await Promise.all([sessionWatchMonitor.dispose(), githubWatchPoller.stop(), outsideWait.stop()]);
 					await sessionWatches.stop();
 				}),
 				start("stop routine scheduler", () => scheduler.close()),
@@ -747,8 +781,16 @@ export class RoutineRuntimeAssembly {
 		const authority = () => turnAuthorityOf(latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin);
 		const turn = () => ({ kind: "turn" as const, authority: authority() });
 		const watchPort: SessionWatchPort = {
-			arm: (watch, toolCallId, signal) =>
-				sessionWatches.arm({ ...watch, armedBy: { kind: "session", authority: authority() }, toolCallId }, signal),
+			arm: ({ forRequirement, ...watch }, toolCallId, signal) =>
+				sessionWatches.arm(
+					{
+						...watch,
+						...(forRequirement === undefined ? {} : { forRequirement: this.goalRequirement(forRequirement) }),
+						armedBy: { kind: "session", authority: authority() },
+						toolCallId,
+					},
+					signal,
+				),
 			list: () => sessionWatches.listFor(turn()),
 			get: (watchId) => sessionWatches.get(watchId, turn()),
 			cancel: (watchId, signal) => sessionWatches.cancel(watchId, turn(), signal),
@@ -774,6 +816,7 @@ export class RoutineRuntimeAssembly {
 			githubWatchPoller,
 			watchPort,
 			autoWatches,
+			goalWatches,
 			stop,
 		};
 	}

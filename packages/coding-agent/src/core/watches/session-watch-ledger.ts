@@ -132,12 +132,29 @@ export interface SessionWatchRecord {
 	readonly awaitingFailedJob?: true;
 	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
 	readonly tellOwner?: true;
+	/** The goal requirement the watch waits for (`watch` arm `forRequirement`): the goal's continuation waits on it. */
+	readonly forRequirement?: SessionWatchRequirement;
 	/**
 	 * The transcript entry the watch was armed from: its wakes carry it (`details.served`), so a bot's spend window that
 	 * armed the watch is the one its wake turns are charged to (`bot-spend-window.ts`).
 	 */
 	readonly served?: SessionWatchServed;
 	readonly wakes: readonly SessionWatchWake[];
+}
+
+/** A requirement of the session's goal, by the goal's id: a later goal's requirement of the same id is another. */
+export interface SessionWatchRequirement {
+	readonly goalId: string;
+	readonly requirementId: string;
+}
+
+function parseRequirement(value: unknown): SessionWatchRequirement {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["goalId", "requirementId"]))
+		throw new TypeError("Watch requirement is invalid.");
+	return {
+		goalId: boundedRoutineText(value.goalId, MAX_ID_CHARS, "goal"),
+		requirementId: boundedRoutineText(value.requirementId, MAX_ID_CHARS, "requirement"),
+	};
 }
 
 /** The session and transcript entry a watch serves. */
@@ -262,6 +279,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"result",
 			"awaitingFailedJob",
 			"tellOwner",
+			"forRequirement",
 			"served",
 			"wakes",
 		]) ||
@@ -302,6 +320,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		...(value.result === undefined ? {} : { result: parseGithubWatchResult(value.result) }),
 		...(value.awaitingFailedJob === true ? { awaitingFailedJob: true as const } : {}),
 		...(value.tellOwner === true ? { tellOwner: true as const } : {}),
+		...(value.forRequirement === undefined ? {} : { forRequirement: parseRequirement(value.forRequirement) }),
 		...(value.served === undefined ? {} : { served: parseServed(value.served) }),
 		wakes: value.wakes.map(parseWake),
 	};

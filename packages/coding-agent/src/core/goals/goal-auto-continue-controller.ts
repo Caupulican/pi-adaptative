@@ -19,13 +19,16 @@ import {
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
 /**
- * A wait whose decision carries a deadline the timer re-decides at: a dispatched worker's, or the admitted plan steps' stable
- * deadline. Either wait ends by re-deciding, so a lost wake cannot hold the goal.
+ * A wait whose decision carries a deadline the timer re-decides at: a dispatched worker's, the admitted plan steps' stable
+ * deadline, or the end time of the watches the goal's open requirements wait on. Each wait ends by re-deciding, so a lost
+ * wake cannot hold the goal.
  */
 function isDeadlineWait(continuation: GoalRuntimeSnapshot["continuation"]): boolean {
 	return (
 		continuation.action === "waiting" &&
-		(continuation.reasonCode === "worker_in_flight" || continuation.reasonCode === "plan_in_flight") &&
+		(continuation.reasonCode === "worker_in_flight" ||
+			continuation.reasonCode === "plan_in_flight" ||
+			continuation.reasonCode === "watch_in_flight") &&
 		continuation.resumeAt !== undefined
 	);
 }

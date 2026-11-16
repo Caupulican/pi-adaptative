@@ -8,6 +8,8 @@
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { GoalWatchFacts } from "../goals/goal-runtime-snapshot.ts";
+import type { GoalState } from "../goals/goal-state.ts";
 import type { ToolCallFacts } from "../tool-capability-policy.ts";
 import type { SessionWatchView } from "../watches/session-watch-service.ts";
 import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
@@ -55,6 +57,12 @@ export class SessionRoutines {
 			this.loaded()?.sessionWatches.endArmedByStop(stopAt, carried) ?? { ended: 0, settled: 0 },
 		/** The session's watches as the host arms them after its own calls (`watch-auto-arm.ts`); none until the runtime is built. */
 		auto: (): WatchAutoArmPort | undefined => this.runtime?.autoWatches,
+		/** The session's watches as its goal's continuation reads them (`GoalWatchFacts`); none until the runtime is built. */
+		goals: {
+			boundTo: (goalId: string) => this.runtime?.goalWatches.boundTo(goalId) ?? [],
+			anyLive: () => this.runtime?.goalWatches.anyLive() ?? false,
+			waitsOutside: (state: GoalState) => this.runtime?.goalWatches.waitsOutside(state) ?? [],
+		} satisfies GoalWatchFacts,
 		subscribe: (listener: () => void): (() => void) => {
 			this.watchListeners.add(listener);
 			return () => this.watchListeners.delete(listener);

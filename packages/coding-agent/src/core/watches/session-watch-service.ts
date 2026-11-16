@@ -21,6 +21,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
+import type { GoalBoundWatch } from "../goals/goal-continuation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import {
 	MAX_AGENT_ARMED_WATCHES,
@@ -73,6 +74,7 @@ import {
 	type SessionWatchArmer,
 	type SessionWatchLedger,
 	type SessionWatchRecord,
+	type SessionWatchRequirement,
 	type SessionWatchServed,
 	type SessionWatchSource,
 	type SessionWatchStatus,
@@ -118,6 +120,8 @@ export interface SessionWatchArmRequest {
 	readonly armedBy: SessionWatchArmer;
 	/** Tell the owner each result on the phone besides the armer's wake. */
 	readonly tellOwner?: boolean;
+	/** The goal requirement the watch waits for: the goal's continuation waits on it while it is live. */
+	readonly forRequirement?: SessionWatchRequirement;
 	/** The entry the arming answers to, when read before the arming (the host's for a call it read later); else the session's latest. */
 	readonly served?: SessionWatchServed;
 	/**
@@ -143,6 +147,8 @@ export interface SessionWatchView {
 		| { readonly kind: "auto" }
 		| { readonly kind: "worker"; readonly runtimeId: string };
 	readonly tellOwner?: true;
+	/** The id of the goal requirement the watch waits for. */
+	readonly forRequirement?: string;
 	/** What the watch last observed of its condition: while it watches, and when it ended without firing. */
 	readonly lastObservation: WatchLastSeen;
 	/** What its firing saw, once it fired. */
@@ -305,6 +311,7 @@ function view(record: SessionWatchRecord): SessionWatchView {
 				? { kind: "worker", runtimeId: record.armedBy.runtimeId }
 				: { kind: record.armedBy.kind },
 		...(record.tellOwner ? { tellOwner: true as const } : {}),
+		...(record.forRequirement ? { forRequirement: record.forRequirement.requirementId } : {}),
 		lastObservation: github
 			? record.result === undefined
 				? "unobserved"
@@ -453,6 +460,7 @@ export class SessionWatchService implements WatchObservationStore {
 				expiresAt: request.expiresAt,
 				armedBy: request.armedBy,
 				...(request.tellOwner === true ? { tellOwner: true } : {}),
+				...(request.forRequirement === undefined ? {} : { forRequirement: request.forRequirement }),
 				...(served === undefined ? {} : { served }),
 				cursor: { kind: "watch", truth: null, fires: 0 },
 				status: "live",
@@ -549,6 +557,42 @@ export class SessionWatchService implements WatchObservationStore {
 		this.replace(cancelled);
 		this.followEndTimes();
 		return view(cancelled);
+	}
+
+	/**
+	 * The watches bound to `goalId`'s requirements, the latest armed per requirement (one it replaced is history): live
+	 * while it waits before its end time, with what is left of it on the routines clock; else how it ended. A live record
+	 * past its end time has timed out, which the next expiry pass records.
+	 */
+	boundTo(goalId: string, nowMs = this.deps.timers.now()): GoalBoundWatch[] {
+		const latest = new Map<string, SessionWatchRecord>();
+		for (const record of this.deps.ledger.list()) {
+			const bound = record.forRequirement;
+			if (bound?.goalId !== goalId) continue;
+			const held = latest.get(bound.requirementId);
+			if (!held || held.armedAt <= record.armedAt) latest.set(bound.requirementId, record);
+		}
+		return [...latest].map(([requirementId, { watchId, status, expiresAt }]) =>
+			status === "live" && nowMs < expiresAt
+				? { requirementId, watchId, status, remainingMs: expiresAt - nowMs }
+				: { requirementId, watchId, status: status === "live" ? "timed-out" : status },
+		);
+	}
+
+	/** Whether a watch the session armed for itself, not a worker's, still waits. */
+	ownLive(nowMs = this.deps.timers.now()): boolean {
+		return this.deps.ledger
+			.list()
+			.some((record) => record.armedBy.kind !== "worker" && isLiveSessionWatch(record, nowMs));
+	}
+
+	/** The incarnations of the session's own watches that ended: one not seen before fired, timed out or was cancelled. */
+	endedOwn(): string[] {
+		return this.deps.ledger
+			.list()
+			.flatMap((record) =>
+				record.armedBy.kind !== "worker" && record.status !== "live" ? [record.incarnationId] : [],
+			);
 	}
 
 	subscribe(listener: () => void): () => void {

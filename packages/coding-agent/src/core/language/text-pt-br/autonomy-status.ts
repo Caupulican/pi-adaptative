@@ -255,6 +255,7 @@ export const AUTONOMY_STATUS = {
 			"A continuação automática está parada: o objetivo está bloqueado e precisa da sua decisão ou resposta.",
 		waiting_for_worker: "A continuação automática aguarda um worker terminar.",
 		waiting_for_background_task: "A continuação automática aguarda uma tarefa de fundo terminar.",
+		waiting_for_watch: "A continuação automática aguarda um monitoramento de trabalho externo dar notícia.",
 		off: "A continuação automática está desligada, então o objetivo avança só quando você manda uma mensagem.",
 		tools_unavailable:
 			"A continuação automática não roda porque as ferramentas de objetivo não estão disponíveis nesta sessão.",

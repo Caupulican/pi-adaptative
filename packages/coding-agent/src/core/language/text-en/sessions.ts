@@ -158,6 +158,9 @@ export const SESSIONS = {
 		intentOutage: (cause: string) =>
 			`System One could not judge whether your message sets a goal (${cause}); no goal was started.`,
 		intentNotStarted: (cause: string) => `A goal your message asked for was not started: ${cause}`,
+		/** The warning when System One could not judge whether open requirements wait on outside work; `cause` as reported. */
+		outsideWaitOutage: (cause: string) =>
+			`System One could not judge whether the goal's open requirements wait on outside work (${cause}); the goal follows only the watches bound to a requirement.`,
 		intentNoteFailed: (cause: string) =>
 			`A goal was started from your message, but the note telling the agent about it was not delivered: ${cause}`,
 		/** The owner's word for a goal status, keyed by the identifier the goal record holds. */

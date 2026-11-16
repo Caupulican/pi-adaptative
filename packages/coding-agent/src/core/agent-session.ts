@@ -165,6 +165,7 @@ import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts"
 import type { GoalCompletionOwnerDecisionInput } from "./goals/goal-completion-owner-decision.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
+import { goalRuntimeFactsOf } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
@@ -1159,9 +1160,7 @@ export class AgentSession {
 			getSessionManager: () => this.sessionManager,
 			timers: config.timers,
 			getModel: () => this.model,
-			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
-			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
-			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
+			runtimeFacts: () => goalRuntimeFactsOf(this._backgroundLanes, this._backgroundToolTasks.list()),
 			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			synchronizeGoalState: (state) => {
 				this._unsettledLadder.noteGoalState(state); // owner items a paused goal held post on resume; never throws

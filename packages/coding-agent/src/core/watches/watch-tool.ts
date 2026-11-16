@@ -33,6 +33,8 @@ export interface OwnWatchRequest {
 	readonly expiresAt: number;
 	/** Tell the owner each result on the phone besides waking the session. */
 	readonly tellOwner?: boolean;
+	/** The id of the open goal requirement the wait stands for. */
+	readonly forRequirement?: string;
 	readonly parentToolName: string;
 }
 
@@ -89,6 +91,13 @@ const parameters = Type.Object(
 				description: "Also tell the owner the result on their phone (fired, deadline passed, or failing).",
 			}),
 		),
+		forRequirement: Type.Optional(
+			Type.String({
+				minLength: 1,
+				description:
+					"The id of the open goal requirement this wait stands for. While the watch is live the goal's continuation waits on it instead of prompting you; once it ends you are told to act on its result.",
+			}),
+		),
 		deadline: Type.Optional(
 			Type.String({
 				pattern: DEADLINE_PATTERN.source,
@@ -117,7 +126,7 @@ function result(value: object) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value };
 }
 
-const DESCRIPTION = `Wait on your own work without polling: arm a watch on a file, a harness-managed process, a process id, a port, a command, a page, a GitHub Actions run, a pushed commit's CI or a release; the host checks it in code at no model cost and wakes you with the event when it becomes true (once; a condition that already holds when armed is the starting state), or with what it last saw when the deadline passes first. When your work waits on an external job (a CI run, a release or deploy workflow, a long process, a port, a file), arm a watch for it and keep working, talk to the owner or end the turn; never block a turn polling the job (gh run watch, sleep loops). Arming works in any turn, the owner's or one a result, event, goal continuation or wake started, and a wake may arm the next. arm takes watchId, source (a condition: ${WATCH_CONDITION_SHAPES}; or a GitHub source: ${GITHUB_WATCH_SHAPES}), onFire, deadline (at most ${HORIZON_HOURS}h) and optionally purpose and tellOwner (the owner also hears the result on their phone). A command runs in your working directory and is admitted as your own shell call would be (a page as your own fetch call), at arming and at every check; its output comes back fenced as untrusted data. A watch fires once and is then done; this session holds at most ${MAX_AGENT_ARMED_WATCHES} live watches. The host arms one by itself on the CI of a commit you push, a run \`gh workflow run\` or a release script starts and a version tag you push, tells the owner its result, and tells you its id; arm no second watch on those. list shows this session's watches, live and recently ended; get reads one; cancel stops a live one, which then wakes nobody. A turn a third party's words or an owner channel opened reaches only the watches armed at its own standing or below. A wake is steered into your running turn, or starts a new turn once yours has ended.`;
+const DESCRIPTION = `Wait on your own work without polling: arm a watch on a file, a harness-managed process, a process id, a port, a command, a page, a GitHub Actions run, a pushed commit's CI or a release; the host checks it in code at no model cost and wakes you with the event when it becomes true (once; a condition that already holds when armed is the starting state), or with what it last saw when the deadline passes first. When your work waits on an external job (a CI run, a release or deploy workflow, a long process, a port, a file), arm a watch for it and keep working, talk to the owner or end the turn; never block a turn polling the job (gh run watch, sleep loops). Arming works in any turn, the owner's or one a result, event, goal continuation or wake started, and a wake may arm the next. arm takes watchId, source (a condition: ${WATCH_CONDITION_SHAPES}; or a GitHub source: ${GITHUB_WATCH_SHAPES}), onFire, deadline (at most ${HORIZON_HOURS}h) and optionally purpose, tellOwner (the owner also hears the result on their phone) and forRequirement (the id of the open goal requirement the wait stands for: pass it whenever a requirement is done only once the watched job is, so the goal waits on the watch and you are told to act when it ends). A command runs in your working directory and is admitted as your own shell call would be (a page as your own fetch call), at arming and at every check; its output comes back fenced as untrusted data. A watch fires once and is then done; this session holds at most ${MAX_AGENT_ARMED_WATCHES} live watches. The host arms one by itself on the CI of a commit you push, a run \`gh workflow run\` or a release script starts and a version tag you push, tells the owner its result, and tells you its id; arm no second watch on those. list shows this session's watches, live and recently ended; get reads one; cancel stops a live one, which then wakes nobody. A turn a third party's words or an owner channel opened reaches only the watches armed at its own standing or below. A wake is steered into your running turn, or starts a new turn once yours has ended.`;
 
 /** The session's `watch` tool. The port is read at the call, since the session's watch service is built with its store. */
 export function createWatchTool(getPort: () => SessionWatchPort | undefined): ToolDefinition {
@@ -151,6 +160,7 @@ export function createWatchTool(getPort: () => SessionWatchPort | undefined): To
 						onFire: plan(required(input.onFire, "onFire", action), "onFire"),
 						condition: parseSessionWatchSource(required(input.source, "source", action)),
 						...(input.tellOwner === true ? { tellOwner: true } : {}),
+						...(input.forRequirement === undefined ? {} : { forRequirement: input.forRequirement.trim() }),
 						expiresAt: port.now() + watchDeadlineMs(required(input.deadline, "deadline", action)),
 						parentToolName: WATCH_TOOL_NAME,
 					},

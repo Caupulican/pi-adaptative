@@ -15,7 +15,11 @@ import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
 import type { OpenTaskStepProjection } from "../tasks/task-projection.ts";
 import type { GoalAutoContinueState } from "./goal-auto-continue-state.ts";
-import { evaluateGoalContinuation, type GoalContinuationDecision } from "./goal-continuation-controller.ts";
+import {
+	evaluateGoalContinuation,
+	type GoalBoundWatch,
+	type GoalContinuationDecision,
+} from "./goal-continuation-controller.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goal-continuation-defaults.ts";
 import type { GoalState } from "./goal-state.ts";
 import { getLatestGoalStateSnapshot } from "./session-goal-state.ts";
@@ -96,14 +100,53 @@ export interface GoalRuntimeSnapshot {
 	autoContinue?: GoalAutoContinueState;
 }
 
+/** What the session's watches tell a goal's continuation: read at each snapshot, never written to the goal's state. */
+export interface GoalWatchFacts {
+	/** The watches bound to `goalId`'s requirements, one per requirement. */
+	boundTo(goalId: string): readonly GoalBoundWatch[];
+	/** Whether a watch the session armed for itself (a worker's waits are its own) still waits. */
+	anyLive(): boolean;
+	/** The open requirements of `state` System One judged to wait on state outside the session (`goal-outside-wait.ts`). */
+	waitsOutside(state: GoalState): readonly string[];
+}
+
+/**
+ * The live facts a goal's runtime snapshot reads beside the branch (the goal runtime facts port,
+ * `GoalSessionControllerDeps.runtimeFacts`): the session's lanes, its task runtime, its tool tasks and its watches.
+ */
+export interface GoalRuntimeFacts {
+	readonly laneRecords?: readonly LaneRecord[];
+	readonly taskRuntime?: TaskRuntimeProjection;
+	readonly backgroundToolTasks?: readonly BackgroundToolTaskRef[];
+	readonly watches?: GoalWatchFacts;
+}
+
+/** Where a session's goal runtime facts are read: its background lanes, which hold its watches too. */
+export interface GoalRuntimeFactSources {
+	getLaneRecords(): readonly LaneRecord[];
+	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
+	ownWatches(): { readonly goals: GoalWatchFacts };
+}
+
+export function goalRuntimeFactsOf(
+	lanes: GoalRuntimeFactSources,
+	backgroundToolTasks: readonly BackgroundToolTaskRef[],
+): GoalRuntimeFacts {
+	return {
+		laneRecords: lanes.getLaneRecords(),
+		taskRuntime: lanes.getTaskRuntimeSnapshot(),
+		backgroundToolTasks,
+		watches: lanes.ownWatches().goals,
+	};
+}
+
 /** An attempt that carries its retry while it waits for it and once it runs again after it. */
 const RETRY_IN_FLIGHT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>(["suspended", "leased", "running"]);
 
 /** Whether work dispatched for `state` still runs: a worker bound to one of its requirements, or a background tool task of the goal. */
 export function goalHasInFlightWork(
 	state: GoalState,
-	laneRecords: readonly LaneRecord[],
-	backgroundToolTasks: readonly BackgroundToolTaskRef[],
+	{ laneRecords = [], backgroundToolTasks = [] }: GoalRuntimeFacts,
 ): boolean {
 	const inFlightLanes = new Set(
 		laneRecords
@@ -166,6 +209,8 @@ export function buildGoalRuntimeSnapshot(args: {
 	taskRuntime?: TaskRuntimeProjection;
 	/** Live background tool_task records for this session. */
 	backgroundToolTasks?: readonly BackgroundToolTaskRef[];
+	/** The session's watches bound to the goal's requirements, and System One's saved judgments of outside waits. */
+	watches?: GoalWatchFacts;
 }): GoalRuntimeSnapshot {
 	const branchEntries = getActiveSessionBranchEntries(args.sessionManager);
 	let goalState = getLatestGoalStateSnapshot(args.sessionManager);
@@ -282,6 +327,7 @@ export function buildGoalRuntimeSnapshot(args: {
 			.getBranch()
 			.flatMap((entry) => (entry.type === "message" ? [entry.message as AgentMessage] : [])),
 	).getActiveIds();
+	const watches = args.watches;
 	const continuation = evaluateGoalContinuation({
 		state: goalState,
 		settings: { maxStallTurns: args.settings.maxStallTurns },
@@ -295,6 +341,13 @@ export function buildGoalRuntimeSnapshot(args: {
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
 		...(planStepsInFlight > 0 ? { planStepsInFlight, planInFlightStepIds } : {}),
 		...(planRemainingMs !== undefined ? { planRemainingMs } : {}),
+		...(goalState && watches
+			? {
+					boundWatches: watches.boundTo(goalState.goalId),
+					sessionWatchLive: watches.anyLive(),
+					outsideWaitRequirementIds: watches.waitsOutside(goalState),
+				}
+			: {}),
 	});
 
 	return {

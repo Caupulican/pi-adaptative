@@ -16,6 +16,7 @@ export type GoalAutoContinueState =
 	| "owner_answer_needed"
 	| "waiting_for_worker"
 	| "waiting_for_background_task"
+	| "waiting_for_watch"
 	| "off"
 	| "tools_unavailable"
 	| "interrupted"
@@ -56,6 +57,7 @@ const DECIDED_BY_GOAL: Readonly<Record<GoalContinuationReasonCode, GoalAutoConti
 	worker_in_flight: "waiting_for_worker",
 	plan_in_flight: "waiting_for_worker",
 	tool_task_in_flight: "waiting_for_background_task",
+	watch_in_flight: "waiting_for_watch",
 	goal_active: undefined,
 	goal_completion_required: undefined,
 	acceptance_evidence_required: undefined,

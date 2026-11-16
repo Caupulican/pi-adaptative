@@ -148,6 +148,8 @@ export const SESSIONS = {
 		intentOutage: (cause: string) =>
 			`O System One não conseguiu avaliar se a sua mensagem define um objetivo (${cause}); nenhum objetivo foi iniciado.`,
 		intentNotStarted: (cause: string) => `Um objetivo pedido pela sua mensagem não foi iniciado: ${cause}`,
+		outsideWaitOutage: (cause: string) =>
+			`O System One não conseguiu avaliar se os requisitos abertos do objetivo aguardam trabalho externo (${cause}); o objetivo segue apenas os monitoramentos vinculados a um requisito.`,
 		intentNoteFailed: (cause: string) =>
 			`Um objetivo foi iniciado a partir da sua mensagem, mas o aviso ao agente sobre ele não foi entregue: ${cause}`,
 		statusWords: GOAL_STATUS_WORDS,

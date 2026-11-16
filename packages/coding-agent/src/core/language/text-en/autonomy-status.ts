@@ -191,6 +191,7 @@ export const AUTONOMY_STATUS = {
 		owner_answer_needed: "Automatic continuation is stopped: the goal is blocked and needs your decision or answer.",
 		waiting_for_worker: "Automatic continuation is waiting for a helper agent to finish.",
 		waiting_for_background_task: "Automatic continuation is waiting for a background task to finish.",
+		waiting_for_watch: "Automatic continuation is waiting for a watch on outside work to report.",
 		off: "Automatic continuation is turned off, so the goal advances only when you send a message.",
 		tools_unavailable: "Automatic continuation cannot run because the goal tools are not available in this session.",
 		interrupted:

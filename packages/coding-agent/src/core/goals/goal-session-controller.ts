@@ -14,8 +14,6 @@ import {
 	isInterruptedAssistantStopReason,
 	type PromptOptions,
 } from "../agent-session-contracts.ts";
-import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import {
@@ -25,7 +23,6 @@ import {
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
-import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
@@ -56,6 +53,7 @@ import {
 import { type ObjectiveTerminalPort, settleObjectiveTerminal } from "./goal-objective-terminal.ts";
 import {
 	buildGoalRuntimeSnapshot,
+	type GoalRuntimeFacts,
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 	goalHasInFlightWork,
@@ -84,9 +82,8 @@ export interface GoalSessionControllerDeps {
 	 */
 	timers: TimerSource;
 	getModel(): GoalStopModel | undefined;
-	getLaneRecords(): readonly LaneRecord[];
-	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
-	getBackgroundToolTasks(): readonly BackgroundToolTaskRef[];
+	/** The live facts the runtime snapshot reads beside the branch: lanes, task runtime, tool tasks and bound watches. */
+	runtimeFacts(): GoalRuntimeFacts;
 	/** The owner evidence a started goal records the owner source it came from in. */
 	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "sourceOfEntry" | "currentTurnSources">;
 	synchronizeGoalState(state: GoalState): void;
@@ -984,9 +981,7 @@ export class GoalSessionController {
 			settings,
 			now: () => new Date(continuationClock.now()).toISOString(),
 			planNow: () => planClock.now(),
-			laneRecords: this.deps.getLaneRecords(),
-			taskRuntime: this.deps.getTaskRuntimeSnapshot(),
-			backgroundToolTasks: this.deps.getBackgroundToolTasks(),
+			...this.deps.runtimeFacts(),
 		});
 		const autoContinue = this.deps.describeAutoContinue?.(snapshot);
 		return autoContinue === undefined ? snapshot : { ...snapshot, autoContinue };
@@ -1097,7 +1092,7 @@ export class GoalSessionController {
 		if (!state) return false;
 		const reopened = reopenUnsupportedGoalCompletion(
 			state,
-			this.deps.getTaskRuntimeSnapshot()?.objectives[goalObjectiveId(state.goalId)]?.objective.status,
+			this.deps.runtimeFacts().taskRuntime?.objectives[goalObjectiveId(state.goalId)]?.objective.status,
 			new Date().toISOString(),
 		);
 		if (reopened === undefined) return false;
@@ -1262,7 +1257,7 @@ export class GoalSessionController {
 			if (!state || (!isGoalExecutionActive(state.status) && getGoalCompletionRefusal(state) === undefined)) {
 				return stop("continuation_not_allowed");
 			}
-			const revisionBefore = this.deps.getTaskRuntimeSnapshot()?.lastOrdinal;
+			const revisionBefore = this.deps.runtimeFacts().taskRuntime?.lastOrdinal;
 			const { result: once, disposed } = await this.runPrimaryCycle(controller, options);
 			if (disposed) return stop("session_disposed");
 			if (once.turnOutcome === "interrupted") return stop("turn_interrupted");
@@ -1275,7 +1270,7 @@ export class GoalSessionController {
 			}
 			const route = controller.getLastRoute();
 			if (route?.route === "wait_for_worker" || route?.route === "wait_for_tool") return stop("worker_in_flight");
-			const moved = once.submitted || this.deps.getTaskRuntimeSnapshot()?.lastOrdinal !== revisionBefore;
+			const moved = once.submitted || this.deps.runtimeFacts().taskRuntime?.lastOrdinal !== revisionBefore;
 			idleCycles = moved ? 0 : idleCycles + 1;
 			if (idleCycles >= 2) {
 				this.deps.emitWarning(
@@ -1310,7 +1305,7 @@ export class GoalSessionController {
 		}
 
 		const isTransient = classified.retryable || getAutoResumableReasonPrefix(reason) !== undefined;
-		const inFlight = goalHasInFlightWork(state, this.deps.getLaneRecords(), this.deps.getBackgroundToolTasks());
+		const inFlight = goalHasInFlightWork(state, this.deps.runtimeFacts());
 		const currentStreak = state.systemFailureStreak ?? 0;
 
 		if (!this.stopActiveGoal("blocked", reason, refusedBy)) return;

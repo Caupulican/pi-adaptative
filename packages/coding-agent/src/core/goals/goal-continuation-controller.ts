@@ -67,6 +67,57 @@ function planWaitTiming(
 	return { timedOut: false, resumeAt: new Date(nowMs + remainingMs).toISOString() };
 }
 
+/**
+ * A watch bound to one of the goal's requirements (the `watch` tool's `forRequirement`), as the session's watch ledger holds
+ * it: the latest armed for that requirement. Live while it still waits before its end time, with what is left of that wait
+ * in milliseconds on the routines clock its end time is on; else how it ended.
+ */
+export interface GoalBoundWatch {
+	readonly requirementId: string;
+	readonly watchId: string;
+	readonly status: "live" | "fired" | "timed-out" | "cancelled";
+	readonly remainingMs?: number;
+}
+
+/** The latest bound watch of each open requirement: those still waiting, and those that ended while it is open. */
+function boundWatchesOf(
+	state: GoalState,
+	watches: readonly GoalBoundWatch[] | undefined,
+): { live: GoalBoundWatch[]; ended: GoalBoundWatch[] } {
+	const open = new Set(state.requirements.filter((r) => r.status === "open").map((r) => r.id));
+	const bound = (watches ?? []).filter((watch) => open.has(watch.requirementId));
+	return {
+		live: bound.filter((watch) => watch.status === "live"),
+		ended: bound.filter((watch) => watch.status !== "live"),
+	};
+}
+
+/**
+ * The wait on live bound watches: each wakes the session with its result or, at its end time, with what it last saw, so
+ * the loop has nothing to do until then. The resume instant (the earliest end time, turned from the routines clock's
+ * remaining time into the continuation clock) only recovers a lost wake, as a plan wait's deadline does.
+ */
+function watchWait(
+	live: readonly GoalBoundWatch[],
+	baseDecision: GoalContinuationBaseDecision,
+	now: string | undefined,
+	message: string,
+): GoalContinuationDecision {
+	const remaining = live.flatMap((watch) => (watch.remainingMs === undefined ? [] : [watch.remainingMs]));
+	const timing = planWaitTiming(remaining.length > 0 ? Math.max(1, Math.min(...remaining)) : undefined, now);
+	return {
+		...baseDecision,
+		action: "waiting",
+		reasonCode: "watch_in_flight",
+		message,
+		...(timing.resumeAt ? { resumeAt: timing.resumeAt } : {}),
+	};
+}
+
+function namedWatches(watches: readonly GoalBoundWatch[]): string {
+	return watches.map((watch) => `${watch.watchId} (requirement ${watch.requirementId}, ${watch.status})`).join(", ");
+}
+
 function planWaitTimeoutMessage(steps: number, maxWaitMs: number, stepIds?: readonly string[]): string {
 	const hours = Math.round((maxWaitMs / 3_600_000) * 10) / 10;
 	const named = stepIds && stepIds.length > 0 ? ` (${stepIds.join(", ")})` : "";
@@ -90,6 +141,7 @@ export type GoalContinuationReasonCode =
 	| "worker_in_flight"
 	| "tool_task_in_flight"
 	| "plan_in_flight"
+	| "watch_in_flight"
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
 	| "lane_sync_required"
@@ -266,6 +318,16 @@ export function evaluateGoalContinuation(args: {
 	 * not a reason to keep spending continuation turns on an answer the host will never accept.
 	 */
 	activeVerificationIds?: readonly string[];
+	/**
+	 * The watches bound to the goal's requirements, the latest per requirement (`GoalWatchFacts.boundTo`). While every open
+	 * requirement waits on a live one, the loop waits for its wake as it does for a bound worker; a requirement still open
+	 * after its watch ended is work to act on.
+	 */
+	boundWatches?: readonly GoalBoundWatch[];
+	/** Whether a watch the session armed for itself still waits. */
+	sessionWatchLive?: boolean;
+	/** Open requirements System One judged, at p >= 0.90, to wait on state outside the session (`goal-outside-wait.ts`). */
+	outsideWaitRequirementIds?: readonly string[];
 }): GoalContinuationDecision {
 	if (!args.state) {
 		return {
@@ -349,6 +411,15 @@ export function evaluateGoalContinuation(args: {
 				reasonCode: "tool_task_in_flight",
 				message: `A system interruption occurred, but background tool_task(s) ${[...args.inFlightToolTaskIds].join(", ")} are still running; waiting before continuing.`,
 			};
+		}
+		const blockedWatches = boundWatchesOf(state, args.boundWatches).live;
+		if (blockedWatches.length > 0) {
+			return watchWait(
+				blockedWatches,
+				baseDecision,
+				args.now,
+				`A system interruption occurred, but watch(es) ${namedWatches(blockedWatches)} still wait on outside work for open requirements; waiting for their wake before stopping.`,
+			);
 		}
 
 		return {
@@ -546,12 +617,47 @@ export function evaluateGoalContinuation(args: {
 		};
 	}
 
+	// Every open requirement waits on outside work a live watch follows: a pass now has nothing to advance.
+	const watched = boundWatchesOf(state, args.boundWatches);
+	const waitingOnWatch = new Set(watched.live.map((watch) => watch.requirementId));
+	if (waitingOnWatch.size > 0 && openRequirementIds.every((id) => waitingOnWatch.has(id))) {
+		return watchWait(
+			watched.live,
+			baseDecision,
+			args.now,
+			`Every open requirement waits on a live watch: ${namedWatches(watched.live)}. Each wakes you with its result, or with what it last saw when its deadline passes.`,
+		);
+	}
+
 	if (args.settings.maxStallTurns > 0 && state.stallTurns >= args.settings.maxStallTurns) {
 		return {
 			...baseDecision,
 			action: "continue",
 			reasonCode: "stall_limit_reached",
 			message: `The goal has reached the recovery threshold of ${args.settings.maxStallTurns} unchanged turns. Do not repeat the same operation: inspect failure evidence, use a different approach, tool, or route, and keep working unless a true owner/approval boundary is proven. ${SHARED_PREMISE_CHECK}`,
+		};
+	}
+
+	if (watched.ended.length > 0) {
+		return {
+			...baseDecision,
+			action: "continue",
+			reasonCode: "goal_active",
+			message: `Watch(es) ${namedWatches(watched.ended)} ended while their requirement is still open. Act on each result: record the requirement's evidence when the outside work succeeded; repair it when it failed; when it is still pending, arm a new watch on it with forRequirement.`,
+		};
+	}
+
+	// System One judged these requirements to wait on outside state, and nothing the session armed follows any of it.
+	const linked = new Set((args.boundWatches ?? []).map((watch) => watch.requirementId));
+	const unwatched = args.sessionWatchLive
+		? []
+		: (args.outsideWaitRequirementIds ?? []).filter((id) => openRequirementIds.includes(id) && !linked.has(id));
+	if (unwatched.length > 0) {
+		return {
+			...baseDecision,
+			action: "continue",
+			reasonCode: "goal_active",
+			message: `Requirement(s) ${unwatched.join(", ")} wait on state outside the session, and no watch follows it. Read that state now; while it is still pending, arm a watch on it with forRequirement set to the requirement and end the turn instead of polling.`,
 		};
 	}
 
