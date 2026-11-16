@@ -30,6 +30,7 @@ import { defineTool, type ToolDefinition } from "../extensions/types.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { SessionWatchView } from "../watches/session-watch-service.ts";
+import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
 import { MAX_ROUTINE_ID_CHARS, MAX_ROUTINE_ID_PATTERN, MAX_ROUTINE_PROMPT_CHARS } from "./routine-contract.ts";
 import { TASK_WATCH_TOOL_NAME } from "./routine-tool-names.ts";
@@ -59,6 +60,13 @@ export interface TaskWatchPort {
 	 * for it; one another runtime or the session armed is absent to it.
 	 */
 	cancel(worker: WorkerWatchAuthority, watchId: string, signal?: AbortSignal): Promise<void>;
+	/**
+	 * The port the host arms the worker's own waits through after its calls (a push's CI, a dispatched run), in the
+	 * worker's slots with its wakes going to it (`watch-auto-arm.ts`); undefined while the session holds no watches.
+	 */
+	autoArm(worker: WorkerWatchAuthority): WatchAutoArmPort | undefined;
+	/** Tells the worker runtime a note of the host's (what it armed for the worker), once per key. */
+	noteWorker(worker: WorkerWatchAuthority, text: string, key: string): void;
 }
 
 /** The worker the tool arms for: its runtime id, its lane's scope and its own gate, which judges the call a check would make. */

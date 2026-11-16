@@ -92,8 +92,8 @@ export const CHAT = {
 			run: (runId: number, repo: string) => `execução ${runId} do GitHub em ${repo}`,
 			ci: (sha: string) => `o CI do commit ${sha}`,
 			release: (tag: string) => `release ${tag}`,
-			runEnded: (subject: string, conclusion: string, failedJob: string | undefined) =>
-				`${subject} terminou: ${conclusion}${failedJob === undefined ? "" : ` (job com falha: ${failedJob})`}`,
+			runEnded: (subject: string, conclusion: string, failedJob: string | undefined, jobUnread: boolean) =>
+				`${subject} terminou: ${conclusion}${failedJob !== undefined ? ` (job com falha: ${failedJob})` : jobUnread ? " (não foi possível ler o job com falha)" : ""}`,
 			released: (subject: string) => `${subject} foi publicada`,
 		},
 		phone: {

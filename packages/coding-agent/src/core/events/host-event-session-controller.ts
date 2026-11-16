@@ -39,8 +39,9 @@ export interface HostEventSessionControllerDeps {
 	/** Records how a root delivery was accepted, for `/proactivity status`. */
 	rootDelivered(delivery: ParentWakeDelivery): void;
 	/**
-	 * Whether a CI result reaches the session through one of its own watches (`SessionWatchService.reportsCi`), so its
-	 * root delivery `deliveryId` would be a second copy of it; absent where no session watch is held.
+	 * Whether a CI result reaches the session through one of its own watches, which fire on it in the same call
+	 * (`SessionWatchService.claimCi`), so its root delivery `deliveryId` would be a second copy of it; absent where no
+	 * session watch is held.
 	 */
 	reportedByWatch?(event: CiAttemptTerminalEvent, deliveryId: string): boolean;
 	deliverParent(input: ParentInputDelivery, options: ParentInputDeliveryOptions): Promise<ParentInputReceipt>;

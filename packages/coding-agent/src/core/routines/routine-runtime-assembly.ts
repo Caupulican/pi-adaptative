@@ -32,6 +32,7 @@ import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
 import {
 	SessionWatchLedger,
@@ -39,7 +40,7 @@ import {
 	sessionWatchLedgerPath,
 } from "../watches/session-watch-ledger.ts";
 import { SessionWatchService } from "../watches/session-watch-service.ts";
-import type { WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
+import type { AutoArmContext, WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
 import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
@@ -265,6 +266,44 @@ export class RoutineRuntimeAssembly {
 					routines.sessionWatches.cancel(watchId, { kind: "worker", runtimeId: worker.runtimeId }, signal);
 				else await routines.session.cancelForWorker(worker, watchId, signal);
 			},
+			autoArm: (worker) => {
+				const routines = runtime();
+				return (
+					routines &&
+					this.autoWatchPort(routines.sessionWatches, this.deps.getTimers().port("routines"), () => ({
+						armer: { kind: "worker", runtimeId: worker.runtimeId, scope: worker.scope },
+					}))
+				);
+			},
+			// A runtime that does not take the note now still hears each watch's result when it fires.
+			noteWorker: (worker, text, key) => {
+				wakeWorkerRuntime(this.workerWakeHost(), worker.runtimeId, text, key);
+			},
+		};
+	}
+
+	/**
+	 * The port the host arms waits through after a caller's own calls (`watch-auto-arm.ts`): this session's watches, read
+	 * through the host's GitHub link, each telling the owner its result on the phone besides waking its armer.
+	 */
+	private autoWatchPort(
+		sessionWatches: SessionWatchService,
+		timers: TimerPort,
+		armingContext: () => AutoArmContext,
+	): WatchAutoArmPort {
+		return {
+			followsCi: () => this.host.githubWatches().followsCi,
+			github: () => this.host.githubWatches().current,
+			armingContext,
+			armedOn: (source) => sessionWatches.armedOn(source),
+			arm: (watch, { armer, served }) =>
+				sessionWatches.arm({
+					...watch,
+					armedBy: armer,
+					tellOwner: true,
+					...(served === undefined ? {} : { served }),
+				}),
+			timers,
 		};
 	}
 
@@ -721,23 +760,10 @@ export class RoutineRuntimeAssembly {
 			},
 			now: () => routineTimers.now(),
 		};
-		const autoWatches: WatchAutoArmPort = {
-			followsCi: () => this.host.githubWatches().followsCi,
-			readsGithub: () => this.host.githubWatches().readsGithub,
-			armingContext: () => {
-				const served = this.armingEntry();
-				return { authority: authority(), ...(served === undefined ? {} : { served }) };
-			},
-			armedOn: (source) => sessionWatches.armedOn(source),
-			arm: (watch, { authority: armedUnder, served }) =>
-				sessionWatches.arm({
-					...watch,
-					armedBy: { kind: "auto", authority: armedUnder },
-					tellOwner: true,
-					...(served === undefined ? {} : { served }),
-				}),
-			now: () => routineTimers.now(),
-		};
+		const autoWatches = this.autoWatchPort(sessionWatches, routineTimers, () => {
+			const served = this.armingEntry();
+			return { armer: { kind: "auto", authority: authority() }, ...(served === undefined ? {} : { served }) };
+		});
 		return {
 			scheduler,
 			session,

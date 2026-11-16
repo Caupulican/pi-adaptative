@@ -2,23 +2,34 @@
  * The host's own arming of the session's waits on what its tool calls start outside it: a `git push` from the session's
  * checkout arms a `ci` watch on each commit it pushed (while the host's CI source follows the checkout), a pushed version
  * tag a `release` watch, and a `gh workflow run` or a release script (`npm run release*` and its pnpm, yarn and bun
- * forms) a `github_run` watch on each Actions run URL its output names (a run or a release only while the host offers its
- * reader of GitHub). Each is armed once per subject (a subject the session already watches, whoever armed it, is left
- * alone), under the authority of the turn the call ran in and charged to the entry it was made at (both read when the call
- * started), and
- * tells its result on the owner's phone besides waking the session. What was armed, and what could not be (the session's
- * watch slots are full), is told to the model in one note per call, steered into the running turn.
+ * forms) a `github_run` watch on each Actions run URL its output names that GitHub created after the call began (a run or a
+ * release only while the host offers its reader of GitHub). A `gh workflow run` whose output names no run (older gh
+ * prints none) is followed by listing that workflow's dispatched runs created since the call began, a few times over two
+ * minutes, until GitHub lists one. A pushed tag whose release existed before the call arms nothing. Each is armed once per
+ * subject (a subject the session already watches, whoever armed it, is left alone), for whoever made the call: the
+ * session, under the authority of the turn the call ran in and charged to the entry it was made at (both read when the
+ * call started), or a worker runtime, in its own slots, its wakes going to it. Each tells its result on the owner's phone
+ * besides waking its armer. What was armed, what is still looked for and what was not armed (and why: nothing reads it,
+ * it was there before the call, the slots are full) is told to the armer in one note per call.
  *
- * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once. A call
- * handed off to the background is read when its task reaches its terminal, from the task's output.
+ * Arms are made one call at a time, in the order the calls ended, so two calls naming one subject arm it once; a read of
+ * GitHub that waits for a run to be listed waits outside that order. A call handed off to the background is read when its
+ * task reaches its terminal, from the task's output.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
-import type { TurnAuthority } from "../turn-origin.ts";
-import { describeGithubWatchSource, type GithubWatchSource, githubWatchSubject } from "./github-watch-source.ts";
-import type { SessionWatchServed } from "./session-watch-ledger.ts";
+import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
+import { NO_CI_SOURCE, NO_READER } from "./github-watch-poller.ts";
+import {
+	describeGithubWatchSource,
+	type GithubCreatedRun,
+	type GithubWatchReader,
+	type GithubWatchSource,
+	githubWatchSubject,
+} from "./github-watch-source.ts";
+import type { SessionWatchArmer, SessionWatchServed } from "./session-watch-ledger.ts";
 import type { SessionWatchView } from "./session-watch-service.ts";
 
 /** The note telling the model which watches the host armed after one of its calls; the host's own words. */
@@ -32,6 +43,12 @@ const RELEASE_DEADLINE_MS = 120 * MINUTE_MS;
 /** Distinct subjects one call's output arms at most; the session's watch slots bound the rest. */
 const MAX_SUBJECTS_PER_CALL = 8;
 const GIT_TIMEOUT_MS = 5_000;
+/**
+ * When GitHub is asked again for the run a `gh workflow run` started, after the call ended: GitHub creates a dispatched
+ * run a few seconds after accepting the dispatch, so the first listing may hold none yet.
+ */
+const DISPATCH_LISTING_DELAYS_MS = [3_000, 10_000, 30_000, 60_000] as const;
+const DISPATCH_LISTING_TIMEOUT_MS = 60_000;
 
 /** A tag a release is cut from: a version, optionally v-prefixed, with a pre-release or build suffix. */
 const VERSION_TAG = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/u;
@@ -41,6 +58,10 @@ const PUSHED_REF =
 const RUN_URL = /https:\/\/[A-Za-z0-9.-]+\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/actions\/runs\/(\d{1,19})/gu;
 /** A revision a push names that may be handed to `git rev-parse`: a ref name or an abbreviated sha, never an option. */
 const REVISION = /^[A-Za-z0-9_][A-Za-z0-9_./+-]{0,254}$/u;
+/** A repository `gh -R` names: owner/name, optionally behind a host. */
+const REPO_ARGUMENT = /^(?:[A-Za-z0-9.-]+\/)?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})$/u;
+/** `gh workflow run` options that take a value, besides the ones read here (`--ref`, `--repo`). */
+const DISPATCH_VALUE_OPTIONS = new Set(["-f", "--field", "-F", "--raw-field"]);
 const PACKAGE_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const LEADING_WRAPPERS = new Set(["sudo", "command", "exec", "nohup", "time", "nice", "doas", "env"]);
 
@@ -55,32 +76,36 @@ export interface AutoWatchRequest {
 }
 
 /**
- * Whom an arming answers to, read when the call starts: the authority of the turn the call runs in and the transcript
- * entry it was made at (its wakes are charged to that entry's spend window), so a call read only at its background
- * terminal still arms for the turn that made it.
+ * Whom an arming answers to, read when the call starts: the session under the authority of the turn the call runs in and
+ * the transcript entry it was made at (its wakes are charged to that entry's spend window), so a call read only at its
+ * background terminal still arms for the turn that made it; or the worker runtime that made the call.
  */
 export interface AutoArmContext {
-	readonly authority: TurnAuthority;
+	readonly armer: Extract<SessionWatchArmer, { readonly kind: "auto" | "worker" }>;
 	readonly served?: SessionWatchServed;
 }
 
-/** The session's watches as the host arms them (`SessionWatchService` under an `auto` armer that tells the owner). */
+/** The session's watches as the host arms them (`SessionWatchService`, for the session or a worker, telling the owner). */
 export interface WatchAutoArmPort {
 	/** Whether the host's CI source follows the session's checkout, which a `ci` watch is read from. */
 	followsCi(): boolean;
-	/** Whether the host offers its reader of GitHub, which a run or a release watch is read through. */
-	readsGithub(): boolean;
+	/**
+	 * The host's reader of GitHub while it offers one: a run or a release watch is read through it, and what a call started
+	 * is told apart through it from what was there before the call.
+	 */
+	github(): GithubWatchReader | undefined;
 	armingContext(): AutoArmContext;
 	armedOn(source: GithubWatchSource): SessionWatchView | undefined;
 	arm(request: AutoWatchRequest, context: AutoArmContext): Promise<SessionWatchView>;
-	now(): number;
+	/** The session's routines clock: a watch's end time is on it, and the host's waits for a dispatched run are timed on it. */
+	readonly timers: TimerPort;
 }
 
 export interface WatchAutoArmDeps {
-	/** Undefined where the session holds no watches (a worker, or before its routine runtime is built). */
+	/** Undefined where the session holds no watches (before its routine runtime is built, or a session without one). */
 	port(): WatchAutoArmPort | undefined;
 	cwd(): string;
-	/** Steers the model-facing note into the running turn; resolves once it is durable. */
+	/** Tells the armer the model-facing note; resolves once it is durable. */
 	note(text: string): Promise<void>;
 	/** Arming or its note failed while the session is not disposed: the owner is told. */
 	failed(error: unknown): void;
@@ -92,14 +117,33 @@ interface StartedCall {
 	readonly toolName: string;
 	/** Set when the call starts in a session that holds watches. */
 	readonly context?: AutoArmContext;
+	/**
+	 * When the call began, on the system clock GitHub's own creation times are compared with, cut to the whole second
+	 * GitHub keeps: a run or release created before it was not started by the call.
+	 */
+	readonly startedAt: number;
 	readonly pushes: boolean;
-	readonly dispatches: boolean;
+	readonly dispatches: readonly DispatchedWorkflow[];
 	readonly releases: boolean;
+}
+
+/** What one `gh workflow run` dispatches: the workflow, and the ref and repository when it names them. */
+export interface DispatchedWorkflow {
+	readonly workflow: string;
+	readonly ref?: string;
+	readonly repo?: string;
 }
 
 interface PlannedWatch {
 	readonly source: GithubWatchSource;
 	readonly deadlineMs: number;
+}
+
+/** What a call's output was read as: the watches to arm, the subjects armed nowhere and why, the dispatches looked for. */
+interface CallPlan {
+	readonly planned: readonly PlannedWatch[];
+	readonly unwatched: readonly string[];
+	readonly dispatched: readonly DispatchedWorkflow[];
 }
 
 /** The command segments a call runs: a shell call's lexed segments, or a process call's executable and arguments. */
@@ -139,9 +183,27 @@ function executableName(token: string): string {
 	return base.replace(/\.(?:exe|cmd)$/iu, "").toLowerCase();
 }
 
-/** `gh workflow run ...`: a workflow dispatch, whose output names the run it started. */
-function dispatchesWorkflow(tokens: readonly string[]): boolean {
-	return tokens[0] === "gh" && tokens[1] === "workflow" && tokens[2] === "run";
+/** `gh workflow run <workflow> [--ref ref] [-R repo]`: the workflow it dispatches; undefined for any other command. */
+function dispatchedWorkflow(tokens: readonly string[]): DispatchedWorkflow | undefined {
+	if (tokens[0] !== "gh" || tokens[1] !== "workflow" || tokens[2] !== "run") return undefined;
+	let workflow: string | undefined;
+	let ref: string | undefined;
+	let repo: string | undefined;
+	for (let index = 3; index < tokens.length; index += 1) {
+		const token = tokens[index] ?? "";
+		const [flag = "", inline] = token.startsWith("--") ? token.split(/=(.*)/su, 2) : [token, undefined];
+		const value = () => inline ?? tokens[++index];
+		if (flag === "--ref" || flag === "-r") ref = value();
+		else if (flag === "--repo" || flag === "-R") repo = REPO_ARGUMENT.exec(value() ?? "")?.[1];
+		else if (DISPATCH_VALUE_OPTIONS.has(flag)) value();
+		else if (!flag.startsWith("-") && workflow === undefined) workflow = token;
+	}
+	if (workflow === undefined || workflow.length === 0) return undefined;
+	return {
+		workflow,
+		...(ref !== undefined && REVISION.test(ref) && !ref.includes("..") ? { ref } : {}),
+		...(repo === undefined ? {} : { repo }),
+	};
 }
 
 /** A package script whose name starts with `release` (`npm run release:patch`, `pnpm release`, `yarn run release`). */
@@ -153,15 +215,18 @@ function runsReleaseScript(tokens: readonly string[]): boolean {
 }
 
 /** What a call starting now may start outside the session; undefined for a call that starts nothing a watch reads. */
-export function classifyStartedCall(toolName: string, args: unknown): StartedCall | undefined {
+export function classifyStartedCall(toolName: string, args: unknown): Omit<StartedCall, "startedAt"> | undefined {
 	const segments = commandSegments(toolName, args).map(invoked);
-	const call: StartedCall = {
+	const call = {
 		toolName,
 		pushes: toolCallPushesGitAtCwd(toolName, args),
-		dispatches: segments.some(dispatchesWorkflow),
+		dispatches: segments.flatMap((segment) => {
+			const dispatch = dispatchedWorkflow(segment);
+			return dispatch ? [dispatch] : [];
+		}),
 		releases: segments.some(runsReleaseScript),
 	};
-	return call.pushes || call.dispatches || call.releases ? call : undefined;
+	return call.pushes || call.dispatches.length > 0 || call.releases ? call : undefined;
 }
 
 /** One ref a push updated: a version tag it created, or the revision a branch now points at. */
@@ -249,15 +314,24 @@ function watchIdOf(source: GithubWatchSource): string {
 	return `auto-release-${shortHash(githubWatchSubject(source))}`;
 }
 
-function purposeOf(source: GithubWatchSource): string {
+function purposeOf(source: GithubWatchSource, armer: AutoArmContext["armer"]): string {
 	const subject = describeGithubWatchSource(source);
-	if (source.type === "ci") return `${subject}, pushed by this session`;
-	if (source.type === "github_run") return `${subject}, started by this session`;
-	return `${subject}, whose tag this session pushed`;
+	const who = armer.kind === "worker" ? "this worker" : "this session";
+	if (source.type === "ci") return `${subject}, pushed by ${who}`;
+	if (source.type === "github_run") return `${subject}, started by ${who}`;
+	return `${subject}, whose tag ${who} pushed`;
 }
 
 const ON_FIRE =
 	"Read the result. On a failure, inspect the failed job and repair its cause; once it succeeded, continue the work that waited on it. When the deadline passes first, find out why it has not finished.";
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function dispatchText(dispatch: DispatchedWorkflow): string {
+	return `workflow ${dispatch.workflow}${dispatch.ref === undefined ? "" : ` on ${dispatch.ref}`}${dispatch.repo === undefined ? "" : ` of ${dispatch.repo}`}`;
+}
 
 export class WatchAutoArm {
 	private readonly deps: WatchAutoArmDeps;
@@ -272,7 +346,12 @@ export class WatchAutoArm {
 	noteStart(toolCallId: string, toolName: string, args: unknown): void {
 		const call = classifyStartedCall(toolName, args);
 		const port = call && this.deps.port();
-		if (call && port) this.started.set(toolCallId, { ...call, context: port.armingContext() });
+		if (call && port)
+			this.started.set(toolCallId, {
+				...call,
+				context: port.armingContext(),
+				startedAt: Math.floor(OWNER_STOP_CLOCK.now() / 1_000) * 1_000,
+			});
 	}
 
 	/**
@@ -292,18 +371,44 @@ export class WatchAutoArm {
 		const call = this.started.get(toolCallId);
 		if (!call) return;
 		this.started.delete(toolCallId);
-		this.queue = this.queue
-			.then(() => this.armFor(call, output))
-			.catch((error: unknown) => {
-				if (!this.deps.disposed()) this.deps.failed(error);
-			});
+		this.enqueue(() => this.armFor(call, output));
+	}
+
+	/** Runs one arming step after the ones before it; a failure is the owner's to hear, never the queue's end. */
+	private enqueue(step: () => Promise<void>): void {
+		this.queue = this.queue.then(step).catch((error: unknown) => {
+			if (!this.deps.disposed()) this.deps.failed(error);
+		});
 	}
 
 	private async armFor(call: StartedCall, output: string): Promise<void> {
 		const port = this.deps.port();
 		const { context } = call;
 		if (!port || !context || this.deps.disposed()) return;
-		const planned = await this.plan(call, output, port);
+		const plan = await this.plan(call, output, port);
+		const { armed, missed } = await this.armPlanned(plan.planned, call, port, context);
+		this.tell([
+			...(armed.length === 0
+				? []
+				: [
+						`The host armed watches for what your last ${call.toolName} call started: ${armed.join("; ")}. Each result wakes you and is told to the owner; keep working instead of polling it, and arm no second watch on it.`,
+					]),
+			...(plan.dispatched.length === 0
+				? []
+				: [
+						`Your ${call.toolName} call named no run it started, so the host is asking GitHub for the run of ${plan.dispatched.map(dispatchText).join("; ")} created since the call began, for up to two minutes, and arms a watch on it once listed; you are told then.`,
+					]),
+			...this.missedLines([...plan.unwatched, ...missed]),
+		]);
+		for (const dispatch of plan.dispatched) this.followDispatch(call, dispatch, 0);
+	}
+
+	private async armPlanned(
+		planned: readonly PlannedWatch[],
+		call: StartedCall,
+		port: WatchAutoArmPort,
+		context: AutoArmContext,
+	): Promise<{ armed: string[]; missed: string[] }> {
 		const armed: string[] = [];
 		const missed: string[] = [];
 		for (const { source, deadlineMs } of planned) {
@@ -313,10 +418,10 @@ export class WatchAutoArm {
 				await port.arm(
 					{
 						watchId,
-						purpose: purposeOf(source),
+						purpose: purposeOf(source, context.armer),
 						onFire: ON_FIRE,
 						condition: source,
-						expiresAt: port.now() + deadlineMs,
+						expiresAt: port.timers.now() + deadlineMs,
 						parentToolName: call.toolName,
 					},
 					context,
@@ -325,59 +430,169 @@ export class WatchAutoArm {
 					`${watchId} on ${describeGithubWatchSource(source)} (deadline in ${deadlineMs / MINUTE_MS} minutes)`,
 				);
 			} catch (error) {
-				missed.push(
-					`${describeGithubWatchSource(source)}: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				missed.push(`${describeGithubWatchSource(source)}: ${errorText(error)}`);
 			}
 		}
-		if (armed.length === 0 && missed.length === 0) return;
-		const lines = [
-			...(armed.length === 0
-				? []
-				: [
-						`The host armed watches for what your last ${call.toolName} call started: ${armed.join("; ")}. Each result wakes you and is told to the owner; keep working instead of polling it, and arm no second watch on it.`,
-					]),
-			...(missed.length === 0
-				? []
-				: [
-						`The host could not arm a watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`,
-					]),
-		];
-		// The note lands at the session's next provider boundary, which may be the next run's; the arms of later calls never
-		// wait for it.
+		return { armed, missed };
+	}
+
+	private missedLines(missed: readonly string[]): string[] {
+		return missed.length === 0
+			? []
+			: [`The host armed no watch on: ${missed.join("; ")}. Wait on it yourself if your work needs its result.`];
+	}
+
+	/** Tells the armer the lines, without holding the arms of later calls: the note may land only at a later boundary. */
+	private tell(lines: readonly string[]): void {
+		if (lines.length === 0) return;
 		void this.deps.note(lines.join("\n")).catch((error: unknown) => {
 			if (!this.deps.disposed()) this.deps.failed(error);
 		});
 	}
 
 	/**
+	 * Asks GitHub, after the next delay, for the runs of a dispatched workflow created since the call began, outside the
+	 * arming order; the oldest one no watch of the session holds yet is armed in that order. Asked again after each delay
+	 * until one is listed, then the armer is told none was.
+	 */
+	private followDispatch(call: StartedCall, dispatch: DispatchedWorkflow, attempt: number): void {
+		const port = this.deps.port();
+		const delay = DISPATCH_LISTING_DELAYS_MS[attempt];
+		if (!port || delay === undefined || this.deps.disposed()) return;
+		port.timers.setTimeout(() => {
+			void this.listDispatched(call, dispatch, attempt);
+		}, delay);
+	}
+
+	private async listDispatched(call: StartedCall, dispatch: DispatchedWorkflow, attempt: number): Promise<void> {
+		const port = this.deps.port();
+		const reader = port?.github();
+		if (!port || this.deps.disposed()) return;
+		const last = attempt + 1 >= DISPATCH_LISTING_DELAYS_MS.length;
+		let runs: readonly GithubCreatedRun[];
+		try {
+			if (!reader) throw new Error(NO_READER);
+			runs = await reader.runsCreatedSince(
+				dispatch.repo,
+				call.startedAt,
+				{
+					workflow: dispatch.workflow,
+					event: "workflow_dispatch",
+					...(dispatch.ref === undefined ? {} : { branch: dispatch.ref }),
+				},
+				AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS),
+			);
+		} catch (error) {
+			if (this.deps.disposed()) return;
+			if (!last) this.followDispatch(call, dispatch, attempt + 1);
+			else this.tell(this.missedLines([`the run of ${dispatchText(dispatch)}: ${errorText(error)}`]));
+			return;
+		}
+		this.enqueue(async () => {
+			const { context } = call;
+			if (!context || this.deps.disposed()) return;
+			const run = [...runs]
+				.sort((a, b) => a.createdAt - b.createdAt || a.runId - b.runId)
+				.map((entry): GithubWatchSource => ({ type: "github_run", repo: entry.repo, runId: entry.runId }))
+				.find((source) => !port.armedOn(source));
+			if (!run) {
+				if (!last) this.followDispatch(call, dispatch, attempt + 1);
+				else
+					this.tell(
+						this.missedLines([
+							`the run of ${dispatchText(dispatch)}: GitHub listed none created since your ${call.toolName} call began`,
+						]),
+					);
+				return;
+			}
+			const { armed, missed } = await this.armPlanned(
+				[{ source: run, deadlineMs: DISPATCHED_RUN_DEADLINE_MS }],
+				call,
+				port,
+				context,
+			);
+			this.tell([
+				...(armed.length === 0
+					? []
+					: [
+							`The host armed a watch on the run your earlier ${call.toolName} call started (${dispatchText(dispatch)}): ${armed.join("; ")}. Its result wakes you and is told to the owner; keep working instead of polling it.`,
+						]),
+				...this.missedLines(missed),
+			]);
+		});
+	}
+
+	/**
 	 * The subjects a call's output names, at most {@link MAX_SUBJECTS_PER_CALL}, each once: a commit's CI only while the CI
 	 * source follows the checkout, a run or a release only while the host offers its reader of GitHub, so no watch is armed
-	 * that nothing can read.
+	 * that nothing can read; a run only when GitHub created it after the call began, a tag's release only when none existed
+	 * before it. Every subject left out is named with why.
 	 */
-	private async plan(call: StartedCall, output: string, port: WatchAutoArmPort): Promise<PlannedWatch[]> {
+	private async plan(call: StartedCall, output: string, port: WatchAutoArmPort): Promise<CallPlan> {
 		const planned = new Map<string, PlannedWatch>();
+		const unwatched: string[] = [];
 		const add = (source: GithubWatchSource, deadlineMs: number) => {
 			const subject = githubWatchSubject(source);
 			if (planned.size < MAX_SUBJECTS_PER_CALL && !planned.has(subject))
 				planned.set(subject, { source, deadlineMs });
 		};
+		const leave = (source: GithubWatchSource, why: string) =>
+			unwatched.push(`${describeGithubWatchSource(source)} (${why})`);
 		const followsCi = port.followsCi();
-		const readsGithub = port.readsGithub();
+		const reader = port.github();
+		const signal = AbortSignal.timeout(DISPATCH_LISTING_TIMEOUT_MS);
 		if (call.pushes || call.releases)
 			for (const ref of pushedRefs(output)) {
 				if (ref.kind === "tag") {
-					if (readsGithub && VERSION_TAG.test(ref.tag))
-						add({ type: "release", tag: ref.tag }, RELEASE_DEADLINE_MS);
+					if (!VERSION_TAG.test(ref.tag)) continue;
+					const source: GithubWatchSource = { type: "release", tag: ref.tag };
+					if (!reader) {
+						leave(source, NO_READER);
+						continue;
+					}
+					try {
+						const createdAt = await reader.releaseCreatedAt(undefined, ref.tag, signal);
+						if (createdAt !== undefined && createdAt < call.startedAt)
+							leave(source, "it was published before your call began");
+						else add(source, RELEASE_DEADLINE_MS);
+					} catch (error) {
+						leave(source, `whether it existed before your call could not be read: ${errorText(error)}`);
+					}
 					continue;
 				}
-				if (!followsCi) continue;
 				const sha = await resolveCommit(this.deps.cwd(), ref.revision);
-				if (sha) add({ type: "ci", sha }, CI_DEADLINE_MS);
+				if (!sha) continue;
+				if (followsCi) add({ type: "ci", sha }, CI_DEADLINE_MS);
+				else leave({ type: "ci", sha }, NO_CI_SOURCE);
 			}
-		if (readsGithub && (call.dispatches || call.releases))
-			for (const { repo, runId } of actionRunsNamed(output))
-				add({ type: "github_run", repo, runId }, call.releases ? RELEASE_DEADLINE_MS : DISPATCHED_RUN_DEADLINE_MS);
-		return [...planned.values()];
+		const named = call.dispatches.length > 0 || call.releases ? actionRunsNamed(output) : [];
+		const deadlineMs = call.releases ? RELEASE_DEADLINE_MS : DISPATCHED_RUN_DEADLINE_MS;
+		for (const repo of new Set(named.map((run) => run.repo))) {
+			const runs = named
+				.filter((run) => run.repo === repo)
+				.map((run): GithubWatchSource => ({ type: "github_run", repo, runId: run.runId }));
+			if (!reader) {
+				for (const source of runs) leave(source, NO_READER);
+				continue;
+			}
+			let created: ReadonlySet<number>;
+			try {
+				created = new Set(
+					(await reader.runsCreatedSince(repo, call.startedAt, {}, signal)).map((run) => run.runId),
+				);
+			} catch (error) {
+				for (const source of runs)
+					leave(source, `whether GitHub created it after your call began could not be read: ${errorText(error)}`);
+				continue;
+			}
+			for (const source of runs)
+				if (source.type === "github_run" && created.has(source.runId)) add(source, deadlineMs);
+				else leave(source, "GitHub created it before your call began");
+		}
+		// A dispatch whose output names no run (an older gh prints none) is looked for by listing its workflow's runs.
+		const dispatched = named.length === 0 ? call.dispatches : [];
+		if (!reader)
+			for (const dispatch of dispatched) unwatched.push(`the run of ${dispatchText(dispatch)} (${NO_READER})`);
+		return { planned: [...planned.values()], unwatched, dispatched: reader ? dispatched : [] };
 	}
 }

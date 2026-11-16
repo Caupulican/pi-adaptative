@@ -115,6 +115,8 @@ export interface GithubWatchResult {
 	readonly status: string;
 	readonly conclusion?: string;
 	readonly failedJob?: string;
+	/** Why the first failed job of a failed attempt could not be read, when it could not: the result is told without it. */
+	readonly failedJobUnread?: string;
 	readonly url?: string;
 	/** The run (and its attempt) the result is of; a release has none. */
 	readonly runId?: number;
@@ -137,7 +139,17 @@ function positiveInteger(value: unknown, label: string): number {
 export function parseGithubWatchResult(value: unknown): GithubWatchResult {
 	if (
 		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["state", "status", "conclusion", "failedJob", "url", "runId", "runAttempt", "observedAt"]) ||
+		!hasOnlyKeys(value, [
+			"state",
+			"status",
+			"conclusion",
+			"failedJob",
+			"failedJobUnread",
+			"url",
+			"runId",
+			"runAttempt",
+			"observedAt",
+		]) ||
 		(value.state !== "pending" && value.state !== "done")
 	)
 		throw new TypeError("Watch result is invalid.");
@@ -150,6 +162,9 @@ export function parseGithubWatchResult(value: unknown): GithubWatchResult {
 		...(value.failedJob === undefined
 			? {}
 			: { failedJob: resultText(value.failedJob, MAX_RESULT_TEXT_CHARS, "failed job") }),
+		...(value.failedJobUnread === undefined
+			? {}
+			: { failedJobUnread: resultText(value.failedJobUnread, MAX_RESULT_TEXT_CHARS, "failed job reason") }),
 		...(value.url === undefined ? {} : { url: resultText(value.url, MAX_RESULT_URL_CHARS, "result URL") }),
 		...(value.runId === undefined ? {} : { runId: positiveInteger(value.runId, "result run") }),
 		...(value.runAttempt === undefined ? {} : { runAttempt: positiveInteger(value.runAttempt, "result attempt") }),
@@ -163,12 +178,14 @@ export function boundedGithubWatchResult(result: GithubWatchResult): GithubWatch
 		text === undefined || text.length === 0 ? undefined : text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 	const conclusion = cut(result.conclusion, MAX_RESULT_TEXT_CHARS);
 	const failedJob = cut(result.failedJob, MAX_RESULT_TEXT_CHARS);
+	const failedJobUnread = cut(result.failedJobUnread, MAX_RESULT_TEXT_CHARS);
 	const url = result.url !== undefined && result.url.length <= MAX_RESULT_URL_CHARS ? result.url : undefined;
 	return {
 		state: result.state,
 		status: cut(result.status, MAX_RESULT_TEXT_CHARS) ?? "unknown",
 		...(conclusion === undefined ? {} : { conclusion }),
 		...(failedJob === undefined ? {} : { failedJob }),
+		...(failedJobUnread === undefined ? {} : { failedJobUnread }),
 		...(url === undefined ? {} : { url }),
 		...(result.runId === undefined ? {} : { runId: result.runId }),
 		...(result.runAttempt === undefined ? {} : { runAttempt: result.runAttempt }),
@@ -199,7 +216,12 @@ export function describeGithubWatchSource(source: GithubWatchSource): string {
 export function describeGithubWatchResult(source: GithubWatchSource, result: GithubWatchResult): string {
 	const subject = describeGithubWatchSource(source);
 	if (source.type === "release") return `${subject} is ${result.status}`;
-	const job = result.failedJob === undefined ? "" : ` (failed job: ${result.failedJob})`;
+	const job =
+		result.failedJob !== undefined
+			? ` (failed job: ${result.failedJob})`
+			: result.failedJobUnread !== undefined
+				? ` (its failed job could not be read: ${result.failedJobUnread})`
+				: "";
 	return `${subject} ${result.status}${result.conclusion === undefined ? "" : ` with ${result.conclusion}`}${job}`;
 }
 
@@ -231,7 +253,12 @@ export function describeGithubWatchResultForOwner(
 ): string {
 	const subject = describeGithubWatchSourceForOwner(source, words);
 	if (source.type === "release") return words.released(subject);
-	return words.runEnded(subject, result.conclusion ?? result.status, result.failedJob);
+	return words.runEnded(
+		subject,
+		result.conclusion ?? result.status,
+		result.failedJob,
+		result.failedJob === undefined && result.failedJobUnread !== undefined,
+	);
 }
 
 /** Read access to GitHub for the session's typed watches; the host supplies it (core never starts a process). */
@@ -247,6 +274,33 @@ export interface GithubWatchReader {
 	): Promise<readonly GithubWatchReading[]>;
 	/** The first failed job of a failed CI attempt. */
 	failedCiJob(identity: CiAttemptIdentity, signal: AbortSignal): Promise<string | undefined>;
+	/**
+	 * The runs of one repository (`repo` absent: the checkout's) GitHub created at or after `since` (epoch ms; GitHub keeps
+	 * whole seconds), the newest first, at most one listing's worth; `narrow` keeps one workflow's, one branch's or one
+	 * event's.
+	 */
+	runsCreatedSince(
+		repo: string | undefined,
+		since: number,
+		narrow: GithubRunNarrowing,
+		signal: AbortSignal,
+	): Promise<readonly GithubCreatedRun[]>;
+	/** When GitHub created the release of `tag` (epoch ms), or undefined while there is none. */
+	releaseCreatedAt(repo: string | undefined, tag: string, signal: AbortSignal): Promise<number | undefined>;
+}
+
+/** What a listing of runs keeps: a workflow (its id, file name or display name), a branch or tag, an event. */
+export interface GithubRunNarrowing {
+	readonly workflow?: string;
+	readonly branch?: string;
+	readonly event?: "workflow_dispatch";
+}
+
+/** A run GitHub created, with its repository (owner/name) and creation time (epoch ms). */
+export interface GithubCreatedRun {
+	readonly repo: string;
+	readonly runId: number;
+	readonly createdAt: number;
 }
 
 /** One source's reading: what it was seen as, or why it could not be read. */

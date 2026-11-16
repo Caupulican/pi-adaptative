@@ -8,7 +8,9 @@
  */
 import type { CiAttemptIdentity, CiSubject } from "../../core/events/host-event-contract.ts";
 import type {
+	GithubCreatedRun,
 	GithubPolledSource,
+	GithubRunNarrowing,
 	GithubWatchReader,
 	GithubWatchReading,
 	GithubWatchResult,
@@ -75,18 +77,89 @@ export class GithubWatchHostReader implements GithubWatchReader {
 		return read;
 	}
 
+	/**
+	 * The host and name a repository is read under: a named repository on the checkout's host, or on gh's own default host
+	 * where the session's working directory is no GitHub checkout; the checkout's own repository needs the checkout.
+	 */
+	private async repository(
+		repo: string | undefined,
+		signal: AbortSignal,
+	): Promise<{ readonly host: string | undefined; readonly name: string }> {
+		const checkout =
+			repo === undefined ? await this.checkout(signal) : await this.checkout(signal).catch(() => undefined);
+		const name = repo ?? checkout?.nameWithOwner;
+		if (name === undefined) throw new Error("No GitHub repository to read.");
+		return { host: checkout?.host, name };
+	}
+
+	async runsCreatedSince(
+		repo: string | undefined,
+		since: number,
+		narrow: GithubRunNarrowing,
+		signal: AbortSignal,
+	): Promise<readonly GithubCreatedRun[]> {
+		const { host, name } = await this.repository(repo, signal);
+		const query = new URLSearchParams({
+			per_page: String(MAX_LISTED),
+			// GitHub's own search syntax over its creation time, whose timestamps are whole seconds.
+			created: `>=${new Date(since).toISOString().replace(/\.\d{3}Z$/u, "Z")}`,
+			...(narrow.branch === undefined ? {} : { branch: narrow.branch }),
+			...(narrow.event === undefined ? {} : { event: narrow.event }),
+		});
+		const workflowId =
+			narrow.workflow === undefined ? undefined : await this.workflowId(host, name, narrow.workflow, signal);
+		const path =
+			workflowId === undefined
+				? `repos/${name}/actions/runs?${query}`
+				: `repos/${name}/actions/workflows/${workflowId}/runs?${query}`;
+		return listed(await this.api(host, path, signal), "workflow_runs").flatMap((run) => {
+			const createdAt = Date.parse(String(run.created_at));
+			return typeof run.id === "number" && Number.isFinite(createdAt)
+				? [{ repo: name, runId: run.id, createdAt }]
+				: [];
+		});
+	}
+
+	/** The id of the workflow `gh workflow run` names: by its id, its file's name or path, or its display name. */
+	private async workflowId(
+		host: string | undefined,
+		name: string,
+		workflow: string,
+		signal: AbortSignal,
+	): Promise<number> {
+		const wanted = workflow.toLowerCase();
+		const match = listed(
+			await this.api(host, `repos/${name}/actions/workflows?per_page=${MAX_LISTED}`, signal),
+			"workflows",
+		).find(
+			(entry) =>
+				String(entry.id) === workflow ||
+				String(entry.name).toLowerCase() === wanted ||
+				String(entry.path).toLowerCase() === wanted ||
+				String(entry.path).toLowerCase().split("/").pop() === wanted,
+		);
+		if (typeof match?.id !== "number") throw new Error(`No workflow ${workflow} in ${name}.`);
+		return match.id;
+	}
+
+	async releaseCreatedAt(repo: string | undefined, tag: string, signal: AbortSignal): Promise<number | undefined> {
+		const { host, name } = await this.repository(repo, signal);
+		const release = listed(
+			await this.api(host, `repos/${name}/releases?per_page=${MAX_LISTED}`, signal),
+			"releases",
+		).find((entry) => entry.tag_name === tag);
+		if (!release) return undefined;
+		const createdAt = Date.parse(String(release.created_at));
+		if (!Number.isFinite(createdAt)) throw new Error("Invalid GitHub release.");
+		return createdAt;
+	}
+
 	async observe(
 		repo: string | undefined,
 		sources: readonly GithubPolledSource[],
 		signal: AbortSignal,
 	): Promise<readonly GithubWatchReading[]> {
-		// A named repository is read on the checkout's host, or on gh's own default host where the session's working
-		// directory is no GitHub checkout; the checkout's own releases need the checkout.
-		const checkout =
-			repo === undefined ? await this.checkout(signal) : await this.checkout(signal).catch(() => undefined);
-		const host = checkout?.host;
-		const name = repo ?? checkout?.nameWithOwner;
-		if (name === undefined) throw new Error("No GitHub repository to read.");
+		const { host, name } = await this.repository(repo, signal);
 		const runIds = sources.flatMap((source) => (source.type === "github_run" ? [source.runId] : []));
 		const runs =
 			runIds.length > 1

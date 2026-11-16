@@ -99,9 +99,9 @@ export const CHAT = {
 			run: (runId: number, repo: string) => `GitHub run ${runId} of ${repo}`,
 			ci: (sha: string) => `the CI of commit ${sha}`,
 			release: (tag: string) => `release ${tag}`,
-			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed. */
-			runEnded: (subject: string, conclusion: string, failedJob: string | undefined) =>
-				`${subject} finished: ${conclusion}${failedJob === undefined ? "" : ` (failed job: ${failedJob})`}`,
+			/** A run's end: GitHub's own conclusion word, and its first failed job when one failed (or that it could not be read). */
+			runEnded: (subject: string, conclusion: string, failedJob: string | undefined, jobUnread: boolean) =>
+				`${subject} finished: ${conclusion}${failedJob !== undefined ? ` (failed job: ${failedJob})` : jobUnread ? " (its failed job could not be read)" : ""}`,
 			released: (subject: string) => `${subject} was published`,
 		},
 		/** A watch's result told on the owner's phone (`watchResultPhoneText`): its lead word and the outcomes besides a firing. */

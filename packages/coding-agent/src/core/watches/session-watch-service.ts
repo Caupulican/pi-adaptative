@@ -641,23 +641,106 @@ export class SessionWatchService implements WatchObservationStore {
 	}
 
 	/**
-	 * Whether a CI attempt's result reaches the session through one of its watches: a live `ci` watch on its commit the
-	 * session armed (a worker's wakes reach the worker), or one that fired on that very attempt. The root delivery of the
-	 * same result is then the session's second copy of it (`HostEventSessionController`).
+	 * Fires every live `ci` watch on a CI attempt's commit with that attempt's result, in one read and one write, and answers
+	 * whether a watch the session armed (a worker's wakes reach the worker) now holds that attempt's firing, so the root
+	 * delivery of the same result would be the session's second copy of it (`HostEventSessionController`). Coverage is the
+	 * record's own firing, never a watch's liveness read at one instant and its firing made at another. A failed attempt's
+	 * first failed job is read after the firing (`ciJobsAwaited`), and the wake waits for that read.
 	 */
-	reportsCi(event: CiAttemptTerminalEvent): boolean {
+	claimCi(event: CiAttemptTerminalEvent): boolean {
 		const nowMs = this.deps.timers.now();
-		return this.deps.ledger.list().some((record) => {
-			const { condition } = record;
-			if (condition.type !== "ci" || condition.sha !== event.headSha || record.armedBy.kind === "worker")
-				return false;
-			if (isLiveSessionWatch(record, nowMs)) return true;
-			return (
-				record.status === "fired" &&
-				record.result?.runId === event.identity.runId &&
-				record.result.runAttempt === event.identity.runAttempt
+		const onCommit = (record: SessionWatchRecord) =>
+			record.condition.type === "ci" && record.condition.sha === event.headSha;
+		const due = this.deps.ledger.list().filter((record) => onCommit(record) && isLiveSessionWatch(record, nowMs));
+		if (due.length > 0) {
+			const result: GithubWatchResult = boundedGithubWatchResult({
+				state: "done",
+				status: "completed",
+				conclusion: event.conclusion,
+				url: event.runUrl,
+				runId: event.identity.runId,
+				runAttempt: event.identity.runAttempt,
+				observedAt: nowMs,
+			});
+			const fired = new Map(
+				due.map((record) => {
+					const ended: SessionWatchRecord = {
+						...record,
+						cursor: { ...record.cursor, fires: record.cursor.fires + 1, spent: true },
+						status: "fired",
+						endedAt: nowMs,
+						result,
+						...(event.conclusion === "failure" ? { awaitingFailedJob: true as const } : {}),
+					};
+					const wake: SessionWatchWake = {
+						kind: "fired",
+						deliveryId: deliveryId(this.deps.sessionId, ended, "fired", nowMs),
+						at: nowMs,
+						delivered: false,
+					};
+					return [record.watchId, { ...ended, wakes: withWake(ended, wake) }] as const;
+				}),
 			);
+			this.deps.ledger.commit(this.deps.ledger.list().map((record) => fired.get(record.watchId) ?? record));
+			this.followEndTimes();
+			this.drain();
+		}
+		return this.deps.ledger
+			.list()
+			.some(
+				(record) =>
+					onCommit(record) &&
+					record.armedBy.kind !== "worker" &&
+					record.status === "fired" &&
+					record.result?.runId === event.identity.runId &&
+					record.result.runAttempt === event.identity.runAttempt,
+			);
+	}
+
+	/** The fired `ci` watches whose failed attempt's first failed job is still to be read, for the poller that reads it. */
+	ciJobsAwaited(): readonly {
+		watchId: string;
+		incarnationId: string;
+		sha: string;
+		runId: number;
+		runAttempt: number;
+	}[] {
+		return this.deps.ledger.list().flatMap((record) => {
+			const { condition, result } = record;
+			return record.awaitingFailedJob &&
+				condition.type === "ci" &&
+				result?.runId !== undefined &&
+				result.runAttempt !== undefined
+				? [
+						{
+							watchId: record.watchId,
+							incarnationId: record.incarnationId,
+							sha: condition.sha,
+							runId: result.runId,
+							runAttempt: result.runAttempt,
+						},
+					]
+				: [];
 		});
+	}
+
+	/** Records what the read of a fired watch's failed job found: the job's name, none, or why it could not be read. */
+	settleFailedJob(watchId: string, incarnationId: string, read: { job?: string } | { unread: string }): void {
+		const record = this.deps.ledger.get(watchId);
+		if (!record?.awaitingFailedJob || record.incarnationId !== incarnationId || !record.result) return;
+		const { awaitingFailedJob: _settled, ...rest } = record;
+		this.replace({
+			...rest,
+			result: boundedGithubWatchResult({
+				...record.result,
+				...("unread" in read
+					? { failedJobUnread: read.unread }
+					: read.job === undefined
+						? {}
+						: { failedJob: read.job }),
+			}),
+		});
+		this.drain();
 	}
 
 	/** The edge rule over a watch's cursor: a firing ends the watch in the same write that records the wake it owes. */
@@ -838,7 +921,8 @@ export class SessionWatchService implements WatchObservationStore {
 		let retry = false;
 		for (const record of this.deps.ledger.list())
 			for (const wake of record.wakes) {
-				if (wake.delivered || !this.active) continue;
+				// A failed attempt's wake is told with its failed job, or why that could not be read, once the read ends.
+				if (wake.delivered || !this.active || (wake.kind === "fired" && record.awaitingFailedJob)) continue;
 				try {
 					const outcome = await this.deliver(record, wake);
 					if (outcome === "later") {

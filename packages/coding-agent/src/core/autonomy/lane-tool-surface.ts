@@ -179,9 +179,20 @@ export interface LaneToolSurface {
 	assertHealthy(): void;
 	/** Register the owner of execution-admitted mutation and tool-selection attribution. */
 	onToolAdmitted(observer: (event: LaneToolAdmissionEvent) => void): () => void;
+	/**
+	 * Hears each admitted call of the lane start and end, with its result (undefined when it threw): what the host does
+	 * after a call of the lane (the waits it arms on a push) reads it there.
+	 */
+	onToolExecution(observer: LaneToolExecutionObserver): () => void;
 	/** Canonical cumulative authority/budget meter for a compiled worker grant. */
 	gateway?: CapabilityGateway;
 	toolUsage: LaneToolUsage;
+}
+
+/** One admitted call of a lane, as it starts and as it ends. */
+export interface LaneToolExecutionObserver {
+	start(toolCallId: string, toolName: string, args: unknown): void;
+	end(toolCallId: string, result: unknown): void;
 }
 
 export interface LaneToolSurfaceOptions {
@@ -822,6 +833,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					: tool,
 			)
 		: rawTools;
+	const executionObservers = new Set<LaneToolExecutionObserver>();
 	const admittedTools = watchedTools.map((tool) =>
 		wrapToolExecution(tool, (executor) => ({
 			...executor,
@@ -834,7 +846,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					if (refused?.block) {
 						throw new AgentToolPolicyDeniedError(refused.reason, refused.terminate, refused.correction);
 					}
-					return executor.execute(toolCallId, args, signal, onUpdate);
+					for (const observer of [...executionObservers]) observer.start(toolCallId, tool.name, args);
+					let result: Awaited<ReturnType<typeof executor.execute>> | undefined;
+					try {
+						result = await executor.execute(toolCallId, args, signal, onUpdate);
+						return result;
+					} finally {
+						for (const observer of [...executionObservers]) observer.end(toolCallId, result);
+					}
 				}),
 		})),
 	);
@@ -874,6 +893,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		toolUsage,
 		assertHealthy: () => admission.assertHealthy(),
 		onToolAdmitted: (observer) => admission.subscribe(observer),
+		onToolExecution: (observer) => {
+			executionObservers.add(observer);
+			return () => executionObservers.delete(observer);
+		},
 		beforeToolCall: async ({ toolCall, args }, signal) => {
 			signal?.throwIfAborted();
 			return admission.check(toolCall.name, args);

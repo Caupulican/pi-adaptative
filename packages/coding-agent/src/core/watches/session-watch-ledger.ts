@@ -125,6 +125,11 @@ export interface SessionWatchRecord {
 	readonly lastSeen?: WatchLastSeen;
 	/** A typed source's last reading: pending while it watches, the done one it fired on. */
 	readonly result?: GithubWatchResult;
+	/**
+	 * A `ci` watch fired on a failed attempt whose first failed job is still being read: its wake waits for that read, which
+	 * names the job or says why it could not be read (`result.failedJobUnread`).
+	 */
+	readonly awaitingFailedJob?: true;
 	/** The owner is told each result on the phone (`OwnerPush`), besides the armer's wake. */
 	readonly tellOwner?: true;
 	/**
@@ -255,6 +260,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"event",
 			"lastSeen",
 			"result",
+			"awaitingFailedJob",
 			"tellOwner",
 			"served",
 			"wakes",
@@ -272,6 +278,11 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 	if (value.tellOwner !== undefined && value.tellOwner !== true) throw new TypeError("Watch record is invalid.");
 	const condition = parseSessionWatchSource(value.condition);
 	if (value.result !== undefined && !isGithubWatchSource(condition)) throw new TypeError("Watch result is invalid.");
+	if (
+		value.awaitingFailedJob !== undefined &&
+		(value.awaitingFailedJob !== true || condition.type !== "ci" || status !== "fired" || value.result === undefined)
+	)
+		throw new TypeError("Watch record is invalid.");
 	return {
 		watchId: watchIdOf(value.watchId),
 		incarnationId: boundedRoutineText(value.incarnationId, MAX_ID_CHARS, "incarnation"),
@@ -289,6 +300,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		...(value.event === undefined ? {} : { event: parseWatchFiredEvent(value.event) }),
 		...(value.lastSeen === undefined ? {} : { lastSeen: oneOf(value.lastSeen, WATCH_LAST_SEEN, "last seen") }),
 		...(value.result === undefined ? {} : { result: parseGithubWatchResult(value.result) }),
+		...(value.awaitingFailedJob === true ? { awaitingFailedJob: true as const } : {}),
 		...(value.tellOwner === true ? { tellOwner: true as const } : {}),
 		...(value.served === undefined ? {} : { served: parseServed(value.served) }),
 		wakes: value.wakes.map(parseWake),

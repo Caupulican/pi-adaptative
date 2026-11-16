@@ -90,9 +90,12 @@ export class GithubWatchLink {
 }
 
 export interface GithubWatchPollerDeps {
-	readonly watches: Pick<SessionWatchService, "githubWatches" | "observeGithub" | "noteFailing" | "subscribe">;
+	readonly watches: Pick<
+		SessionWatchService,
+		"githubWatches" | "observeGithub" | "noteFailing" | "subscribe" | "claimCi" | "ciJobsAwaited" | "settleFailedJob"
+	>;
 	readonly link: GithubWatchLink;
-	/** The session's accepted host events; read only while a `ci` watch is live. */
+	/** The session's accepted host events; read while a `ci` watch is live or a fired one's failed job is read. */
 	readonly hostEvents: { feed(): RoutineHostEventFeed; subscribe(listener: () => void): () => void };
 	readonly timers: TimerPort;
 	isDisposed(): boolean;
@@ -103,9 +106,9 @@ type LiveGithubWatch = ReturnType<SessionWatchService["githubWatches"]>[number];
 type PolledWatch = LiveGithubWatch & { readonly source: GithubPolledSource };
 
 /** Why a read could not be made, in the words the armer is told. */
-const NO_READER =
+export const NO_READER =
 	"GitHub cannot be read from this session (no GitHub checkout was found here, or the gh command is unavailable)";
-const NO_CI_SOURCE =
+export const NO_CI_SOURCE =
 	"this session does not collect its checkout's CI results (proactivity.ciEvents is off, or the checkout has no CI workflow)";
 
 export class GithubWatchPoller {
@@ -190,7 +193,8 @@ export class GithubWatchPoller {
 			for (const key of [...map.keys()]) if (!live.has(key)) map.delete(key);
 		const followed = this.deps.link.followsCi;
 		const fromCi = watches.filter((watch) => watch.source.type === "ci" && followed);
-		if (fromCi.length > 0) await this.readCi(fromCi);
+		if (fromCi.length > 0) this.readCi(fromCi);
+		await this.readFailedJobs();
 		const due = watches.filter(
 			(watch) => !fromCi.includes(watch) && (this.nextRead.get(watch.incarnationId) ?? 0) <= nowMs,
 		);
@@ -206,50 +210,60 @@ export class GithubWatchPoller {
 		this.followNextRead(watches.filter((watch) => !fromCi.includes(watch)));
 	}
 
-	/** The newest current CI result of each watched commit, from the session's accepted host events. */
-	private async readCi(watches: readonly LiveGithubWatch[]): Promise<void> {
-		const results = this.deps.hostEvents
-			.feed()
-			.events.flatMap((fact) =>
-				fact.current && fact.event.kind === "ci-attempt-terminal"
-					? [{ ordinal: fact.acceptedOrdinal, event: fact.event }]
-					: [],
-			);
-		for (const watch of watches) {
-			const { source } = watch;
-			if (source.type !== "ci" || !this.active) continue;
+	/**
+	 * The newest current CI result of each watched commit, from the session's accepted host events: the watches on that
+	 * commit fire on it in one write (`SessionWatchService.claimCi`), as they do when the root delivery of the same result
+	 * is decided first.
+	 */
+	private readCi(watches: readonly LiveGithubWatch[]): void {
+		const results = this.ciResults();
+		for (const sha of new Set(watches.flatMap(({ source }) => (source.type === "ci" ? [source.sha] : [])))) {
 			const latest = results
-				.filter(({ event }) => event.headSha === source.sha)
+				.filter(({ event, current }) => current && event.headSha === sha)
 				.sort((a, b) => b.ordinal - a.ordinal)[0];
-			if (!latest) continue;
-			const failedJob = latest.event.conclusion === "failure" ? await this.failedJob(latest.event) : undefined;
-			if (!this.active) return;
-			this.deps.watches.observeGithub(watch.watchId, watch.incarnationId, {
-				state: "done",
-				status: "completed",
-				conclusion: latest.event.conclusion,
-				...(failedJob === undefined ? {} : { failedJob }),
-				url: latest.event.runUrl,
-				runId: latest.event.identity.runId,
-				runAttempt: latest.event.identity.runAttempt,
-				observedAt: this.deps.timers.now(),
-			});
+			if (latest) this.deps.watches.claimCi(latest.event);
 		}
 	}
 
+	private ciResults(): { ordinal: number; event: CiAttemptTerminalEvent; current: boolean }[] {
+		return this.deps.hostEvents
+			.feed()
+			.events.flatMap((fact) =>
+				fact.event.kind === "ci-attempt-terminal"
+					? [{ ordinal: fact.acceptedOrdinal, event: fact.event, current: fact.current }]
+					: [],
+			);
+	}
+
 	/**
-	 * The first failed job of a failed attempt. The attempt's conclusion is the result the watch fires on; the job's name
-	 * only adds to it, so a job list that cannot be read is warned and the watch fires with the conclusion and the run's URL.
+	 * The first failed job of each failed attempt a watch fired on. The attempt's conclusion is the result the watch fired
+	 * on; the wake waits for this read, which names the job, finds none, or says why it could not be read.
 	 */
-	private async failedJob(event: CiAttemptTerminalEvent): Promise<string | undefined> {
+	private async readFailedJobs(): Promise<void> {
+		const awaited = this.deps.watches.ciJobsAwaited();
+		if (awaited.length === 0) return;
 		const reader = this.deps.link.current;
-		if (!reader) return undefined;
-		try {
-			return await reader.failedCiJob(event.identity, this.abort.signal);
-		} catch (error) {
-			if (this.active)
-				this.deps.warn(`CI failed job unavailable: ${error instanceof Error ? error.message : String(error)}`);
-			return undefined;
+		const results = this.ciResults();
+		for (const watch of awaited) {
+			if (!this.active) return;
+			const attempt = results.find(
+				({ event }) =>
+					event.headSha === watch.sha &&
+					event.identity.runId === watch.runId &&
+					event.identity.runAttempt === watch.runAttempt,
+			)?.event;
+			let read: { job?: string } | { unread: string };
+			if (!reader) read = { unread: NO_READER };
+			else if (!attempt) read = { unread: "the session no longer holds the CI attempt's identity" };
+			else
+				try {
+					const job = await reader.failedCiJob(attempt.identity, this.abort.signal);
+					read = job === undefined ? {} : { job };
+				} catch (error) {
+					if (!this.active) return;
+					read = { unread: error instanceof Error ? error.message : String(error) };
+				}
+			this.deps.watches.settleFailedJob(watch.watchId, watch.incarnationId, read);
 		}
 	}
 

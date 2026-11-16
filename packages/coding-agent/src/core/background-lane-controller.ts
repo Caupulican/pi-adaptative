@@ -872,7 +872,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				rootDelivered: (delivery) => {
 					this._lastEventDelivery = delivery;
 				},
-				reportedByWatch: (event) => this._routines.current?.sessionWatches.reportsCi(event) === true,
+				reportedByWatch: (event) => this._routines.current?.sessionWatches.claimCi(event) === true,
 				deliverParent: (input, options) => this.deps.deliverParentInput(input, options),
 				warn: (message) => this._safeWarn(message),
 				retired: (retired) => this._hostEventSessions.delete(retired),
