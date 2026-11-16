@@ -19,11 +19,11 @@ import {
 import type { SettingsManager } from "../settings-manager.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
 import {
+	awayBoundResetUntil,
 	type ChannelBatchRecord,
 	ChannelJournal,
 	type ChannelJournalState,
 	type ChannelPendingMessage,
-	chargesAwayBound,
 	DAY_MS,
 	isDraftOpen,
 	pendingOfferTimes,
@@ -123,7 +123,7 @@ export function readAwayChannelCharges(
 	agentDir: string,
 	maxUsdPerRun: number,
 	nowMs: number,
-	resets?: (path: string, until: number) => void,
+	resets?: (path: string, until: number, gapId: string) => void,
 ): RoutineAwayChargesRead {
 	const dir = channelsDir(agentDir);
 	let files: string[];
@@ -149,9 +149,10 @@ export function readAwayChannelCharges(
 		if (read.reset && !resets) return { unread: { path: journal.path, cause: "invalid" } };
 		const state = read.result;
 		for (const gap of state.gaps) {
-			if (!chargesAwayBound(gap, nowMs)) continue;
-			dayAllowanceUntil.push(gap.at + DAY_MS);
-			resets?.(journal.path, gap.at + DAY_MS);
+			const until = awayBoundResetUntil(gap, nowMs);
+			if (until === undefined) continue;
+			dayAllowanceUntil.push(until);
+			resets?.(journal.path, until, gap.id);
 		}
 		for (const batch of state.batches) {
 			const charge = channelAwayCharge(name, batch, maxUsdPerRun, reservedMetered, nowMs);
@@ -174,12 +175,12 @@ export function awayChannelChargesReader(
 	tell: (message: string) => void,
 ): (maxUsdPerRun: number, nowMs: number) => RoutineAwayChargesRead {
 	let told: RoutineAwayChargesUnread | undefined;
-	// The resets told, by journal and end of their charge, until that charge ends.
+	// The resets told, by journal and gap, until their charge ends (a reset dated ahead of this clock ends later each read).
 	const toldResets = new Map<string, number>();
 	return (maxUsdPerRun, nowMs) => {
 		for (const [key, until] of toldResets) if (until <= nowMs) toldResets.delete(key);
-		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path, until) => {
-			const key = `${path}@${until}`;
+		const read = readAwayChannelCharges(agentDir, maxUsdPerRun, nowMs, (path, until, gapId) => {
+			const key = `${path}#${gapId}`;
 			if (toldResets.has(key)) return;
 			toldResets.set(key, until);
 			const text = interfaceText();

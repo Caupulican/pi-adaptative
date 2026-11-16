@@ -492,7 +492,18 @@ function prune(state: ChannelJournalState, now: number): void {
  * so it charges the away spend bound until a day after it (`readAwayChannelCharges`).
  */
 export function chargesAwayBound(gap: Pick<ChannelGapRecord, "reason" | "at">, now: number): boolean {
-	return gap.reason === "reset" && now - gap.at < DAY_MS;
+	return awayBoundResetUntil(gap, now) !== undefined;
+}
+
+/**
+ * When the reset's charge on the away spend bound ends, or undefined when the gap charges nothing now. A reset dated after
+ * `now` (another host's clock ahead of this one, or a record no build wrote) is read as set aside now, so its charge ends a
+ * day from now at the latest and is always a date.
+ */
+export function awayBoundResetUntil(gap: Pick<ChannelGapRecord, "reason" | "at">, now: number): number | undefined {
+	if (gap.reason !== "reset") return undefined;
+	const until = Math.min(gap.at, now) + DAY_MS;
+	return until > now ? until : undefined;
 }
 
 /**
