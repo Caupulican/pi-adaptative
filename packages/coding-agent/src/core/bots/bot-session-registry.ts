@@ -17,6 +17,7 @@ import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
+import { errorText } from "./bot-error-text.ts";
 import { LinkedSessionNotices } from "./bot-link-notices.ts";
 import { publishBotRootHost } from "./bot-root-hosts.ts";
 import {
@@ -246,7 +247,13 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 	const sender = senderOf(attached, ports);
 	const listeners = new Set<() => void>();
 	let detached = false;
-	let unpublish: (() => void) | undefined;
+	let unpublish: (() => unknown) | undefined;
+	// The root's record goes once the host it names let the bots go (the root left it, or it stopped): a failure is told.
+	const unrecord = () => {
+		const failed = unpublish?.();
+		unpublish = undefined;
+		if (failed !== undefined) ports.warn(interfaceText().botTeam.botRootHostNotRemoved(errorText(failed)));
+	};
 	return {
 		host,
 		hostOwed() {
@@ -277,7 +284,6 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		async detach() {
 			if (detached) return;
 			detached = true;
-			unpublish?.();
 			for (const unsubscribe of listeners) unsubscribe();
 			listeners.clear();
 			for (const follower of followers) {
@@ -286,6 +292,7 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			}
 			if (roots.length > 1) {
 				roots.splice(roots.indexOf(ports), 1);
+				unrecord();
 				return;
 			}
 			// The last root answers the host's stop (its warnings, its cost view), then leaves; the host stays registered
@@ -297,6 +304,7 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			} finally {
 				roots.length = 0;
 				if (hosts.get(key) === attached) hosts.delete(key);
+				unrecord();
 				// A child's host keeps its own: the stops it still holds go to its process and agent directory's, recorded
 				// there again and at the quit of a runtime of that directory, not lost with the host.
 				if (!root) keepsFor(key, true).unrecorded.adopt(attached.keeps.unrecorded);

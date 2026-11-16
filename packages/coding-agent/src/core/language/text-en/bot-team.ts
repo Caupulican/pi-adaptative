@@ -67,6 +67,12 @@ export const BOT_TEAM = {
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`Bot ${agentId} was not started: its profile ${profileId} does not admit it now (${reason}). Fix the profile or the worker policy, then message it again.`,
 	/** A root session could not record that it hosts bots: the daemon keeps hosting the bots it holds. */
+	/** The bot daemon's charge file did not parse: it was set aside, so its charges no longer count. */
+	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
+		`Bots: the record of what bots spent while no session was open (${file}) did not read (${reason}); it was set aside as ${to}, and the spend it held no longer counts toward routines.away.maxUsdPerDay.`,
+	/** A root's record that it hosts bots could not be removed as it closed; the daemon leaves its directory to it until its process ends. */
+	botRootHostNotRemoved: (reason: string) =>
+		`Bots: this session could not remove its record that it hosts bots (${reason}); the bot daemon leaves the bots of this directory to it until this process ends.`,
 	botRootHostNotRecorded: (reason: string) =>
 		`Bots: this session could not record that it hosts bots (${reason}); the bot daemon keeps hosting the bots it holds, and your messages reach them through their inboxes.`,
 	/** A bot made from a profile has no root session to compile its profile (the daemon hosts the bots): it waits for one. */

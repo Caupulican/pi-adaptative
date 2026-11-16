@@ -31,12 +31,23 @@ interface BotRootHostRecord {
 	readonly cwd: string;
 }
 
-/** Records that a root session working in `cwd` hosts bots in this process; returns the removal, which never throws. */
-export function publishBotRootHost(agentDir: string, cwd: string): () => void {
+/**
+ * Records that a root session working in `cwd` hosts bots in this process; returns the removal, which never throws: it
+ * returns why the record could not be removed (undefined once it is gone), and a record left names this process, which
+ * the reader removes once the process is gone.
+ */
+export function publishBotRootHost(agentDir: string, cwd: string): () => unknown {
 	const file = join(botRootHostsDir(agentDir), `${randomBytes(8).toString("hex")}.json`);
 	const record: BotRootHostRecord = { version: 1, owner: ownProcessOwner(), cwd };
 	writeFileAtomicSync(file, `${JSON.stringify(record, null, 1)}\n`, { mode: 0o600 });
-	return () => rmSync(file, { force: true });
+	return () => {
+		try {
+			rmSync(file, { force: true });
+			return undefined;
+		} catch (error) {
+			return error;
+		}
+	};
 }
 
 function readRecord(file: string): BotRootHostRecord | undefined {

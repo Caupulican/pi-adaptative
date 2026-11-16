@@ -148,7 +148,7 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 			warn: (message) => input.report(message),
 			reportUsage: (usage, report) => {
 				const model = modelRegistry.find(report.provider, report.model);
-				recordBotAwayCharge(agentDir, {
+				const setAside = recordBotAwayCharge(agentDir, {
 					reportId: report.reportId,
 					agentId: report.agentId,
 					sessionId: report.sessionId,
@@ -157,6 +157,10 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 					micros: isMeteredSpend(model, modelRegistry) ? awaySpendMicros(usage.cost.total) : 0,
 					at: awayClock.now(),
 				});
+				if (setAside)
+					input.report(
+						interfaceText().botTeam.botAwayChargesSetAside(setAside.file, setAside.to, setAside.reason),
+					);
 				return "persisted";
 			},
 			// The roots' session files hold the charges made while a root hosted the bot; the ledger the daemon's own.

@@ -7,9 +7,10 @@
  * the bound's 24-hour window, except each bot's latest, which keeps how far the daemon holds the charges of its session
  * (`botAwayChargesReach`) for a spend ledger that lost its watermark.
  *
- * Written under the file's lock, atomically and private (0600). A record file that does not parse is set aside by the
- * next write (`away-charges.json.unreadable-<time>`) and the charges after it are kept; until then, and while it cannot
- * be read at all, it is read as unreadable (`readBotAwayCharges`): spend that cannot be read is no room.
+ * Written under the file's lock, atomically and private (0600). A record file that does not parse is set aside under
+ * that lock by the next write or read (`away-charges.json.unreadable-<time>`), the read saying so for its caller to
+ * tell the owner once, and the charges after it are kept. A file the file system refuses, or one that could not be set
+ * aside, is read as unreadable (`readBotAwayCharges`): spend that cannot be read is no room.
  */
 
 import { readFileSync, renameSync } from "node:fs";
@@ -20,6 +21,7 @@ import { usageReach } from "../cost/usage-delta.ts";
 import { ROUTINE_AWAY_SPEND_WINDOW_MS, type RoutineAwayCharge } from "../routines/routine-contract.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { errorText } from "./bot-error-text.ts";
 
 /** One charge of a bot's spend while the daemon hosted it. */
 export interface BotAwayChargeRecord {
@@ -79,21 +81,35 @@ function readRecords(
 	return { records: value.charges };
 }
 
+/** A record file that did not parse, set aside: where it went and why it did not parse. */
+export interface BotAwayChargesSetAside {
+	readonly file: string;
+	readonly to: string;
+	readonly reason: string;
+}
+
+/** Sets the file aside when it does not parse now (called under its lock); undefined when it parses or is gone. */
+function setAsideMalformed(file: string, at: number): BotAwayChargesSetAside | undefined {
+	const read = readRecords(file);
+	if (!("unreadable" in read) || !read.malformed) return undefined;
+	const to = `${file}.unreadable-${at}`;
+	renameSync(file, to);
+	return { file, to, reason: read.unreadable };
+}
+
 /**
  * Charges one range of a bot's spend, once per report id, dropping the records past the window that are not their bot's
- * latest. A file that does not parse is set aside first; one that cannot be read throws, and the charge is delivered again.
+ * latest. A file that does not parse is set aside first, and returned for the caller to tell; one that cannot be read
+ * throws, and the charge is delivered again.
  */
-export function recordBotAwayCharge(agentDir: string, charge: BotAwayChargeRecord): void {
+export function recordBotAwayCharge(agentDir: string, charge: BotAwayChargeRecord): BotAwayChargesSetAside | undefined {
 	const file = botAwayChargesFile(agentDir);
-	withFileLockSync(file, () => {
-		let read = readRecords(file);
-		if ("unreadable" in read) {
-			// A file the file system refuses is not set aside: its charges count once it reads again.
-			if (!read.malformed) throw new Error(`${file} does not read: ${read.unreadable}`);
-			renameSync(file, `${file}.unreadable-${charge.at}`);
-			read = { records: [] };
-		}
-		if (read.records.some((entry) => entry.reportId === charge.reportId)) return;
+	return withFileLockSync(file, () => {
+		const setAside = setAsideMalformed(file, charge.at);
+		const read = readRecords(file);
+		// A file the file system refuses is not set aside: its charges count once it reads again.
+		if ("unreadable" in read) throw new Error(`${file} does not read: ${read.unreadable}`);
+		if (read.records.some((entry) => entry.reportId === charge.reportId)) return setAside;
 		const records = [...read.records, charge];
 		const latest = new Map<string, BotAwayChargeRecord>();
 		for (const entry of records) {
@@ -104,22 +120,37 @@ export function recordBotAwayCharge(agentDir: string, charge: BotAwayChargeRecor
 			(entry) => entry.at + ROUTINE_AWAY_SPEND_WINDOW_MS > charge.at || latest.get(entry.agentId) === entry,
 		);
 		writeFileAtomicSync(file, `${JSON.stringify({ version: 1, charges: kept }, null, 1)}\n`, { mode: 0o600 });
+		return setAside;
 	});
 }
 
-/** The bots' charges on the away spend bound now, each until it leaves the 24-hour window; or why they do not read. */
+/**
+ * The bots' charges on the away spend bound now, each until it leaves the 24-hour window, with the record file this read
+ * set aside when it did not parse; or why they do not read.
+ */
 export function readBotAwayCharges(
 	agentDir: string,
 	nowMs: number,
-): { readonly charges: RoutineAwayCharge[] } | { readonly unreadable: string } {
-	const read = readRecords(botAwayChargesFile(agentDir));
+):
+	| { readonly charges: RoutineAwayCharge[]; readonly setAside?: BotAwayChargesSetAside }
+	| { readonly unreadable: string } {
+	const file = botAwayChargesFile(agentDir);
+	let read = readRecords(file);
+	let setAside: BotAwayChargesSetAside | undefined;
+	if ("unreadable" in read && read.malformed) {
+		try {
+			setAside = withFileLockSync(file, () => setAsideMalformed(file, nowMs));
+		} catch (error) {
+			return { unreadable: `${read.unreadable}; it was not set aside: ${errorText(error)}` };
+		}
+		read = readRecords(file);
+	}
 	if ("unreadable" in read) return { unreadable: read.unreadable };
-	return {
-		charges: read.records.flatMap((entry) => {
-			const until = entry.at + ROUTINE_AWAY_SPEND_WINDOW_MS;
-			return entry.micros > 0 && until > nowMs ? [{ micros: entry.micros, until }] : [];
-		}),
-	};
+	const charges = read.records.flatMap((entry) => {
+		const until = entry.at + ROUTINE_AWAY_SPEND_WINDOW_MS;
+		return entry.micros > 0 && until > nowMs ? [{ micros: entry.micros, until }] : [];
+	});
+	return setAside ? { charges, setAside } : { charges };
 }
 
 /**

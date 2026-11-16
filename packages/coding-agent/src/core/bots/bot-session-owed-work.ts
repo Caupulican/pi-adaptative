@@ -257,7 +257,7 @@ export class BotOwedWork {
 		this.openRetries = new BotOpenRetries({
 			timers: () => ports.admissionTimers(),
 			stopped: () => ports.stopped(),
-			retry: (agentId) => this.openIfOwed(agentId),
+			retry: (agentId) => this.ask(agentId),
 		});
 	}
 
@@ -355,7 +355,25 @@ export class BotOwedWork {
 	 * ({@link armOwedAt}). A saved session that does not read arms no usage wait, and the owner is told.
 	 */
 	unhosted(agentId: string, saved = this.savedRead(agentId)): void {
-		this.armOwedAt(agentId, this.usageResumeAt(agentId, saved));
+		// Each bot on its own: every bot is asked in turn (an attach, the home watch), and one whose files do not read is told
+		// once per cause, as the periodic listing tells it, never holding back the bots after it.
+		try {
+			this.armOwedAt(agentId, this.usageResumeAt(agentId, saved));
+		} catch (error) {
+			this.tellAskFailed(agentId, error);
+		}
+	}
+
+	/**
+	 * {@link openIfOwed} for a caller nothing above answers for (an alarm, a session's close, a refusal's end): a read that
+	 * throws is told once per cause, as the periodic listing tells it, which asks again within a minute.
+	 */
+	ask(agentId: string): void {
+		try {
+			this.openIfOwed(agentId);
+		} catch (error) {
+			this.tellAskFailed(agentId, error);
+		}
 	}
 
 	/** The bot's saved session; undefined when its home does not read, which {@link openIfOwed} tells the owner. */
@@ -456,7 +474,7 @@ export class BotOwedWork {
 				alarmAt(this.ports.admissionTimers(), usageResumeAt, () => {
 					this.usageWaits.delete(agentId);
 					this.usageDue.add(agentId);
-					this.openIfOwed(agentId);
+					this.ask(agentId);
 				}),
 			);
 	}
@@ -470,7 +488,7 @@ export class BotOwedWork {
 		if (at === undefined || this.ports.stopped()) return;
 		const alarm = alarmAt(this.ports.timers(), at, () => {
 			this.retryWaits.delete(agentId);
-			this.openIfOwed(agentId);
+			this.ask(agentId);
 		});
 		this.retryWaits.set(agentId, { at, alarm });
 	}
@@ -551,14 +569,19 @@ export class BotOwedWork {
 				try {
 					if (this.sweepBot(agentDir, agentId)) this.sweepTold.delete(agentId);
 				} catch (error) {
-					const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
-					const told = this.sweepTold.get(agentId) ?? new Set<string>();
-					this.sweepTold.set(agentId, told);
-					if (told.has(message)) continue;
-					this.ports.warn(message);
-					told.add(message);
+					this.tellAskFailed(agentId, error);
 				}
 		});
+	}
+
+	/** The bot's inbox and owed work did not read (`error`): told once per cause until its listing reads clean again. */
+	private tellAskFailed(agentId: string, error: unknown): void {
+		const message = interfaceText().botTeam.botSweepFailed(agentId, botFailureText(agentId, error));
+		const told = this.sweepTold.get(agentId) ?? new Set<string>();
+		this.sweepTold.set(agentId, told);
+		if (told.has(message)) return;
+		this.ports.warn(message);
+		told.add(message);
 	}
 
 	/**

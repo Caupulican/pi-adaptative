@@ -73,6 +73,10 @@ export const BOT_TEAM = {
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
+	botAwayChargesSetAside: (file: string, to: string, reason: string) =>
+		`Bots: o registro do que os bots gastaram sem sessão aberta (${file}) não pôde ser lido (${reason}); foi posto de lado como ${to}, e o gasto que ele guardava não conta mais para routines.away.maxUsdPerDay.`,
+	botRootHostNotRemoved: (reason: string) =>
+		`Bots: esta sessão não conseguiu remover o registro de que hospeda bots (${reason}); o daemon de bots deixa os bots deste diretório para ela até este processo terminar.`,
 	botRootHostNotRecorded: (reason: string) =>
 		`Bots: esta sessão não conseguiu registrar que hospeda bots (${reason}); o daemon de bots continua hospedando os bots que tem, e suas mensagens chegam a eles pelas caixas de entrada.`,
 	botProfileNeedsRoot: (agentId: string, profileId: string) =>

@@ -151,27 +151,44 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	store = routineStore;
 	// The away bounds are the owner's global settings; no project's settings reach a daemon serving every project.
 	const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
-	// The bots owed work while no root session takes them (`bot-daemon-host.ts`), hosted only with the credentials to run them.
+	// The bots owed work while no root session takes them (`bot-daemon-host.ts`), hosted only with the credentials to run
+	// them. Hosting them is a duty beside the routines and channels, never their end: a start that fails is reported once per
+	// cause and tried again at the next tick.
 	const { authStorage, modelRegistry } = input;
 	let bots: BotDaemonHost | undefined;
-	const botHosting =
-		authStorage && modelRegistry
-			? startBotDaemonHost({
-					agentDir,
-					store: routineStore,
-					authStorage,
-					modelRegistry,
-					timers,
-					settings,
-					report,
-				}).then((started) => {
+	let botsStarting: Promise<void> | undefined;
+	let botsStartTold: string | undefined;
+	const startBots = (): void => {
+		if (!authStorage || !modelRegistry || bots || botsStarting || stopping) return;
+		botsStarting = startBotDaemonHost({
+			agentDir,
+			store: routineStore,
+			authStorage,
+			modelRegistry,
+			timers,
+			settings,
+			report,
+		})
+			.then(
+				(started) => {
 					bots = started;
-				})
-			: Promise.resolve();
-	botHosting.catch(fail);
+					botsStartTold = undefined;
+				},
+				(error: unknown) => {
+					const told = `Bot hosting: the bots owed work were not hosted (${errorText(error)}); tried again at the next tick.`;
+					if (told !== botsStartTold) report(told);
+					botsStartTold = told;
+				},
+			)
+			.finally(() => {
+				botsStarting = undefined;
+			});
+	};
+	startBots();
 	// Everything else on the away bound: the channels' turns and the bots' spend, their working turns included.
 	const awayCharges = () =>
-		bots?.awayCharges(clock.now()) ?? readAwayCharges(agentDir, settings.getRoutineAwaySettings(), clock.now());
+		bots?.awayCharges(clock.now()) ??
+		readAwayCharges(agentDir, settings.getRoutineAwaySettings(), clock.now(), report);
 	const supervisor = new AwayRoutineSupervisor({
 		store: routineStore,
 		agentDir,
@@ -229,8 +246,8 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				ended = { reason: "failed", detail: `the channel hosts did not close: ${errorText(error)}` };
 			}
 			try {
-				// A start still running ends first; one that failed has hosted nothing.
-				await botHosting.catch(() => undefined);
+				// A start still running ends first (it never rejects); one that failed has hosted nothing.
+				await botsStarting;
 				await bots?.stop();
 			} catch (error) {
 				code = 1;
@@ -285,6 +302,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				if (stopping) return;
 				supervisor.wake();
 				channelHosts?.sync(credentialStamp);
+				startBots();
 				const credentials = botCredentialsChanged;
 				botCredentialsChanged = false;
 				return bots

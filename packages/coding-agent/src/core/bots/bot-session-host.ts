@@ -62,7 +62,7 @@ import { OWNER_STOP_CLOCK, type TimerPort, type TimerSource } from "../util/time
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
 import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
-import { botFailureText, inOwnerWords } from "./bot-failure-words.ts";
+import { botFailureText, inOwnerWords, logBotsFailure } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
@@ -949,7 +949,14 @@ export class BotSessionHost {
 
 	/** Asks every bot whether its session is owed work that no process takes (`BotOwedWork.unhosted`). */
 	askOwed(): void {
-		const bots = this.ports.store().listBots();
+		let bots: readonly { readonly agentId: string }[];
+		try {
+			bots = this.ports.store().listBots();
+		} catch (error) {
+			// The periodic listing (`BotOwedWork.sweepInboxes`) lists them again within a minute.
+			logBotsFailure("the owed-work ask could not list the bots", error);
+			return;
+		}
 		if (bots.length === 0) return;
 		this.view.watch();
 		for (const bot of bots) this.owed.unhosted(bot.agentId);
@@ -963,10 +970,22 @@ export class BotSessionHost {
 		const agentDir = this.ports.agentDir();
 		for (const entry of [...this.entries.values()]) {
 			if (!this.ports.leavesTo?.(entry.builtFor.cwd()) || this.holdsLoaded(entry)) continue;
-			if (botInboxWaiting(agentDir, entry.agentId) || botInboxStopWaiting(agentDir, entry.agentId)) continue;
+			if (this.inboxMayHold(agentDir, entry.agentId)) continue;
 			void this.close(entry.agentId).catch((error: unknown) =>
 				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
 			);
+		}
+	}
+
+	/**
+	 * Whether a message or stop may wait in the bot's inbox: one that does not list may hold either, so the bot stays here
+	 * (the periodic listing tells the owner why it does not list).
+	 */
+	private inboxMayHold(agentDir: string, agentId: string): boolean {
+		try {
+			return botInboxWaiting(agentDir, agentId) || botInboxStopWaiting(agentDir, agentId);
+		} catch {
+			return true;
 		}
 	}
 
@@ -1093,7 +1112,7 @@ export class BotSessionHost {
 		}
 		if (entry && entry.profileKey !== this.admission.currentKey(record, entry.builtFor))
 			void this.close(record.agentId).then(
-				() => this.owed.openIfOwed(record.agentId),
+				() => this.owed.ask(record.agentId),
 				(error: unknown) =>
 					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
 			);
@@ -1130,10 +1149,10 @@ export class BotSessionHost {
 	 */
 	private retakeRefused(agentId: string): void {
 		const entry = this.entries.get(agentId);
-		if (!entry) this.owed.openIfOwed(agentId);
+		if (!entry) this.owed.ask(agentId);
 		else if (!this.holdsLoaded(entry))
 			void this.close(agentId).then(
-				() => this.owed.openIfOwed(agentId),
+				() => this.owed.ask(agentId),
 				(error: unknown) =>
 					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
 			);

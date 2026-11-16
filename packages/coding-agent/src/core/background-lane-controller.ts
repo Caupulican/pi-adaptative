@@ -1652,7 +1652,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			channelStates: () => this.channels.getStates(),
 			channelJournals: () => this.channels.readJournalSummaries(),
-			awayCharges: (away, nowMs) => readAwayCharges(this.deps.getAgentDir(), away, nowMs),
+			awayCharges: (away, nowMs) => readAwayCharges(this.deps.getAgentDir(), away, nowMs, (m) => this._safeWarn(m)),
 			awayRunMetered: (definition) =>
 				awayRunMetered(definition.executionSnapshot?.savedIntent, this.deps.getModelRegistry()),
 			awayRunReserved: (dispatchKey) => awayMeteredRunReserved(this.deps.getAgentDir())(dispatchKey),

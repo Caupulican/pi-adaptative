@@ -78,7 +78,7 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 			.map(() => ({ micros: perRun }));
 	};
 	const charges = (nowMs: number, except: string | undefined): RoutineAwayCharge[] => [
-		...readAwayCharges(agentDir, settings.getRoutineAwaySettings(), nowMs),
+		...readAwayCharges(agentDir, settings.getRoutineAwaySettings(), nowMs, input.report),
 		...working(except),
 	];
 	const sources = botProcessSources({
@@ -89,7 +89,13 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 	await sources.refresh(true);
 	places = readPlaces();
 	const { host, stop } = rootlessBotSessionHost(sources.ports);
-	host.openOwed();
+	try {
+		host.openOwed();
+	} catch (error) {
+		// A start that did not finish hosts nothing: what it began is closed before the failure is reported.
+		await stop();
+		throw error;
+	}
 	return {
 		awayCharges: (nowMs) => charges(nowMs, undefined),
 		refresh: async (credentials) => {
