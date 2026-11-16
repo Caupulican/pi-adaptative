@@ -68,13 +68,16 @@ import { tellUnreadableHomeRecord } from "./bot-home-records.ts";
 import type { BotSessionState } from "./bot-host-state.ts";
 import {
 	type BotInboxItem,
+	type BotInboxMessage,
 	type BotInboxRefusal,
+	botInboxOwnerWordsWaiting,
 	botInboxStopWaiting,
 	botInboxWaiting,
 	readBotInbox,
 	readBotInboxRefusals,
+	restoreGivenBotInboxMail,
 } from "./bot-inbox.ts";
-import { BotInboxDrain } from "./bot-inbox-drain.ts";
+import { BotInboxDrain, type BotInboxGiven } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
 import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
 import { BotMail } from "./bot-mail.ts";
@@ -322,11 +325,10 @@ export class BotSessionHost {
 			timers: () => this.idleTimers(),
 			watching: () => this.view.watching(),
 			hosted: () => [...this.entries.keys()],
-			give: async (agentId, message) => {
+			give: (agentId, message) => this.giveRecord(agentId, message),
+			busy: (agentId) => {
 				const entry = this.entries.get(agentId);
-				if (!entry || this.stopped) return false;
-				await this.give(entry, message.text, message.mode, message.origin ?? "owner");
-				return true;
+				return entry === undefined || this.stopped ? undefined : this.isBusy(entry);
 			},
 			takeStops: (agentId) => this.takeStops(agentId),
 			warn: (message) => ports.warn(message),
@@ -393,7 +395,11 @@ export class BotSessionHost {
 				},
 				settle: (entry) => this.settle(entry),
 				register: (entry, continued) => this.register(entry, continued),
-				drainInbox: (agentId) => this.inbox.drain(agentId),
+				// The mail a gone host gave and whose turn it did not see end is given again, under its origin.
+				drainInbox: (agentId) => {
+					restoreGivenBotInboxMail(ports.agentDir(), agentId);
+					return this.inbox.drain(agentId);
+				},
 				forget: (entry) => {
 					if (this.entries.get(entry.agentId) === entry) this.entries.delete(entry.agentId);
 				},
@@ -616,15 +622,36 @@ export class BotSessionHost {
 		// The owner's words never start a turn while a stop of the bot waits: it is taken first, or they wait behind it.
 		const agentDir = this.ports.agentDir();
 		const behindStop = botInboxStopWaiting(agentDir, agentId) && !this.takeStops(agentId);
-		// Words its inbox holds (left behind a stop since taken) go first, and these follow them in order.
+		// Words its inbox holds (left behind a stop since taken) go first, and these follow them in order. Words under a
+		// recorded origin also wait there while the session runs (`giveRecord`): its own queue would keep no origin.
 		if (!behindStop && botInboxWaiting(agentDir, agentId)) await this.inbox.drain(agentId);
-		if (!behindStop && !botInboxWaiting(agentDir, agentId)) return this.give(entry, message, mode, origin);
+		const waits =
+			origin === "owner"
+				? botInboxOwnerWordsWaiting(agentDir, agentId)
+				: botInboxWaiting(agentDir, agentId) || this.isBusy(entry);
+		if (!behindStop && !waits) return this.give(entry, message, mode, origin);
 		const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
 		const result = queueInBotInbox(agentDir, agentId, message, mode, from, entry.modelRef, behindStop, origin);
 		// A sender that does not show why the words wait (`showsWaits`) leaves the owner to be told here.
 		if (result.waitsFor !== undefined && !showsWaits) this.ports.warn(result.waitsFor);
 		this.changed(agentId);
 		return result;
+	}
+
+	/**
+	 * Gives one inbox record to the bot's loaded session (`BotInboxDrain`): the owner's words at once, leaving the queue. A
+	 * mail record (words under a recorded origin) is given only to an idle session, never into its own queue, whose record
+	 * keeps no origin (a restored copy reads as the channel's third party): it waits while the session runs, and once given
+	 * it is kept as given until that turn ends, so a host killed before the turn's entry is written gives it again.
+	 */
+	private async giveRecord(agentId: string, message: BotInboxMessage): Promise<BotInboxGiven> {
+		const entry = this.entries.get(agentId);
+		if (!entry || this.stopped) return "gone";
+		const { origin } = message;
+		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), origin.ref)) return "take";
+		if (origin !== undefined && this.isBusy(entry)) return "keep";
+		await this.give(entry, message.text, message.mode, origin ?? "owner");
+		return origin === undefined ? "take" : "given";
 	}
 
 	/**
@@ -798,6 +825,13 @@ export class BotSessionHost {
 	/** After an event: a busy session is not idle, an idle one starts its bound. */
 	private settle(entry: BotSessionEntry): void {
 		if (this.entries.get(entry.agentId) !== entry) return;
+		// Mail that waited for the turn to end is given now (`giveRecord`).
+		if (!this.isBusy(entry) && botInboxWaiting(this.ports.agentDir(), entry.agentId))
+			void this.inbox
+				.drain(entry.agentId)
+				.catch((error: unknown) =>
+					this.ports.warn(interfaceText().botTeam.botInboxNotTaken(entry.agentId, errorText(error))),
+				);
 		if (this.holdsLoaded(entry)) this.touch(entry);
 		else this.armIdle(entry);
 		this.publishState(entry);

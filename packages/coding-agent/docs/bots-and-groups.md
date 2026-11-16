@@ -529,9 +529,15 @@ goal and grants no authority; what the receiving bot may do is what its own sess
 reached carries that taint on. The receiver reads who wrote it and answers in plain words: when its turn ends, its last
 words after the mail go back to the sender once, as a reply that is a turn of the sender's own session. A reply is not
 answered again, and a reply sent twice (the receiver's turn ran again after its session reopened) is taken once. A chain
-of mails holds at most 8; a send past that is refused and the bot is told to stop the exchange and report. A mail to a
-bot whose session is not open, or that another process hosts, waits in its inbox as a `.mail.json` record, which a build
-before this one never lists. A bot's chat shows a mail as `alice wrote` (`alice escreveu`), and a group's message as
+of mails holds at most 8; a send past that is refused and the bot is told to stop the exchange and report. Every refusal
+reaches the sending bot in English, whatever language your interface draws in. A mail to a bot whose session is not
+open, that another process hosts, or whose session is running a turn waits in its inbox as a `.mail.json` record, which
+a build before this one never lists: a mail is given only to an idle session, as a turn of its own (never as a steer of
+the running turn, nor in the session's own queue, which keeps no origin), so a mail waiting when pi stops is given after
+it starts again as the same mail from the same sender. A mail the session took is kept as `.mail.json` renamed
+`.mail.given.json` until the turn that took it ends; a host that stops before then leaves it, and the next host gives it
+again unless the bot's transcript already holds it. A group's message and a routine's prompt to a bot that is running a
+turn wait the same way. A bot's chat shows a mail as `alice wrote` (`alice escreveu`), and a group's message as
 yours in that group.
 
 ## History and lifecycle

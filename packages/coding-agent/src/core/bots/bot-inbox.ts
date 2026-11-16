@@ -6,7 +6,10 @@
  *
  * Files: `<at>-<id>.json` waiting, `<at>-<id>.refused.json` refused, `<at>-<id>.mail.json` and `<at>-<id>.mail.refused.json`
  * the same for words whose origin the sending host recorded (an agent's mail, a routine's prompt: `origin`), which the
- * bot's session takes under that origin and never as the owner's words, `<at>-<id>.stop.json` the owner's stop of the bot's
+ * bot's session takes under that origin and never as the owner's words, only while it is idle (a mail waits here while a
+ * turn runs, never in the session's own queue, whose record keeps no origin), `<at>-<id>.mail.given.json` a mail record
+ * the session took, kept until the turn that took it ends (a host killed before then leaves it to the next host, which
+ * gives it again unless the transcript holds it), `<at>-<id>.stop.json` the owner's stop of the bot's
  * work, `<at>-<id>.scoped.stop.json` a stop recorded after it was made (the process that made it could not record it then),
  * which ends only the work there was when it was made, `<name>.unreadable` a file that did not read as a record, set aside
  * so it neither blocks the queue nor is lost.
@@ -24,7 +27,7 @@
  * process tools are refused the bot homes.
  */
 import { randomUUID } from "node:crypto";
-import { rmSync, statSync } from "node:fs";
+import { renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	isRecordedDeliveryOrigin,
@@ -58,6 +61,8 @@ const SCOPED_STOP = /^\d{15}-[0-9a-f-]{36}\.scoped\.stop\.json$/;
 /** Words under a recorded origin: a suffix of their own, so a build that knows no such origin never gives them as the owner's. */
 const MAIL_WAITING = /^\d{15}-[0-9a-f-]{36}\.mail\.json$/;
 const MAIL_REFUSED = /^\d{15}-[0-9a-f-]{36}\.mail\.refused\.json$/;
+/** A mail record the bot's session took, kept until the turn that took it ends (`markBotInboxMailGiven`). */
+const MAIL_GIVEN = /^\d{15}-[0-9a-f-]{36}\.mail\.given\.json$/;
 /** Either kind of stop. */
 const ANY_STOP = /^\d{15}-[0-9a-f-]{36}\.(?:scoped\.)?stop\.json$/;
 
@@ -196,14 +201,26 @@ export function readBotInboxRefusals(
 	].sort((a, b) => a.message.at - b.message.at);
 }
 
-/** The file names of the messages waiting (both kinds); read from the names alone. */
+/** The file names of the messages waiting (both kinds) and of the mail given whose turn has not ended; from the names alone. */
 function waitingNames(dir: string): string[] {
-	return [...homeRecordNames(dir, WAITING), ...homeRecordNames(dir, MAIL_WAITING)];
+	return [
+		...homeRecordNames(dir, WAITING),
+		...homeRecordNames(dir, MAIL_WAITING),
+		...homeRecordNames(dir, MAIL_GIVEN),
+	];
 }
 
-/** Whether a message waits for the bot's session; read from the names alone. */
+/** Whether a message waits for the bot's session, or a mail it took whose turn has not ended; from the names alone. */
 export function botInboxWaiting(agentDir: string, agentId: string): boolean {
 	return waitingNames(botInboxDir(agentDir, agentId)).length > 0;
+}
+
+/**
+ * Whether the owner's words wait for the bot's session (a plain record, not a mail record): the owner's next words go
+ * behind them. A mail record waits for the session's turn to end, which the owner's words do not.
+ */
+export function botInboxOwnerWordsWaiting(agentDir: string, agentId: string): boolean {
+	return homeRecordNames(botInboxDir(agentDir, agentId), WAITING).length > 0;
 }
 
 /**
@@ -322,6 +339,40 @@ export function enqueueBotInbox(
 /** The bot's session accepted the message: it leaves the queue. */
 export function takeBotInboxMessage(item: BotInboxItem): void {
 	rmSync(item.file, { force: true });
+}
+
+/**
+ * The bot's session took the mail record: it is kept as given (`.mail.given.json`), no longer waiting or shown, until the
+ * turn that took it ends and the drain takes it. A host killed before then leaves it, and the next host gives it again
+ * (`restoreGivenBotInboxMail`), once: a session whose transcript holds its reference does not take it twice.
+ */
+export function markBotInboxMailGiven(item: BotInboxItem): void {
+	renameSync(item.file, item.file.replace(/\.mail\.json$/, ".mail.given.json"));
+}
+
+/** The mail records the bot's session took whose turns had not ended when they were last read, oldest first. */
+export function readBotInboxGiven(
+	agentDir: string,
+	agentId: string,
+	unreadable: (file: string, reason: string, setAside: boolean) => void,
+): BotInboxItem[] {
+	return readHomeRecords(
+		botInboxDir(agentDir, agentId),
+		MAIL_GIVEN,
+		(value) => parseMessage(value, agentId, true),
+		unreadable,
+	);
+}
+
+/**
+ * Puts the given mail back in the queue, for the host that has just taken the bot's lock: the process that gave it is gone
+ * (or closed the session before its turn ended), so whether its turn ran is read from the session's transcript when it
+ * is given again.
+ */
+export function restoreGivenBotInboxMail(agentDir: string, agentId: string): void {
+	const dir = botInboxDir(agentDir, agentId);
+	for (const name of homeRecordNames(dir, MAIL_GIVEN))
+		renameSync(join(dir, name), join(dir, name.replace(/\.mail\.given\.json$/, ".mail.json")));
 }
 
 /** The bot's session refused the message: it leaves the queue as a refused record with `reason`, and old records go. */
