@@ -108,7 +108,8 @@ export interface BotSender {
 	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 	/**
 	 * How far the root sessions of the process hold the charges of file instance `instance` of bot session `sessionId` in
-	 * the files changed since `since`, and the charges they hold unwritten (`botChargesHeld`).
+	 * the files changed since `since`, and the charges they hold unwritten (`botChargesHeld`), reaching as far as the
+	 * daemon's records of the bot's charges hold them (`withBotAwayChargesReach`), whichever host reads it back.
 	 */
 	chargesHeld(sessionId: string, instance: string, since: number): Promise<BotChargesHeld>;
 	/**

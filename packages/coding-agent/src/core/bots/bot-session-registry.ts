@@ -17,6 +17,7 @@ import { resolve } from "node:path";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { withBotAwayChargesReach } from "./bot-away-charges.ts";
 import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
 import { LinkedSessionNotices } from "./bot-link-notices.ts";
@@ -147,15 +148,17 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 		warn: (message) => current().warn(message),
 		reportUsage: (usage, report) => current().reportUsage(usage, report),
 		chargesPersisted: (listener) => current().chargesPersisted(listener),
-		// Every attached root may hold a charge it took while it answered: each is read, none attached answering nothing.
-		chargesHeld: (sessionId, instance, since) => {
-			answering(shared);
-			return botChargesHeld(
+		// Every attached root may hold a charge it took while it answered: each is read, none attached answering nothing;
+		// the daemon's records hold the charges it took while it hosted the bot.
+		chargesHeld: async (sessionId, instance, since) => {
+			const agentDir = answering(shared).agentDir();
+			const held = await botChargesHeld(
 				shared.roots.map((attached) => attached.chargeHolder()),
 				sessionId,
 				instance,
 				since,
 			);
+			return withBotAwayChargesReach(held, agentDir, sessionId, instance);
 		},
 	};
 }

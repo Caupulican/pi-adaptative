@@ -2,8 +2,9 @@
  * What the turns of the bots the daemon hosts spent while no session was open: `state/bots/away-charges.json`, one
  * record per charge (its report id, so a range is charged once), naming the bot session and file instance it covers and
  * how far its range reaches. Under the owner's cost rule only metered spend counts as dollars against the away spend
- * bound (`routines.away.maxUsdPerDay`): a charge made on a subscription is kept at zero dollars, since its limit is its
- * plan's usage windows, which hold the bot's model until they reset (`bot-model-admission.ts`). A record leaves once past
+ * bound (`routines.away.maxUsdPerDay`): a charge keeps only its metered part (`BotChargeReport.meteredUsd`, each share by
+ * the model it ran on), so spend on a subscription is kept at zero dollars, since its limit is its plan's usage windows,
+ * which hold the model until they reset (`bot-model-admission.ts`). A record leaves once past
  * the bound's 24-hour window, except each bot's latest, which keeps how far the daemon holds the charges of its session
  * (`botAwayChargesReach`) for a spend ledger that lost its watermark.
  *
@@ -21,6 +22,7 @@ import { usageReach } from "../cost/usage-delta.ts";
 import { ROUTINE_AWAY_SPEND_WINDOW_MS, type RoutineAwayCharge } from "../routines/routine-away-spend.ts";
 import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { BotChargesHeld } from "./bot-charges-held.ts";
 import { errorText } from "./bot-error-text.ts";
 
 /** One charge of a bot's spend while the daemon hosted it. */
@@ -32,7 +34,7 @@ export interface BotAwayChargeRecord {
 	readonly instance: string;
 	/** The cumulative usage the charge's range ends at. */
 	readonly through: Usage;
-	/** What it counts against the away spend bound, in micro-dollars: its metered spend, zero on a subscription. */
+	/** What it counts against the away spend bound, in micro-dollars: its metered part, zero for spend on a subscription. */
 	readonly micros: number;
 	/** When it was charged (ms since the epoch, on the daemon's clock). */
 	readonly at: number;
@@ -193,4 +195,19 @@ export function botAwayChargesReach(agentDir: string, sessionId: string, instanc
 		if (entry.sessionId === sessionId && entry.instance === instance)
 			reach = reach ? usageReach(reach, entry.through) : entry.through;
 	return reach;
+}
+
+/**
+ * `held`, how far the roots' files hold the charges of file instance `instance` of bot session `sessionId`
+ * (`botChargesHeld`), reaching as far as the daemon's records hold them too (`botAwayChargesReach`): a watermark any
+ * host reads back covers the charges the daemon took while it hosted the bot. Throws when the daemon's file does not read.
+ */
+export function withBotAwayChargesReach(
+	held: BotChargesHeld,
+	agentDir: string,
+	sessionId: string,
+	instance: string,
+): BotChargesHeld {
+	const reach = botAwayChargesReach(agentDir, sessionId, instance);
+	return reach ? { ...held, through: usageReach(held.through, reach) } : held;
 }

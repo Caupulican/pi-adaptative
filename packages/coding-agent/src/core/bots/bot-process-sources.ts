@@ -31,7 +31,6 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { sessionsDir } from "../../kernel/storage/paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
-import { usageReach } from "../cost/usage-delta.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -45,7 +44,7 @@ import { SettingsManager } from "../settings-manager.ts";
 import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { readWatchCommandBase, watchCommandEnvironment } from "../watches/watch-command-base.ts";
-import { botAwayChargesReach, recordBotAwayCharge } from "./bot-away-charges.ts";
+import { recordBotAwayCharge, withBotAwayChargesReach } from "./bot-away-charges.ts";
 import { botChargesHeld } from "./bot-charges-held.ts";
 import { type BotModelFacts, botModelRefusal, sharedExhaustions } from "./bot-model-admission.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
@@ -213,8 +212,7 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 					instance,
 					since,
 				);
-				const reach = botAwayChargesReach(agentDir, sessionId, instance);
-				return reach ? { ...held, through: usageReach(held.through, reach) } : held;
+				return withBotAwayChargesReach(held, agentDir, sessionId, instance);
 			},
 			// Every charge is held at once (`persisted`): no write is ever awaited.
 			chargesPersisted: () => () => {},

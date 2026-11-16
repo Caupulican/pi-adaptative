@@ -679,8 +679,9 @@ export class BotOwedWork {
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
 		const refusal = error instanceof BotModelRefusedError ? error.refusal : undefined;
-		this.refusals.set(agentId, { scope, key, cause: refusal?.cause, clearsAt: refusal?.clearsAt });
-		this.armRetake(agentId, refusal?.clearsAt);
+		const recorded: RecordedRefusal = { scope, key, cause: refusal?.cause, clearsAt: refusal?.clearsAt };
+		this.refusals.set(agentId, recorded);
+		this.armRetake(agentId, recorded);
 	}
 
 	private forgetRefusal(agentId: string): void {
@@ -688,14 +689,21 @@ export class BotOwedWork {
 		this.armRetake(agentId, undefined);
 	}
 
-	/** Takes the bot's refused work up again at `clearsAt`, when the cause is known to end then; any earlier alarm ends. */
-	private armRetake(agentId: string, clearsAt: number | undefined): void {
+	/**
+	 * Takes the bot's work refused for a model cause up again at `clearsAt`, when the cause is known to end then, else
+	 * one sweep interval (`OWED_INBOX_SWEEP_MS`) on: a cause with no known end (the day's away bound held by runs that end
+	 * with no set time, an account listing) ends by a change no alarm observes, and each retake still refused arms the next
+	 * (`stillRefused`). A refusal of the definition itself waits for its change. Any earlier alarm ends.
+	 */
+	private armRetake(agentId: string, refused: Pick<RecordedRefusal, "cause" | "clearsAt"> | undefined): void {
 		this.alarms.get(agentId)?.stop();
 		this.alarms.delete(agentId);
-		if (clearsAt === undefined || this.ports.stopped()) return;
+		if (refused?.cause === undefined || this.ports.stopped()) return;
+		const timers = this.ports.admissionTimers();
+		const at = refused.clearsAt ?? timers.now() + OWED_INBOX_SWEEP_MS;
 		this.alarms.set(
 			agentId,
-			alarmAt(this.ports.admissionTimers(), clearsAt, () => {
+			alarmAt(timers, at, () => {
 				this.alarms.delete(agentId);
 				this.ports.retake(agentId);
 			}),
@@ -705,7 +713,8 @@ export class BotOwedWork {
 	/**
 	 * Whether the refusal recorded for the bot still holds back what it is owed: the same definition, refused for the same
 	 * cause now. When it does and the cause's end as recorded now differs from the one armed (a reset can be recorded
-	 * later), the retake is armed again at it; the same end keeps its alarm.
+	 * later), or no retake is armed (the one a cause with no known end armed has fired), the retake is armed again; the same
+	 * end keeps its alarm.
 	 */
 	private stillRefused(agentId: string, record: PersistentBotRecord, sender: BotSender, onlyWakes: boolean): boolean {
 		const recorded = this.refusals.get(agentId);
@@ -713,9 +722,10 @@ export class BotOwedWork {
 		const key = this.ports.currentKey(record, sender);
 		const now = key === undefined ? undefined : this.ports.modelRefusal(record, sender);
 		if (recorded.key !== key || recorded.cause !== now?.cause) return false;
-		if (recorded.clearsAt !== now?.clearsAt) {
-			this.refusals.set(agentId, { ...recorded, clearsAt: now?.clearsAt });
-			this.armRetake(agentId, now?.clearsAt);
+		if (recorded.clearsAt !== now?.clearsAt || !this.alarms.has(agentId)) {
+			const refused = { ...recorded, clearsAt: now?.clearsAt };
+			this.refusals.set(agentId, refused);
+			this.armRetake(agentId, refused);
 		}
 		return true;
 	}
