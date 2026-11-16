@@ -2989,6 +2989,12 @@ export class HarnessProcesses {
 			void settled.then(() => this.settling.delete(settled));
 			return child;
 		}
+		const callback =
+			operation === "execFile"
+				? args.findLast((arg): arg is (...result: unknown[]) => void => typeof arg === "function")
+				: undefined;
+		if (isGit && Array.isArray(argv) && typeof callback === "function")
+			return this.answerGitExecFile(argv as string[], typeof options === "function" ? undefined : options, callback);
 		if (isGit && Array.isArray(argv)) {
 			const cwd = (options as { cwd?: string } | undefined)?.cwd ?? "";
 			const env = (options as { env?: Record<string, string | undefined> } | undefined)?.env ?? {};
@@ -3018,6 +3024,69 @@ export class HarnessProcesses {
 		}
 		this.unscripted.push(`${operation} ${String(file)} ${JSON.stringify(argv)}`);
 		throw new Error(`Unscripted process ${operation}: ${String(file)}`);
+	}
+
+	/**
+	 * Node's callback execFile of git: git reads its repository when it starts, and the callback is answered after the call
+	 * returns, as a finished process answers, with Node's error for a non-zero exit (its code is the exit code) and the output
+	 * as text unless the caller asked for buffers. A command the virtual git refuses reaches the callback as its error and is
+	 * kept as a cause, as a refused spawn is. The call is tracked until its callback has run.
+	 */
+	private answerGitExecFile(
+		argv: string[],
+		options: unknown,
+		callback: (...result: unknown[]) => void,
+	): VirtualGitChild {
+		const invocation = (options ?? {}) as {
+			cwd?: string;
+			env?: Record<string, string | undefined>;
+			encoding?: string | null;
+		};
+		const child = new VirtualGitChild();
+		child.stdin.end();
+		child.stdout.resume();
+		child.stderr.resume();
+		let outcome: GitOutcome | undefined;
+		let refusal: unknown;
+		try {
+			outcome = this.git.run(argv, invocation.cwd ?? "", invocation.env ?? {});
+		} catch (error) {
+			refusal = error;
+		}
+		const settled = new Promise<void>((resolve) => {
+			setImmediate(() => {
+				try {
+					if (outcome === undefined) {
+						this.causes.push(refusal);
+						callback(refusal, "", "");
+						return;
+					}
+					child.finish(outcome);
+					child.emit("close", outcome.code, null);
+					const asText = invocation.encoding !== "buffer" && invocation.encoding !== null;
+					const command = `git ${argv.join(" ")}`;
+					const error =
+						outcome.code === 0
+							? null
+							: Object.assign(new Error(`Command failed: ${command}\n${outcome.stderr}`), {
+									code: outcome.code,
+									killed: false,
+									signal: null,
+									cmd: command,
+								});
+					callback(
+						error,
+						asText ? outcome.stdout : Buffer.from(outcome.stdout),
+						asText ? outcome.stderr : Buffer.from(outcome.stderr),
+					);
+				} finally {
+					resolve();
+				}
+			});
+		});
+		this.settling.add(settled);
+		void settled.then(() => this.settling.delete(settled));
+		return child;
 	}
 
 	/** A detached daemon launch: an owned child whose SIGTERM stops the daemon body, released once that stop is joined. */

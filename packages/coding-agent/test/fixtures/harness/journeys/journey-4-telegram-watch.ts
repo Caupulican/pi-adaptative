@@ -583,8 +583,14 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 			"the watch's result is recorded for the phone",
 			world.io.waitForMutation(() => watchPushes().length > 0),
 		);
-		await withDeadline(trace, "the watch's result reaches the phone", api.untilSent(2));
 		const phoneText = `Watch "the CI of commit ${sha.slice(0, 12)}, pushed by this session": the CI of commit ${sha.slice(0, 7)} finished: success.`;
+		await withDeadline(
+			trace,
+			"the watch's result reaches the phone",
+			(async () => {
+				while (!api.texts().includes(phoneText)) await api.nextSend();
+			})(),
+		);
 		expect(
 			api.texts().filter((text) => text === phoneText),
 			"the phone hears the result in one sentence",
