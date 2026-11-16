@@ -123,7 +123,8 @@ export interface SessionWatchArmRequest {
 	readonly tellOwner?: boolean;
 	/**
 	 * When the call the host arms this after began, on `OWNER_STOP_CLOCK` (the host's own arming, `watch-auto-arm.ts`): an
-	 * owner's stop made at or after then refuses it, since the stop ended the work that call belongs to.
+	 * owner's stop applied here at or after then refuses it, since the stop ended the work that call belongs to, and the
+	 * record keeps it, so a stop made before the arming and applied after it ends the watch.
 	 */
 	readonly callStartedAt?: number;
 	/** The goal requirement the watch waits for: the goal's continuation waits on it while it is live. */
@@ -468,6 +469,7 @@ export class SessionWatchService implements WatchObservationStore {
 				condition: admitted.condition,
 				// On the clock an owner's stop of a bot is dated on, so a stop judges what was armed before it by one clock.
 				armedAt: OWNER_STOP_CLOCK.now(),
+				...(request.callStartedAt === undefined ? {} : { callStartedAt: request.callStartedAt }),
 				expiresAt: request.expiresAt,
 				armedBy: request.armedBy,
 				...(request.tellOwner === true ? { tellOwner: true } : {}),

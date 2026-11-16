@@ -114,6 +114,12 @@ export interface SessionWatchRecord {
 	readonly condition: SessionWatchSource;
 	/** On the clock an owner's stop of a bot is dated on (`OWNER_STOP_CLOCK`), which the stop judges it by. */
 	readonly armedAt: number;
+	/**
+	 * When the call the host armed it after began, on the same clock: an owner's stop judges such a watch by that instant
+	 * instead, so a call begun before a stop that arms only after it (the stop applied later, in this process or by
+	 * another) is ended by the stop.
+	 */
+	readonly callStartedAt?: number;
 	/** On the session's `routines` clock, as its samples and end-time alarm are. */
 	readonly expiresAt: number;
 	readonly armedBy: SessionWatchArmer;
@@ -305,6 +311,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 			"onFire",
 			"condition",
 			"armedAt",
+			"callStartedAt",
 			"expiresAt",
 			"armedBy",
 			"cursor",
@@ -346,6 +353,7 @@ export function parseSessionWatchRecord(value: unknown): SessionWatchRecord {
 		onFire: boundedRoutineText(value.onFire, MAX_ROUTINE_PROMPT_CHARS, "plan"),
 		condition,
 		armedAt,
+		...(value.callStartedAt === undefined ? {} : { callStartedAt: instant(value.callStartedAt) }),
 		expiresAt,
 		armedBy: parseArmer(value.armedBy),
 		cursor: parseCursor(value.cursor),
@@ -455,7 +463,7 @@ export interface WatchesEndedByStop {
  * ended (a live one cancelled, waking nobody) and every wake it is still owed is settled: marked delivered, by the input
  * that carried it when `carried` says the session's transcript holds one (the delivery appended it while the stop
  * waited), otherwise as settled by the stop (`stopSettledAt`). A watch armed after the stop is the session's later work
- * and is kept as it is.
+ * and is kept as it is; one the host armed after a call is judged by when that call began (`callStartedAt`).
  */
 export function endWatchesArmedByStop(
 	records: readonly SessionWatchRecord[],
@@ -465,7 +473,7 @@ export function endWatchesArmedByStop(
 ): WatchesEndedByStop {
 	let [ended, settled] = [0, 0];
 	const next = records.map((record): SessionWatchRecord => {
-		if (record.armedAt > stopAt) return record;
+		if ((record.callStartedAt ?? record.armedAt) > stopAt) return record;
 		const live = record.status === "live";
 		const owed = record.wakes.some((wake) => !wake.delivered);
 		if (!live && !owed) return record;
