@@ -197,6 +197,11 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		"the recovery entrance releases the exact old reservation from the durable store",
 	).toBe(false);
 	world.faultMatrix.witness("R2", { control: false });
+	// The second writer's worker is held at its request, as the first writer's is, so the fresh admission is read while that
+	// worker runs: an ungated worker settles and releases its lease whenever its run ends, before or after the root's prompt
+	// returns, and the lease read below would race it. The gate opens in the finally, before the handoff is joined.
+	const e13SecondAdmitted = createBarrier();
+	const e13SecondGate = createBarrier();
 	let e13SecondTaskId: string | undefined;
 	world.provider.enqueue(
 		"root",
@@ -225,6 +230,8 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	);
 	world.provider.enqueue("worker-a", {
 		name: "e13-writer-two",
+		check: () => e13SecondAdmitted.release(),
+		gate: e13SecondGate.promise,
 		reply: {
 			content: [
 				{
@@ -247,6 +254,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	await withDeadline(trace, "E13 second writer started", e13Fresh.session.prompt("Start the second scope writer."));
 	const e13Failures: unknown[] = [];
 	try {
+		await withDeadline(trace, "E13 second writer admitted", e13SecondAdmitted.promise);
 		const e13Running = e13Fresh.session.getResourceSnapshot().workers?.reservations.heldLeases ?? [];
 		const e13Adm = {
 			leases: e13Running,
@@ -296,6 +304,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		e13Failures.push(error);
 	} finally {
 		// The admitted task's own terminal handoff and the foreground tail are joined while this owner is live, before its disposal.
+		e13SecondGate.release();
 		try {
 			await withDeadline(trace, "E13 second writer handed off", e13Wake.promise, 90_000).catch((error: unknown) => {
 				throw new Error(
