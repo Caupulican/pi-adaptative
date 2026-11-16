@@ -194,24 +194,34 @@ function isOwnerTurn(entry: SessionEntry): boolean {
 }
 
 /**
- * The owner turns on the branch before the last proactive review that spent on it (its last `proactivity` usage record),
- * 0 when none did: the review's own durable mark, read where the session was loaded again since. A review's records land
- * while no message is added (a new message discards it), so the count is the one the review started at.
+ * The owner turns on the active branch that the last proactive review spending on it had read, 0 when none did: the
+ * review's own durable mark, read where the session was loaded again since. That review's last `proactivity` usage record
+ * names, as its origin, the entry the review started at (captured when its run was admitted), and the turns it read are
+ * the ones on the path to that entry (`pathTo`) that the active branch shares. Where the record lands tells nothing: a
+ * paid response settles after the owner message that discarded its review, so the turns before the record can include
+ * one the review never read. An origin that names no entry was captured on an empty branch, which holds no owner turn.
  */
-export function ownerTurnsAtLastReview(entries: readonly SessionEntry[]): number {
-	let turns = 0;
-	let atReview = 0;
+export function ownerTurnsAtLastReview(
+	entries: readonly SessionEntry[],
+	pathTo: (entryId: string) => readonly SessionEntry[],
+): number {
+	let reviewed = false;
+	let startedAt: string | undefined;
 	for (const entry of entries) {
-		if (isOwnerTurn(entry)) turns++;
-		else if (
-			entry.type === "custom" &&
-			entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE &&
-			isPlainRecord(entry.data) &&
-			entry.data.route === "proactivity"
+		if (
+			entry.type !== "custom" ||
+			entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE ||
+			!isPlainRecord(entry.data) ||
+			entry.data.route !== "proactivity"
 		)
-			atReview = turns;
+			continue;
+		reviewed = true;
+		const origin = entry.data.origin;
+		startedAt = isPlainRecord(origin) && typeof origin.entryId === "string" ? origin.entryId : undefined;
 	}
-	return atReview;
+	if (!reviewed || startedAt === undefined) return 0;
+	const read = new Set(pathTo(startedAt).map((entry) => entry.id));
+	return entries.filter((entry) => read.has(entry.id) && isOwnerTurn(entry)).length;
 }
 
 /** Digests of notes already delivered on this branch, and the newest few as text for the review. */

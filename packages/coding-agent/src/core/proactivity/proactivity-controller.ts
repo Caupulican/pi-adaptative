@@ -302,10 +302,15 @@ export class ProactivityController {
 		const settings = this.deps.getSettingsManager().getProactivitySettings();
 		if (!settings.enabled) return "proactivity_disabled";
 		if (this._runs >= settings.maxRunsPerSession) return "max_runs_reached";
-		const entries = getActiveSessionBranchEntries(this.deps.getSessionManager());
+		const manager = this.deps.getSessionManager();
+		const entries = getActiveSessionBranchEntries(manager);
 		// Counted from the last review this session ran, or the last its transcript records spending (one before it was loaded
-		// again: a bot's session after each idle close), so a load does not review again without new owner turns.
-		const sinceRun = Math.max(this._ownerTurnsAtLastRun, ownerTurnsAtLastReview(entries));
+		// again: a bot's session after each idle close), each at the owner turns it started at, so a load does not review
+		// again without new owner turns and an owner turn that discarded a review counts as new.
+		const sinceRun = Math.max(
+			this._ownerTurnsAtLastRun,
+			ownerTurnsAtLastReview(entries, (entryId) => manager.getBranch(entryId)),
+		);
 		if (countOwnerTurns(entries) - sinceRun < settings.minOwnerTurnsBetweenRuns) {
 			return "not_enough_new_owner_turns";
 		}

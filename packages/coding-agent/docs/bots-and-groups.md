@@ -179,7 +179,9 @@ A bot's own session owns a goal as a root session does: it holds the goal tools 
 as its own shell would run the command. The roster, `/bot list`, the bot and team selector and the bot's chat badge mark an
 unfinished goal as the operator bar marks the root's (`◎`, with `satisfied/total` once it has requirements; in the roster,
 accent while it runs and warning while it waits), read from the loaded session in the process hosting the bot and from the
-bot's saved session file in every other, and the mark follows each change of the goal.
+bot's saved session file in every other, and the mark follows each change of the goal. With System One on, an owner
+message to a bot whose session holds no unfinished goal is judged for a goal it sets, as the root's are (the owner goal
+intent); that judgment is the bot's own spend and reaches the main session among its charges.
 
 A bot's unfinished goal continues on its own, as the root's does, where the settings its session opens with let a goal
 continue (`goalAutoContinue`). A closed bot whose saved session holds a goal its load would take up (a running goal, or
@@ -305,7 +307,7 @@ tool a session does not hold, or sets a token, wall-clock, attempt or tool-call 
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it
 for the message and for the bot's host alike: a bot whose record leaves the session path (it becomes a leader, a leader's,
 or its profile now needs a worker) has its idle session closed and its watches dropped, and no session of it is opened
-again, so it never answers in two conversations at once. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`); it holds
+again, so it never answers in two conversations at once. A bot's session has no subagents, routines or `bot` tool yet (its only routine tool is `task_watch`); it holds
 `bot_mail` to write to the other bots (see [Bots mail each other](#bots-mail-each-other)). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.

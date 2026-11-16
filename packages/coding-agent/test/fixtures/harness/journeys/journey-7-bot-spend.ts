@@ -92,16 +92,25 @@ function spenderRequests(world: HarnessWorld): number {
  * Leg: an owner's bot answers with priced usage, and its spend reaches the main session as charged ranges. Each answer
  * lands one bot-session charge in the main session's file, each range starting where the last ended, and the main
  * session's cost view and the daily brake's reader count each dollar once. Every message after the first reaches a
- * session closed (retired) and reopened from the same file, so each owner message opens a session with no owner words
- * left to settle and no System One question is asked in either mode; a reopened session whose turn spends nothing
- * charges nothing again, and the bot's transcript marks how far the main session holds its charges. A reply that passes
- * the main session's worker bound stops the bot's turn with the product's sentence.
+ * session closed (retired) and reopened from the same file; a reopened session whose turn spends nothing charges nothing
+ * again, and the bot's transcript marks how far the main session holds its charges. A reply that passes the main
+ * session's worker bound stops the bot's turn with the product's sentence.
+ *
+ * The root runs with System One off in both modes, and its bots' sessions with it: a bot's session holds the goal tools,
+ * so with System One on each owner message is judged for a goal it sets (`OwnerGoalIntent`), a paid judgment detached
+ * from the turn whose receipt the bot's charges take in whichever range is cut after it lands. That would make the
+ * spend of a turn that spends nothing, and the count and bounds of the ranges, depend on that order; this leg proves the
+ * ranges of the model's own priced spend, and the bot-delegate leg proves a bot's own System One judgments charged to
+ * the main session.
  */
 export async function runJourney7BotSpendPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
-	const { session, manager } = await createChargedRoot(world, "bot-spend", {
-		workerDelegation: { maxUsd: CEILING_USD },
-	});
+	const { session, manager } = await createChargedRoot(
+		world,
+		"bot-spend",
+		{ workerDelegation: { maxUsd: CEILING_USD } },
+		false,
+	);
 	try {
 		await runLeg(world, session, manager);
 	} finally {
@@ -137,8 +146,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, manager: Sessi
 		},
 		{ name: "j7-spender-over", reply: { content: [{ type: "text", text: FOURTH_ANSWER }], usage: OVER_USAGE } },
 	);
-	// Each owner message opens the bot's session, so its turn, which calls no tool, leaves its words unjudged and nothing
-	// settles them: no System One question is asked in this leg (as for the owner-messages leg's first message).
+	// The root and its bots' sessions run with System One off (see the leg's comment): no System One question is asked.
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-spend", {});
 	const baselineDailyUsd = await dailySpawnedUsd(manager);
 	const recordsReach = (count: number, label: string) =>
