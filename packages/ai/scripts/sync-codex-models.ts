@@ -1,5 +1,5 @@
 /**
- * Pins the Codex CLI's bundled model catalogue at one release or commit, for the model generator and for the
+ * Pins the Codex CLI's model catalogue at one release or commit, for the model generator and for the
  * client version pi reports to the Codex models endpoint. Codex's catalogue is the source of truth
  * for which models the ChatGPT backend serves to a Codex client and how each one is driven (context
  * window, reasoning levels, Responses Lite, Ultra's wire effort); pricing is not in it and comes from
@@ -9,13 +9,15 @@
  *   node scripts/sync-codex-models.ts /path/to/external/codex <commit-sha> rust-v0.159.0
  *
  * Unreleased Codex commits declare version 0.0.0; use the latest released client identity with them.
+ * To include public API models absent from the bundle, append the Codex models-cache path and their
+ * slugs after the client release tag. Only those models and the cache's client version are imported.
  *
  * Then regenerate (PI_FETCH_MODELS=1 npm run generate-models) and set OPENAI_CODEX_CLIENT_VERSION in
  * src/providers/openai-codex-account.ts to the written `clientVersion` (a test pins the two together).
  */
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,9 +47,11 @@ function gitShow(checkout: string, tag: string, path: string): string {
 	});
 }
 
-const [checkout, tag, clientTag = tag] = process.argv.slice(2);
-if (!checkout || !tag) {
-	throw new Error("Usage: node scripts/sync-codex-models.ts <codex-checkout> <release-tag-or-commit> [client-release-tag]");
+const [checkout, tag, clientTag = tag, cachePath, ...cacheSlugs] = process.argv.slice(2);
+if (!checkout || !tag || (cachePath && cacheSlugs.length === 0) || new Set(cacheSlugs).size !== cacheSlugs.length) {
+	throw new Error(
+		"Usage: node scripts/sync-codex-models.ts <codex-checkout> <release-tag-or-commit> [client-release-tag [models-cache.json <model-slug>...]]",
+	);
 }
 
 const cargo = gitShow(checkout, clientTag, "codex-rs/Cargo.toml");
@@ -61,7 +65,23 @@ const catalogue = JSON.parse(gitShow(checkout, tag, "codex-rs/models-manager/mod
 };
 if (!Array.isArray(catalogue.models)) throw new Error(`No models list in Codex's catalogue at ${tag}`);
 
-const models = catalogue.models.map((model) => {
+// Account catalogues can receive new public models before the upstream bundle. Import only the
+// explicitly selected, publicly released models; keep the bundle for all other entries.
+const cache = cachePath
+	? (JSON.parse(readFileSync(cachePath, "utf8")) as { client_version?: string; models?: Record<string, unknown>[] })
+	: undefined;
+if (cache && (typeof cache.client_version !== "string" || !Array.isArray(cache.models))) {
+	throw new Error("No client version or models list in Codex's cache");
+}
+const selectedModels = cacheSlugs.map((slug) => {
+	const entries = cache?.models?.filter((model) => model.slug === slug) ?? [];
+	if (entries.length !== 1 || entries[0].visibility !== "list" || entries[0].supported_in_api !== true) {
+		throw new Error(`Expected one listed API model for ${slug} in Codex's cache`);
+	}
+	return entries[0];
+});
+const bundledModels = catalogue.models.filter((model) => !cacheSlugs.some((slug) => model.slug === slug));
+const models = [...selectedModels, ...bundledModels].map((model) => {
 	const kept: Record<string, unknown> = {};
 	for (const field of KEPT_FIELDS) {
 		if (model[field] === undefined) continue;
@@ -78,7 +98,14 @@ writeFileSync(
 	outputPath,
 	`${JSON.stringify(
 		{
-			source: { repository: "openai/codex", tag, clientTag, path: "codex-rs/models-manager/models.json", clientVersion },
+			source: {
+				repository: "openai/codex",
+				tag,
+				clientTag,
+				path: "codex-rs/models-manager/models.json",
+				clientVersion,
+				...(cache ? { accountCatalogue: { clientVersion: cache.client_version, models: cacheSlugs } } : {}),
+			},
 			models,
 		},
 		null,

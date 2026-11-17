@@ -27,7 +27,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	openai: "gpt-5.4",
 	fugu: "fugu",
 	"azure-openai-responses": "gpt-5.4",
-	"openai-codex": "gpt-6.1-sol",
+	"openai-codex": "gpt-6.2-sol",
 	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",
 	"google-vertex": "gemini-3.1-pro-preview",

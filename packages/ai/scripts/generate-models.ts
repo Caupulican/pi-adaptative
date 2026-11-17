@@ -1849,7 +1849,7 @@ async function generateModels() {
 	// did). The reasoning default is ours in either case. GPT-6 Astra prices are the OpenAI model page
 	// of 2026-09-03 (input 10, cached 1, cache write 12.5, output 50; the long tier above 272k input
 	// tokens is 2x input and cache, 1.5x output, as for 5.6).
-	const openAiGpt56Models = [
+	const openAiFlagshipModels = [
 		{ id: "gpt-5.6", name: "GPT-5.6", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
 		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
 		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
@@ -1858,8 +1858,12 @@ async function generateModels() {
 		// https://developers.openai.com/api/docs/pricing: GPT-6.1 Sol and Terra cached input is 5% of input.
 		{ id: "gpt-6.1-sol", name: "GPT-6.1 Sol", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 		{ id: "gpt-6.1-terra", name: "GPT-6.1 Terra", input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25 },
+		// https://developers.openai.com/api/docs/models/gpt-6.2-astra
+		{ id: "gpt-6.2-astra", name: "GPT-6.2 Astra", input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
+		// https://developers.openai.com/api/docs/models/gpt-6.2-sol
+		{ id: "gpt-6.2-sol", name: "GPT-6.2 Sol", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 	] as const;
-	for (const spec of openAiGpt56Models) {
+	for (const spec of openAiFlagshipModels) {
 		const existing = getIndexedModel("openai", spec.id);
 		if (existing) {
 			existing.defaultThinkingLevel = "medium";
