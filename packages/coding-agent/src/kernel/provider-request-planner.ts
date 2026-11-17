@@ -22,6 +22,7 @@ import type {
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./loop-config.ts";
+import { messageSourceOf } from "./message-revision.ts";
 import { recordPrefixFoldWork } from "./prefix-fold.ts";
 import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
@@ -334,7 +335,15 @@ async function buildContextPlan(
 ): Promise<AgentContextPlan> {
 	if (config.planContext)
 		return await config.planContext(
-			{ messages, attempt, sentPrefixCount, model: config.model, wire, measureRequest },
+			{
+				messages,
+				sourceMessage: messageSourceOf,
+				attempt,
+				sentPrefixCount,
+				model: config.model,
+				wire,
+				measureRequest,
+			},
 			signal,
 		);
 	return {
@@ -453,6 +462,7 @@ async function materializeContextPlan(
 	plan: AgentContextPlanPayload,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
+	history?: AgentContextPlan["providerHistory"],
 ) {
 	// Append-on-change transients (turn-economics A1 extended - see transient-records.ts's
 	// module doc for the full mechanism and why it exists: the old approach rebuilt and
@@ -472,6 +482,8 @@ async function materializeContextPlan(
 	// unchanged, so `pendingTransientRecords` is typically empty FOR THEM; the trailing pair is
 	// not typically empty while active (measured: every turn, not just content-changing ones -
 	// see `reconcileTransientRecords`'s doc comment in transient-records.ts for the numbers).
+	history?.trackDependencies?.(plan.messages);
+	if (plan.transientMessages) history?.trackDependencies?.(plan.transientMessages);
 	const hostTransients = adaptHostTransients(plan.transientMessages ?? []);
 	// Precedence order matters here (see TransientRecordSlot.trailing's doc comment): host
 	// transients are informational and carry no `trailing` flag, so their position among
@@ -515,7 +527,9 @@ async function materializeContextPlan(
 		plan.messages,
 	);
 	const pendingTransientRecords = reconciliation.records;
+	history?.trackDependencies?.(pendingTransientRecords);
 	const compactableMessages = await config.convertToLlm(plan.messages);
+	history?.trackDependencies?.(compactableMessages);
 	const nonCompactableHead = plan.nonCompactableHead ?? 0;
 	if (!Number.isInteger(nonCompactableHead) || nonCompactableHead < 0 || nonCompactableHead > plan.messages.length) {
 		throw new TypeError(
@@ -533,12 +547,14 @@ async function materializeContextPlan(
 	// has no safe durable identity for, appended fresh every request exactly as before this
 	// mechanism existed - see `adaptHostTransients`) form the new tail. Live request-only projections
 	// are separate: they lead compactable history and contribute to both wire boundaries below.
+	history?.trackDependencies?.(requestOnlyWireMessages);
 	const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
 	const newTransientWireMessages =
 		newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
 	// Live knowledge must remain replaceable and absent from durable history. Placing it after the
 	// fixed host head, before growing history, also keeps an unchanged projection at the same wire
 	// position on every tool-loop append. A real correction or withholding still replaces it now.
+	history?.trackDependencies?.(newTransientWireMessages);
 	const llmMessages: Message[] = compactableMessages.slice();
 	llmMessages.splice(headWireCount, 0, ...requestOnlyWireMessages);
 	for (const message of newTransientWireMessages) llmMessages.push(message);
@@ -563,6 +579,7 @@ async function materializeContextPlan(
 		budgeted.context === protocolMaterialized.context
 			? protocolMaterialized
 			: { ...protocolMaterialized, context: budgeted.context };
+	history?.trackDependencies?.(materialized.context.messages);
 	const nonCompactableContext = nonCompactableProviderContext(
 		materialized.context,
 		compactableMessages.length + requestOnlyWireMessages.length,
@@ -686,7 +703,15 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			const fresh = await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
+			const fresh = await materializeContextPlan(
+				sourceContext,
+				sanitized,
+				ledgerView,
+				plan,
+				config,
+				signal,
+				plan.providerHistory,
+			);
 			const { nonCompactableContext, pendingTransientRecords, transientDecisions } = fresh;
 			const historyCandidate = plan.providerHistory && {
 				model: config.model,

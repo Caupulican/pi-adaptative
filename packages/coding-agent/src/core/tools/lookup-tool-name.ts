@@ -7,3 +7,6 @@ export const LOOKUP_TOOL_NAME = "lookup";
  */
 export const LOOKUP_SUB_TOOL_NAMES = ["read", "repo_read", "grep"] as const;
 export type LookupSubToolName = (typeof LOOKUP_SUB_TOOL_NAMES)[number];
+
+export const MAX_LOOKUP_REQUESTS = 12;
+export const LOOKUP_MAX_LABEL_CHARS = 100;

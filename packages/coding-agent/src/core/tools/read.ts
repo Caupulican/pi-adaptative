@@ -1073,7 +1073,7 @@ function buildReadToolDefinition(
 									limitedBy: truncation.truncatedBy,
 								});
 								// Truncation occurred. Build an actionable continuation notice.
-								const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
+								const endLineDisplay = slicedLines[truncation.outputLines - 1]!.originalIndex;
 								const nextOffset = endLineDisplay + 1;
 								outputText = truncation.content;
 								if (truncation.truncatedBy === "lines") {
@@ -1081,10 +1081,11 @@ function buildReadToolDefinition(
 								} else {
 									outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalDisplay} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
 								}
-								details = { truncation };
+								details = { truncation, nextOffset };
 							} else if (moreContentRemains) {
 								// More content exists beyond this slice; hand the model a continuation pointer.
-								const nextOffset = startLine + slicedLines.length + 1;
+								const nextOffset = (slicedLines.at(-1)?.originalIndex ?? startLine) + 1;
+								if (userLimitedLines === undefined) details = { nextOffset };
 								const remaining =
 									totalFileLines !== undefined && userLimitedLines !== undefined
 										? `${totalFileLines - (startLine + userLimitedLines)} more lines in file`
@@ -1093,6 +1094,17 @@ function buildReadToolDefinition(
 							} else {
 								// No truncation and no remaining content.
 								outputText = truncation.content;
+							}
+							if (
+								!projectSessionTranscript &&
+								!details?.lineWindow &&
+								slicedLines.length &&
+								(!filter || filter === "none")
+							) {
+								details = {
+									...details,
+									sourceLines: { first: slicedLines[0]!.originalIndex, count: truncation.outputLines },
+								};
 							}
 							if (projectSessionTranscript) {
 								outputText = `Pi session transcript (user/assistant/summary/tool labels only; thinking and payloads omitted).\n${outputText}`;
@@ -1122,7 +1134,11 @@ function buildReadToolDefinition(
 					bounded.text,
 					bounded.truncated ? "partial" : "window",
 				);
-				return { ...result, content: [{ type: "text" as const, text: bounded.text }] };
+				return {
+					...result,
+					...(bounded.truncated ? { details: { ...result.details, truncated: true as const } } : {}),
+					content: [{ type: "text" as const, text: bounded.text }],
+				};
 			}
 			return result;
 		},

@@ -36,6 +36,10 @@ export type ReadToolInput = Static<typeof readSchema>;
 
 export interface ReadToolDetails {
 	lineWindow?: ReadLineWindowDetails;
+	nextOffset?: number;
+	/** Consecutive source lines at the start of the returned text, before any footer. */
+	sourceLines?: { first: number; count: number };
+	truncated?: true;
 	truncation?: TruncationResult;
 	/** Present for `mode: "outline"`. */
 	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };

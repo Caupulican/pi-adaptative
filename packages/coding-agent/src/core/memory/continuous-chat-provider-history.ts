@@ -2,7 +2,6 @@
 
 import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai";
 import type { AgentContextPlan, AgentProviderHistoryPlan, ProviderHistoryCandidate } from "../../kernel/loop-config.ts";
-import { messageContentEpoch } from "../../kernel/message-revision.ts";
 import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { PathAliasLegendEntry } from "../comms/host-injection-records.ts";
@@ -11,9 +10,9 @@ import {
 	renderRetainedAliasAdditions,
 	replayableBodyAliases,
 } from "./continuous-chat-history-aliases.ts";
+import { ContinuousChatMessageDependencies, MAX_RETAINED_MESSAGES } from "./continuous-chat-message-dependencies.ts";
 import type { IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
-const MAX_HISTORY_MESSAGES = 128;
 const MAX_HISTORY_INPUT_TOKENS = 48_000;
 
 interface RetentionSource {
@@ -32,11 +31,13 @@ interface HistoryOffer {
 	messages: Message[];
 	requestOnly: ProviderHistoryCandidate["requestOnly"];
 	frameLength: number;
+	model: Model<Api>;
+	tokens: number;
 }
 
 interface AcceptedRequest {
 	handle: IcmTurnHandle;
-	contentEpoch: number;
+	dependencies: ContinuousChatMessageDependencies;
 	envelope: ProviderHistoryCandidate;
 	requestOnly: ProviderHistoryCandidate["requestOnly"];
 	fixedHeadMessages: number;
@@ -142,22 +143,32 @@ export class ContinuousChatProviderHistory {
 		handle: IcmTurnHandle,
 		messages: readonly AgentMessage[],
 		start: number,
+		sourceMessage: ((message: AgentMessage) => AgentMessage) | undefined,
 		frame: ProviderHistoryFrame,
+		dependencies: ContinuousChatMessageDependencies,
 		canUseHistory: () => boolean,
 		noteFrame: (frame: readonly AgentMessage[], lineageStartedAt?: number) => void,
 	): RetentionPlan {
 		const previous =
-			this.active?.handle === handle ? this.active.previous : this.previousTurn(handle, messages, start);
+			this.active?.handle === handle
+				? this.active.previous
+				: this.previousTurn(handle, messages, start, sourceMessage);
 		let selected: HistoryOffer | undefined;
 		let offeredAliases: readonly PathAliasLegendEntry[] | undefined;
 		let committed: AcceptedRequest | undefined;
 		const fixedHeadMessages = frame.headMessages - (frame.legend ? 1 : 0);
-		const aliasesCurrent = (aliases: readonly PathAliasLegendEntry[]): boolean =>
-			aliases.length === 0 || frame.verifyAliases?.(aliases) === true;
+		const aliasesCurrent = (aliases: readonly PathAliasLegendEntry[]): boolean => {
+			try {
+				return aliases.length === 0 || frame.verifyAliases?.(aliases) === true;
+			} catch {
+				return false;
+			}
+		};
 		const authorized = (): boolean => {
 			if (
-				!previous ||
-				previous.request.contentEpoch !== messageContentEpoch() ||
+				!previous?.request.dependencies.isCurrent() ||
+				previous.request.handle.latestCompaction !== undefined ||
+				!dependencies.complete ||
 				!canUseHistory() ||
 				handle.latestCompaction !== undefined
 			)
@@ -168,6 +179,7 @@ export class ContinuousChatProviderHistory {
 					aliasesCurrent(aliases) &&
 					(aliases.length === 0 || previous.request.verifyAliases?.(aliases) === true) &&
 					(offeredAliases === undefined || aliasesCurrent(offeredAliases)) &&
+					(selected === undefined || this.tokensAllowed(selected.model, selected.tokens)) &&
 					this.source.canRetain(previous.request.handle, handle, previous.history)
 				);
 			} catch {
@@ -176,10 +188,18 @@ export class ContinuousChatProviderHistory {
 		};
 
 		return {
+			trackDependencies: (messages) => dependencies.add(messages),
 			offer: (candidate) => {
 				selected = undefined;
 				offeredAliases = undefined;
-				if (!canUseHistory() || !candidate.nativeHistory || !frame.bodyAliases) return undefined;
+				if (
+					!dependencies.complete ||
+					!dependencies.isCurrent() ||
+					!canUseHistory() ||
+					!candidate.nativeHistory ||
+					!frame.bodyAliases
+				)
+					return undefined;
 				const tail = replayableBodyAliases(candidate.transientTail, true);
 				if (!tail) return undefined;
 				const aliases = [...(frame.legend ?? []), ...frame.bodyAliases, ...tail];
@@ -199,10 +219,19 @@ export class ContinuousChatProviderHistory {
 					additions,
 					handle.boundary.totalMessages,
 				);
-				if (selected) offeredAliases = indexedAliases(merged);
+				if (selected) {
+					dependencies.add(selected.messages.slice(previous.request.messages.length + 1, selected.frameLength));
+					if (!dependencies.complete) {
+						selected = undefined;
+						return undefined;
+					}
+					offeredAliases = indexedAliases(merged);
+				}
 				return selected;
 			},
-			isCurrent: () => selected === undefined || authorized(),
+			isCurrent: () =>
+				dependencies.isCurrent() &&
+				(selected ? authorized() : offeredAliases === undefined || aliasesCurrent(offeredAliases)),
 			accept: (candidate, messages) => {
 				const retained = selected?.messages === messages ? selected : undefined;
 				this.active = { handle, previous: retained ? previous : undefined };
@@ -213,11 +242,13 @@ export class ContinuousChatProviderHistory {
 				} else noteFrame([]);
 				if (
 					!canUseHistory() ||
+					!dependencies.complete ||
+					!dependencies.isCurrent() ||
 					handle.latestCompaction ||
 					!candidate.nativeHistory ||
 					!offeredAliases ||
 					!aliasesCurrent(offeredAliases) ||
-					(!retained && !this.fits(candidate, candidate.context))
+					(!retained && this.eligibleTokens(candidate, candidate.context) === undefined)
 				)
 					return;
 				const { start, count } = candidate.requestOnly;
@@ -226,11 +257,14 @@ export class ContinuousChatProviderHistory {
 					transientTail: [],
 					context: { ...candidate.context, messages: candidate.context.messages.slice(0, start + count) },
 				};
-				// Wire messages and their durable anchors may share objects. The kernel advances this
-				// epoch before any sanctioned in-place edit, so an edited prefix is never adopted again.
+				const retainedDependencies = new ContinuousChatMessageDependencies();
+				if (retained && previous) retainedDependencies.include(previous.request.dependencies);
+				retainedDependencies.include(dependencies);
+				retainedDependencies.add(messages);
+				if (!retainedDependencies.complete || !retainedDependencies.isCurrent()) return;
 				committed = {
 					handle,
-					contentEpoch: messageContentEpoch(),
+					dependencies: retainedDependencies,
 					envelope,
 					requestOnly: retained?.requestOnly ?? candidate.requestOnly,
 					fixedHeadMessages,
@@ -244,11 +278,12 @@ export class ContinuousChatProviderHistory {
 				if (
 					!committed ||
 					this.accepted !== committed ||
-					committed.contentEpoch !== messageContentEpoch() ||
+					!committed.dependencies.isCurrent() ||
 					!sameTerminal(provider, final, committed.envelope.model)
 				)
 					return;
-				committed.terminal = { wire: provider, durable: final };
+				committed.dependencies.add([provider, final]);
+				if (committed.dependencies.complete) committed.terminal = { wire: provider, durable: final };
 			},
 		};
 	}
@@ -257,6 +292,7 @@ export class ContinuousChatProviderHistory {
 		handle: IcmTurnHandle,
 		messages: readonly AgentMessage[],
 		start: number,
+		sourceMessage: ((message: AgentMessage) => AgentMessage) | undefined,
 	): PreviousTurn | undefined {
 		const request = this.accepted;
 		const terminal = request?.terminal;
@@ -270,8 +306,10 @@ export class ContinuousChatProviderHistory {
 		)
 			return undefined;
 		if (messages[start - 1] !== terminal.durable) return undefined;
-		for (let index = start - 1, count = 1; index >= 0 && count <= MAX_HISTORY_MESSAGES; index--, count++) {
-			if (messages[index] === first) return { request, terminal, history: messages.slice(index, start) };
+		for (let index = start - 1, count = 1; index >= 0 && count <= MAX_RETAINED_MESSAGES; index--, count++) {
+			if (messages[index] !== first) continue;
+			const history = messages.slice(index, start);
+			return { request, terminal, history: sourceMessage ? history.map(sourceMessage) : history };
 		}
 		return undefined;
 	}
@@ -328,23 +366,34 @@ export class ContinuousChatProviderHistory {
 			});
 		}
 		const context = { ...fresh, messages: [...head, ...fresh.messages.slice(end)] };
-		return this.fits(candidate, context)
-			? { messages: context.messages, requestOnly: previous.request.requestOnly, frameLength: head.length }
-			: undefined;
+		const tokens = this.eligibleTokens(candidate, context);
+		return tokens === undefined
+			? undefined
+			: {
+					messages: context.messages,
+					requestOnly: previous.request.requestOnly,
+					frameLength: head.length,
+					model: candidate.model,
+					tokens,
+				};
 	}
 
-	private fits(candidate: ProviderHistoryCandidate, context: Context): boolean {
+	private eligibleTokens(candidate: ProviderHistoryCandidate, context: Context): number | undefined {
 		if (
 			!candidate.nativeHistory ||
 			candidate.accountKey === undefined ||
-			context.messages.length >= MAX_HISTORY_MESSAGES ||
+			context.messages.length >= MAX_RETAINED_MESSAGES ||
 			hasImages(context.messages)
 		)
-			return false;
+			return undefined;
 		const tokens = estimateProviderRequestTokens(context, candidate.model);
+		return this.tokensAllowed(candidate.model, tokens) ? tokens : undefined;
+	}
+
+	private tokensAllowed(model: Model<Api>, tokens: number): boolean {
 		return (
 			tokens <= MAX_HISTORY_INPUT_TOKENS &&
-			(this.source.allowsHistoryTokens?.(candidate.model, tokens) ?? tokens <= candidate.model.contextWindow / 3)
+			(this.source.allowsHistoryTokens?.(model, tokens) ?? tokens <= model.contextWindow / 3)
 		);
 	}
 }

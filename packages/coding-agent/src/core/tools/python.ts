@@ -9,6 +9,7 @@ import {
 	describeThrownToolError,
 	readAgentToolPolicyDeniedError,
 } from "../../kernel/types.ts";
+import { truncateMiddle } from "../../kernel/utils/truncate.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
@@ -27,15 +28,17 @@ import {
 } from "./file-failure-recovery.ts";
 import { carryNestedMutation, releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
 import type { NestedCallHost } from "./nested-tool-call.ts";
-import { OutputAccumulator } from "./output-accumulator.ts";
+import { OutputAccumulator, type OutputSnapshot } from "./output-accumulator.ts";
 import {
+	createReductionProjector,
 	formatOutputReductionNotice,
 	type OutputReductionToolOptions,
 	type ReduceToolOutputOptions,
-	reduceToolOutput,
 	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
+import { createShellOutputDecoder } from "./shell-output-decoder.ts";
+import type { ShellOutputProjectorLike } from "./shell-output-projection.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -169,15 +172,20 @@ function createLocalPythonOperations(): PythonOperations {
 				env: request.env,
 				stdio: ["pipe", "pipe", "pipe"],
 			});
-			child.stdout?.on("data", (chunk: Buffer) => request.onStdout(chunk));
-			child.stderr?.on("data", (chunk: Buffer) => request.onStderr(chunk));
-			child.stdin?.end(request.stdin ?? "");
-			const terminal = await waitForOwnedProcessTreeWithTermination(child, request.cwd, {
-				killGraceMs: PYTHON_KILL_GRACE_MS,
-				signal: request.signal,
-				timeoutMs: request.timeoutMs,
-			});
-			return { exitCode: terminal.code, reason: terminal.reason, signal: child.signalCode };
+			child.stdout?.on("data", request.onStdout);
+			child.stderr?.on("data", request.onStderr);
+			try {
+				child.stdin?.end(request.stdin ?? "");
+				const terminal = await waitForOwnedProcessTreeWithTermination(child, request.cwd, {
+					killGraceMs: PYTHON_KILL_GRACE_MS,
+					signal: request.signal,
+					timeoutMs: request.timeoutMs,
+				});
+				return { exitCode: terminal.code, reason: terminal.reason, signal: child.signalCode };
+			} finally {
+				child.stdout?.off("data", request.onStdout);
+				child.stderr?.off("data", request.onStderr);
+			}
 		},
 	};
 }
@@ -209,6 +217,31 @@ function renderStreamNotice(label: string, path: string | undefined, error: stri
 	if (path) return `[${label} truncated; full output: ${path}]`;
 	if (error) return `[${label} truncated; full-output artifact failed: ${error}]`;
 	return undefined;
+}
+
+/** Reduce the complete bounded sample, then publish the display and the settled raw artifact. */
+async function finishPythonStream(
+	output: OutputAccumulator,
+	projector: ShellOutputProjectorLike | undefined,
+	exitCode: number | null,
+	maxBytes: number,
+): Promise<OutputSnapshot & { reduction?: OutputReductionDetails; reducedDisplayTruncated?: boolean }> {
+	output.finish();
+	const projection = projector?.finish(exitCode);
+	const display = projection && truncateMiddle(projection.content, { maxBytes });
+	// A partial line of the original output is more useful than an empty projection.
+	const reduction = display && (!display.truncated || display.content) ? projection?.reduction : undefined;
+	const persistRaw = reduction !== undefined && (reduction.persistRaw || display?.truncated === true);
+	output.snapshot({ persistIfTruncated: true, persistAlways: persistRaw });
+	await output.closeTempFile();
+	const snapshot = output.snapshot();
+	if (!reduction || !display || (persistRaw && !snapshot.fullOutputPath)) return snapshot;
+
+	const details: OutputReductionDetails = {
+		...reduction,
+		...(persistRaw ? { persistRaw, rawPath: snapshot.fullOutputPath } : {}),
+	};
+	return { ...snapshot, content: display.content, reduction: details, reducedDisplayTruncated: display.truncated };
 }
 
 /**
@@ -321,9 +354,9 @@ export function createPythonToolDefinition(
 			// The facts every failure below keeps: the stakes the host read from the file, whatever the run's outcome.
 			const receipt = scriptStakes ? { scriptStakes } : undefined;
 			try {
-				const reduceStdout = input.fullOutput !== true && reductionEnabled;
+				const reduceStreams = input.fullOutput !== true && reductionEnabled;
 				let reductionOptions: ReduceToolOutputOptions | undefined;
-				if (reduceStdout) {
+				if (reduceStreams) {
 					const projectPath = resolvePythonToolPath(baseCwd, `.pi/${OUTPUT_RULES_FILE_NAME}`, pathOptions);
 					const projectRules = await awaitPreflight(async () => {
 						try {
@@ -383,68 +416,15 @@ export function createPythonToolDefinition(
 				};
 				const stdout = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stdout" });
 				const stderr = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stderr" });
-				const finishStreams = () => {
-					stdout.finish();
-					stderr.finish();
-					// Reduce the complete stdout before the cap so the model sees the shorter version of the
-					// whole output, not of its head+tail; the raw stream is persisted when lines were dropped.
-					const rawStdout = reduceStdout ? stdout.snapshot({ persistIfTruncated: true }) : undefined;
-					const reduction =
-						rawStdout && !rawStdout.truncation.truncated
-							? reduceToolOutput(
-									{
-										tool: "python",
-										command: "python",
-										text: rawStdout.content,
-										exitCode: 0,
-										level: reductionLevel(),
-									},
-									reductionOptions,
-								)
-							: undefined;
-					const stdoutSnapshot = reduction
-						? stdout.snapshot({ persistIfTruncated: true, persistAlways: reduction.details.persistRaw })
-						: (rawStdout ?? stdout.snapshot({ persistIfTruncated: true }));
-					const outputReduction: OutputReductionDetails | undefined = reduction
-						? {
-								...reduction.details,
-								...(reduction.details.persistRaw && stdoutSnapshot.fullOutputPath
-									? { rawPath: stdoutSnapshot.fullOutputPath }
-									: {}),
-							}
-						: undefined;
-					// stderr carries tracebacks and compiler-style diagnostics; the same pipeline applies.
-					const rawStderr = reduceStdout ? stderr.snapshot({ persistIfTruncated: true }) : undefined;
-					const stderrReduction =
-						rawStderr && !rawStderr.truncation.truncated && rawStderr.content
-							? reduceToolOutput(
-									{
-										tool: "python",
-										command: "python",
-										text: rawStderr.content,
-										exitCode: 0,
-										level: reductionLevel(),
-									},
-									reductionOptions,
-								)
-							: undefined;
-					const stderrSnapshot = stderrReduction
-						? stderr.snapshot({ persistIfTruncated: true, persistAlways: stderrReduction.details.persistRaw })
-						: (rawStderr ?? stderr.snapshot({ persistIfTruncated: true }));
-					return {
-						stdout: reduction ? { ...stdoutSnapshot, content: reduction.text } : stdoutSnapshot,
-						stderr: stderrReduction ? { ...stderrSnapshot, content: stderrReduction.text } : stderrSnapshot,
-						outputReduction,
-						stderrReduction: stderrReduction
-							? {
-									...stderrReduction.details,
-									...(stderrReduction.details.persistRaw && stderrSnapshot.fullOutputPath
-										? { rawPath: stderrSnapshot.fullOutputPath }
-										: {}),
-								}
-							: undefined,
-					};
-				};
+				const level = reduceStreams ? reductionLevel() : undefined;
+				const project = () =>
+					level === undefined
+						? undefined
+						: createReductionProjector("python", "python", level, reductionOptions, (bytes) =>
+								createShellOutputDecoder().decode(bytes),
+							);
+				const stdoutProjector = project();
+				const stderrProjector = project();
 				let execution: PythonExecutionResult;
 				let bridgeReport: ToolBridgeReport | undefined;
 				try {
@@ -497,8 +477,14 @@ export function createPythonToolDefinition(
 								timeoutMs,
 								signal,
 								env: environment,
-								onStdout: (chunk) => stdout.append(chunk),
-								onStderr: (chunk) => stderr.append(chunk),
+								onStdout: (chunk) => {
+									stdout.append(chunk);
+									stdoutProjector?.append(chunk);
+								},
+								onStderr: (chunk) => {
+									stderr.append(chunk);
+									stderrProjector?.append(chunk);
+								},
 							});
 						} finally {
 							if (bridge) bridgeReport = await bridge.close();
@@ -521,30 +507,26 @@ export function createPythonToolDefinition(
 							...(mutationAnnouncer !== undefined ? { announcer: mutationAnnouncer } : {}),
 						},
 					);
-					const snapshots = finishStreams();
+					const [stdoutResult, stderrResult] = await Promise.all([
+						finishPythonStream(stdout, stdoutProjector, execution.exitCode, maxOutputBytes),
+						finishPythonStream(stderr, stderrProjector, execution.exitCode, maxOutputBytes),
+					]);
 					const sections: string[] = [];
-					if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());
-					if (snapshots.stderr.content) sections.push(`[stderr]\n${snapshots.stderr.content.trimEnd()}`);
-					const stdoutNotice = renderStreamNotice(
-						"stdout",
-						snapshots.stdout.fullOutputPath,
-						snapshots.stdout.fullOutputError,
-					);
-					const stderrNotice = renderStreamNotice(
-						"stderr",
-						snapshots.stderr.fullOutputPath,
-						snapshots.stderr.fullOutputError,
-					);
-					const reductionNotice = snapshots.outputReduction
-						? formatOutputReductionNotice(snapshots.outputReduction)
-						: undefined;
-					if (reductionNotice) sections.push(reductionNotice);
-					if (stdoutNotice && !snapshots.outputReduction?.rawPath) sections.push(stdoutNotice);
-					const stderrReductionNotice = snapshots.stderrReduction
-						? formatOutputReductionNotice(snapshots.stderrReduction)
-						: undefined;
-					if (stderrReductionNotice) sections.push(`[stderr] ${stderrReductionNotice}`);
-					if (stderrNotice && !snapshots.stderrReduction?.rawPath) sections.push(stderrNotice);
+					if (stdoutResult.content) sections.push(stdoutResult.content.trimEnd());
+					if (stderrResult.content) sections.push(`[stderr]\n${stderrResult.content.trimEnd()}`);
+					for (const [label, result] of [
+						["stdout", stdoutResult],
+						["stderr", stderrResult],
+					] as const) {
+						const reduction = result.reduction && formatOutputReductionNotice(result.reduction);
+						if (reduction) sections.push(label === "stderr" ? `[stderr] ${reduction}` : reduction);
+						if (result.reducedDisplayTruncated) {
+							sections.push(`[${label} reduced preview truncated; see full output above.]`);
+						} else if (!result.reduction?.rawPath) {
+							const notice = renderStreamNotice(label, result.fullOutputPath, result.fullOutputError);
+							if (notice) sections.push(notice);
+						}
+					}
 					if (bridgeReport) sections.push(formatToolBridgeReport(bridgeReport));
 					const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
 					sections.push(status);
@@ -595,23 +577,27 @@ export function createPythonToolDefinition(
 							exitCode: execution.exitCode,
 							signal: execution.signal,
 							timedOut: false,
-							...(snapshots.stdout.truncation.truncated
-								? { stdoutTruncation: snapshots.stdout.truncation }
-								: {}),
-							...(snapshots.stderr.truncation.truncated
-								? { stderrTruncation: snapshots.stderr.truncation }
-								: {}),
-							stdoutOutputPath: snapshots.stdout.fullOutputPath,
-							stderrOutputPath: snapshots.stderr.fullOutputPath,
-							...(snapshots.outputReduction ? { outputReduction: snapshots.outputReduction } : {}),
-							...(snapshots.stderrReduction ? { stderrReduction: snapshots.stderrReduction } : {}),
-							stdoutOutputError: snapshots.stdout.fullOutputError,
-							stderrOutputError: snapshots.stderr.fullOutputError,
+							...(stdoutResult.truncation.truncated ? { stdoutTruncation: stdoutResult.truncation } : {}),
+							...(stderrResult.truncation.truncated ? { stderrTruncation: stderrResult.truncation } : {}),
+							...(stdoutResult.reducedDisplayTruncated === undefined
+								? {}
+								: { stdoutReducedDisplayTruncated: stdoutResult.reducedDisplayTruncated }),
+							...(stderrResult.reducedDisplayTruncated === undefined
+								? {}
+								: { stderrReducedDisplayTruncated: stderrResult.reducedDisplayTruncated }),
+							stdoutOutputPath: stdoutResult.fullOutputPath,
+							stderrOutputPath: stderrResult.fullOutputPath,
+							...(stdoutResult.reduction ? { outputReduction: stdoutResult.reduction } : {}),
+							...(stderrResult.reduction ? { stderrReduction: stderrResult.reduction } : {}),
+							stdoutOutputError: stdoutResult.fullOutputError,
+							stderrOutputError: stderrResult.fullOutputError,
 							...(bridgeReport ? { toolBridge: bridgeReport } : {}),
 							...(scriptStakes ? { scriptStakes } : {}),
 						},
 					};
 				} finally {
+					stdout.finish();
+					stderr.finish();
 					await Promise.all([stdout.closeTempFile(), stderr.closeTempFile()]);
 				}
 			} catch (error) {

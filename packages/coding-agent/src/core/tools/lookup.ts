@@ -3,7 +3,12 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { LOOKUP_TOOL_NAME, type LookupSubToolName } from "./lookup-tool-name.ts";
+import {
+	LOOKUP_MAX_LABEL_CHARS,
+	LOOKUP_TOOL_NAME,
+	type LookupSubToolName,
+	MAX_LOOKUP_REQUESTS,
+} from "./lookup-tool-name.ts";
 import {
 	type NestedCallHost,
 	type NestedCallOutcome,
@@ -24,10 +29,10 @@ import { readSchema } from "./schemas/read.ts";
  * request's section; it is never skipped and never run unadmitted.
  */
 
-export const MAX_LOOKUP_REQUESTS = 12;
+export { MAX_LOOKUP_REQUESTS } from "./lookup-tool-name.ts";
+
 /** The least a section is given, however many requests share the result. */
 const MIN_SECTION_BYTES = 1024;
-const MAX_LABEL_CHARS = 100;
 
 const lookupReadSchema = Type.Pick(readSchema, ["path", "offset", "limit", "tail", "mode"]);
 const lookupSearchSchema = Type.Pick(grepSchema, ["pattern", "path", "glob", "limit"]);
@@ -60,7 +65,13 @@ export type LookupSectionStatus = NestedCallStatus;
 
 export interface LookupToolDetails {
 	requests: number;
-	sections: { label: string; status: LookupSectionStatus; truncated: boolean }[];
+	sections: {
+		label: string;
+		status: LookupSectionStatus;
+		truncated: boolean;
+		continuation?: string;
+		producer?: NestedCallOutcome["producer"];
+	}[];
 }
 
 interface PlannedCall {
@@ -69,12 +80,12 @@ interface PlannedCall {
 	toolName: LookupSubToolName;
 	args: Record<string, unknown>;
 	/** What to do next when this request's section is cut after `shownLines` lines. */
-	continuation(shownLines: number): string;
+	continuation(shownLines?: number, outcome?: NestedCallOutcome): string;
 }
 
 function singleLine(value: string): string {
 	const flat = value.replace(/\s+/g, " ").trim();
-	return flat.length <= MAX_LABEL_CHARS ? flat : `${flat.slice(0, MAX_LABEL_CHARS - 1)}…`;
+	return flat.length <= LOOKUP_MAX_LABEL_CHARS ? flat : `${flat.slice(0, LOOKUP_MAX_LABEL_CHARS - 1)}…`;
 }
 
 function definedFields<T extends Record<string, unknown>>(fields: T): Record<string, unknown> {
@@ -85,17 +96,20 @@ function planRequest(request: LookupRequest): PlannedCall {
 	if ("read" in request) {
 		const read = request.read;
 		const outline = read.mode === "outline";
-		const startLine = Math.max(1, Math.floor(read.offset ?? 1));
+
 		return {
 			kind: "read",
 			label: singleLine(`read ${read.path}${outline ? " (outline)" : ""}`),
 			toolName: "read",
 			args: definedFields(read),
-			continuation: (shown) => {
+			continuation: (shown, outcome) => {
 				if (outline) return "read the part you need with offset and limit";
 				if (read.tail !== undefined) return "ask for a smaller tail, or read a range with offset and limit";
 				if (shown === 0) return "one line exceeds the section limit; read it as its own call";
-				return `read it again with offset=${startLine + shown}`;
+				const source = outcome?.readSourceLines;
+				return source && shown !== undefined && shown <= source.count
+					? `read it again with offset=${source.first + shown}`
+					: "read the needed range directly with offset and limit";
 			},
 		};
 	}
@@ -128,11 +142,16 @@ function planRequest(request: LookupRequest): PlannedCall {
 	};
 }
 
-function boundSection(call: PlannedCall, outcome: NestedCallOutcome, capBytes: number): { text: string; cut: boolean } {
+function boundSection(
+	call: PlannedCall,
+	outcome: NestedCallOutcome,
+	capBytes: number,
+): { text: string; continuation?: string } {
 	const cut = truncateHead(outcome.text, { maxBytes: capBytes, maxLines: DEFAULT_MAX_LINES });
-	if (!cut.truncated) return { text: cut.content, cut: false };
-	const notice = `[cut: ${cut.outputLines} of ${cut.totalLines} lines shown (${formatSize(cut.outputBytes)} of ${formatSize(cut.totalBytes)}); ${call.continuation(cut.outputLines)}]`;
-	return { text: cut.content ? `${cut.content}\n${notice}` : notice, cut: true };
+	if (!cut.truncated) return { text: cut.content };
+	const continuation = call.continuation(cut.outputLines, outcome);
+	const notice = `[cut: ${cut.outputLines} of ${cut.totalLines} lines shown (${formatSize(cut.outputBytes)} of ${formatSize(cut.totalBytes)}); ${continuation}]`;
+	return { text: cut.content ? `${cut.content}\n${notice}` : notice, continuation };
 }
 
 function countKinds(planned: readonly PlannedCall[]): Record<string, number> {
@@ -155,7 +174,7 @@ function lookupWarnings(details: LookupToolDetails | undefined): string[] {
 	const warnings: string[] = [];
 	const refused = details.sections.filter((section) => section.status === "refused").length;
 	const failed = details.sections.filter((section) => section.status === "error").length;
-	const cut = details.sections.filter((section) => section.truncated).length;
+	const cut = details.sections.filter((section) => section.truncated || section.producer?.clipped).length;
 	if (refused > 0) warnings.push(`${refused} refused`);
 	if (failed > 0) warnings.push(`${failed} failed`);
 	if (cut > 0) warnings.push(`${cut} cut`);
@@ -199,7 +218,18 @@ export function createLookupToolDefinition(
 			const sections = planned.map((call, index) => {
 				const outcome = outcomes[index]!;
 				const bounded = boundSection(call, outcome, capBytes);
-				details.sections.push({ label: call.label, status: outcome.status, truncated: bounded.cut });
+				const producer = outcome.producer;
+				const continuation =
+					bounded.continuation ??
+					outcome.readContinuation ??
+					(producer?.clipped ? call.continuation() : undefined);
+				details.sections.push({
+					label: call.label,
+					status: outcome.status,
+					truncated: bounded.continuation !== undefined,
+					...(continuation ? { continuation } : {}),
+					...(producer ? { producer } : {}),
+				});
 				return `[${index + 1}] ${call.label}\n${bounded.text}`;
 			});
 			const refused = details.sections.filter((section) => section.status === "refused").length;

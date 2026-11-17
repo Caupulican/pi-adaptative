@@ -11,7 +11,7 @@ import {
 	renderContinuousChatOverlengthCorrection,
 	truncateContinuousChatUtf8,
 } from "./continuous-chat-prompt.ts";
-import { buildContinuousChatToolLeafText, clipUtf8SingleLine } from "./continuous-chat-tool-leaf.ts";
+import { buildContinuousChatToolLeaf, clipUtf8SingleLine } from "./continuous-chat-tool-leaf.ts";
 import {
 	CONTINUOUS_CHAT_NODE_MAX_BYTES,
 	CONTINUOUS_CHAT_NODE_TARGET_BYTES,
@@ -298,6 +298,8 @@ export function continuousChatNoCallNode(target: ContinuousChatCompactionTarget)
 		}
 		return undefined;
 	}
+	const toolLeaf = buildContinuousChatToolLeaf(target.record);
+	if (toolLeaf) return toolLeaf;
 	const source = renderContinuousChatLeaf(target.record);
 	if (Buffer.byteLength(source, "utf8") <= CONTINUOUS_CHAT_NODE_MAX_BYTES)
 		return createContinuousChatLeaf(target.record);
@@ -307,9 +309,7 @@ export function continuousChatNoCallNode(target: ContinuousChatCompactionTarget)
 			? createContinuousChatLeaf(target.record)
 			: createContinuousChatLeaf(target.record, normalized);
 	}
-	// A tool call or result that does not fit is still code facts (name and arguments, size, head and tail), not words.
-	const toolLine = buildContinuousChatToolLeafText(target.record);
-	return toolLine === undefined ? undefined : createContinuousChatLeaf(target.record, toolLine);
+	return undefined;
 }
 
 function failure(

@@ -199,7 +199,7 @@ export function outputReductionApplies(command: string, options?: ReduceToolOutp
 }
 
 /**
- * Streaming adapter over the pure reducers for the bash tool: buffers the output as it arrives and
+ * Streaming adapter over the pure reducers for process tools: buffers the output as it arrives and
  * reduces it once the command finished, in the same shape as the test projector so the tool's
  * persistence and notice flow applies unchanged. Gives up (undefined) when the output outgrows the
  * buffer or the reducer declines; the raw path then handles the result exactly as before.
@@ -209,35 +209,46 @@ export function createReductionProjector(
 	command: string,
 	level: OutputReductionLevel,
 	options?: ReduceToolOutputOptions,
+	decode?: (bytes: Buffer) => string,
 ): ShellOutputProjectorLike | undefined {
 	if (classifyCommandFamily(command).verbose) return undefined;
-	const chunks: Buffer[] = [];
+	let buffer: Buffer | undefined;
 	let bufferedBytes = 0;
 	let overflowed = false;
 	let finished: ShellOutputProjection | null | undefined;
 	return {
 		append(data: Buffer): void {
-			if (overflowed) return;
-			bufferedBytes += data.length;
-			if (bufferedBytes > MAX_BUFFERED_REDUCTION_BYTES) {
+			if (overflowed || finished !== undefined || data.length === 0) return;
+			const end = bufferedBytes + data.length;
+			if (end > MAX_BUFFERED_REDUCTION_BYTES) {
 				overflowed = true;
-				chunks.length = 0;
+				buffer = undefined;
 				return;
 			}
-			chunks.push(data);
+			if (!buffer || buffer.length < end) {
+				const capacity = Math.min(MAX_BUFFERED_REDUCTION_BYTES, Math.max(end, (buffer?.length ?? 2048) * 2));
+				const next = Buffer.allocUnsafe(capacity);
+				buffer?.copy(next, 0, 0, bufferedBytes);
+				buffer = next;
+			}
+			data.copy(buffer, bufferedBytes);
+			bufferedBytes = end;
 		},
 		finish(exitCode: number | null): ShellOutputProjection | undefined {
 			if (finished !== undefined) return finished ?? undefined;
-			if (overflowed) {
-				finished = null;
+			finished = null;
+			if (overflowed || !buffer) return undefined;
+			const bytes = buffer.subarray(0, bufferedBytes);
+			buffer = undefined;
+			let result: OutputReductionResult | undefined;
+			try {
+				const text = decode ? decode(bytes) : bytes.toString("utf-8");
+				result = reduceToolOutput({ tool, command, text, exitCode, level }, options);
+			} catch {
+				// Reduction is opportunistic. The raw accumulator owns the complete stream and its recovery.
 				return undefined;
 			}
-			const text = Buffer.concat(chunks).toString("utf-8");
-			const result = reduceToolOutput({ tool, command, text, exitCode, level }, options);
-			if (!result) {
-				finished = null;
-				return undefined;
-			}
+			if (!result) return undefined;
 			finished = {
 				kind: "reduction",
 				content: result.text,

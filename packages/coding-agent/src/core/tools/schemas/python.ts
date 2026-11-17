@@ -2,6 +2,7 @@ import { type Static, Type } from "typebox";
 import type { TruncationResult } from "../../../kernel/node.ts";
 import type { ExecutionEnvironment } from "../../execution-environment.ts";
 import type { ScriptStakes } from "../../proof/proof-stakes.ts";
+import type { OutputReductionDetails } from "../output-reduction-types.ts";
 import type { ToolBridgeReport } from "../tool-bridge.ts";
 import {
 	DEFAULT_TOOL_BRIDGE_MAX_CALLS,
@@ -54,7 +55,7 @@ export const pythonSchema = Type.Object(
 		fullOutput: Type.Optional(
 			Type.Boolean({
 				description:
-					"Return complete raw stdout with no output filters; the persisted file named in a filtered notice is usually enough.",
+					"Skip reduction for stdout and stderr. Each stream still uses maxOutputBytes and spills excess output to a managed file.",
 			}),
 		),
 		maxOutputBytes: Type.Optional(
@@ -93,10 +94,15 @@ export interface PythonToolDetails {
 	timedOut: boolean;
 	stdoutTruncation?: TruncationResult;
 	stderrTruncation?: TruncationResult;
+	/** Present when the corresponding stream sent a reduction, including false for a complete reduced display. */
+	stdoutReducedDisplayTruncated?: boolean;
+	stderrReducedDisplayTruncated?: boolean;
 	stdoutOutputPath?: string;
 	stderrOutputPath?: string;
 	stdoutOutputError?: string;
 	stderrOutputError?: string;
+	outputReduction?: OutputReductionDetails;
+	stderrReduction?: OutputReductionDetails;
 	/** The calls the script made through `pi_tools`, when it named `tools`. */
 	toolBridge?: ToolBridgeReport;
 	/** For `scriptPath`: the stakes the host read from the script before it ran (the scan, or why it was not read). */
@@ -128,5 +134,6 @@ export interface PythonOperations {
 	getEnvironment(cwd: string, signal?: AbortSignal): Promise<ExecutionEnvironment>;
 	/** Read a backend JSON rules document; preserve missing-path errors. Schema validation is shared. */
 	readOutputRules(path: string, signal?: AbortSignal): Promise<unknown>;
+	/** Drains or detaches output callbacks before settling, including failure and cancellation. */
 	exec(request: PythonExecutionRequest): Promise<PythonExecutionResult>;
 }

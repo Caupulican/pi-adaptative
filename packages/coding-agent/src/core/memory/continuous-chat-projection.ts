@@ -5,7 +5,6 @@
 
 import type { Api, Model, TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
-import { messageContentEpoch } from "../../kernel/message-revision.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import { isContextPlanDispatchCurrent } from "../../kernel/provider-request-planner.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -13,6 +12,7 @@ import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../context/path-alias-table.ts";
 import type { ContinuousChatAudit } from "../extensions/builtin.ts";
 import type { ContinuousChatCacheTextContent, ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import { replayableAliasLegend, replayableBodyAliases } from "./continuous-chat-history-aliases.ts";
+import { ContinuousChatMessageDependencies, MAX_RETAINED_MESSAGES } from "./continuous-chat-message-dependencies.ts";
 import { ContinuousChatProviderHistory } from "./continuous-chat-provider-history.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
@@ -334,7 +334,7 @@ export function createContinuousChatPlanWrapper(
 			throw new Error("Continuous-chat provider request has no running turn; durable history must not be sent.");
 		}
 		const { handle, stateText } = current;
-		const contentEpoch = messageContentEpoch();
+		const compaction = handle.latestCompaction;
 		const startIndex = turnStartIndex(handle, request.messages);
 		// The turn's messages, untransformed: the durable form transient records were committed in.
 		// Only the running turn is handed to the base planner so context GC, path aliasing, prompt
@@ -358,6 +358,13 @@ export function createContinuousChatPlanWrapper(
 		// turn and state, so what a reader derives from them is computed once.
 		const frameMessages = frameFor(handle, stateText);
 		const memoized = carried?.handle === handle ? carried : undefined;
+		const dependencies = retention ? captureTurnDependencies(turnMessages, request.sourceMessage) : undefined;
+		dependencies?.add(frameMessages);
+		if (memoized) {
+			dependencies?.add(memoized.records);
+			dependencies?.add(memoized.wire);
+		}
+		if (request.wire?.messages) dependencies?.add(request.wire.messages);
 		const plan = await base(
 			{
 				...request,
@@ -382,29 +389,36 @@ export function createContinuousChatPlanWrapper(
 		}
 		const isTurnCurrent = (): boolean => {
 			const now = source.current();
-			return now?.handle === handle && now.stateText === stateText;
+			return now?.handle === handle && now.stateText === stateText && handle.latestCompaction === compaction;
 		};
 		const freshFrame = [...head.wire, ...frameMessages];
 		const frameLegend = legend && isFrameLegend(legend) ? replayableAliasLegend(legend, true) : undefined;
-		const history = retention?.plan(
-			handle,
-			request.messages,
-			startIndex,
-			{
-				headMessages: head.wire.length,
-				legend: frameLegend,
-				bodyAliases: replayableBodyAliases(plan.messages, false),
-				verifyAliases: plan.verifyPathAliases,
-			},
-			() =>
-				(!legend || !isFrameLegend(legend) || frameLegend !== undefined) &&
-				contentEpoch === messageContentEpoch() &&
-				request.attempt === 0 &&
-				(plan.nonCompactableHead ?? 0) === 0,
-			(frame, lineage) => {
-				if (isTurnCurrent()) handle.noteFrame(frame.length > 0 ? frame : freshFrame, lineage);
-			},
-		);
+		dependencies?.add(records);
+		dependencies?.add(head.wire);
+		dependencies?.add(plan.messages);
+		if (plan.transientMessages) dependencies?.add(plan.transientMessages);
+		const history =
+			dependencies &&
+			retention?.plan(
+				handle,
+				request.messages,
+				startIndex,
+				request.sourceMessage,
+				{
+					headMessages: head.wire.length,
+					legend: frameLegend,
+					bodyAliases: replayableBodyAliases(plan.messages, false),
+					verifyAliases: plan.verifyPathAliases,
+				},
+				dependencies,
+				() =>
+					(!legend || !isFrameLegend(legend) || frameLegend !== undefined) &&
+					request.attempt === 0 &&
+					(plan.nonCompactableHead ?? 0) === 0,
+				(frame, lineage) => {
+					if (isTurnCurrent()) handle.noteFrame(frame.length > 0 ? frame : freshFrame, lineage);
+				},
+			);
 		const { carriedRecords: _carriedRecords, ...planWithoutHead } = plan;
 		return {
 			...planWithoutHead,
@@ -424,6 +438,22 @@ export function createContinuousChatPlanWrapper(
 			},
 		};
 	};
+}
+
+/** Capture only the current projected messages and the durable objects they came from. */
+function captureTurnDependencies(
+	messages: readonly AgentMessage[],
+	source: ((message: AgentMessage) => AgentMessage) | undefined,
+): ContinuousChatMessageDependencies {
+	const dependencies = new ContinuousChatMessageDependencies();
+	if (messages.length > MAX_RETAINED_MESSAGES) {
+		dependencies.markIncomplete();
+		return dependencies;
+	}
+	dependencies.add(messages);
+	if (source) dependencies.add(messages.map(source));
+	else dependencies.markIncomplete();
+	return dependencies;
 }
 
 /** The text a carried record holds: its string content (`transientRecordMessageOf` builds it so). */

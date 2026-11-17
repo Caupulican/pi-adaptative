@@ -9,6 +9,13 @@ import {
 } from "../../kernel/index.ts";
 import { prepareToolCallArguments, toolCallForm } from "../../kernel/tool-call-arguments.ts";
 import { type BoundToolInvocation, bindToolInvocation } from "../../kernel/tool-invocation-binding.ts";
+import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
+import type { ReadToolDetails } from "./schemas/read.ts";
+import {
+	readOutputContinuation,
+	type ToolOutputFidelity,
+	toolOutputFidelityFromResult,
+} from "./tool-output-fidelity.ts";
 
 /**
  * A tool call made from inside another admitted tool call (a `lookup` request, a `python` script's `pi_tools` call).
@@ -66,13 +73,13 @@ export interface NestedCallAdmission {
 	start(): void;
 	/**
 	 * Closes the call after its body returned or threw: the surface's result hooks and terminal records run, then its
-	 * cleanups. Returns the policy-finalized content and error flag.
+	 * cleanups. Returns the policy-finalized content, details and error flag.
 	 */
 	finish(
 		result: AgentToolResult<unknown>,
 		isError: boolean,
 		signal?: AbortSignal,
-	): Promise<{ content: AgentToolResult<unknown>["content"]; isError: boolean }>;
+	): Promise<{ content: AgentToolResult<unknown>["content"]; details?: unknown; isError: boolean }>;
 	/** Drops an admitted call whose body never started. */
 	abandon(): void;
 	/**
@@ -112,7 +119,13 @@ export interface NestedCallHost {
 
 export type NestedCallStatus = "ok" | "error" | "refused";
 
-export interface NestedCallOutcome {
+interface NestedOutputEvidence {
+	producer?: ToolOutputFidelity;
+	readContinuation?: string;
+	readSourceLines?: ReadToolDetails["sourceLines"];
+}
+
+export interface NestedCallOutcome extends NestedOutputEvidence {
 	status: NestedCallStatus;
 	/** The tool's text; a refusal or a thrown failure reads `refused: <reason>` / `error: <message>`. */
 	text: string;
@@ -145,6 +158,45 @@ function outcomeFromThrown(error: unknown): NestedCallOutcome {
 	const execution = readAgentToolExecutionError(error);
 	if (execution?.failureCode === "credential_access_blocked") return refusedNestedOutcome(execution.message);
 	return errorOutcome(describeError(error));
+}
+
+/** Retain only bounded evidence from the policy-finalized result. A rewritten body loses its line mapping. */
+function finalizedEvidence(
+	tool: string,
+	details: unknown,
+	content: AgentToolResult<unknown>["content"],
+	originalText: string | undefined,
+): NestedOutputEvidence {
+	const producer = toolOutputFidelityFromResult(tool, details);
+	const evidence: NestedOutputEvidence = producer ? { producer } : {};
+	if (tool !== "read") return evidence;
+	if (content.some((block) => block.type === "image")) {
+		return {
+			...evidence,
+			producer: { ...producer, clipped: true },
+			readContinuation: "read the file as its own call to see the image",
+		};
+	}
+	if (
+		content[0]?.type !== "text" ||
+		originalText !== content[0].text ||
+		!isPlainRecord(details) ||
+		details.truncated === true
+	)
+		return evidence;
+	const continuation = readOutputContinuation(details);
+	if (continuation) evidence.readContinuation = continuation;
+	const source = details.sourceLines;
+	if (
+		isPlainRecord(source) &&
+		isNonNegativeSafeInteger(source.first) &&
+		source.first > 0 &&
+		isNonNegativeSafeInteger(source.count) &&
+		Number.isSafeInteger(source.first + source.count)
+	) {
+		evidence.readSourceLines = { first: source.first, count: source.count };
+	}
+	return evidence;
 }
 
 function contentText(content: AgentToolResult<unknown>["content"]): string {
@@ -230,17 +282,25 @@ export async function startNestedCall(
 					thrown = outcomeFromThrown(error);
 					result = { content: [{ type: "text", text: thrown.text }], details: undefined, isError: true };
 				}
+				const originalText = result.content[0]?.type === "text" ? result.content[0].text : undefined;
 				let content = result.content;
 				let isError = thrown !== undefined || result.isError === true;
 				let hookNote = "";
+				let evidence: NestedOutputEvidence = {};
 				try {
-					({ content, isError } = await admission.finish(result, isError, signal));
+					const finished = await admission.finish(result, isError, signal);
+					({ content, isError } = finished);
+					evidence = finalizedEvidence(toolName, finished.details, content, originalText);
 				} catch (error) {
 					// The operation ran; a failed result hook is told, not turned into a different result.
 					hookNote = `\n[result hooks failed: ${describeError(error)}]`;
 				}
 				if (thrown) return thrown;
-				return { status: isError ? "error" : "ok", text: `${contentText(content)}${hookNote}` };
+				return {
+					status: isError ? "error" : "ok",
+					text: `${contentText(content)}${hookNote}`,
+					...evidence,
+				};
 			} catch (error) {
 				// A sub-call settles as its own outcome; whatever went wrong around it never rejects its siblings.
 				return outcomeFromThrown(error);

@@ -1,111 +1,76 @@
 /** Capture tool-output fidelity once, for stable summary leaves and on-demand inspection in zoom. */
-import { getToolResultArtifactId } from "../context/context-tool-result.ts";
-import { formatStructuredOutputCounts, type OutputReductionDetails } from "../tools/output-reduction-types.ts";
-import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
+import { LOOKUP_MAX_LABEL_CHARS, LOOKUP_TOOL_NAME, MAX_LOOKUP_REQUESTS } from "../tools/lookup-tool-name.ts";
+import { formatStructuredOutputCounts } from "../tools/output-reduction-types.ts";
+import {
+	parseToolOutputFidelity,
+	type ToolOutputFidelity,
+	toolOutputFidelityFromResult,
+} from "../tools/tool-output-fidelity.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 
-type ReductionReceipt = Pick<
-	OutputReductionDetails,
-	"inputBytes" | "outputBytes" | "omittedLines" | "rawPath" | "omittedItems" | "clippedStrings"
->;
-
-export interface ContinuousChatToolOutput {
-	clipped?: true;
-	artifactId?: string;
-	outputReduction?: ReductionReceipt;
-	stderrReduction?: ReductionReceipt;
+interface LookupSectionReceipt {
+	index: number;
+	label: string;
+	truncated?: true;
+	continuation?: string;
+	producer?: ToolOutputFidelity;
 }
 
-function reductionReceipt(value: unknown, streamPath?: unknown): ReductionReceipt | undefined {
-	if (!isPlainRecord(value)) return undefined;
-	const { inputBytes, outputBytes, omittedLines, omittedItems, clippedStrings } = value;
-	if (
-		!isNonNegativeSafeInteger(inputBytes) ||
-		!isNonNegativeSafeInteger(outputBytes) ||
-		!isNonNegativeSafeInteger(omittedLines)
-	)
-		return undefined;
-	const path = value.rawPath ?? streamPath;
-	// Store the producer's actual file reference as data. Never execute its suggested recovery command.
-	const rawPath =
-		typeof path === "string" &&
-		/^(?:\/|[A-Za-z]:[\\/]|\\\\)/u.test(path) &&
-		Buffer.byteLength(path, "utf8") <= 4096 &&
-		!/[\p{Cc}\p{Zl}\p{Zp}]/u.test(path)
-			? path
-			: undefined;
-	return {
-		inputBytes,
-		outputBytes,
-		omittedLines,
-		...(isNonNegativeSafeInteger(omittedItems) && omittedItems > 0 ? { omittedItems } : {}),
-		...(isNonNegativeSafeInteger(clippedStrings) && clippedStrings > 0 ? { clippedStrings } : {}),
-		...(rawPath ? { rawPath } : {}),
-	};
+export interface ContinuousChatToolOutput extends ToolOutputFidelity {
+	sections?: LookupSectionReceipt[];
 }
 
-function artifactReference(value: unknown): string | undefined {
-	return typeof value === "string" && /^[a-f0-9]{24}$/.test(value) ? value : undefined;
+function receiptText(value: unknown, max: number): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= max && !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+		? value
+		: undefined;
 }
 
-function toolOutput(
-	clipped: boolean,
-	artifactId: string | undefined,
-	outputReduction: ReductionReceipt | undefined,
-	stderrReduction: ReductionReceipt | undefined,
+function withLookupSections(
+	base: ToolOutputFidelity | undefined,
+	value: unknown,
+	persisted: boolean,
 ): ContinuousChatToolOutput | undefined {
-	if (!clipped && !outputReduction && !stderrReduction) return undefined;
-	return {
-		...(clipped ? { clipped: true } : {}),
-		...(artifactId ? { artifactId } : {}),
-		...(outputReduction ? { outputReduction } : {}),
-		...(stderrReduction ? { stderrReduction } : {}),
-	};
+	if (!Array.isArray(value) || value.length > MAX_LOOKUP_REQUESTS) return base;
+	const sections: LookupSectionReceipt[] = [];
+	for (const [position, item] of value.entries()) {
+		if (!isPlainRecord(item)) continue;
+		const index = persisted ? item.index : position + 1;
+		if (
+			typeof index !== "number" ||
+			!Number.isSafeInteger(index) ||
+			index <= (sections.at(-1)?.index ?? 0) ||
+			index > MAX_LOOKUP_REQUESTS
+		)
+			continue;
+		const producer = parseToolOutputFidelity(item.producer);
+		const truncated = item.truncated === true;
+		if (!truncated && !producer) continue;
+		const label = receiptText(item.label, LOOKUP_MAX_LABEL_CHARS) ?? "lookup request";
+		const continuation = receiptText(item.continuation, 256);
+		sections.push({
+			index,
+			label,
+			...(truncated ? { truncated } : {}),
+			...(continuation ? { continuation } : {}),
+			...(producer ? { producer } : {}),
+		});
+	}
+	return sections.length ? { ...base, sections } : base;
 }
 
 export function parseContinuousChatToolOutput(value: unknown): ContinuousChatToolOutput | undefined {
-	if (!isPlainRecord(value) || (value.clipped !== undefined && value.clipped !== true)) return undefined;
-	const artifactId = artifactReference(value.artifactId);
-	if (value.artifactId !== undefined && !artifactId) return undefined;
-	return toolOutput(
-		value.clipped === true,
-		artifactId,
-		reductionReceipt(value.outputReduction),
-		reductionReceipt(value.stderrReduction),
-	);
+	return withLookupSections(parseToolOutputFidelity(value), isPlainRecord(value) && value.sections, true);
 }
 
 export function continuousChatToolOutputFromResult(
 	tool: string,
 	details: unknown,
 ): ContinuousChatToolOutput | undefined {
-	if (!isPlainRecord(details)) return undefined;
-	const artifactId = artifactReference(getToolResultArtifactId(details));
-	const truncated = (value: unknown) => isPlainRecord(value) && value.truncated === true;
-	const clipped =
-		artifactId !== undefined ||
-		details.truncated === true ||
-		details.linesTruncated === true ||
-		(typeof details.matchLimitReached === "number" && details.matchLimitReached > 0) ||
-		(typeof details.resultLimitReached === "number" && details.resultLimitReached > 0) ||
-		truncated(details.truncation) ||
-		(tool === "python" && (truncated(details.stdoutTruncation) || truncated(details.stderrTruncation)));
-	let outputReduction: ReductionReceipt | undefined;
-	let stderrReduction: ReductionReceipt | undefined;
-	switch (tool) {
-		case "bash":
-			outputReduction =
-				reductionReceipt(details.outputReduction, details.fullOutputPath) ??
-				reductionReceipt(details.outputProjection, details.fullOutputPath);
-			break;
-		case "python":
-			outputReduction = reductionReceipt(details.outputReduction, details.stdoutOutputPath);
-			stderrReduction = reductionReceipt(details.stderrReduction, details.stderrOutputPath);
-			break;
-		case "repo_read":
-			outputReduction = reductionReceipt(details.outputReduction);
-			break;
-	}
-	return toolOutput(clipped, artifactId, outputReduction, stderrReduction);
+	const base = toolOutputFidelityFromResult(tool, details);
+	return tool === LOOKUP_TOOL_NAME && isPlainRecord(details)
+		? withLookupSections(base, details.sections, false)
+		: base;
 }
 
 export function continuousChatToolOutputLabel(record: {
@@ -113,6 +78,10 @@ export function continuousChatToolOutputLabel(record: {
 	toolOutput?: ContinuousChatToolOutput;
 }): string {
 	const output = record.toolOutput;
+	if (output?.sections?.length) {
+		const condition = record.toolClipping || output.clipped ? "clipped lookup record" : "partial lookup output";
+		return `${condition} (${output.sections.length} affected sections)`;
+	}
 	if (output?.outputReduction || output?.stderrReduction)
 		return output.clipped || record.toolClipping ? "reduced and clipped tool output" : "reduced tool output";
 	if (output?.artifactId)
@@ -125,16 +94,19 @@ export function continuousChatToolOutputLabel(record: {
 /** Keep transient recovery paths out of both short and excerpted tree leaves. Zoom keeps the producer text. */
 export function continuousChatSummaryText(record: { text: string; toolOutput?: ContinuousChatToolOutput }): string {
 	let text = record.text;
-	if (!record.toolOutput?.outputReduction?.rawPath && !record.toolOutput?.stderrReduction?.rawPath) return text;
-	for (const path of [record.toolOutput.outputReduction?.rawPath, record.toolOutput.stderrReduction?.rawPath]) {
-		if (path) text = text.replaceAll(path, "[session output file]");
+	const output = record.toolOutput;
+	if (!output) return text;
+	for (const fidelity of [output, ...(output.sections ?? []).map((section) => section.producer)]) {
+		for (const path of [fidelity?.outputReduction?.rawPath, fidelity?.stderrReduction?.rawPath]) {
+			if (path) text = text.replaceAll(path, "[session output file]");
+		}
 	}
 	return text;
 }
 
 /** These details are paged along with the record, even for a long file name on a small worker budget. */
 export function reductionZoomDetails(output: ContinuousChatToolOutput | undefined): string[] {
-	if (!output?.outputReduction && !output?.stderrReduction) return [];
+	if (!output) return [];
 	const lines: string[] = [];
 	for (const [stream, receipt] of [
 		["output", output.outputReduction],
@@ -148,5 +120,16 @@ export function reductionZoomDetails(output: ContinuousChatToolOutput | undefine
 	}
 	if (output.artifactId)
 		lines.push(`Stored output reference: tool-output:${output.artifactId} (availability may change).`);
+	for (const section of output.sections ?? []) {
+		const reasons = [
+			section.truncated && "section cut",
+			section.producer?.clipped && "producer clipped",
+			section.producer?.outputReduction && "producer reduced",
+		].filter(Boolean);
+		lines.push(
+			`[${section.index}] ${section.label}: ${reasons.join(", ")}.${section.continuation ? ` Next: ${section.continuation}.` : ""}`,
+		);
+		if (section.producer) lines.push(...reductionZoomDetails(section.producer));
+	}
 	return lines;
 }

@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { OAuthRefreshRejectedError, registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { expect } from "vitest";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import type { ContinuousChatCacheTextContent } from "../../../../src/core/memory/continuous-chat-cache.ts";
 import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/memory/continuous-chat-index.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
 import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
@@ -1215,6 +1216,13 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		// The previous turn used no tool: its owner words are settled by this submission.
 		world.systemOne.enterPhase(`${label}-${name}`, turnJudgments);
 		await withDeadline(trace, `R10s ${name}`, root.session.prompt(`Answer after the R10s ${name}.`));
+		expect(
+			root.session.messages.findLast((message) => message.role === "assistant"),
+			`R10s ${name} answered`,
+		).toMatchObject({
+			stopReason: "stop",
+			content: [{ type: "text", text: "Done." }],
+		});
 		await icmEndForegroundQuiet(world);
 		messages += 2;
 		await withDeadline(
@@ -1370,12 +1378,34 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	});
 	const prefixInterrupted = (request: ScriptedRequest): void => {
 		const blocks = chatBlocks(request);
-		expect(blocks[0], "a held summary interrupts the stable prefix inside a complete block").toMatchObject({
-			icmCache: {
-				stablePrefixLineCount: 1,
-				lines: Array.from({ length: messages }, (_, ordinal) => ({ level: 0, ordinal })),
-			},
+		const first = blocks[0] as ContinuousChatCacheTextContent;
+		expect(first, "a held summary interrupts the stable prefix inside a complete block").toMatchObject({
+			icmCache: { stablePrefixLineCount: 1 },
 		});
+		const lines = first.icmCache.lines;
+		const rows = blocks
+			.map(({ text }) => text)
+			.join("")
+			.split("\n")
+			.slice(1, -1);
+		expect(lines.slice(0, 2)).toMatchObject([
+			{ level: 0, ordinal: 0 },
+			{ level: 0, ordinal: 1 },
+		]);
+		expect(rows[0]).toBe("0+1|user: Record the R10s spacing reply.");
+		expect(rows[1]).toContain("not summarized yet");
+		expect(lines.length).toBeGreaterThanOrEqual(4);
+		expect(rows).toHaveLength(lines.length);
+		// Newly pending siblings can occupy one aligned row instead of two leaves; the rendered rows
+		// and their provenance must still cover every past message in order.
+		let nextMessage = 0;
+		for (const [index, row] of lines.entries()) {
+			const count = 2 ** row.level;
+			expect(row.ordinal * count, "rendered ranges have no gaps or overlaps").toBe(nextMessage);
+			expect(rows[index]?.startsWith(`${nextMessage}+${count}|`), "each row names its metadata range").toBe(true);
+			nextMessage += count;
+		}
+		expect(nextMessage, "the pending view covers the whole pinned chat").toBe(messages);
 		expect(
 			blocks.some((block) => block.cacheBoundary),
 			"no marked block may include the pending summary",

@@ -6,6 +6,7 @@ import {
 } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import { harnessLog } from "./harness-log.ts";
+import { withMessageSource } from "./message-revision.ts";
 import { PrefixFold } from "./prefix-fold.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
@@ -1587,7 +1588,6 @@ function buildFailureContextAnalysis(
 	} = state;
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 	const activeRecords = activeFailureRecords(active);
-
 	if (omittedCallIds.size === 0 && omittedResults.size === 0 && boundedReplacements.size === 0) {
 		return { messages, activeRecords, activeDirectives: [...activeDirectives.values()], kindMistakesSummary };
 	}
@@ -1606,11 +1606,11 @@ function buildFailureContextAnalysis(
 			if (!replacement) {
 				const details: ToolFailureMemoryDetails = { piToolFailureMemory: bounded };
 				const receipt = retainedToolInvocation(message.details);
-				replacement = {
+				replacement = withMessageSource(message, {
 					...message,
 					content: [{ type: "text", text: `[harness] ${formatRecordJson(bounded, false)}` }],
 					details: receipt ? stampToolInvocation(details, receipt) : details,
-				};
+				});
 				boundedMessages.set(message, replacement);
 			}
 			filteredMessages.push(replacement);
@@ -1644,7 +1644,7 @@ function buildFailureContextAnalysis(
 				omittedIds,
 				message:
 					retainedContent.length > 0
-						? ({ ...message, content: retainedContent } satisfies AssistantMessage)
+						? withMessageSource(message, { ...message, content: retainedContent } satisfies AssistantMessage)
 						: undefined,
 			};
 			filteredAssistantMessages.set(message, filtered);

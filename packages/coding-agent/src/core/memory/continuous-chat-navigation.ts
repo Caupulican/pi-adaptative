@@ -18,6 +18,7 @@ import {
 	continuousChatToolOutputLabel,
 } from "./continuous-chat-contracts.ts";
 import { truncateContinuousChatUtf8 } from "./continuous-chat-prompt.ts";
+import { buildContinuousChatToolLeaf } from "./continuous-chat-tool-leaf.ts";
 import { reductionZoomDetails } from "./continuous-chat-tool-output.ts";
 import {
 	type ContinuousChatNodeCoordinate,
@@ -368,7 +369,7 @@ export class ContinuousChatNavigator {
 			const coordinate = item.coordinate;
 			const first = continuousChatNodeFirstMessage(coordinate);
 			const count = 2 ** coordinate.level;
-			const node = await this.source.readNode(coordinate, context);
+			let node = await this.source.readNode(coordinate, context);
 			reads++;
 			assertMemoryReadActive(context);
 			if (!node && item.required)
@@ -388,20 +389,23 @@ export class ContinuousChatNavigator {
 				pending.push({ coordinate: left, expand: false, required: !!node });
 				continue;
 			}
-			let line: string;
-			if (node) {
-				line = renderContinuousChatViewLine(node);
-				if (coordinate.level === 0) line += ` [retained message and images: zoom({id:${first},n:1,page:0})]`;
-			} else {
+			let line = "";
+			const reference = `zoom({id:${first},n:1,page:0})`;
+			if (!node) {
 				if (reads >= ZOOM_RANGE_MAX_READS) break;
 				const record = await this.source.readMessageById(first, context);
 				reads++;
 				assertMemoryReadActive(context);
 				if (!record) return rejected("not-found", `No message ${first}.`);
-				const reference = `zoom({id:${first},n:1,page:0})`;
-				line = `${first}+1|${record.kind}: ${record.text}${record.images?.length ? ` [images: ${reference}]` : ""}`;
-				if (record.toolClipping || record.toolOutput || Buffer.byteLength(line, "utf8") > textBudget)
-					line = `${first}+1|${record.kind === "echo" ? continuousChatToolOutputLabel(record) : "Full message"}: ${reference}`;
+				node = buildContinuousChatToolLeaf(record);
+				if (!node) {
+					line = `${first}+1|${record.kind}: ${record.text}${record.images?.length ? ` [images: ${reference}]` : ""}`;
+					if (Buffer.byteLength(line, "utf8") > textBudget) line = `${first}+1|Full message: ${reference}`;
+				}
+			}
+			if (node) {
+				line = renderContinuousChatViewLine(node);
+				if (coordinate.level === 0) line += ` [retained message and images: ${reference}]`;
 			}
 			const lineBytes = Buffer.byteLength(line, "utf8") + (lines.length ? 1 : 0);
 			if (bytes + lineBytes > textBudget) break;

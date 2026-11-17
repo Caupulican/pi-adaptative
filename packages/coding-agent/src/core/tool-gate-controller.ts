@@ -774,7 +774,11 @@ export class ToolGateController {
 						},
 						finishSignal,
 					);
-					return { content: finalized?.content ?? result.content, isError: finalized?.isError ?? isError };
+					return {
+						content: finalized?.content ?? result.content,
+						details: finalized && "details" in finalized ? finalized.details : result.details,
+						isError: finalized?.isError ?? isError,
+					};
 				} finally {
 					release();
 				}

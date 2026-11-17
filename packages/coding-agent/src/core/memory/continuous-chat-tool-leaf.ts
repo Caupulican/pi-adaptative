@@ -7,7 +7,13 @@
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type ContinuousChatRecord, continuousChatToolOutputLabel } from "./continuous-chat-contracts.ts";
 import { continuousChatSummaryText } from "./continuous-chat-tool-output.ts";
-import { CONTINUOUS_CHAT_NODE_TARGET_BYTES } from "./continuous-chat-tree.ts";
+import {
+	CONTINUOUS_CHAT_NODE_MAX_BYTES,
+	CONTINUOUS_CHAT_NODE_TARGET_BYTES,
+	type ContinuousChatTreeNode,
+	createContinuousChatLeaf,
+	renderContinuousChatLeaf,
+} from "./continuous-chat-tree.ts";
 
 /** Longest tool name read from a call record; anything else on the first line is not a name. */
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -201,13 +207,12 @@ function toolResultLine(record: ContinuousChatRecord): string {
 	return `${lead}${excerpt(summaryText, CONTINUOUS_CHAT_NODE_TARGET_BYTES - byteLength(lead))}`;
 }
 
-/**
- * The deterministic leaf text of a `tool` or `echo` record, within the node target; undefined for any other kind. A line
- * says it is an automatic summary, so a reader knows `zoom` on the message gives the retained text. A result's tool name
- * and success are not in its record, so neither is claimed.
- */
-export function buildContinuousChatToolLeafText(record: ContinuousChatRecord): string | undefined {
-	if (record.kind === "tool") return toolCallLine(record);
-	if (record.kind === "echo") return toolResultLine(record);
-	return undefined;
+/** Project pending and published tool leaves from the same retained record. */
+export function buildContinuousChatToolLeaf(record: ContinuousChatRecord): ContinuousChatTreeNode | undefined {
+	if (record.kind !== "tool" && record.kind !== "echo") return undefined;
+	const fits = Buffer.byteLength(renderContinuousChatLeaf(record), "utf8") <= CONTINUOUS_CHAT_NODE_MAX_BYTES;
+	return createContinuousChatLeaf(
+		record,
+		fits ? undefined : record.kind === "tool" ? toolCallLine(record) : toolResultLine(record),
+	);
 }

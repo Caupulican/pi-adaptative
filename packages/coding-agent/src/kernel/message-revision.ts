@@ -37,3 +37,15 @@ export function advanceMessageContentRevision(message: object): void {
 	contentRevisions.set(message, (contentRevisions.get(message) ?? 0) + 1);
 	contentEpoch++;
 }
+
+const messageSources = new WeakMap<AgentMessage, AgentMessage>();
+
+/** Preserve provenance when a projection rewrites a message without modifying the original. */
+export function withMessageSource<T extends AgentMessage>(source: AgentMessage, projection: T): T {
+	messageSources.set(projection, messageSourceOf(source));
+	return projection;
+}
+
+export function messageSourceOf(message: AgentMessage): AgentMessage {
+	return messageSources.get(message) ?? message;
+}

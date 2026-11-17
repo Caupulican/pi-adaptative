@@ -787,7 +787,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					toolUsage.assertOpen();
 					admission.assertHealthy();
 				},
-				finish: async (result, isError) => ({ content: result.content, isError }),
+				finish: async (result, isError) => ({ content: result.content, details: result.details, isError }),
 				abandon() {},
 				// A lane's admission claims nothing a start would spend.
 				consume() {},

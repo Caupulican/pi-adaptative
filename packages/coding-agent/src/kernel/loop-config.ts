@@ -375,6 +375,8 @@ export interface AgentContextPlanRequest {
 	model?: Model<Api>;
 	/** Sanitized durable history used as the compactable portion of this request. */
 	messages: AgentMessage[];
+	/** Find the durable source of a message replaced by sanitation, without scanning history. */
+	sourceMessage?: (message: AgentMessage) => AgentMessage;
 	/** Zero-based admission generation; freshness-only retries repeat the same value. */
 	attempt: number;
 	/**
@@ -438,6 +440,8 @@ export interface ProviderHistoryCandidate {
 
 /** Request-local projection; a rejected or measured candidate never advances the host's history window. */
 export interface AgentProviderHistoryPlan {
+	/** Record the first-seen revisions of objects built during actual provider materialization. */
+	trackDependencies?(messages: readonly AgentMessage[]): void;
 	offer(
 		candidate: ProviderHistoryCandidate,
 	): { messages: Message[]; requestOnly: ProviderHistoryCandidate["requestOnly"] } | undefined;

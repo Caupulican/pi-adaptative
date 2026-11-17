@@ -59,7 +59,13 @@ function fixture() {
 	const knowledgeRanges: Array<{ start: number; count: number } | undefined> = [];
 	const cache = { authority: "project", stablePrefixLineCount: 0, lines: [] };
 	const view = "<chat>\n</chat>";
-	const controls = { covered: true, budget: 48_000, knowledge: "current fact", totalMessages: 0 };
+	const controls = {
+		covered: true,
+		budget: 48_000,
+		knowledge: "current fact",
+		totalMessages: 0,
+		transform: async (messages: AgentMessage[]) => messages,
+	};
 	const turns = new IcmTurnCoordinator({
 		started: Promise.resolve(),
 		ingestor: { flush: async () => {}, settled: async () => {} },
@@ -94,7 +100,7 @@ function fixture() {
 			knowledgeRanges.push(snapshot.requestOnlyMessageRange);
 		},
 		planContext: project(async ({ messages }) => ({
-			messages,
+			messages: await controls.transform(messages),
 			carriedRecords: frameRecords.slice(),
 			verifyPathAliases: (entries) => entries.every(({ id, path }) => aliases.get(id) === path),
 			transientMessages: [
@@ -186,6 +192,69 @@ describe("continuous chat at the native provider boundary", () => {
 		await f.send();
 		expect(f.wires[3]!.messages.slice(0, next.length + 1)).toEqual([...next, second]);
 	});
+
+	it("ignores revisions outside the window and drops the window after an older dependency changes", async () => {
+		const f = fixture();
+		await f.begin("First original");
+		await f.send();
+		const first = f.source.messages[0] as UserMessage;
+		const elsewhere: UserMessage = { role: "user", content: "Unrelated session", timestamp: 0 };
+		advanceMessageContentRevision(elsewhere);
+		await f.begin("Second input");
+		await f.send();
+		expect(JSON.stringify(f.wires[1]!.messages)).toContain("First original");
+
+		first.content = "First corrected";
+		advanceMessageContentRevision(first);
+		await f.begin("Third input");
+		await f.send();
+		const third = JSON.stringify(f.wires[2]!.messages);
+		expect(third).toContain("Third input");
+		expect(third).not.toContain("First corrected");
+		expect(third).not.toContain("Second input");
+	});
+
+	it("replans a derived message after its durable source changes across asynchronous planning", async () => {
+		const f = fixture();
+		await f.begin("Original text");
+		let mutate = true;
+		f.controls.transform = async (messages) => {
+			const source = messages[0] as UserMessage;
+			const clone = { ...source, content: `derived: ${source.content}` };
+			if (mutate) {
+				mutate = false;
+				await Promise.resolve();
+				source.content = "Corrected text";
+				advanceMessageContentRevision(source);
+			}
+			return [clone];
+		};
+		await f.send();
+		expect(f.wires).toHaveLength(1);
+		expect(JSON.stringify(f.wires[0]!.messages)).toContain("derived: Corrected text");
+		expect(JSON.stringify(f.wires[0]!.messages)).not.toContain("Original text");
+	});
+
+	it.each(["fresh wire", "retained terminal", "unrelated edit"] as const)(
+		"checks %s at dispatch, after the accepted request snapshot",
+		async (risk) => {
+			const f = fixture();
+			await f.begin("First input");
+			const prior = risk === "retained terminal" ? await f.send() : undefined;
+			if (prior) await f.begin("Second input");
+			f.config.onProviderRequestSnapshot = ({ context }) => {
+				if (risk === "unrelated edit") {
+					advanceMessageContentRevision({ role: "user", content: "Not visible", timestamp: 0 });
+				} else {
+					// The earlier provider assistant and today's wire can have different objects than their durable anchors.
+					advanceMessageContentRevision(prior ?? context.messages.at(-1)!);
+				}
+			};
+			const response = await f.send();
+			expect(response.stopReason).toBe(risk === "unrelated edit" ? "stop" : "error");
+			expect(f.wires).toHaveLength(risk === "fresh wire" ? 0 : 1);
+		},
+	);
 
 	it("keeps accepted alias deltas in place when the next frame introduces more mappings", async () => {
 		const f = fixture();
