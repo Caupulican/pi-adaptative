@@ -52,7 +52,7 @@
 		"packages/coding-agent/src/core/worktree-sync/git-engine.ts": 1547,
 		"packages/coding-agent/src/core/context-pipeline.ts": 1530,
 		"packages/coding-agent/src/modes/interactive/auto-learn-controller.ts": 1497,
-		"packages/ai/src/providers/anthropic.ts": 1505,
+		"packages/ai/src/providers/anthropic.ts": 1504,
 		"packages/coding-agent/src/core/prompt-submission-controller.ts": 1492,
 		"packages/coding-agent/src/core/models/local-runtime.ts": 1482,
 		"packages/coding-agent/src/core/goals/goal-session-controller.ts": 1347,

@@ -47,6 +47,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./anthropic-identity.ts";
+import { buildAnthropicOAuthHeaders } from "./anthropic-oauth-headers.ts";
 import { AnthropicUsageAccumulator } from "./anthropic-usage.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -893,15 +894,6 @@ function isOAuthToken(apiKey: string): boolean {
 
 type AnthropicClientOptions = NonNullable<ConstructorParameters<typeof Anthropic>[0]>;
 
-function isValidOAuthSessionId(sessionId: unknown): sessionId is string {
-	return (
-		typeof sessionId === "string" &&
-		sessionId.length >= 1 &&
-		sessionId.length <= 200 &&
-		/^[\x21-\x7e]+$/.test(sessionId)
-	);
-}
-
 function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
 	return new Anthropic({ ...options, dangerouslyAllowBrowser: true });
 }
@@ -1001,14 +993,7 @@ async function createClient(
 			authToken: apiKey,
 			baseURL: model.baseUrl,
 			defaultHeaders: mergeHeaders(
-				{
-					accept: "application/json",
-					"anthropic-dangerous-direct-browser-access": "true",
-					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": compatibility.identity.messagesUserAgent,
-					"x-app": "cli",
-					...(isValidOAuthSessionId(sessionId) ? { "X-Claude-Code-Session-Id": sessionId } : {}),
-				},
+				buildAnthropicOAuthHeaders(betaFeatures, compatibility.identity.messagesUserAgent, sessionId),
 				model.headers,
 				optionsHeaders,
 			),
