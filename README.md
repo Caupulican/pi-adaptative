@@ -1,157 +1,81 @@
 # Pi Adaptative
 
-Pi Adaptative is an independent coding-agent harness for work that needs durable
-orchestration, explicit recovery, and evidence that survives long sessions.
+Pi Adaptative is a terminal coding agent for work that takes more than one sitting. Give it a goal, split the work among agents, and come back to see what changed, what was verified, and what still needs your call.
 
-It began from the Pi codebase and is built for durable, inspectable agent work.
-The project invests in durable sessions, compaction, background workers, tool-call
-recovery, process lifecycle management, and evidence-gated changes so long-running
-work remains observable and recoverable.
+You can start with a question about one file. When that question turns into a project, the same conversation can coordinate workers, keep track of decisions, and bring you back when CI has news.
 
-## Install and update the standalone release
+[Install Pi](#install-pi) · [Try a first task](#try-a-first-task) · [Browse the docs](packages/coding-agent/docs/index.md)
 
-Pi Adaptative ships as a native standalone release for Linux and Windows on x64 or
-arm64. Every release includes a deployment script, a matching binary archive, and
-`SHA256SUMS`. The installer selects the right archive, verifies its SHA-256 digest,
-and activates it only after the staged binary passes its version check. End users do
-not need npm or Node.js to install or update Pi.
+## Install Pi
 
-Releases are published from this repository:
+The standalone installers support Linux and Windows on x64 and arm64. They verify the download and keep the previous version available for rollback. Node.js and npm are only needed for development.
 
-<https://github.com/Caupulican/pi-adaptative/releases>
-
-### Update Pi
-
-The fastest way to update an installed release is:
-
-```sh
-pi update --self
-```
-
-Pi pulls the current platform deployment script from the latest GitHub release and
-runs it. On Linux that is `install.sh`; on Windows it is `install.ps1`. The script
-downloads and verifies the matching archive before activating it, while keeping the
-previous release available for rollback. `pi update pi` is an equivalent self-update
-target, and plain `pi update` updates extensions/packages before updating Pi itself.
-Use `pi update --extensions` when you want to update extensions/packages only.
-
-A managed standalone install installs GitHub's latest stable release by itself when that release is newer; the session that finds it keeps the previous binary until the next start; a source checkout does not replace itself.
-
-### Linux
+**Linux**
 
 ```sh
 curl -fsSL https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.sh | sh
 ```
 
-The installer places the managed `pi` launcher in the user-local installation
-location, selects the native x64 or arm64 archive, verifies `SHA256SUMS`, and keeps
-the previous release available for rollback. Run `pi --version` after installation.
-Review the installer before piping it to a shell if your environment requires that
-policy.
-
-### Windows PowerShell
+**Windows PowerShell**
 
 ```powershell
 irm https://github.com/Caupulican/pi-adaptative/releases/latest/download/install.ps1 | iex
 ```
 
-The PowerShell installer selects the native x64 or arm64 archive, verifies it against
-`SHA256SUMS`, and installs the matching `pi.exe` with the previous release available
-for rollback. Windows users can also download the corresponding archive and
-`SHA256SUMS` directly from the
-[latest release](https://github.com/Caupulican/pi-adaptative/releases/latest).
+Prefer to inspect the installer or download an archive yourself? The release includes both scripts, platform archives, and `SHA256SUMS`. [Latest release](https://github.com/Caupulican/pi-adaptative/releases/latest)
 
-The release archives and deployment scripts are the supported distribution format.
-npm and Node.js remain available for source development and third-party extension
-packages; they are not end-user installation requirements.
+## Try a first task
 
-## What the harness provides
+Open a terminal in a repository you know and run `pi`. Inside Pi, use `/login` to connect a supported subscription, or set your provider's API key before launching. Use `/model` to choose a model. [Provider setup](packages/coding-agent/docs/providers.md)
 
-- Durable session and process ownership across long-running work.
-- Compaction that preserves bounded, verifiable context instead of treating a
-  transcript as an unbounded action counter.
-- Delegated workers that carry the final profile-filtered context-file snapshot,
-  preserve explicit workspace scope, enforce model prompt budgets, return bounded
-  completion handoffs, and coordinate cleanup across overlapping sessions.
-- Tool-call validation and recovery that teaches corrective usage, scopes failures
-  to the operation that failed, and keeps unrelated work admissible.
-- Persistent shell execution with explicit cancellation, timeout, and process-tree
-  cleanup semantics.
-- Evidence-gated development workflows with focused red tests, coverage gates,
-  adversarial checks, and release artifact verification.
-- A terminal coding-agent interface with provider adapters, extensions, themes,
-  skills, and SDK support.
+Start with a question whose answer you can check against your code:
 
-Together, these capabilities turn long-running agent work into an observable,
-recoverable, evidence-backed workflow across Linux and Windows—from the first tool
-call through the verified release artifact.
+> Trace one request from its entry point to storage. Show me where a failed write reaches the caller, with file references. Leave the code unchanged.
 
-## Use the agent
+Then put the team to work:
 
-After installation, start in the repository you want to work on:
+> Have two workers review that path. One should look for lost writes, the other for duplicate writes on retry. Bring me their evidence and a proposed fix before editing.
 
-```sh
-pi
+Open `/plan` to inspect a plan Pi has created. When you return to the repository later, `pi -c` continues your most recent session. [Plans](packages/coding-agent/docs/plans.md) · [Sessions](packages/coding-agent/docs/sessions.md)
+
+## What makes Pi adaptative?
+
+**Keep a specialist you can come back to.** A bot has a name, model, and conversation of its own. Create a reviewer, give it a brief, and follow up with the same bot after your next change. Bring several bots into a group chat, or appoint a leader to coordinate workers toward a goal. [Bots, teams, and leaders](packages/coding-agent/docs/bots-and-groups.md)
+
+```text
+/bot new reviewer
+/bot msg reviewer Review my current diff for changes that could break existing callers.
 ```
 
-Useful checks:
+**Give parallel work a finish line.** A plan records which steps depend on each other, which files each worker may change, and how their results come together. For a change spanning a CLI and its docs, Pi can assign separate worktrees, collect both changes, and give another worker the verification step. The plan survives closing and reopening the session. [How plans work](packages/coding-agent/docs/plans.md)
 
-```sh
-pi --version
-pi --help
-pi --list-models
-```
+**Teach Pi how you work.** Pi can retain project decisions and standing preferences, such as how your team names migrations. When you and Pi work out a repeatable procedure, type `/skillify` to turn that session into a reusable skill. You review the draft and decide whether to activate it. [Memory](packages/coding-agent/docs/memory.md) · [Self-adaptation](packages/coding-agent/docs/self-adaptation.md)
 
-Provider setup, settings, sessions, extensions, and the full CLI reference live in
-the [coding-agent documentation](packages/coding-agent/docs/index.md). Provider
-configuration is documented in [providers.md](packages/coding-agent/docs/providers.md),
-and the project-specific runtime contract is in [AGENTS.md](AGENTS.md).
+**Tell Pi what deserves an interruption.** Ask “Tell me the next time CI fails,” or let an idle review surface a loose end. Reviews have configurable spending and wake-up limits. Use `/proactivity status` to see what ran or why Pi stayed quiet, and `/proactivity off` to disable idle reviews. [Proactive reviews and routines](packages/coding-agent/docs/proactivity.md)
 
-## Repository map
+## Everyday commands
 
-| Path | Responsibility |
+| When you want to… | Use |
 | --- | --- |
-| [`packages/coding-agent`](packages/coding-agent) | Standalone CLI, TUI integration, sessions, tools, extensions, and harness policy |
-| [`packages/coding-agent/src/kernel`](packages/coding-agent/src/kernel) | Agent state machine, tool execution, orchestration, and durable runtime primitives (imports only itself, `ai`, `tui` and Node built-ins) |
-| [`packages/ai`](packages/ai) | Provider-neutral model, streaming, tool-call, usage, and cost interfaces |
-| [`packages/tui`](packages/tui) | Terminal rendering and interactive input components |
-| [`scripts`](scripts) | Build, release, installer, verification, and repository gates |
-| [`.github/workflows`](.github/workflows) | Release artifact and verification automation |
+| Start work in the current repository | `pi` |
+| Pick an earlier conversation | `pi -r` |
+| See which models are available | `pi --list-models` |
+| See your bots inside Pi | `/bot list` |
+| Update the standalone installation now | `pi update --self` |
 
-The package directories are a source workspace and architectural map. They are not
-separate npm products or a second installation path.
+Managed installs also pick up new stable releases automatically. Your running session keeps its current binary until the next start. [Quickstart](packages/coding-agent/docs/quickstart.md) · [CLI reference](packages/coding-agent/docs/usage.md)
 
-## Development
+## Build on Pi
 
-Contributor work requires Node.js and npm because the repository uses TypeScript,
-workspace builds, and development checks. This is separate from end-user runtime
-installation.
+Extend Pi with a project-specific tool, bring your own model provider, or embed the agent in another application. [Extensions](packages/coding-agent/docs/extensions.md) · [Custom providers](packages/coding-agent/docs/custom-provider.md) · [SDK](packages/coding-agent/docs/sdk.md)
 
-```bash
+The TypeScript workspace contains the [coding agent](packages/coding-agent), [provider layer](packages/ai), and [terminal UI](packages/tui). For a source checkout, use the Node.js version in `.nvmrc` and run:
+
+```sh
 npm ci --ignore-scripts
-npm run check
 npm run build
 ```
 
-Run the smallest targeted test for the code you changed. The repository contract in
-[AGENTS.md](AGENTS.md) defines the required Detect → Verify → Score → Gate workflow,
-coverage thresholds, red-test expectations, concurrency checks, and release rules.
-Do not treat a successful command as evidence when a probe was skipped, truncated,
-or failed.
+See the [architecture map](docs/architecture.md), [contributor guide](CONTRIBUTING.md), and [repository instructions](AGENTS.md) before making changes.
 
-## Contributing
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening a
-change. Contributions should identify an observable invariant, add or update a
-focused regression test, explain rejected candidates and remaining risks, and keep
-ownership in the authoritative subsystem. Do not commit generated artifacts or
-change release behavior without corresponding verification evidence.
-
-## Attribution and license
-
-Pi Adaptative began from the open-source Pi codebase by Mario Zechner and
-contributors. The adaptive harness, reliability work, packaging, and release
-process in this repository are maintained independently. See the repository history
-and package notices for source-level attribution.
-
-This project is released under the [MIT License](LICENSE).
+Pi Adaptative began with the open-source Pi codebase by Mario Zechner and contributors. This project independently maintains the adaptive harness and standalone releases. [MIT License](LICENSE)
