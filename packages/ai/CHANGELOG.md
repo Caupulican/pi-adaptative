@@ -2,6 +2,7 @@
 
 ### Changed
 
+- The generated model catalog follows the providers' current listings. Added since 0.104.67: LiquidAI d1.2, LiquidAI d1.2-ultra, Meta Muse Spark 1.2 Contributor, Meta Muse Spark 1.3 Contributor, OpenAI GPT-5.2 Chat, Sakana Namazu, and batch variants of current Anthropic and OpenAI models. MiniMax M3.1 Flash Free is no longer listed.
 - Interactive Anthropic login requests `user:privacy_consents:write`, matching reviewed Claude Code 2.1.326, and OAuth message requests send `X-Claude-Code-Session-Id` when a safe session id is present. Refresh still asks for the six inference scopes. A legacy refresh that rewrites stored scopes keeps `user:privacy_consents:write` when it is already stored, and still keeps Design scopes.
 
 ### Fixed
