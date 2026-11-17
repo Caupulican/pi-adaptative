@@ -93,6 +93,9 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 		const oldInput = `[Harness background delivery ${accepted.metadata.deliveryId}; not owner-authored evidence] ${input.content}`;
 		const oldWake = `[Harness background wake ${wakeIdentity.wakeId}; not owner-authored evidence] ${wake.content}`;
 		const control = `Ordinary history remains available (${tag}).`;
+		// Message 4 loses its seeded summary during suffix reconciliation. Give the rebuild its own
+		// over-budget ordinary leaf instead of relying on a short exact join to require a provider.
+		const laterOrdinary = `Later ordinary history one (${tag}). ${"Keep this ordinary history. ".repeat(24)}`;
 		const leak = `OBSOLETE-CAUSAL-SUMMARY-${tag}`;
 		const unavailable = `UNPROVEN-BACKGROUND-CONTENT-${tag}`;
 		const ordinaryUnavailable = `Ordinary history with an unavailable source (${tag}).`;
@@ -135,7 +138,7 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 					sourceKey: `parent:${wake.id}:0`,
 					source: { sessionId: header.id, entryId: wake.id },
 				},
-				{ kind: "user", date, text: "Later ordinary history one.", sourceKey: `upgrade-later-one-${tag}` },
+				{ kind: "user", date, text: laterOrdinary, sourceKey: `upgrade-later-one-${tag}` },
 				{ kind: "pi", date, text: "Later ordinary history two.", sourceKey: `upgrade-later-two-${tag}` },
 				{
 					kind: "work",
@@ -237,6 +240,7 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 			for (const pass of [0, 1]) {
 				const warningMark = world.warnings.length;
 				const startupReplyMark = compactionReplies.length;
+				const startupReachedMark = world.provider.reached.length;
 				const root = await world.createRootSession("root", {
 					agentDir,
 					sessionManager: pass === 0 ? manager : world.createSessionManager(agentDir),
@@ -257,6 +261,11 @@ export async function runJourney1ProactiveUpgrade(world: HarnessWorld, captured:
 					return report?.route === "history_summary" ? [{ entry, report }] : [];
 				});
 				if (pass === 0) {
+					const paidLeaf = `upgrade-${tag}-4+1`;
+					expect(
+						world.provider.reached.slice(startupReachedMark),
+						"the oversized ordinary leaf is rebuilt with a provider",
+					).toContain(`${paidLeaf}:${paidLeaf}`);
 					expect(startupReplies.length, "startup rebuild reaches the physical summary provider").toBeGreaterThan(
 						0,
 					);
