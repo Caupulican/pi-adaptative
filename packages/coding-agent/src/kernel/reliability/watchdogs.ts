@@ -57,6 +57,7 @@ import { assistantMessageFromEvent as partialFromEvent } from "@caupulican/pi-ai
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderResponse } from "@caupulican/pi-ai/types";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
+import { harnessLog } from "../harness-log.ts";
 import type { StreamFn } from "../loop-config.ts";
 
 export type StallPhase = "connect" | "first-progress" | "quiet" | "active";
@@ -90,15 +91,13 @@ export interface StreamIdleOptions {
 	outputRepetitionWindowChars?: number;
 	/** Max ms to wait for the FIRST event (connection/first-token allowance). */
 	connectMs: number;
-	/** Max ms between events while content is flowing — the latest content block is
-	 *  text or toolCall. A flowing stream that goes silent this long is presumed dead. */
+	/** Max ms without further model progress after text or tool-call output. */
 	activeIdleMs: number;
 	/** Max ms after transport confirmation until the first non-empty model delta.
 	 *  Headers and structural start frames prove connectivity, not generation progress. */
 	firstProgressMs: number;
-	/** Max ms between events while the model is quietly working — no content blocks
-	 *  after it has emitted non-empty thinking. Deep-thinking models legitimately sit
-	 *  here for minutes, so this bound is deliberately generous. */
+	/** Max ms without further model progress after non-empty thinking. Deep-thinking
+	 *  models legitimately sit here for minutes, so this bound is deliberately generous. */
 	quietIdleMs: number;
 	/** Fired once when a stall is detected, before the inner request is aborted. */
 	onStall?: (info: { phase: StallPhase; elapsedMs: number }) => void;
@@ -252,9 +251,6 @@ export function withStreamIdleWatchdog(
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-		let stalled = false;
-		let meaningfulProgressSeen = false;
-		let transportConfirmed = false;
 		let streamSetupSettled = false;
 		let terminalPushed = false;
 		let abortSettlementTimer: NodeJS.Timeout | undefined;
@@ -262,13 +258,20 @@ export function withStreamIdleWatchdog(
 			if (abortSettlementTimer) clearTimeout(abortSettlementTimer);
 			abortSettlementTimer = undefined;
 		};
-		const pushFailure = (error?: unknown) => {
-			if (terminalPushed || stalled) return;
+		const settleTerminal = (event: Extract<AssistantMessageEvent, { type: "done" | "error" }>) => {
+			if (terminalPushed) return;
+			terminalPushed = true;
 			clearAbortSettlementTimer();
+			watchdog.disarm();
+			callerSignal?.removeEventListener("abort", onCallerAbort);
+			outer.push(event);
+			settleReady();
+		};
+		const pushFailure = (error?: unknown) => {
+			if (terminalPushed) return;
 			const stopReason = callerAborted ? "aborted" : "error";
 			const detail = error instanceof Error ? `: ${error.message}` : error === undefined ? "" : `: ${String(error)}`;
-			terminalPushed = true;
-			outer.push({
+			settleTerminal({
 				type: "error",
 				reason: stopReason,
 				error: {
@@ -279,42 +282,36 @@ export function withStreamIdleWatchdog(
 						: `stream ended without terminal event${detail}`,
 				},
 			});
-			settleReady();
 		};
 
-		// The idle bound adapts per event: quiet while nothing/thinking, active while
-		// text/toolCall content is flowing. Mutable so the onSilence closure always
-		// reports the phase/bound that actually elapsed.
+		// Both fields describe the armed deadline. Structural frames leave it alone.
 		let currentPhase: StallPhase = "connect";
 		let currentBoundMs = opts.connectMs;
-		const idleBoundFor = (message: AssistantMessage): { phase: StallPhase; ms: number } => {
-			const lastBlock = message.content[message.content.length - 1];
-			return !lastBlock || lastBlock.type === "thinking"
-				? { phase: "quiet", ms: opts.quietIdleMs }
-				: { phase: "active", ms: opts.activeIdleMs };
-		};
 
 		// Emits the stall result directly (rather than after the inner loop finishes) so a
 		// connection that never resolves at all still yields a result promptly — providers
 		// are contractually expected to end their stream after abort, but the watchdog does
 		// not depend on that to report the stall itself.
 		const stall = (phase: StallPhase, elapsedMs: number) => {
-			if (callerAborted || stalled || terminalPushed) return;
-			stalled = true;
-			clearAbortSettlementTimer();
-			opts.onStall?.({ phase, elapsedMs });
+			if (callerAborted || terminalPushed) return;
 			const stallError = new StreamStallError(phase, elapsedMs);
-			const description = stallError.message;
-			controller.abort(stallError);
 			const message: AssistantMessage = {
 				...latest,
 				stopReason: "error",
-				errorMessage: description,
+				errorMessage: stallError.message,
 			};
-			terminalPushed = true;
-			outer.push({ type: "error", reason: "error", error: message });
-			settleReady();
-			callerSignal?.removeEventListener("abort", onCallerAbort);
+			settleTerminal({ type: "error", reason: "error", error: message });
+			try {
+				opts.onStall?.({ phase, elapsedMs });
+			} catch (error) {
+				harnessLog.warn("provider", "a stream stall observer failed", () => ({
+					phase,
+					elapsedMs,
+					error: error instanceof Error ? error.message : String(error),
+				}));
+			} finally {
+				controller.abort(stallError);
+			}
 		};
 
 		const watchdog = createSilenceWatchdog({
@@ -322,8 +319,7 @@ export function withStreamIdleWatchdog(
 			onSilence: () => stall(currentPhase, currentBoundMs),
 		});
 		const markTransportConfirmed = () => {
-			if (callerAborted || stalled || meaningfulProgressSeen || transportConfirmed) return;
-			transportConfirmed = true;
+			if (callerAborted || terminalPushed || currentPhase !== "connect") return;
 			currentPhase = "first-progress";
 			currentBoundMs = opts.firstProgressMs;
 			watchdog.touch(opts.firstProgressMs);
@@ -331,11 +327,8 @@ export function withStreamIdleWatchdog(
 		const originalOnResponse = streamOptions?.onResponse;
 		const pushAbortFallback = () => {
 			abortSettlementTimer = undefined;
-			if (!callerAborted || terminalPushed || stalled) return;
-			terminalPushed = true;
-			watchdog.disarm();
-			callerSignal?.removeEventListener("abort", onCallerAbort);
-			outer.push({
+			if (!callerAborted || terminalPushed) return;
+			settleTerminal({
 				type: "error",
 				reason: "aborted",
 				error: {
@@ -346,10 +339,10 @@ export function withStreamIdleWatchdog(
 						: "stream aborted before terminal event during stream setup",
 				},
 			});
-			settleReady();
 		};
 		const onCallerAbort = () => {
 			callerAborted = true;
+			watchdog.disarm();
 			controller.abort(callerSignal?.reason);
 			if (!streamSetupSettled) {
 				pushAbortFallback();
@@ -366,95 +359,57 @@ export function withStreamIdleWatchdog(
 
 		void (async () => {
 			try {
-				let inner: Awaited<ReturnType<StreamFn>>;
-				try {
-					inner = await streamFn(model, context, {
-						...streamOptions,
-						signal: controller.signal,
-						onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
-							markTransportConfirmed();
-							await originalOnResponse?.(response, responseModel);
-						},
-					});
-					streamSetupSettled = true;
-					settleReady();
-				} catch (error) {
-					streamSetupSettled = true;
-					if (terminalPushed || stalled) return;
-					watchdog.disarm();
-					callerSignal?.removeEventListener("abort", onCallerAbort);
-					pushFailure(error);
-					return;
-				}
+				const inner = await streamFn(model, context, {
+					...streamOptions,
+					signal: controller.signal,
+					onResponse: async (response: ProviderResponse, responseModel: Model<Api>) => {
+						markTransportConfirmed();
+						await originalOnResponse?.(response, responseModel);
+					},
+				});
+				streamSetupSettled = true;
+				settleReady();
 
 				// A setup promise may resolve after a connect stall or caller abort. The outer
 				// stream is already terminal in that case, so never attach a late event pump.
-				if (terminalPushed || stalled || callerAborted) return;
+				if (terminalPushed || callerAborted) return;
+				const completedBlocks = new Set<number>();
 				for await (const event of inner) {
-					if (stalled || terminalPushed) break;
-					latest = partialFromEvent(event);
-					const repeats = outputRepetition(latest, opts);
-					if (repeats !== undefined) {
-						// A degenerate loop: end it here, before the output cap, with a message the host
-						// classifies as a runaway rather than a retryable stall.
-						stalled = true;
-						clearAbortSettlementTimer();
-						watchdog.disarm();
-						callerSignal?.removeEventListener("abort", onCallerAbort);
-						controller.abort();
-						terminalPushed = true;
-						const message: AssistantMessage = {
-							...latest,
-							stopReason: "error",
-							errorMessage: `output runaway: the last ${opts.outputRepetitionWindowChars ?? DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS} characters repeated ${repeats} times`,
-						};
-						outer.push({ type: "error", reason: "error", error: message });
-						settleReady();
+					if (terminalPushed) return;
+					if (event.type === "done" || event.type === "error") {
+						settleTerminal(event);
 						return;
 					}
-					const meaningfulProgress = eventHasMeaningfulProgress(event);
-					if (meaningfulProgress) meaningfulProgressSeen = true;
-					if (!transportConfirmed && !meaningfulProgress) {
-						markTransportConfirmed();
-					} else if (meaningfulProgressSeen) {
-						const bound = idleBoundFor(latest);
-						currentPhase = bound.phase;
-						currentBoundMs = bound.ms;
-						watchdog.touch(bound.ms);
-					}
-					// A terminal event ends the turn: disarm synchronously, in the same tick as
-					// the push below, so no watchdog can fire after the consumer's `result()`
-					// promise resolves — a disarm that only happened once the loop later notices
-					// `inner` is done would race with that resolution (it runs a tick or more
-					// later) and could fire a spurious stall on an already-finished stream.
-					const terminal = event.type === "done" || event.type === "error";
-					if (terminal) {
-						terminalPushed = true;
-						clearAbortSettlementTimer();
-						watchdog.disarm();
-						callerSignal?.removeEventListener("abort", onCallerAbort);
+					latest = partialFromEvent(event);
+					if (!callerAborted) {
+						const phase = eventProgressPhase(event, completedBlocks);
+						if (phase === undefined) {
+							markTransportConfirmed();
+						} else {
+							const repeats = outputRepetition(latest, opts);
+							if (repeats !== undefined) {
+								settleTerminal({
+									type: "error",
+									reason: "error",
+									error: {
+										...latest,
+										stopReason: "error",
+										errorMessage: `output runaway: the last ${opts.outputRepetitionWindowChars ?? DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS} characters repeated ${repeats} times`,
+									},
+								});
+								controller.abort();
+								return;
+							}
+							currentPhase = phase;
+							currentBoundMs = phase === "quiet" ? opts.quietIdleMs : opts.activeIdleMs;
+							watchdog.touch(currentBoundMs);
+						}
 					}
 					outer.push(event);
-					if (terminal) return;
 				}
-				if (!terminalPushed && !stalled) {
-					const stopReason = callerAborted ? "aborted" : "error";
-					const description = callerAborted
-						? "stream aborted before terminal event"
-						: "stream ended without terminal event";
-					terminalPushed = true;
-					outer.push({
-						type: "error",
-						reason: stopReason,
-						error: { ...latest, stopReason, errorMessage: description },
-					});
-				}
+				pushFailure();
 			} catch (error) {
 				pushFailure(error);
-			} finally {
-				clearAbortSettlementTimer();
-				watchdog.disarm();
-				callerSignal?.removeEventListener("abort", onCallerAbort);
 			}
 		})();
 
@@ -462,18 +417,24 @@ export function withStreamIdleWatchdog(
 	};
 }
 
-function eventHasMeaningfulProgress(event: AssistantMessageEvent): boolean {
+function eventProgressPhase(
+	event: AssistantMessageEvent,
+	completedBlocks: Set<number>,
+): "quiet" | "active" | undefined {
 	switch (event.type) {
 		case "text_delta":
-		case "thinking_delta":
 		case "toolcall_delta":
-			return event.delta.length > 0;
+		case "thinking_delta":
+			if (event.delta.length === 0 || completedBlocks.has(event.contentIndex)) return undefined;
+			return event.type === "thinking_delta" ? "quiet" : "active";
 		case "text_end":
 		case "thinking_end":
-			return event.content.length > 0;
 		case "toolcall_end":
-			return true;
+			if (completedBlocks.has(event.contentIndex)) return undefined;
+			completedBlocks.add(event.contentIndex);
+			if (event.type !== "toolcall_end" && event.content.length === 0) return undefined;
+			return event.type === "thinking_end" ? "quiet" : "active";
 		default:
-			return false;
+			return undefined;
 	}
 }
