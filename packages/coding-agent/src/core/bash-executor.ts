@@ -9,11 +9,11 @@
 import { resolve as resolvePath } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { sanitizeBinaryOutput } from "../kernel/utils/shell-output.ts";
-import { DEFAULT_MAX_BYTES } from "../kernel/utils/truncate.ts";
 import { stripAnsi } from "../utils/ansi.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
-import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
-import { OutputAccumulator, type OutputSnapshot } from "./tools/output-accumulator.ts";
+import { classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
+import { prepareFilteredGitDisplay } from "./tools/git-filter-display.ts";
+import { OutputAccumulator } from "./tools/output-accumulator.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { createShellOutputDecoder } from "./tools/shell-output-decoder.ts";
 
@@ -47,14 +47,6 @@ function createBashOutputAccumulator(): OutputAccumulator {
 	});
 }
 
-async function publishBashOutput(output: OutputAccumulator, persistAlways = false): Promise<OutputSnapshot> {
-	output.finish();
-	output.snapshot({ persistIfTruncated: true, persistAlways });
-	await output.closeTempFile();
-	// Re-read publication state after close: a close failure invalidates and removes the artifact.
-	return output.snapshot();
-}
-
 /**
  * Execute a bash command using custom BashOperations.
  * Used for remote execution (SSH, containers, etc.).
@@ -78,24 +70,20 @@ export async function executeBashWithOperations(
 				{ signal: options.signal, timeout: options.timeout, environment: options.environment },
 			);
 			if (res.exitCode !== -100) {
-				const rawOutputIncomplete = res.rawBytes === undefined;
-				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
-				// The filter already spills oversized output to a temp file; reuse that
-				// authoritative artifact. A missing rawBytes value means only a retained
-				// head is available and must never be relabelled as complete output.
-				let fullOutputPath = res.fullOutputPath;
-				if (fullOutputPath === undefined && !rawOutputIncomplete && rawBytes.length > DEFAULT_MAX_BYTES) {
-					const persisted = createBashOutputAccumulator();
-					persisted.append(rawBytes);
-					fullOutputPath = (await publishBashOutput(persisted, true)).fullOutputPath;
-				}
-				const filteredOutput = applyGitTailStage(res.output, classification.tailStage);
-				options.onChunk?.(filteredOutput);
+				const output = createBashOutputAccumulator();
+				const { display, raw, partial, toolText, fullOutputPath } = await prepareFilteredGitDisplay(
+					res,
+					classification.tailStage,
+					output,
+				);
+				// BashExecutionMessage adds the raw file reference when this result enters the next prompt.
+				const text = fullOutputPath ? display.content : toolText;
+				options.onChunk?.(text);
 				return {
-					output: filteredOutput,
+					output: text,
 					exitCode: res.exitCode,
 					cancelled: options.signal?.aborted ?? false,
-					truncated: rawOutputIncomplete || rawBytes.length > DEFAULT_MAX_BYTES,
+					truncated: partial || raw?.truncation.truncated === true,
 					fullOutputPath,
 				};
 			}
@@ -137,7 +125,7 @@ export async function executeBashWithOperations(
 		});
 		finishDecoding();
 
-		const snapshot = await publishBashOutput(output);
+		const snapshot = await output.publishSnapshot();
 		const cancelled = options?.signal?.aborted ?? false;
 
 		return {
@@ -151,7 +139,7 @@ export async function executeBashWithOperations(
 		finishDecoding();
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
-			const snapshot = await publishBashOutput(output);
+			const snapshot = await output.publishSnapshot();
 			return {
 				output: snapshot.content,
 				exitCode: undefined,

@@ -9,7 +9,6 @@ import {
 	describeThrownToolError,
 	readAgentToolPolicyDeniedError,
 } from "../../kernel/types.ts";
-import { truncateMiddle } from "../../kernel/utils/truncate.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
@@ -38,7 +37,12 @@ import {
 } from "./output-reduction.ts";
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import { createShellOutputDecoder } from "./shell-output-decoder.ts";
-import type { ShellOutputProjectorLike } from "./shell-output-projection.ts";
+import {
+	boundShellOutputProjection,
+	type ShellOutputProjectorLike,
+	settleShellOutputProjection,
+	shellOutputProjectionRequiresRaw,
+} from "./shell-output-projection.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -226,22 +230,16 @@ async function finishPythonStream(
 	exitCode: number | null,
 	maxBytes: number,
 ): Promise<OutputSnapshot & { reduction?: OutputReductionDetails; reducedDisplayTruncated?: boolean }> {
-	output.finish();
-	const projection = projector?.finish(exitCode);
-	const display = projection && truncateMiddle(projection.content, { maxBytes });
-	// A partial line of the original output is more useful than an empty projection.
-	const reduction = display && (!display.truncated || display.content) ? projection?.reduction : undefined;
-	const persistRaw = reduction !== undefined && (reduction.persistRaw || display?.truncated === true);
-	output.snapshot({ persistIfTruncated: true, persistAlways: persistRaw });
-	await output.closeTempFile();
-	const snapshot = output.snapshot();
-	if (!reduction || !display || (persistRaw && !snapshot.fullOutputPath)) return snapshot;
-
-	const details: OutputReductionDetails = {
-		...reduction,
-		...(persistRaw ? { persistRaw, rawPath: snapshot.fullOutputPath } : {}),
+	const display = boundShellOutputProjection(projector?.finish(exitCode), { maxBytes });
+	const snapshot = await output.publishSnapshot(shellOutputProjectionRequiresRaw(display));
+	const projection = settleShellOutputProjection(display, snapshot);
+	if (!projection?.reduction) return snapshot;
+	return {
+		...snapshot,
+		content: projection.content,
+		reduction: projection.reduction,
+		reducedDisplayTruncated: projection.displayTruncated,
 	};
-	return { ...snapshot, content: display.content, reduction: details, reducedDisplayTruncated: display.truncated };
 }
 
 /**

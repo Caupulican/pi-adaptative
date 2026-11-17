@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
@@ -38,7 +38,8 @@ import {
 	workspaceRecoveryTarget,
 } from "./file-failure-recovery.ts";
 import { releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
-import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
+import { classifyGitCommand, executeFilteredGit } from "./git-filter.ts";
+import { prepareFilteredGitDisplay } from "./git-filter-display.ts";
 import { prepareManagedShellEnvironment } from "./managed-shell-preparation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import {
@@ -71,9 +72,14 @@ import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
 import { createRuleOutputReducer, loadOutputRules } from "./output-rules.ts";
 import { acquireShellSessionLanes } from "./shell-lane-pool.ts";
 import {
+	boundShellOutputProjection,
 	createShellOutputProjector,
 	type ShellOutputProjection,
 	type ShellOutputProjectorLike,
+	settleShellOutputProjection,
+	shellOutputProjectionDetails,
+	shellOutputProjectionPreview,
+	shellOutputProjectionRequiresRaw,
 } from "./shell-output-projection.ts";
 import { type ShellPrewarmScheduler, scheduleShellPrewarm } from "./shell-prewarm.ts";
 import { acquirePersistentShellSession, buildBashOneShotWire } from "./shell-session.ts";
@@ -534,7 +540,7 @@ function rebuildBashResultRenderComponent(
 
 	const renderPreview = !options.expanded ? result.details?.preview : undefined;
 	let output = (renderPreview ? renderPreview.content : getTextOutput(result as any, showImages)).trim();
-	const truncation = result.details?.truncation;
+	const truncation = result.details?.displayTruncated === undefined ? result.details?.truncation : undefined;
 	const fullOutputPath = result.details?.fullOutputPath;
 	const fullOutputError = result.details?.fullOutputError;
 	if (!options.isPartial && truncation?.truncated && fullOutputPath && output.endsWith("]")) {
@@ -818,15 +824,11 @@ function createShellToolDefinition(
 				scheduleOutputUpdate();
 			};
 
-			const finishOutput = async (persistAlways = false) => {
-				output.finish();
-				clearUpdateTimer();
-				emitOutputUpdate();
-				output.snapshot({ persistIfTruncated: true, persistAlways });
-				await output.closeTempFile();
-				// Close may invalidate and remove the artifact; publish only the settled state.
-				return output.snapshot();
-			};
+			const finishOutput = (persistAlways = false) =>
+				output.publishSnapshot(persistAlways, () => {
+					clearUpdateTimer();
+					emitOutputUpdate();
+				});
 
 			const finishProjection = (exitCode: number | null): ShellOutputProjection | undefined => {
 				if (!outputProjector) return undefined;
@@ -877,13 +879,10 @@ function createShellToolDefinition(
 				let text = (projection?.content ?? snapshot.content).replace(/\r/g, "") || emptyText;
 				let details: BashToolDetails | undefined;
 				const preview = projection
-					? (() => {
-							const lines = projection.content.split("\n");
-							return {
-								content: lines.slice(-BASH_PREVIEW_LINES).join("\n"),
-								skippedLines: Math.max(0, lines.length - BASH_PREVIEW_LINES),
-							};
-						})()
+					? shellOutputProjectionPreview(projection, {
+							maxLines: BASH_PREVIEW_LINES,
+							maxBytes: BASH_PREVIEW_BYTES,
+						})
 					: output.preview(BASH_PREVIEW_LINES, BASH_PREVIEW_BYTES);
 				const fullOutputNotice = snapshot.fullOutputPath
 					? `Full output: ${snapshot.fullOutputPath}`
@@ -927,24 +926,14 @@ function createShellToolDefinition(
 				}
 				if (projection) {
 					details = {
-						...(details ?? {}),
-						outputProjection: {
-							kind: projection.kind,
-							inputLines: projection.inputLines,
-							inputBytes: projection.inputBytes,
-							outputLines: projection.outputLines,
-							outputBytes: projection.outputBytes,
-							omittedLines: projection.omittedLines,
-							collapsedPassingLines: projection.collapsedPassingLines,
-						},
+						...details,
+						outputProjection: shellOutputProjectionDetails(projection),
+						displayTruncated: projection.displayTruncated,
 					};
-					if (projection.kind === "reduction" && projection.reduction) {
-						const reduction = {
-							...projection.reduction,
-							...(projection.persistRaw ? { rawPath: snapshot.fullOutputPath } : {}),
-						};
-						details = { ...details, outputReduction: reduction };
-						const notice = formatOutputReductionNotice(reduction);
+					if (projection.displayTruncated) text += "\n\n[Reduced preview truncated; inspect the full raw output.]";
+					if (projection.reduction) {
+						details.outputReduction = projection.reduction;
+						const notice = formatOutputReductionNotice(projection.reduction);
 						if (notice) text += `\n\n${notice}`;
 					} else {
 						const passingNotice =
@@ -966,6 +955,7 @@ function createShellToolDefinition(
 				exitCode: number,
 				effectiveCwd: string,
 				exit: BashExitDetails = exitDetails(exitCode),
+				outputSignature = output.getOutputSignature(),
 			) => {
 				const coverage =
 					/No files were processed in the specified paths/i.test(text) &&
@@ -975,7 +965,7 @@ function createShellToolDefinition(
 				return new AgentToolExecutionError(
 					appendStatus(`${text}${coverage}`, `Command exited with code ${exitCode}\ncwd: ${effectiveCwd}`),
 					`exit_${exitCode}`,
-					output.getOutputSignature(),
+					outputSignature,
 					"operation_outcome",
 					exit,
 				);
@@ -1163,7 +1153,7 @@ function createShellToolDefinition(
 						return { content: [{ type: "text", text: routedText }], details: exitDetails(0) };
 					}
 				}
-				if (filterContext && filterContext.command === command) {
+				if (fullOutput !== true && filterContext && filterContext.command === command) {
 					const classification = classifyGitCommand(command, filterContext.env);
 					if (classification.eligible && classification.subcommand) {
 						let gitCwd = options?.forceCwd
@@ -1228,40 +1218,30 @@ function createShellToolDefinition(
 							},
 						);
 						if (res.exitCode !== -100) {
-							const rawOutputIncomplete = res.rawBytes === undefined;
-							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
-							let snapshot = await finishOutput();
-							if (rawOutputIncomplete) {
-								// The accumulator saw only Git's retained head. Its artifact is not the
-								// complete command output and must never compete with Git's owner path.
-								await output.discardTempFile();
-								snapshot = {
-									...snapshot,
-									fullOutputPath: res.fullOutputPath,
-									fullOutputError:
-										res.fullOutputPath === undefined
-											? "complete filtered Git output is unavailable"
-											: undefined,
-									persistedOutputTruncated: undefined,
-									persistedOutputBytes: undefined,
-								};
-							}
+							const { raw, partial, toolText, fullOutputPath, fullOutputError } =
+								await prepareFilteredGitDisplay(
+									res,
+									res.exitCode === 0 ? classification.tailStage : undefined,
+									output,
+								);
 							if (res.exitCode !== 0) {
-								const { text: rawOutputText } = formatOutput(snapshot);
-								throw createExitError(rawOutputText, res.exitCode, gitCwd, exitDetails(res.exitCode));
+								const text = raw ? formatOutput(raw).text : toolText;
+								// A spilled query has no complete stream in this accumulator. Preserve the retained
+								// error signature without writing its head to a second recovery file.
+								const retainedSignature = raw
+									? undefined
+									: createHash("sha256").update(res.rawOut).digest("base64url");
+								throw createExitError(text, res.exitCode, gitCwd, exitDetails(res.exitCode), retainedSignature);
 							}
-							const details: BashToolDetails = snapshot.truncation.truncated
-								? {
-										truncation: snapshot.truncation,
-										fullOutputPath: snapshot.fullOutputPath,
-										fullOutputError: snapshot.fullOutputError,
-									}
-								: snapshot.fullOutputPath || snapshot.fullOutputError
-									? { fullOutputPath: snapshot.fullOutputPath, fullOutputError: snapshot.fullOutputError }
-									: {};
 							return {
-								content: [{ type: "text", text: applyGitTailStage(res.output, classification.tailStage) }],
-								details: { ...details, ...exitDetails(res.exitCode) },
+								content: [{ type: "text", text: toolText }],
+								details: {
+									...(raw?.truncation.truncated ? { truncation: raw.truncation } : {}),
+									...(fullOutputPath ? { fullOutputPath } : {}),
+									...(fullOutputError ? { fullOutputError } : {}),
+									displayTruncated: partial,
+									...exitDetails(res.exitCode),
+								},
 							};
 						}
 					}
@@ -1312,13 +1292,9 @@ function createShellToolDefinition(
 					throw err;
 				}
 
-				const candidateProjection = finishProjection(exitCode);
-				// Test projections and lossy reductions persist the raw output for recovery; pure cleaning
-				// (nothing omitted) has nothing to recover and writes no file.
-				const persistRaw = candidateProjection !== undefined && candidateProjection.persistRaw !== false;
-				const snapshot = await finishOutput(persistRaw);
-				const projection =
-					candidateProjection && (!persistRaw || snapshot.fullOutputPath) ? candidateProjection : undefined;
+				const candidateProjection = boundShellOutputProjection(finishProjection(exitCode));
+				const snapshot = await finishOutput(shellOutputProjectionRequiresRaw(candidateProjection));
+				const projection = settleShellOutputProjection(candidateProjection, snapshot);
 				const expectedNoMatch = expectedContentSearchNoMatch(command, exitCode);
 				const { text: outputText, details } = formatOutput(
 					snapshot,

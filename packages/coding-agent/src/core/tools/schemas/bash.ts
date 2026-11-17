@@ -70,6 +70,8 @@ export interface BashToolDetails {
 		skippedLines: number;
 	};
 	outputProjection?: ShellOutputProjectionDetails;
+	/** Whether the body actually shown was capped, even if the original raw stream had a different limit. */
+	displayTruncated?: boolean;
 	/** Present when a family reducer produced the text; `rawPath` names the persisted raw output. */
 	outputReduction?: OutputReductionDetails;
 	piVerification?: VerificationRecord;

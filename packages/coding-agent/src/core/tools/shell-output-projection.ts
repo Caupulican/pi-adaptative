@@ -1,4 +1,12 @@
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	type TruncationOptions,
+	truncateMiddle,
+	truncateTail,
+} from "../../kernel/utils/truncate.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
+import type { OutputPreview, OutputSnapshot } from "./output-accumulator.ts";
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import { isProjectableTestCommand } from "./shell-test-command.ts";
 
@@ -28,9 +36,74 @@ export interface ShellOutputProjection {
 	reduction?: OutputReductionDetails;
 	/** Whether the raw output must be persisted for recovery; absent means yes (test projections always are). */
 	persistRaw?: boolean;
+	/** Whether the displayed projection itself was capped, independent of the raw stream preview. */
+	displayTruncated?: boolean;
 }
 
-export type ShellOutputProjectionDetails = Omit<ShellOutputProjection, "content" | "reduction">;
+export type ShellOutputProjectionDetails = Omit<
+	ShellOutputProjection,
+	"content" | "reduction" | "persistRaw" | "displayTruncated"
+>;
+
+/** Apply the tool's display limits after reducing the complete stream. Empty bounded projections use raw fallback. */
+export function boundShellOutputProjection(
+	projection: ShellOutputProjection | undefined,
+	options?: TruncationOptions,
+): ShellOutputProjection | undefined {
+	if (!projection) return undefined;
+	// Both built-in projectors already measured the complete text; skip a second scan for an in-budget display.
+	if (
+		projection.outputBytes <= (options?.maxBytes ?? DEFAULT_MAX_BYTES) &&
+		projection.outputLines <= (options?.maxLines ?? DEFAULT_MAX_LINES)
+	)
+		return { ...projection, displayTruncated: false };
+	const display = truncateMiddle(projection.content, options);
+	if (display.truncated && !display.content) return undefined;
+	return {
+		...projection,
+		content: display.content,
+		outputLines: display.outputLines,
+		outputBytes: display.outputBytes,
+		displayTruncated: display.truncated,
+		...(display.truncated ? { persistRaw: true } : {}),
+	};
+}
+
+export function shellOutputProjectionRequiresRaw(projection: ShellOutputProjection | undefined): boolean {
+	return projection !== undefined && projection.persistRaw !== false;
+}
+
+/** Publish a projected view only after the required full raw artifact has settled. */
+export function settleShellOutputProjection(
+	projection: ShellOutputProjection | undefined,
+	snapshot: Pick<OutputSnapshot, "fullOutputPath" | "persistedOutputTruncated">,
+): ShellOutputProjection | undefined {
+	if (!projection || !shellOutputProjectionRequiresRaw(projection)) return projection;
+	if (!snapshot.fullOutputPath || snapshot.persistedOutputTruncated) return undefined;
+	const reduction = projection.reduction;
+	return reduction
+		? { ...projection, reduction: { ...reduction, persistRaw: true, rawPath: snapshot.fullOutputPath } }
+		: projection;
+}
+
+export function shellOutputProjectionDetails(projection: ShellOutputProjection): ShellOutputProjectionDetails {
+	const {
+		content: _content,
+		reduction: _reduction,
+		persistRaw: _persistRaw,
+		displayTruncated: _displayTruncated,
+		...details
+	} = projection;
+	return details;
+}
+
+export function shellOutputProjectionPreview(
+	projection: ShellOutputProjection,
+	options: TruncationOptions,
+): OutputPreview {
+	const preview = truncateTail(projection.content, options);
+	return { content: preview.content, skippedLines: Math.max(0, preview.totalLines - preview.outputLines) };
+}
 
 /** What the bash tool drives: bytes in as they stream, one projection (or nothing) at the end. */
 export interface ShellOutputProjectorLike {

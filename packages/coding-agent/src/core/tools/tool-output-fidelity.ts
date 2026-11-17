@@ -79,6 +79,7 @@ export function toolOutputFidelityFromResult(tool: string, details: unknown): To
 	const artifactId = artifactReference(getToolResultArtifactId(details));
 	const truncated = (value: unknown) => isPlainRecord(value) && value.truncated === true;
 	const directory = tool === "read" && isPlainRecord(details.directory) ? details.directory : undefined;
+	const shell = tool === "bash" || tool === "powershell";
 	const clipped =
 		(tool === "read" && isNonNegativeSafeInteger(details.nextOffset) && details.nextOffset > 0) ||
 		(directory !== undefined &&
@@ -93,7 +94,9 @@ export function toolOutputFidelityFromResult(tool: string, details: unknown): To
 		details.linesTruncated === true ||
 		(typeof details.matchLimitReached === "number" && details.matchLimitReached > 0) ||
 		(typeof details.resultLimitReached === "number" && details.resultLimitReached > 0) ||
-		truncated(details.truncation) ||
+		(shell && typeof details.displayTruncated === "boolean"
+			? details.displayTruncated
+			: truncated(details.truncation)) ||
 		(tool === "python" &&
 			((typeof details.stdoutReducedDisplayTruncated === "boolean"
 				? details.stdoutReducedDisplayTruncated
@@ -105,6 +108,7 @@ export function toolOutputFidelityFromResult(tool: string, details: unknown): To
 	let stderrReduction: ReductionReceipt | undefined;
 	switch (tool) {
 		case "bash":
+		case "powershell":
 			outputReduction =
 				reductionReceipt(details.outputReduction, details.fullOutputPath) ??
 				reductionReceipt(details.outputProjection, details.fullOutputPath);

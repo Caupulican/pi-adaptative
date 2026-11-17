@@ -101,18 +101,20 @@ function rawText(res: GitQueryResult, combine = false): string {
 	return res.stderr || res.stdout;
 }
 
-function applyOverflowDisclosure(res: GitQueryResult, result: FilterResult): FilterResult {
-	if (!res.overflow) return result;
-	const totalMb = (res.overflow.totalBytes / (1024 * 1024)).toFixed(1);
+/** Keep the selected command text separate from recovery metadata so head and tail operate on Git output. */
+function resultFromQuery(
+	res: GitQueryResult,
+	output: string,
+	exitCode = res.status ?? 0,
+	rawOut = rawText(res),
+): FilterResult {
 	return {
-		...result,
-		output: `${result.output}\n\n[git output was ${totalMb}MB; filtered view computed from the retained head. Full output: ${res.overflow.fullOutputPath}]`,
-		fullOutputPath: res.overflow.fullOutputPath,
+		output,
+		exitCode,
+		rawOut,
+		rawBytes: res.rawBytes,
+		...(res.overflow ? { fullOutputPath: res.overflow.fullOutputPath } : {}),
 	};
-}
-
-function resultFromQuery(res: GitQueryResult, output: string, exitCode = res.status ?? 0): FilterResult {
-	return applyOverflowDisclosure(res, { output, exitCode, rawOut: rawText(res), rawBytes: res.rawBytes });
 }
 
 export async function runGitQuery(
@@ -457,7 +459,7 @@ async function handleStatus(
 	if (!isSimple) {
 		const res = await runGitQuery(cwd, globalOptions, ["status", ...args], options);
 		const rawOut = rawText(res);
-		if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+		if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
 		const cleanedLines = res.stdout
 			.split("\n")
 			.map((line) => line.trimEnd())
@@ -470,7 +472,7 @@ async function handleStatus(
 	let rawOut = rawText(res);
 	if (res.status !== 0) {
 		if (rawOut.includes("not a git repository")) rawOut = "fatal: not a git repository";
-		return { output: rawOut.trim(), exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+		return resultFromQuery(res, rawOut.trim(), res.status ?? 1, rawOut);
 	}
 
 	const lines = res.stdout.split("\n").filter((line) => line.trim().length > 0);
@@ -522,7 +524,7 @@ async function handleLog(
 	if (hasPretty) return resultFromQuery(res, rawText(res), res.status ?? 0);
 
 	const rawOut = rawText(res);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
 
 	const commits = res.stdout.split(/(?=^commit [0-9a-f]{7,40})/m).filter((commit) => commit.trim().length > 0);
 	const compactedCommits: string[] = [];
@@ -661,7 +663,7 @@ async function handleDiff(
 	const { compacted, truncated } = compactDiff(diffRes.stdout);
 	let output = `${statRes.stdout.trimEnd()}\n\n${compacted}`.trim();
 	if (truncated) output += "\n\n[Diff truncated. Re-run with: git diff --no-compact]";
-	return applyOverflowDisclosure(diffRes, { output, exitCode: 0, rawOut: diffRes.stdout, rawBytes: diffRes.rawBytes });
+	return resultFromQuery(diffRes, output, 0, diffRes.stdout);
 }
 
 async function handleShow(
@@ -683,8 +685,7 @@ async function handleShow(
 
 	const showRes = await runGitQuery(cwd, globalOptions, ["show", ...args], options);
 	const rawOut = rawText(showRes);
-	if (showRes.status !== 0)
-		return { output: rawOut, exitCode: showRes.status ?? 1, rawOut, rawBytes: showRes.rawBytes };
+	if (showRes.status !== 0) return resultFromQuery(showRes, rawOut, showRes.status ?? 1, rawOut);
 
 	const lines = showRes.stdout.split("\n");
 	const diffStart = lines.findIndex((line) => line.startsWith("diff --git"));
@@ -725,12 +726,12 @@ async function handleAdd(
 	if (args.length === 0) return handlePassthroughGit(cwd, globalOptions, ["add"], options);
 	const addRes = await runGitQuery(cwd, globalOptions, ["add", ...args], options);
 	const rawOut = rawText(addRes);
-	if (addRes.status !== 0) return { output: rawOut, exitCode: addRes.status ?? 1, rawOut, rawBytes: addRes.rawBytes };
+	if (addRes.status !== 0) return resultFromQuery(addRes, rawOut, addRes.status ?? 1, rawOut);
 	const statRes = await runGitQuery(cwd, globalOptions, ["diff", "--cached", "--stat"], options);
 	if (statRes.status === 0 && statRes.stdout.trim().length > 0) {
-		return { output: `Staged changes:\n${statRes.stdout.trim()}`, exitCode: 0, rawOut, rawBytes: addRes.rawBytes };
+		return resultFromQuery(statRes, `Staged changes:\n${statRes.stdout.trim()}`, 0);
 	}
-	return { output: rawOut.trim() || "Successfully staged.", exitCode: 0, rawOut, rawBytes: addRes.rawBytes };
+	return resultFromQuery(addRes, rawOut.trim() || "Successfully staged.", 0, rawOut);
 }
 
 async function handleCommit(
@@ -745,15 +746,15 @@ async function handleCommit(
 	if (!hasMsg) return { output: "", exitCode: -100, rawOut: "" };
 	const res = await runGitQuery(cwd, globalOptions, ["commit", ...args], options);
 	const rawOut = rawText(res, true);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
 	if (rawOut.includes("nothing to commit") || rawOut.includes("working tree clean")) {
-		return { output: "nothing to commit, working tree clean", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+		return resultFromQuery(res, "nothing to commit, working tree clean", 0, rawOut);
 	}
 	const firstLine = rawOut
 		.split("\n")
 		.find((line) => line.trim().length > 0)
 		?.trim();
-	return { output: firstLine || "Committed successfully.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, firstLine || "Committed successfully.", 0, rawOut);
 }
 
 async function handlePush(
@@ -774,15 +775,14 @@ async function handlePush(
 				(prefix) => trimmed.startsWith(prefix),
 			);
 		});
-	if (res.status !== 0)
-		return { output: outputLines.join("\n"), exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, outputLines.join("\n"), res.status ?? 1, rawOut);
 	if (outputLines.some((line) => line.includes("Everything up-to-date"))) {
-		return { output: "Everything up-to-date.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+		return resultFromQuery(res, "Everything up-to-date.", 0, rawOut);
 	}
 	// Git's report as git words it, without its progress lines: the remote's messages, the destination and every ref the
 	// push updated, so a push of several refs names them all and the host reads what it pushed from them (`pushedRefs`).
 	const output = outputLines.length > 0 ? outputLines.join("\n") : "Push successful.";
-	return { output, exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, output, 0, rawOut);
 }
 
 async function handlePull(
@@ -793,14 +793,13 @@ async function handlePull(
 ): Promise<FilterResult> {
 	const res = await runGitQuery(cwd, globalOptions, ["pull", ...args], options);
 	const rawOut = rawText(res, true);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
-	if (rawOut.includes("Already up to date."))
-		return { output: "Already up to date.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
+	if (rawOut.includes("Already up to date.")) return resultFromQuery(res, "Already up to date.", 0, rawOut);
 	const lines = rawOut.split("\n");
 	const summary = lines.filter(
 		(line) => line.includes("Fast-forward") || line.includes("file changed") || line.includes("files changed"),
 	);
-	return { output: summary.join("\n") || "Pull successful.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, summary.join("\n") || "Pull successful.", 0, rawOut);
 }
 
 async function handleFetch(
@@ -811,18 +810,14 @@ async function handleFetch(
 ): Promise<FilterResult> {
 	const res = await runGitQuery(cwd, globalOptions, ["fetch", ...args], options);
 	const rawOut = rawText(res, true);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
 	const refs = rawOut
 		.split("\n")
 		.filter((line) => line.includes("[new branch]") || line.includes("[new tag]") || line.includes("->"));
-	return {
-		output: refs.length
-			? `Fetched:\n${refs.map((line) => line.trim()).join("\n")}`
-			: "Fetch successful (no new refs).",
-		exitCode: 0,
-		rawOut,
-		rawBytes: res.rawBytes,
-	};
+	const output = refs.length
+		? `Fetched:\n${refs.map((line) => line.trim()).join("\n")}`
+		: "Fetch successful (no new refs).";
+	return resultFromQuery(res, output, 0, rawOut);
 }
 
 async function handleBranch(
@@ -833,7 +828,7 @@ async function handleBranch(
 ): Promise<FilterResult> {
 	if (args.includes("--show-current")) {
 		const res = await runGitQuery(cwd, globalOptions, ["branch", "--show-current"], options);
-		return { output: res.stdout.trim(), exitCode: res.status ?? 0, rawOut: rawText(res), rawBytes: res.rawBytes };
+		return resultFromQuery(res, res.stdout.trim());
 	}
 	const isWrite = args.some(
 		(arg) =>
@@ -842,19 +837,19 @@ async function handleBranch(
 	if (isWrite) {
 		const res = await runGitQuery(cwd, globalOptions, ["branch", ...args], options);
 		const rawOut = rawText(res);
-		if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
-		return { output: rawOut.trim() || "Branch updated successfully.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+		if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
+		return resultFromQuery(res, rawOut.trim() || "Branch updated successfully.", 0, rawOut);
 	}
 	const res = await runGitQuery(cwd, globalOptions, ["branch", "--no-color", ...args], options);
 	const rawOut = rawText(res);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
 	const lines = res.stdout.split("\n").filter((line) => line.trim().length > 0);
 	const remoteBranches = lines.filter((line) => line.includes("remotes/"));
 	const localBranches = lines.filter((line) => !line.includes("remotes/"));
 	const remoteDisplay = remoteBranches.slice(0, 5);
 	const omitted = remoteBranches.length - remoteDisplay.length;
 	if (omitted > 0) remoteDisplay.push(`  remotes/... (${omitted} more remote branches)`);
-	return { output: [...localBranches, ...remoteDisplay].join("\n"), exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, [...localBranches, ...remoteDisplay].join("\n"), 0, rawOut);
 }
 
 async function handleStash(
@@ -866,25 +861,19 @@ async function handleStash(
 	const sub = args[0] || "push";
 	const res = await runGitQuery(cwd, globalOptions, ["stash", ...args], options);
 	const rawOut = rawText(res);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
-	if (sub === "list")
-		return { output: res.stdout.trim() || "No stashes found.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
+	if (sub === "list") return resultFromQuery(res, res.stdout.trim() || "No stashes found.", 0, rawOut);
 	if (sub === "show") {
 		const { compacted, truncated } = compactDiff(res.stdout);
-		return applyOverflowDisclosure(res, {
-			output: `${compacted.trim()}${truncated ? "\n\n[Diff truncated.]" : ""}`,
-			exitCode: 0,
-			rawOut,
-			rawBytes: res.rawBytes,
-		});
+		return resultFromQuery(res, `${compacted.trim()}${truncated ? "\n\n[Diff truncated.]" : ""}`, 0, rawOut);
 	}
 	if (res.stdout.includes("No local changes to save"))
-		return { output: "No local changes to save.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+		return resultFromQuery(res, "No local changes to save.", 0, rawOut);
 	const firstLine = res.stdout
 		.split("\n")
 		.find((line) => line.trim().length > 0)
 		?.trim();
-	return { output: firstLine || "Stash successful.", exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, firstLine || "Stash successful.", 0, rawOut);
 }
 
 async function handleWorktree(
@@ -896,15 +885,15 @@ async function handleWorktree(
 	const sub = args[0] || "list";
 	const res = await runGitQuery(cwd, globalOptions, ["worktree", ...(sub === "list" ? ["list"] : args)], options);
 	const rawOut = rawText(res, true);
-	if (res.status !== 0) return { output: rawOut, exitCode: res.status ?? 1, rawOut, rawBytes: res.rawBytes };
-	if (sub !== "list") return { output: rawOut.trim(), exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	if (res.status !== 0) return resultFromQuery(res, rawOut, res.status ?? 1, rawOut);
+	if (sub !== "list") return resultFromQuery(res, rawOut.trim(), 0, rawOut);
 	const home = process.env.HOME || "";
 	const output = res.stdout
 		.split("\n")
 		.map((line) => (home && line.startsWith(home) ? `~${line.slice(home.length)}` : line))
 		.join("\n")
 		.trim();
-	return { output, exitCode: 0, rawOut, rawBytes: res.rawBytes };
+	return resultFromQuery(res, output, 0, rawOut);
 }
 
 export async function executeFilteredGit(

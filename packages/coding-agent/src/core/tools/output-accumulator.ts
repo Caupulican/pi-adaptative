@@ -215,6 +215,15 @@ export class OutputAccumulator {
 		};
 	}
 
+	/** Publish the final display and its recovery path only after the file has closed successfully. */
+	async publishSnapshot(persistAlways = false, onFinished?: () => void): Promise<OutputSnapshot> {
+		this.finish();
+		onFinished?.();
+		this.snapshot({ persistIfTruncated: true, persistAlways });
+		await this.closeTempFile();
+		return this.snapshot();
+	}
+
 	async closeTempFile(): Promise<void> {
 		const fd = this.tempFileFd;
 		if (fd === undefined) {
@@ -473,7 +482,8 @@ export class OutputAccumulator {
 		if (this.tempFileError !== undefined) {
 			return false;
 		}
-		if (this.tempFileFd !== undefined) {
+		// A settled artifact stays intact if publication is requested again.
+		if (this.tempFileFd !== undefined || (this.finished && this.tempFilePath !== undefined)) {
 			return true;
 		}
 		try {
