@@ -6,6 +6,7 @@ import {
 	continuousChatDay,
 	continuousChatToolOutputLabel,
 } from "./continuous-chat-contracts.ts";
+import { continuousChatSummaryText } from "./continuous-chat-tool-output.ts";
 
 /** Compaction target. After five corrections the reference keeps the shortest reply even if slightly over. */
 export const CONTINUOUS_CHAT_NODE_TARGET_BYTES = 512;
@@ -71,7 +72,7 @@ export function continuousChatParentCoordinate(
 export function renderContinuousChatLeaf(record: ContinuousChatRecord): string {
 	const line = `${record.kind}: ${record.text}`;
 	return record.kind === "echo" && (record.toolClipping || record.toolOutput)
-		? `echo: [${continuousChatToolOutputLabel(record)}] ${record.text}`
+		? `echo: [${continuousChatToolOutputLabel(record)}] ${continuousChatSummaryText(record)}`
 		: line;
 }
 

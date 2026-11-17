@@ -12,6 +12,10 @@ export interface OutputReductionDetails {
 	inputLines: number;
 	outputLines: number;
 	omittedLines: number;
+	/** Logical array members omitted by a structured reducer, independent of physical line count. */
+	omittedItems?: number;
+	/** Logical string values clipped by a structured reducer. */
+	clippedStrings?: number;
 	/** Path of the persisted raw output when the caller stored it. */
 	rawPath?: string;
 	/** A command prefix that projects the raw output (`jq -c '.items[] | {id,status}'`); the notice appends the path. */
@@ -23,4 +27,15 @@ export interface OutputReductionDetails {
 	 * leaves it false: nothing to recover.
 	 */
 	persistRaw: boolean;
+}
+
+/** The data removed by a structured reducer, independent of physical line formatting. */
+export function formatStructuredOutputCounts(
+	details: Pick<OutputReductionDetails, "omittedItems" | "clippedStrings">,
+): string | undefined {
+	const { omittedItems = 0, clippedStrings = 0 } = details;
+	const counts: string[] = [];
+	if (omittedItems > 0) counts.push(`${omittedItems} JSON ${omittedItems === 1 ? "item" : "items"} omitted`);
+	if (clippedStrings > 0) counts.push(`${clippedStrings} JSON ${clippedStrings === 1 ? "string" : "strings"} clipped`);
+	return counts.length > 0 ? counts.join(", ") : undefined;
 }

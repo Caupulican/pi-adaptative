@@ -286,7 +286,7 @@ function isLegacyNoteNodeText(text: string): boolean {
 	return lines.length > 0 && lines.every((line) => line.startsWith("note: "));
 }
 
-/** The node that needs no model call: the leaf when it fits as is (or is a legacy note), a tool call or result as an automatic line of code facts, or the joined children when their join fits (or both are legacy-note subtrees). */
+/** Builds exact leaves and joins that fit, bounded tool evidence, and excerpts of imported notes without a model call. */
 export function continuousChatNoCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeNode | undefined {
 	if (target.kind === "merge") {
 		const exact = createContinuousChatParentWithoutCall(target.left, target.right);

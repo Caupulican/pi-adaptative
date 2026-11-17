@@ -79,6 +79,8 @@ const LEGEND_BUDGET_MARGIN = 1;
 
 export interface PathAliasSyncResult {
 	messages: AgentMessage[];
+	/** Verify advertised aliases against the live table and the cwd this projection used. */
+	verifyPathAliases?: (entries: readonly { id: string; path: string }[]) => boolean;
 	/**
 	 * The cumulative delta legend record for one request: the aliases the model can see on the wire (these rendered messages,
 	 * plus the request's other `visibleMessages` and `visibleTexts`) that no legend record in the synced history, or on the
@@ -157,6 +159,8 @@ function legendStateChars(record: PathAliasLegendRecord | undefined): number {
 
 export class PathAliasRuntime {
 	private table: PathAliasTable;
+	private retainedPaths?: { table: PathAliasTable; byId: ReadonlyMap<string, string> };
+	private readonly isActive?: () => boolean;
 	private records: PathAliasRecord[] = [];
 	private store: SqlitePathAliasStore | undefined;
 	private loaded = false;
@@ -306,12 +310,13 @@ export class PathAliasRuntime {
 		getCwd: () => string,
 		getDatabasePath: () => string,
 		getTurnIndex: () => number,
-		options?: { requireExistingTargets?: boolean },
+		options?: { requireExistingTargets?: boolean; isActive?: () => boolean },
 	) {
 		this.getCwd = getCwd;
 		this.getDatabasePath = getDatabasePath;
 		this.getTurnIndex = getTurnIndex;
 		this.requireExistingTargets = options?.requireExistingTargets ?? true;
+		this.isActive = options?.isActive;
 		this.table = emptyPathAliasTable(".");
 	}
 
@@ -415,6 +420,7 @@ export class PathAliasRuntime {
 		const paused = this.mintingPaused;
 		const result: PathAliasSyncResult = {
 			messages: rewritten,
+			verifyPathAliases: (entries) => this.verifyRetainedPaths(table.cwd, entries),
 			legendFor: (visibleMessages, visibleTexts) => {
 				const ids = new Set(visible);
 				for (const message of visibleMessages) for (const id of this.referencedAliasIds(message)) ids.add(id);
@@ -448,6 +454,17 @@ export class PathAliasRuntime {
 			result,
 		};
 		return result;
+	}
+
+	private verifyRetainedPaths(cwd: string, entries: readonly { id: string; path: string }[]): boolean {
+		if (!this.loaded || this.isActive?.() === false || this.getCwd() !== cwd || this.table.cwd !== cwd) return false;
+		if (this.retainedPaths?.table !== this.table) {
+			this.retainedPaths = {
+				table: this.table,
+				byId: new Map(this.table.entries.map(({ id, path }) => [id, path])),
+			};
+		}
+		return entries.every(({ id, path }) => this.retainedPaths!.byId.get(id) === path);
 	}
 
 	/** The alias ids a wire message references (see {@link collectReferencedAliasIds}), read once per message object. */
@@ -659,6 +676,7 @@ export class PathAliasRuntime {
 		}
 		this.store = undefined;
 		this.records = [];
+		this.retainedPaths = undefined;
 		this.loaded = false;
 		this.rendered = new WeakMap();
 		this.renderFold = this.createRenderFold();

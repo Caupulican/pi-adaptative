@@ -2,20 +2,22 @@
  * JSON reducer for command and script output that is one JSON document (`gh api`, `curl`, `aws`,
  * `kubectl -o json`, a python `json.dumps`). Measured on live sessions such results are lists of
  * near-identical records where the model reads the shape and a few samples, then filters. The
- * reduction keeps the shape and the anomalies:
+ * reduction keeps anomalies and describes any change of shape:
  *
+ * - same-column scalar objects can use one column list and positional JSON rows;
  * - arrays longer than the sample window keep their first items and last item, every item that
  *   carries an error or a non-ok status, and one marker string `[… N more items]` where the cut is;
  * - long strings are clipped with their length (`… [+N chars]`);
  * - objects, numbers, booleans and short strings are untouched, so keys and values stay searchable.
  *
- * Indentation follows the original (pretty stays pretty, compact stays compact). The raw document is
+ * Tables use compact JSON. Ordinary samples retain the original indentation style. The raw document is
  * persisted by the caller, so an omitted item is one read away.
  */
 
 import { isRecordObject as isObjectRecord } from "../util/value-guards.ts";
 import type { CommandFamilyClassification } from "./command-family.ts";
-import type { OutputReducer, OutputReductionRequest } from "./output-reduction.ts";
+import { jsonOutputCanReserialize } from "./json-output-lexemes.ts";
+import { MAX_BUFFERED_REDUCTION_BYTES, type OutputReducer, type OutputReductionRequest } from "./output-reduction.ts";
 import type { OutputReductionLevel } from "./output-reduction-types.ts";
 
 /** Below this size a document is cheaper to send than to describe. */
@@ -77,6 +79,111 @@ export function isAnomalousItem(value: unknown): boolean {
 interface Walk {
 	omittedItems: number;
 	clippedStrings: number;
+	usedTable: boolean;
+	pretty: boolean;
+}
+
+type JsonScalar = string | number | boolean | null;
+
+interface ColumnarTable {
+	$format: "columnar-json";
+	columns: string[];
+	rows: JsonScalar[][];
+	/** Zero-based positions in the original array, included only when rows were omitted. */
+	sourceRowIndices?: number[];
+	omittedRows?: number;
+}
+
+const MAX_TABLE_COLUMNS = 64;
+const COLUMNAR_FORMAT = "columnar-json";
+
+function scalar(value: unknown): value is JsonScalar {
+	return value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number";
+}
+
+function columnsForRows(values: readonly unknown[]): string[] | undefined {
+	if (values.length < 2 || !isObjectRecord(values[0])) return undefined;
+	const columns = Object.keys(values[0]);
+	if (columns.length === 0 || columns.length > MAX_TABLE_COLUMNS) return undefined;
+	return values.every(
+		(row) =>
+			isObjectRecord(row) &&
+			Object.keys(row).length === columns.length &&
+			columns.every((key) => Object.hasOwn(row, key) && scalar(row[key])),
+	)
+		? columns
+		: undefined;
+}
+
+/** Builds only rows that fit the already-selected sample's material budget. */
+function tableWithinBudget(
+	values: readonly unknown[],
+	columns: string[],
+	limit: number,
+	sample?: { indices: number[]; omitted: number },
+): ColumnarTable | undefined {
+	const table: ColumnarTable = {
+		$format: COLUMNAR_FORMAT,
+		columns,
+		rows: [],
+		...(sample ? { sourceRowIndices: sample.indices, omittedRows: sample.omitted } : {}),
+	};
+	let remaining = limit - Buffer.byteLength(JSON.stringify(table));
+	if (remaining < 0) return undefined;
+	for (const value of values) {
+		// Schema was checked once against the entire input array, including omitted rows.
+		const row = columns.map((key) => (value as Record<string, JsonScalar>)[key]!);
+		const minimumBytes = row.reduce<number>((sum, cell) => sum + (typeof cell === "string" ? cell.length + 2 : 1), 0);
+		if (minimumBytes > remaining) return undefined;
+		remaining -= Buffer.byteLength(JSON.stringify(row)) + (table.rows.length ? 1 : 0);
+		if (remaining < 0) return undefined;
+		table.rows.push(row);
+	}
+	return table;
+}
+
+function selectArrayIndices(values: readonly unknown[], level: OutputReductionLevel): number[] {
+	if (values.length <= ARRAY_WINDOW[level]) return values.map((_item, index) => index);
+	const head = ARRAY_HEAD[level];
+	const indices = Array.from({ length: head }, (_, index) => index);
+	let anomalies = 0;
+	for (let index = head; index < values.length - 1 && anomalies < MAX_ANOMALIES_PER_ARRAY; index++) {
+		if (isAnomalousItem(values[index])) {
+			indices.push(index);
+			anomalies++;
+		}
+	}
+	indices.push(values.length - 1);
+	return indices;
+}
+
+function reduceArray(values: readonly unknown[], level: OutputReductionLevel, walk: Walk): unknown {
+	const indices = selectArrayIndices(values, level);
+	const omitted = values.length - indices.length;
+	const stringsBefore = walk.clippedStrings;
+	const rows = indices.map((index) => reduceValue(values[index], level, walk));
+	const sample = [...rows];
+	if (omitted > 0) sample.splice(ARRAY_HEAD[level], 0, `[… ${omitted} more items]`);
+	const columns = columnsForRows(values);
+	if (columns) {
+		const budget = Buffer.byteLength(JSON.stringify(sample, null, walk.pretty ? 2 : undefined));
+		const full = tableWithinBudget(values, columns, budget);
+		if (full) {
+			walk.usedTable = true;
+			walk.clippedStrings = stringsBefore;
+			return full;
+		}
+		if (omitted > 0) {
+			const compact = tableWithinBudget(rows, columns, budget - 1, { indices, omitted });
+			if (compact) {
+				walk.usedTable = true;
+				walk.omittedItems += omitted;
+				return compact;
+			}
+		}
+	}
+	walk.omittedItems += omitted;
+	return sample;
 }
 
 function reduceValue(value: unknown, level: OutputReductionLevel, walk: Walk): unknown {
@@ -85,35 +192,10 @@ function reduceValue(value: unknown, level: OutputReductionLevel, walk: Walk): u
 		walk.clippedStrings++;
 		return `${value.slice(0, CLIPPED_STRING_HEAD)}… [+${value.length - CLIPPED_STRING_HEAD} chars]`;
 	}
-	if (Array.isArray(value)) {
-		if (value.length <= ARRAY_WINDOW[level]) return value.map((item) => reduceValue(item, level, walk));
-		const head = ARRAY_HEAD[level];
-		const kept: unknown[] = [];
-		for (let index = 0; index < head; index++) kept.push(reduceValue(value[index], level, walk));
-		let anomalies = 0;
-		let omitted = 0;
-		let markerAt = kept.length;
-		for (let index = head; index < value.length - 1; index++) {
-			const item = value[index];
-			if (anomalies < MAX_ANOMALIES_PER_ARRAY && isAnomalousItem(item)) {
-				kept.push(reduceValue(item, level, walk));
-				anomalies++;
-				continue;
-			}
-			omitted++;
-		}
-		// The marker sits where the first omitted item was; kept anomalies follow it in order.
-		kept.splice(markerAt, 0, `[… ${omitted} more items]`);
-		markerAt = -1;
-		kept.push(reduceValue(value[value.length - 1], level, walk));
-		walk.omittedItems += omitted;
-		return kept;
-	}
-	if (typeof value === "object" && value !== null) {
-		const out: Record<string, unknown> = {};
-		for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-			out[key] = reduceValue(entry, level, walk);
-		}
+	if (Array.isArray(value)) return reduceArray(value, level, walk);
+	if (isObjectRecord(value)) {
+		const out: Record<string, unknown> = Object.create(null);
+		for (const [key, entry] of Object.entries(value)) out[key] = reduceValue(entry, level, walk);
 		return out;
 	}
 	return value;
@@ -126,8 +208,12 @@ export interface JsonReduction {
 	clippedStrings: number;
 }
 
-/** Parse the text as one JSON document and reduce it; undefined when it is not JSON or too small. */
-export function reduceJsonOutput(text: string, level: OutputReductionLevel = "standard"): JsonReduction | undefined {
+function analyzeJsonOutput(
+	text: string,
+	level: OutputReductionLevel,
+): { reduced: JsonReduction; document: unknown } | undefined {
+	if (text.length > MAX_BUFFERED_REDUCTION_BYTES || Buffer.byteLength(text) > MAX_BUFFERED_REDUCTION_BYTES)
+		return undefined;
 	const trimmed = text.trim();
 	if (trimmed.length < MIN_JSON_BYTES) return undefined;
 	const first = trimmed[0];
@@ -138,56 +224,80 @@ export function reduceJsonOutput(text: string, level: OutputReductionLevel = "st
 	} catch {
 		return undefined;
 	}
-	const walk: Walk = { omittedItems: 0, clippedStrings: 0 };
+	if (!jsonOutputCanReserialize(trimmed)) return undefined;
+	const walk: Walk = { omittedItems: 0, clippedStrings: 0, usedTable: false, pretty: trimmed.includes("\n") };
 	const reduced = reduceValue(document, level, walk);
-	if (walk.omittedItems === 0 && walk.clippedStrings === 0) return undefined;
-	const pretty = trimmed.includes("\n");
-	const rendered = pretty ? JSON.stringify(reduced, null, 2) : JSON.stringify(reduced);
+	if (!walk.usedTable && walk.omittedItems === 0 && walk.clippedStrings === 0) return undefined;
+	const rendered = JSON.stringify(reduced, null, walk.pretty && !walk.usedTable ? 2 : undefined);
 	const out = text.endsWith("\n") ? `${rendered}\n` : rendered;
 	const inputLines = text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
 	const outputLines = out.split("\n").length - (out.endsWith("\n") ? 1 : 0);
 	return {
-		text: out,
-		omittedLines: Math.max(0, inputLines - outputLines),
-		omittedItems: walk.omittedItems,
-		clippedStrings: walk.clippedStrings,
+		document,
+		reduced: {
+			text: out,
+			omittedLines: walk.omittedItems > 0 || walk.clippedStrings > 0 ? Math.max(0, inputLines - outputLines) : 0,
+			omittedItems: walk.omittedItems,
+			clippedStrings: walk.clippedStrings,
+		},
 	};
 }
 
-const JQ_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+/** Parse and reduce one JSON document. Declines unrepresentable or unaffected inputs. */
+export function reduceJsonOutput(text: string, level: OutputReductionLevel = "standard"): JsonReduction | undefined {
+	return analyzeJsonOutput(text, level)?.reduced;
+}
+
+const JQ_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const JQ_KEYWORDS = new Set([
+	"and",
+	"as",
+	"break",
+	"catch",
+	"def",
+	"elif",
+	"else",
+	"end",
+	"false",
+	"foreach",
+	"if",
+	"import",
+	"include",
+	"label",
+	"module",
+	"null",
+	"or",
+	"reduce",
+	"then",
+	"true",
+	"try",
+]);
 const MAX_PROJECTED_KEYS = 4;
 
-function jqKey(key: string): string {
-	return JQ_IDENTIFIER_RE.test(key) ? key : JSON.stringify(key);
+function jqIdentifier(key: string): boolean {
+	return key.length <= 64 && JQ_IDENTIFIER.test(key) && !JQ_KEYWORDS.has(key);
 }
 
-/** Keys of the first record worth projecting: scalars first, at most a few, in document order. */
-function projectedKeys(item: unknown): string[] {
-	if (!isObjectRecord(item)) return [];
-	const scalar = Object.entries(item)
-		.filter(([, value]) => value === null || typeof value !== "object")
-		.map(([key]) => key);
-	const keys = scalar.length > 0 ? scalar : Object.keys(item);
-	return keys.slice(0, MAX_PROJECTED_KEYS);
+function projectJqRows(list: readonly unknown[], iterator: string, sample: string): string {
+	const first = list[0];
+	if (!isObjectRecord(first)) return iterator;
+	const keys = Object.keys(first).filter(jqIdentifier);
+	const scalarKeys = keys.filter((key) => scalar(first[key]));
+	const projected = (scalarKeys.length > 0 ? scalarKeys : keys).slice(0, MAX_PROJECTED_KEYS);
+	return projected.length > 0 ? `${iterator} | {${projected.join(",")}}` : sample;
 }
 
-/**
- * A jq filter over the persisted raw document, derived from its shape, so the model queries the
- * file with one jq call instead of reading it whole: `.[] | {id,status}` for a list, `.items[] |
- * {id,status}` for an object holding a list, `keys` for anything else. Deterministic.
- */
+/** Use only safe jq identifiers in the quoted recovery command. Other keys use a fixed query. */
 export function suggestJqProjection(document: unknown): string {
-	if (Array.isArray(document)) {
-		const keys = projectedKeys(document[0]);
-		return keys.length > 0 ? `.[] | {${keys.map(jqKey).join(",")}}` : ".[]";
-	}
+	if (Array.isArray(document)) return projectJqRows(document, ".[]", ".[:6][]");
 	if (isObjectRecord(document)) {
-		for (const [key, value] of Object.entries(document)) {
-			if (Array.isArray(value) && value.length > 0) {
-				const keys = projectedKeys(value[0]);
-				return keys.length > 0 ? `.${jqKey(key)}[] | {${keys.map(jqKey).join(",")}}` : `.${jqKey(key)}[]`;
-			}
+		let unsafeList = false;
+		for (const [key, list] of Object.entries(document)) {
+			if (!Array.isArray(list) || list.length === 0) continue;
+			if (jqIdentifier(key)) return projectJqRows(list, `.${key}[]`, `.${key}[:6][]`);
+			unsafeList = true;
 		}
+		if (unsafeList) return 'first(to_entries[] | select(.value | type == "array")) | .value[:6][]';
 		return "keys";
 	}
 	return ".";
@@ -200,17 +310,11 @@ export const jsonOutputReducer: OutputReducer = {
 		return trimmed.startsWith("{") || trimmed.startsWith("[");
 	},
 	reduce(_classification: CommandFamilyClassification, request: OutputReductionRequest) {
-		const reduced = reduceJsonOutput(request.text, request.level);
-		if (!reduced) return undefined;
-		let document: unknown;
-		try {
-			document = JSON.parse(request.text.trim());
-		} catch {
-			return { text: reduced.text, omittedLines: reduced.omittedLines };
-		}
+		const analysis = analyzeJsonOutput(request.text, request.level);
+		if (!analysis) return undefined;
+		const { document, reduced } = analysis;
 		return {
-			text: reduced.text,
-			omittedLines: reduced.omittedLines,
+			...reduced,
 			recoveryHint: `jq -c '${suggestJqProjection(document)}'`,
 		};
 	},

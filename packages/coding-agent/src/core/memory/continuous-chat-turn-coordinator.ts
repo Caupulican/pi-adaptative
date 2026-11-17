@@ -29,6 +29,7 @@ export interface IcmTurnCompaction {
 export interface IcmTurnHandle {
 	readonly turnId: number;
 	readonly boundary: ContinuousChatTurnBoundary;
+	readonly lineageStartedAt: number;
 	readonly startedAt: number;
 	/** `alreadyLogged` documents whether the start already exists in the log. */
 	markStart(firstMessage: AgentMessage, alreadyLogged?: boolean): void;
@@ -48,7 +49,7 @@ export interface IcmTurnHandle {
 	 */
 	readonly frame: readonly AgentMessage[] | undefined;
 	/** Records the frame the projection sends for this turn. A projection re-created mid-turn notes the frame it sends. */
-	noteFrame(frame: readonly AgentMessage[]): void;
+	noteFrame(frame: readonly AgentMessage[], lineageStartedAt?: number): void;
 }
 
 class IcmTurn implements IcmTurnHandle {
@@ -59,11 +60,13 @@ class IcmTurn implements IcmTurnHandle {
 	private latest: IcmTurnCompaction | undefined;
 	private readonly noted = new Set<string>();
 	private sentFrame: readonly AgentMessage[] | undefined;
+	private lineageStart: number;
 
 	constructor(turnId: number, boundary: ContinuousChatTurnBoundary, startedAt: number) {
 		this.turnId = turnId;
 		this.boundary = boundary;
 		this.startedAt = startedAt;
+		this.lineageStart = startedAt;
 	}
 
 	get startMessage(): AgentMessage | undefined {
@@ -74,7 +77,12 @@ class IcmTurn implements IcmTurnHandle {
 		return this.sentFrame;
 	}
 
-	noteFrame(frame: readonly AgentMessage[]): void {
+	get lineageStartedAt(): number {
+		return this.lineageStart;
+	}
+
+	noteFrame(frame: readonly AgentMessage[], lineageStartedAt = this.startedAt): void {
+		this.lineageStart = lineageStartedAt;
 		this.sentFrame = frame;
 	}
 

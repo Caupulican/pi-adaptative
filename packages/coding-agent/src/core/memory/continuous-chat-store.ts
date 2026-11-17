@@ -141,6 +141,7 @@ export type ContinuousChatQueueOrigin = "fresh" | "legacy-replay-v1";
 
 /** A consistent read for a turn boundary: the queue that proves the prefix, and the rendered turn view it covers. */
 export interface ContinuousChatTurnSnapshot {
+	visibility: ContinuousChatReadVersion;
 	queue: ContinuousChatSchedulerSnapshot;
 	totalMessages: number;
 	viewRevision: number;
@@ -735,6 +736,7 @@ export class ContinuousChatStore {
 			const birthView = await this.renderBirthLocked(state.root.revision, turn);
 			return {
 				queue: state.queue,
+				visibility: this.rangeVersion(this.projection, state.root.nextId),
 				totalMessages: state.root.nextId,
 				viewRevision: turn.revision,
 				view: view.text,
@@ -778,7 +780,13 @@ export class ContinuousChatStore {
 	}
 
 	private async readRangeVersion(end: number, context?: MemoryReadContext): Promise<ContinuousChatReadVersion> {
-		const projection = await this.readProjection(context);
+		return this.rangeVersion(await this.readProjection(context), end);
+	}
+
+	private rangeVersion(
+		projection: ContinuousChatRecordProjection | undefined,
+		end: number,
+	): ContinuousChatReadVersion {
 		const key = () =>
 			projection ? `${projection.meta().identity}:${projection.requiredRevision(end)}` : "unprojected";
 		const captured = key();

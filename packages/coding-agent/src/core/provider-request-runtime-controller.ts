@@ -176,6 +176,7 @@ export class ProviderRequestRuntimeController {
 			);
 			return {
 				messages: sessionPlan.messages,
+				verifyPathAliases: sessionPlan.verifyPathAliases,
 				// The carried head (ICM frame layout) is the session plan's own: the continuous-chat wrapper reads it here.
 				...(sessionPlan.carriedRecords ? { carriedRecords: sessionPlan.carriedRecords } : {}),
 				transientMessages: [...(basePlan.transientMessages ?? []), ...(sessionPlan.transientMessages ?? [])],

@@ -88,11 +88,11 @@ import {
 	CONTINUOUS_CHAT_LANE_PAGE_BYTES,
 } from "./memory/continuous-chat-navigation.ts";
 import {
+	type ContinuousChatProjectionSource,
 	type ContinuousChatWire,
 	continuousChatRequestHistory,
 	createBlockedContinuousChatPlanWrapper,
 	createContinuousChatPlanWrapper,
-	renderContinuousChatTurnState,
 } from "./memory/continuous-chat-projection.ts";
 import { executeContinuousChatNavigation } from "./memory/continuous-chat-tools.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
@@ -460,6 +460,7 @@ export interface MemoryControllerDeps {
 	subscribeSystemSwitchLeaseAvailability?(listener: () => void): () => void;
 	/** Active model context window, used to cap prompt-visible memory. */
 	getContextWindow(): number | undefined;
+	allowsHistoryTokens?: ContinuousChatProjectionSource["allowsHistoryTokens"];
 	/** Latest active goal state, used for short-term current-work memory. */
 	getGoalState(): GoalState | undefined;
 	/**
@@ -2646,10 +2647,7 @@ export class MemoryController {
 		return this._activeMemorySystem === "icm" && !this._transitioning ? this._continuousChat : undefined;
 	}
 
-	/**
-	 * The part of `messages` the next provider request carries from durable history: under ICM the running turn's own
-	 * messages, otherwise (a child session, or no chat projection) all of them. See `continuousChatRequestHistory`.
-	 */
+	/** The rule hooks see the retained frame and the running turn's own messages. */
 	requestHistory(messages: readonly AgentMessage[]): readonly AgentMessage[] {
 		const wire = this.deps.standing.ownsHistory ? this._continuousChatWire : undefined;
 		return continuousChatRequestHistory({ wire, host: this.continuousChatHost() }, messages);
@@ -2687,12 +2685,13 @@ export class MemoryController {
 		}
 		const host = wire.host;
 		providerRequest.setPlanProjection(
-			createContinuousChatPlanWrapper({
-				current: () => {
-					const handle = host.turns.current();
-					return handle && { handle, stateText: renderContinuousChatTurnState(handle) };
-				},
-			}),
+			createContinuousChatPlanWrapper(
+				host.projectionSource(
+					this.deps.getSessionId,
+					() => !this.deps.isThirdPartyRun?.(),
+					this.deps.allowsHistoryTokens,
+				),
+			),
 		);
 		this._continuousChatWire = { kind: "chat" };
 	}

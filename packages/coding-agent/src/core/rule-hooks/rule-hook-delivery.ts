@@ -16,8 +16,8 @@ import {
 export interface RuleHookDeliveryDeps {
 	/**
 	 * The messages the model will actually receive on its next request, read fresh: compaction and branch changes
-	 * replace them, and under ICM continuous chat only the running turn's own messages ride the wire (the owner of that
-	 * windowing is `continuousChatRequestHistory`), so a rule delivered in an earlier turn is not in context any more.
+	 * replace them. Under ICM, continuousChatRequestHistory includes earlier tool results only while the provider
+	 * projection retains them.
 	 */
 	getMessages(): readonly AgentMessage[];
 	/**

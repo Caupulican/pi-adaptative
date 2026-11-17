@@ -12,21 +12,20 @@ import { type ParentInputConsumptionSource, parentInputOf } from "../../kernel/s
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import { isExternalEvidenceMessage, parseWorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
-import { getToolResultArtifactId } from "../context/context-tool-result.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import {
-	type ContinuousChatAppendInput,
-	type ContinuousChatImageInput,
-	type ContinuousChatMessageKind,
-	type ContinuousChatToolOutput,
-	parseContinuousChatToolOutput,
+import type {
+	ContinuousChatAppendInput,
+	ContinuousChatImageInput,
+	ContinuousChatMessageKind,
+	ContinuousChatToolOutput,
 } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatLegacyEntrySource } from "./continuous-chat-legacy-import.ts";
 import { parseContinuousChatNavigationCommand } from "./continuous-chat-navigation.ts";
 import type { ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
 import { CONTINUOUS_CHAT_MAX_BULK_INPUTS } from "./continuous-chat-store.ts";
+import { continuousChatToolOutputFromResult } from "./continuous-chat-tool-output.ts";
 
 /** One loggable piece of a session message. `part` is the raw content-block index, stable across thinking blocks. */
 export interface ContinuousChatMessagePart {
@@ -142,20 +141,7 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
 		}
 		case "toolResult": {
 			const parts = wholeMessagePart("echo", message.content);
-			if (!isPlainRecord(message.details)) return parts;
-			const details = message.details;
-			// Use structured tool-result metadata only. Output text can impersonate an artifact notice.
-			const artifact = parseContinuousChatToolOutput({
-				clipped: true,
-				artifactId: getToolResultArtifactId(details),
-			});
-			const clipped =
-				details.truncated === true ||
-				details.linesTruncated === true ||
-				(typeof details.matchLimitReached === "number" && details.matchLimitReached > 0) ||
-				(typeof details.resultLimitReached === "number" && details.resultLimitReached > 0) ||
-				(isPlainRecord(details.truncation) && details.truncation.truncated === true);
-			const output = artifact?.artifactId ? artifact : clipped ? ({ clipped: true } as const) : undefined;
+			const output = continuousChatToolOutputFromResult(message.toolName, message.details);
 			return output ? parts.map((part) => ({ ...part, toolOutput: output })) : parts;
 		}
 		default:
@@ -211,8 +197,8 @@ export interface ContinuousChatIngestorDeps {
 	warn(message: string): void;
 }
 
-/** One record to log, with its exact occurrence timestamp. Segment chronology is a store concern. */
-type ChatRecord = Omit<ContinuousChatAppendInput, "date"> & { timestamp: string };
+// A live continuation only needs a short suffix. Older or untracked ranges fall back to the complete tree view.
+const MAX_TRACKED_ARRIVALS = 256;
 
 type IngestTask = { kind: "entry"; sessionId: string; entryId: string };
 
@@ -225,6 +211,7 @@ export class ContinuousChatIngestor {
 	/** Set by a failed head, cleared when the head is logged. Every `settled()` rejects with it while it is set. */
 	private failure: Error | undefined;
 	private closed = false;
+	private readonly liveArrivals: Array<{ id: number; sessionId: string; entryId: string } | undefined> = [];
 
 	constructor(deps: ContinuousChatIngestorDeps) {
 		this.deps = deps;
@@ -364,16 +351,36 @@ export class ContinuousChatIngestor {
 		if (entry === undefined) throw new Error(`Persisted session entry ${entryId} is not readable.`);
 		const source = this.deps.getParentInputConsumptionSource();
 		for (const piece of await this.entryParts(entry, source)) {
-			await this.appendRecord({
+			const result = await this.deps.appender.append({
 				kind: piece.kind,
-				timestamp: piece.date ?? entry.timestamp,
+				date: piece.date ?? entry.timestamp,
 				text: piece.text,
 				...(piece.images ? { images: piece.images } : {}),
 				...(piece.toolOutput ? { toolOutput: piece.toolOutput } : {}),
 				sourceKey: piece.sourceKey ?? `${sessionId}:${entryId}:${piece.part}`,
 				source: { sessionId, entryId: piece.sourceEntryId ?? entryId },
 			});
+			// A derived report or imported record exists only in the tree until proven on the provider wire.
+			if (entry.type === "message" && piece.kind !== "work" && piece.sourceEntryId === undefined) {
+				for (const { id } of result.records) {
+					this.liveArrivals[id % MAX_TRACKED_ARRIVALS] = { id, sessionId, entryId };
+				}
+			}
 		}
+	}
+
+	/** Proves every intervening project record came from this turn's durable messages, using only bounded metadata. */
+	coversLiveArrivals(sessionId: string, first: number, end: number, history: readonly AgentMessage[]): boolean {
+		if (first === end) return true;
+		if (end < first || end - first > MAX_TRACKED_ARRIVALS) return false;
+		const messages = new Set(history);
+		for (let id = first; id < end; id++) {
+			const arrival = this.liveArrivals[id % MAX_TRACKED_ARRIVALS];
+			if (arrival?.id !== id || arrival.sessionId !== sessionId) return false;
+			const entry = this.deps.readEntry(arrival.entryId);
+			if (entry?.type !== "message" || !messages.has(entry.message)) return false;
+		}
+		return true;
 	}
 
 	/**
@@ -430,14 +437,5 @@ export class ContinuousChatIngestor {
 		if (batch.length > 0) await this.deps.appender.appendMany(batch);
 		if (derived.length > 0) await this.deps.appender.appendMany(derived);
 		signal?.throwIfAborted();
-	}
-
-	/**
-	 * The whole append command goes to the runtime, never a pre-check of one unit: the store deduplicates each unit by
-	 * its own source key, so a crash that committed some units of a long text still completes the rest on replay.
-	 */
-	private async appendRecord(record: ChatRecord): Promise<void> {
-		const { timestamp, ...fields } = record;
-		await this.deps.appender.append({ ...fields, date: timestamp });
 	}
 }

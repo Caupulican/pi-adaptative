@@ -9,6 +9,14 @@
 import { createHash } from "node:crypto";
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
 
+import { type ContinuousChatToolOutput, parseContinuousChatToolOutput } from "./continuous-chat-tool-output.ts";
+
+export {
+	type ContinuousChatToolOutput,
+	continuousChatToolOutputLabel,
+	parseContinuousChatToolOutput,
+} from "./continuous-chat-tool-output.ts";
+
 export const CONTINUOUS_CHAT_SCHEMA_VERSION = 1;
 export const CONTINUOUS_CHAT_MAX_TEXT_CHARACTERS = 30_000;
 export const CONTINUOUS_CHAT_MAX_SOURCE_KEY_CHARACTERS = 1_024;
@@ -32,29 +40,6 @@ export interface ContinuousChatToolClipping {
 	originalCharacters: number;
 	headCharacters: number;
 	tailCharacters: number;
-}
-
-export interface ContinuousChatToolOutput {
-	/** Producer reported that this result was clipped before chat ingest. */
-	clipped: true;
-	artifactId?: string;
-}
-
-export function parseContinuousChatToolOutput(value: unknown): ContinuousChatToolOutput | undefined {
-	if (!isPlainRecord(value) || value.clipped !== true) return undefined;
-	const id = value.artifactId;
-	if (id === undefined) return { clipped: true };
-	return typeof id === "string" && /^[a-f0-9]{24}$/.test(id) ? { clipped: true, artifactId: id } : undefined;
-}
-
-export function continuousChatToolOutputLabel(
-	record: Pick<ContinuousChatRecord, "toolClipping" | "toolOutput">,
-): string {
-	if (record.toolOutput?.artifactId)
-		return `clipped record; original reference tool-output:${record.toolOutput.artifactId} (availability not guaranteed)`;
-	return record.toolClipping || record.toolOutput
-		? "clipped record; no original artifact recorded"
-		: "exact retained record";
 }
 
 export interface ContinuousChatRecord {

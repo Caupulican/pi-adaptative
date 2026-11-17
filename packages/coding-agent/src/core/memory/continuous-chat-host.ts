@@ -30,6 +30,7 @@ import {
 	reconcileParentInputHistory,
 	stageParentInputReconciliation,
 } from "./continuous-chat-parent-reconciliation.ts";
+import { type ContinuousChatProjectionSource, renderContinuousChatTurnState } from "./continuous-chat-projection.ts";
 import { type ContinuousChatCompactionPrefixHead, ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
 import { ContinuousChatStore } from "./continuous-chat-store.ts";
 import type { ContinuousChatPort } from "./continuous-chat-tools.ts";
@@ -139,6 +140,42 @@ export class ContinuousChatHost {
 		this.stopped = this.halt.promise;
 		// The runtime stops on its own only when its lease is lost; a stop through `dispose` has already closed the host.
 		void parts.runtime.stopped.then(() => this.close("Continuous chat stopped with its runtime."));
+	}
+
+	/** The live projection is confined to one session generation; third-party turns never seed or extend its retained prefix. */
+	projectionSource(
+		sessionId: () => string,
+		ownerScope: () => boolean,
+		allowsHistoryTokens: ContinuousChatProjectionSource["allowsHistoryTokens"],
+	): ContinuousChatProjectionSource {
+		const restricted = new WeakSet<object>();
+		return {
+			current: () => {
+				const handle = this.turns.current();
+				if (!handle || this.closed || this.turns.phase() !== "running" || sessionId() !== this.options.sessionId)
+					return undefined;
+				if (!ownerScope()) restricted.add(handle);
+				return { handle, stateText: renderContinuousChatTurnState(handle) };
+			},
+			allowsHistoryTokens,
+			canRetain: (previous, next, history) =>
+				!this.closed &&
+				sessionId() === this.options.sessionId &&
+				ownerScope() &&
+				this.turns.current() === next &&
+				!restricted.has(previous) &&
+				!restricted.has(next) &&
+				previous.turnId + 1 === next.turnId &&
+				previous.boundary.visibility.key === next.boundary.visibility.key &&
+				next.boundary.visibility.isCurrent() &&
+				previous.boundary.visibility.isCurrent() &&
+				this.ingestor.coversLiveArrivals(
+					this.options.sessionId,
+					previous.boundary.totalMessages,
+					next.boundary.totalMessages,
+					history,
+				),
+		};
 	}
 
 	/**

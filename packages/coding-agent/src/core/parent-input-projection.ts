@@ -54,9 +54,20 @@ export function projectParentInputs(
 		);
 		const projected = plan.messages.filter(keep);
 		const transientMessages = plan.transientMessages?.filter(keep);
+		const history = plan.providerHistory;
 		return {
 			...plan,
 			...(transientMessages ? { transientMessages } : {}),
+			// A selection is request-local authority. Admitting this request starts a fresh history window.
+			...(selection && history
+				? {
+						providerHistory: {
+							...history,
+							offer: () => undefined,
+							accept: (candidate, messages) => history.accept({ ...candidate, nativeHistory: false }, messages),
+						} satisfies typeof history,
+					}
+				: {}),
 			messages: [
 				...projected,
 				...(selection

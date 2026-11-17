@@ -18,6 +18,7 @@ import {
 	continuousChatToolOutputLabel,
 } from "./continuous-chat-contracts.ts";
 import { truncateContinuousChatUtf8 } from "./continuous-chat-prompt.ts";
+import { reductionZoomDetails } from "./continuous-chat-tool-output.ts";
 import {
 	type ContinuousChatNodeCoordinate,
 	type ContinuousChatTreeNode,
@@ -102,6 +103,7 @@ export type ContinuousChatNavigationResult =
 			images: ContinuousChatImageRef[];
 			toolClipping?: ContinuousChatToolClipping;
 			toolOutput?: ContinuousChatToolOutput;
+			reductionDetails?: string;
 	  }
 	| { status: "date"; id: number; date: string }
 	| { status: "worker-log"; name: string; page: number; hasMore: boolean; text: string }
@@ -284,7 +286,12 @@ export class ContinuousChatNavigator {
 		const record = await this.source.readMessageById(id, context);
 		assertMemoryReadActive(context);
 		if (record === undefined) return rejected("not-found", `No message ${id}.`);
-		const textPage = pageContinuousChatText([record.text], this.pageBytes, page);
+		const receiptText = reductionZoomDetails(record.toolOutput).join("\n");
+		// Preserve exact text paging and keep the combined receipt and text within the caller's byte budget.
+		const textPage = pageContinuousChatText([receiptText, record.text], this.pageBytes, page);
+		const receiptPage = receiptText
+			? pageContinuousChatText([receiptText], this.pageBytes, page, true).text
+			: undefined;
 		const imagePages: ContinuousChatImageRef[][] = [];
 		for (const image of record.images ?? []) {
 			let current = imagePages.at(-1);
@@ -310,7 +317,8 @@ export class ContinuousChatNavigator {
 			date: record.date,
 			page,
 			pageCount,
-			text: textPage.text ?? "",
+			text: textPage.text?.slice(receiptPage?.length ?? 0) ?? "",
+			...(receiptPage ? { reductionDetails: receiptPage } : {}),
 			images: imagePages[page] ?? [],
 		};
 		if (record.toolClipping !== undefined) message.toolClipping = record.toolClipping;
@@ -437,6 +445,7 @@ export function renderContinuousChatNavigationResult(result: ContinuousChatNavig
 				`message ${result.id} (${result.kind}, ${result.date}) page ${result.page + 1}/${result.pageCount}`,
 			];
 			if (result.kind === "echo") lines.push(continuousChatToolOutputLabel(result));
+			if (result.reductionDetails) lines.push(result.reductionDetails);
 			for (const image of result.images) lines.push(`image ${image.digest} ${image.mimeType} ${image.bytes}`);
 			if (result.toolClipping !== undefined) {
 				const { originalCharacters, headCharacters, tailCharacters } = result.toolClipping;

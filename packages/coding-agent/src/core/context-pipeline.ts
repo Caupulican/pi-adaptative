@@ -440,15 +440,14 @@ export class ContextPipeline {
 	}
 
 	applyPathAliases(messages: AgentMessage[]): PathAliasSyncResult {
-		// A request projection already in flight may arrive after session cleanup closed the index.
-		// It must not reacquire storage or a retention lease for a disposed owner.
-		if (this.deps.isDisposed()) return { messages };
-		// A tier without aliasing sends paths as they are: no table, no legend, no rewrite.
-		if (this.deps.isPathAliasingEnabled?.() === false) return { messages };
+		// A disposed owner or an unaliased tier never acquires alias storage.
+		const isActive = () => !this.deps.isDisposed() && this.deps.isPathAliasingEnabled?.() !== false;
+		if (!isActive()) return { messages };
 		this._pathAliasRuntime ??= new PathAliasRuntime(
 			() => this.deps.getCwd(),
 			() => join(this._indexDir(), "runtime.sqlite"),
 			() => this.deps.getTurnIndex(),
+			{ isActive },
 		);
 		return this._pathAliasRuntime.sync(messages);
 	}

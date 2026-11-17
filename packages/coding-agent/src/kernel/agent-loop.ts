@@ -961,7 +961,6 @@ async function streamAssistantResponse(
 			degenerationAbort.signal,
 			streamFn,
 		);
-
 		let partialMessage: AssistantMessage | null = null;
 		let addedPartial = false;
 		let abortedForDegeneration = false;
@@ -1059,6 +1058,7 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
+		response.observeAssistant?.(providerMessage, finalMessage);
 		await emit({ type: "message_end", message: finalMessage });
 		return { message: finalMessage, comparisonMessage, requestId: response.requestId };
 	} finally {

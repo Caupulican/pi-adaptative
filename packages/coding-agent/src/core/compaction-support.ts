@@ -10,6 +10,7 @@
 import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import {
+	assessCompactionNeed,
 	type CompactionSettings,
 	hardCompactionTriggerTokens,
 	type StructuredCompactionRequest,
@@ -214,6 +215,15 @@ export class CompactionSupport {
 		const percent = settings.triggerPercent ?? 0;
 		if (!model?.contextWindow || !settings.enabled || !(percent > 0 && percent < 1)) return undefined;
 		return Math.floor(model.contextWindow * percent);
+	}
+
+	/** Drop optional provider history before it can trigger a paid summary of the active turn. */
+	allowsOptionalHistory(model: Model<Api>, tokens: number): boolean {
+		const settings = this.getAdaptedSettings(model);
+		const trigger = model.autoCompactionTriggerTokens;
+		return settings.enabled
+			? assessCompactionNeed(tokens, model.contextWindow, settings, trigger) === "none"
+			: tokens <= hardCompactionTriggerTokens(model.contextWindow, settings, trigger);
 	}
 
 	getAdaptedSettings(requestModel?: Model<Api>): CompactionSettings {

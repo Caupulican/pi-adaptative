@@ -1375,6 +1375,7 @@ export class AgentSession {
 			standing: this._caps,
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
+			allowsHistoryTokens: (model, tokens) => this._compactionSupport.allowsOptionalHistory(model, tokens),
 			getPromptHeadroom: (messages) =>
 				estimatePromptHeadroom({
 					model: this.model,
@@ -4360,17 +4361,6 @@ export class AgentSession {
 		this._treeNavigator.abort();
 	}
 
-	/**
-	 * Check if compaction is needed and run it.
-	 * Called after agent_end and before prompt submission.
-	 *
-	 * Two cases:
-	 * 1. Overflow: LLM returned context overflow error, remove error message from agent state, compact, auto-retry
-	 * 2. Threshold: Context over threshold, compact, NO auto-retry (user continues manually)
-	 *
-	 * @param assistantMessage The assistant message to check
-	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
-	 */
 	private _getAdaptedCompactionSettings(model?: Model<Api>): CompactionSettings {
 		return this._compactionSupport.getAdaptedSettings(model);
 	}
@@ -4420,16 +4410,12 @@ export class AgentSession {
 		return this._continuousChatWire() !== undefined;
 	}
 
-	/**
-	 * The lineage the foreground's requests are made on. Under ICM a turn's requests carry only its frame and its own
-	 * messages, so a turn is its own lineage until it applies a compaction, then that checkpoint's (the latest the rebuilt
-	 * history holds). Between ICM turns no request is sent and the history's own lineage stands.
-	 */
+	/** Retained turns share the initial projection's lineage until the provider history is rebased. */
 	private _foregroundLineage(): string {
 		const turn = this._isContinuousChatRoot() ? this._memory.continuousChatHost()?.turns.current() : undefined;
 		return turn === undefined || turn.latestCompaction !== undefined
 			? historyLineage(this.agent.state.messages)
-			: `icm-turn@${turn.startedAt}`;
+			: `icm-turn@${turn.lineageStartedAt}`;
 	}
 
 	/**

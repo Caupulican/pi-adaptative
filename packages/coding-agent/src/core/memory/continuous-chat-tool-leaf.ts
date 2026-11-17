@@ -6,6 +6,7 @@
 
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type ContinuousChatRecord, continuousChatToolOutputLabel } from "./continuous-chat-contracts.ts";
+import { continuousChatSummaryText } from "./continuous-chat-tool-output.ts";
 import { CONTINUOUS_CHAT_NODE_TARGET_BYTES } from "./continuous-chat-tree.ts";
 
 /** Longest tool name read from a call record; anything else on the first line is not a name. */
@@ -195,8 +196,9 @@ function toolCallLine(record: ContinuousChatRecord): string {
 function toolResultLine(record: ContinuousChatRecord): string {
 	const clipped =
 		record.toolClipping === undefined ? "" : ` (clipped from ${record.toolClipping.originalCharacters} characters)`;
-	const lead = `echo: ${record.textBytes} bytes${clipped}, auto-summary: zoom for ${continuousChatToolOutputLabel(record)}. `;
-	return `${lead}${excerpt(record.text, CONTINUOUS_CHAT_NODE_TARGET_BYTES - byteLength(lead))}`;
+	const summaryText = continuousChatSummaryText(record);
+	const lead = `echo: ${byteLength(summaryText)} bytes${clipped}, auto-summary: zoom for ${continuousChatToolOutputLabel(record)}. `;
+	return `${lead}${excerpt(summaryText, CONTINUOUS_CHAT_NODE_TARGET_BYTES - byteLength(lead))}`;
 }
 
 /**

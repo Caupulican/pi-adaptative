@@ -42,6 +42,7 @@ import {
 
 export interface ContinuousChatTurnBoundary {
 	readonly boundaryId: number;
+	readonly visibility: ContinuousChatTurnSnapshot["visibility"];
 	readonly totalMessages: number;
 	readonly viewRevision: number;
 	/** Rendered `<chat>` of messages [0, totalMessages). It excludes the arriving user message. */
@@ -503,6 +504,7 @@ export class ContinuousChatRuntime {
 	private boundaryFor(snapshot: ContinuousChatTurnSnapshot): ContinuousChatTurnBoundary {
 		return {
 			boundaryId: this.nextBoundaryId,
+			visibility: snapshot.visibility,
 			totalMessages: snapshot.totalMessages,
 			viewRevision: snapshot.viewRevision,
 			view: snapshot.view,

@@ -272,8 +272,8 @@ export interface CompactionControllerDeps {
 	getAdaptedSettings(model?: Model<Api>): CompactionSettings;
 	/**
 	 * The ICM projection that owns this session's provider wire (an ICM root session), undefined when none does. Under
-	 * the chat, history before the running chat turn is never sent, so host compaction is scoped to that turn's own
-	 * entries; under the block, no provider request is sent at all, so nothing is compactable.
+	 * the chat, retained history can be dropped on replan. Durable compaction is scoped to the running turn's
+	 * own entries. The block disables provider requests and compaction.
 	 */
 	getContinuousChatWire?(): ContinuousChatWire | undefined;
 	/** The running ICM chat turn, if one is running. Read only while {@link getContinuousChatWire} is defined. */

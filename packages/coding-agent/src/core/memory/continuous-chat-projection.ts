@@ -1,15 +1,19 @@
 /**
- * Turn-scoped provider projection of the continuous chat. A turn's wire carries the turn view (summaries of the whole
- * chat), the turn's live state, and the turn's own messages; durable history from before the turn is never sent.
+ * Provider projection of continuous chat. A fresh window carries the pinned chat view and live turn messages.
+ * An eligible follow-up extends an accepted provider prefix and appends its own state and messages.
  */
 
-import type { TextContent } from "@caupulican/pi-ai";
+import type { Api, Model, TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
+import { messageContentEpoch } from "../../kernel/message-revision.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
+import { isContextPlanDispatchCurrent } from "../../kernel/provider-request-planner.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../context/path-alias-table.ts";
 import type { ContinuousChatAudit } from "../extensions/builtin.ts";
 import type { ContinuousChatCacheTextContent, ContinuousChatViewCache } from "./continuous-chat-cache.ts";
+import { replayableAliasLegend, replayableBodyAliases } from "./continuous-chat-history-aliases.ts";
+import { ContinuousChatProviderHistory } from "./continuous-chat-provider-history.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
 export const CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE = "continuous_chat_view";
@@ -22,6 +26,8 @@ const VIEW_CLOSING_TAG = "</chat>";
 /** The running turn, with the live state fixed for its whole duration. */
 export interface ContinuousChatProjectionSource {
 	current(): { handle: IcmTurnHandle; stateText: string } | undefined;
+	canRetain?(previous: IcmTurnHandle, next: IcmTurnHandle, previousTurnHistory: readonly AgentMessage[]): boolean;
+	allowsHistoryTokens?(model: Model<Api>, tokens: number): boolean;
 }
 
 /** The turn's live state: its start instant in RFC 3339. Fixed per turn, so every plan of the turn stays current. */
@@ -120,8 +126,8 @@ export interface ContinuousChatRequestSource {
 }
 
 /**
- * What a request carries under ICM, split for measurement: the frame (turn view and live state) and the running turn's
- * own messages. Durable history before the turn is not sent, so it is not part of either. Between turns no request is
+ * What a request carries under ICM, split for measurement: the frame (including an accepted retained prefix when
+ * present) and the running turn's own messages. Between turns no request is
  * sent; the split then previews the next turn, which opens with the latest pinned view and no messages of its own.
  * Absent when no chat projection owns the wire, so the session's own history is what a request carries.
  */
@@ -154,15 +160,14 @@ export function splitContinuousChatRequest(
 }
 
 /**
- * The durable history the next provider request carries: the running turn's own messages under ICM (earlier turns are
- * only summarized in the view), the whole `messages` when no chat projection owns the wire. The one definition of what
- * the model can see of the session's messages; a message outside it is not in the model's context.
+ * Messages used for rule-delivery deduplication. A retained frame can carry earlier tool results and their rule IDs.
  */
 export function continuousChatRequestHistory(
 	source: ContinuousChatRequestSource,
 	messages: readonly AgentMessage[],
 ): readonly AgentMessage[] {
-	return splitContinuousChatRequest(source, messages)?.own ?? messages;
+	const split = splitContinuousChatRequest(source, messages);
+	return split ? [...split.frame, ...split.own] : messages;
 }
 
 /**
@@ -317,24 +322,19 @@ export function createContinuousChatPlanWrapper(
 	let legendSent: readonly string[] = [];
 	// The running turn's carried head, memoized on its first request.
 	let carried: CarriedTurnHead | undefined;
-	const carryHead = (
-		handle: IcmTurnHandle,
-		records: readonly AgentMessage[],
-		frameMessages: readonly AgentMessage[],
-	): CarriedTurnHead => {
-		const legend = records.at(-1);
-		legendSent = legend !== undefined && isFrameLegend(legend) ? legendBatches(legendSent, carriedText(legend)) : [];
-		const head: CarriedTurnHead = { handle, records, wire: carriedHeadWire(records, legendSent) };
-		carried = head;
-		handle.noteFrame([...records, ...frameMessages]);
-		return head;
-	};
+	const retention = source.canRetain
+		? new ContinuousChatProviderHistory({
+				canRetain: source.canRetain,
+				allowsHistoryTokens: source.allowsHistoryTokens,
+			})
+		: undefined;
 	return (base) => async (request, signal) => {
 		const current = source.current();
 		if (current === undefined) {
 			throw new Error("Continuous-chat provider request has no running turn; durable history must not be sent.");
 		}
 		const { handle, stateText } = current;
+		const contentEpoch = messageContentEpoch();
 		const startIndex = turnStartIndex(handle, request.messages);
 		// The turn's messages, untransformed: the durable form transient records were committed in.
 		// Only the running turn is handed to the base planner so context GC, path aliasing, prompt
@@ -371,7 +371,11 @@ export function createContinuousChatPlanWrapper(
 			},
 			signal,
 		);
-		const head = memoized ?? carryHead(handle, plan.carriedRecords ?? [], frameMessages);
+		const records = memoized?.records ?? plan.carriedRecords ?? [];
+		const legend = records.at(-1);
+		const legendBlocks =
+			legend !== undefined && isFrameLegend(legend) ? legendBatches(legendSent, carriedText(legend)) : [];
+		const head = memoized ?? { handle, records, wire: carriedHeadWire(records, legendBlocks) };
 		const turnTimestamps = new Set(turnMessages.map((message) => message.timestamp));
 		if (plan.messages.some((message) => !turnTimestamps.has(message.timestamp))) {
 			throw new Error("Continuous-chat planned history does not end with the running turn.");
@@ -380,14 +384,44 @@ export function createContinuousChatPlanWrapper(
 			const now = source.current();
 			return now?.handle === handle && now.stateText === stateText;
 		};
+		const freshFrame = [...head.wire, ...frameMessages];
+		const frameLegend = legend && isFrameLegend(legend) ? replayableAliasLegend(legend, true) : undefined;
+		const history = retention?.plan(
+			handle,
+			request.messages,
+			startIndex,
+			{
+				headMessages: head.wire.length,
+				legend: frameLegend,
+				bodyAliases: replayableBodyAliases(plan.messages, false),
+				verifyAliases: plan.verifyPathAliases,
+			},
+			() =>
+				(!legend || !isFrameLegend(legend) || frameLegend !== undefined) &&
+				contentEpoch === messageContentEpoch() &&
+				request.attempt === 0 &&
+				(plan.nonCompactableHead ?? 0) === 0,
+			(frame, lineage) => {
+				if (isTurnCurrent()) handle.noteFrame(frame.length > 0 ? frame : freshFrame, lineage);
+			},
+		);
 		const { carriedRecords: _carriedRecords, ...planWithoutHead } = plan;
 		return {
 			...planWithoutHead,
-			messages: [...head.wire, ...frameMessages, ...plan.messages],
-			nonCompactableHead: head.wire.length + frameMessages.length + (plan.nonCompactableHead ?? 0),
+			messages: [...freshFrame, ...plan.messages],
+			nonCompactableHead: freshFrame.length + (plan.nonCompactableHead ?? 0),
 			transientReconciliationBase: [...head.records, ...turnMessages],
-			isCurrent: () => isTurnCurrent() && plan.isCurrent?.() !== false,
-			prepareCommit: () => isTurnCurrent() && plan.prepareCommit?.() !== false,
+			providerHistory: history,
+			isCurrent: () => isTurnCurrent() && history?.isCurrent() !== false && plan.isCurrent?.() !== false,
+			isDispatchCurrent: () =>
+				isTurnCurrent() && history?.isCurrent() !== false && isContextPlanDispatchCurrent(plan),
+			prepareCommit: () => isTurnCurrent() && history?.isCurrent() !== false && plan.prepareCommit?.() !== false,
+			commit: () => {
+				plan.commit?.();
+				carried = head;
+				legendSent = legendBlocks;
+				if (!history) handle.noteFrame(freshFrame);
+			},
 		};
 	};
 }

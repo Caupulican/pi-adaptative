@@ -6,7 +6,7 @@ import {
 	startMaterializedProviderStream,
 	streamSimple,
 } from "@caupulican/pi-ai/stream";
-import type { Api, Context, Message, Model } from "@caupulican/pi-ai/types";
+import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai/types";
 import { harnessLog } from "./harness-log.ts";
 import type {
 	AgentContext,
@@ -292,6 +292,7 @@ export interface StartedAgentProviderRequest {
 	requestId: AgentRequestId;
 	stream: Awaited<ReturnType<StreamFn>>;
 	usesTextToolProtocol: boolean;
+	observeAssistant?: (provider: AssistantMessage, final: AssistantMessage) => void;
 }
 
 /** A present post-commit predicate must synchronously prove currency; malformed hooks cannot authorize dispatch. */
@@ -578,6 +579,8 @@ async function materializeContextPlan(
 		requestOnlyMessageRange,
 		pendingTransientRecords,
 		transientDecisions: reconciliation.decisions,
+		nativeHistory: !materialized.usesTextToolProtocol && !sourceContext.instructionTail,
+		transientTail: newTransientMessages,
 	};
 }
 
@@ -683,13 +686,22 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			const {
-				materialized,
-				nonCompactableContext,
-				requestOnlyMessageRange,
-				pendingTransientRecords,
-				transientDecisions,
-			} = await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
+			const fresh = await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
+			const { nonCompactableContext, pendingTransientRecords, transientDecisions } = fresh;
+			const historyCandidate = plan.providerHistory && {
+				model: config.model,
+				context: fresh.materialized.context,
+				accountKey: requestAuth.providerAccountKey,
+				requestOnly: fresh.requestOnlyMessageRange,
+				transientTail: fresh.transientTail,
+				nativeHistory: fresh.nativeHistory,
+			};
+			const continued = historyCandidate && plan.providerHistory?.offer(historyCandidate);
+			// A prior wire prefix is optional. Its size is checked before admission, which always receives
+			// the very context transport will send. The fresh envelope remains the compactable floor.
+			const materialized = continued
+				? { ...fresh.materialized, context: { ...fresh.materialized.context, messages: continued.messages } }
+				: fresh.materialized;
 
 			if (plan.isCurrent?.() === false) {
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
@@ -790,6 +802,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			);
 			requestAuth.requestGuard?.(config.model, signal);
 			plan.commit?.();
+			if (historyCandidate) plan.providerHistory?.accept(historyCandidate, materialized.context.messages);
 			recordPrefixFoldWork(sourceContext.messages.length, plan.messages.length);
 			adoptReplannedMessages(initialContext, sourceContext);
 			keepPlan = true;
@@ -798,7 +811,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					model: config.model,
 					context: materialized.context,
 					nonCompactableContext,
-					requestOnlyMessageRange,
+					requestOnlyMessageRange: continued?.requestOnly ?? fresh.requestOnlyMessageRange,
 					// The loop appends the provider reply to its live history after this callback.
 					// Freeze the accepted source extent so cache-lane compaction can identify that reply as newer.
 					sourceContext: { ...sourceContext, messages: sourceContext.messages.slice() },
@@ -843,7 +856,12 @@ export async function startPlannedAgentProviderRequestWithId(
 							)
 						: streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
-			return { requestId, stream, usesTextToolProtocol: materialized.usesTextToolProtocol };
+			return {
+				requestId,
+				stream,
+				usesTextToolProtocol: materialized.usesTextToolProtocol,
+				observeAssistant: plan.providerHistory?.observeAssistant,
+			};
 		} finally {
 			if (!keepPlan) {
 				try {

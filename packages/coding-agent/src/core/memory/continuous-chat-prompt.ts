@@ -29,8 +29,8 @@ the user's new message, or by a task starting "Compaction:".
 
 # The view
 
-Pi's memory: the whole chat between Pi and the user, oldest first, inside
-<chat> tags, as one-line summaries:
+Earlier chat appears oldest first inside <chat> tags, as one-line summaries.
+Recent turns may follow as messages. The next turn state gives their chat IDs for zoom:
 
   id+n|text   the n messages from id on, summarized (newlines as spaces)
 

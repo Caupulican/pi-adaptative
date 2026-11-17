@@ -426,6 +426,25 @@ export interface AgentContextWire {
 	readonly carry?: true;
 }
 
+/** The materialized fresh request offered to an optional host-owned provider history window. */
+export interface ProviderHistoryCandidate {
+	readonly model: Model<Api>;
+	readonly context: Context;
+	readonly accountKey?: string;
+	readonly requestOnly: { readonly start: number; readonly count: number };
+	readonly transientTail: readonly AgentMessage[];
+	readonly nativeHistory: boolean;
+}
+
+/** Request-local projection; a rejected or measured candidate never advances the host's history window. */
+export interface AgentProviderHistoryPlan {
+	offer(
+		candidate: ProviderHistoryCandidate,
+	): { messages: Message[]; requestOnly: ProviderHistoryCandidate["requestOnly"] } | undefined;
+	accept(candidate: ProviderHistoryCandidate, messages: readonly Message[]): void;
+	observeAssistant(provider: AssistantMessage, final: AssistantMessage): void;
+}
+
 /**
  * Replay-safe context plan. `messages` is compactable history. `transientMessages` and
  * `transientSystemPrompt` are mandatory request-local context that compaction must never summarize
@@ -433,6 +452,10 @@ export interface AgentContextWire {
  */
 export interface AgentContextPlan {
 	messages: AgentMessage[];
+	/** Optional history relative to this request’s fresh materialization. */
+	providerHistory?: AgentProviderHistoryPlan;
+	/** The path projection's live proof that a retained mapping still names the same path. */
+	verifyPathAliases?: (entries: readonly { id: string; path: string }[]) => boolean;
 	transientMessages?: AgentMessage[];
 	/** Host-owned instructions appended to the system channel for this request only. */
 	transientSystemPrompt?: string;

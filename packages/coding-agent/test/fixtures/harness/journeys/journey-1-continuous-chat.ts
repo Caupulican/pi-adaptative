@@ -425,6 +425,21 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		const icmNavOutputs: Record<string, string> = {};
 		let turn2ChatView = "";
 		let turn2StateText = "";
+		// The revised live projection forces a fresh view at this turn boundary.
+		seed(fact.key, {
+			...fact,
+			revision: 3,
+			text: "K-CORRECTED-PREFERENCE, confirmed before navigation.",
+			lastEvidencedAt: "2022-06-01T00:00:00.000Z",
+			citations: [
+				{
+					sessionId: "prior-owner",
+					sourceId: "prior-owner/confirmation",
+					quote: "K-CORRECTED-PREFERENCE, confirmed before navigation.",
+					at: "2022-06-01T00:00:00.000Z",
+				},
+			],
+		});
 		world.provider.enqueue(
 			"root",
 			{
@@ -448,7 +463,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					);
 					knowledge.forget(
 						fact.id,
-						2,
+						3,
 						[
 							{
 								sessionId: "prior-owner",
@@ -660,6 +675,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
 		await verifyTurnRetrySpacing(world, `${icmAgentDir}-r10s`);
 		await verifyFrameCacheLayout(world);
+		await verifyRetainedProviderPrefix(world, `${icmAgentDir}-retained-prefix`);
 
 		const r5ProviderId = "r5-oauth-401";
 		const r5AuthPath = `${icmAgentDir}-r5-auth.json`;
@@ -894,10 +910,11 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 	await icmEndForegroundQuiet(world);
 	await icmWaitForChatIdle(world, agentDir, 8);
 
-	// Turn B: its first request is the one whose head and view the checks read.
+	// Switch native models so turn B opens a fresh window over the same durable chat and alias table.
+	await root.session.setModel(world.provider.model("worker-a"), { persistSettings: false });
 	world.systemOne.enterPhase("frame-b", ICM_INTAKE_JUDGMENTS);
 	world.provider.enqueue(
-		"root",
+		"worker-a",
 		{
 			...calls("frame-b-read", [{ id: "frame-read-x", name: "read", arguments: { path: pathX } }]),
 			check: capture("b1"),
@@ -976,6 +993,87 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 		"the frame leg's only summary request is the merge of messages 0 to 7: turns 0, A and B make no other compaction call",
 	).toEqual(["worker-c:frame-merge-0-4-4"]);
 	expect(await world.disposeSessionInBody(root.session), "the frame-layout root disposes cleanly").toBeUndefined();
+}
+
+/** The scripted provider witnesses the actual native context after session and kernel admission. */
+async function verifyRetainedProviderPrefix(world: HarnessWorld, agentDir: string): Promise<void> {
+	const root = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: icmContinuousSettings(),
+	});
+	const firstPath = projectPath("src", "features", "provider-prefix", "configuration", "original.ts");
+	const nextPath = projectPath("src", "features", "provider-prefix", "configuration", "follow-up.ts");
+	world.io.seed(firstPath, "export const original = 1;\n");
+	world.io.seed(nextPath, "export const next = 2;\n");
+	let firstRequest: ScriptedRequest["context"] | undefined;
+	let firstResponse: FrameMessage | undefined;
+	let firstAlias: string | undefined;
+	world.provider.enqueue("root", {
+		name: "retained-prefix-first",
+		reply: (request) => {
+			firstRequest = request.context;
+			firstAlias = legendAliasFor(request, firstPath);
+			if (firstAlias === undefined) throw new Error("The first request must explain the alias it uses.");
+			return { content: [{ type: "text", text: `Original file: ${firstAlias}.` }] };
+		},
+		onTerminal: (_request, response) => {
+			firstResponse = response;
+		},
+	});
+	world.systemOne.enterPhase("retained-prefix-first", {});
+	await withDeadline(
+		world.trace,
+		"retained prefix first turn",
+		root.session.prompt(`Note file ${firstPath} for later.`),
+	);
+	await icmEndForegroundQuiet(world);
+	await icmWaitForChatIdle(world, agentDir, 2);
+
+	world.provider.enqueue("root", {
+		name: "retained-prefix-follow-up",
+		check: (request) => {
+			if (!firstRequest || !firstResponse || firstAlias === undefined)
+				throw new Error("The first native request and response were not captured.");
+			const previous = firstRequest.messages;
+			const messages = request.context.messages;
+			expect(request.context.systemPrompt).toBe(firstRequest.systemPrompt);
+			expect(request.context.tools).toEqual(firstRequest.tools);
+			expect(messages.slice(0, previous.length), "the accepted native request is the exact wire prefix").toEqual(
+				previous,
+			);
+			expect(messages[previous.length], "the prior native response is the next message").toEqual(firstResponse);
+			expect(
+				frameTextBlocks(messages[previous.length + 1]!),
+				"the follow-up's live state immediately follows the prior response",
+			).toEqual([
+				{ type: "text", text: expect.stringMatching(/^Current time: /) },
+				{ type: "text", text: "Previous turn: chat IDs 0 through 1." },
+			]);
+			expect(legendAliasFor(request, firstPath)).toBe(firstAlias);
+			const nextAlias = legendAliasFor(request, nextPath);
+			expect(nextAlias).toMatch(/^p\//);
+			expect(nextAlias).not.toBe(firstAlias);
+			expect(
+				messages
+					.slice(previous.length + 2)
+					.flatMap((message) => frameTextBlocks(message).map((block) => block.text)),
+			).toContain(`Note file ${nextAlias} as well.`);
+		},
+		reply: { content: [{ type: "text", text: "Both files are noted." }] },
+	});
+	world.systemOne.enterPhase("retained-prefix-follow-up", {
+		...ICM_INTAKE_JUDGMENTS,
+		carries_0: { kind: "noul", probability: 0.02 },
+	});
+	await withDeadline(
+		world.trace,
+		"retained prefix follow-up turn",
+		root.session.prompt(`Note file ${nextPath} as well.`),
+	);
+	await icmEndForegroundQuiet(world);
+	await icmWaitForChatIdle(world, agentDir, 4);
+	expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 }
 
 /**
@@ -1108,8 +1206,8 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	const turnJudgments = { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } } as const;
 	let messages = 2;
 	/** One short follow-up turn: its two messages and its start are the only arrivals, and it asks for no summary of its own. */
-	const followUp = async (name: string, check?: (request: ScriptedRequest) => void): Promise<void> => {
-		world.provider.enqueue("root", {
+	const followUp = async (name: string, check?: (request: ScriptedRequest) => void, track = "root"): Promise<void> => {
+		world.provider.enqueue(track, {
 			name: `${label}-${name}`,
 			...(check === undefined ? {} : { check }),
 			reply: { content: [{ type: "text", text: "Done." }] },
@@ -1285,7 +1383,10 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	let turnsToSecondRetry = 0;
 	try {
 		while (turnsToSecondRetry === 0 || (!dueForRetry() && turnsToSecondRetry < 16)) {
-			await followUp(`turn-c${++turnsToSecondRetry}`, prefixInterrupted);
+			// Each check exercises the newly built view while the leaf is pending, across native model boundaries.
+			const track = ++turnsToSecondRetry % 2 === 1 ? "worker-a" : "root";
+			await root.session.setModel(world.provider.model(track), { persistSettings: false });
+			await followUp(`turn-c${turnsToSecondRetry}`, prefixInterrupted, track);
 		}
 		expect(dueForRetry(), "enough arrivals make the leaf eligible once more").toBe(true);
 		expect(turnsToSecondRetry, "each further failure doubles the arrivals the retry waits for").toBeGreaterThan(

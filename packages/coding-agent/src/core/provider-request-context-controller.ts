@@ -672,6 +672,7 @@ export class ProviderRequestContextController {
 		return {
 			messages: compactableMessages,
 			transientMessages,
+			verifyPathAliases: pathAliasPlan.verifyPathAliases,
 			...(carriedRecords === undefined ? {} : { carriedRecords }),
 			isCurrent: dependenciesCurrent,
 			isDispatchCurrent: () => memoryPlan === undefined || isContextPlanDispatchCurrent(memoryPlan),

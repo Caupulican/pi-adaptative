@@ -11,7 +11,11 @@
  */
 import { type CommandFamilyClassification, classifyCommandFamily, commandFamilyLabel } from "./command-family.ts";
 import { reduceGenericOutput } from "./generic-output-reducer.ts";
-import type { OutputReductionDetails, OutputReductionLevel } from "./output-reduction-types.ts";
+import {
+	formatStructuredOutputCounts,
+	type OutputReductionDetails,
+	type OutputReductionLevel,
+} from "./output-reduction-types.ts";
 import type { ShellOutputProjection, ShellOutputProjectorLike } from "./shell-output-projection.ts";
 
 export interface OutputReductionRequest {
@@ -43,7 +47,10 @@ export interface OutputReducer {
 		classification: CommandFamilyClassification,
 		request: OutputReductionRequest,
 	):
-		| (Omit<OutputReductionResult, "details"> & { omittedLines: number; kind?: string; recoveryHint?: string })
+		| (Omit<OutputReductionResult, "details"> &
+				Pick<OutputReductionDetails, "omittedLines" | "omittedItems" | "clippedStrings" | "recoveryHint"> & {
+					kind?: string;
+				})
 		| undefined;
 }
 
@@ -114,7 +121,7 @@ export function reduceToolOutput(
 	let text = generic.text;
 	let omittedLines = generic.omittedLines;
 	let kind: string | undefined;
-	let recoveryHint: string | undefined;
+	let familyDetails: Pick<OutputReductionDetails, "omittedItems" | "clippedStrings" | "recoveryHint"> | undefined;
 	for (const reducer of [...reducers, ...(options?.extraReducers ?? [])]) {
 		if (!reducer.applies(classification, cleaned)) continue;
 		const reduced = reducer.reduce(classification, cleaned);
@@ -125,7 +132,12 @@ export function reduceToolOutput(
 		text = reduced.text;
 		omittedLines += reduced.omittedLines;
 		kind = reduced.kind ?? reducer.name;
-		recoveryHint = reduced.recoveryHint;
+		const { omittedItems, clippedStrings, recoveryHint } = reduced;
+		familyDetails = {
+			...(omittedItems === undefined ? {} : { omittedItems }),
+			...(clippedStrings === undefined ? {} : { clippedStrings }),
+			...(recoveryHint === undefined ? {} : { recoveryHint }),
+		};
 		break;
 	}
 	const outputBytes = Buffer.byteLength(text, "utf-8");
@@ -147,7 +159,7 @@ export function reduceToolOutput(
 			inputLines: countLines(request.text),
 			outputLines: countLines(text),
 			omittedLines,
-			...(recoveryHint !== undefined ? { recoveryHint } : {}),
+			...familyDetails,
 			// A family or rule reducer changed the shape of the output; the generic stage only cleaned it
 			// unless it dropped lines. Either way a small cut is not worth a file.
 			persistRaw: saved >= MIN_PERSIST_SAVED_BYTES && (omittedLines > 0 || kind !== "generic"),
@@ -155,14 +167,18 @@ export function reduceToolOutput(
 	};
 }
 
-/**
- * The one-line notice appended to a reduced result; deterministic, no timestamps or random ids.
- * Undefined when no line was dropped and no raw file was written: cleaning needs no announcement.
- */
+/** One-line notice of logical data changes, physical line counts and the stored recovery path. */
 export function formatOutputReductionNotice(details: OutputReductionDetails): string | undefined {
-	if (details.omittedLines === 0 && !details.rawPath) return undefined;
-	const kept =
-		details.omittedLines === 0
+	const counts = formatStructuredOutputCounts(details);
+	if (details.omittedLines === 0 && counts === undefined && !details.rawPath) return undefined;
+	const structured = details.omittedItems !== undefined || details.clippedStrings !== undefined;
+	const physical =
+		details.inputLines === details.outputLines
+			? ""
+			: ` (${details.outputLines} output lines from ${details.inputLines} input lines)`;
+	const kept = structured
+		? `${counts ?? "JSON data regrouped, none omitted"}${physical}`
+		: details.omittedLines === 0
 			? `${details.inputLines} lines regrouped, none omitted`
 			: `retained ${details.outputLines} of ${details.inputLines} lines`;
 	const projection =
@@ -172,7 +188,7 @@ export function formatOutputReductionNotice(details: OutputReductionDetails): st
 }
 
 /** Reducers see the whole output; beyond this the raw path (caps and managed file) takes over. */
-const MAX_BUFFERED_REDUCTION_BYTES = 8 * 1024 * 1024;
+export const MAX_BUFFERED_REDUCTION_BYTES = 8 * 1024 * 1024;
 
 /** Whether a family reducer (registered or extra) would consider this command; the generic stage always applies. */
 export function outputReductionApplies(command: string, options?: ReduceToolOutputOptions): boolean {
