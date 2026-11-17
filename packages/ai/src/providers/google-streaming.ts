@@ -28,7 +28,13 @@ import {
 	retainThoughtSignature,
 	toGoogleGenAiThinkingConfig,
 } from "./google-shared.ts";
-import { type GoogleUsageMetadata, mergeGoogleUsage, projectGoogleUsage } from "./google-usage.ts";
+import {
+	GEMINI_API_USAGE_ACCOUNTING,
+	type GoogleUsageAccounting,
+	type GoogleUsageMetadata,
+	mergeGoogleUsage,
+	projectGoogleUsage,
+} from "./google-usage.ts";
 import {
 	applyProviderPayloadHook,
 	completeAssistantStream,
@@ -67,6 +73,7 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 	context: Context,
 	options: GoogleGenAiOptions | undefined,
 	createClient: () => GoogleGenAiClient,
+	usageAccounting: GoogleUsageAccounting = GEMINI_API_USAGE_ACCOUNTING,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 
@@ -200,7 +207,7 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 				}
 
 				if (chunk.usageMetadata !== undefined || chunk.usageCredits !== undefined) {
-					output.usage = projectGoogleUsage(usageMetadata ?? {}, usageCredits);
+					output.usage = projectGoogleUsage(usageMetadata ?? {}, usageCredits, usageAccounting);
 					calculateCost(model, output.usage);
 				}
 			}

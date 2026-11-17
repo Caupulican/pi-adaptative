@@ -16,9 +16,16 @@ import {
 	type GoogleGenAiResponse,
 	streamGoogleGenAi,
 } from "./google-streaming.ts";
+import { ANTIGRAVITY_USAGE_ACCOUNTING } from "./google-usage.ts";
 
 export const streamAntigravity: StreamFunction<"google-antigravity", GoogleGenAiOptions> = (model, context, options) =>
-	streamGoogleGenAi(model, context, options, () => createAntigravityClient(model, options ?? {}));
+	streamGoogleGenAi(
+		model,
+		context,
+		options,
+		() => createAntigravityClient(model, options ?? {}),
+		ANTIGRAVITY_USAGE_ACCOUNTING,
+	);
 
 export const streamSimpleAntigravity: StreamFunction<"google-antigravity", SimpleStreamOptions> = (
 	model,

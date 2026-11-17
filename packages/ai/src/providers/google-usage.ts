@@ -24,11 +24,33 @@ const MODALITY_FIELDS = [
 	"toolUsePromptTokensDetails",
 ] as const;
 
-function count(value: unknown): number {
-	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
-		throw new Error("Invalid Google token or unit count");
+function safeInteger(value: unknown): number {
+	if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error("Invalid Google token or unit count");
 	return value;
 }
+
+function count(value: unknown): number {
+	const numeric = safeInteger(value);
+	if (numeric < 0) throw new Error("Invalid Google token or unit count");
+	return numeric;
+}
+
+/** Like the native AGY usage mapping, a negative token count reads as zero. */
+function tokenCount(value: unknown): number {
+	return Math.max(0, safeInteger(value));
+}
+
+/** How one transport's usage scalars become aggregate counts. */
+export interface GoogleUsageAccounting {
+	/** Whether the tool-use prompt count is billed as input beside the prompt count. */
+	toolUsePromptIsInput: boolean;
+}
+
+/** Gemini API and Vertex report the tool-use prompt inside `totalTokenCount` and bill it as input. */
+export const GEMINI_API_USAGE_ACCOUNTING: GoogleUsageAccounting = Object.freeze({ toolUsePromptIsInput: true });
+
+/** AGY's native usage mapping never reads the tool-use prompt count into input or the total. */
+export const ANTIGRAVITY_USAGE_ACCOUNTING: GoogleUsageAccounting = Object.freeze({ toolUsePromptIsInput: false });
 
 function list(value: unknown): unknown[] {
 	if (!Array.isArray(value) || value.length > 200) throw new Error("Invalid Google usage detail list");
@@ -39,7 +61,7 @@ function list(value: unknown): unknown[] {
 export function mergeGoogleUsage(previous: GoogleUsageMetadata | undefined, value: unknown): GoogleUsageMetadata {
 	if (!isRecord(value)) throw new Error("Invalid Google usage metadata");
 	const next: GoogleUsageMetadata = { ...previous };
-	for (const key of TOKEN_FIELDS) if (value[key] !== undefined) next[key] = count(value[key]);
+	for (const key of TOKEN_FIELDS) if (value[key] !== undefined) next[key] = tokenCount(value[key]);
 	for (const key of MODALITY_FIELDS) {
 		if (value[key] === undefined) continue;
 		next[key] = list(value[key]).map((entry) => {
@@ -48,7 +70,7 @@ export function mergeGoogleUsage(previous: GoogleUsageMetadata | undefined, valu
 				throw new Error("Invalid Google modality");
 			return {
 				modality: entry.modality as NonNullable<GoogleUsageMetadata[typeof key]>[number]["modality"],
-				tokenCount: entry.tokenCount === undefined ? 0 : count(entry.tokenCount),
+				tokenCount: entry.tokenCount === undefined ? 0 : tokenCount(entry.tokenCount),
 			};
 		});
 	}
@@ -96,11 +118,16 @@ export function mergeGoogleUsage(previous: GoogleUsageMetadata | undefined, valu
  * The cached count may exceed the prompt count on the wire; like the native client's usage
  * mapping, uncached input floors at zero and the cached count is kept as reported.
  */
-export function projectGoogleUsage(metadata: GoogleUsageMetadata, credits: UsageDetails = {}): Usage {
+export function projectGoogleUsage(
+	metadata: GoogleUsageMetadata,
+	credits: UsageDetails = {},
+	accounting: GoogleUsageAccounting = GEMINI_API_USAGE_ACCOUNTING,
+): Usage {
 	const usage = createEmptyUsage();
 	usage.cacheRead = metadata.cachedContentTokenCount ?? 0;
 	usage.input =
-		Math.max(0, (metadata.promptTokenCount ?? 0) - usage.cacheRead) + (metadata.toolUsePromptTokenCount ?? 0);
+		Math.max(0, (metadata.promptTokenCount ?? 0) - usage.cacheRead) +
+		(accounting.toolUsePromptIsInput ? (metadata.toolUsePromptTokenCount ?? 0) : 0);
 	usage.output = (metadata.candidatesTokenCount ?? 0) + (metadata.thoughtsTokenCount ?? 0);
 	usage.totalTokens = metadata.totalTokenCount ?? usage.input + usage.output + usage.cacheRead;
 	if (![usage.input, usage.output, usage.totalTokens].every(Number.isSafeInteger))
