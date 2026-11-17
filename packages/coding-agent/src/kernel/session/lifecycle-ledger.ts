@@ -10,6 +10,8 @@ import type {
 	SessionLifecycleEntry,
 	SessionMessageEntry,
 } from "./session-entries.ts";
+import { stringifySessionJson } from "./session-json.ts";
+import type { FileEntry } from "./session-manager-types.ts";
 import { collectSessionBranch } from "./session-tree.ts";
 
 /** Maximum serialized size for one lifecycle payload. Lifecycle records are a ledger, not a payload store. */
@@ -307,7 +309,7 @@ export function validateLoadedLifecycleEntries(entries: readonly (SessionEntry |
 
 export function encodeSessionLifecycleEntry(entry: SessionLifecycleEntry): string {
 	validateSessionLifecycleEntry(entry);
-	const encoded = JSON.stringify(entry);
+	const encoded = encodeSessionJsonRecord(entry);
 	if (encoded.length > MAX_LIFECYCLE_PAYLOAD_CHARS) {
 		throw lifecycleValidationError("entry", `serialized record exceeds ${MAX_LIFECYCLE_PAYLOAD_CHARS} characters`);
 	}
@@ -320,8 +322,16 @@ export function decodeSessionLifecycleEntry(value: unknown): SessionLifecycleEnt
 	return value;
 }
 
-export function encodeSessionEntry(entry: SessionEntry): string {
-	return isSessionLifecycleEntry(entry) ? encodeSessionLifecycleEntry(entry) : JSON.stringify(entry);
+function encodeSessionJsonRecord(entry: FileEntry): string {
+	const encoded = stringifySessionJson(entry);
+	if (encoded === undefined) throw new TypeError("Session record has no JSON representation");
+	return encoded;
+}
+
+export function encodeSessionEntry(entry: FileEntry): string {
+	return entry.type !== "session" && isSessionLifecycleEntry(entry)
+		? encodeSessionLifecycleEntry(entry)
+		: encodeSessionJsonRecord(entry);
 }
 
 export interface SessionLifecycleAssistantToolCall {

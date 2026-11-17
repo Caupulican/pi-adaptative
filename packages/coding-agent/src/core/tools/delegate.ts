@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { type Static, Type } from "typebox";
+import { stringifySessionJson } from "../../kernel/session/session-json.ts";
 import { formatWallClockCap } from "../autonomy/bounded-completion.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
@@ -2594,11 +2595,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "missing_agent_id",
 						});
 					if (action === "transcript") {
+						const refusal = { started: false, action, agentId } as const;
 						if (!deps.workerAgentControl)
 							return invalid("delegate transcript is unavailable", {
-								started: false,
-								action,
-								agentId,
+								...refusal,
 								skipReason: "worker_agent_control_unavailable",
 							});
 						const page = deps.workerAgentControl.readWorkerAgentTranscript(agentId, {
@@ -2607,12 +2607,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							maxBytes: MAX_DELEGATE_TRANSCRIPT_MESSAGE_BYTES,
 							...(workerScope ?? {}),
 						});
-						const serialized = JSON.stringify(page);
-						if (Buffer.byteLength(serialized, "utf-8") > MAX_DELEGATE_CONTROL_RESULT_BYTES) {
+						const serialized = stringifySessionJson(page);
+						if (!serialized || Buffer.byteLength(serialized) > MAX_DELEGATE_CONTROL_RESULT_BYTES) {
 							return invalid("delegate transcript exceeded its bounded response envelope", {
-								started: false,
-								action,
-								agentId,
+								...refusal,
 								skipReason: "worker_transcript_envelope_exceeded",
 							});
 						}

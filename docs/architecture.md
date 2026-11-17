@@ -100,6 +100,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-header.ts` | (no header comment) |
 | `kernel/session/session-id-generation.ts` | Session and entry id generation: fresh session ids, the auto-learn session id test, and the entry id space that keeps generated ids unique within one transcript. |
 | `kernel/session/session-identity.ts` | Defines the one session id rule and the validators that admit a session id read from a record or a session file header. |
+| `kernel/session/session-json.ts` | Stack-safe JSON encoding for durable session rows, with the property semantics of JSON.stringify. |
 | `kernel/session/session-lease-sweep.ts` | The start sweep of one orchestration home's lifetime lease registries (`deletions/<session-key>.json.leases.json`, `session-bundle-lifecycle.ts`). |
 | `kernel/session/session-listing.ts` | Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. |
 | `kernel/session/session-manager-types.ts` | Public record types of the session transcript: the header and entry file union, the context and tree views, session info, and persisted-entry events and listeners. |
@@ -144,6 +145,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/usage-components.ts` | Captures an actual provider response's usage as an independent usage component and defines the error for a host usage-retention failure. |
 | `kernel/usage.ts` | (no header comment) |
 | `kernel/utils/bounded-value.ts` | One primitive for required, trimmed durable text fields shared across control-plane stores. |
+| `kernel/utils/json-traversal.ts` | Iterative JSON serialization order shared by encoding and allocation-free length measurement. |
 | `kernel/utils/json-types.ts` | (no header comment) |
 | `kernel/utils/paths.ts` | Normalizes user and tool path input (tilde, @ prefix, unicode spaces) against a base directory and re-exports the execution path primitives. |
 | `kernel/utils/shell-output.ts` | Sanitize binary output for display/storage. |
@@ -156,7 +158,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-122 kernel modules, 63 with a header comment.
+124 kernel modules, 65 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

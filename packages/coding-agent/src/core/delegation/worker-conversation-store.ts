@@ -18,7 +18,6 @@ import {
 	isCoreConversationMessageRole,
 	isWireNativeAgentMessageRole,
 } from "../../kernel/messages.ts";
-import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
 import { cloneResumeContext } from "../../kernel/session/agent-identity.ts";
 import {
 	indexSessionLifecycle,
@@ -31,6 +30,7 @@ import {
 	withSessionFileMutation,
 	withWorkerTranscriptContinuation,
 } from "../../kernel/session/session-file-admission.ts";
+import { stringifySessionJson } from "../../kernel/session/session-json.ts";
 import {
 	assertValidSessionId,
 	MAX_SESSION_ENTRY_VISIT_COUNT,
@@ -125,7 +125,8 @@ import {
 	type WorkerMailboxContextReference,
 	workerMailboxPath,
 } from "./worker-mailbox-record.ts";
-import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
+import { equalWorkerTranscriptValues } from "./worker-transcript-equality.ts";
+import { boundedTranscriptJsonBytes, projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
 export const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
@@ -287,7 +288,7 @@ function providerView(message: AgentMessage | undefined): string | undefined {
 		toolName?: unknown;
 		customType?: unknown;
 	};
-	return JSON.stringify([view.role, view.content, view.toolCallId, view.toolName, view.customType]);
+	return stringifySessionJson([view.role, view.content, view.toolCallId, view.toolName, view.customType]);
 }
 
 export interface WorkerTranscriptCommitCursor {
@@ -448,68 +449,6 @@ function carryWorkerControl<T extends AgentMessage>(persisted: T, control: Worke
 	return persisted;
 }
 
-/** Conservative JSON byte measurement that stops before an oversized message is cloned. */
-function boundedJsonBytes(value: unknown, limit: number): number {
-	const pending: unknown[] = [value];
-	const seen = new WeakSet<object>();
-	let bytes = 0;
-	const add = (count: number): boolean => {
-		bytes += count;
-		return bytes <= limit;
-	};
-	while (pending.length > 0) {
-		const item = pending.pop();
-		if (item === null) {
-			if (!add(4)) return limit + 1;
-			continue;
-		}
-		switch (typeof item) {
-			case "string":
-				if (!add(measureJsonStringUtf8Bytes(item, limit - bytes))) return limit + 1;
-				continue;
-			case "number":
-				if (!add(Number.isFinite(item) ? String(item).length : 4)) return limit + 1;
-				continue;
-			case "boolean":
-				if (!add(item ? 4 : 5)) return limit + 1;
-				continue;
-			case "undefined":
-			case "function":
-			case "symbol":
-			case "bigint":
-				if (!add(4)) return limit + 1;
-				continue;
-			case "object":
-				break;
-		}
-		if (seen.has(item)) return limit + 1;
-		seen.add(item);
-		if (Array.isArray(item)) {
-			if (!add(2 + Math.max(0, item.length - 1))) return limit + 1;
-			for (let index = item.length - 1; index >= 0; index -= 1) pending.push(item[index]);
-			continue;
-		}
-		const prototype = Object.getPrototypeOf(item);
-		if (prototype !== Object.prototype && prototype !== null) return limit + 1;
-		if (!add(2)) return limit + 1;
-		let propertyCount = 0;
-		for (const key in item) {
-			if (!Object.hasOwn(item, key)) continue;
-			const descriptor = Object.getOwnPropertyDescriptor(item, key);
-			if (!descriptor || !("value" in descriptor)) return limit + 1;
-			const propertyValue = descriptor.value;
-			if (propertyValue === undefined || typeof propertyValue === "function" || typeof propertyValue === "symbol") {
-				continue;
-			}
-			if (propertyCount > 0 && !add(1)) return limit + 1;
-			propertyCount += 1;
-			if (!add(measureJsonStringUtf8Bytes(key, limit - bytes) + 1)) return limit + 1;
-			pending.push(propertyValue);
-		}
-	}
-	return bytes;
-}
-
 function workerDiagnosticForPersistence(
 	diagnostic: AssistantMessageDiagnostic,
 ): AssistantMessageDiagnostic | undefined {
@@ -532,6 +471,13 @@ function workerDiagnosticForPersistence(
 			...(code !== undefined ? { code } : {}),
 		},
 	};
+}
+
+/** Clone a transcript message in its durable JSON shape, regardless of nesting depth. */
+function clonePersistableWorkerMessage<T extends WorkerTranscriptMessage>(message: T): T {
+	const serialized = stringifySessionJson(message);
+	if (serialized === undefined) throw new TypeError("Worker transcript message is not JSON-persistable.");
+	return JSON.parse(serialized) as T;
 }
 
 /** Apply the canonical JSON, diagnostic, and shared details-retention shape used on session reopen. */
@@ -559,9 +505,7 @@ function workerMessageForPersistence(message: WorkerTranscriptMessage): WorkerTr
 	// SessionManager persists messages as JSON. Normalize before both append and comparison so own
 	// optional properties with `undefined` values cannot look divergent after the canonical reopen
 	// drops them. Real value, ordering, and content differences remain fail-closed.
-	const serialized = JSON.stringify(projected);
-	if (serialized === undefined) throw new TypeError("Worker transcript message is not JSON-persistable.");
-	const persisted = JSON.parse(serialized) as WorkerTranscriptMessage;
+	const persisted = clonePersistableWorkerMessage(projected);
 	compactToolResultDetailsForRetention(persisted);
 	return persisted;
 }
@@ -594,7 +538,7 @@ function differingFields(left: WorkerTranscriptMessage, right: WorkerTranscriptM
 	const a = left as unknown as Record<string, unknown>;
 	const b = right as unknown as Record<string, unknown>;
 	const differing = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(
-		(key) => !isDeepStrictEqual(a[key], b[key]),
+		(key) => !equalWorkerTranscriptValues(a[key], b[key]),
 	);
 	return differing.length > 0 ? differing.join(", ") : "none";
 }
@@ -764,7 +708,7 @@ function verifyWorkerBirthContextPrefix(
 		if (
 			entry.type !== "message" ||
 			(entry.message.role !== "user" && entry.message.role !== "assistant") ||
-			!isDeepStrictEqual(
+			!equalWorkerTranscriptValues(
 				workerMessageForPersistence(entry.message),
 				workerMessageForPersistence(snapshot.messages[index]!),
 			)
@@ -780,7 +724,7 @@ function verifyWorkerBirthContextPrefix(
 		throw new Error("Worker conversation birth context prefix is incomplete; reopen through ensure for recovery.");
 	}
 	for (const message of snapshot.messages.slice(entryCount)) {
-		sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)));
+		sessionManager.appendMessage(workerMessageForPersistence(message));
 	}
 	return true;
 }
@@ -1045,7 +989,8 @@ export class WorkerConversation {
 		const messages: Message[] = [];
 		visitWorkerSessionEntries(this.sessionManager, 0, this.sessionManager.getEntryCount(), (entry) => {
 			const message = rawWorkerTranscriptMessage(entry);
-			if (message && isWireNativeWorkerTranscriptMessage(message)) messages.push(structuredClone(message));
+			if (message && isWireNativeWorkerTranscriptMessage(message))
+				messages.push(clonePersistableWorkerMessage(message));
 		});
 		return messages;
 	}
@@ -1057,7 +1002,8 @@ export class WorkerConversation {
 			let message: Message | undefined;
 			this.sessionManager.visitEntries(cursor, 1, (entry) => {
 				const candidate = rawWorkerTranscriptMessage(entry);
-				if (candidate && isWireNativeWorkerTranscriptMessage(candidate)) message = structuredClone(candidate);
+				if (candidate && isWireNativeWorkerTranscriptMessage(candidate))
+					message = clonePersistableWorkerMessage(candidate);
 			});
 			if (message !== undefined) yield message;
 		}
@@ -1121,7 +1067,7 @@ export class WorkerConversation {
 					if (
 						(persistedBytes !== undefined && persistedBytes > inputLimit) ||
 						((options.projection !== "inspection" || persistedBytes === undefined) &&
-							boundedJsonBytes(message, inputLimit) > inputLimit)
+							boundedTranscriptJsonBytes(message, inputLimit) > inputLimit)
 					) {
 						consumedMessages += 1;
 						omittedMessages += 1;
@@ -1134,15 +1080,17 @@ export class WorkerConversation {
 					try {
 						const projected =
 							options.projection === "inspection" ? projectWorkerTranscriptForInspection(message) : message;
-						if (boundedJsonBytes(projected, singleMessageByteLimit) > singleMessageByteLimit) {
+						if (boundedTranscriptJsonBytes(projected, singleMessageByteLimit) > singleMessageByteLimit) {
 							consumedMessages += 1;
 							omittedMessages += 1;
 							nextEntryCursor = entryIndex + 1;
 							return;
 						}
-						clonedMessage = structuredClone(projected);
-						const serializedMessage = JSON.stringify(clonedMessage);
+						const serializedMessage = stringifySessionJson(projected);
+						if (serializedMessage === undefined)
+							throw new TypeError("Worker transcript message is not JSON-persistable.");
 						messageBytes = Buffer.byteLength(serializedMessage, "utf8");
+						clonedMessage = JSON.parse(serializedMessage) as Message;
 					} catch {
 						consumedMessages += 1;
 						omittedMessages += 1;
@@ -1196,7 +1144,7 @@ export class WorkerConversation {
 				let omitted = false;
 				visitWorkerSessionEntries(sessionManager, boundary + 1, end, (entry, _index, persistedBytes) => {
 					if (omitted) return;
-					const size = persistedBytes ?? boundedJsonBytes(entry, MAX_WORKER_TRANSCRIPT_PAGE_BYTES);
+					const size = persistedBytes ?? boundedTranscriptJsonBytes(entry, MAX_WORKER_TRANSCRIPT_PAGE_BYTES);
 					if (bytes + size + 1 > MAX_WORKER_TRANSCRIPT_PAGE_BYTES) {
 						omitted = true;
 						return;
@@ -1209,7 +1157,7 @@ export class WorkerConversation {
 						omitted = true;
 						return;
 					}
-					messages.push({ entryId: entry.id, message: structuredClone(message) });
+					messages.push({ entryId: entry.id, message: clonePersistableWorkerMessage(message) });
 				});
 				if (omitted) return undefined;
 				const lifecycle = indexSessionLifecycle(entries);
@@ -1229,7 +1177,7 @@ export class WorkerConversation {
 		if (boundaryIndex < 0) {
 			if (this.usageAccountingVersion === 1) return undefined;
 			const legacyLast = this.getProviderMessages().at(-1);
-			return legacyLast ? structuredClone(legacyLast) : undefined;
+			return legacyLast ? clonePersistableWorkerMessage(legacyLast) : undefined;
 		}
 		const nextBoundaryIndex = attemptUsageBoundaryIndex(this.sessionManager, undefined, boundaryIndex + 1);
 		const lastAttemptEntry = nextBoundaryIndex >= 0 ? nextBoundaryIndex : this.sessionManager.getEntryCount();
@@ -1243,7 +1191,7 @@ export class WorkerConversation {
 			) {
 				return;
 			}
-			lastMessage = structuredClone(entry.message);
+			lastMessage = clonePersistableWorkerMessage(entry.message);
 		});
 		return lastMessage;
 	}
@@ -1503,7 +1451,7 @@ export class WorkerConversation {
 				if (delivered || !appendIfMissing) return { delivered, appended: false };
 				const control = workerControlOf(message);
 				this.appendSessionEntryLocked(sessionManager, (owner) =>
-					owner.appendMessage(carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control)),
+					owner.appendMessage(carryWorkerControl(workerMessageForPersistence(message), control)),
 				);
 				return { delivered: true, appended: true };
 			},
@@ -1604,9 +1552,7 @@ export class WorkerConversation {
 						throw new HostEventError("stale_execution", "Host event attempt window is no longer open.");
 					return hostEvents.guardedDelivery(binding, "consume", (transaction) => {
 						const entryId = this.appendSessionEntryLocked(sessionManager, (owner) =>
-							owner.appendMessage(
-								carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control),
-							),
+							owner.appendMessage(carryWorkerControl(workerMessageForPersistence(message), control)),
 						);
 						transaction.consume(transcriptReceipt(entryId));
 						return { delivered: true, appended: true };
@@ -1716,10 +1662,7 @@ export class WorkerConversation {
 		const control = workerControlOf(message);
 		if (control?.k === "host_event") throw new TypeError("Host events require guarded transcript consumption.");
 		return this.appendSessionEntry((sessionManager) =>
-			sessionManager.appendMessage(
-				carryWorkerControl(structuredClone(workerMessageForPersistence(message)), control),
-				origin,
-			),
+			sessionManager.appendMessage(carryWorkerControl(workerMessageForPersistence(message), control), origin),
 		);
 	}
 
@@ -1754,9 +1697,15 @@ export class WorkerConversation {
 		operation: (sessionManager: SessionManager) => string,
 	): string {
 		const beforeCount = sessionManager.getEntryCount();
+		const head = this.core.head;
 		let entryId: string;
+		let encodedEntry: string | undefined;
 		try {
-			entryId = operation(sessionManager);
+			if (head) {
+				({ entryId, encodedEntry } = sessionManager.capturePersistedAppend(() => operation(sessionManager)));
+			} else {
+				entryId = operation(sessionManager);
+			}
 		} catch (error) {
 			this.core.invalid = true;
 			throw error;
@@ -1765,16 +1714,14 @@ export class WorkerConversation {
 			this.core.invalid = true;
 			throw new WorkerConversationOwnershipError("Worker conversation append did not advance exactly one entry.");
 		}
-		const head = this.core.head;
-		if (!head) return entryId;
+		if (!head || encodedEntry === undefined) return entryId;
 		const entry = sessionManager.getEntry(entryId);
 		if (!entry) {
 			this.core.invalid = true;
 			throw new WorkerConversationOwnershipError("Worker conversation appended entry is unavailable.");
 		}
-		const serialized = JSON.stringify(entry);
 		try {
-			this.core.head = advanceWorkerSessionHeadAfterOwnedAppend(this.resumeContext.sessionFile!, head, serialized);
+			this.core.head = advanceWorkerSessionHeadAfterOwnedAppend(this.resumeContext.sessionFile!, head, encodedEntry);
 		} catch (error) {
 			this.core.invalid = true;
 			throw error;
@@ -1976,7 +1923,7 @@ export class WorkerConversation {
 			throw new WorkerConversationOwnershipError("Worker transcript cursor is no longer active.");
 		}
 		if (state.status === "committed") {
-			if (!isDeepStrictEqual(state.committedSuffix, normalizedSuffix)) {
+			if (!equalWorkerTranscriptValues(state.committedSuffix, normalizedSuffix)) {
 				throw new WorkerConversationOwnershipError(
 					"Worker transcript cursor replay conflicts with its committed suffix.",
 				);
@@ -2004,7 +1951,7 @@ export class WorkerConversation {
 				}
 				const emittedPersisted = modelEmittedMessage(workerMessageForPersistence(persisted));
 				const emittedCandidate = modelEmittedMessage(candidate);
-				if (!isDeepStrictEqual(emittedPersisted, emittedCandidate)) {
+				if (!equalWorkerTranscriptValues(emittedPersisted, emittedCandidate)) {
 					divergenceIndex = persistedMessages;
 					divergenceDetail = ` (persisted ${describeTranscriptMessage(emittedPersisted)}, suffix ${describeTranscriptMessage(emittedCandidate)}; differing fields: ${differingFields(emittedPersisted, emittedCandidate)})`;
 				}
@@ -2023,18 +1970,21 @@ export class WorkerConversation {
 					"Worker conversation is missing callback-persisted transcript suffix entries.",
 				);
 			}
-			for (let index = persistedMessages; index < normalizedSuffix.length; index += 1) {
-				const control = workerControlOf(suffix[index]!);
+			// Prepare detached append copies first. The manager can release their payloads in place,
+			// while replay must keep the original normalized suffix without cold-file reads.
+			const missingMessages = normalizedSuffix.slice(persistedMessages).map((message, index) => {
+				const control = workerControlOf(suffix[persistedMessages + index]!);
 				if (control?.k === "host_event")
 					throw new WorkerConversationOwnershipError(
 						"Missing host event consumption cannot be appended through generic transcript reconciliation.",
 					);
-				this.appendSessionEntryLocked(sessionManager, (owner) =>
-					owner.appendMessage(carryWorkerControl(structuredClone(normalizedSuffix[index]!), control)),
-				);
+				return carryWorkerControl(clonePersistableWorkerMessage(message), control);
+			});
+			for (const message of missingMessages) {
+				this.appendSessionEntryLocked(sessionManager, (owner) => owner.appendMessage(message));
 			}
+			state.committedSuffix = normalizedSuffix;
 			state.status = "committed";
-			state.committedSuffix = structuredClone(normalizedSuffix);
 			this.core.activeTranscriptCursors -= 1;
 			return normalizedSuffix.length - persistedMessages;
 		});
@@ -2570,7 +2520,7 @@ export class WorkerConversationStore {
 			});
 		}
 		withSessionFileMutation(options, sessionFile, resumeContext.sessionId, "create", () =>
-			writeFileAtomicSync(sessionFile, `${JSON.stringify(header)}\n`),
+			writeFileAtomicSync(sessionFile, `${stringifySessionJson(header)}\n`),
 		);
 		const conversation = this.recoverBirthContextLocked(options, resumeContext);
 		harnessLog.info("workers", "a worker conversation was created", {

@@ -133,6 +133,10 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 			await withDeadline(world.trace, `${label}: initial prompt settled`, original.waitForForegroundIdle());
 			const file = originalManager.getSessionFile();
 			if (!file || !taskId) throw new Error(`${label}: initial handoff has no durable identity`);
+			const depth = 32_000;
+			let deepData: unknown = "durable leaf";
+			for (let level = 0; level < depth; level++) deepData = [deepData];
+			const deepEntryId = originalManager.appendCustomEntry("stack-safe-durable-entry", deepData);
 			const selectTask = (manager: SessionManager) =>
 				loadBackgroundToolTaskRecordsNewestFirst(manager).find(
 					(value) => typeof value === "object" && value !== null && "taskId" in value && value.taskId === taskId,
@@ -161,6 +165,15 @@ export async function verifySessionReplacementTerminalIdentity(world: HarnessWor
 			expect(activations, "the replacement activates exactly once after retirement").toBe(2);
 			await withDeadline(world.trace, `${label}: active session settled`, runtime.session.waitForForegroundIdle());
 			const reopened = SessionManager.open(file, ownerSessionStorageRoots(agentDir));
+			const deepEntry = reopened.getEntry(deepEntryId);
+			if (deepEntry?.type !== "custom") throw new Error(`${label}: deep durable entry did not reopen`);
+			let restored = deepEntry.data;
+			for (let level = 0; level < depth; level++) {
+				if (!Array.isArray(restored) || restored.length !== 1)
+					throw new Error(`${label}: deep durable entry changed at level ${level}`);
+				restored = restored[0];
+			}
+			expect(restored).toBe("durable leaf");
 			const observations = {
 				order,
 				originalAtPrepare,

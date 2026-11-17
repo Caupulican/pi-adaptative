@@ -1,7 +1,18 @@
 /** Transcript file writes under the session file lock: the lock wrapper that shares an active synchronous scope, the append to an existing history, and the full-file write. */
-import { closeSync, constants as fsConstants, fstatSync, openSync, type Stats, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+	closeSync,
+	constants as fsConstants,
+	fstatSync,
+	openSync,
+	type Stats,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { currentSynchronousFileLockScope, withFileLockSync } from "../storage/atomic-file.ts";
 import { sameFileVersion } from "../storage/bounded-file.ts";
+import { encodeSessionEntry } from "./lifecycle-ledger.ts";
+import type { FileEntry } from "./session-manager-types.ts";
 import { confirmSessionFileWrite } from "./session-write-confirmation.ts";
 
 /** Share the exact active transcript lock when called from its synchronous owner. */
@@ -63,4 +74,28 @@ export function writeSessionFile(
 		onRecoveredWrite(failure.error);
 		return confirmed;
 	});
+}
+
+/** Stage a full transcript alongside its destination, publishing only after every row was written. */
+export function stageSessionFile(
+	target: string,
+	entries: Iterable<FileEntry>,
+	publish: (temporary: string) => void,
+): void {
+	const temporary = `${target}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+	const fd = openSync(temporary, "wx");
+	try {
+		try {
+			for (const entry of entries) writeFileSync(fd, `${encodeSessionEntry(entry)}\n`);
+		} finally {
+			closeSync(fd);
+		}
+		publish(temporary);
+	} finally {
+		try {
+			unlinkSync(temporary);
+		} catch {
+			/* Link/rename publication stands even if temporary cleanup fails. */
+		}
+	}
 }

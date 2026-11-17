@@ -1,16 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readSync,
-	renameSync,
-	type Stats,
-	statSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, type Stats, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
 import {
@@ -127,7 +116,12 @@ import {
 	retainedStringChars,
 	type SessionEntryFileLocation,
 } from "./session-file-reading.ts";
-import { appendToExistingSessionFile, withSessionFileLock, writeSessionFile } from "./session-file-writing.ts";
+import {
+	appendToExistingSessionFile,
+	stageSessionFile,
+	withSessionFileLock,
+	writeSessionFile,
+} from "./session-file-writing.ts";
 import { readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
 import { assistantToolIdentityKey, createSessionId, generateId, pendingIdSpace } from "./session-id-generation.ts";
 import { assertValidSessionId } from "./session-identity.ts";
@@ -342,6 +336,7 @@ export class SessionManager {
 	private readonly persistenceFenceListeners = new Set<() => void>();
 	private navigationRevision = 0;
 	private inheritedSessionIds = new Set<string>();
+	private persistedAppendCapture: { writes: number; entryId?: string; encodedEntry?: string } | undefined;
 	private readonly entriesPersistedListeners = new Set<SessionEntriesPersistedListener>();
 	private readonly observerErrorListeners = new Set<SessionObserverErrorListener>();
 	private parentInputCache:
@@ -703,37 +698,19 @@ export class SessionManager {
 				// Write-then-rename keeps the session file valid at every instant: truncating
 				// in place leaves a torn-file window for crashes or a concurrent process
 				// appending to the same session.
-				const tempFile = `${targetFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-				try {
-					const fd = openSync(tempFile, "wx");
-					try {
-						for (const entry of this.fileEntries) {
-							writeFileSync(
-								fd,
-								`${entry.type === "session" ? JSON.stringify(entry) : encodeSessionEntry(entry)}\n`,
-							);
-						}
-					} finally {
-						closeSync(fd);
-					}
+				stageSessionFile(targetFile, this.fileEntries, (temporary) =>
 					withSessionFileLock(targetFile, () => {
 						assertCurrent();
 						if (expected) {
 							if (!sameFileVersion(expected, statSync(targetFile)))
 								throw new Error("Session file changed before its rewrite; reopen it before retrying.");
-							renameSync(tempFile, targetFile);
+							renameSync(temporary, targetFile);
 						} else {
-							// New branch publication must not replace a file created while serialization ran.
-							publishSessionFileExclusive(tempFile, targetFile);
+							// New branch publication must not replace any concurrent creation.
+							publishSessionFileExclusive(temporary, targetFile);
 						}
-					});
-				} finally {
-					try {
-						unlinkSync(tempFile);
-					} catch {
-						/* Link/rename publication stands even if temporary cleanup fails. */
-					}
-				}
+					}),
+				);
 				if (targetFile === this.sessionFile) {
 					try {
 						this.storageRevision = statSync(targetFile);
@@ -1077,12 +1054,7 @@ export class SessionManager {
 		// Preparation failure is not an uncertain physical write and must remain recoverable.
 		const encodedPayload =
 			!this.flushed && shouldFlush
-				? `${this.fileEntries
-						.map((candidate) =>
-							candidate.type === "session" ? JSON.stringify(candidate) : encodeSessionEntry(candidate),
-						)
-						.concat(encodedEntries)
-						.join("\n")}\n`
+				? `${this.fileEntries.map(encodeSessionEntry).concat(encodedEntries).join("\n")}\n`
 				: `${encodedEntries.join("\n")}\n`;
 		signal?.throwIfAborted();
 		assertCurrent();
@@ -1150,6 +1122,14 @@ export class SessionManager {
 				);
 			throw error;
 		}
+		const capture = this.persistedAppendCapture;
+		if (capture && writeStarted) {
+			capture.writes++;
+			if (!initialFlush && entries.length === 1) {
+				capture.entryId = identity.entries[0]?.id;
+				capture.encodedEntry = encodedEntries[0];
+			}
+		}
 		const tail = fileEntries.at(-1);
 		let parentId: string | null = tail === undefined || tail.type === "session" ? null : tail.id;
 		const leafAppend =
@@ -1175,6 +1155,21 @@ export class SessionManager {
 			}),
 			...(recoveredFailure ? { recoveredFailure } : {}),
 		};
+	}
+
+	/** Capture the exact row written by a single synchronous append without re-encoding its source. */
+	capturePersistedAppend(operation: () => string): { entryId: string; encodedEntry: string } {
+		if (this.persistedAppendCapture) throw new Error("A persisted append is already being captured.");
+		const capture: NonNullable<SessionManager["persistedAppendCapture"]> = { writes: 0 };
+		this.persistedAppendCapture = capture;
+		try {
+			const entryId = operation();
+			if (capture.writes !== 1 || capture.entryId !== entryId || capture.encodedEntry === undefined)
+				throw new Error("Expected exactly one durable session append.");
+			return { entryId, encodedEntry: capture.encodedEntry };
+		} finally {
+			this.persistedAppendCapture = undefined;
+		}
 	}
 
 	private _assertWritable(): void {
@@ -3338,16 +3333,16 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		withSessionFileMutation(roots, newSessionFile, newSessionId, "create", () => {
-			const fd = openSync(newSessionFile, "wx");
-			try {
-				writeFileSync(fd, `${JSON.stringify(newHeader)}\n`);
-				for (const entry of sourceEntries) {
-					if (entry.type !== "session") writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-				}
-			} finally {
-				closeSync(fd);
+		function* forkEntries(): Iterable<FileEntry> {
+			yield newHeader;
+			for (const entry of sourceEntries) {
+				if (entry.type !== "session") yield entry;
 			}
+		}
+		withSessionFileMutation(roots, newSessionFile, newSessionId, "create", () => {
+			stageSessionFile(newSessionFile, forkEntries(), (temporary) =>
+				publishSessionFileExclusive(temporary, newSessionFile),
+			);
 		});
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, roots);

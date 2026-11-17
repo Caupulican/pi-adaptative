@@ -6,6 +6,7 @@ import type { IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { WorkerTranscriptMessage } from "./worker-conversation-store.ts";
+import { equalWorkerTranscriptValues } from "./worker-transcript-equality.ts";
 
 export class WorkerCompletionProtocolError extends Error {
 	constructor(message: string) {
@@ -294,7 +295,7 @@ export function callbackEvidencedCompletion(
 	let suffix: WorkerTranscriptMessage[];
 	if (result.messages !== undefined) {
 		suffix = result.messages.slice(historyLength);
-		if (!isDeepStrictEqual(suffix, emittedMessages)) {
+		if (!equalWorkerTranscriptValues(suffix, emittedMessages)) {
 			throw new WorkerCompletionProtocolError(
 				"Worker completion protocol returned a suffix without exact callback evidence.",
 			);

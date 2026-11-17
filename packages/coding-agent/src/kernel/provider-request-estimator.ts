@@ -1,6 +1,7 @@
 import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
 import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
+import { visitJsonTokens } from "./utils/json-traversal.ts";
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 export const ESTIMATED_IMAGE_TOKENS = 1_200;
@@ -56,72 +57,47 @@ export function measureJsonStringUtf8Bytes(value: string, maximumBytes = Number.
 	return measureJsonString(value, true, maximumBytes);
 }
 
-function measuredJsonValue(
-	value: unknown,
-	key: string,
-	active: Set<object>,
-	measureString: JsonStringMeasure,
-): number | undefined {
-	if (typeof value === "object" && value !== null) {
-		const toJSON = Reflect.get(value, "toJSON");
-		if (typeof toJSON === "function") value = Reflect.apply(toJSON, value, [key]) as unknown;
-	}
-
-	switch (typeof value) {
-		case "string":
-			return measureString(value);
-		case "number":
-			return Number.isFinite(value) ? (Object.is(value, -0) ? 1 : String(value).length) : 4;
-		case "boolean":
-			return value ? 4 : 5;
-		case "bigint":
-			throw new TypeError("Do not know how to serialize a BigInt");
-		case "undefined":
-		case "function":
-		case "symbol":
-			return undefined;
-		case "object":
-			break;
-	}
-
-	if (value === null) return 4;
-	if (value instanceof String || value instanceof Number || value instanceof Boolean) {
-		return measuredJsonValue(value.valueOf(), key, active, measureString);
-	}
-	if (active.has(value)) throw new TypeError("Converting circular structure to JSON");
-	active.add(value);
-	try {
-		if (Array.isArray(value)) {
-			let length = 2 + Math.max(0, value.length - 1);
-			for (let index = 0; index < value.length; index++) {
-				length += measuredJsonValue(value[index], String(index), active, measureString) ?? 4;
-			}
-			return length;
-		}
-
-		let length = 2;
-		let fields = 0;
-		for (const field of Object.keys(value)) {
-			const fieldLength = measuredJsonValue(Reflect.get(value, field), field, active, measureString);
-			if (fieldLength === undefined) continue;
-			if (fields > 0) length++;
-			length += measureString(field) + 1 + fieldLength;
-			fields++;
-		}
-		return length;
-	} finally {
-		active.delete(value);
-	}
+function unboxMeasuredJsonValue(value: object): unknown {
+	if (value instanceof Number || value instanceof String || value instanceof Boolean) return value.valueOf();
+	return value;
 }
 
-/** Exact UTF-16 length of standard JSON-compatible data without allocating its serialized copy. */
+/** Exact UTF-16 length of JSON data without allocating its serialized copy. */
 export function measureJsonLength(value: unknown): number | undefined {
-	return measuredJsonValue(value, "", new Set(), jsonStringUtf16Length);
+	return measureJson(value, jsonStringUtf16Length, (literal) => literal.length);
 }
 
-/** Exact UTF-8 byte length of standard JSON-compatible data without allocating its serialized copy. */
+function utf8LiteralLength(literal: string): number {
+	let bytes = 0;
+	for (const character of literal) {
+		const codePoint = character.codePointAt(0)!;
+		bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+	}
+	return bytes;
+}
+
+/** Exact UTF-8 byte length of JSON data without allocating its serialized copy. */
 export function measureJsonUtf8Bytes(value: unknown): number | undefined {
-	return measuredJsonValue(value, "", new Set(), measureJsonStringUtf8Bytes);
+	return measureJson(value, measureJsonStringUtf8Bytes, utf8LiteralLength);
+}
+
+function measureJson(
+	value: unknown,
+	measureString: JsonStringMeasure,
+	measureLiteral: JsonStringMeasure,
+): number | undefined {
+	let length = 0;
+	const written = visitJsonTokens(
+		value,
+		unboxMeasuredJsonValue,
+		(literal) => {
+			length += measureLiteral(literal);
+		},
+		(string) => {
+			length += measureString(string);
+		},
+	);
+	return written ? length : undefined;
 }
 
 function semanticImageContent(

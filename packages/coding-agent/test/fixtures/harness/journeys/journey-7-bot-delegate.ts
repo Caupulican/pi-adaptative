@@ -1,11 +1,12 @@
 import "../builtin-install.ts";
-import { createEmptyUsage, type Usage } from "@caupulican/pi-ai";
+import { type AssistantMessage, createEmptyUsage, type Usage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
 import { botInboxStopNames, requestBotStop } from "../../../../src/core/bots/bot-inbox.ts";
 import { readStopScope } from "../../../../src/core/bots/bot-stop.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
+import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import {
 	OWNER_STOPPED_REASON,
 	unendedWorkerAttempts,
@@ -21,6 +22,7 @@ import {
 import { workerTranscriptLocation } from "../../../../src/kernel/session/worker-storage-identity.ts";
 import {
 	createBarrier,
+	HARNESS_API,
 	HARNESS_PROVIDER,
 	type ScriptedReply,
 	type ScriptedRequest,
@@ -93,6 +95,68 @@ const SYSTEM_ONE_ANSWER_TOKENS = "10/5";
 /** The product's refusal of a message to a delegate worker's id (`assertBotId`, bot-runtime-bindings.ts), whole. */
 const notABot = (id: string): string =>
 	`"${id}" is a delegate worker, not a bot; manage it with the delegate tool (status, send, cancel). Bots are created with /bot new or the bot tool under another name.`;
+
+/** A durable worker row can carry more nesting than recursive clone or comparison can traverse. */
+function verifyDeepWorkerTranscript(world: HarnessWorld, parentSessionId: string): void {
+	const roots = { agentDir: world.agentDir, orchestrationHome: botOrchestrationHome(world.agentDir, DELEGATOR) };
+	const logicalAgentId = "j7-deep-worker-transcript";
+	const store = new WorkerConversationStore();
+	const conversation = store.ensure({
+		...roots,
+		parentSessionId,
+		logicalAgentId,
+		cwd: HARNESS_PROJECT_CWD,
+		resourceProfileNames: [],
+		contextPointers: [],
+	});
+	const attemptId = "j7-deep-transcript-attempt";
+	conversation.beginAttemptUsage(attemptId, parentSessionId);
+	const nestedArgument = (leaf: string): unknown => {
+		let value: unknown = leaf;
+		for (let depth = 0; depth < 9_000; depth++) value = [value];
+		return value;
+	};
+	const assistant = (args: Record<string, unknown>): AssistantMessage => ({
+		role: "assistant",
+		api: HARNESS_API,
+		provider: HARNESS_PROVIDER,
+		model: MODEL_ID.reader,
+		timestamp: 1,
+		usage: createEmptyUsage(),
+		stopReason: "toolUse",
+		content: [{ type: "toolCall", id: "j7-deep-transcript-call", name: "read", arguments: args }],
+	});
+	const original = assistant({ sequence: [1, 2], nested: nestedArgument("kept") });
+	const replay = assistant({ nested: nestedArgument("kept"), sequence: [1, 2] });
+	const { cursor } = conversation.beginTranscriptCommit();
+	conversation.appendMessage(original);
+	expect(conversation.commitTranscript(cursor, [replay], { appendMissing: false })).toBe(0);
+	expect(conversation.commitTranscript(cursor, [replay])).toBe(0);
+	expect(() =>
+		conversation.commitTranscript(cursor, [assistant({ nested: nestedArgument("changed"), sequence: [1, 2] })]),
+	).toThrow("replay conflicts");
+
+	// Replaying a committed suffix must leave no active cursor that could pin the old owner.
+	store.clearCache();
+	const reopened = store.open({
+		...roots,
+		resumeContext: conversation.getResumeContext(),
+		expectedLogicalAgentId: logicalAgentId,
+	});
+	const page = reopened.getRawTranscriptPage({ projection: "inspection" });
+	expect(page.omittedMessages).toBe(0);
+	expect(page.messages).toHaveLength(1);
+	const saved = page.messages[0];
+	const block = saved?.role === "assistant" ? saved.content[0] : undefined;
+	let nested = block?.type === "toolCall" ? block.arguments.nested : undefined;
+	for (let depth = 0; depth < 9_000; depth++) nested = Array.isArray(nested) ? nested[0] : undefined;
+	expect(nested).toBe("kept");
+	expect(reopened.getRawTranscriptPage({ maxBytes: 512 }).omittedMessages).toBe(1);
+	expect(reopened.getAttemptTranscript(attemptId)?.messages).toHaveLength(1);
+	const aborted = reopened.beginTranscriptCommit().cursor;
+	reopened.abortTranscriptCommit(aborted);
+	expect(() => reopened.commitTranscript(aborted, [replay])).toThrow("no longer active");
+}
 
 /** The worker's priced reply: the dollars split between input and output, binary-exact so the sums stay exact. */
 function priced(input: number, output: number, usd: number): Usage {
@@ -324,6 +388,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			judgedAtScriptedUsage: true,
 			charged: expect.closeTo(WORKER_USAGE.cost.total + judged.usd, 10),
 		});
+
+		verifyDeepWorkerTranscript(world, botSessionId);
 
 		// Step 5: the owner's stop while a second worker runs cancels it, and its end opens no turn of the bot.
 		if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-delegate-stop", BOT_DELEGATION_JUDGMENTS);

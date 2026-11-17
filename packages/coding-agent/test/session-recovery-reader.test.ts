@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +7,8 @@ import { MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES } from "../src/kernel/session/me
 import { ownerSessionStorageRoots } from "../src/kernel/session/session-bundle-paths.ts";
 import type { SessionEntry } from "../src/kernel/session/session-entries.ts";
 import { retainedStringChars, visitSessionEntriesAsync } from "../src/kernel/session/session-file-reading.ts";
+import { stageSessionFile } from "../src/kernel/session/session-file-writing.ts";
+import { stringifySessionJson } from "../src/kernel/session/session-json.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 import { CURRENT_SESSION_VERSION } from "../src/kernel/session/session-version-migration.ts";
 
@@ -14,14 +16,14 @@ function transcript(tail: string | Buffer = "") {
 	const directory = mkdtempSync(join(tmpdir(), "pi-session-recovery-reader-"));
 	const file = join(directory, "session.jsonl");
 	const header = {
-		type: "session",
+		type: "session" as const,
 		version: CURRENT_SESSION_VERSION,
 		id: randomUUID(),
 		timestamp: "2026-11-12T00:00:00.000Z",
 		cwd: directory,
 	};
 	const receipt = {
-		type: "custom",
+		type: "custom" as const,
 		id: "receipt-row",
 		parentId: null,
 		timestamp: header.timestamp,
@@ -34,6 +36,101 @@ function transcript(tail: string | Buffer = "") {
 }
 
 const selected = (line: string) => line.includes('"customType":"selected"');
+
+describe("durable session JSON", () => {
+	it("matches native JSON bytes and invokes hooks in native order", () => {
+		const observations: string[] = [];
+		const shared = { "10": true, "2": false, text: "\ud800\n😀" };
+		const array: unknown[] = [shared, undefined, undefined, Number.NaN, () => null];
+		delete array[1];
+		const data = {
+			get accessed() {
+				observations.push("get");
+				return {
+					toJSON(key: string) {
+						observations.push(`toJSON:${key}`);
+						return [array, shared];
+					},
+				};
+			},
+			skipped: undefined,
+			date: new Date(0),
+			wrapped: Object(-0),
+		};
+		const native = JSON.stringify(data);
+		const nativeObservations = observations.splice(0);
+		expect(stringifySessionJson(data)).toBe(native);
+		expect(observations).toEqual(nativeObservations);
+		expect(stringifySessionJson(undefined)).toBeUndefined();
+		expect(() => stringifySessionJson({ invalid: 1n })).toThrow(TypeError);
+	});
+
+	it("captures the exact appended row without re-encoding deep details", () => {
+		const fixture = transcript();
+		try {
+			const roots = ownerSessionStorageRoots(fixture.directory);
+			const session = SessionManager.open(fixture.file, roots);
+			const depth = 40_000;
+			let calls = 0;
+			const details: unknown = JSON.parse(`${"[".repeat(depth)}42${"]".repeat(depth)}`);
+			const captured = session.capturePersistedAppend(() =>
+				session.appendCustomEntry("deep", {
+					toJSON() {
+						calls++;
+						return details;
+					},
+				}),
+			);
+			expect(calls).toBe(1);
+			expect(readFileSync(fixture.file, "utf8")).toBe(`${fixture.prefix}${captured.encodedEntry}\n`);
+			expect(captured.encodedEntry).toContain(`"data":${"[".repeat(depth)}42${"]".repeat(depth)}`);
+			expect(SessionManager.openCanonical(fixture.file, roots).getEntry(captured.entryId)?.type).toBe("custom");
+		} finally {
+			rmSync(fixture.directory, { recursive: true, force: true });
+		}
+	});
+
+	it("rewrites legacy rows and forks an existing deep transcript", () => {
+		const fixture = transcript();
+		try {
+			const depth = 40_000;
+			const payload = `${'{"nested":'.repeat(depth)}42${"}".repeat(depth)}`;
+			const row = `${JSON.stringify({ ...fixture.receipt, data: undefined }).slice(0, -1)},"data":${payload}}\n`;
+			writeFileSync(fixture.file, `${JSON.stringify({ ...fixture.header, version: 2 })}\n${row}`);
+			const roots = ownerSessionStorageRoots(fixture.directory);
+			const migrated = SessionManager.open(fixture.file, roots);
+			expect(migrated.getEntry(fixture.receipt.id)?.type).toBe("custom");
+			const [headerLine, rewritten] = readFileSync(fixture.file, "utf8").split("\n");
+			expect(JSON.parse(headerLine!).version).toBe(CURRENT_SESSION_VERSION);
+			expect(`${rewritten}\n`).toBe(row);
+			const fork = SessionManager.forkFrom(fixture.file, fixture.directory, roots, fixture.directory);
+			const [, forked] = readFileSync(fork.getSessionFile()!, "utf8").split("\n");
+			expect(`${forked}\n`).toBe(row);
+		} finally {
+			rmSync(fixture.directory, { recursive: true, force: true });
+		}
+	});
+
+	it("never publishes or leaves staged bytes when a later transcript row fails encoding", () => {
+		const fixture = transcript();
+		try {
+			const data: Record<string, unknown> = {};
+			data.self = data;
+			const publish = vi.fn();
+			expect(() =>
+				stageSessionFile(
+					join(fixture.directory, "fork.jsonl"),
+					[fixture.header, { ...fixture.receipt, data }],
+					publish,
+				),
+			).toThrow(TypeError);
+			expect(publish).not.toHaveBeenCalled();
+			expect(readdirSync(fixture.directory)).toEqual(["session.jsonl"]);
+		} finally {
+			rmSync(fixture.directory, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("cold session payload retention", () => {
 	it("opens and restores a wide message payload", () => {
