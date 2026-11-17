@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Google and Antigravity responses no longer fail with "Invalid Google cached token count" when the reported cached tokens exceed the prompt tokens. Usage follows the AGY `1.5.9` usage mapping: uncached input floors at zero and the cached count is kept as reported. The opening Antigravity leg also keeps prompt counts reported before the first candidate.
+
 ## [0.104.67] - 2026-11-17
 
 ### Changed

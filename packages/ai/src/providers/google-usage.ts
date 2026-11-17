@@ -88,12 +88,14 @@ export function mergeGoogleUsage(previous: GoogleUsageMetadata | undefined, valu
 			};
 		});
 	}
-	if (next.promptTokenCount !== undefined && (next.cachedContentTokenCount ?? 0) > next.promptTokenCount)
-		throw new Error("Invalid Google cached token count");
 	return next;
 }
 
-/** Details are subtotals. Only the six scalar counts participate in aggregate accounting. */
+/**
+ * Details are subtotals. Only the six scalar counts participate in aggregate accounting.
+ * The cached count may exceed the prompt count on the wire; like the native client's usage
+ * mapping, uncached input floors at zero and the cached count is kept as reported.
+ */
 export function projectGoogleUsage(metadata: GoogleUsageMetadata, credits: UsageDetails = {}): Usage {
 	const usage = createEmptyUsage();
 	usage.cacheRead = metadata.cachedContentTokenCount ?? 0;

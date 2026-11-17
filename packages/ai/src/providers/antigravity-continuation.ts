@@ -100,6 +100,9 @@ export class AntigravityContinuationState {
 				this.lastUsage = this.projectUsage(snapshot);
 				usageMetadata = this.lastUsage;
 			} else if (this.continuationCount === 0) {
+				// The opening leg's pre-candidate usage is this response's own prompt accounting;
+				// later candidate snapshots merge onto it instead of dropping its prompt counts.
+				this.legUsage = snapshot;
 				usageMetadata = snapshot;
 			} else if (this.lastUsage) {
 				// A resumed leg's pre-candidate usage repeats the already accounted prefix.
