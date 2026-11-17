@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAntigravityCredits } from "../src/providers/antigravity-credits.ts";
-import { mergeGoogleUsage, projectGoogleUsage } from "../src/providers/google-usage.ts";
+import { ANTIGRAVITY_USAGE_ACCOUNTING, mergeGoogleUsage, projectGoogleUsage } from "../src/providers/google-usage.ts";
 import {
 	antigravityThinkingBudget,
 	antigravityThinkingLevel,
@@ -66,16 +66,27 @@ describe("Antigravity packaged provider", () => {
 		const merged = mergeGoogleUsage(original, {
 			toolCallStats: [{ functionName: "lookup", toolCallCount: 2, serverExecuted: true }],
 		});
-		const usage = projectGoogleUsage(merged, {
-			consumedCredits: parseAntigravityCredits([
-				{ creditType: "AI", creditAmount: "7", minimumCreditAmountForUsage: 2 },
-			]),
-		});
-		expect([usage.input, usage.output, usage.cacheRead, usage.totalTokens]).toEqual([83, 7, 20, 110]);
+		const usage = projectGoogleUsage(
+			merged,
+			{
+				consumedCredits: parseAntigravityCredits([
+					{ creditType: "AI", creditAmount: "7", minimumCreditAmountForUsage: 2 },
+				]),
+			},
+			ANTIGRAVITY_USAGE_ACCOUNTING,
+		);
+		expect([usage.input, usage.output, usage.cacheRead, usage.totalTokens]).toEqual([80, 7, 20, 107]);
 		expect(usage.details?.toolCalls?.[0]?.count).toBe(2);
 		expect(usage.details?.consumedCredits?.[0]?.amount).toBe(7);
 		expect(original.toolCallStats).toBeUndefined();
-		expect(() => mergeGoogleUsage(original, { promptTokenCount: 10 })).toThrow("cached token");
+		const reduced = mergeGoogleUsage(original, { promptTokenCount: 10 });
+		expect(reduced.promptTokenCount).toBe(10);
+		expect(reduced.cachedContentTokenCount).toBe(20);
+		expect(reduced.toolUsePromptTokenCount).toBe(3);
+		const reducedUsage = projectGoogleUsage(reduced, {}, ANTIGRAVITY_USAGE_ACCOUNTING);
+		expect([reducedUsage.input, reducedUsage.output, reducedUsage.cacheRead, reducedUsage.totalTokens]).toEqual([
+			0, 7, 20, 27,
+		]);
 	});
 
 	it("keeps adaptive presets and GPT-OSS Medium budget mutually exclusive", () => {
