@@ -1279,7 +1279,8 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			world.timers.advance("continuous-chat", 2000),
 			"the same-key accounting poll fires while arrival-a remains held",
 		).toBe(1);
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		// The pump may still be awaiting local work lookup when this timer fires.
+		await withDeadline(trace, "R10s held accounting poll rearmed", world.timers.whenArmed("continuous-chat"));
 		expect(
 			world.timers.armedDelays("continuous-chat"),
 			"the held request keeps one bounded accounting poll armed",
