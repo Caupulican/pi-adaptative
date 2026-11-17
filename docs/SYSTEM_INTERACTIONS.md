@@ -1341,3 +1341,16 @@ notifications into one pending turn, clearing its scheduling flag before evaluat
 so a mutation during evaluation schedules another turn. Waiter error isolation and all journey
 deadlines remain unchanged. This test-side change must pass the normal cross-platform
 journeys separately from the immutable v0.104.60 artifact.
+
+## Continuous-chat and delegation follow-up, 2026-11-17
+
+Pi session `01a1eb49-a3a4-7f3a-8407-943dfee2b619` ran against checkout `0c98c4e4e`. Its canceled worker left a partial implementation. The following evidence guided the resumed work.
+
+| Observed in the session | Work assigned |
+|---|---|
+| The foreground analysis counted 1,678 consecutive single-message pending lines, about 64 KB. The harness log for session PID 678333 recorded a 120-second summary hold. | Collapse pending siblings into addressable ranges, retain recent role cues, and make deterministic compaction eligible during model holds. Log the reason for a hold. |
+| Five delegate calls failed before the first successful start. A later follow-up also used the wrong action and payload field. | Align routing guidance, tool examples and worker identity with the advertised start and follow-up contracts. |
+| Five numeric `zoom({id})` calls passed the root tool schema and were rejected by the navigation parser for missing `n`. | Give a numeric ID the same single-message meaning across schema, parser and worker navigation. |
+| Three successful tool searches each loaded five tools. All three were followed by a WebSocket input-prefix mismatch on an otherwise intact foreground request. | Exclude synthesized tool outputs from the saved assistant-response baseline so the next delta carries the actual search result. |
+
+Two questions remain for measurements from a subsequent session. Compare pending bytes and foreground latency while the local compactor drains a held backlog. Check whether repeated paid summary replies improve retained content enough to justify their cost. This session has no `history_summary` usage receipt. Its seven fresh-turn snapshots with a divergent prefix are distinct from the three within-turn tool-search cases. A full-request fallback alone does not establish a provider cache miss.

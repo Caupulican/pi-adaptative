@@ -12,13 +12,16 @@ import { type ParentInputConsumptionSource, parentInputOf } from "../../kernel/s
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import { isExternalEvidenceMessage, parseWorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
+import { getToolResultArtifactId } from "../context/context-tool-result.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import type {
-	ContinuousChatAppendInput,
-	ContinuousChatImageInput,
-	ContinuousChatMessageKind,
+import {
+	type ContinuousChatAppendInput,
+	type ContinuousChatImageInput,
+	type ContinuousChatMessageKind,
+	type ContinuousChatToolOutput,
+	parseContinuousChatToolOutput,
 } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatLegacyEntrySource } from "./continuous-chat-legacy-import.ts";
 import { parseContinuousChatNavigationCommand } from "./continuous-chat-navigation.ts";
@@ -31,6 +34,7 @@ export interface ContinuousChatMessagePart {
 	kind: Exclude<ContinuousChatMessageKind, "note">;
 	text: string;
 	images?: ContinuousChatImageInput[];
+	toolOutput?: ContinuousChatToolOutput;
 	/** Explicit idempotency identity for durable derived entries such as worker terminals. */
 	sourceKey?: string;
 	/** A derived work record retains the original canonical input as its source. */
@@ -136,8 +140,24 @@ export function continuousChatMessageParts(message: AgentMessage): ContinuousCha
 			});
 			return [...parts, ...assistantFailureParts(message)];
 		}
-		case "toolResult":
-			return wholeMessagePart("echo", message.content);
+		case "toolResult": {
+			const parts = wholeMessagePart("echo", message.content);
+			if (!isPlainRecord(message.details)) return parts;
+			const details = message.details;
+			// Use structured tool-result metadata only. Output text can impersonate an artifact notice.
+			const artifact = parseContinuousChatToolOutput({
+				clipped: true,
+				artifactId: getToolResultArtifactId(details),
+			});
+			const clipped =
+				details.truncated === true ||
+				details.linesTruncated === true ||
+				(typeof details.matchLimitReached === "number" && details.matchLimitReached > 0) ||
+				(typeof details.resultLimitReached === "number" && details.resultLimitReached > 0) ||
+				(isPlainRecord(details.truncation) && details.truncation.truncated === true);
+			const output = artifact?.artifactId ? artifact : clipped ? ({ clipped: true } as const) : undefined;
+			return output ? parts.map((part) => ({ ...part, toolOutput: output })) : parts;
+		}
 		default:
 			// Custom messages, committed transient records among them, bash runs and summaries are never chat turns.
 			return [];
@@ -349,6 +369,7 @@ export class ContinuousChatIngestor {
 				timestamp: piece.date ?? entry.timestamp,
 				text: piece.text,
 				...(piece.images ? { images: piece.images } : {}),
+				...(piece.toolOutput ? { toolOutput: piece.toolOutput } : {}),
 				sourceKey: piece.sourceKey ?? `${sessionId}:${entryId}:${piece.part}`,
 				source: { sessionId, entryId: piece.sourceEntryId ?? entryId },
 			});
@@ -382,6 +403,7 @@ export class ContinuousChatIngestor {
 					date: canonicalPiece ? (piece.date ?? entry.timestamp) : entry.timestamp,
 					text: canonicalPiece ? piece.text : `${piece.kind}: ${piece.text}`,
 					...(piece.images ? { images: piece.images } : {}),
+					...(piece.toolOutput ? { toolOutput: piece.toolOutput } : {}),
 					sourceKey: canonicalPiece
 						? (piece.sourceKey ?? `${sessionId}:${entry.id}:${piece.part}`)
 						: `${sessionId}:${entry.id}:${piece.part}`,

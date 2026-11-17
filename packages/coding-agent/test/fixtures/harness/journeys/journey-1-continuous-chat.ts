@@ -52,7 +52,7 @@ function chatBlocks(request: ScriptedRequest) {
 export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
 	// ICM continuous chat (Pi-adaptative-memory): summaryModel refusal that warns without stopping the chat, append-only daily logs + 16-byte index,
-	// exact <=512 B leaf vs >512 B model compaction + size-retry loop, 30,000-char tool clipping vs assistant splitting,
+	// exact <=528 B leaf vs >528 B model compaction + size-retry loop, 30,000-char tool clipping vs assistant splitting,
 	// stable system prompt + <chat> view + Current time injection, and root zoom / date navigation.
 	const icmAgentDir = `${world.agentDir}-icm`;
 	const icmStore = icmContinuousStore(icmAgentDir);
@@ -80,7 +80,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			world.provider.enqueue("root", text(`${label}-reply`, "Acknowledged."));
 			// Turn without a tool: its owner words are settled by a later submission, so this phase scripts no judgment.
 			world.systemOne.enterPhase(label, {});
-			// A message over 512 B cannot be an exact leaf: it needs a model-generated node.
+			// A message over 528 B cannot be an exact leaf: it needs a model-generated node.
 			await withDeadline(
 				trace,
 				`${label} turn`,
@@ -349,14 +349,16 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			{
 				text: echoLeaf?.text.slice(0, 40),
 				clippedNote: echoLeaf?.text.includes("(clipped from "),
-				exactNote: echoLeaf?.text.includes("auto-summary: zoom for the exact result"),
+				retentionNote: echoLeaf?.text.includes(
+					"auto-summary: zoom for clipped record; no original artifact recorded",
+				),
 				withinTarget: (echoLeaf?.size ?? Number.POSITIVE_INFINITY) <= 512,
 			},
 			"the over-512-byte read result becomes a code-built leaf: no summary request was scripted for it",
 		).toEqual({
 			text: expect.stringMatching(/^echo: \d+ bytes \(clipped from /),
 			clippedNote: true,
-			exactNote: true,
+			retentionNote: true,
 			withinTarget: true,
 		});
 		expect(
@@ -486,7 +488,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				reply: {
 					content: [
 						{ type: "thinking", thinking: "Read raw page 0 of message 2." },
-						{ type: "toolCall", id: "icm-zoom-raw", name: "zoom", arguments: { id: 2, n: 1, page: 0 } },
+						{ type: "toolCall", id: "icm-zoom-raw", name: "zoom", arguments: { id: 2, page: 0 } },
 					],
 					stopReason: "toolUse",
 				},

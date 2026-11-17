@@ -63,7 +63,7 @@ function describeTool(name: ContinuousChatNavigationToolName): string {
 }
 
 const ZOOM_N_PARAMETER = Type.Optional(
-	Type.Integer({ minimum: 1, description: "Number of consecutive messages from id" }),
+	Type.Integer({ minimum: 1, description: "Number of consecutive messages from id, defaults to 1 for a numeric id" }),
 );
 const ZOOM_PAGE_PARAMETER = Type.Optional(
 	Type.Integer({ minimum: 0, description: "Page of one message or agent log, from 0" }),
@@ -76,7 +76,7 @@ const ZOOM_PARAMETERS = Type.Object(
 				Type.String({ minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS }),
 			],
 			{
-				description: "Message id (with n), agent name, or worker-ref reference",
+				description: "Message id, agent name, or worker-ref reference",
 			},
 		),
 		n: ZOOM_N_PARAMETER,
@@ -87,7 +87,7 @@ const ZOOM_PARAMETERS = Type.Object(
 /** A worker's zoom: message ids only, since another agent's private log stays readable by the root alone. */
 const MESSAGE_ZOOM_PARAMETERS = Type.Object(
 	{
-		id: Type.Integer({ minimum: 0, description: "Message id (with n)" }),
+		id: Type.Integer({ minimum: 0, description: "Message id" }),
 		n: ZOOM_N_PARAMETER,
 		page: ZOOM_PAGE_PARAMETER,
 	},

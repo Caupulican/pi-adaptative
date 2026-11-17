@@ -2286,7 +2286,6 @@ async function* startWebSocketOutputOnFirstEvent(
 		yield event;
 	}
 }
-
 async function processWebSocketStream(
 	url: string,
 	getBody: () => RequestBody,
@@ -2371,10 +2370,11 @@ async function processWebSocketStream(
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {
+			// Isolated conversion fabricates missing tool results; only server output belongs in the continuation baseline.
 			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
 				toolNameMap,
 				toolSearch: planCodexToolSearch(model, context),
-			}).filter((item) => item.type !== "function_call_output");
+			}).filter((item) => item.type !== "function_call_output" && item.type !== "tool_search_output");
 			entry.continuation = {
 				requestShape: requestBodyWithoutInput(requestBody),
 				lastResponseId: output.responseId,

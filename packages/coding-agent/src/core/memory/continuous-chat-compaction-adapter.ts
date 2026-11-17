@@ -263,6 +263,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		} catch {
 			return {
 				message: "Memory summaries wait for accounting storage.",
+				reasons: ["accounting"],
 				retryInMs: DEFAULT_RETRY_POLICY.maxDelayMs,
 			};
 		}
@@ -273,15 +274,26 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		if (spend === undefined && providerWaitMs <= 0 && accountingWaitMs <= 0) return undefined;
 		// The hold lifts when its earliest reason may have: the next UTC day for the limit, the reset for the provider.
 		const wakes: number[] = [];
-		if (spend !== undefined) wakes.push(meter.resetsInMs());
-		if (providerWaitMs > 0) wakes.push(providerWaitMs);
-		if (accountingWaitMs > 0) wakes.push(accountingWaitMs);
+		const reasons: ContinuousChatDispatchHold["reasons"][number][] = [];
+		if (spend !== undefined) {
+			wakes.push(meter.resetsInMs());
+			reasons.push("spend");
+		}
+		if (providerWaitMs > 0) {
+			wakes.push(providerWaitMs);
+			reasons.push("provider");
+		}
+		if (accountingWaitMs > 0) {
+			wakes.push(accountingWaitMs);
+			reasons.push("accounting");
+		}
 		return {
 			message:
 				spend ??
 				(providerWaitMs > 0
 					? "Memory summaries wait for the model provider's limit to reset."
 					: "Memory summaries wait for response usage accounting to recover."),
+			reasons,
 			retryInMs: Math.min(...wakes),
 		};
 	}
@@ -425,7 +437,10 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 							requestSignal: AbortSignal | undefined,
 						): undefined => {
 							try {
-								if (reservedToken === undefined && this.accountingHold(accountingKey) > 0)
+								if (
+									this.providerHoldUntil > this.timers.now() ||
+									(reservedToken === undefined && this.accountingHold(accountingKey) > 0)
+								)
 									throw new ContinuousChatAccountingHold();
 								usage.assertAvailable();
 								this.assertPinned(pinned, requestSignal);

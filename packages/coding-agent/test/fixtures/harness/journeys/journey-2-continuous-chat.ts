@@ -173,7 +173,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				reply: {
 					content: [
 						{ type: "thinking", thinking: "Read page 0 of message 2 with the 4 KiB worker page cap." },
-						{ type: "toolCall", id: "w-worker-zoom-2", name: "zoom", arguments: { id: 2, n: 1, page: 0 } },
+						{ type: "toolCall", id: "w-worker-zoom-2", name: "zoom", arguments: { id: 2, page: 0 } },
 					],
 					usage: {
 						input: 16,
@@ -345,7 +345,7 @@ export async function runJourney2ContinuousChatPhase(world: HarnessWorld): Promi
 				workerHasBirthView:
 					workerBirthContext.includes("<chat>") &&
 					workerBirthContext.includes("2+1|echo: ") &&
-					workerBirthContext.includes("auto-summary: zoom for the exact result"),
+					workerBirthContext.includes("auto-summary: zoom for exact retained record"),
 				workerTools: workerToolNames.filter((name) => name === "zoom" || name === "date").sort(),
 				workerZoomIs4kPaged:
 					workerNavResults.zoom2?.isError === false &&

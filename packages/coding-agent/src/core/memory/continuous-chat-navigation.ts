@@ -14,6 +14,8 @@ import {
 	type ContinuousChatMessageKind,
 	type ContinuousChatRecord,
 	type ContinuousChatToolClipping,
+	type ContinuousChatToolOutput,
+	continuousChatToolOutputLabel,
 } from "./continuous-chat-contracts.ts";
 import { truncateContinuousChatUtf8 } from "./continuous-chat-prompt.ts";
 import {
@@ -99,6 +101,7 @@ export type ContinuousChatNavigationResult =
 			text: string;
 			images: ContinuousChatImageRef[];
 			toolClipping?: ContinuousChatToolClipping;
+			toolOutput?: ContinuousChatToolOutput;
 	  }
 	| { status: "date"; id: number; date: string }
 	| { status: "worker-log"; name: string; page: number; hasMore: boolean; text: string }
@@ -220,11 +223,9 @@ export function parseContinuousChatNavigationCommand(
 	if (typeof id !== "number" || !isNonNegativeSafeInteger(id)) {
 		return invalidArguments("zoom id must be a non-negative safe integer message id or an agent name.");
 	}
-	const n = args.n;
+	const n = args.n === undefined ? 1 : args.n;
 	if (!isNonNegativeSafeInteger(n) || n === 0) {
-		return invalidArguments(
-			`zoom with a message id requires n, a positive safe integer (use n: 1 for message ${id}).`,
-		);
+		return invalidArguments(`zoom with a message id takes a positive safe integer n (omit n for message ${id}).`);
 	}
 	return { tool: "zoom", kind: "node", id, n, page };
 }
@@ -313,6 +314,7 @@ export class ContinuousChatNavigator {
 			images: imagePages[page] ?? [],
 		};
 		if (record.toolClipping !== undefined) message.toolClipping = record.toolClipping;
+		if (record.toolOutput !== undefined) message.toolOutput = record.toolOutput;
 		return message;
 	}
 
@@ -381,7 +383,7 @@ export class ContinuousChatNavigator {
 			let line: string;
 			if (node) {
 				line = renderContinuousChatViewLine(node);
-				if (coordinate.level === 0) line += ` [full message and images: zoom({id:${first},n:1,page:0})]`;
+				if (coordinate.level === 0) line += ` [retained message and images: zoom({id:${first},n:1,page:0})]`;
 			} else {
 				if (reads >= ZOOM_RANGE_MAX_READS) break;
 				const record = await this.source.readMessageById(first, context);
@@ -390,8 +392,8 @@ export class ContinuousChatNavigator {
 				if (!record) return rejected("not-found", `No message ${first}.`);
 				const reference = `zoom({id:${first},n:1,page:0})`;
 				line = `${first}+1|${record.kind}: ${record.text}${record.images?.length ? ` [images: ${reference}]` : ""}`;
-				if (record.toolClipping || Buffer.byteLength(line, "utf8") > textBudget)
-					line = `${first}+1|${record.toolClipping ? "Clipped tool output" : "Full message"}: ${reference}`;
+				if (record.toolClipping || record.toolOutput || Buffer.byteLength(line, "utf8") > textBudget)
+					line = `${first}+1|${record.kind === "echo" ? continuousChatToolOutputLabel(record) : "Full message"}: ${reference}`;
 			}
 			const lineBytes = Buffer.byteLength(line, "utf8") + (lines.length ? 1 : 0);
 			if (bytes + lineBytes > textBudget) break;
@@ -434,6 +436,7 @@ export function renderContinuousChatNavigationResult(result: ContinuousChatNavig
 			const lines = [
 				`message ${result.id} (${result.kind}, ${result.date}) page ${result.page + 1}/${result.pageCount}`,
 			];
+			if (result.kind === "echo") lines.push(continuousChatToolOutputLabel(result));
 			for (const image of result.images) lines.push(`image ${image.digest} ${image.mimeType} ${image.bytes}`);
 			if (result.toolClipping !== undefined) {
 				const { originalCharacters, headCharacters, tailCharacters } = result.toolClipping;

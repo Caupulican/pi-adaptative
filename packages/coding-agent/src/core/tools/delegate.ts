@@ -141,12 +141,13 @@ export const DELEGATE_ACTIONS = [
 ] as const;
 
 export type DelegateAction = (typeof DELEGATE_ACTIONS)[number];
-
 const ORCHESTRATION_TOOL_NAME_PATTERN = `^(?:${WORKER_ORCHESTRATION_TOOL_NAMES.join("|")})$`;
 
 function createDelegateSchema(actions: readonly DelegateAction[]) {
 	const actionDescription = [
-		actions.includes("start") ? "start dispatches a worker" : undefined,
+		actions.includes("start")
+			? 'Pass a JSON object. Start example: {"action":"start","instructions":"<worker brief>"}. Optional model override: {"provider":"<provider>","modelId":"<model-id>"}.'
+			: undefined,
 		actions.includes("tasks")
 			? "tasks lists durable tasks, list worker metadata and activity, transcript pages messages"
 			: undefined,
@@ -157,7 +158,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			: undefined,
 		actions.includes("profile_create") ? "profile_inspect/profile_create manage narrowed session presets" : undefined,
 		actions.includes("send")
-			? "send/broadcast post non-waking peer evidence, follow_up starts an idle worker or steers an active one"
+			? 'send/broadcast post non-waking peer evidence. Use {"action":"follow_up","agentId":"<returned agentId>","message":"<follow-up>"} to continue work on the same worker.'
 			: undefined,
 		actions.includes("reply") ? "reply answers one request" : undefined,
 		actions.includes("inbox")

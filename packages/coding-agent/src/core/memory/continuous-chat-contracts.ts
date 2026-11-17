@@ -34,6 +34,29 @@ export interface ContinuousChatToolClipping {
 	tailCharacters: number;
 }
 
+export interface ContinuousChatToolOutput {
+	/** Producer reported that this result was clipped before chat ingest. */
+	clipped: true;
+	artifactId?: string;
+}
+
+export function parseContinuousChatToolOutput(value: unknown): ContinuousChatToolOutput | undefined {
+	if (!isPlainRecord(value) || value.clipped !== true) return undefined;
+	const id = value.artifactId;
+	if (id === undefined) return { clipped: true };
+	return typeof id === "string" && /^[a-f0-9]{24}$/.test(id) ? { clipped: true, artifactId: id } : undefined;
+}
+
+export function continuousChatToolOutputLabel(
+	record: Pick<ContinuousChatRecord, "toolClipping" | "toolOutput">,
+): string {
+	if (record.toolOutput?.artifactId)
+		return `clipped record; original reference tool-output:${record.toolOutput.artifactId} (availability not guaranteed)`;
+	return record.toolClipping || record.toolOutput
+		? "clipped record; no original artifact recorded"
+		: "exact retained record";
+}
+
 export interface ContinuousChatRecord {
 	schemaVersion: typeof CONTINUOUS_CHAT_SCHEMA_VERSION;
 	id: number;
@@ -45,6 +68,7 @@ export interface ContinuousChatRecord {
 	source?: ContinuousChatSource;
 	images?: ContinuousChatImageRef[];
 	toolClipping?: ContinuousChatToolClipping;
+	toolOutput?: ContinuousChatToolOutput;
 }
 
 export interface ContinuousChatImageInput {
@@ -53,6 +77,7 @@ export interface ContinuousChatImageInput {
 }
 
 export interface ContinuousChatAppendInput {
+	toolOutput?: ContinuousChatToolOutput;
 	kind: ContinuousChatMessageKind;
 	date: string;
 	text: string;
@@ -70,6 +95,7 @@ export interface ContinuousChatAppendUnit {
 	source?: ContinuousChatSource;
 	images?: ContinuousChatImageInput[];
 	toolClipping?: ContinuousChatToolClipping;
+	toolOutput?: ContinuousChatToolOutput;
 }
 
 export interface ContinuousChatAppendResult {
@@ -216,6 +242,11 @@ export function normalizeContinuousChatAppend(input: ContinuousChatAppendInput):
 			textBytes: Buffer.byteLength(unit.text, "utf8"),
 			sourceKey,
 		};
+		if (input.kind === "echo" && input.toolOutput !== undefined) {
+			const output = parseContinuousChatToolOutput(input.toolOutput);
+			if (!output) throw new TypeError("Invalid continuous-chat tool output metadata.");
+			normalized.toolOutput = output;
+		}
 		if (input.source !== undefined) normalized.source = { ...input.source, unit: index };
 		if (index === 0 && input.images !== undefined && input.images.length > 0) normalized.images = input.images;
 		if ("toolClipping" in unit && unit.toolClipping !== undefined) normalized.toolClipping = unit.toolClipping;
@@ -306,6 +337,11 @@ export function parseContinuousChatRecord(value: unknown): ContinuousChatRecord 
 			return undefined;
 		}
 		record.toolClipping = { originalCharacters, headCharacters, tailCharacters };
+	}
+	if (value.toolOutput !== undefined) {
+		const output = parseContinuousChatToolOutput(value.toolOutput);
+		if (!output || record.kind !== "echo") return undefined;
+		record.toolOutput = output;
 	}
 	return record;
 }

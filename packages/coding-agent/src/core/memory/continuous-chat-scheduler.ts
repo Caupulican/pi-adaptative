@@ -57,7 +57,7 @@ interface WorkRow {
 }
 
 /** Schema 2 orders deferred work by context endpoint (see `continuousChatNodeContextEnd`); schema 1 ordered it by arrival. */
-const SCHEDULER_SCHEMA_VERSION = 3;
+const SCHEDULER_SCHEMA_VERSION = 4;
 /**
  * A failed node is eligible again only after this many more arrivals (messages and turn starts), doubling with each
  * failure up to the cap, and only for a bounded number of attempts: past it the node waits for a configuration change or
@@ -83,7 +83,7 @@ const RECOVERY_SCHEMA_SQL = `
  * Version of the length rule that decides whether a node fails. Rule 1 (no marker stored) failed a node whose shortest
  * reply stayed over the node maximum and parked it; rule 2 cuts that reply to fit, so nothing fails for length.
  * A scheduler file stamped below the current rule releases the nodes the old rule parked, once. The marker has its
- * own table, so the schema version stays 3 and an older build ignores it.
+ * own table, so the schema version need not change for this rule and an older build ignores it.
  */
 const LENGTH_RULE_VERSION = 2;
 const LENGTH_RULE_SCHEMA_SQL =
@@ -103,6 +103,17 @@ const CLAIM_INDEX_SQL = `
 	CREATE INDEX IF NOT EXISTS fresh_by_context ON work(kind,status,attempts,${CONTEXT_END_SQL},level DESC);
 	CREATE INDEX IF NOT EXISTS active_claim ON work(status,sequence);
 	CREATE INDEX IF NOT EXISTS ready_retry_by_context ON work(kind,${CONTEXT_END_SQL},level DESC) WHERE status='ready' AND attempts>0;
+`;
+
+// Unclassified and deterministic work share lane 0. A held dispatch can skip lane 1 using the index,
+// without repeatedly scanning a prefix of deferred model work.
+const LOCAL_CLAIM_INDEX_SQL = `
+	CREATE INDEX IF NOT EXISTS local_ready ON work(lane,kind,${CONTEXT_END_SQL},level DESC)
+		WHERE status='ready' AND attempts=0;
+	CREATE INDEX IF NOT EXISTS local_retry ON work(lane,kind,${CONTEXT_END_SQL},level DESC)
+		WHERE status='ready' AND attempts>0;
+	CREATE INDEX IF NOT EXISTS local_blocked ON work(lane,kind,retry_after,sequence)
+		WHERE status='blocked' AND attempts<${MAX_RETRY_ATTEMPTS};
 `;
 
 /** Rows changed by the statement that `run` executed (the SQLite changes count). */
@@ -173,8 +184,14 @@ export class ContinuousChatScheduler {
 					"PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA mmap_size=0;",
 				);
 				const version = db.prepare("PRAGMA user_version").get()?.user_version;
-				// Schema 2 opens as is, schema 1 through its atomic migration, and an empty file only when creating.
-				if (version !== SCHEDULER_SCHEMA_VERSION && version !== 2 && version !== 1 && !(version === 0 && create))
+				// Older schemas migrate atomically; an empty file is valid only when creating.
+				if (
+					version !== SCHEDULER_SCHEMA_VERSION &&
+					version !== 3 &&
+					version !== 2 &&
+					version !== 1 &&
+					!(version === 0 && create)
+				)
 					throw new ContinuousChatCorruptError(path, "Unsupported ICM scheduler schema");
 				if (version === 0)
 					withSqliteTransaction(
@@ -188,11 +205,13 @@ export class ContinuousChatScheduler {
 				 level INTEGER NOT NULL, ordinal INTEGER NOT NULL, kind INTEGER NOT NULL CHECK(kind IN(0,1)),
 				 status TEXT NOT NULL CHECK(status IN('ready','running','blocked')), sequence INTEGER NOT NULL,
 				 claim_id INTEGER NOT NULL, attempts INTEGER NOT NULL, retry_after INTEGER NOT NULL,
+				 lane INTEGER NOT NULL DEFAULT 0 CHECK(lane IN(0,1)),
 				 reason TEXT, last_action TEXT CHECK(last_action IS NULL OR last_action IN('release','fail')),
 				 PRIMARY KEY(level,ordinal), CHECK(level>=0 AND level<=52 AND ordinal>=0),
 				 CHECK(sequence>=0 AND claim_id>=0 AND attempts>=0 AND retry_after>=-1), CHECK(reason IS NULL OR length(reason)<=512)
 				) STRICT, WITHOUT ROWID;
 				${CLAIM_INDEX_SQL}
+				${LOCAL_CLAIM_INDEX_SQL}
 				${RECOVERY_SCHEMA_SQL}
 				CREATE TABLE IF NOT EXISTS legacy_half (level INTEGER NOT NULL, ordinal INTEGER NOT NULL, PRIMARY KEY(level,ordinal)) STRICT, WITHOUT ROWID;
 				PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION};
@@ -201,13 +220,15 @@ export class ContinuousChatScheduler {
 						"ICM scheduler initialization",
 					);
 				const scheduler = new ContinuousChatScheduler(db, path);
-				if (version === 1 || version === 2)
+				if (version === 1 || version === 2 || version === 3)
 					scheduler.transaction(() => {
 						// Another process may have migrated the file between the unlocked version read and this lock.
 						const locked = db.prepare("PRAGMA user_version").get()?.user_version;
 						if (locked === SCHEDULER_SCHEMA_VERSION) return;
 						if (locked === 1) scheduler.migrateFromSchema1();
 						db.exec(RECOVERY_SCHEMA_SQL);
+						db.exec("ALTER TABLE work ADD COLUMN lane INTEGER NOT NULL DEFAULT 0 CHECK(lane IN(0,1));");
+						db.exec(LOCAL_CLAIM_INDEX_SQL);
 						db.exec(`PRAGMA user_version=${SCHEDULER_SCHEMA_VERSION}`);
 					});
 				scheduler.applyLengthRule();
@@ -370,7 +391,9 @@ export class ContinuousChatScheduler {
 					this.sql("INSERT INTO legacy_half VALUES(?,?)").run(entry.item.level, entry.item.ordinal);
 					continue;
 				}
-				this.sql("INSERT INTO work VALUES(?,?,?,?,?,?,?,?,?,?)").run(
+				this.sql(
+					"INSERT INTO work(level,ordinal,kind,status,sequence,claim_id,attempts,retry_after,reason,last_action) VALUES(?,?,?,?,?,?,?,?,?,?)",
+				).run(
 					entry.item.level,
 					entry.item.ordinal,
 					entry.item.level === 0 ? 0 : 1,
@@ -523,24 +546,28 @@ export class ContinuousChatScheduler {
 	 * (earliest endpoint, a merge first at a tie). Failed work, once a later generation makes it eligible, comes oldest
 	 * failure first, behind released work.
 	 */
-	private candidate(kind: number, retry: boolean, generation: number): WorkRow | undefined {
+	private candidate(kind: number, retry: boolean, generation: number, localOnly: boolean): WorkRow | undefined {
+		const filter = localOnly ? "AND lane=0" : "";
+		const freshIndex = localOnly ? "local_ready" : "fresh_by_context";
+		const retryIndex = localOnly ? "local_retry" : "ready_retry_by_context";
+		const blockedIndex = localOnly ? "local_blocked" : "candidate";
 		const order = `ORDER BY ${CONTEXT_END_SQL},level DESC LIMIT 1`;
 		if (!retry)
 			return decodeWork(
 				this.sql(
-					`SELECT * FROM work INDEXED BY fresh_by_context WHERE kind=? AND status='ready' AND attempts=0 ${order}`,
+					`SELECT * FROM work INDEXED BY ${freshIndex} WHERE kind=? AND status='ready' AND attempts=0 ${filter} ${order}`,
 				).get(kind),
 			);
 		return (
 			decodeWork(
 				this.sql(
-					`SELECT * FROM work INDEXED BY ready_retry_by_context WHERE kind=? AND status='ready' AND attempts>0 ${order}`,
+					`SELECT * FROM work INDEXED BY ${retryIndex} WHERE kind=? AND status='ready' AND attempts>0 ${filter} ${order}`,
 				).get(kind),
 			) ??
 			decodeWork(
 				this.sql(
-					"SELECT * FROM work WHERE kind=? AND status='blocked' AND retry_after<? AND attempts<? ORDER BY retry_after,sequence LIMIT 1",
-				).get(kind, generation, MAX_RETRY_ATTEMPTS),
+					`SELECT * FROM work INDEXED BY ${blockedIndex} WHERE kind=? AND status='blocked' AND retry_after<? AND attempts<${MAX_RETRY_ATTEMPTS} ${filter} ORDER BY retry_after,sequence LIMIT 1`,
+				).get(kind, generation),
 			)
 		);
 	}
@@ -550,18 +577,32 @@ export class ContinuousChatScheduler {
 	 * are then compared by endpoint, so the selected parent candidate precedes a selected leaf with a later or equal
 	 * endpoint. Retry-class selection is not a global chronological order over every eligible row.
 	 */
-	claim(): ContinuousChatClaim | undefined {
-		const claim = this.transaction(() => {
+	claim(localOnly = false): ContinuousChatClaim | undefined {
+		return this.select(localOnly, "claim");
+	}
+
+	peekLocal(): ContinuousChatWorkItem | undefined {
+		return this.select(true, "peek");
+	}
+
+	deferModelWork(): void {
+		this.select(true, "defer");
+	}
+
+	private select(localOnly: boolean, mode: "claim"): ContinuousChatClaim | undefined;
+	private select(localOnly: true, mode: "peek" | "defer"): ContinuousChatWorkItem | undefined;
+	private select(localOnly: boolean, mode: "claim" | "peek" | "defer"): ContinuousChatWorkItem | undefined {
+		const claim = this.transaction((): ContinuousChatWorkItem | ContinuousChatClaim | undefined => {
 			const snapshot = this.snapshot();
 			const { running: _running, builtLeafPrefix: _built, ...meta } = snapshot;
 			if (snapshot.running.length >= CONTINUOUS_CHAT_MAX_CONCURRENT_COMPACTIONS) return undefined;
-			const retryLeaf = this.candidate(0, true, meta.generation);
-			const storedLeaf = this.candidate(0, false, meta.generation);
+			const retryLeaf = this.candidate(0, true, meta.generation, localOnly);
+			const storedLeaf = this.candidate(0, false, meta.generation, localOnly);
 			const freshLeaf =
 				storedLeaf ?? (meta.nextLeaf < meta.totalMessages ? { level: 0, ordinal: meta.nextLeaf } : undefined);
 			const leaf = retryLeaf && (!freshLeaf || meta.leafRetryNext) ? retryLeaf : freshLeaf;
-			const freshParent = this.candidate(1, false, meta.generation);
-			const retryParent = this.candidate(1, true, meta.generation);
+			const freshParent = this.candidate(1, false, meta.generation, localOnly);
+			const retryParent = this.candidate(1, true, meta.generation, localOnly);
 			const parent = meta.parentRetryNext ? (retryParent ?? freshParent) : (freshParent ?? retryParent);
 			let selected: ContinuousChatWorkItem;
 			let row: WorkRow | undefined;
@@ -578,14 +619,26 @@ export class ContinuousChatScheduler {
 					selected = storedLeaf;
 					row = storedLeaf;
 				} else {
-					selected = { level: 0, ordinal: meta.nextLeaf++ };
-					if (this.row(selected))
-						throw new ContinuousChatCorruptError(this.path, "Unadmitted leaf already has work");
-					this.insert(selected, ++meta.sequence);
-					row = this.row(selected);
+					selected = { level: 0, ordinal: meta.nextLeaf };
 				}
 				meta.leafRetryNext = true;
 			} else return undefined;
+			if (mode === "peek") return { level: selected.level, ordinal: selected.ordinal };
+			if (mode === "defer") {
+				if (!row) {
+					meta.nextLeaf++;
+					this.insert(selected, ++meta.sequence);
+					meta.leafRetryNext = snapshot.leafRetryNext;
+					this.save(meta);
+				}
+				this.sql("UPDATE work SET lane=1 WHERE level=? AND ordinal=?").run(selected.level, selected.ordinal);
+				return undefined;
+			}
+			if (!row) {
+				meta.nextLeaf++;
+				if (this.row(selected)) throw new ContinuousChatCorruptError(this.path, "Unadmitted leaf already has work");
+				this.insert(selected, ++meta.sequence);
+			}
 			if (continuousChatNodeFirstMessage(selected) + continuousChatNodeMessageCount(selected.level) > meta.nextLeaf)
 				throw new ContinuousChatCorruptError(this.path, "Claim exceeds admitted messages");
 			const claimId = ++meta.revision;
@@ -604,7 +657,7 @@ export class ContinuousChatScheduler {
 				}));
 			return { level: selected.level, ordinal: selected.ordinal, claimId };
 		});
-		if (claim)
+		if (claim && "claimId" in claim)
 			harnessLog.debug("memory", "chat work claimed", () => ({
 				level: claim.level,
 				ordinal: claim.ordinal,

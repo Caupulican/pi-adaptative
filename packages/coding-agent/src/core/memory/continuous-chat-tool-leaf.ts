@@ -5,7 +5,7 @@
  */
 
 import { isPlainRecord } from "../util/value-guards.ts";
-import type { ContinuousChatRecord } from "./continuous-chat-contracts.ts";
+import { type ContinuousChatRecord, continuousChatToolOutputLabel } from "./continuous-chat-contracts.ts";
 import { CONTINUOUS_CHAT_NODE_TARGET_BYTES } from "./continuous-chat-tree.ts";
 
 /** Longest tool name read from a call record; anything else on the first line is not a name. */
@@ -46,7 +46,6 @@ const TOOL_ARGUMENTS: Readonly<Record<string, ToolArgumentMap>> = {
 
 /** Why a reader meets this line instead of the message, and how to reach the message. */
 const CALL_NOTE = "auto-summary: zoom for the exact call";
-const RESULT_NOTE = "auto-summary: zoom for the exact result";
 
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf8");
@@ -196,13 +195,13 @@ function toolCallLine(record: ContinuousChatRecord): string {
 function toolResultLine(record: ContinuousChatRecord): string {
 	const clipped =
 		record.toolClipping === undefined ? "" : ` (clipped from ${record.toolClipping.originalCharacters} characters)`;
-	const lead = `echo: ${record.textBytes} bytes${clipped}, ${RESULT_NOTE}. `;
+	const lead = `echo: ${record.textBytes} bytes${clipped}, auto-summary: zoom for ${continuousChatToolOutputLabel(record)}. `;
 	return `${lead}${excerpt(record.text, CONTINUOUS_CHAT_NODE_TARGET_BYTES - byteLength(lead))}`;
 }
 
 /**
  * The deterministic leaf text of a `tool` or `echo` record, within the node target; undefined for any other kind. A line
- * says it is an automatic summary, so a reader knows `zoom` on the message gives the exact text. A result's tool name
+ * says it is an automatic summary, so a reader knows `zoom` on the message gives the retained text. A result's tool name
  * and success are not in its record, so neither is claimed.
  */
 export function buildContinuousChatToolLeafText(record: ContinuousChatRecord): string | undefined {

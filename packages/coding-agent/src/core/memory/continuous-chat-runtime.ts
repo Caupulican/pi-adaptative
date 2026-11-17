@@ -17,6 +17,7 @@ import {
 	type ContinuousChatCompactionPort,
 	type ContinuousChatCompactionPrefix,
 	type ContinuousChatCompactionTarget,
+	type ContinuousChatDispatchHold,
 } from "./continuous-chat-compaction.ts";
 import {
 	type ContinuousChatAppendInput,
@@ -123,7 +124,8 @@ export class ContinuousChatRuntime {
 	/** The pause is logged once per hold, not once per pump. */
 	private foregroundPauseLogged = false;
 	/** The port's hold (daily limit, provider limit) is told once per hold, not once per pump. */
-	private holdNoticed = false;
+	private holdNoticed: string | undefined;
+	private activeHold: ContinuousChatDispatchHold | undefined;
 	/** Wakes dispatch when the port's hold may have lifted; armed while a pass ends on that hold. */
 	private holdAlarm: WallAlarm | undefined;
 	/** Resolves once, when this runtime stops accepting work: at `stop()`, or when its lease is lost. Never rejects. */
@@ -343,7 +345,9 @@ export class ContinuousChatRuntime {
 	 * Nothing happens unless a pass ended on a hold, so a setting change that does not concern the hold starts no work.
 	 */
 	holdMayHaveLifted(): void {
-		if (this.holdAlarm !== undefined) this.requestPump();
+		if (!this.holdAlarm) return;
+		this.clearHoldAlarm();
+		this.requestPump();
 	}
 
 	private armHoldAlarm(retryInMs: number): void {
@@ -353,6 +357,7 @@ export class ContinuousChatRuntime {
 			this.timers.now() + Math.max(retryInMs, CONTINUOUS_CHAT_HOLD_MIN_WAKE_MS),
 			() => {
 				this.holdAlarm = undefined;
+				this.activeHold = undefined;
 				this.requestPump();
 			},
 		);
@@ -361,6 +366,7 @@ export class ContinuousChatRuntime {
 	private clearHoldAlarm(): void {
 		this.holdAlarm?.stop();
 		this.holdAlarm = undefined;
+		this.activeHold = undefined;
 	}
 
 	/** A turn is in progress, or one ended less than the quiet window ago. */
@@ -570,32 +576,44 @@ export class ContinuousChatRuntime {
 				}
 				return;
 			}
-			const hold = this.port.dispatchHold?.();
+			const hold = this.activeHold ?? this.port.dispatchHold?.();
 			if (hold !== undefined) {
-				// Nothing is claimed, so nothing churns: pending work keeps its place; the alarm, a raised limit or an arrival wakes dispatch.
-				this.armHoldAlarm(hold.retryInMs);
-				if (!this.holdNoticed) {
-					this.holdNoticed = true;
-					harnessLog.warn("memory", "chat summaries are held by a spend or provider limit", {
-						retryInMs: hold.retryInMs,
-					});
-					this.warn(hold.message);
+				// Model candidates stay queued; a hold wake re-enables normal dispatch.
+				if (!this.holdAlarm) {
+					this.activeHold = hold;
+					this.armHoldAlarm(hold.retryInMs);
+					const noticed = hold.reasons.join(",");
+					if (this.holdNoticed !== noticed) {
+						this.holdNoticed = noticed;
+						harnessLog.warn("memory", "model-backed chat summaries are held", {
+							reasons: hold.reasons,
+							retryInMs: hold.retryInMs,
+						});
+						this.warn(hold.message);
+					}
+				}
+			} else {
+				this.clearHoldAlarm();
+				this.holdNoticed = undefined;
+			}
+			const item = hold ? await this.store.claimLocalWork() : await this.store.claimWork();
+			if (item === "advanced") {
+				await yieldToEventLoop();
+				continue;
+			}
+			if (item === undefined) {
+				if (this.jobs.size === 0) {
+					if (this.dispatchOpen() && !this.foregroundHeld()) await this.store.fitPublishedViews();
+					this.emit({ type: "idle" });
 				}
 				return;
 			}
-			this.clearHoldAlarm();
-			this.holdNoticed = false;
-			const item = await this.store.claimWork();
-			if (item === undefined) {
-				if (this.jobs.size === 0) this.emit({ type: "idle" });
-				return;
-			}
-			if (!this.dispatchOpen()) {
+			if (!this.dispatchOpen() || this.foregroundHeld()) {
 				// After a lost lease the claim stays persisted for the next owner's recovery to requeue.
 				if (!this.leaseLost) await this.recordOrRetain(item, { kind: "release" });
 				return;
 			}
-			this.startJob(item);
+			this.startJob(item, hold !== undefined);
 			// Each claim ends a macrotask turn, whatever its awaits cost: a backlog whose store and model reads resolve in
 			// microtasks would otherwise hold timers and other I/O for its whole length. The loop condition re-checks dispatch,
 			// close and stop, so the yield is also their check point. A counter here would not fire: each pass claims one job,
@@ -604,20 +622,20 @@ export class ContinuousChatRuntime {
 		}
 	}
 
-	private startJob(item: ContinuousChatClaim): void {
+	private startJob(item: ContinuousChatClaim, localOnly: boolean): void {
 		const key = continuousChatWorkItemKey(item);
 		// `finally` runs after the job is registered, so the map entry is always present when it is removed.
-		const job = this.runJob(item).finally(() => {
+		const job = this.runJob(item, localOnly).finally(() => {
 			this.jobs.delete(key);
 			this.requestPump();
 		});
 		this.jobs.set(key, job);
 	}
 
-	private async runJob(item: ContinuousChatClaim): Promise<void> {
+	private async runJob(item: ContinuousChatClaim, localOnly: boolean): Promise<void> {
 		try {
 			const recoveryKey = this.port.recoveryKey?.();
-			await this.settle(item, await this.compact(item), recoveryKey);
+			await this.settle(item, await this.compact(item, localOnly), recoveryKey);
 		} catch (error) {
 			// After a lost lease the store refuses every write: the claim is left for recovery.
 			if (this.leaseLost) return;
@@ -670,20 +688,25 @@ export class ContinuousChatRuntime {
 		}
 	}
 
-	private async compact(item: ContinuousChatClaim): Promise<ContinuousChatCompactionOutcome> {
+	private async compact(item: ContinuousChatClaim, localOnly: boolean): Promise<ContinuousChatCompactionOutcome> {
 		const projectionRevision = await this.store.projectionRevision();
+		if (this.abort.signal.aborted || projectionRevision !== item.projectionRevision)
+			return { status: "cancelled", replies: 0 };
 		const { target, end } = await this.causalTarget(item);
-		const causal = await this.store.readCausalPrefix(end);
-		if (projectionRevision !== (await this.store.projectionRevision()))
-			throw new Error("Continuous-chat projection changed during compaction preparation.");
-		const head = this.prefixHead();
 		const coordinator = new ContinuousChatCompactionCoordinator(this.port, {
 			readNode: (coordinate) => this.store.readNode(coordinate),
 			appendNode: (node) => this.store.appendNode(node, projectionRevision, item),
 		});
 		return coordinator.run({
 			target,
-			prefix: { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text, viewCache: causal.cache },
+			prefix: async () => {
+				if (localOnly || this.foregroundHeld()) return undefined;
+				const causal = await this.store.readCausalPrefix(end);
+				if (projectionRevision !== (await this.store.projectionRevision()) || this.foregroundHeld())
+					return undefined;
+				const head = this.prefixHead();
+				return { systemPrompt: head.systemPrompt, tools: head.tools, view: causal.text, viewCache: causal.cache };
+			},
 			signal: this.abort.signal,
 			closing: this.closing,
 		});

@@ -17,6 +17,7 @@ import type {
 	ContinuousChatViewProjection,
 	RenderedContinuousChatView,
 } from "./continuous-chat-cache.ts";
+import { continuousChatNoCallNode } from "./continuous-chat-compaction.ts";
 import {
 	CONTINUOUS_CHAT_SCHEMA_VERSION,
 	type ContinuousChatAppendInput,
@@ -24,6 +25,7 @@ import {
 	type ContinuousChatAppendUnit,
 	type ContinuousChatImageInput,
 	type ContinuousChatImageRef,
+	type ContinuousChatMessageKind,
 	type ContinuousChatRecord,
 	type ContinuousChatRoot,
 	continuousChatDay,
@@ -87,21 +89,30 @@ import {
 	continuousChatNodeKey,
 	continuousChatNodeMessageCount,
 	parseContinuousChatTreeNode,
-	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
 import {
-	advanceContinuousChatView,
 	CONTINUOUS_CHAT_CAUSAL_VIEW_HIGH_BYTES,
 	CONTINUOUS_CHAT_CAUSAL_VIEW_LOW_BYTES,
-	type ContinuousChatViewEntry,
+	CONTINUOUS_CHAT_RECENT_CUE_COUNT,
 	type ContinuousChatViewKind,
 	type ContinuousChatViewState,
 	continuousChatViewBytes,
 	createContinuousChatView,
-	parseContinuousChatView,
 	refreshContinuousChatView,
+	refreshContinuousChatViewEntry,
 	renderContinuousChatView,
 } from "./continuous-chat-view.ts";
+import {
+	cutContinuousChatView,
+	loadContinuousChatViews,
+	persistView,
+	presentContinuousChatNodes,
+	proposeContinuousChatViewFit,
+	readViewFile,
+	settleContinuousChatViews,
+	type ViewPair,
+	viewFileName,
+} from "./continuous-chat-view-storage.ts";
 import {
 	CONTINUOUS_CHAT_TOP_LEVEL,
 	type ContinuousChatWorkAbandonment,
@@ -115,8 +126,6 @@ const SEGMENT_SUFFIX = ".jsonl";
 const ROOT_FILE = "root.json";
 const QUEUE_FILE = "queue.json";
 const LOCK_FILE = "writer";
-const TURN_VIEW_FILE = "view.json";
-const CAUSAL_VIEW_FILE = "compaction-view.json";
 const MESSAGE_INDEX_FILE = "messages.idx";
 const KEYS_INDEX_FILE = "keys.idx";
 const NODE_INDEX_DIR = "nodes";
@@ -178,13 +187,12 @@ interface HeldRuntimeLease {
 	releaseAtExit: () => void;
 }
 
-/** Turn view, then causal view. */
-type ViewPair = [ContinuousChatViewState, ContinuousChatViewState];
-
 /** Views caught up to the root revision they were settled against. */
 interface SettledViews {
 	revision: number;
 	views: ViewPair;
+	fitTurn?: boolean;
+	fitCausal?: boolean;
 }
 
 interface LockedState {
@@ -305,64 +313,6 @@ function treeNodeLine(node: ContinuousChatTreeNode): string {
 	return `${JSON.stringify(node)}\n`;
 }
 
-function viewFileName(kind: ContinuousChatViewKind): string {
-	return kind === "turn" ? TURN_VIEW_FILE : CAUSAL_VIEW_FILE;
-}
-
-/** The persisted view, or undefined when it was never written. Malformed content is corruption. */
-async function readViewFile(
-	rootDir: string,
-	kind: ContinuousChatViewKind,
-): Promise<ContinuousChatViewState | undefined> {
-	const filePath = join(rootDir, viewFileName(kind));
-	const parsed = await readJsonFile(filePath, "persisted view");
-	if (parsed === undefined) return undefined;
-	const view = parseContinuousChatView(parsed, kind);
-	if (view === undefined) throw new ContinuousChatCorruptError(filePath, "Invalid persisted view");
-	return view;
-}
-
-async function persistView(rootDir: string, view: ContinuousChatViewState): Promise<void> {
-	await writeDurableAtomic(join(rootDir, viewFileName(view.kind)), `${JSON.stringify(view)}\n`);
-}
-
-/**
- * Advances a view one arriving leaf at a time to `expectedMessages`, then refreshes its lines against the current tree.
- * Only the arrivals commit a pending batch; the closing refresh is a background fit.
- */
-function catchUpView(
-	view: ContinuousChatViewState,
-	expectedMessages: number,
-	nodes: ReadonlyMap<string, ContinuousChatTreeNode>,
-): ContinuousChatViewState {
-	let next = view;
-	while (next.totalMessages < expectedMessages) next = advanceContinuousChatView(next, next.totalMessages, nodes);
-	return refreshContinuousChatView(next, nodes, "background");
-}
-
-/** Whether two views have the same partition and the same lines. Revisions are ignored, since a refresh bumps them. */
-function sameLayout(a: ContinuousChatViewState, b: ContinuousChatViewState): boolean {
-	return (
-		a.totalMessages === b.totalMessages &&
-		a.batchPending === b.batchPending &&
-		a.entries.length === b.entries.length &&
-		a.entries.every((entry, index) => {
-			const other = b.entries[index];
-			return (
-				other !== undefined &&
-				entry.level === other.level &&
-				entry.ordinal === other.ordinal &&
-				entry.size === other.size
-			);
-		})
-	);
-}
-
-/** Coordinates of the message leaves [from, to). */
-function leafCoordinates(from: number, to: number): ContinuousChatNodeCoordinate[] {
-	return Array.from({ length: Math.max(0, to - from) }, (_, offset) => ({ level: 0, ordinal: from + offset }));
-}
-
 /**
  * Consecutive records grouped by storage day. Occurrence timestamps are immutable and may go backwards when older
  * sessions are imported; segment names remain monotone independently so journal replay preserves permanent-id order.
@@ -453,6 +403,7 @@ export class ContinuousChatStore {
 	private indexedRevision: number | undefined;
 	/** Views caught up to the root revision they name. Undefined after a failed locked step. */
 	private settled: SettledViews | undefined;
+	private viewFit: Promise<void> | undefined;
 	/** The rendered turn view for one root revision. */
 	private rendered: { revision: number; view: RenderedContinuousChatView } | undefined;
 	private renderedBirth: { revision: number; view: RenderedContinuousChatView } | undefined;
@@ -621,7 +572,19 @@ export class ContinuousChatStore {
 		projectionRevision = 0,
 		claim?: ContinuousChatClaim,
 	): Promise<boolean> {
-		return this.withWriterLock(() => this.appendNodeLocked({ ...node, projectionRevision }, claim));
+		const created = await this.withWriterLock(() => this.appendNodeLocked({ ...node, projectionRevision }, claim));
+		if (!claim) await this.fitPublishedViews();
+		return created;
+	}
+
+	/** Coalesce changes made by the compaction drain into one checkpoint pass. */
+	async fitPublishedViews(): Promise<void> {
+		if (!this.viewFit && (this.settled?.fitTurn || this.settled?.fitCausal)) {
+			this.viewFit = this.checkpointPublishedViews().finally(() => {
+				this.viewFit = undefined;
+			});
+		}
+		await this.viewFit;
 	}
 
 	/** The next background work item, or undefined when nothing is ready or the running limit is reached. */
@@ -629,14 +592,44 @@ export class ContinuousChatStore {
 		return this.withWriterLock(async () => {
 			if (this.pendingAbandonments.size > 0) return undefined;
 			await this.reconcileLocked();
-			for (;;) {
-				const claim = this.requireScheduler().claim();
-				if (!claim) return undefined;
-				if ((await this.nodeAt(claim)) === undefined)
-					return { ...claim, projectionRevision: this.projection!.meta().revision };
-				await this.completePublishedWorkLocked(claim);
-			}
+			return this.claimWorkLocked(false);
 		});
+	}
+
+	/** Inspect at most one candidate per lock acquisition, without spending a claim on deferred model work. */
+	async claimLocalWork(): Promise<ContinuousChatClaim | "advanced" | undefined> {
+		return this.withWriterLock(async () => {
+			if (this.pendingAbandonments.size > 0) return undefined;
+			await this.reconcileLocked();
+			const scheduler = this.requireScheduler();
+			const item = scheduler.peekLocal();
+			if (!item) return undefined;
+			if (item.level === 0) {
+				const record = await this.recordAt(item.ordinal);
+				if (record && continuousChatNoCallNode({ kind: "leaf", record })) return this.claimWorkLocked(true);
+			} else {
+				const left = await this.nodeAt({ level: item.level - 1, ordinal: item.ordinal * 2 });
+				const right = await this.nodeAt({ level: item.level - 1, ordinal: item.ordinal * 2 + 1 });
+				if (left && right && continuousChatNoCallNode({ kind: "merge", left, right }))
+					return this.claimWorkLocked(true);
+			}
+			scheduler.deferModelWork();
+			return "advanced";
+		});
+	}
+
+	private claimWorkLocked(localOnly: false): Promise<ContinuousChatClaim | undefined>;
+	private claimWorkLocked(localOnly: true): Promise<ContinuousChatClaim | "advanced" | undefined>;
+	private async claimWorkLocked(localOnly: boolean): Promise<ContinuousChatClaim | "advanced" | undefined> {
+		const scheduler = this.requireScheduler();
+		for (;;) {
+			const claim = scheduler.claim(localOnly);
+			if (!claim) return undefined;
+			if ((await this.nodeAt(claim)) === undefined)
+				return { ...claim, projectionRevision: this.projection!.meta().revision };
+			await this.completePublishedWorkLocked(claim);
+			if (localOnly) return "advanced";
+		}
 	}
 
 	/** A claimed item failed. Its reason remains available for diagnostics after a restart. */
@@ -922,22 +915,29 @@ export class ContinuousChatStore {
 				viewedMessages: 0,
 			};
 		}
-		const filePath = join(this.rootDir, CAUSAL_VIEW_FILE);
-		const view = await readViewFile(this.rootDir, "causal");
+		const filePath = join(this.rootDir, viewFileName("causal"));
+		const view = this.settled?.views[1] ?? (await readViewFile(this.rootDir, "causal"));
 		if (view === undefined) throw new ContinuousChatCorruptError(filePath, "Persisted view is missing");
 		if (view.totalMessages < viewed) {
 			throw new ContinuousChatCorruptError(filePath, "Persisted causal view does not cover the built prefix");
 		}
-		const entries = await this.causalCut(view.entries, viewed, filePath);
+		const entries = await cutContinuousChatView(this.viewPort().readNode, view.entries, viewed, filePath);
 		const causal = { ...view, totalMessages: viewed, batchPending: false, entries };
 		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
-		const nodes = await this.presentNodes(entries, continuousChatViewBytes(causal) > causal.highBytes);
+		const nodes = await presentContinuousChatNodes(
+			this.viewPort().readNode,
+			entries,
+			continuousChatViewBytes(causal) > causal.highBytes,
+		);
 		return { ...renderContinuousChatView(causal, nodes, this.viewProjection()), viewedMessages: viewed };
 	}
 
 	async readView(kind: ContinuousChatViewKind): Promise<ContinuousChatViewState> {
-		if (this.lease) await this.readQueue();
-		else {
+		if (this.lease) {
+			await this.readQueue();
+			const current = this.settled?.views[kind === "turn" ? 0 : 1];
+			if (current) return { ...current, entries: [...current.entries] };
+		} else {
 			const projection = await this.readProjection();
 			const meta = projection?.meta();
 			if (meta && meta.revision !== meta.derivedRevision)
@@ -952,7 +952,8 @@ export class ContinuousChatStore {
 		if (view.totalMessages > root.nextId) {
 			throw new ContinuousChatCorruptError(join(this.rootDir, viewFileName(kind)), "Invalid persisted view");
 		}
-		return view;
+		const nodes = await presentContinuousChatNodes(this.viewPort().readNode, view.entries, true);
+		return refreshContinuousChatView(view, nodes, "background");
 	}
 
 	async readMessageById(id: number, context?: MemoryReadContext): Promise<ContinuousChatRecord | undefined> {
@@ -1096,7 +1097,10 @@ export class ContinuousChatStore {
 		await checkpointContinuousChatRecovery(signal);
 		let settled = this.settled;
 		if (settled === undefined || settled.revision !== root.revision) {
-			settled = { revision: root.revision, views: await this.loadViewsLocked(root.nextId, signal) };
+			settled = {
+				revision: root.revision,
+				views: await loadContinuousChatViews(this.viewPort(), root.nextId, signal),
+			};
 			this.settled = settled;
 		}
 		const queue = await this.reconcileQueueLocked(root, signal);
@@ -1355,54 +1359,6 @@ export class ContinuousChatStore {
 	}
 
 	/**
-	 * The persisted views caught up to `expected`. A view never stored is created here, valid only while nothing is
-	 * logged: the empty view is persisted before the first log or root write.
-	 */
-	private async loadViewsLocked(expected: number, signal?: AbortSignal): Promise<ViewPair> {
-		const views: ViewPair = [createContinuousChatView("turn"), createContinuousChatView("causal")];
-		const persisted: [boolean, boolean] = [true, true];
-		for (const index of [0, 1] as const) {
-			signal?.throwIfAborted();
-			const kind: ContinuousChatViewKind = index === 0 ? "turn" : "causal";
-			const filePath = join(this.rootDir, viewFileName(kind));
-			const stored = await readViewFile(this.rootDir, kind);
-			if (stored === undefined) {
-				if (expected > 0) throw new ContinuousChatCorruptError(filePath, "Persisted view is missing");
-				persisted[index] = false;
-				continue;
-			}
-			if (stored.totalMessages > expected) throw new ContinuousChatCorruptError(filePath, "Invalid persisted view");
-			views[index] = stored;
-		}
-		return this.settleViewsLocked(views, persisted, expected, signal);
-	}
-
-	/** Catches both views up to `expected`, and persists each one that was never stored or whose layout changed. */
-	private async settleViewsLocked(
-		views: ViewPair,
-		persisted: [boolean, boolean],
-		expected: number,
-		signal?: AbortSignal,
-	): Promise<ViewPair> {
-		const coordinates = [
-			...views[0].entries,
-			...views[1].entries,
-			...leafCoordinates(Math.min(views[0].totalMessages, views[1].totalMessages), expected),
-		];
-		const nodes = await this.presentNodes(coordinates, true, signal);
-		signal?.throwIfAborted();
-		// Each view is fitted on its own, as the reference fits its two views: the causal view never inherits a merge.
-		const settled: ViewPair = [catchUpView(views[0], expected, nodes), catchUpView(views[1], expected, nodes)];
-		for (const index of [0, 1] as const) {
-			signal?.throwIfAborted();
-			if (!persisted[index] || !sameLayout(views[index], settled[index])) {
-				await persistView(this.rootDir, settled[index]);
-			}
-		}
-		return settled;
-	}
-
-	/**
 	 * The queue for the published range. A missing queue file for a non-empty chat predates the queue, and is rebuilt
 	 * once from the tree and marked `legacy-replay-v1`. Built items are completed, so the queue agrees with the tree.
 	 */
@@ -1484,6 +1440,7 @@ export class ContinuousChatStore {
 				};
 				if (unit.source !== undefined) record.source = unit.source;
 				if (unit.toolClipping !== undefined) record.toolClipping = unit.toolClipping;
+				if (unit.toolOutput !== undefined) record.toolOutput = unit.toolOutput;
 				if (unit.images !== undefined) record.images = await persistImages(this.imagesDir, unit.images);
 				planned.set(unit.sourceKey, record);
 				created.push(record);
@@ -1496,7 +1453,7 @@ export class ContinuousChatStore {
 			return outcomes.map((outcome) => ({ revision: state.root.revision, ...outcome }));
 		}
 		const root = await this.commitRecordsLocked(created, state.root);
-		const views = await this.settleViewsLocked(state.views, [true, true], root.nextId);
+		const views = await settleContinuousChatViews(this.viewPort(), state.views, [true, true], root.nextId);
 		this.settled = { revision: root.revision, views };
 		this.requireScheduler().arrival(root.nextId);
 		return outcomes.map((outcome) => ({ revision: root.revision, ...outcome }));
@@ -1577,11 +1534,36 @@ export class ContinuousChatStore {
 			this.rememberNode(key, validated);
 			// A node changes the tree, so the revision moves too: readers that cache by revision re-read the views.
 			const root = await this.writeRootLocked({ ...state.root, revision: state.root.revision + 1 });
-			const views = await this.settleViewsLocked(state.views, [true, true], root.nextId);
-			this.settled = { revision: root.revision, views };
+			const [turn, causal] = state.views;
+			const fitTurn = refreshContinuousChatViewEntry(turn, validated) || this.settled?.fitTurn;
+			const fitCausal = refreshContinuousChatViewEntry(causal, validated) || this.settled?.fitCausal;
+			this.settled = { revision: root.revision, views: state.views, fitTurn, fitCausal };
 		}
 		await this.completePublishedWorkLocked(validated);
 		return existing === undefined;
+	}
+
+	/** Checkpoint changed partitions once per stable revision, outside node publication. */
+	private async checkpointPublishedViews(): Promise<void> {
+		for (let snapshot = this.settled; snapshot?.fitTurn || snapshot?.fitCausal; snapshot = this.settled) {
+			const readNode = this.viewPort().readNode;
+			const [turn, causal] = await Promise.all([
+				snapshot.fitTurn ? proposeContinuousChatViewFit(readNode, snapshot.views[0]) : undefined,
+				snapshot.fitCausal ? proposeContinuousChatViewFit(readNode, snapshot.views[1]) : undefined,
+			]);
+			await this.withWriterLock(async () => {
+				const state = await this.reconcileLocked();
+				if (this.settled !== snapshot) return;
+				if (turn) await persistView(this.rootDir, "turn", turn.serialized);
+				if (causal) await persistView(this.rootDir, "causal", causal.serialized);
+				const views: ViewPair = [turn?.view ?? snapshot.views[0], causal?.view ?? snapshot.views[1]];
+				const root =
+					turn || causal
+						? await this.writeRootLocked({ ...state.root, revision: state.root.revision + 1 })
+						: state.root;
+				this.settled = { revision: root.revision, views };
+			});
+		}
 	}
 
 	/** A node covers only published messages, and both its children must already be in the tree. */
@@ -1667,57 +1649,13 @@ export class ContinuousChatStore {
 		if (!oldest.done) this.nodeCache.delete(oldest.value);
 	}
 
-	/**
-	 * Present nodes for `coordinates`. With `ancestors`, every present ancestor is included too. A node is present only
-	 * after both its children, so the climb stops at the first missing ancestor: nothing above it can be present.
-	 */
-	private async presentNodes(
-		coordinates: Iterable<ContinuousChatNodeCoordinate>,
-		ancestors: boolean,
-		signal?: AbortSignal,
-	): Promise<Map<string, ContinuousChatTreeNode>> {
-		const nodes = new Map<string, ContinuousChatTreeNode>();
-		const visited = new Set<string>();
-		const pending = [...coordinates];
-		for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
-			await checkpointContinuousChatRecovery(signal, visited.size);
-			const key = continuousChatNodeKey(next);
-			if (visited.has(key)) continue;
-			visited.add(key);
-			const node = await this.nodeAt(next);
-			if (node === undefined) continue;
-			nodes.set(key, node);
-			if (ancestors && next.level < CONTINUOUS_CHAT_TOP_LEVEL) {
-				pending.push({ level: next.level + 1, ordinal: Math.floor(next.ordinal / 2) });
-			}
+	/** Expose only recent projected role tags, never text, paths, tool arguments, or owner identifiers. */
+	private async recentViewKinds(end: number): Promise<ReadonlyMap<number, ContinuousChatMessageKind>> {
+		const kinds = new Map<number, ContinuousChatMessageKind>();
+		for (let id = Math.max(0, end - CONTINUOUS_CHAT_RECENT_CUE_COUNT); id < end; id++) {
+			kinds.set(id, (await this.recordAt(id)).kind);
 		}
-		return nodes;
-	}
-
-	/** The built part of a causal view. A straddling entry is split into its children until each piece ends by `end`. */
-	private async causalCut(
-		entries: readonly ContinuousChatViewEntry[],
-		end: number,
-		filePath: string,
-	): Promise<ContinuousChatViewEntry[]> {
-		const cut: ContinuousChatViewEntry[] = [];
-		const visit = async (coordinate: ContinuousChatNodeCoordinate): Promise<void> => {
-			const first = continuousChatNodeFirstMessage(coordinate);
-			if (first >= end) return;
-			const node = await this.nodeAt(coordinate);
-			if (node !== undefined && first + continuousChatNodeMessageCount(coordinate.level) <= end) {
-				const size = Buffer.byteLength(`${renderContinuousChatViewLine(node)}\n`, "utf8");
-				cut.push({ level: coordinate.level, ordinal: coordinate.ordinal, size });
-				return;
-			}
-			if (coordinate.level === 0) {
-				throw new ContinuousChatCorruptError(filePath, `Causal prefix reaches unbuilt message ${first}`);
-			}
-			await visit({ level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 });
-			await visit({ level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 + 1 });
-		};
-		for (const entry of entries) await visit(entry);
-		return cut;
+		return kinds;
 	}
 
 	/** The turn view collapsed to the causal view's budget, rendered once per root revision. */
@@ -1727,7 +1665,7 @@ export class ContinuousChatStore {
 	): Promise<RenderedContinuousChatView> {
 		const rendered = this.renderedBirth;
 		if (rendered !== undefined && rendered.revision === revision) return rendered.view;
-		const nodes = await this.presentNodes(turn.entries, true);
+		const nodes = await presentContinuousChatNodes(this.viewPort().readNode, turn.entries, true);
 		const view = renderContinuousChatView(
 			{
 				...turn,
@@ -1736,6 +1674,7 @@ export class ContinuousChatStore {
 			},
 			nodes,
 			this.viewProjection(),
+			await this.recentViewKinds(turn.totalMessages),
 		);
 		this.renderedBirth = { revision, view };
 		return view;
@@ -1749,10 +1688,23 @@ export class ContinuousChatStore {
 		const rendered = this.rendered;
 		if (rendered !== undefined && rendered.revision === revision) return rendered.view;
 		// Past high water a collapsed line may name a parent node, so the entries' ancestors are read too.
-		const nodes = await this.presentNodes(turn.entries, continuousChatViewBytes(turn) > turn.highBytes);
-		const view = renderContinuousChatView(turn, nodes, this.viewProjection());
+		const nodes = await presentContinuousChatNodes(
+			this.viewPort().readNode,
+			turn.entries,
+			continuousChatViewBytes(turn) > turn.highBytes,
+		);
+		const view = renderContinuousChatView(
+			turn,
+			nodes,
+			this.viewProjection(),
+			await this.recentViewKinds(turn.totalMessages),
+		);
 		this.rendered = { revision, view };
 		return view;
+	}
+
+	private viewPort() {
+		return { rootDir: this.rootDir, readNode: (coordinate: ContinuousChatNodeCoordinate) => this.nodeAt(coordinate) };
 	}
 
 	private viewProjection(): ContinuousChatViewProjection {

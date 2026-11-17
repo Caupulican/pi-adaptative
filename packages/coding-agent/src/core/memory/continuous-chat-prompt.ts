@@ -152,7 +152,7 @@ export interface ContinuousChatToolDefinition {
 
 /** What every `zoom` reads: the chat view's lines and messages. */
 export const CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION =
-	"Read n consecutive messages starting at id: aligned summary lines open into their children, and unmerged ranges descend to available summaries or messages. Follow a remaining-range continuation with its id and n. Use n = 1 for the full message and images; long messages use page from 0.";
+	"Read n consecutive messages starting at id: aligned summary lines open into their children, and unmerged ranges descend to available summaries or messages. Follow a remaining-range continuation with its id and n. Omit n or use n = 1 to read the retained message and images. Long messages use page from 0.";
 
 /** What only the root's `zoom` also reads: an agent's chat log. */
 export const CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION =
@@ -169,13 +169,17 @@ export const CONTINUOUS_CHAT_TOOL_DEFINITIONS: readonly ContinuousChatToolDefini
 			required: ["id"],
 			properties: {
 				id: {
-					description: "Message id (with n), agent name, or worker-ref reference",
+					description: "Message id, agent name, or worker-ref reference",
 					anyOf: [
 						{ type: "integer", minimum: 0 },
 						{ type: "string", minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS },
 					],
 				},
-				n: { type: "integer", minimum: 1, description: "Number of consecutive messages from id" },
+				n: {
+					type: "integer",
+					minimum: 1,
+					description: "Number of consecutive messages from id, defaults to 1 for a numeric id",
+				},
 				page: { type: "integer", minimum: 0, description: "Page of one message or agent log, from 0" },
 			},
 		},

@@ -213,7 +213,7 @@ export class DelegationGate {
 		this.deps.notify(interfaceText().notices.delegationGate.refused(subject));
 		return {
 			block: true,
-			reason: `This session orchestrates and does not carry out task work itself: ${subject} is task work. Start a worker for it: delegate {"action":"start","task":"<what to do, with the file paths>"}, then continue with other work. The worker's handoff arrives as an event.`,
+			reason: `This session orchestrates and does not carry out task work itself: ${subject} is task work. Start a worker for it: delegate {"action":"start","instructions":"<what to do, with the file paths>"}, then continue with other work. The worker's handoff arrives as an event.`,
 		};
 	}
 

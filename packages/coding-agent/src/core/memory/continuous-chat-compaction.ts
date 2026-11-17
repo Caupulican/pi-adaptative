@@ -59,6 +59,7 @@ export interface ContinuousChatCompactionConversation {
 /** A reason new compactions wait: the owner's words, and how long until the reason may have lifted (the runtime wakes then). */
 export interface ContinuousChatDispatchHold {
 	readonly message: string;
+	readonly reasons: readonly ("spend" | "provider" | "accounting")[];
 	readonly retryInMs: number;
 }
 
@@ -77,7 +78,7 @@ export class ContinuousChatAccountingHold extends Error {
 export interface ContinuousChatCompactionPort {
 	/** Stable summary configuration identity; changes permit retrying exhausted output failures. */
 	recoveryKey?(): string | undefined;
-	/** Why no compaction may start now (a spend limit, a provider limit) and when that may lift, or undefined. New claims wait while it holds. */
+	/** Why model-backed compaction is held and when the hold may lift, or undefined. */
 	dispatchHold?(): ContinuousChatDispatchHold | undefined;
 	/** The node the conversation builds names its paid spend, so every reply's usage is attributable to it. */
 	open(
@@ -101,7 +102,7 @@ export type ContinuousChatCompactionTarget =
 /** One compaction request. Its causal view ends before a leaf target or at a merge target's last message. */
 export interface ContinuousChatCompactionJob {
 	target: ContinuousChatCompactionTarget;
-	prefix: ContinuousChatCompactionPrefix;
+	prefix: ContinuousChatCompactionPrefix | (() => Promise<ContinuousChatCompactionPrefix | undefined>);
 	signal?: AbortSignal;
 	/**
 	 * Aborts when the run's owner closes: its port admits no further request, while a request already admitted still
@@ -170,9 +171,7 @@ export class ContinuousChatCompactionCoordinator {
 	}
 
 	async run(job: ContinuousChatCompactionJob): Promise<ContinuousChatCompactionOutcome> {
-		if (!job.prefix.view.startsWith("<chat>") || !job.prefix.view.endsWith("</chat>")) {
-			throw new TypeError("Continuous-chat compaction view must be a <chat> block.");
-		}
+		if (typeof job.prefix !== "function") assertChatPrefix(job.prefix);
 		const coordinate = targetCoordinate(job.target);
 		if (job.signal?.aborted) return { status: "cancelled", replies: 0 };
 		let existing: ContinuousChatTreeNode | undefined;
@@ -182,17 +181,21 @@ export class ContinuousChatCompactionCoordinator {
 			return failure("sink-error", 0, safeErrorMessage(error, "Continuous-chat node read failed."));
 		}
 		if (existing !== undefined) return { status: "published", node: existing, replies: 0, existing: true };
-		const node = noCallNode(job.target);
+		const node = continuousChatNoCallNode(job.target);
 		if (node !== undefined) return this.publish(job.signal, node, 0);
 		return this.compose(job);
 	}
 
 	private async compose(job: ContinuousChatCompactionJob): Promise<ContinuousChatCompactionOutcome> {
 		const { target, signal } = job;
-		if (signal?.aborted) return { status: "cancelled", replies: 0 };
+		if (signal?.aborted || this.port.dispatchHold?.()) return { status: "cancelled", replies: 0 };
+		const prefix = typeof job.prefix === "function" ? await job.prefix() : job.prefix;
+		if (prefix === undefined || signal?.aborted || this.port.dispatchHold?.())
+			return { status: "cancelled", replies: 0 };
+		assertChatPrefix(prefix);
 		let conversation: ContinuousChatCompactionConversation;
 		try {
-			conversation = this.port.open(job.prefix, targetCoordinate(target));
+			conversation = this.port.open(prefix, targetCoordinate(target));
 		} catch (error) {
 			return portFailure(job, 0, error);
 		}
@@ -204,6 +207,7 @@ export class ContinuousChatCompactionCoordinator {
 		let replies = 0;
 		let shortest: ContinuousChatCompactionCandidate | undefined;
 		while (replies < CONTINUOUS_CHAT_COMPACTION_MAX_REPLIES) {
+			if (signal?.aborted || this.port.dispatchHold?.()) return { status: "cancelled", replies };
 			let reply: string;
 			try {
 				reply = await conversation.send(correction === undefined ? { task } : { task, correction }, signal);
@@ -262,6 +266,12 @@ export class ContinuousChatCompactionCoordinator {
 	}
 }
 
+function assertChatPrefix(prefix: ContinuousChatCompactionPrefix): void {
+	if (!prefix.view.startsWith("<chat>") || !prefix.view.endsWith("</chat>")) {
+		throw new TypeError("Continuous-chat compaction view must be a <chat> block.");
+	}
+}
+
 function targetCoordinate(target: ContinuousChatCompactionTarget): ContinuousChatNodeCoordinate {
 	if (target.kind === "leaf") return { level: 0, ordinal: target.record.id };
 	const coordinate = continuousChatParentCoordinate(target.left, target.right);
@@ -277,7 +287,7 @@ function isLegacyNoteNodeText(text: string): boolean {
 }
 
 /** The node that needs no model call: the leaf when it fits as is (or is a legacy note), a tool call or result as an automatic line of code facts, or the joined children when their join fits (or both are legacy-note subtrees). */
-function noCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeNode | undefined {
+export function continuousChatNoCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeNode | undefined {
 	if (target.kind === "merge") {
 		const exact = createContinuousChatParentWithoutCall(target.left, target.right);
 		if (exact !== undefined) return exact;
@@ -289,22 +299,17 @@ function noCallNode(target: ContinuousChatCompactionTarget): ContinuousChatTreeN
 		return undefined;
 	}
 	const source = renderContinuousChatLeaf(target.record);
+	if (Buffer.byteLength(source, "utf8") <= CONTINUOUS_CHAT_NODE_MAX_BYTES)
+		return createContinuousChatLeaf(target.record);
 	if (target.record.kind === "note") {
 		const normalized = clipUtf8SingleLine(source, CONTINUOUS_CHAT_NODE_TARGET_BYTES);
 		return normalized === source
 			? createContinuousChatLeaf(target.record)
 			: createContinuousChatLeaf(target.record, normalized);
 	}
-	const fits = Buffer.byteLength(source, "utf8") <= CONTINUOUS_CHAT_NODE_TARGET_BYTES;
-	if (fits) return createContinuousChatLeaf(target.record);
 	// A tool call or result that does not fit is still code facts (name and arguments, size, head and tail), not words.
 	const toolLine = buildContinuousChatToolLeafText(target.record);
-	if (toolLine === undefined) return undefined;
-	harnessLog.debug("memory", "chat tool leaf built without a model call", () => ({
-		kind: target.record.kind,
-		originalBytes: target.record.textBytes,
-	}));
-	return createContinuousChatLeaf(target.record, toolLine);
+	return toolLine === undefined ? undefined : createContinuousChatLeaf(target.record, toolLine);
 }
 
 function failure(

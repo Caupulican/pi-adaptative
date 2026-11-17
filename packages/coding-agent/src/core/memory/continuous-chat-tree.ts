@@ -1,7 +1,11 @@
 /** Exact binary summary tree used by the permanent ICM chat. */
 
 import { isNonNegativeSafeInteger, isPlainRecord } from "../util/value-guards.ts";
-import { type ContinuousChatRecord, continuousChatDay } from "./continuous-chat-contracts.ts";
+import {
+	type ContinuousChatRecord,
+	continuousChatDay,
+	continuousChatToolOutputLabel,
+} from "./continuous-chat-contracts.ts";
 
 /** Compaction target. After five corrections the reference keeps the shortest reply even if slightly over. */
 export const CONTINUOUS_CHAT_NODE_TARGET_BYTES = 512;
@@ -65,13 +69,16 @@ export function continuousChatParentCoordinate(
 
 /** Model input for a message leaf. It is also the leaf itself when it already fits. */
 export function renderContinuousChatLeaf(record: ContinuousChatRecord): string {
-	return `${record.kind}: ${record.text}`;
+	const line = `${record.kind}: ${record.text}`;
+	return record.kind === "echo" && (record.toolClipping || record.toolOutput)
+		? `echo: [${continuousChatToolOutputLabel(record)}] ${record.text}`
+		: line;
 }
 
 export function createContinuousChatLeaf(record: ContinuousChatRecord, summary?: string): ContinuousChatTreeNode {
 	const source = renderContinuousChatLeaf(record);
 	const text = summary ?? source;
-	if (summary === undefined && Buffer.byteLength(source, "utf8") > CONTINUOUS_CHAT_NODE_TARGET_BYTES) {
+	if (summary === undefined && Buffer.byteLength(source, "utf8") > CONTINUOUS_CHAT_NODE_MAX_BYTES) {
 		throw new RangeError("An overlong message leaf requires a summary.");
 	}
 	return createContinuousChatTreeNode({
@@ -107,7 +114,7 @@ export function createContinuousChatParentWithoutCall(
 	right: ContinuousChatTreeNode,
 ): ContinuousChatTreeNode | undefined {
 	const text = `${left.text}\n${right.text}`;
-	if (Buffer.byteLength(text, "utf8") > CONTINUOUS_CHAT_NODE_TARGET_BYTES) return undefined;
+	if (Buffer.byteLength(text, "utf8") > CONTINUOUS_CHAT_NODE_MAX_BYTES) return undefined;
 	return createContinuousChatParent(left, right, text);
 }
 
@@ -184,7 +191,7 @@ export function parseContinuousChatTreeNode(value: unknown): ContinuousChatTreeN
 }
 
 export function renderContinuousChatViewLine(node: ContinuousChatTreeNode): string {
-	return `${continuousChatNodeLabel(node)}|${node.text.replaceAll(/\r?\n/g, " ")}`;
+	return `${continuousChatNodeLabel(node)}|${node.text.replace(/^(echo: \d+ bytes(?: \(clipped from \d+ characters\))?, auto-summary: zoom for )the exact result\./gm, "$1the retained record.").replaceAll(/\r?\n/g, " ")}`;
 }
 
 /** Why a coordinate has no line of its own: a message is not summarized yet, or a run of summaries is not merged yet. */
