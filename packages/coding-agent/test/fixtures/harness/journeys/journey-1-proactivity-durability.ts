@@ -37,7 +37,7 @@ export async function runJourney1ProactivityDurability(world: HarnessWorld): Pro
 			const agentDir = `${world.agentDir}-proactive-durable-${delivery}`;
 			const settings = icmContinuousSettings("worker-c", {
 				autoLearn: { enabled: false },
-				proactivity: { enabled: true, delivery, minOwnerTurnsBetweenRuns: 1 },
+				proactivity: { enabled: true, delivery, minOwnerTurnsBetweenRuns: 1, maxRunsPerSession: 1 },
 			});
 			let root = await world.createRootSession("root", {
 				agentDir,
@@ -217,6 +217,10 @@ export async function runJourney1ProactivityDurability(world: HarnessWorld): Pro
 				systemOneEnabled: false,
 				settings,
 			});
+			expect(
+				await root.session.backgroundLanes.runProactiveReviewOnce(),
+				"the reopened session has already spent its one review, including a review with two model responses",
+			).toMatchObject({ started: false, skipReason: "max_runs_reached" });
 			expect(await world.disposeSessionInBody(root.session)).toBeUndefined();
 			expect(rootRequests(), "a settled note never wakes again after reopening").toBe(beforeFinalOpen);
 			if (delivery === "turn") {

@@ -43,11 +43,12 @@ import { ProactivityInvestigation } from "./proactivity-investigation.ts";
 import type { ProactivityInvestigationHost } from "./proactivity-read-authority.ts";
 import {
 	buildReviewPrompt,
-	countOwnerTurns,
+	countSessionReviewStarts,
 	createRaiseNoteTool,
 	MAX_REVIEW_PROFILE_CHARS,
-	ownerTurnsAtLastReview,
+	ownerTurnsSinceLastReview,
 	PROACTIVE_NOTE_CUSTOM_TYPE,
+	PROACTIVITY_REVIEW_START_CUSTOM_TYPE,
 	type ProactiveNote,
 	priorNotes,
 	REVIEW_SYSTEM_PROMPT,
@@ -231,8 +232,6 @@ export class ProactivityController {
 	private _timer: unknown;
 	private _isRunning = false;
 	private _aborted = false;
-	private _runs = 0;
-	private _ownerTurnsAtLastRun = 0;
 	private _lastSkipReason: string | undefined;
 	private _daily: ProactivityDailyState = {};
 	private _unsubscribeActivity: (() => void) | undefined;
@@ -301,17 +300,12 @@ export class ProactivityController {
 		if (this.deps.isForegroundBusy()) return "foreground_busy";
 		const settings = this.deps.getSettingsManager().getProactivitySettings();
 		if (!settings.enabled) return "proactivity_disabled";
-		if (this._runs >= settings.maxRunsPerSession) return "max_runs_reached";
 		const manager = this.deps.getSessionManager();
+		if (this.hasReachedRunCap(manager, settings)) return "max_runs_reached";
 		const entries = getActiveSessionBranchEntries(manager);
-		// Counted from the last review this session ran, or the last its transcript records spending (one before it was loaded
-		// again: a bot's session after each idle close), each at the owner turns it started at, so a load does not review
-		// again without new owner turns and an owner turn that discarded a review counts as new.
-		const sinceRun = Math.max(
-			this._ownerTurnsAtLastRun,
-			ownerTurnsAtLastReview(entries, (entryId) => manager.getBranch(entryId)),
-		);
-		if (countOwnerTurns(entries) - sinceRun < settings.minOwnerTurnsBetweenRuns) {
+		if (
+			ownerTurnsSinceLastReview(entries, (entryId) => manager.getBranch(entryId)) < settings.minOwnerTurnsBetweenRuns
+		) {
 			return "not_enough_new_owner_turns";
 		}
 		const shipment = this.models.resolveShipment(settings, "no_proactivity_model");
@@ -319,6 +313,13 @@ export class ProactivityController {
 		if (!this.models.capabilityProfile(shipment.model).backgroundLanesEnabled) return "model_proactivity_unsupported";
 		if (this.isSubjectSuppressed(entries, settings)) return "topic_suppressed";
 		return undefined;
+	}
+
+	private hasReachedRunCap(manager: SessionManager, settings: ResolvedProactivitySettings): boolean {
+		return (
+			settings.maxRunsPerSession === 0 ||
+			countSessionReviewStarts(manager.getEntries(), manager.getSessionId()) >= settings.maxRunsPerSession
+		);
 	}
 
 	/**
@@ -502,11 +503,13 @@ export class ProactivityController {
 			// Past the wake bound the review still runs; its accepted notes wait for the owner's next turn.
 			const deliveryHold =
 				settings.delivery === "turn" && turnWakes >= settings.maxTurnWakesPerDay ? MAX_TURN_WAKES_HOLD : undefined;
+			const usageOrigin = usageOwner.captureOrigin();
 			const runUsage = new BoundedCompletionUsage(
 				usageOwner,
 				"proactivity",
 				new RequestSpendBudget(Math.min(maxUsd, remainingDayUsd), undefined, billing),
 				2,
+				usageOrigin,
 			);
 			usage = runUsage;
 			runtimeLease = await runtimeGenerationAdmission(this.deps.getAgentDir()).admitWork({
@@ -516,12 +519,24 @@ export class ProactivityController {
 			});
 			runtimeLease.assertCurrent();
 			assertCurrent();
+			if (this.hasReachedRunCap(manager, settings)) {
+				this._lastSkipReason = "max_runs_reached";
+				this.noticeSkip("max_runs_reached", settings);
+				return { started: false, skipReason: "max_runs_reached", delivered: [] };
+			}
+			const reviewEntryId = manager.appendCustomEntry(PROACTIVITY_REVIEW_START_CUSTOM_TYPE, {
+				version: 1,
+				sessionId: usageOrigin.sessionId,
+				...(usageOrigin.entryId !== undefined ? { entryId: usageOrigin.entryId } : {}),
+			});
+			// The origin capture has flushed the branch for file-backed sessions. Never dispatch with a buffered start.
+			if (manager.isPersisted() && !manager.isEntryPersisted(reviewEntryId))
+				throw new Error("Proactive review start was not persisted before admission.");
 			started = true;
+			assertCurrent();
 			// A review that starts has passed every gate the owner may have been told about.
 			this.deps.observeHarnessNotice?.("proactive-review", () => "clear");
-			this._runs++;
-			this._ownerTurnsAtLastRun = countOwnerTurns(entries);
-			deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${this._runs}`);
+			deregisterInFlight = registerInFlightWork(this.deps.getAgentDir(), "lane", `proactivity:${reviewEntryId}`);
 			const capture: { raised: ProactiveNote[] } = { raised: [] };
 			const reviewInvestigation = new ProactivityInvestigation(this.deps, {
 				model,

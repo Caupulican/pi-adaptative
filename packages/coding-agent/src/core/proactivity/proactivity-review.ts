@@ -12,6 +12,54 @@ import { isPlainRecord } from "../util/value-guards.ts";
 export const PROACTIVE_NOTE_CUSTOM_TYPE = "proactive-note";
 export const RAISE_NOTE_TOOL_NAME = "raise_note";
 
+/** One slot is consumed when the owning session admits a review, before any provider response. */
+export const PROACTIVITY_REVIEW_START_CUSTOM_TYPE = "proactivity-review-start";
+
+interface ProactivityReviewOrigin {
+	readonly sessionId: string;
+	readonly entryId?: string;
+}
+
+function reviewOrigin(entry: SessionEntry): ProactivityReviewOrigin | undefined {
+	if (entry.type !== "custom" || !isPlainRecord(entry.data)) return undefined;
+	let origin: Record<string, unknown>;
+	if (entry.customType === PROACTIVITY_REVIEW_START_CUSTOM_TYPE && entry.data.version === 1) {
+		origin = entry.data;
+	} else if (
+		entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE &&
+		entry.data.route === "proactivity" &&
+		isPlainRecord(entry.data.origin)
+	) {
+		origin = entry.data.origin;
+	} else {
+		return undefined;
+	}
+	return typeof origin.sessionId === "string" && (origin.entryId === undefined || typeof origin.entryId === "string")
+		? { sessionId: origin.sessionId, ...(origin.entryId !== undefined ? { entryId: origin.entryId } : {}) }
+		: undefined;
+}
+
+/** Count starts on every branch of this session. Legacy response rows can prove one review per origin. */
+export function countSessionReviewStarts(entries: readonly SessionEntry[], sessionId: string): number {
+	let starts = 0;
+	const startOrigins = new Set<string | undefined>();
+	const responseOrigins = new Set<string | undefined>();
+	for (const entry of entries) {
+		const origin = reviewOrigin(entry);
+		if (origin?.sessionId !== sessionId || entry.type !== "custom") continue;
+		if (entry.customType === PROACTIVITY_REVIEW_START_CUSTOM_TYPE) {
+			starts++;
+			startOrigins.add(origin.entryId);
+		} else {
+			responseOrigins.add(origin.entryId);
+		}
+	}
+	for (const entryId of responseOrigins) {
+		if (!startOrigins.has(entryId)) starts++;
+	}
+	return starts;
+}
+
 export const MAX_NOTE_TEXT_CHARS = 400;
 export const MAX_NOTE_WHY_CHARS = 200;
 /** Recent conversation text carried into one review, newest last. */
@@ -184,44 +232,33 @@ function conversationEntries(entries: readonly SessionEntry[]): EntryText[] {
 	return texts;
 }
 
-/** Inputs the owner spoke on the active branch: a hidden internal turn has no input id, and a peer's message has an extension one. */
-export function countOwnerTurns(entries: readonly SessionEntry[]): number {
-	return entries.filter(isOwnerTurn).length;
-}
-
-function isOwnerTurn(entry: SessionEntry): boolean {
-	return entry.type === "message" && entry.ownerInputId !== undefined && isOwnerSpokenInputId(entry.ownerInputId);
-}
-
 /**
- * The owner turns on the active branch that the last proactive review spending on it had read, 0 when none did: the
- * review's own durable mark, read where the session was loaded again since. That review's last `proactivity` usage record
- * names, as its origin, the entry the review started at (captured when its run was admitted), and the turns it read are
- * the ones on the path to that entry (`pathTo`) that the active branch shares. Where the record lands tells nothing: a
- * paid response settles after the owner message that discarded its review, so the turns before the record can include
- * one the review never read. An origin that names no entry was captured on an empty branch, which holds no owner turn.
+ * Count owner inputs newer than the most advanced review origin this branch records. Responses can
+ * settle out of order or after the owner turn that interrupted them. An off-branch origin counts
+ * only the owner inputs its path shares with the active branch.
  */
-export function ownerTurnsAtLastReview(
+export function ownerTurnsSinceLastReview(
 	entries: readonly SessionEntry[],
 	pathTo: (entryId: string) => readonly SessionEntry[],
 ): number {
-	let reviewed = false;
-	let startedAt: string | undefined;
+	const ownerTurnsAt = new Map<string, number>();
+	const origins = new Set<string>();
+	let turns = 0;
 	for (const entry of entries) {
-		if (
-			entry.type !== "custom" ||
-			entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE ||
-			!isPlainRecord(entry.data) ||
-			entry.data.route !== "proactivity"
-		)
-			continue;
-		reviewed = true;
-		const origin = entry.data.origin;
-		startedAt = isPlainRecord(origin) && typeof origin.entryId === "string" ? origin.entryId : undefined;
+		if (entry.type === "message" && entry.ownerInputId !== undefined && isOwnerSpokenInputId(entry.ownerInputId))
+			turns++;
+		ownerTurnsAt.set(entry.id, turns);
+		const origin = reviewOrigin(entry);
+		if (origin?.entryId !== undefined) origins.add(origin.entryId);
 	}
-	if (!reviewed || startedAt === undefined) return 0;
-	const read = new Set(pathTo(startedAt).map((entry) => entry.id));
-	return entries.filter((entry) => read.has(entry.id) && isOwnerTurn(entry)).length;
+	let reviewed = 0;
+	for (const origin of origins) {
+		const shared = ownerTurnsAt.has(origin)
+			? origin
+			: pathTo(origin).findLast((entry) => ownerTurnsAt.has(entry.id))?.id;
+		if (shared !== undefined) reviewed = Math.max(reviewed, ownerTurnsAt.get(shared)!);
+	}
+	return turns - reviewed;
 }
 
 /** Digests of notes already delivered on this branch, and the newest few as text for the review. */

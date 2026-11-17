@@ -90,7 +90,7 @@ import { isHostInputId, isOwnerChannelInputId, isOwnerSpokenInputId } from "./ow
 import { PIPELINE_RUN_CUSTOM_TYPE } from "./pipelines/types.ts";
 import { ACT_AHEAD_CUSTOM_TYPE } from "./proactivity/act-ahead-record.ts";
 import { PROACTIVITY_FEEDBACK_CUSTOM_TYPE } from "./proactivity/proactivity-feedback.ts";
-import { PROACTIVE_NOTE_CUSTOM_TYPE } from "./proactivity/proactivity-review.ts";
+import { PROACTIVE_NOTE_CUSTOM_TYPE, PROACTIVITY_REVIEW_START_CUSTOM_TYPE } from "./proactivity/proactivity-review.ts";
 import {
 	BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
 	PLAN_UPDATE_CUSTOM_TYPE,
@@ -381,6 +381,7 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		HARNESS_NOTICE_CUSTOM_TYPE,
 		WATCH_AUTO_ARM_CUSTOM_TYPE,
 		PROACTIVE_NOTE_CUSTOM_TYPE,
+		PROACTIVITY_REVIEW_START_CUSTOM_TYPE,
 		PROACTIVITY_FEEDBACK_CUSTOM_TYPE,
 		ACT_AHEAD_CUSTOM_TYPE,
 		GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
