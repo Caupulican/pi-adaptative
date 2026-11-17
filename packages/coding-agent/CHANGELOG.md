@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Changed
+
+- GPT-6.2 Sol is now the default Codex model.
+
+### Fixed
+
+- Wide and deeply nested transcript payloads survive session save, reopen, fork, and worker replay. A failed transcript write leaves the previous transcript available.
+- Silent provider streams time out even when the provider continues sending frames without model progress. Non-empty thinking retains its longer idle allowance.
+- Foreground recovery keeps retry decisions, cancellation, and cleanup consistent when a provider call fails or a turn is interrupted.
+- Reopening a session preserves the proactive review limit and the required number of owner turns between reviews.
+- The reconciliation alarm retries failed leader outcome delivery and retirement. A paused parent can receive its pending outcome when it resumes.
+
 ## [0.104.68] - 2026-11-17
 
 ### Changed

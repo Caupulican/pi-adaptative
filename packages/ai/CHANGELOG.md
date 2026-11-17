@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added GPT-6.2 Sol and GPT-6.2 Astra to the OpenAI and Codex model catalogs.
+
+### Changed
+
+- Updated the Codex client identity to `0.171.0-alpha.12`.
+
 ## [0.104.68] - 2026-11-17
 
 ### Changed
