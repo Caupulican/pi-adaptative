@@ -39,7 +39,7 @@ function reviewOrigin(entry: SessionEntry): ProactivityReviewOrigin | undefined 
 		: undefined;
 }
 
-/** Count starts on every branch of this session. Legacy response rows can prove one review per origin. */
+/** Count starts across all branches. Responses without a matching start establish one review per recorded origin. */
 export function countSessionReviewStarts(entries: readonly SessionEntry[], sessionId: string): number {
 	let starts = 0;
 	const startOrigins = new Set<string | undefined>();
