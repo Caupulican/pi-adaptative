@@ -708,6 +708,7 @@ export class PlanExecutor implements PlanExecutorPort {
 						headroom: runtime.getProjectionCapacity().headroom,
 						releasedTasks: Object.values(plan.nodes).filter((entry) => entry.release).length,
 						maxScopeChars: PLAN_LIMITS.scopeChars,
+						sessionCwd: this.deps.workerWrites().cwd,
 					})
 				: undefined;
 		if (!built || !facts?.ok) {

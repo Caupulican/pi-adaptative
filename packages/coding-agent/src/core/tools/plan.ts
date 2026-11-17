@@ -29,7 +29,8 @@ const step = Type.Object(
 		files: Type.Optional(
 			Type.Array(Type.String({ minLength: 1 }), {
 				maxItems: PLAN_LIMITS.writeScopeEntries,
-				description: "Files or folders this step may change. Leave out for read-only work.",
+				description:
+					"Files or folders this step may change: paths under the working directory, or absolute directories outside it. Leave out for read-only work.",
 			}),
 		),
 		uses: stepIds("Steps whose results this step needs; it starts after them and receives their results."),

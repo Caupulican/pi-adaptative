@@ -169,12 +169,12 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 	let proposed: PlanNodeSpec[];
 	let final: string | undefined;
 	if (current) {
-		const revised = revisedNodes(current, input, version);
+		const revised = revisedNodes(current, input, version, context.workerWrites.cwd);
 		if (revised.problems.length > 0) return { ok: false, problems: revised.problems };
 		proposed = revised.nodes;
 		final = revised.final;
 	} else {
-		proposed = (input.steps ?? []).map((step) => nodeFromStep(step, version));
+		proposed = (input.steps ?? []).map((step) => nodeFromStep(step, version, context.workerWrites.cwd));
 		final = input.final ?? defaultFinal(proposed);
 	}
 	const reserved = reservedLandIdProblems(proposed, current, new Set((input.steps ?? []).map((step) => step.id)));
@@ -204,6 +204,7 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 		headroom: context.headroom,
 		releasedTasks,
 		maxScopeChars: PLAN_LIMITS.scopeChars,
+		sessionCwd: context.workerWrites.cwd,
 	};
 	// F11 reads the steps stated at this version, as F8 does: a step a revise leaves unchanged keeps the files it runs with.
 	const unlent = unlentWriteRefusals(proposed, context.workerWrites, changed).map((refusal) => refusal.fix);

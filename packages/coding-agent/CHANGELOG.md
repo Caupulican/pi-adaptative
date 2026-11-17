@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- A plan step's `files` may name absolute directories outside the working directory; such a step is refused only where the session's workers may not write. An absolute path inside the working directory counts as its relative form, so two steps naming one file either way are ordered. Windows drive paths are accepted. A merge member that names a directory outside the repository is refused when the plan is checked, because a merge lands each member from its own worktree; before, its worker start failed instead.
+
 ## [0.104.67] - 2026-11-17
 
 ## [0.104.66] - 2026-11-16

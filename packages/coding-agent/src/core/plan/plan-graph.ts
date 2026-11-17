@@ -186,7 +186,10 @@ export interface PlanNodeSpec {
 	readonly inputs: readonly string[];
 	/** Pure ordering edges, no data. The node's edges are `inputs` and `after` together. */
 	readonly after: readonly string[];
-	/** Repository-relative files or folders the node may change, forward slashes; empty is read-only. */
+	/**
+	 * Files or folders the node may change, forward slashes; empty is read-only. Relative to the session directory, or an
+	 * absolute directory outside it (`normalizePlanWriteScope`).
+	 */
 	readonly writeScope: readonly string[];
 	readonly requirementIds: readonly string[];
 	/** From the step's `by`: prefer this bot, leader or machine. */
@@ -501,18 +504,53 @@ export function planPathExists(
 	return false;
 }
 
+/** Windows names an absolute directory by its drive, with either separator, and compares names without case. */
+const WINDOWS_PATHS = process.platform === "win32";
+
+function scopeSegments(path: string): string[] {
+	return path
+		.replaceAll("\\", "/")
+		.split("/")
+		.filter((segment) => segment.length > 0 && segment !== ".");
+}
+
+function sameSegment(left: string, right: string): boolean {
+	return WINDOWS_PATHS ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/** Whether a normalized write scope is an absolute directory outside the session directory. */
+export function planScopeOutsideSession(scope: string): boolean {
+	return WINDOWS_PATHS ? /^[A-Za-z]:\//.test(scope) : scope.startsWith("/");
+}
+
 /**
- * Normalizes one write scope to the repository-relative form X-31 fixes (forward slashes, no leading `./`, no
- * trailing `/`), or returns undefined when it leaves the repository or is not a relative path.
+ * Normalizes one write scope (forward slashes, no leading `./`, no trailing `/`). A relative path stays inside the
+ * session directory. An absolute path inside it takes its relative form, so both spellings of one file are one scope
+ * (F9); any other absolute path is a directory the step was given outside it, which F11 still refuses when the
+ * session's workers may not write there. The session directory itself, `..`, `~`, and backslashes or drive
+ * prefixes outside a Windows absolute path are refused.
  */
-export function normalizePlanWriteScope(scope: string, maxChars: number): string | undefined {
+export function normalizePlanWriteScope(scope: string, maxChars: number, sessionCwd: string): string | undefined {
 	const trimmed = scope.trim();
-	if (trimmed.length === 0 || trimmed.length > maxChars) return undefined;
-	if (trimmed.includes("\\") || trimmed.includes("\0")) return undefined;
-	if (trimmed.startsWith("/") || /^[A-Za-z]:/.test(trimmed) || trimmed.startsWith("~")) return undefined;
-	const segments = trimmed.split("/").filter((segment) => segment.length > 0 && segment !== ".");
+	if (trimmed.length === 0 || trimmed.length > maxChars || trimmed.includes("\0") || trimmed.startsWith("~")) {
+		return undefined;
+	}
+	const absolute = WINDOWS_PATHS ? /^[A-Za-z]:[\\/]/.test(trimmed) : trimmed.startsWith("/");
+	if (!absolute && (trimmed.includes("\\") || trimmed.startsWith("/") || /^[A-Za-z]:/.test(trimmed))) return undefined;
+	if (absolute && !WINDOWS_PATHS && trimmed.includes("\\")) return undefined;
+	const segments = scopeSegments(trimmed);
 	if (segments.length === 0 || segments.includes("..")) return undefined;
-	return segments.join("/");
+	if (!absolute) return segments.join("/");
+	const base = scopeSegments(sessionCwd);
+	const insideSession =
+		base.length > 0 &&
+		segments.length >= base.length &&
+		base.every((segment, index) => sameSegment(segment, segments[index] as string));
+	if (insideSession) {
+		const relative = segments.slice(base.length);
+		return relative.length > 0 ? relative.join("/") : undefined;
+	}
+	return WINDOWS_PATHS ? segments.join("/") : `/${segments.join("/")}`;
 }
 
 /**
@@ -550,6 +588,8 @@ export interface PlanFactContext {
 	/** Tasks already released by earlier versions of this plan; they do not need new slots. */
 	readonly releasedTasks?: number;
 	readonly maxScopeChars: number;
+	/** The session directory relative write scopes are under (F5). */
+	readonly sessionCwd: string;
 }
 
 export interface PlanFactsAccepted {
@@ -677,17 +717,26 @@ function checkJoinShape(node: PlanNodeSpec, nodes: readonly PlanNodeSpec[], prob
 					fix: `merge needs every member to be a work step that changes files; ${member} is not`,
 				});
 			}
+			// A member runs in its own worktree of the repository, which holds nothing outside the session directory.
+			const outside = spec?.writeScope.filter(planScopeOutsideSession) ?? [];
+			if (outside.length > 0) {
+				problems.push({
+					fact: "F4",
+					nodeId: node.id,
+					fix: `merge lands repository files from each member's own worktree; ${member} names ${outside.join(", ")}, outside it; order the steps with after instead of merging them`,
+				});
+			}
 		}
 	}
 }
 
-function checkScopes(node: PlanNodeSpec, maxChars: number, problems: PlanFactProblem[]): void {
+function checkScopes(node: PlanNodeSpec, maxChars: number, sessionCwd: string, problems: PlanFactProblem[]): void {
 	for (const scope of node.writeScope) {
-		if (normalizePlanWriteScope(scope, maxChars) !== scope) {
+		if (normalizePlanWriteScope(scope, maxChars, sessionCwd) !== scope) {
 			problems.push({
 				fact: "F5",
 				nodeId: node.id,
-				fix: `step "${node.id}": give "${scope}" as a path inside the repository`,
+				fix: `step "${node.id}": give "${scope}" as a path under the working directory or an absolute directory outside it`,
 			});
 		}
 	}
@@ -721,7 +770,7 @@ export function checkPlanFacts(
 	for (const node of nodes) {
 		checkNodeBounds(node, problems);
 		checkJoinShape(node, nodes, problems);
-		checkScopes(node, context.maxScopeChars, problems);
+		checkScopes(node, context.maxScopeChars, context.sessionCwd, problems);
 	}
 	const order = planTopologicalOrder(nodes);
 	let depth = 0;

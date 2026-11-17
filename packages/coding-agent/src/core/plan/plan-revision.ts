@@ -109,8 +109,11 @@ function stepBrief(step: PlanToolStep): TaskBrief | undefined {
 	};
 }
 
-/** One tool step as a node spec stated at `version`. A path that normalizes is kept normalized; F5 refuses the rest. */
-export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec {
+/**
+ * One tool step as a node spec stated at `version`. A path that normalizes against the session directory is kept
+ * normalized; F5 refuses the rest.
+ */
+export function nodeFromStep(step: PlanToolStep, version: number, sessionCwd: string): PlanNodeSpec {
 	const kind = step.join ?? "work";
 	const inputs = [...new Set(step.uses ?? [])];
 	const brief = stepBrief(step);
@@ -122,7 +125,9 @@ export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec 
 		...(brief ? { brief } : {}),
 		inputs,
 		after: [...new Set(step.after ?? [])].filter((id) => !inputs.includes(id)),
-		writeScope: (step.files ?? []).map((path) => normalizePlanWriteScope(path, PLAN_LIMITS.scopeChars) ?? path),
+		writeScope: (step.files ?? []).map(
+			(path) => normalizePlanWriteScope(path, PLAN_LIMITS.scopeChars, sessionCwd) ?? path,
+		),
 		requirementIds: [...new Set(step.req ?? [])],
 		...(step.by ? { pin: pinFromBy(step.by) } : {}),
 		effort: step.deep ? "deep" : "normal",
@@ -188,6 +193,7 @@ export function revisedNodes(
 	record: PlanRecord,
 	input: PlanToolInput,
 	version: number,
+	sessionCwd: string,
 ): { readonly nodes: PlanNodeSpec[]; readonly final: string | undefined; readonly problems: string[] } {
 	const problems: string[] = [];
 	const removed = new Set(input.remove ?? []);
@@ -202,7 +208,7 @@ export function revisedNodes(
 			if (land) removed.add(land.id);
 		}
 	}
-	const replacements = new Map((input.steps ?? []).map((step) => [step.id, nodeFromStep(step, version)]));
+	const replacements = new Map((input.steps ?? []).map((step) => [step.id, nodeFromStep(step, version, sessionCwd)]));
 	const nodes = record.nodes.filter((node) => !removed.has(node.id)).map((node) => replacements.get(node.id) ?? node);
 	for (const [id, node] of replacements) if (!record.nodes.some((existing) => existing.id === id)) nodes.push(node);
 	const final = input.final ?? (removed.has(record.final) ? defaultFinal(nodes) : record.final);
