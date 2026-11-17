@@ -103,7 +103,7 @@ and package update checks.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `warnings.anthropicExtraUsage` | boolean | `true` | Show a warning when Anthropic subscription auth may use paid extra usage |
+| `warnings.anthropicExtraUsage` | boolean | `false` | Show a warning when Anthropic subscription auth may use paid extra usage |
 
 ```json
 {
@@ -1048,7 +1048,7 @@ Zero-footprint repo/directory overlays live under `~/.pi/agent/profiles/director
   },
   "enabledModels": ["claude-*", "gpt-4o"],
   "warnings": {
-    "anthropicExtraUsage": true
+    "anthropicExtraUsage": false
   },
   "packages": ["pi-skills"]
 }

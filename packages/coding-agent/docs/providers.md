@@ -72,7 +72,7 @@ Those instances can run concurrently. Switching `/model` in one instance only ch
 
 ### Claude Pro/Max
 
-Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
+Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits. The interactive warning is off unless `warnings.anthropicExtraUsage` is true.
 
 Pi uses the locally verified Claude Code request identity for OAuth Messages and account usage. Signed thinking and redacted-thinking payloads replay unchanged. If signed readable thinking contains credentials that must be redacted, Pi withholds the request instead of altering the signed block.
 

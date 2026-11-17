@@ -358,7 +358,7 @@ export async function loginAnthropic(options: {
 			client_id: protocol.clientId,
 			response_type: "code",
 			redirect_uri: redirectUriForExchange,
-			scope: ["org:create_api_key", ...protocol.inferenceScopes].join(" "),
+			scope: ["org:create_api_key", ...protocol.inferenceScopes, "user:privacy_consents:write"].join(" "),
 			code_challenge: challenge,
 			code_challenge_method: "S256",
 			state: expectedState,
@@ -476,7 +476,8 @@ export async function refreshAnthropicToken(
 						scope === "user:projects:read" ||
 						scope === "user:projects:write" ||
 						scope === "user:design:read" ||
-						scope === "user:design:write",
+						scope === "user:design:write" ||
+						scope === "user:privacy_consents:write",
 				),
 			]
 		: originalScopes.length

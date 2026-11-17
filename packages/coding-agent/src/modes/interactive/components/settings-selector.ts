@@ -2555,7 +2555,7 @@ class WarningSettingsSubmenu extends SettingsListSubmenu {
 				id: "anthropic-extra-usage",
 				label: screenText().warnings.anthropicExtraUsage.label,
 				description: screenText().warnings.anthropicExtraUsage.description,
-				currentValue: (this.state.anthropicExtraUsage ?? true) ? "true" : "false",
+				currentValue: (this.state.anthropicExtraUsage ?? false) ? "true" : "false",
 				values: ["true", "false"],
 				valueLabels: screenText().valueLabels.onOff,
 			},

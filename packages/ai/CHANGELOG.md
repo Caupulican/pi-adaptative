@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Interactive Anthropic login requests `user:privacy_consents:write`, matching reviewed Claude Code 2.1.326, and OAuth message requests send `X-Claude-Code-Session-Id` when a safe session id is present. Refresh still asks for the six inference scopes. A legacy refresh that rewrites stored scopes keeps `user:privacy_consents:write` when it is already stored, and still keeps Design scopes.
+
 ### Fixed
 
 - Google and Antigravity responses no longer fail with "Invalid Google cached token count" when the reported cached tokens exceed the prompt tokens. Usage follows the AGY `1.5.9` usage mapping: uncached input floors at zero and the cached count is kept as reported. The opening Antigravity leg also keeps prompt counts reported before the first candidate.

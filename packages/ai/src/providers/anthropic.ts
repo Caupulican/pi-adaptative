@@ -570,6 +570,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					() => (compatibility ??= awaitAuthorizationInput(resolveAnthropicCompatibility, options?.signal)),
 					options?.headers,
 					copilotDynamicHeaders,
+					options?.sessionId,
 					cacheSessionId,
 				);
 				if (
@@ -892,6 +893,15 @@ function isOAuthToken(apiKey: string): boolean {
 
 type AnthropicClientOptions = NonNullable<ConstructorParameters<typeof Anthropic>[0]>;
 
+function isValidOAuthSessionId(sessionId: unknown): sessionId is string {
+	return (
+		typeof sessionId === "string" &&
+		sessionId.length >= 1 &&
+		sessionId.length <= 200 &&
+		/^[\x21-\x7e]+$/.test(sessionId)
+	);
+}
+
 function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
 	return new Anthropic({ ...options, dangerouslyAllowBrowser: true });
 }
@@ -906,6 +916,7 @@ async function createClient(
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
+	cacheSessionId?: string,
 ): Promise<{ client: Anthropic; isOAuthToken: boolean; compatibility?: AnthropicCompatibilitySnapshot }> {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
 	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
@@ -996,6 +1007,7 @@ async function createClient(
 					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
 					"user-agent": compatibility.identity.messagesUserAgent,
 					"x-app": "cli",
+					...(isValidOAuthSessionId(sessionId) ? { "X-Claude-Code-Session-Id": sessionId } : {}),
 				},
 				model.headers,
 				optionsHeaders,
@@ -1007,7 +1019,9 @@ async function createClient(
 
 	// API key auth
 	const sessionAffinityHeaders: Record<string, string | null> =
-		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
+		cacheSessionId && getAnthropicCompat(model).sendSessionAffinityHeaders
+			? { "x-session-affinity": cacheSessionId }
+			: {};
 	const client = createAnthropicSdkClient({
 		apiKey,
 		authToken: null,

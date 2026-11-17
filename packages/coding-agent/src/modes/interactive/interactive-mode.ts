@@ -2912,7 +2912,7 @@ export class InteractiveMode {
 	private async maybeWarnAboutAnthropicSubscriptionAuth(
 		model: Model<any> | undefined = this.session.model,
 	): Promise<void> {
-		if (this.settingsManager.getWarnings().anthropicExtraUsage === false) {
+		if (this.settingsManager.getWarnings().anthropicExtraUsage !== true) {
 			return;
 		}
 		if (this.anthropicSubscriptionWarningShown) {

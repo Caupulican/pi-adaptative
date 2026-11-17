@@ -209,7 +209,7 @@ export interface MarkdownSettings {
 }
 
 export interface WarningSettings {
-	anthropicExtraUsage?: boolean; // default: true
+	anthropicExtraUsage?: boolean; // default: false
 }
 
 export interface SelfModificationSettings {
