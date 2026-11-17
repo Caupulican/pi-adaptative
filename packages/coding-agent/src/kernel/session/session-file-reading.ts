@@ -370,26 +370,41 @@ export function indexSessionEntryFileLocations(
 	}
 }
 
-export function retainedStringChars(value: unknown, stopAfter: number): number {
-	const pending: unknown[] = [value];
-	const seen = new WeakSet<object>();
-	let chars = 0;
-	while (pending.length > 0) {
-		const item = pending.pop();
-		if (typeof item === "string") {
-			chars += item.length;
-			if (chars >= stopAfter) return chars;
-			continue;
-		}
-		if (!item || typeof item !== "object" || seen.has(item)) continue;
-		seen.add(item);
-		if (Array.isArray(item)) {
-			pending.push(...item);
-		} else {
-			pending.push(...Object.values(item));
+function* retainedStringChildren(value: object): Generator<unknown, void> {
+	if (Array.isArray(value)) {
+		for (let index = value.length - 1; index >= 0; index--) yield value[index];
+	} else {
+		const record = value as Record<string, unknown>;
+		for (const key in record) {
+			if (Object.hasOwn(record, key)) yield record[key];
 		}
 	}
-	return chars;
+}
+
+export function retainedStringChars(value: unknown, stopAfter: number): number {
+	// Keep one iterator per ancestor so wide containers do not expand the traversal stack.
+	const pending: Generator<unknown, void>[] = [];
+	const seen = new WeakSet<object>();
+	let chars = 0;
+	while (true) {
+		if (typeof value === "string") {
+			chars += value.length;
+			if (chars >= stopAfter) return chars;
+		} else if (value && typeof value === "object" && !seen.has(value)) {
+			seen.add(value);
+			pending.push(retainedStringChildren(value));
+		}
+
+		while (pending.length > 0) {
+			const next = pending[pending.length - 1].next();
+			if (!next.done) {
+				value = next.value;
+				break;
+			}
+			pending.pop();
+		}
+		if (pending.length === 0) return chars;
+	}
 }
 
 /**

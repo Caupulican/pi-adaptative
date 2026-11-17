@@ -8,46 +8,55 @@
 export const MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES = 32 * 1024;
 
 function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: number; exceeded: boolean } {
+	if (maxBytes < 0) return { bytes: 0, exceeded: true };
 	const seen = new WeakSet<object>();
+	const pending: Generator<unknown, void>[] = [];
 	let bytes = 0;
 	const add = (amount: number): boolean => {
 		bytes += amount;
 		return bytes <= maxBytes;
 	};
-	const visit = (current: unknown): boolean => {
-		if (bytes > maxBytes) return false;
-		if (current === null) return add(4);
-		if (current === undefined) return add(9);
-		if (typeof current === "string") return add(current.length * 4 + 2);
-		if (typeof current === "number") return add(24);
-		if (typeof current === "boolean") return add(current ? 4 : 5);
-		if (typeof current === "bigint") return add(current.toString().length + 2);
-		if (typeof current === "symbol" || typeof current === "function") return add(12);
-		if (typeof current !== "object") return add(8);
-
-		const objectValue = current as Record<string, unknown>;
-		if (seen.has(objectValue)) return add(20);
-		seen.add(objectValue);
+	function* children(objectValue: object): Generator<unknown, void> {
 		if (Array.isArray(objectValue)) {
-			if (!add(2)) return false;
 			for (let index = 0; index < objectValue.length; index++) {
-				if (!add(index === 0 ? 0 : 1)) return false;
-				if (!visit(objectValue[index])) return false;
+				if (index > 0 && !add(1)) return;
+				yield objectValue[index];
 			}
-			return bytes <= maxBytes;
+			return;
 		}
 
-		if (!add(2)) return false;
+		const record = objectValue as Record<string, unknown>;
 		let first = true;
-		for (const key in objectValue) {
-			if (!Object.hasOwn(objectValue, key)) continue;
-			if (!add((first ? 0 : 1) + key.length * 4 + 3)) return false;
+		for (const key in record) {
+			if (!Object.hasOwn(record, key)) continue;
+			if (!add((first ? 0 : 1) + key.length * 4 + 3)) return;
 			first = false;
-			if (!visit(objectValue[key])) return false;
+			yield record[key];
 		}
-		return bytes <= maxBytes;
+	}
+
+	const account = (current: unknown): void => {
+		if (current === null) add(4);
+		else if (current === undefined) add(9);
+		else if (typeof current === "string") add(current.length * 4 + 2);
+		else if (typeof current === "number") add(24);
+		else if (typeof current === "boolean") add(current ? 4 : 5);
+		else if (typeof current === "bigint") add(current.toString().length + 2);
+		else if (typeof current === "symbol" || typeof current === "function") add(12);
+		else if (typeof current !== "object") add(8);
+		else if (seen.has(current)) add(20);
+		else if (add(2)) {
+			seen.add(current);
+			pending.push(children(current));
+		}
 	};
-	visit(value);
+
+	account(value);
+	while (bytes <= maxBytes && pending.length > 0) {
+		const next = pending[pending.length - 1].next();
+		if (next.done) pending.pop();
+		else account(next.value);
+	}
 	return { bytes, exceeded: bytes > maxBytes };
 }
 
