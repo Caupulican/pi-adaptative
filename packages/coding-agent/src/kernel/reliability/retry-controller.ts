@@ -16,7 +16,7 @@
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import type { AgentMessage } from "../types.ts";
-import { classifyFailure } from "./classifier.ts";
+import { type ClassifiedError, classifyFailure } from "./classifier.ts";
 import { computeRetryDelayMs, RetryDelayExceededError, type RetryPolicy, sleepAbortable } from "./retry.ts";
 
 /** The slice of an Agent the retry driver reads and mutates: just the live transcript. */
@@ -78,7 +78,7 @@ function hasMeaningfulAssistantProgress(message: AssistantMessage): boolean {
  */
 function effectiveMaxAttempts(
 	message: AssistantMessage,
-	reason: ReturnType<typeof classifyFailure>["reason"],
+	reason: ClassifiedError["reason"],
 	configuredMaxAttempts: number,
 ): number {
 	if (message.provider === "xai" && reason === "stream_stall" && !hasMeaningfulAssistantProgress(message)) {
@@ -115,7 +115,7 @@ export class RetryController {
 		return this._attempt;
 	}
 
-	/** True from the instant onRetryStart fires until the backoff sleep resolves or is aborted. */
+	/** True while the start event and its backoff are in progress. */
 	get isRetrying(): boolean {
 		return this._abortController !== undefined;
 	}
@@ -161,51 +161,62 @@ export class RetryController {
 		}
 	}
 
-	/**
-	 * Classify `message`; if it is retryable and attempts remain, drop the trailing assistant
-	 * error from agent state, emit the start event, and wait out the backoff (abortable).
-	 * @returns true if the caller should continue the agent, false otherwise.
-	 */
-	async prepareRetry(message: AssistantMessage): Promise<boolean> {
-		const policy = this.getPolicy();
-		if (!policy.enabled) {
-			return false;
-		}
-
-		// The classifier is the single source of the retry verdict: context overflow (host-computed
-		// from the live window) routes to compaction, billing/auth are terminal, transient failures retry.
-		const classified = classifyFailure({
-			message: message.errorMessage ?? "",
+	classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {
+		if (message.stopReason !== "error" || !message.errorMessage) return undefined;
+		return classifyFailure({
+			message: message.errorMessage,
 			contextOverflow: isContextOverflow(message, this.getContextWindow()),
 			provider: message.provider,
 		});
-		if (!classified.retryable) {
-			return false;
-		}
+	}
 
+	/** Check retry eligibility without opening a retry window or sampling backoff jitter. */
+	canRetry(message: AssistantMessage): boolean {
+		return this.eligibleRetry(message) !== undefined;
+	}
+
+	private eligibleRetry(message: AssistantMessage) {
+		const policy = this.getPolicy();
+		if (!policy.enabled || this.isRetrying) return undefined;
+		const classified = this.classifyAssistantError(message);
+		if (!classified?.retryable) return undefined;
 		const maxAttempts = effectiveMaxAttempts(message, classified.reason, policy.maxAttempts);
 		const nextAttempt = this._attempt + 1;
-		if (nextAttempt > maxAttempts) return false;
+		if (nextAttempt > maxAttempts) return undefined;
 
-		let delayMs: number;
-		try {
-			delayMs = computeRetryDelayMs(policy, nextAttempt, { retryAfterMs: classified.retryAfterMs });
-		} catch (error) {
-			if (error instanceof RetryDelayExceededError) return false;
-			throw error;
+		let providerDelayMs: number | undefined;
+		if (classified.retryAfterMs !== undefined) {
+			try {
+				providerDelayMs = computeRetryDelayMs(policy, nextAttempt, { retryAfterMs: classified.retryAfterMs });
+			} catch (error) {
+				if (error instanceof RetryDelayExceededError) return undefined;
+				throw error;
+			}
 		}
+		return { policy, maxAttempts, nextAttempt, providerDelayMs };
+	}
+
+	/**
+	 * If retry is eligible, announce it, drop the live assistant error and wait out the backoff.
+	 * @returns true if the caller should continue the agent, false otherwise.
+	 */
+	async prepareRetry(message: AssistantMessage): Promise<boolean> {
+		const retry = this.eligibleRetry(message);
+		if (!retry) return false;
+		const { policy, maxAttempts, nextAttempt, providerDelayMs } = retry;
+		const delayMs = providerDelayMs ?? computeRetryDelayMs(policy, nextAttempt);
 		this._attempt = nextAttempt;
 
 		// The retry window counts as active work from the instant listeners hear about it:
 		// isRetrying must already be true inside onRetryStart handlers so prompts arriving there
 		// queue as steering instead of racing the retry continuation.
-		this._abortController = new AbortController();
-
-		this.startAttempt(maxAttempts, delayMs, message.errorMessage || "Unknown error");
+		const abortController = new AbortController();
+		this._abortController = abortController;
 
 		let end: RetryBackoffEnd;
 		try {
-			end = await this.backoff(delayMs, this._abortController.signal);
+			this.startAttempt(maxAttempts, delayMs, message.errorMessage || "Unknown error");
+			end = await this.backoff(delayMs, abortController.signal);
 		} finally {
 			this._abortController = undefined;
 		}

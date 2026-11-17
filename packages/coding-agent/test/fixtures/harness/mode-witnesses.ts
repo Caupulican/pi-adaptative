@@ -3503,19 +3503,18 @@ async function verifyRetryClosingAndUnicodeQueue(world: HarnessWorld): Promise<v
 
 /**
  * goal-execution-submission-release. A chat goal queued behind a held run starts when that run delivers it, and the run's
- * submission works on it from there; the goal's execution ends when that submission releases the foreground, whatever its
- * run's outcome. Here the delivered turn fails retryably and the owner abandons the retry from its start announcement: the
- * backoff already waits on the retry's abort controller, so the retry is cancelled and the run ends on its failure. The next
- * prompt begins its own execution, which refuses to begin while an earlier one is still held. The control recovers the same
- * failure through its retry. Each owner runs System One off in its own binding (both world modes) and never continues the goal
+ * submission works on it from there. The delivered turn fails retryably. The owner can abort the submission on message end
+ * or cancel the retry from its start announcement. The control recovers through the retry. The next prompt begins its own
+ * goal execution once the foreground is released. Each owner runs System One off in its own binding (both world modes) and never continues the goal
  * on its own.
  */
 async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> {
 	const failure = "network error: scripted connection interrupted";
 	const objective = "keep the release notes current";
 	const goalWords = `Set a goal: ${objective}`;
-	for (const abandon of [true, false] as const) {
-		const label = abandon ? "queued-goal-abandoned-retry" : "queued-goal-recovered-retry";
+	for (const outcome of ["before-backoff", "during-backoff", "recovered"] as const) {
+		const recovered = outcome === "recovered";
+		const label = `queued-goal-retry-${outcome}`;
 		const agentDir = `${world.agentDir}-${label}`;
 		const session = (
 			await world.createRootSession("root", {
@@ -3536,10 +3535,21 @@ async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> 
 		const requestMark = world.provider.requests.length;
 		const warningMark = world.warnings.length;
 		const retryEvents: Array<Record<string, unknown>> = [];
+		const retryFlags: boolean[] = [];
+		let aborted: Promise<void> | undefined;
 		session.subscribe((event) => {
+			if (event.type === "agent_end") retryFlags.push(event.willRetry);
+			if (
+				outcome === "before-backoff" &&
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason === "error"
+			) {
+				aborted ??= session.abort("cancel before retry");
+			}
 			if (event.type === "auto_retry_start") {
 				retryEvents.push({ type: event.type, attempt: event.attempt, delayMs: event.delayMs });
-				if (abandon) session.abortRetry();
+				if (outcome === "during-backoff") session.abortRetry();
 			} else if (event.type === "auto_retry_end")
 				retryEvents.push({ type: event.type, success: event.success, finalError: event.finalError });
 		});
@@ -3547,7 +3557,7 @@ async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> 
 			"root",
 			{ ...text(`${label}-first`, "The first answer."), check: () => reached.release(), gate: hold.promise },
 			fail(`${label}-failure`, failure),
-			...(abandon ? [] : [text(`${label}-recovered`, "The goal turn recovered on its retry.")]),
+			...(recovered ? [text(`${label}-recovered`, "The goal turn recovered on its retry.")] : []),
 			text(`${label}-next`, "The next answer."),
 		);
 		let disposal: Promise<{ readonly error: unknown } | undefined> | undefined;
@@ -3570,6 +3580,11 @@ async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> 
 				await withDeadline(world.trace, `${label}: the delivering run ends`, delivering, 60_000),
 				`${label}: the run that delivered the chat goal resolves`,
 			).toBe("resolved");
+			if (outcome === "before-backoff") {
+				expect(aborted, "the error reached the cancellation handler").toBeDefined();
+				await aborted;
+				expect(retryFlags.at(-1), "the cancelled provider failure advertises no retry").toBe(false);
+			}
 			const goal = session.getGoalStateSnapshot();
 			expect(
 				{ userGoal: goal?.userGoal, chatGoal: goal?.goalId.startsWith("chat-") === true },
@@ -3577,15 +3592,21 @@ async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> 
 			).toEqual({ userGoal: objective, chatGoal: true });
 			expect(
 				retryEvents,
-				abandon
-					? "the retry abandoned from its start announcement is cancelled"
-					: "the retry of the goal turn recovers",
-			).toEqual([
-				{ type: "auto_retry_start", attempt: 1, delayMs: 5 },
-				abandon
-					? { type: "auto_retry_end", success: false, finalError: "Retry cancelled" }
-					: { type: "auto_retry_end", success: true, finalError: undefined },
-			]);
+				outcome === "before-backoff"
+					? "the cancelled submission opens no retry window"
+					: recovered
+						? "the retry of the goal turn recovers"
+						: "the retry abandoned from its start announcement is cancelled",
+			).toEqual(
+				outcome === "before-backoff"
+					? []
+					: [
+							{ type: "auto_retry_start", attempt: 1, delayMs: 5 },
+							recovered
+								? { type: "auto_retry_end", success: true, finalError: undefined }
+								: { type: "auto_retry_end", success: false, finalError: "Retry cancelled" },
+						],
+			);
 			expect(
 				await withDeadline(
 					world.trace,
@@ -3596,18 +3617,19 @@ async function verifyQueuedGoalRetryRelease(world: HarnessWorld): Promise<void> 
 					),
 					60_000,
 				),
-				abandon
-					? "the next prompt begins its own goal execution after a run that ended with an abandoned retry"
-					: "the next prompt begins its own goal execution after a run whose retry recovered",
+				recovered
+					? "the next prompt begins its own goal execution after a run whose retry recovered"
+					: "the next prompt begins its own goal execution after a run that ended with an abandoned retry",
 			).toBe("resolved");
 			expect(
 				world.provider.requests.slice(requestMark).map((request) => request.model.id),
-				`${label}: the first turn, the goal turn${abandon ? "" : ", its retry"} and the next turn each reach the provider once`,
-			).toEqual(abandon ? ["root", "root", "root"] : ["root", "root", "root", "root"]);
+				`${label}: the first turn, the goal turn${recovered ? ", its retry" : ""} and the next turn each reach the provider once`,
+			).toEqual(recovered ? ["root", "root", "root", "root"] : ["root", "root", "root"]);
 			disposal = world.disposeSessionInBody(session);
 			expect(await disposal, `${label}: the owner with its active chat goal is disposed cleanly`).toBeUndefined();
 			expect(world.warnings.splice(warningMark), `${label}: the owner discloses nothing`).toEqual([]);
-			world.faultMatrix.witness("goal-execution-submission-release", { control: !abandon });
+			if (outcome !== "before-backoff")
+				world.faultMatrix.witness("goal-execution-submission-release", { control: recovered });
 		} finally {
 			hold.release();
 			if (disposal === undefined) await world.disposeSessionInBody(session);

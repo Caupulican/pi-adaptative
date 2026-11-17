@@ -1,14 +1,10 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { type Agent, AgentBusyError } from "../kernel/agent.ts";
 import {
 	type ClassifiedError,
-	classifyFailure,
-	computeRetryDelayMs,
 	DEFAULT_RETRY_POLICY,
 	type RetryBackoffEnd,
 	RetryController,
-	RetryDelayExceededError,
 } from "../kernel/reliability/index.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
@@ -27,7 +23,7 @@ import type {
 } from "./runtime-generation-admission.ts";
 import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
 import { RunTurnOrigin } from "./turn-origin.ts";
-import { runReleaseSteps } from "./util/resource-release.ts";
+import { runAsyncReleaseSteps, runReleaseSteps } from "./util/resource-release.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import { createWaitStatus, type WaitEndReason, type WaitStatusEvent, waitFor } from "./util/wait.ts";
 
@@ -165,8 +161,8 @@ export class ForegroundRecoveryController {
 	 * nothing. Cleared in the same synchronous step as the run's last queue check, so nothing is admitted behind it unseen.
 	 */
 	private consumingRun = false;
-	/** Whether the round now running is followed by a recovery classification: false at the stall cap and in stranded delivery. */
-	private recoveryRoundAvailable = false;
+	/** The active submission signal while this round can be followed by recovery. */
+	private recoveryRoundSignal: AbortSignal | undefined;
 	/**
 	 * Tree navigations rewriting the history, each from its start until its new branch is installed or it ends. A run
 	 * and a rewrite of the history it executes on exclude each other here: see `beginHistoryRewrite`.
@@ -1018,8 +1014,7 @@ export class ForegroundRecoveryController {
 		this.activeRuns++;
 		// Set once the submission reached its stranded-input delivery, which holds what stays queued; every other exit holds it below.
 		let deliveredStranded = false;
-		// Set when the failure path already ran `afterRun` (so the finally below does not run it twice).
-		let afterRunSettled = false;
+		let primary: { readonly error: unknown } | undefined;
 		// Ends the chat turn this run began, if it began one; set at the run's first provider call.
 		let endChatTurn: (() => void) | undefined;
 		try {
@@ -1053,7 +1048,7 @@ export class ForegroundRecoveryController {
 			let stoppedOnUsageLimit = false;
 			// From here the run delivers what the agent's queue holds, until its last round.
 			this.setConsumingRun(true);
-			this.recoveryRoundAvailable = !atRoundCap();
+			this.recoveryRoundSignal = atRoundCap() ? undefined : signal;
 			// The run answers whoever the branch last answered, then its opening messages, until a later message decides again.
 			this.turnOrigin.begin(mode === "continue" ? [] : [messages ?? []].flat(), this.deps.getBranchEntries());
 			this.toolManifests.beginRoot(lease?.epoch, this.turnOrigin.origin(), Date.now());
@@ -1110,13 +1105,13 @@ export class ForegroundRecoveryController {
 					this.finishRetry(false, "Submission cancelled");
 					return;
 				}
-				this.recoveryRoundAvailable = !atRoundCap();
+				this.recoveryRoundSignal = atRoundCap() ? undefined : signal;
 				await this.deps.agent.continue();
 			}
 			// Every `break` above is an exit with no further recovery round: a retry window the loop left open
 			// (its last failure had no message to classify, or the session is closing) ends here, before any
 			// stranded delivery round could read as the retry's recovery.
-			this.recoveryRoundAvailable = false;
+			this.recoveryRoundSignal = undefined;
 			if (this.retry.attempt > 0) this.finishRetry(false, "The run ended before the retry recovered.");
 			// Input admitted to the agent's queue is the owner's and is never left behind it: delivered by stranded rounds
 			// when another round may run, otherwise held for its owner by the finally below.
@@ -1125,49 +1120,59 @@ export class ForegroundRecoveryController {
 				deliveredStranded = true;
 			}
 		} catch (error: unknown) {
-			// The run failed. Its owned queued input is held first, then its cleanup runs HERE so that a failing cleanup is joined to
-			// the run's failure (both stay in the thrown graph) instead of replacing it from the finally below.
-			this.setConsumingRun(false);
-			this.runOwnsHistory = false;
-			this.recoveryRoundAvailable = false;
-			if (this.retry.attempt > 0) this.finishRetry(false, error instanceof Error ? error.message : String(error));
-			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
-			afterRunSettled = true;
-			try {
-				await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin, signal));
-			} catch (afterRunError: unknown) {
-				throw new AggregateError(
-					[error, afterRunError],
-					error instanceof Error ? error.message : "The run and its cleanup both failed.",
-				);
-			}
+			primary = { error };
 			throw error;
 		} finally {
-			// Any exit that did not reach the stranded-input delivery (a closing exit, a runtime-update or usage-limit stop, or a run
-			// whose prompt/continue/recovery threw) leaves the owner's admitted input in the agent's queue: hold it for its owner,
-			// visible and recoverable, so it cannot leak into the next prompt's first boundary. Nothing is deleted and no refusal is
-			// swallowed. (Messages an extension or the system queued directly on the agent are not owner input; the kernel's queue
-			// delivers them at the next boundary.) The run delivers nothing more: it stops being a consumer in the same step as that
-			// last queue check, and its cleanup below no longer owns the history (a queued extension command may navigate).
-			this.setConsumingRun(false);
+			// Release delivery and history authority before afterRun, where an extension may navigate.
 			this.runOwnsHistory = false;
-			this.recoveryRoundAvailable = false;
-			if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
+			this.recoveryRoundSignal = undefined;
+			this.lastAssistantMessage = undefined;
+			let deliveryReleaseFailure: { readonly error: unknown } | undefined;
 			try {
-				if (!afterRunSettled)
-					await this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin, signal));
-			} finally {
-				// After the run's cleanup, so the turn covers every provider round the run made.
-				endChatTurn?.();
-				this.toolManifests.endRoot(Date.now());
-				this.turnOrigin.end();
-				detachAbort();
-				this.activeRuns--;
-				if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
-				if (this.activeRuns === 0 && this.submissionLease === undefined) {
-					this.resolveIdleWaiters();
-				}
+				this.setConsumingRun(false);
+			} catch (error) {
+				deliveryReleaseFailure = { error };
 			}
+			const holdUndeliveredQueue = () => {
+				if (!deliveredStranded && this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
+			};
+			const failure = primary?.error;
+			await runAsyncReleaseSteps(
+				[
+					() => {
+						if (deliveryReleaseFailure) throw deliveryReleaseFailure.error;
+					},
+					() => {
+						if (primary && this.retry.attempt > 0)
+							this.finishRetry(false, failure instanceof Error ? failure.message : String(failure));
+					},
+					holdUndeliveredQueue,
+					() => this.atRuntimeMutationBoundary(lease, true, (begin) => this.deps.afterRun(begin, signal)),
+					// On failure, recheck input after afterRun before releasing the foreground.
+					() => {
+						if (primary) holdUndeliveredQueue();
+					},
+					() =>
+						runReleaseSteps(
+							[
+								() => endChatTurn?.(),
+								() => this.toolManifests.endRoot(Date.now()),
+								() => this.turnOrigin.end(),
+								detachAbort,
+								() => {
+									this.activeRuns--;
+								},
+								() => {
+									if (releaseLease && lease && this.ownsSubmission(lease)) this.releaseSubmission(lease);
+								},
+								() => this.resolveIdleWaiters(),
+							],
+							"Could not release all foreground run resources.",
+						),
+				],
+				failure instanceof Error ? failure.message : "Could not clean up the foreground run.",
+				primary,
+			);
 		}
 	}
 
@@ -1323,26 +1328,12 @@ export class ForegroundRecoveryController {
 	}
 
 	willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
-		const settings = this.deps.settingsManager.getRetrySettings();
-		// The same answer handlePostAgentRun gives: a closing session starts no retry, so it must not advertise one.
-		if (this.shutdownReason) return false;
-		// Nor does a round no recovery follows: the stall cap's last round, stranded delivery, or a run outside the loop.
-		if (!this.recoveryRoundAvailable) return false;
-		if (!settings.enabled || this.retry.attempt >= settings.maxRetries) return false;
+		const signal = this.recoveryRoundSignal;
+		if (!signal || this.isClosing(signal)) return false;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			const message = event.messages[index];
 			if (message.role !== "assistant") continue;
-			const classified = this.classifyAssistantError(message);
-			if (!classified?.retryable) return false;
-			try {
-				computeRetryDelayMs(this.getRetryPolicy(), this.retry.attempt + 1, {
-					retryAfterMs: classified.retryAfterMs,
-				});
-				return true;
-			} catch (error) {
-				if (error instanceof RetryDelayExceededError) return false;
-				throw error;
-			}
+			return this.retry.canRetry(message);
 		}
 		return false;
 	}
@@ -1355,12 +1346,10 @@ export class ForegroundRecoveryController {
 	private async handlePostAgentRun(): Promise<"recover" | "end" | "usage_limit_stop"> {
 		const message = this.lastAssistantMessage;
 		this.lastAssistantMessage = undefined;
-		if (!message) return "end";
-		// A closing session starts no recovery of its own: no retry, no model switch, no failover and no compaction (each of them is a
-		// paid provider call). The run's last message is already persisted; whatever remains queued is held by the caller.
-		if (this.shutdownReason) return "end";
+		const signal = this.recoveryRoundSignal;
+		if (!message || !signal || this.isClosing(signal)) return "end";
 
-		const classified = this.classifyAssistantError(message);
+		const classified = this.retry.classifyAssistantError(message);
 		if (classified) {
 			this.deps.failureCorpus.record({
 				provider: message.provider,
@@ -1376,20 +1365,21 @@ export class ForegroundRecoveryController {
 		const repeatedCompactionFailure =
 			compactionRetryKey !== undefined && compactionRetryKey === this.pendingCompactionRetryKey;
 		if (!repeatedCompactionFailure) this.pendingCompactionRetryKey = undefined;
-		if (repeatedCompactionFailure && (await this.deps.checkCompaction(message))) {
-			return "recover";
-		}
+		if (repeatedCompactionFailure && (await this.deps.checkCompaction(message))) return "recover";
+		if (this.isClosing(signal)) return "end";
 		if (classified?.retryable && (await this.retry.prepareRetry(message))) {
 			this.pendingCompactionRetryKey = compactionRetryKey;
 			return "recover";
 		}
 		if (classified?.reason === "model_unsupported") {
 			const replacement = await this.deps.replaceUnsupportedModel?.(message);
+			if (this.isClosing(signal)) return "end";
 			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`))
 				return "recover";
 		}
 		if (classified) this.deps.onRunStopped?.(message, classified);
 		const billing = await this.billingFailover.handleAssistantError(message, classified);
+		if (this.isClosing(signal)) return "end";
 		// A quota the work moved off continues at once on the model it moved to, like an unsupported model.
 		if (billing.continuedOn && this.retry.prepareModelSwitchRetry(message, `Continuing on ${billing.continuedOn}.`))
 			return "recover";
@@ -1410,14 +1400,5 @@ export class ForegroundRecoveryController {
 		// retry window must still be closed when it does.
 		this.retry.reset();
 		this.deps.emit({ type: "auto_retry_end", success, attempt, finalError });
-	}
-
-	private classifyAssistantError(message: AssistantMessage): ClassifiedError | undefined {
-		if (message.stopReason !== "error" || !message.errorMessage) return undefined;
-		return classifyFailure({
-			message: message.errorMessage,
-			contextOverflow: isContextOverflow(message, this.deps.getContextWindow()),
-			provider: message.provider,
-		});
 	}
 }
