@@ -28,6 +28,7 @@ import { owesParentItsResult } from "../orchestration/worker-terminal-notificati
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import type { BotAskRootResult } from "./bot-message-contract.ts";
+import { BotUnreachableError } from "./bot-unreachable.ts";
 import { ACTIVE_ATTEMPT_STATUSES, delegationBudgetLeftUsd, delegationBudgetStop } from "./delegation-spend.ts";
 import type { LeaderControllerDeps } from "./leader-controller-ports.ts";
 import {
@@ -82,6 +83,15 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
  */
 export const MAIL_HOLD_RECHECK_MS = 60_000;
 
+const LEADER_RETRY_INITIAL_MS = 1_000;
+const LEADER_RETRY_MAX_MS = 60_000;
+
+interface LeaderRetry {
+	at: number;
+	delay: number;
+	visited: boolean;
+}
+
 function isOpen(record: DelegationRecord): boolean {
 	return record.state !== "closed";
 }
@@ -97,10 +107,13 @@ export class LeaderController {
 	private timer: { handle: unknown; at: number } | undefined;
 	/** When the next pass reads again the mail a goal waits for (`MAIL_HOLD_RECHECK_MS`); undefined when none waits. */
 	private mailRecheckAt: number | undefined;
+	private passRetry: LeaderRetry | undefined;
+	private readonly effectRetries = new Map<string, LeaderRetry>();
 	/** The mail of this process's workers being sent now: recorded on its goal, not yet in the bot's inbox. */
 	private readonly mailsInFlight = new Set<string>();
 	/** A reconcile pass runs: set before its first step, which may change the store or the mail synchronously. */
 	private running = false;
+	private closing = false;
 	private again = false;
 	/** Deliveries this process saw land; the session's parent-input ledger is the durable answer. */
 	private readonly delivered = new Set<string>();
@@ -134,6 +147,8 @@ export class LeaderController {
 		this.unsubscribe = undefined;
 		if (this.timer) this.deps.timers.clearTimeout(this.timer.handle);
 		this.timer = undefined;
+		this.effectRetries.clear();
+		this.passRetry = undefined;
 		this.listeners.clear();
 	}
 
@@ -179,8 +194,9 @@ export class LeaderController {
 	private releaseSubtree(leader: string, reasonCode: string): void {
 		const current = this.currentFor(leader);
 		if (current?.state === "running" || current?.state === "paused") return;
-		if (!this.openSubtrees.delete(leader)) return;
+		if (!this.openSubtrees.has(leader)) return;
 		this.deps.closeSubtree(leader, reasonCode);
+		this.openSubtrees.delete(leader);
 	}
 
 	/** The open delegation a leader is working, else the oldest one waiting for it. */
@@ -336,7 +352,14 @@ export class LeaderController {
 
 	async cancel(leader: string): Promise<DelegationRecord> {
 		const record = this.requireCurrent(leader);
-		return this.forceClose(record, "cancelled");
+		this.closing = true;
+		try {
+			return this.forceClose(record, "cancelled");
+		} finally {
+			this.closing = false;
+			this.trigger();
+			this.notifyListeners();
+		}
 	}
 
 	/**
@@ -359,10 +382,13 @@ export class LeaderController {
 		if (parent) {
 			if (parent.state !== "running")
 				throw new Error("The leader that handed this goal on is paused; ask again later.");
-			if (
-				!(await this.sendToParent(parent, leaderAskNotice({ ...notice, to: "parent_leader" }), deliveryId, leader))
-			)
-				throw new Error("The leader that handed this goal on did not receive the question yet; ask again.");
+			await this.sendToParent(parent, leaderAskNotice({ ...notice, to: "parent_leader" }), deliveryId, leader).catch(
+				(error) => {
+					throw new Error("The leader that handed this goal on did not receive the question yet; ask again.", {
+						cause: error,
+					});
+				},
+			);
 			this.ledger.recordAsk(record.objectiveId, askId);
 			return { askId };
 		}
@@ -452,7 +478,7 @@ export class LeaderController {
 	// -------------------------------------------------------------------------------------------------------------
 
 	private trigger(): void {
-		if (this.disposed) return;
+		if (this.disposed || this.closing || (this.passRetry && this.deps.timers.now() < this.passRetry.at)) return;
 		if (this.running) {
 			this.again = true;
 			return;
@@ -463,14 +489,26 @@ export class LeaderController {
 		void this.reconcileUntilSettled();
 	}
 
-	/** Runs passes while one more is asked for; `running` is cleared however it ends. */
+	/** Runs passes while one more is asked for. Each complete pass drops retries for effects that no longer apply. */
 	private async reconcileUntilSettled(): Promise<void> {
 		try {
 			do {
 				this.again = false;
+				for (const retry of this.effectRetries.values()) retry.visited = false;
 				await this.reconcile();
+				for (const [key, retry] of this.effectRetries) {
+					if (!retry.visited) this.effectRetries.delete(key);
+				}
+				if (this.disposed) return;
+				const deadline = earliestDeadlineMs(this.ledger.list());
+				this.passRetry = undefined;
+				this.armAlarm(deadline);
 			} while (this.again && !this.disposed);
 		} catch (error) {
+			if (this.disposed) return;
+			this.passRetry = this.nextRetry(this.passRetry);
+			// The failing pass may not have been able to read deadlines. Retry without reading the store again here.
+			this.armAlarm();
 			harnessLog.warn("leaders", "a leader reconcile pass failed", () => ({
 				error: error instanceof Error ? error.message : String(error),
 			}));
@@ -499,6 +537,7 @@ export class LeaderController {
 		const nowMs = this.deps.now();
 		let changed = false;
 		for (const listed of records) {
+			if (this.disposed) return;
 			// A nested goal that an earlier cascade of this pass closed is read from the store, not from the snapshot taken before it.
 			const record = this.ledger.get(listed.objectiveId) ?? listed;
 			if (record.state === "closed") {
@@ -508,14 +547,14 @@ export class LeaderController {
 			if (record.state !== "running") continue;
 			const leader = bots.get(record.charter.leader);
 			if (!leader || leader.retired) {
-				await this.forceClose(record, "leader_unavailable");
+				this.forceClose(record, "leader_unavailable");
 				changed = true;
 				continue;
 			}
 			this.ensureSubtree(leader.agentId, this.parentOf(record, records)?.charter.leader);
 			const deadline = record.charter.envelope.deadlineAt;
 			if (deadline !== undefined && Date.parse(deadline) <= nowMs) {
-				await this.forceClose(record, "deadline");
+				this.forceClose(record, "deadline");
 				changed = true;
 				continue;
 			}
@@ -531,7 +570,7 @@ export class LeaderController {
 				this.mailSpent,
 			);
 			if (stop !== undefined) {
-				await this.forceClose(record, "budget", stop === "unpriced" ? UNPRICED_BUDGET_REMEDY : undefined);
+				this.forceClose(record, "budget", stop === "unpriced" ? UNPRICED_BUDGET_REMEDY : undefined);
 				changed = true;
 				continue;
 			}
@@ -545,7 +584,7 @@ export class LeaderController {
 				]),
 			];
 			if (this.deps.subscriptionExhausted(ranAliases)) {
-				await this.forceClose(record, "allowance");
+				this.forceClose(record, "allowance");
 				changed = true;
 				continue;
 			}
@@ -583,8 +622,8 @@ export class LeaderController {
 			await this.settleClosed(closed, this.deps.snapshot(), bots, aliasOf);
 			changed = true;
 		}
+		if (this.disposed) return;
 		changed = (await this.dispatchQueued(bots)) || changed;
-		this.armAlarm();
 		if (changed) this.notifyListeners();
 	}
 
@@ -643,7 +682,10 @@ export class LeaderController {
 		options?: { readonly idempotencyKey?: string; readonly fromLeader?: string },
 	): Promise<void> {
 		const prior = this.sendChains.get(leader) ?? Promise.resolve();
-		const run = prior.catch(() => undefined).then(() => this.deps.send(leader, content, objectiveId, options));
+		const run = prior.then(() => {
+			if (this.disposed) throw new Error("Leader controller is disposed.");
+			return this.deps.send(leader, content, objectiveId, options);
+		});
 		const settled = run.then(
 			() => undefined,
 			() => undefined,
@@ -658,24 +700,15 @@ export class LeaderController {
 	/**
 	 * Sends a notice from a nested leader (`fromLeader`) to the parent leader of its goal, filed under that parent's goal. The
 	 * key makes a repeated send one message, so a restart that sends again delivers nothing twice. A send that did not land
-	 * returns false and is retried.
+	 * propagates its error to the caller.
 	 */
 	private async sendToParent(
 		parent: DelegationRecord,
 		content: string,
 		idempotencyKey: string,
 		fromLeader: string,
-	): Promise<boolean> {
-		try {
-			await this.sendToLeader(parent.charter.leader, content, parent.objectiveId, { idempotencyKey, fromLeader });
-			return true;
-		} catch (error) {
-			harnessLog.warn("leaders", "a nested leader's notice could not reach the parent leader yet", () => ({
-				idempotencyKey,
-				error: error instanceof Error ? error.message : String(error),
-			}));
-			return false;
-		}
+	): Promise<void> {
+		return this.sendToLeader(parent.charter.leader, content, parent.objectiveId, { idempotencyKey, fromLeader });
 	}
 
 	/** Every pending terminal notice of a delegation's leader turn is consumed here; the store already says what it means. */
@@ -705,11 +738,12 @@ export class LeaderController {
 		);
 		let changed = false;
 		for (const record of records) {
+			if (this.disposed) return changed;
 			if (record.state !== "queued" || busy.has(record.charter.leader)) continue;
 			busy.add(record.charter.leader);
 			const leader = bots.get(record.charter.leader);
 			if (!leader || leader.retired) {
-				await this.forceClose(record, "leader_unavailable");
+				this.forceClose(record, "leader_unavailable");
 				changed = true;
 				continue;
 			}
@@ -729,12 +763,13 @@ export class LeaderController {
 					idempotencyKey: `leader-dispatch:${record.objectiveId}`,
 				});
 			} catch (error) {
+				if (this.disposed) return changed;
 				harnessLog.warn("leaders", "a leader could not be started for its goal", () => ({
 					leader: leader.agentId,
 					error: error instanceof Error ? error.message : String(error),
 				}));
 				const current = this.ledger.get(record.objectiveId);
-				if (current && isOpen(current)) await this.forceClose(current, "leader_unavailable");
+				if (current && isOpen(current)) this.forceClose(current, "leader_unavailable");
 			}
 		}
 		return changed;
@@ -745,19 +780,10 @@ export class LeaderController {
 	 * nested goals end first, deepest first, and every one is recorded closed before any is settled: a settled nested goal's
 	 * Outcome then goes to the orchestrator, not to a parent that is closing.
 	 */
-	private async forceClose(
-		record: DelegationRecord,
-		reason: DelegationCloseReason,
-		remedy?: string,
-	): Promise<DelegationRecord> {
-		const closing = [...openDescendantsDeepestFirst(this.ledger.list(), record.objectiveId), record];
-		const closed = closing.map((entry) => this.closeRecord(entry, reason, entry === record ? remedy : undefined));
-		const bots = new Map(this.deps.bots().map((bot) => [bot.agentId, bot]));
-		for (const entry of closed) {
-			await this.settleClosed(entry, this.deps.snapshot(), bots, (agentId) => this.deps.directBotOf(agentId));
-		}
-		this.notifyListeners();
-		return closed[closed.length - 1] ?? record;
+	private forceClose(record: DelegationRecord, reason: DelegationCloseReason, remedy?: string): DelegationRecord {
+		for (const child of openDescendantsDeepestFirst(this.ledger.list(), record.objectiveId))
+			this.closeRecord(child, reason);
+		return this.closeRecord(record, reason, remedy);
 	}
 
 	/** Stops one delegation's leader and records its Outcome as the close: the settle (delivery) follows the whole cascade. */
@@ -820,7 +846,7 @@ export class LeaderController {
 		// A crash between recording the Outcome and settling the objective left it open; the record says how it ends.
 		if (record.objectiveStatus === "active" || record.objectiveStatus === "paused")
 			record = this.ledger.settle(record.objectiveId);
-		const delivered = await this.deliverOutcome(record, snapshot, aliasOf);
+		if (!(await this.deliverOutcome(record, snapshot, aliasOf)) || this.disposed) return;
 		const leader = bots.get(record.charter.leader);
 		// A standing leader whose goal has ended restarts an idle runtime that predates leading bots (see the restart below).
 		if (leader && !leader.retired && record.charter.appointedBy === "owner" && this.leaderIdle(leader.agentId))
@@ -831,15 +857,15 @@ export class LeaderController {
 			!leader.retired &&
 			!this.leadsOpenDelegation(leader.agentId);
 		if (retireDue) {
-			if (!this.leaderIdle(leader.agentId)) return;
-			const result = this.deps.retire(leader.agentId);
-			if (!result.retired)
-				harnessLog.warn("leaders", "a goal leader could not be retired after its goal", () => ({
-					leader: leader.agentId,
-					detail: result.detail,
-				}));
+			const retired = await this.retryEffect(`leader-retire:${record.objectiveId}`, async () => {
+				if (!this.leaderIdle(leader.agentId)) return false;
+				const result = this.deps.retire(leader.agentId);
+				if (!result.retired) throw new Error(result.detail);
+				return true;
+			});
+			if (!retired) return;
 		}
-		if (delivered) this.settled.add(record.objectiveId);
+		this.settled.add(record.objectiveId);
 	}
 
 	/**
@@ -866,28 +892,36 @@ export class LeaderController {
 			report: record.closeReason === "settled" ? last?.result?.summary?.trim() : undefined,
 		};
 		const parent = this.parentOf(record);
-		if (parent) {
-			// A paused parent takes the Outcome when it resumes: the next pass retries it.
-			if (parent.state !== "running") return false;
-			const content = leaderOutcomeNotice({ ...notice, to: "parent_leader" });
-			if (!(await this.sendToParent(parent, content, deliveryId, record.charter.leader))) return false;
-			this.delivered.add(deliveryId);
-			this.ledger.recordChildOutcomeDelivered(record.objectiveId);
-			return true;
+		const parentAlreadyReceived =
+			record.charter.parentObjectiveId !== undefined && this.deps.hasAcceptedParentNotice(deliveryId);
+		if (parent || parentAlreadyReceived) {
+			// A paused parent takes the Outcome when it resumes. A receipt can be recorded even after a pause or close.
+			if (!parentAlreadyReceived && parent?.state !== "running") return false;
+			return this.retryEffect(deliveryId, async () => {
+				if (parent && !parentAlreadyReceived) {
+					const content = leaderOutcomeNotice({ ...notice, to: "parent_leader" });
+					await this.sendToParent(parent, content, deliveryId, record.charter.leader);
+					if (this.disposed) return false;
+				}
+				this.ledger.recordChildOutcomeDelivered(record.objectiveId);
+				return true;
+			});
 		}
-		if (this.delivered.has(deliveryId) || this.deps.hasDelivered(deliveryId)) return true;
-		return this.deliverOnce(deliveryId, {
-			customType: LEADER_OUTCOME_CUSTOM_TYPE,
-			display: true,
-			content: leaderOutcomeNotice({ ...notice, to: "orchestrator" }),
-			details: {
-				objectiveId: record.objectiveId,
-				leader: record.charter.leader,
-				outcome: outcomeDetails(outcome),
-				...(record.closeReason ? { closeReason: record.closeReason } : {}),
-				...(touchedByThirdParty(snapshot, leaderTurns) ? { thirdParty: true } : {}),
-			},
-		});
+		if (this.deps.hasDelivered(deliveryId)) return true;
+		return this.retryEffect(deliveryId, () =>
+			this.deliverOnce(deliveryId, {
+				customType: LEADER_OUTCOME_CUSTOM_TYPE,
+				display: true,
+				content: leaderOutcomeNotice({ ...notice, to: "orchestrator" }),
+				details: {
+					objectiveId: record.objectiveId,
+					leader: record.charter.leader,
+					outcome: outcomeDetails(outcome),
+					...(record.closeReason ? { closeReason: record.closeReason } : {}),
+					...(touchedByThirdParty(snapshot, leaderTurns) ? { thirdParty: true } : {}),
+				},
+			}),
+		);
 	}
 
 	/**
@@ -918,20 +952,28 @@ export class LeaderController {
 		if (parent) {
 			if (parent.state !== "running") return;
 			const content = leaderQuestionNotice({ ...notice, to: "parent_leader" });
-			if (await this.sendToParent(parent, content, deliveryId, leader.agentId)) this.delivered.add(deliveryId);
+			if (
+				await this.retryEffect(deliveryId, async () => {
+					await this.sendToParent(parent, content, deliveryId, leader.agentId);
+					return true;
+				})
+			)
+				this.delivered.add(deliveryId);
 			return;
 		}
-		await this.deliverOnce(deliveryId, {
-			customType: LEADER_QUESTION_CUSTOM_TYPE,
-			display: true,
-			content: leaderQuestionNotice({ ...notice, to: "orchestrator" }),
-			details: {
-				objectiveId: record.objectiveId,
-				leader: leader.agentId,
-				attemptId: attempt.attemptId,
-				...(touchedByThirdParty(snapshot, [attempt]) ? { thirdParty: true } : {}),
-			},
-		});
+		await this.retryEffect(deliveryId, () =>
+			this.deliverOnce(deliveryId, {
+				customType: LEADER_QUESTION_CUSTOM_TYPE,
+				display: true,
+				content: leaderQuestionNotice({ ...notice, to: "orchestrator" }),
+				details: {
+					objectiveId: record.objectiveId,
+					leader: leader.agentId,
+					attemptId: attempt.attemptId,
+					...(touchedByThirdParty(snapshot, [attempt]) ? { thirdParty: true } : {}),
+				},
+			}),
+		);
 	}
 
 	private async deliverOnce(deliveryId: string, message: ParentInputDelivery["message"]): Promise<boolean> {
@@ -945,7 +987,6 @@ export class LeaderController {
 			this.delivered.add(deliveryId);
 			return true;
 		} catch (error) {
-			// Delivery is retried by the next pass; the durable record already holds what it says.
 			harnessLog.warn("leaders", "a leader notice could not reach the orchestrator yet", () => ({
 				deliveryId,
 				error: error instanceof Error ? error.message : String(error),
@@ -958,21 +999,52 @@ export class LeaderController {
 		return this.deps.bots().find((bot) => bot.agentId === alias)?.displayName ?? alias;
 	}
 
-	/**
-	 * One alarm for the earliest open deadline or mail read again (`MAIL_HOLD_RECHECK_MS`); firing runs a pass, which
-	 * closes what is due and re-arms.
-	 */
-	private armAlarm(): void {
-		const deadline = earliestDeadlineMs(this.ledger.list());
-		const next =
-			deadline === undefined || this.mailRecheckAt === undefined
-				? (deadline ?? this.mailRecheckAt)
-				: Math.min(deadline, this.mailRecheckAt);
-		if (this.timer && this.timer.at === next) return;
+	private nextRetry(previous?: LeaderRetry): LeaderRetry {
+		const delay = previous ? Math.min(previous.delay * 2, LEADER_RETRY_MAX_MS) : LEADER_RETRY_INITIAL_MS;
+		return { at: this.deps.timers.now() + delay, delay, visited: true };
+	}
+
+	private async retryEffect(key: string, effect: () => Promise<boolean>): Promise<boolean> {
+		if (this.disposed) return false;
+		const retry = this.effectRetries.get(key);
+		if (retry && this.deps.timers.now() < retry.at) {
+			retry.visited = true;
+			return false;
+		}
+		try {
+			if (await effect()) {
+				this.effectRetries.delete(key);
+				return true;
+			}
+		} catch (error) {
+			harnessLog.warn("leaders", "a leader effect could not complete", () => ({
+				key,
+				error: error instanceof Error ? error.message : String(error),
+			}));
+			if (error instanceof BotUnreachableError) {
+				this.effectRetries.delete(key);
+				return false;
+			}
+		}
+		if (!this.disposed) this.effectRetries.set(key, this.nextRetry(retry));
+		return false;
+	}
+
+	/** One alarm for deadlines, held mail, and the next eligible retry. */
+	private armAlarm(deadline?: number): void {
+		if (this.disposed) return;
+		const now = this.deps.timers.now();
+		let next = this.passRetry?.at ?? Infinity;
+		if (!this.passRetry) {
+			const orchestrationNow = this.deps.now();
+			next = now + Math.min(deadline ?? Infinity, this.mailRecheckAt ?? Infinity) - orchestrationNow;
+			for (const retry of this.effectRetries.values()) next = Math.min(next, retry.at);
+		}
+		if (this.timer?.at === next) return;
 		if (this.timer) this.deps.timers.clearTimeout(this.timer.handle);
 		this.timer = undefined;
-		if (next === undefined || this.disposed) return;
-		const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, next - this.deps.now()));
+		if (!Number.isFinite(next)) return;
+		const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, next - now));
 		this.timer = {
 			at: next,
 			handle: this.deps.timers.setTimeout(() => {

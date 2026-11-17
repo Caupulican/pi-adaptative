@@ -1,7 +1,10 @@
 import "../builtin-install.ts";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
+import { LEADER_OUTCOME_CUSTOM_TYPE } from "../../../../src/core/delegation/leader-controller.ts";
+import { parentInputMetadataOfMessage } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
@@ -62,16 +65,17 @@ const LEADER_NOTED = "The question is noted.";
  */
 export async function runJourney7LeaderPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
-	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
+	const sessionManager = world.createSessionManager();
+	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager });
 	try {
-		await runLeg(world, session);
+		await runLeg(world, session, sessionManager);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the leader session disposes cleanly").toBeUndefined();
 	}
 	trace.mark("root", "j7.leader");
 }
 
-async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void> {
+async function runLeg(world: HarnessWorld, session: AgentSession, manager: SessionManager): Promise<void> {
 	const trace = world.trace;
 	// The owner makes a standing leader: a bot of its own, then the one flag only the owner sets (`/bot lead`).
 	session.upsertPersistentBot({
@@ -356,12 +360,40 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-leader", PHASE_JUDGMENTS);
 
-	await withDeadline(trace, "J7 leg 3: the root hands a goal to the leader", session.prompt(GOAL));
-	await withDeadline(
-		trace,
-		"J7 leg 3: the goal's outcome reached the root",
-		world.provider.whenReached(reached(TRACK.root, "j7-lead-outcome")),
-	);
+	const appendParentInput = manager.appendParentInput.bind(manager);
+	let refusedDelivery: string | undefined;
+	const appendSpy = vi.spyOn(manager, "appendParentInput").mockImplementation((message, withAppend) => {
+		if (refusedDelivery === undefined && message.customType === LEADER_OUTCOME_CUSTOM_TYPE) {
+			refusedDelivery = parentInputMetadataOfMessage(message)?.deliveryId;
+			throw new Error("Injected failure at the first leader outcome append.");
+		}
+		return appendParentInput(message, withAppend);
+	});
+	try {
+		await withDeadline(trace, "J7 leg 3: the root hands a goal to the leader", session.prompt(GOAL));
+		const delay = await withDeadline(
+			trace,
+			"J7 leg 3: leader outcome retry armed",
+			world.timers.whenArmed("leaders"),
+		);
+		if (refusedDelivery === undefined) throw new Error("The retry was armed without a failed outcome append.");
+		expect(manager.getParentInput(refusedDelivery), "the failed append left no receipt").toBeUndefined();
+		expect(delay).toBeGreaterThan(0);
+		expect(delay).toBeLessThanOrEqual(1_000);
+		expect(world.timers.advance("leaders", delay), "the retry alarm fires once").toBe(1);
+		await withDeadline(
+			trace,
+			"J7 leg 3: the retry delivered the goal outcome to the root",
+			world.provider.whenReached(reached(TRACK.root, "j7-lead-outcome")),
+		);
+		expect(
+			manager.getParentInput(refusedDelivery),
+			"the retry accepted the original delivery identity",
+		).toBeDefined();
+		expect(world.timers.armedDelays("leaders"), "delivery success clears the retry alarm").toEqual([]);
+	} finally {
+		appendSpy.mockRestore();
+	}
 	await withDeadline(trace, "J7 leg 3: the root is idle", session.waitForForegroundIdle());
 
 	const envelope = seen.leadResult.envelope as Record<string, unknown> | undefined;

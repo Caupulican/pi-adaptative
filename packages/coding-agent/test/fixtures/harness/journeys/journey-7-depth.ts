@@ -1,12 +1,14 @@
 import "../builtin-install.ts";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
-import { HARNESS_PROVIDER } from "../scripted-provider.ts";
+import { LeaderDelegationLedger } from "../../../../src/core/delegation/leader-delegation-ledger.ts";
+import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
 import {
 	acceptedJson,
+	botRecord,
 	carries,
 	delegationsOf,
 	enqueueBot,
@@ -187,12 +189,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-depth", PHASE_JUDGMENTS);
 
-	await withDeadline(trace, "J7 leg 5: the root appoints a goal leader for its goal", session.prompt(GOAL));
-	await withDeadline(
-		trace,
-		"J7 leg 5: the goal's outcome reached the root",
-		world.provider.whenReached(reached(TRACK.root, "j7-depth-outcome")),
-	);
+	await runRecovery(world, session, () => seen.leadResult.leader);
 	await withDeadline(trace, "J7 leg 5: the root is idle", session.waitForForegroundIdle());
 
 	expect(
@@ -269,4 +266,88 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		goalInOutcome: true,
 		reportsTop: true,
 	});
+}
+
+async function runRecovery(world: HarnessWorld, session: AgentSession, goalLeader: () => unknown): Promise<void> {
+	const lanes = session.backgroundLanes;
+	const reconcileMessages = lanes.reconcileDelegatedMessages.bind(lanes);
+	const retireBot = lanes.retirePersistentBot.bind(lanes);
+	const recordReceipt = LeaderDelegationLedger.prototype.recordChildOutcomeDelivered;
+	let failedReconcile = false;
+	let failedReceipt = false;
+	let retirementAttempts = 0;
+	const retired = createBarrier();
+	const reconcile = vi.spyOn(lanes, "reconcileDelegatedMessages").mockImplementation((objectiveId) => {
+		if (
+			!failedReconcile &&
+			delegationsOf(session).some(
+				(record) =>
+					record.objectiveId === objectiveId && record.charter.leader === LEADER && record.state === "closed",
+			)
+		) {
+			failedReconcile = true;
+			throw new Error("Injected failure while reconciling the closed child.");
+		}
+		reconcileMessages(objectiveId);
+	});
+	const record = vi
+		.spyOn(LeaderDelegationLedger.prototype, "recordChildOutcomeDelivered")
+		.mockImplementation(function (this: LeaderDelegationLedger, objectiveId) {
+			if (!failedReceipt) {
+				failedReceipt = true;
+				throw new Error("Injected failure before persisting the nested outcome receipt.");
+			}
+			return recordReceipt.call(this, objectiveId);
+		});
+	const send = vi.spyOn(lanes, "sendOperatorMessageToBot");
+	const retire = vi.spyOn(lanes, "retirePersistentBot").mockImplementation((alias) => {
+		if (alias === goalLeader() && ++retirementAttempts === 1)
+			return { retired: false, detail: "Injected first retirement failure." };
+		const result = retireBot(alias);
+		if (alias === goalLeader() && result.retired) retired.release();
+		return result;
+	});
+	const retry = async (label: string, check: () => void) => {
+		const delay = await withDeadline(world.trace, label, world.timers.whenArmed("leaders"));
+		check();
+		expect(delay).toBeGreaterThan(0);
+		expect(world.timers.advance("leaders", delay)).toBe(1);
+	};
+	try {
+		await withDeadline(world.trace, "J7 leg 5: the root appoints a goal leader", session.prompt(GOAL));
+		await retry("J7 leg 5: the failed reconcile pass armed a retry", () => {
+			expect(failedReconcile).toBe(true);
+			expect(failedReceipt).toBe(false);
+		});
+		await retry("J7 leg 5: the failed nested receipt armed a retry", () => {
+			expect(failedReceipt).toBe(true);
+			expect(delegationsOf(session).find((entry) => entry.charter.leader === LEADER)?.outcomeDeliveredToParent).toBe(
+				false,
+			);
+		});
+		await withDeadline(
+			world.trace,
+			"J7 leg 5: the goal's outcome reached the root",
+			world.provider.whenReached(reached(TRACK.root, "j7-depth-outcome")),
+		);
+		const alias = goalLeader();
+		if (typeof alias !== "string") throw new Error("The goal leader was not recorded.");
+		const child = delegationsOf(session).find((entry) => entry.charter.leader === LEADER);
+		expect(child?.outcomeDeliveredToParent).toBe(true);
+		expect(
+			send.mock.calls.filter(([, , options]) => options?.idempotencyKey === `leader-outcome:${child?.objectiveId}`),
+		).toHaveLength(1);
+		await retry("J7 leg 5: the failed goal leader retirement armed a retry", () => {
+			expect(retirementAttempts).toBe(1);
+			expect(botRecord(session, alias).retired).not.toBe(true);
+		});
+		await withDeadline(world.trace, "J7 leg 5: the retry retired the goal leader", retired.promise);
+		expect(retirementAttempts).toBe(2);
+		expect(botRecord(session, alias).retired).toBe(true);
+	} finally {
+		retire.mockRestore();
+		send.mockRestore();
+		record.mockRestore();
+		reconcile.mockRestore();
+	}
 }

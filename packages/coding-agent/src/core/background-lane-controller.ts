@@ -2019,20 +2019,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			directBotOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
 			workers: () => this.listWorkerAgents(),
-			send: async (alias, text, delegationObjectiveId, options) => {
-				await this.sendOperatorMessageToBot(alias, text, {
-					fromRoot: true,
-					delegationObjectiveId,
-					idempotencyKey: options?.idempotencyKey,
-					fromLeader: options?.fromLeader,
-				});
-			},
+			send: (alias, text, delegationObjectiveId, options) =>
+				this.sendOperatorMessageToBot(alias, text, { fromRoot: true, delegationObjectiveId, ...options }).then(
+					() => undefined,
+				),
 			stop: (alias) => void this.stopPersistentBot(alias),
 			retire: (alias) => this.retirePersistentBot(alias),
 			acknowledge: (notificationIds) => this._getWorkerLifecycle().markNotificationsDelivered(notificationIds),
 			deliver: (input) => this.deps.deliverParentInput(input),
 			origin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+			hasAcceptedParentNotice: (key) => this._getWorkerController().getAgentControl().hasAcceptedControlReplay(key),
 			maxDepth: () => this.deps.getSettingsManager().getLeaderSettings().maxDepth,
 			isMeteredAttempt: (attempt) => this._workers?.attemptIsMetered(attempt) ?? true,
 			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),

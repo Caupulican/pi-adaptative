@@ -1089,11 +1089,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	private assertAgentAcceptsNewMessages(agent: AgentBindingContract, idempotencyKey?: string): void {
 		if (agent.status !== "retired") return;
-		if (idempotencyKey !== undefined) {
-			const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
-			const mailbox = this.getMailbox(agent.agentId);
-			if (mailbox.getMessage(messageId) || mailbox.hasControlReplayReceipt(messageId)) return;
-		}
+		if (this.isAcceptedControlReplay(agent.agentId, idempotencyKey)) return;
 		throw new Error(`Logical worker agent '${agent.agentId}' is retired.`);
 	}
 
@@ -1895,16 +1891,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (options.idempotencyKey !== undefined) {
 			this.assertIdempotencyTarget(target.agentId, options.idempotencyKey);
 		}
-		const replayId =
-			options.idempotencyKey === undefined
-				? undefined
-				: workerAgentMessageId(this.options.parentSessionId, options.idempotencyKey);
-		// Observation only: this view may predate the claim that admission acquires below, so it never mutates.
-		const observer = replayId === undefined ? undefined : this.getMailbox(target.agentId);
-		const replay =
-			replayId !== undefined &&
-			observer !== undefined &&
-			(observer.getMessage(replayId) !== undefined || observer.hasControlReplayReceipt(replayId));
+		// Observation only: this view may predate the claim that admission acquires below.
+		const replay = this.isAcceptedControlReplay(target.agentId, options.idempotencyKey);
 		const sender = options.senderAgentId;
 		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
 		const activeSender =
@@ -2029,16 +2017,28 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return { ...(claim.hostVerdict ? { hostVerdict: workerHostVerdictView(claim.hostVerdict) } : {}), advice };
 	}
 
+	/** Durable control acceptance is recorded on a fresh attempt or in an existing worker's mailbox. */
+	hasAcceptedControlReplay(idempotencyKey: string): boolean {
+		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
+		return (
+			this.admittedSpecialistForControlMessage(messageId) !== undefined ||
+			this.acceptedMailboxTarget(messageId) !== undefined
+		);
+	}
+
 	private assertIdempotencyTarget(targetAgentId: string, idempotencyKey: string): void {
 		const messageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
+		const owner = this.acceptedMailboxTarget(messageId, targetAgentId);
+		if (owner)
+			throw new Error(`Worker control idempotency identity is already accepted by logical worker '${owner}'.`);
+	}
+
+	private acceptedMailboxTarget(messageId: string, excluding?: string): string | undefined {
 		for (const agent of Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents)) {
-			if (agent.agentId === targetAgentId) continue;
+			if (agent.agentId === excluding) continue;
 			const mailbox = this.getMailbox(agent.agentId);
-			if (mailbox.getMessage(messageId) || mailbox.hasControlReplayReceipt(messageId)) {
-				throw new Error(
-					`Worker control idempotency identity is already accepted by logical worker '${agent.agentId}'.`,
-				);
-			}
+			if (mailbox.getMessage(messageId) || mailbox.hasControlReplayReceipt(messageId)) return agent.agentId;
 		}
+		return undefined;
 	}
 }

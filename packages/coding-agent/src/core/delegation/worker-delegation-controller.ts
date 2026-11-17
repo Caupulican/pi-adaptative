@@ -1092,7 +1092,7 @@ export class WorkerDelegationController {
 	}
 
 	/** Narrow model-facing control port. It owns control state; this controller only composes it. */
-	getAgentControl(): WorkerAgentControlPort {
+	getAgentControl(): WorkerAgentControlPort & Pick<WorkerAgentControlCoordinator, "hasAcceptedControlReplay"> {
 		return this.agentControl;
 	}
 

@@ -47,6 +47,8 @@ export interface LeaderControllerDeps {
 	deliver(input: ParentInputDelivery): Promise<unknown>;
 	origin(): WorkerReceiptOrigin;
 	hasDelivered(deliveryId: string): boolean;
+	/** Whether the parent worker's durable control accepted the notice, even after its goal closed. */
+	hasAcceptedParentNotice(idempotencyKey: string): boolean;
 	maxDepth(): number;
 	/**
 	 * Retires a leader's idle runtime when its contract grants it no children (a runtime started before the leader could
