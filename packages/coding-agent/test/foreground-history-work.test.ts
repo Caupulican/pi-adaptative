@@ -94,12 +94,13 @@ it.each([100, 1_000, 10_000])(
 			append({ role: "user", content: "Read the source.", timestamp: 0 });
 			const appendToolExchange = (index: number) => {
 				const toolCallId = `read-source-${index}`;
+				// Distinct reads keep the unrelated replay deduplicator from collapsing the fixture.
 				append({
 					role: "assistant",
 					api: model.api,
 					provider: model.provider,
 					model: model.id,
-					content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "source.ts" } }],
+					content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: `source-${index}.ts` } }],
 					usage: createEmptyUsage(),
 					stopReason: "toolUse",
 					timestamp: 2 * index + 1,
@@ -108,7 +109,7 @@ it.each([100, 1_000, 10_000])(
 					role: "toolResult",
 					toolCallId,
 					toolName: "read",
-					content: [{ type: "text", text: "A small retained tool result." }],
+					content: [{ type: "text", text: `A small retained tool result for source-${index}.ts.` }],
 					isError: false,
 					timestamp: 2 * index + 2,
 				});
@@ -157,6 +158,7 @@ it.each([100, 1_000, 10_000])(
 
 			const initial = await send();
 			const acceptedRows = messages.length;
+			expect(initial.messages).toHaveLength(acceptedRows);
 			appendToolExchange(results);
 			const appendedRows = messages.length - acceptedRows;
 			const work = observeHistoryWork(messages);
