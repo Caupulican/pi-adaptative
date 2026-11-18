@@ -14,7 +14,6 @@
  * through normal worker validation. The root still owns lifecycle and independent verification.
  */
 
-import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
@@ -45,7 +44,12 @@ import {
 	WORKER_DECLARABLE_BLOCKERS,
 	type WorkerDeclarableBlocker,
 } from "./worker-outcome-contract.ts";
-import { workerCommandEvidence, workerCommandOutcome } from "./worker-receipts.ts";
+import {
+	receiptAlias,
+	workerCommandCheckCitation,
+	workerCommandEvidence,
+	workerCommandOutcome,
+} from "./worker-receipts.ts";
 import { boundWorkerReportProgress, workerReportProgressSchema } from "./worker-report-progress.ts";
 
 export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
@@ -101,14 +105,19 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 				Type.Array(
 					Type.Object(
 						{
-							command: Type.String({
-								description:
-									"Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
-							}),
+							command: Type.Optional(
+								Type.String({
+									minLength: 1,
+									description:
+										"Omit when citing receiptId. Otherwise give the exact command or code, preserving whitespace; for run_process use executable/args JSON.",
+								}),
+							),
 							receiptId: Type.Optional(
 								Type.String({
+									minLength: 1,
+									maxLength: MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
 									description:
-										"The stable host receipt name (c-...) of that command, when you were shown one. Omit it otherwise: the host matches the exact command to its own record.",
+										"Copy the host receipt ID (c-...) from your command result. With receiptId, give result and omit command.",
 								}),
 							),
 							result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
@@ -118,7 +127,8 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 					),
 					{
 						description:
-							"List command checks with their exact inputs. If you only used file tools, omit checks. Put edits and writes in changes, and file reads and searches in the summary.",
+							"For command checks, copy the checks entry from the tool result. For file tools only, use checks: []. Put edits and writes in changes and describe reads or searches in the summary.",
+						maxItems: MAX_WORKER_REPORT_ENTRIES,
 					},
 				),
 			),
@@ -310,10 +320,11 @@ export function reasonCodesRefusal(reasonCodes: readonly string[] | undefined): 
 		: `submit_report.reasonCodes: ${REASON_CODE_LIST_CORRECTION}`;
 }
 
-/** Bound what a worker submitted so it fits the claim's limits; nothing is rejected for length. */
+/** Bound the report and fill receipt-only citations from this attempt's recorded commands. */
 export function submittedReportFromArguments(
 	args: SubmitReportArguments,
 	capabilities: WorkerReportCapabilities,
+	receipts: readonly WorkerCommandReceipt[] = [],
 ): SubmittedWorkerReport {
 	// The one place submitted arguments become a report (the live tool and the recovery check both call it): a worker whose
 	// compiled contract does not grant `progress` is refused here, whatever schema the call was checked against.
@@ -321,6 +332,11 @@ export function submittedReportFromArguments(
 		throw new Error("submit_report.progress is not granted to this worker; send the report without it.");
 	const reasonCodeRefusal = reasonCodesRefusal(args.reasonCodes);
 	if (reasonCodeRefusal) throw new Error(reasonCodeRefusal);
+	if ((args.checks?.length ?? 0) > MAX_WORKER_REPORT_ENTRIES)
+		throw new Error(`submit_report.checks accepts at most ${MAX_WORKER_REPORT_ENTRIES} entries.`);
+	const indexedReceipts = args.checks?.some(({ command }) => command === undefined)
+		? receiptIndex(receipts)
+		: undefined;
 	const text = (value: string | undefined): string | undefined => {
 		const trimmed = value?.trim();
 		return trimmed ? boundedText(trimmed, MAX_WORKER_REPORT_TEXT_CHARS) : undefined;
@@ -371,19 +387,30 @@ export function submittedReportFromArguments(
 					},
 				];
 			}),
-			checks: (args.checks ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((check) => {
-				if (!check.command.trim()) return [];
-				const command = workerCommandEvidence(check.command);
+			checks: (args.checks ?? []).map((check) => {
 				const receiptId = check.receiptId?.trim();
+				if (
+					(check.receiptId !== undefined &&
+						(!receiptId || receiptId.length > MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS)) ||
+					(check.command !== undefined && !check.command.trim()) ||
+					(check.command === undefined && !receiptId)
+				)
+					throw new Error("Each submit_report check needs a host receiptId or exact command.");
+				const cited = receiptId ? indexedReceipts?.get(receiptId) : undefined;
+				const command =
+					check.command !== undefined
+						? workerCommandEvidence(check.command)
+						: {
+								command: cited?.command ?? "Command unavailable for cited receipt",
+								...(cited?.commandDigest ? { commandDigest: cited.commandDigest } : {}),
+							};
 				const note = text(check.note);
-				return [
-					{
-						...command,
-						...(receiptId ? { receiptId: receiptId.slice(0, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS) } : {}),
-						result: check.result,
-						...(note ? { note } : {}),
-					},
-				];
+				return {
+					...command,
+					...(receiptId ? { receiptId } : {}),
+					result: check.result,
+					...(note ? { note } : {}),
+				};
 			}),
 			changes: (args.changes ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((change) => {
 				const file = boundedText(change.file.trim(), MAX_WORKER_CLAIM_CHANGED_FILE_CHARS, { path: true });
@@ -410,15 +437,16 @@ export function submittedReportFromArguments(
 export function createSubmitReportTool(
 	capture: WorkerReportCapture,
 	capabilities: WorkerReportCapabilities,
+	receipts: readonly WorkerCommandReceipt[],
 ): AgentTool<SubmitReportParameters> {
 	return {
 		name: SUBMIT_REPORT_TOOL_NAME,
 		label: "Submit report",
 		description:
-			"Submit your final report: what you did, the status of each task requirement with its evidence, the checks you ran (cite the host's receipt ids), the files you changed, what remains. Calling it ends your task. A plain text answer is also accepted, but it cannot be checked against the host's records.",
+			"Submit your final report: what you did, the status of each task requirement with its evidence, the command checks you ran (copy the host's receipt citation, or use checks: [] for file tools only), the files you changed, what remains. Calling it ends your task. A plain text answer is also accepted, but it cannot be checked against the host's records.",
 		parameters: submitReportParametersFor(capabilities),
 		execute: async (_toolCallId, params) => {
-			capture.submitted = submittedReportFromArguments(params, capabilities);
+			capture.submitted = submittedReportFromArguments(params, capabilities, receipts);
 			return {
 				content: [{ type: "text", text: "Report received." }],
 				details: { requirements: capture.submitted.report.requirements.length },
@@ -436,11 +464,6 @@ export function reportWorthRequesting(input: {
 	changedFiles: readonly string[];
 }): boolean {
 	return input.context.requirementIds.length > 0 || input.receipts.length > 0 || input.changedFiles.length > 0;
-}
-
-/** A short, stable receipt name that does not change when bounded history evicts older commands. */
-export function receiptAlias(receipt: WorkerCommandReceipt): string {
-	return `c-${createHash("sha256").update(receipt.id).digest("hex").slice(0, 12)}`;
 }
 
 /** Receipts by id and by alias, for resolving what a report cites. */
@@ -466,9 +489,8 @@ type CheckEvidence =
 
 /**
  * A check that names no receipt is the host's own record of the very same command: receipts and checks carry the digest
- * of the exact command, so equal digests identify it (the latest run when it ran more than once). A worker reports before
- * it is shown any receipt name, so requiring it to quote one made every honest report "without receipt". A check no
- * recorded command matches stays without one and is still reported as such.
+ * of the exact command, so equal digests identify it (the latest run when it ran more than once). A check with no
+ * exact match stays without a receipt and is reported as such.
  */
 function citedByCommand(check: WorkerReportCheck, receipts: readonly WorkerCommandReceipt[]): WorkerReportCheck {
 	if (check.receiptId || !check.commandDigest) return check;
@@ -505,7 +527,8 @@ export function resolvedCheckReceipt(
 function receiptLine(receipt: WorkerCommandReceipt): string {
 	const exit = receipt.exitCode !== undefined ? `exit ${receipt.exitCode}` : "exit outcome unavailable";
 	const outcome = receipt.isError ? `error, ${exit}` : exit;
-	return `- ${receiptAlias(receipt)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}`;
+	const citation = workerCommandCheckCitation(receipt);
+	return `- ${receiptAlias(receipt)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}${citation ? `; checks entry: ${citation}` : ""}`;
 }
 
 function recordedChangesLine(files: readonly string[]): string {
@@ -534,10 +557,10 @@ export function buildReportRequest(input: {
 	}
 	if (receipts.length > 0) {
 		lines.push(
-			"Commands the host recorded; cite the stable receipt name (c-...) for each check. Display snippets may be shortened; checks.command must repeat the exact tool input, preserving whitespace (run_process: executable/args JSON):",
+			"Commands the host recorded. Copy each relevant checks entry as shown, with receiptId and result. Leave command out when citing a receipt:",
 		);
 		lines.push(...receipts.slice(-24).map(receiptLine));
-	} else lines.push("No command receipts were recorded for this attempt. Omit passed and failed checks.");
+	} else lines.push("No command receipts were recorded for this attempt. Use checks: [] if you only used file tools.");
 	if (changedFiles.length > 0) lines.push(recordedChangesLine(changedFiles));
 	lines.push(
 		"Say what remains, what you assumed and what could regress. If something is still unproven, run the check now, then report. If you cannot finish, submit status blocked with the blocker.",
@@ -592,17 +615,14 @@ export function buildNeedsMoreRequest(
 	receipts: readonly WorkerCommandReceipt[] = [],
 	changedFiles: readonly string[] = [],
 ): string {
-	// A check that matches no recorded command is usually a command the worker did run but wrote differently (a `python -c`
-	// line for code the python tool ran): showing what the host recorded lets it cite the exact input instead of giving up.
-	// A requirement reported met needs a receipt name or a changed file as its evidence, and a worker that reports as its
-	// closing action has been shown no receipt name: the review shows the record, or the requirement could never be proven.
+	// Show exact receipt citations the worker can use without repeating command text or rerunning a recorded check.
 	const citesRecord = verdict.reasonCodes.some(
 		(code) => code.startsWith("check_") || RECORD_CITATION_REASON_CODES.has(code),
 	);
 	const recorded =
 		receipts.length > 0 && citesRecord
 			? [
-					"Commands the host recorded; cite a receipt name (c-...) as a requirement's evidence, and to keep a check give its receipt name and repeat that exact input as the check's command:",
+					"Commands the host recorded. Copy the relevant checks entry, leaving command out. Use its receiptId in requirement evidence if it supports that requirement:",
 					...receipts.slice(-12).map(receiptLine),
 				]
 			: [];
@@ -680,7 +700,7 @@ export function judgeSubmittedReport(input: {
 		const evidence = resolveCheckEvidence(check, receipts);
 		if (!check.receiptId) {
 			missing.push(
-				`check ${quotedSpan(check.command)} is reported ${check.result} but matches no command the host recorded. If it was a file read or a search, take it out of checks and keep it in the summary; if it was a command, run it now so the host records it`,
+				`check ${quotedSpan(check.command)} is reported ${check.result} but matches no command the host recorded. If it was a file read or a search, take it out of checks and keep it in the summary; if it was a command, cite the matching receipt below or run it if there is no receipt`,
 			);
 			reasons.push("check_without_receipt");
 		} else if (evidence.kind === "missing") {

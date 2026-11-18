@@ -7,7 +7,9 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-scope.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { WorkerLifecycle } from "../../../../src/core/delegation/worker-lifecycle.ts";
+import { workerCommandReceiptId } from "../../../../src/core/delegation/worker-receipts.ts";
 import { WorkerRecoveryCoordinator } from "../../../../src/core/delegation/worker-recovery-coordinator.ts";
+import { resolvedCheckReceipt } from "../../../../src/core/delegation/worker-report.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
@@ -626,6 +628,9 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		},
 		{ expect: ownerWords("Start a late worker on a third lane.") },
 	);
+	const lateCommand = "printf 'late receipt\\n'";
+	const foreignReceiptId = workerCommandReceiptId("foreign-request", "late-check-1");
+	world.shell.enqueue({ name: "late-command-check", command: lateCommand, output: "late receipt", exitCode: 0 });
 	world.provider.enqueue(
 		"worker-b",
 		{
@@ -672,24 +677,51 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 						name: "write",
 						arguments: { path: "src/late.ts", content: "export const LATE = false;\n" },
 					},
+					{ type: "toolCall", id: "late-check-1", name: "bash", arguments: { command: lateCommand } },
 				],
 				stopReason: "toolUse",
 			},
 		},
-		{
-			name: "late-incomplete",
-			reply: {
-				content: [
-					{
-						type: "toolCall",
-						id: "late-report-0",
-						name: "submit_report",
-						arguments: { status: "completed", summary: "LATE-INCOMPLETE-REPORT: the module is written." },
+		dynamicCalls("late-incomplete", (request) => {
+			const written = request.context.messages.findLast(
+				(message) => message.role === "toolResult" && message.toolCallId === "late-write-1",
+			);
+			if (
+				written?.role !== "toolResult" ||
+				!written.content.some(
+					(block) =>
+						block.type === "text" &&
+						block.text.includes('Use "src/late.ts" as submit_report.changes[].file.') &&
+						block.text.includes("If you only used file tools, use checks: []."),
+				)
+			)
+				throw new Error("the write result did not expose its recorded file path");
+			const output = request.context.messages.findLast(
+				(message) => message.role === "toolResult" && message.toolCallId === "late-check-1",
+			);
+			if (output?.role !== "toolResult") throw new Error("the command result did not reach the worker");
+			const receiptId = output.content
+				.flatMap((block) => (block.type === "text" ? [block.text] : []))
+				.join("\n")
+				.match(
+					/Host command receipt\. For submit_report\.checks, use \{"receiptId":"(c-[a-f0-9]+)","result":"passed"\}/,
+				)?.[1];
+			if (!receiptId) throw new Error("the command result did not expose a receipt-only submission");
+			return [
+				{
+					id: "late-report-0",
+					name: "submit_report",
+					arguments: {
+						status: "completed",
+						summary: "LATE-INCOMPLETE-REPORT: the module is written.",
+						checks: [
+							{ receiptId, result: "passed" },
+							{ receiptId: foreignReceiptId, result: "passed" },
+						],
 					},
-				],
-				stopReason: "toolUse",
-			},
-		},
+				},
+			];
+		}),
 		{
 			name: "late-correction",
 			check: (request) => {
@@ -920,6 +952,17 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	expect(recovered?.submittedReport?.summary, "the recovered report is the typed incomplete report").toContain(
 		"LATE-INCOMPLETE-REPORT",
 	);
+	const checks = recovered?.submittedReport?.report.checks;
+	expect(checks, "recovery retains the local and foreign citations").toHaveLength(2);
+	const receipts = recovered!.commandReceipts;
+	expect(receipts).toHaveLength(1);
+	expect(resolvedCheckReceipt(checks![0]!, receipts), "the local receipt resolves on durable replay").toEqual({
+		receipt: receipts[0],
+		outcome: "passed",
+	});
+	expect(checks![1]?.receiptId).toBe(foreignReceiptId);
+	expect(resolvedCheckReceipt(checks![1]!, receipts), "the foreign receipt cannot borrow local proof").toBeUndefined();
+
 	expect(
 		readerCoordinator.recoveredTerminalCompletion(adverseConversation, "attempt-foreign-not-in-transcript"),
 		"a foreign attempt id is refused",

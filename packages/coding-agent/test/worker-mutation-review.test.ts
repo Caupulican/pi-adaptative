@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { ownerOrchestrationHome } from "../src/core/agent-paths.ts";
 import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
@@ -16,10 +17,14 @@ import {
 	retainCancelledWorkerMutationClaim,
 	WorkerMutationEvidence,
 } from "../src/core/delegation/worker-mutation-evidence.ts";
+import { commandReceiptFor, workerCommandCheckCitation } from "../src/core/delegation/worker-receipts.ts";
 import {
 	buildNeedsMoreRequest,
 	buildReportRequest,
+	createSubmitReportTool,
 	judgeSubmittedReport,
+	resolvedCheckReceipt,
+	type WorkerReportCapture,
 } from "../src/core/delegation/worker-report.ts";
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
@@ -93,6 +98,54 @@ describe("worker mutation review", () => {
 		expect(judge([], []).verdict).toBe("accepted");
 	});
 
+	it("accepts the command-result receipt citation without copying command bytes", async () => {
+		const receipt = commandReceiptFor({
+			requestId: "request",
+			toolCallId: "call",
+			toolName: "bash",
+			args: { command: "printf  'proof'" },
+			isError: false,
+			result: { details: { exitCode: 0 } },
+		})!;
+		const citation = JSON.parse(workerCommandCheckCitation(receipt)!);
+		const capture: WorkerReportCapture = {};
+		const receipts = [receipt];
+		const tool = createSubmitReportTool(capture, { rootAnswer: false, progress: false }, receipts);
+		const base = { status: "completed" as const, summary: "Checked the change." };
+		const judge = () =>
+			judgeSubmittedReport({
+				context: { writeCapable: false, verifier: false, requirementIds: [] },
+				cwd: process.cwd(),
+				receipts,
+				changedFiles: [],
+				submitted: capture.submitted!,
+			});
+		expect(Value.Check(tool.parameters, { ...base, checks: [citation] })).toBe(true);
+		await tool.execute("report", { ...base, checks: [citation] });
+		const check = capture.submitted!.report.checks[0]!;
+		expect(check.commandDigest).toBe(receipt.commandDigest);
+		expect(resolvedCheckReceipt(check, receipts)?.receipt).toBe(receipt);
+		expect(judge().verdict).toBe("accepted");
+
+		await tool.execute("report", { ...base, checks: [{ ...citation, command: "printf 'proof'" }] });
+		expect(judge().reasonCodes).toContain("check_command_mismatch");
+		await tool.execute("report", { ...base, checks: [{ ...citation, receiptId: "c-unknown" }] });
+		expect(judge().reasonCodes).toContain("check_unknown_receipt");
+		await tool.execute("report", { ...base, checks: [{ ...citation, result: "failed" }] });
+		expect(judge().reasonCodes).toContain("check_contradicted_by_receipt");
+		receipts.push({ ...receipt });
+		await tool.execute("report", { ...base, checks: [citation] });
+		expect(judge().reasonCodes).toContain("check_ambiguous_receipt");
+		receipts.pop();
+		receipts[0] = { ...receipt, exitCode: undefined };
+		expect(workerCommandCheckCitation(receipts[0])).toBeUndefined();
+		await tool.execute("report", { ...base, checks: [citation] });
+		expect(judge().reasonCodes).toContain("check_incomplete_receipt");
+		await expect(tool.execute("report", { ...base, checks: [{ result: "passed" }] })).rejects.toThrow(
+			"needs a host receiptId or exact command",
+		);
+	});
+
 	it.each(["cancelled", "failed", "completed"] as const)(
 		"retains and acknowledges %s uncertainty without asserting any changed path",
 		(status) => {
@@ -158,13 +211,13 @@ describe("worker mutation review", () => {
 				});
 			const evidence = open();
 			evidence.start("first", "write", { path: "confirmed.txt" });
-			expect(evidence.end("first", { content: [] })).toBe(true);
+			expect(evidence.end("first", { content: [] })).toEqual({ recordedPath: "confirmed.txt" });
 			evidence.start("read-only", "bash", { command: "ls" });
 			expect(evidence.finding()).toBeUndefined();
 			switch (termination) {
 				case "failed":
 					evidence.start("second", "edit", { path: "unconfirmed.txt" });
-					expect(evidence.end("second", undefined)).toBe(false);
+					expect(evidence.end("second", undefined)).toBeUndefined();
 					break;
 				case "in_flight":
 					evidence.start("second", "write", { path: "unconfirmed.txt" });
@@ -178,7 +231,7 @@ describe("worker mutation review", () => {
 					break;
 			}
 			evidence.seal();
-			expect(evidence.end("second", { content: [] })).toBe(false);
+			expect(evidence.end("second", { content: [] })).toBeUndefined();
 			expect(ownedWrites).toEqual(["confirmed.txt"]);
 			const resumed = open();
 			expect([...resumed.changedFiles]).toEqual(["confirmed.txt"]);
@@ -242,6 +295,40 @@ describe("worker mutation review", () => {
 		expect(recover()).toBe(true);
 		expect(latest()?.parentReviewedAt).toBe(updatedAt);
 	});
+	it("exposes the exact recorded path only when that call's completion was persisted", () => {
+		const cwd = process.cwd();
+		const conversation = workerConversation(sessionManager());
+		const warnings: string[] = [];
+		const tracker = new WorkerMutationEvidence({
+			attemptId: "current",
+			cwd,
+			shellReadOnly: true,
+			store: {
+				getMutationProgress: (id) => conversation.getMutationProgress(id),
+				recordChangedFile: (id, file) => conversation.recordChangedFile(id, file),
+				recordUncertainMutation: (id) => conversation.recordUncertainMutation(id),
+				recordNativeWriteProgress: (id, writeId, file) => {
+					if (file === "in-doubt.ts") throw new Error("unavailable");
+					return conversation.recordNativeWriteProgress(id, writeId, file);
+				},
+			},
+			onPersistenceFailure: (message) => warnings.push(message),
+		});
+		tracker.start("success", "edit", { path: path.join(cwd, "util.ts") });
+		expect(tracker.end("success", { content: [] })).toEqual({ recordedPath: "util.ts" });
+		expect(tracker.end("success", { content: [] })).toBeUndefined();
+		tracker.start("spaced", "write", { path: path.join(cwd, "nested", "file with spaces.ts") });
+		expect(tracker.end("spaced", { content: [] })).toEqual({ recordedPath: "nested/file with spaces.ts" });
+
+		tracker.start("in-doubt", "write", { path: "in-doubt.ts" });
+		expect(tracker.end("in-doubt", { content: [] })).toEqual({ recordedPath: undefined });
+		expect(conversation.getMutationProgress("current").changedFiles).toEqual([
+			"util.ts",
+			"nested/file with spaces.ts",
+		]);
+		expect(warnings).toHaveLength(1);
+	});
+
 	it.each(["edit", "bash", "python", "run_process"])(
 		"refuses %s before running when evidence cannot persist",
 		(tool) => {
@@ -263,7 +350,7 @@ describe("worker mutation review", () => {
 			expect(() => tracker.start("call", tool, { path: "file.txt", command: "touch file.txt" })).toThrow(
 				"mutation journal unavailable",
 			);
-			expect(tracker.end("call", { content: [] })).toBe(false);
+			expect(tracker.end("call", { content: [] })).toBeUndefined();
 			expect(tracker.finding()).toBeUndefined();
 		},
 	);

@@ -1224,22 +1224,24 @@ export class WorkerConversation {
 		);
 	}
 
-	/** With no path this is the pre-execution intent; a path closes it as a confirmed write. */
-	recordNativeWriteProgress(attemptId: string, writeId: string, path?: string): void {
+	/** Record the pre-execution intent or close it as a confirmed write and return its saved path. */
+	recordNativeWriteProgress(attemptId: string, writeId: string, path?: string): string | undefined {
 		attemptId = assertAttemptUsageId(attemptId);
 		if (writeId.length !== 36) throw new TypeError("Worker native write identity is invalid.");
 		const candidate = path === undefined ? undefined : collectBoundedWorkerClaimChangedFiles([path]);
 		if (candidate && (candidate.overflowed || candidate.values.length !== 1)) {
 			throw new TypeError("Worker changed-file progress path is invalid or exceeds its durable bound.");
 		}
+		const recordedPath = candidate?.values[0];
 		if (this.usageAccountingVersion === 1) this.beginAttemptUsage(attemptId);
 		this.appendSessionEntry((sessionManager) =>
 			sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, {
 				attemptId,
 				writeId,
-				...(candidate ? { path: candidate.values[0]! } : {}),
+				...(recordedPath === undefined ? {} : { path: recordedPath }),
 			}),
 		);
+		return recordedPath;
 	}
 
 	getChangedFiles(attemptId: string): string[] {

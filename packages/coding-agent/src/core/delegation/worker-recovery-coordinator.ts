@@ -24,7 +24,6 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
 import {
-	reasonCodesRefusal,
 	reportCapabilitiesOf,
 	SUBMIT_REPORT_TOOL_NAME,
 	type SubmittedWorkerReport,
@@ -755,8 +754,11 @@ export class WorkerRecoveryCoordinator {
 				if (call.name === SUBMIT_REPORT_TOOL_NAME) {
 					if (invocation.operationStatus !== "success") return undefined;
 					if (!Value.Check(reportSchema, call.arguments)) return undefined;
-					if (reasonCodesRefusal(call.arguments.reasonCodes)) return undefined;
-					submittedReport = submittedReportFromArguments(call.arguments, reportCapabilities);
+					try {
+						submittedReport = submittedReportFromArguments(call.arguments, reportCapabilities, commandReceipts);
+					} catch {
+						return undefined;
+					}
 				}
 				const receipt = commandReceiptFor({
 					requestId: invocation.requestId,

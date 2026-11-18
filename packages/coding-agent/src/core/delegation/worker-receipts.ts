@@ -97,6 +97,17 @@ export function workerCommandReceiptId(requestId: string, toolCallId: string): s
 		.digest("hex")}`;
 }
 
+/** A short, stable receipt name that does not change when bounded history evicts older commands. */
+export function receiptAlias(receipt: WorkerCommandReceipt): string {
+	return `c-${createHash("sha256").update(receipt.id).digest("hex").slice(0, 12)}`;
+}
+
+/** A report check the model can copy directly when the host has exact command and outcome evidence. */
+export function workerCommandCheckCitation(receipt: WorkerCommandReceipt): string | undefined {
+	const result = workerCommandOutcome(receipt);
+	return receipt.commandDigest && result ? JSON.stringify({ receiptId: receiptAlias(receipt), result }) : undefined;
+}
+
 /** A missing exit outcome never establishes success. */
 export function workerCommandOutcome(receipt: WorkerCommandReceipt): "passed" | "failed" | undefined {
 	if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) return "failed";

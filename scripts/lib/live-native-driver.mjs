@@ -344,16 +344,24 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			const lane = lanes.get(currentId);
 			const claim = claims.get(currentId);
 			const currentResult = finishes.at(-1).payload.result;
+			const blockedForOwner =
+				lane.status === "blocked" && claim?.status === "blocked" &&
+				["needs_more", "rejected"].includes(claim.hostVerdict?.verdict) &&
+				currentResult.status === "blocked" && currentResult.receipts?.acceptance?.disposition === "rejected" &&
+				outcome?.status === "blocked" && outcome.nextAction?.kind === "ask_owner";
+			const completed =
+				claim?.status === "completed" && claim.hostVerdict?.verdict === "accepted" &&
+				!claim.blockers?.length && !claim.pending?.length &&
+				(claim.parentReviewRequired !== true || (typeof claim.parentReviewedAt === "string" && Number.isFinite(Date.parse(claim.parentReviewedAt)))) &&
+				(lane.status === "partial" ? currentResult.status === "partial" && outcome?.status === "partial" :
+					["succeeded", "completed"].includes(lane.status) && currentResult.status === "completed" && outcome?.status === "succeeded");
 			if (
 				!outcome || outcomeEvent.ordinal <= finishes.at(-1).ordinal || outcome.objectiveId !== objectiveId ||
 				JSON.stringify(outcome.attempts?.map((attempt) => attempt.attemptId)) !== JSON.stringify(ids) ||
 				outcome.attempts.some((attempt, index) => attempt.resultId !== finishes[index].payload.result.resultId || attempt.laneStatus !== (lanes.get(ids[index]).status === "completed" ? "succeeded" : lanes.get(ids[index]).status)) ||
-				claim?.requestId !== taskId || claim.status !== "completed" || claim.hostVerdict?.verdict !== "accepted" || claim.blockers?.length || claim.pending?.length ||
-				(claim.parentReviewRequired === true && (typeof claim.parentReviewedAt !== "string" || !Number.isFinite(Date.parse(claim.parentReviewedAt)))) ||
+				claim?.requestId !== taskId || (!completed && !blockedForOwner) ||
 				typeof currentResult.resultId !== "string" || !currentResult.resultId || currentResult.receipts?.status !== "captured" || !["accepted", "rejected"].includes(currentResult.receipts?.acceptance?.disposition) ||
-				!Number.isSafeInteger(outcome.generation) || outcome.generation < 1 || typeof outcome.outcomeId !== "string" ||
-				!(["succeeded", "completed", "partial"].includes(lane.status)) ||
-				(lane.status === "partial" ? currentResult.status !== "partial" || outcome.status !== "partial" : currentResult.status !== "completed" || outcome.status !== "succeeded")
+				!Number.isSafeInteger(outcome.generation) || outcome.generation < 1 || typeof outcome.outcomeId !== "string"
 			) return undefined;
 			result.push({
 				taskId, objectiveId, currentAttemptId: currentId, laneStatus: lane.status, claimStatus: claim.status,
@@ -434,6 +442,21 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 				if (requireWorker && lanes.size === 0) return undefined;
 				const workers = operationalWorkerTasks(agentDir, input.sessionId, lanes, claims);
 				if (!workers) return undefined;
+				const blocked = workers.find((worker) => worker.laneStatus === "blocked");
+				if (blocked) {
+					// An automatic retry or a handoff the parent has yet to answer can still produce acceptance.
+					const answered = branch.slice(0, branch.indexOf(last)).some((row) =>
+						row.type === "custom_message" && row.customType === "background-worker-completion" &&
+						row.details?.records?.some((record) => record.attemptId === blocked.currentAttemptId && record.status === "blocked")
+					);
+					if (requireWorker && answered &&
+						prior?.blockedAttempt === blocked.currentAttemptId && prior.leafId === current.leafId && prior.sequence < current.sequence) {
+						const reasons = blocked.hostVerdict.reasonCodes?.join(", ") || blocked.hostVerdict.verdict;
+						throw new Error(`required worker ${blocked.currentAttemptId} settled blocked (${reasons}); the parent answered and the recorded next action requires the owner`);
+					}
+					prior = answered ? { ...current, blockedAttempt: blocked.currentAttemptId } : undefined;
+					return undefined;
+				}
 				const retried = workers.filter((worker) => worker.attempts.length > 1);
 				const retryIds = new Set(retried.flatMap((worker) => worker.attempts.map((attempt) => attempt.attemptId)));
 				const retryLanes = new Map([...lanes].filter(([attempt]) => retryIds.has(attempt)));

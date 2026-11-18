@@ -194,7 +194,7 @@ export interface WorkerReportRequirement {
 
 export interface WorkerReportCheck {
 	readonly command: string;
-	/** Host-derived from the submitted command before display truncation. */
+	/** Exact command digest from the host receipt or from the submitted command before display truncation. */
 	readonly commandDigest?: string;
 	readonly receiptId?: string;
 	readonly result: "passed" | "failed" | "not_run";

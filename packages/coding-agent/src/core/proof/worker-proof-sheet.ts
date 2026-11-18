@@ -13,7 +13,8 @@ import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import { MAX_WORKER_CLAIM_BLOCKER_CHARS } from "../delegation/worker-claim.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
-import { receiptAlias, resolvedCheckReceipt } from "../delegation/worker-report.ts";
+import { receiptAlias } from "../delegation/worker-receipts.ts";
+import { resolvedCheckReceipt } from "../delegation/worker-report.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import {
 	buildProofSheet,

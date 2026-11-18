@@ -47,14 +47,14 @@ import { readWorkerFollowUp } from "./worker-follow-up-read.ts";
 import { createWorkerHostTools, WORKER_HOST_TOOL_NAMES } from "./worker-host-tools.ts";
 import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
-import { WorkerMutationEvidence } from "./worker-mutation-evidence.ts";
+import { type NativeWriteCompletion, WorkerMutationEvidence } from "./worker-mutation-evidence.ts";
 import { runProviderCompletionWithBackoff } from "./worker-provider-backoff.ts";
 import {
 	callbackEvidencedCompletion,
 	WorkerCompletionProtocolError,
 	WorkerProviderTurnProtocol,
 } from "./worker-provider-turn-protocol.ts";
-import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
+import { appendCommandReceipt, commandReceiptFor, workerCommandCheckCitation } from "./worker-receipts.ts";
 import {
 	buildNeedsMoreRequest,
 	buildReportRequest,
@@ -393,7 +393,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		verifier: options.verificationSubjectTaskId !== undefined,
 	};
 	const submitReportTool = wrapToolExecution(
-		createSubmitReportTool(reportCapture, options.reportCapabilities),
+		createSubmitReportTool(reportCapture, options.reportCapabilities, commandReceipts),
 		(executor) => ({
 			...executor,
 			execute: (...args) => {
@@ -990,7 +990,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							};
 							const preparedTools = new Map<string, { requestId: string; name: string; args: unknown }>();
 							const admittedCalls = new Set<string>();
-							const successfulMutations = new Set<string>();
+							const successfulMutations = new Map<string, NativeWriteCompletion>();
 							let stopAdmission: (() => void) | undefined;
 							let stopExecution: (() => void) | undefined;
 							let committed = false;
@@ -1024,7 +1024,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										if (admittedCalls.has(id)) mutations.start(id, name, args);
 									},
 									end: (id, result) => {
-										if (mutations.end(id, result)) successfulMutations.add(id);
+										const completion = mutations.end(id, result);
+										if (completion) successfulMutations.set(id, completion);
 									},
 								});
 								let result: IsolatedCompletionResult;
@@ -1152,7 +1153,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												signal.throwIfAborted();
 												options.toolSelection?.complete(toolCall.id, !isError, result.content);
 												admittedToolSelectionIds.delete(toolCall.id);
-												if (successfulMutations.delete(toolCall.id) && !isError)
+												const mutation = successfulMutations.get(toolCall.id);
+												successfulMutations.delete(toolCall.id);
+												if (mutation && !isError)
 													duplicateNote = await options.reviewNewCode?.({
 														toolName: toolCall.name,
 														args,
@@ -1170,14 +1173,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												});
 												if (receipt) appendCommandReceipt(commandReceipts, receipt);
 												await observeToolCall(toolCall.name, args, isError);
-												return duplicateNote
-													? {
-															content: [
-																...result.content,
-																{ type: "text" as const, text: duplicateNote },
-															],
-														}
-													: undefined;
+												const citation =
+													reportHandshake && receipt ? workerCommandCheckCitation(receipt) : undefined;
+												const recordedPath =
+													reportHandshake && !isError ? mutation?.recordedPath : undefined;
+												if (!duplicateNote && !citation && !recordedPath) return undefined;
+												const content = result.content.slice();
+												if (duplicateNote) content.push({ type: "text", text: duplicateNote });
+												if (citation)
+													content.push({
+														type: "text",
+														text: `Host command receipt. For submit_report.checks, use ${citation}`,
+													});
+												if (recordedPath)
+													content.push({
+														type: "text",
+														text: `Host recorded this file change. Use ${JSON.stringify(recordedPath)} as submit_report.changes[].file. If you only used file tools, use checks: [].`,
+													});
+												return { content };
 											} catch (error) {
 												retainCallbackFailure(error);
 												throw error;

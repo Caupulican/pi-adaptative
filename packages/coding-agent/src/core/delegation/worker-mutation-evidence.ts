@@ -48,6 +48,11 @@ interface WorkerMutationEvidenceOptions {
 	onPersistenceFailure(message: string): void;
 }
 
+export interface NativeWriteCompletion {
+	/** Present only when the exact attempted mutation path was durably recorded. */
+	readonly recordedPath?: string;
+}
+
 export class WorkerMutationEvidence {
 	readonly changedFiles: Set<string>;
 	private readonly options: WorkerMutationEvidenceOptions;
@@ -81,24 +86,29 @@ export class WorkerMutationEvidence {
 		}
 	}
 
-	/** True when a native typed write completed successfully and can be reviewed as code. */
-	end(toolCallId: string, result: unknown): boolean {
+	/** Describes a successful native write, including its path when durable evidence is available. */
+	end(toolCallId: string, result: unknown): NativeWriteCompletion | undefined {
 		const write = this.inFlight.get(toolCallId);
-		if (!write) return false;
+		if (!write) return undefined;
 		this.inFlight.delete(toolCallId);
 		if (!result || (result as { isError?: boolean }).isError === true) {
 			this.noteUncertainty();
-			return false;
+			return undefined;
 		}
 		this.changedFiles.add(write.target);
+		let recordedPath: string | undefined;
 		try {
-			this.options.store.recordNativeWriteProgress(this.options.attemptId, write.writeId, write.target);
+			recordedPath = this.options.store.recordNativeWriteProgress(
+				this.options.attemptId,
+				write.writeId,
+				write.target,
+			);
 		} catch (error) {
 			this.uncertain = true;
 			this.options.onPersistenceFailure(`Worker changed-file progress could not be persisted: ${String(error)}`);
 		}
 		this.options.onOwnedWrite?.(write.target);
-		return true;
+		return { recordedPath };
 	}
 
 	restoreActions(options: Omit<Parameters<typeof readWorkerActionMutationProgress>[0], "cwd" | "attemptId">): void {
