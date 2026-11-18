@@ -8,7 +8,7 @@ import { botHomeName } from "../agent-paths.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { botHomeOfDir } from "../orchestration-homes.ts";
 import { ROUTINE_BOT_CHANNEL, routineBotOccurrenceRef } from "../routines/routine-bot-reference.ts";
-import { entryTurnOrigin } from "../turn-origin.ts";
+import { entryTurnOrigin, isAddressedInput } from "../turn-origin.ts";
 
 function scope(homeName: string, ref: string): string {
 	return createHash("sha256")
@@ -60,7 +60,7 @@ export function placedRoutineJobScope(manager: SessionManager, receipt: WorkerRe
 		}
 		visited.push(entry);
 		const origin = entryTurnOrigin(entry);
-		if (origin || (entry.type === "message" && entry.message.role === "user")) {
+		if (isAddressedInput(entry.type === "message" ? entry.message.role : undefined, origin)) {
 			ref = sourceRef(origin) ?? null;
 			break;
 		}

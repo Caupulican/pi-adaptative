@@ -79,7 +79,7 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 			occurrenceId: occurrence.occurrenceId,
 			claimToken: occurrence.claim!.token,
 			nowMs,
-			dispatchKey: "desktop-dispatch",
+			dispatchKey: `routine:${occurrence.occurrenceId}`,
 		};
 		store.markRoutineDispatching(dispatch);
 		store.markRoutineRunning(dispatch);

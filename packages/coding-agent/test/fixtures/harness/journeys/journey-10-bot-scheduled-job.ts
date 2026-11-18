@@ -5,12 +5,14 @@ import { taskStatus } from "../../../../src/core/channels/owner-task.ts";
 import { PersistentBotTeamStore } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import type { RemoteHubController } from "../../../../src/core/remote/hub-controller.ts";
 import { JobStore } from "../../../../src/core/remote/job-store.ts";
+import { routineJobScope } from "../../../../src/core/remote/routine-job-origin.ts";
 import { readRoutineBotJobResults, routineJobStatusLines } from "../../../../src/core/remote/routine-job-results.ts";
 import { formatRoutineList } from "../../../../src/modes/interactive/bot-team-lines.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { BOT_SESSION_JUDGMENTS, createOwnerBot, enqueueBot } from "./journey-7-shared.ts";
+import { createOwnerBot, enqueueBot } from "./journey-7-shared.ts";
 import {
+	enqueueHubRoot,
 	enqueueJoinerJob,
 	joinerJobReached,
 	PLAN_CALL_JUDGMENTS,
@@ -19,6 +21,7 @@ import {
 	reportStep,
 	whenMachine,
 } from "./journey-10-shared.ts";
+import { currentRequestCarries } from "./shared.ts";
 
 export async function scheduledBotJob(
 	world: HarnessWorld,
@@ -66,7 +69,9 @@ export async function scheduledBotJob(
 		"scheduled",
 		reportStep("j10-scheduled-report", { status: "completed", summary }, release.promise, started.release),
 	);
-	world.systemOne.enterPhase("j10-scheduled-placement", { ...BOT_SESSION_JUDGMENTS, ...PLAN_CALL_JUDGMENTS });
+	// The scheduled message supplies a plan brief without going through owner request intake.
+	const { misses_request_part, brief_self_contained } = PLAN_CALL_JUDGMENTS;
+	world.systemOne.enterPhase("j10-scheduled-placement", { misses_request_part, brief_self_contained });
 
 	const add = (routineId: string, at: number) =>
 		store.upsertRoutine({
@@ -79,6 +84,15 @@ export async function scheduledBotJob(
 	const now = world.timers.port("routines").now();
 	const sibling = add("later-limit-check", now + 86_400_000);
 	const routine = add("paired-limit-check", now + 1_000);
+	const rootWake = createBarrier();
+	enqueueHubRoot(world, {
+		name: "j10-scheduled-routine-receipt",
+		check: (request) => {
+			expect(currentRequestCarries(request, `Routine ${routine.routineId} ended: succeeded.`)).toBe(true);
+			rootWake.release();
+		},
+		reply: { content: [{ type: "text", text: "The bot received its scheduled task." }] },
+	});
 	world.timers.advance("routines", 1_000);
 	try {
 		const ticking = root.tickPersistentRoutines();
@@ -95,16 +109,24 @@ export async function scheduledBotJob(
 		release.release();
 		await withDeadline(world.trace, "scheduled placement settled on bot's own plan", done.promise);
 		await withDeadline(world.trace, "scheduled tick settled", ticking);
+		await withDeadline(world.trace, "scheduled routine receipt reached the root", rootWake.promise);
+		await withDeadline(world.trace, "root idle after scheduled routine receipt", root.waitForForegroundIdle());
 		const fresh = new PersistentBotTeamStore(agentDir);
 		try {
 			const saved = fresh.getRoutine(routine.routineId)!;
 			const occurrences = fresh.listRoutineOccurrences({ routineId: routine.routineId });
 			expect(occurrences).toHaveLength(1);
 			expect(occurrences[0]?.trigger.kind).toBe("schedule");
+			const placer = new JobStore(agentDir).out
+				.list()
+				.find((job) => job.offer.instructions.includes("[j10-job:scheduled]"));
+			expect(placer?.routineScope, "placed record carries the scheduled input's scope").toBe(
+				routineJobScope(name, occurrences[0]!.occurrenceId),
+			);
 			const jobs = readRoutineBotJobResults(agentDir, occurrences[0]!);
 			expect(jobs).toHaveLength(1);
 			expect(jobs[0]).toMatchObject({ summary });
-			const placer = new JobStore(agentDir).out.list().find((job) => job.jobId === jobs[0]!.jobId);
+			expect(placer?.jobId).toBe(jobs[0]?.jobId);
 			expect(placer?.ownerSession).toBeDefined();
 			expect(placer?.ownerSession).not.toBe(root.sessionId);
 			expect(placer?.executorId).toBe(machine);

@@ -589,6 +589,14 @@ export function isDecisiveOrigin(origin: TurnOriginRecord): boolean {
 	return origin.thirdParty === true || origin.k === "owner-typed" || origin.k === "owner-channel";
 }
 
+/** An addressed input can replace a delivery even when it does not decide the run's authority. */
+export function isAddressedInput(
+	role: AgentMessage["role"] | undefined,
+	origin: TurnOriginRecord | undefined,
+): boolean {
+	return role === "user" || (origin !== undefined && isDecisiveOrigin(origin));
+}
+
 /** The session reader needed to recognize deliveries already given on its current branch. */
 type TurnRefBranch = Pick<SessionManager, "getLeafEntry" | "getEntryCount" | "getEntry">;
 const branchRefs = new WeakMap<TurnRefBranch, { leaf: SessionEntry | undefined; refs: Set<string> }>();
@@ -678,7 +686,7 @@ export class RunTurnOrigin {
 		this.openedWith = [];
 		if (!this.active) return;
 		const origin = turnOriginOf(message);
-		if (message.role === "user" || (origin && isDecisiveOrigin(origin))) this.addressedRef = origin?.ref;
+		if (isAddressedInput(message.role, origin)) this.addressedRef = origin?.ref;
 		if (origin && isDecisiveOrigin(origin)) {
 			this.latest = origin;
 			this.decidedInRun = true;

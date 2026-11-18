@@ -30,7 +30,7 @@ export function readRoutineBotJobResults(
 	});
 }
 
-/** Both devices resolve the latest retained occurrence of this exact incarnation. Legacy jobs carry no fabricated association. */
+/** Both devices resolve the latest retained occurrence of this exact incarnation using recorded job scopes. */
 export function routineJobStatusLines(
 	store: PersistentBotTeamStore,
 	routine: RoutineDefinitionView,
