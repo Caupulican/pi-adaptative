@@ -563,7 +563,7 @@ export class BotSessionHost {
 			);
 		const { origin } = message;
 		// Its transcript took it already: a returned mail whose turn ended where no answer was sent is answered now.
-		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), origin.ref)) {
+		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager, origin.ref)) {
 			if (returnedMailSender(origin) === undefined) return "take";
 			if (this.isBusy(entry)) return "keep";
 			return this.answers.settle(entry, origin) ? "take" : "keep";
@@ -593,7 +593,7 @@ export class BotSessionHost {
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId } = entry;
 		const recorded = origin === "owner" ? undefined : origin;
-		if (recorded?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), recorded.ref))
+		if (recorded?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager, recorded.ref))
 			return { agentId, mode: "queued", messageId: recorded.ref, modelRef: entry.modelRef };
 		// A turn the owner's stop aborted ends first: the words start the next turn, never steer the one dying.
 		await entry.turnEnding;

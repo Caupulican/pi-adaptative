@@ -33,6 +33,7 @@ import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fl
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { managerSessionHomeNow } from "../../../../src/core/orchestration-homes.ts";
 import { processLockHolder } from "../../../../src/core/remote/host-lock.ts";
+import { branchHoldsTurnRef } from "../../../../src/core/turn-origin.ts";
 import {
 	acquireSessionBundleLease,
 	orchestrationHomeHoldsSession,
@@ -41,6 +42,7 @@ import {
 import { ownerOrchestrationHome, sameOrchestrationHome } from "../../../../src/kernel/session/session-bundle-paths.ts";
 import { createSessionId } from "../../../../src/kernel/session/session-id-generation.ts";
 import { CURRENT_SESSION_VERSION } from "../../../../src/kernel/session/session-manager.ts";
+import { stampTurnOrigin } from "../../../../src/kernel/turn-origin-stamp.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
@@ -131,6 +133,7 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 	let ownerBundle: string;
 	try {
 		verifyBotTranscriptAppends(world, session);
+		verifyBotDeliveryRefReads(world);
 		ownerBundle = await runLeg(world, session);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the root session disposes cleanly").toBeUndefined();
@@ -138,6 +141,33 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 	await replacedHostTellsNothing(world, ownerBundle);
 	await owedReleaseTakenUp(world);
 	world.trace.mark("root", "j7.bot-home");
+}
+
+/** A replay of a bot delivery reads only entries added since the last decision on this branch. */
+function verifyBotDeliveryRefReads(world: HarnessWorld): void {
+	const manager = world.createSessionManager();
+	const parent = manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+	const mail = { role: "user" as const, content: "scheduled message", timestamp: 2 };
+	stampTurnOrigin(mail, { v: 1, k: "routine", channel: "routine", ref: "j7-routine-delivery" });
+	manager.appendMessage(mail);
+	let parentsRead = 0;
+	const branch = {
+		getLeafEntry: () => manager.getLeafEntry(),
+		getEntryCount: () => manager.getEntryCount(),
+		getEntry: (id: string) => {
+			parentsRead++;
+			return manager.getEntry(id);
+		},
+	};
+	expect(branchHoldsTurnRef(branch, "j7-routine-delivery")).toBe(true);
+	parentsRead = 0;
+	expect(branchHoldsTurnRef(branch, "absent")).toBe(false);
+	expect(parentsRead).toBe(0);
+	manager.appendMessage({ role: "user", content: "new message", timestamp: 3 });
+	expect(branchHoldsTurnRef(branch, "j7-routine-delivery")).toBe(true);
+	expect(parentsRead).toBe(1);
+	manager.branch(parent);
+	expect(branchHoldsTurnRef(branch, "j7-routine-delivery")).toBe(false);
 }
 
 /** Read two saved bot chats in turn. Count actual descriptor bytes on the session files. */

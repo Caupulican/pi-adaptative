@@ -16,7 +16,7 @@ export function invalidSessionParentCycle(entryId: string): Error {
 /** Visit one bounded leaf-to-root ancestry through the session tree owner. */
 export function visitSessionAncestry<T extends SessionTreeEntryLike>(
 	start: T | undefined,
-	byId: ReadonlyMap<string, T>,
+	byId: Pick<ReadonlyMap<string, T>, "size" | "get">,
 	visitor: (entry: T) => false | undefined,
 ): void {
 	let current = start;

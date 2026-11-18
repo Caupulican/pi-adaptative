@@ -19,6 +19,8 @@ import {
 	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
 } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
+import { visitSessionAncestry } from "../kernel/session/session-tree.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
 import type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import {
@@ -587,9 +589,30 @@ export function isDecisiveOrigin(origin: TurnOriginRecord): boolean {
 	return origin.thirdParty === true || origin.k === "owner-typed" || origin.k === "owner-channel";
 }
 
-/** Whether an entry of `branch` carries a turn origin with reference `ref`: the words it names were given already. */
-export function branchHoldsTurnRef(branch: readonly SessionEntry[], ref: string): boolean {
-	return branch.some((entry) => entryTurnOrigin(entry)?.ref === ref);
+/** The session reader needed to recognize deliveries already given on its current branch. */
+type TurnRefBranch = Pick<SessionManager, "getLeafEntry" | "getEntryCount" | "getEntry">;
+const branchRefs = new WeakMap<TurnRefBranch, { leaf: SessionEntry | undefined; refs: Set<string> }>();
+
+/** Index the current branch once. On appends only the suffix is visited. A switch or reload replaces the set. */
+export function branchHoldsTurnRef(manager: TurnRefBranch, ref: string): boolean {
+	const leaf = manager.getLeafEntry();
+	const previous = branchRefs.get(manager);
+	if (previous && previous.leaf === leaf) return previous.refs.has(ref);
+	const suffixRefs = new Set<string>();
+	let extendsPrevious = false;
+	visitSessionAncestry(leaf, { size: manager.getEntryCount(), get: (id) => manager.getEntry(id) }, (entry) => {
+		if (previous?.leaf === entry) {
+			extendsPrevious = true;
+			return false;
+		}
+		const seen = entryTurnOrigin(entry)?.ref;
+		if (seen !== undefined) suffixRefs.add(seen);
+		return undefined;
+	});
+	const refs = extendsPrevious && previous ? previous.refs : suffixRefs;
+	if (refs !== suffixRefs) for (const seen of suffixRefs) refs.add(seen);
+	branchRefs.set(manager, { leaf, refs });
+	return refs.has(ref);
 }
 
 /** The latest entry of `branch` (root to leaf) whose origin decides a run's authority, with that origin. */
