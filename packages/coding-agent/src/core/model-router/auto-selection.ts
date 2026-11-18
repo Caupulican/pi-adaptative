@@ -4,7 +4,12 @@ import type { ModelCapabilityClass } from "../capability-tier.ts";
 import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelToolProbeVerdict } from "../models/adaptation-store.ts";
 import type { ModelRouterPoolPreference } from "../settings/settings-schema.ts";
-import type { FitnessGatedSurface, FitnessGateVerdict } from "./fitness-gate.ts";
+import {
+	type FitnessGatedSurface,
+	type FitnessGateVerdict,
+	formatFitnessVerdict,
+	routerSurfaceForTier,
+} from "./fitness-gate.ts";
 import { isLocalOrManagedRouterModel } from "./tool-escalation.ts";
 
 /**
@@ -104,15 +109,6 @@ function logSelection(result: AutoSelectionResult, poolSize: number): void {
 	);
 }
 
-export function routerSurfaceForTier(tier: AutoSelectionTier): FitnessGatedSurface {
-	return tier === "cheap" ? "router_cheap" : tier === "medium" ? "router_medium" : "router_expensive";
-}
-
-function formatFitness(verdict: FitnessGateVerdict): string {
-	if (verdict.fit) return verdict.probed ? "fit" : "unprobed";
-	return verdict.reason === "unprobed" ? "unprobed" : `unfit (${verdict.lane} ${verdict.succeeded}/${verdict.total})`;
-}
-
 function inputCost(model: Model<Api>): number {
 	const cost = model.cost?.input;
 	return typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
@@ -186,7 +182,7 @@ export function selectAutoTierModel(
 		? pool.length === 0
 			? "candidate pool is empty"
 			: `no admitted candidate (${Array.from(new Set(rejected.flatMap((c) => c.rejectReasons))).join(", ")})`
-		: `${chosen.evidenceClass}${subscriptionPreferred ? " + subscription-preferred" : ""} · fitness ${formatFitness(chosen.fitness)}`;
+		: `${chosen.evidenceClass}${subscriptionPreferred ? " + subscription-preferred" : ""} · fitness ${formatFitnessVerdict(chosen.fitness)}`;
 	const result: AutoSelectionResult = {
 		tier,
 		candidates: [...admitted, ...rejected],
@@ -202,5 +198,5 @@ export function selectAutoTierModel(
 
 export function formatAutoSelectionCandidate(candidate: AutoSelectionCandidate): string {
 	const state = candidate.admitted ? "eligible" : `rejected (${candidate.rejectReasons.join(", ")})`;
-	return `${candidate.ref} · ${candidate.subscription ? "subscription" : "metered"} · ${candidate.evidenceClass} · ${formatFitness(candidate.fitness)} · ${state}`;
+	return `${candidate.ref} · ${candidate.subscription ? "subscription" : "metered"} · ${candidate.evidenceClass} · ${formatFitnessVerdict(candidate.fitness)} · ${state}`;
 }

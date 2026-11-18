@@ -19,7 +19,7 @@ export const ROUTER_CALIBRATION_SURFACES: readonly FitnessGatedSurface[] = [
 	"executor",
 ];
 
-/** Evidence older than this is shown STALE rather than silently fresh. */
+/** Age threshold for marking evidence STALE and offering another calibration. */
 export const FITNESS_EVIDENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface RouterCalibrationRow {
@@ -54,6 +54,8 @@ function staleReasonFor(
 	probe: ModelToolProbe | undefined,
 	now: Date,
 ): string | undefined {
+	// Calibration uses these reasons to recommend a fresh probe. Runtime decisions use the
+	// latest host report and enforce their own lane admission policy.
 	if (!report) return undefined;
 	const at = Date.parse(report.at);
 	if (!Number.isFinite(at)) return "fitness evidence has no valid timestamp";

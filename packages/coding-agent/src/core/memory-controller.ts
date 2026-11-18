@@ -165,6 +165,7 @@ import {
 } from "./memory/memory-read-context.ts";
 import { MemoryReadFlights } from "./memory/memory-read-flight.ts";
 import { createMemoryReadReceipt } from "./memory/memory-read-receipt.ts";
+import { MEMORY_EVIDENCE_CUSTOM_TYPE, ProviderContextVisibility } from "./memory/provider-context-visibility.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
 	FileStoreProvider,
@@ -290,8 +291,8 @@ const HISTORY_FRONTIER_WRAPPER_LINES =
 /** Share of the one memory allowance the root frontier may take (bytes, tokens and lines). */
 const HISTORY_FRONTIER_BUDGET_SHARE = 0.5;
 
-/** Durable record kind carrying the tiered memory evidence block (and its cleared form). */
-export const MEMORY_EVIDENCE_CUSTOM_TYPE = "memory_evidence";
+export { MEMORY_EVIDENCE_CUSTOM_TYPE };
+
 const MEMORY_EVIDENCE_CLEARED_TEXT =
 	"MEMORY EVIDENCE: none. Earlier memory evidence records are stale (no current evidence, or it is disabled or outside this model's budget); search memory again when evidence matters.";
 
@@ -559,6 +560,8 @@ export type MemoryOperatorPort = Pick<
 >;
 
 export class MemoryController {
+	private readonly _icmProviderContextVisibility = new ProviderContextVisibility(true);
+	private readonly _inlineProviderContextVisibility = new ProviderContextVisibility(false);
 	/** Stable for this controller generation so an appended frontier preserves the provider-visible prompt prefix. */
 	private readonly _historyFrontierBoundaryNonce = randomBytes(16).toString("hex");
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
@@ -844,31 +847,15 @@ export class MemoryController {
 	createContextProjection(getRunner: () => ExtensionRunner) {
 		return bindExtensionContextProjection(getRunner, {
 			generation: () => this._memoryGeneration,
-			filter: (messages) => this.filterProviderContext(messages),
+			filter: (messages, reuseCertifiedHistory) => this.filterProviderContext(messages, reuseCertifiedHistory),
 		});
 	}
 
 	/** Omit inactive generated context from provider requests, never from durable history. */
-	filterProviderContext(messages: AgentMessage[]): AgentMessage[] {
+	filterProviderContext(messages: AgentMessage[], reuseCertifiedHistory = false): AgentMessage[] {
 		const icm = this.deps.getSettingsManager().getMemorySystem() === "icm";
-		return messages.filter((message) => {
-			if (message.role !== "custom") return true;
-			if (message.customType === "pipeline_context") {
-				const mode = (message.details as { contextMode?: string } | undefined)?.contextMode ?? "inline";
-				return mode === (icm ? "on-demand" : "inline");
-			}
-			return (
-				!icm ||
-				![
-					"memory_context",
-					MEMORY_EVIDENCE_CUSTOM_TYPE,
-					TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
-					"user_persona",
-					"reflection_cue",
-					"reflection_turn_trigger",
-				].includes(message.customType)
-			);
-		});
+		const visibility = icm ? this._icmProviderContextVisibility : this._inlineProviderContextVisibility;
+		return visibility.filter(messages, reuseCertifiedHistory);
 	}
 
 	/**

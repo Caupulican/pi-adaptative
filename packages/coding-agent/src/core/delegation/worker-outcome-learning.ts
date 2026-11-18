@@ -8,6 +8,7 @@ import {
 	outcomeToolSurface,
 } from "../models/outcome-ledger-store.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { LaneFitnessScore } from "../research/model-fitness.ts";
 import type { ResolvedWorkerOutcomeSettings } from "../settings/worker-outcome-settings.ts";
 import type { Outcome } from "./worker-outcome-contract.ts";
 
@@ -49,10 +50,7 @@ export class WorkerOutcomeLearning {
 	}
 
 	/** A new key's prior: the model's stored worker fitness score as at most two observations, else one each way. */
-	private prior(modelRef: string): { alpha: number; beta: number } {
-		const worker = FitnessStore.forAgentDir(this.agentDir)
-			.getForHost()
-			.find((entry) => entry.model === modelRef)?.report.worker;
+	private prior(worker: LaneFitnessScore | undefined): { alpha: number; beta: number } {
 		if (!worker || worker.total <= 0) return { alpha: 1, beta: 1 };
 		const weight = Math.min(FITNESS_PRIOR_WEIGHT, worker.total);
 		const rate = Math.min(1, Math.max(0, worker.succeeded / worker.total));
@@ -65,11 +63,12 @@ export class WorkerOutcomeLearning {
 	rankRoutedModels(models: readonly Model<Api>[], query: OutcomeRankQuery): Model<Api>[] {
 		const policy = this.policy();
 		if (!policy) return [...models];
+		const fitness = FitnessStore.forAgentDir(this.agentDir).createReportLookup();
 		return this.ledger().rank(
 			models,
 			(model) => `${model.provider}/${model.id}`,
 			query,
-			(modelRef) => this.prior(modelRef),
+			(modelRef) => this.prior(fitness(modelRef)?.worker),
 			policy,
 			this.now(),
 		);
@@ -96,6 +95,7 @@ export class WorkerOutcomeLearning {
 					? 0
 					: outcome.coverage.covered.length / required;
 		const write = contract.authority.writePaths.length > 0 && contract.profile.readOnly !== true;
+		const fitness = FitnessStore.forAgentDir(this.agentDir).createReportLookup();
 		this.ledger().observe(
 			{
 				modelRef: last.modelRef,
@@ -104,7 +104,7 @@ export class WorkerOutcomeLearning {
 				attemptId: last.attemptId,
 				sessionId: this.sessionId,
 				coverage,
-				prior: this.prior(last.modelRef),
+				prior: this.prior(fitness(last.modelRef)?.worker),
 			},
 			policy,
 			this.now(),

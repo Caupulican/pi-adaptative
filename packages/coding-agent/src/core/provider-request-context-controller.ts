@@ -84,6 +84,7 @@ export interface ProviderRequestContextControllerDeps {
 		sourceMessages: AgentMessage[],
 		frozenBelow: number,
 		gcReport: ContextGcReport,
+		alignedPolicyHistory?: readonly AgentMessage[],
 	): EnforcePromptPolicyResult;
 	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration?(): void;
@@ -581,6 +582,11 @@ export class ProviderRequestContextController {
 						extensionMessages,
 						frozenBelow,
 						previewGc.report,
+						(previewGc.messages === durableMessages || previewGc.preservesToolPolicyIdentity) &&
+							(pathAliasPlan.messages === previewGc.messages || pathAliasPlan.preservesToolPolicyIdentity) &&
+							!providerTransients.some((message) => message.role === "toolResult")
+							? durableMessages
+							: undefined,
 					)
 				: { messages: previewProviderMessages, transientMessages: [], isCurrent: () => true };
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {

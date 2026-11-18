@@ -1,8 +1,8 @@
 import type { Model } from "@caupulican/pi-ai";
 import type { Api } from "@caupulican/pi-ai/types";
 import { resolveCliModel } from "../model-resolver.ts";
-import { FitnessStore } from "../models/fitness-store.ts";
-import { evaluateSurfaceFitness, type FitnessGatedSurface } from "./fitness-gate.ts";
+import { type FitnessReportLookup, FitnessStore } from "../models/fitness-store.ts";
+import { evaluateModelFitness, type FitnessGatedSurface } from "./fitness-gate.ts";
 import type { ModelRouterStatusSettings } from "./status.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
@@ -44,16 +44,13 @@ function collectFitnessGateDiagnostic(
 	surface: FitnessGatedSurface,
 	modelPattern: string | undefined,
 	modelRegistry: ConfigDiagnosticsModelSource,
-	agentDir: string | undefined,
+	fitness: FitnessReportLookup,
 ): string[] {
-	if (!agentDir || !modelPattern) return [];
+	if (!modelPattern) return [];
 	const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry });
 	if (!resolved.model || !modelRegistry.hasConfiguredAuth(resolved.model)) return [];
 	const modelRef = formatModel(resolved.model);
-	const fitness = FitnessStore.forAgentDir(agentDir)
-		.getForHost()
-		.find((entry) => entry.model === modelRef);
-	const verdict = evaluateSurfaceFitness(surface, fitness?.report);
+	const verdict = evaluateModelFitness(surface, resolved.model, fitness);
 	if (verdict.fit) return [];
 	if (verdict.reason === "unprobed") return [`Model router ${label} is unprobed for the fitness gate: ${modelRef}.`];
 	return [
@@ -67,6 +64,8 @@ export function collectModelRouterConfigDiagnostics(
 	agentDir?: string,
 ): string[] {
 	if (!settings.enabled) return [];
+	const fitness =
+		settings.fitnessGate && agentDir ? FitnessStore.forAgentDir(agentDir).createReportLookup() : undefined;
 	return [
 		...collectModelRouterModelDiagnostics(
 			"cheap model",
@@ -89,28 +88,28 @@ export function collectModelRouterConfigDiagnostics(
 			modelRegistry,
 			settings.selectionMode,
 		),
-		...(settings.fitnessGate
+		...(fitness
 			? [
 					...collectFitnessGateDiagnostic(
 						"cheap model",
 						"router_cheap",
 						settings.cheapModel,
 						modelRegistry,
-						agentDir,
+						fitness,
 					),
 					...collectFitnessGateDiagnostic(
 						"medium model",
 						"router_medium",
 						settings.mediumModel,
 						modelRegistry,
-						agentDir,
+						fitness,
 					),
 					...collectFitnessGateDiagnostic(
 						"expensive model",
 						"router_expensive",
 						settings.expensiveModel,
 						modelRegistry,
-						agentDir,
+						fitness,
 					),
 				]
 			: []),

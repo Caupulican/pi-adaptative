@@ -793,8 +793,13 @@ export function createSessionProviderRequestContext(
 			pipeline.applyContextGc(messages, writePayloads, frozenBelow),
 		correlatePromptPolicyWithContextGc: (report, shadow) =>
 			pipeline.correlatePromptPolicyWithContextGc(report, shadow),
-		runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport) =>
-			pipeline.runPromptEnforcement(messages, report, undefined, { sourceMessages, frozenBelow, gcReport }),
+		runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport, alignedPolicyHistory) =>
+			pipeline.runPromptEnforcement(messages, report, undefined, {
+				sourceMessages,
+				frozenBelow,
+				gcReport,
+				alignedPolicyHistory,
+			}),
 		enqueueRelevanceCuration: (messages, report) => pipeline.enqueueRelevanceCuration(messages, report),
 		maybeDrainBrainCuration: () =>
 			pipeline.maybeDrainBrainCuration((type, data) => owners.sessionManager.appendCustomEntry(type, data)),

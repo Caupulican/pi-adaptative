@@ -35,15 +35,24 @@ const FULL_ONLY = ["full"] as const;
  * owner, so a verdict never selects bytes outside the evidence revision it actually judged.
  */
 export function contextVisibilityExcerpt(text: string, maxChars: number): string {
+	return sliceContextVisibilityExcerpt(text.length, maxChars, (start, end) => text.slice(start, end));
+}
+
+/** Format the same bounded view from an unmaterialized text source. */
+export function sliceContextVisibilityExcerpt(
+	length: number,
+	maxChars: number,
+	slice: (start: number, end: number) => string,
+): string {
 	const bound = Math.max(0, Math.floor(maxChars));
-	if (text.length <= bound) return text;
+	if (length <= bound) return slice(0, length);
 	if (bound === 0) return "";
 	const separator = "\n…\n";
-	if (bound <= separator.length) return text.slice(0, bound);
+	if (bound <= separator.length) return slice(0, bound);
 	const contentChars = bound - separator.length;
 	const headChars = Math.ceil(contentChars / 2);
 	const tailChars = contentChars - headChars;
-	return `${text.slice(0, headChars)}${separator}${text.slice(text.length - tailChars)}`;
+	return `${slice(0, headChars)}${separator}${slice(length - tailChars, length)}`;
 }
 
 /**

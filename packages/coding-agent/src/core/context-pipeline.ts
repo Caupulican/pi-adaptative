@@ -50,7 +50,6 @@ import {
 import {
 	BrainCurator,
 	type ContextRelevanceScope,
-	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
 	CURATION_RELEVANCE_QUERY_MAX_CHARS,
 	type CurationTelemetrySnapshot,
 	contextRelevanceKey,
@@ -82,13 +81,12 @@ import {
 	type PromptEnforcementReport,
 } from "./context/context-prompt-enforcement.ts";
 import {
+	artifactPolicyItems,
 	correlateWithContextGc,
 	type PromptPolicyGcCorrelationReport,
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
-	promptPolicyItems,
 } from "./context/context-prompt-policy.ts";
-import { contextVisibilityExcerpt } from "./context/context-query-visibility.ts";
 import {
 	acquireContextStoreRetention,
 	acquireInheritedContextStoreRetention,
@@ -96,7 +94,7 @@ import {
 	getContextStoreDir,
 	migrateLegacyContextStores,
 } from "./context/context-store-retention.ts";
-import { getToolResultText } from "./context/context-tool-result.ts";
+import { getToolResultPolicyText } from "./context/context-tool-result.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
 import { PathAliasRuntime, type PathAliasSyncResult } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
@@ -589,8 +587,13 @@ export class ContextPipeline {
 			runPromptPolicyPlanning: (report) => this.runPromptPolicyPlanning(report, contextPolicy),
 			previewContextProjection: (history) => this.previewContextProjection(history, contextPolicy),
 			commitContextProjection: (projection) => this.commitContextProjection(projection, contextPolicy),
-			runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport) =>
-				this.runPromptEnforcement(history, report, contextPolicy, { sourceMessages, frozenBelow, gcReport }),
+			runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport, alignedPolicyHistory) =>
+				this.runPromptEnforcement(history, report, contextPolicy, {
+					sourceMessages,
+					frozenBelow,
+					gcReport,
+					alignedPolicyHistory,
+				}),
 			applyContextGc: (history, writePayloads, frozenBelow) =>
 				this.applyContextGc(history, writePayloads, frozenBelow, lane),
 			applyPathAliases: (history) => this.applyPathAliases(history),
@@ -786,9 +789,10 @@ export class ContextPipeline {
 		try {
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			if (!settings.enabled) return;
+			const candidates = artifactPolicyItems(shadowReport);
+			if (candidates.length === 0) return;
 			const goal = latestUserPromptText(messages, CURATION_RELEVANCE_QUERY_MAX_CHARS);
-			for (const item of promptPolicyItems(shadowReport)) {
-				if (!item.hasAvailableRetrievalPath) continue;
+			for (const item of candidates) {
 				const message = messages[item.messageIndex];
 				if (message?.role !== "toolResult" || message.toolCallId !== item.toolCallId) continue;
 				if (message.isError) continue;
@@ -796,7 +800,7 @@ export class ContextPipeline {
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
 					| undefined;
 				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
-				const text = contextVisibilityExcerpt(getToolResultText(message), CURATION_RELEVANCE_CONTENT_MAX_CHARS);
+				const { excerpt: text } = getToolResultPolicyText(message);
 				if (text.length === 0) continue;
 				this._brainCurator.enqueue({
 					kind: "relevance",

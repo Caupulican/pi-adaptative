@@ -4075,6 +4075,7 @@ export class WorkerDelegationController {
 			activeAttempt: (laneId) => this.lifecycle.getActiveAttempt(laneId),
 			goalFor: (request) => this.goalForWorkerRequest(request),
 			isRouteModelAvailable: (model) => this.isWorkerRouteModelAvailable(model),
+			admitNewWorker: (request, pinned) => this.admitNewWorkerRequest(request, pinned),
 			resolveAdmission: (request, pinned, binding, attempt) =>
 				this.resolveWorkerAdmission(request, pinned, binding, attempt),
 		};
@@ -4438,18 +4439,14 @@ export class WorkerDelegationController {
 			reuse.releaseAllocation?.();
 			return { kind: "refused", skipReason: isolated.skipReason };
 		}
-		shared = isolated;
-		const prepared = this.admitNewWorkerRequest(
-			{ ...request, profileId: shared.executionContract.worker.profile.profileId },
-			shared.executionContract,
-		);
+		const prepared = this.fitRoute.revalidateFreshStart(request, isolated);
 		if (!prepared.ok) {
 			reuse.releaseAllocation?.();
 			return { kind: "refused", skipReason: prepared.skipReason };
 		}
 		return {
 			kind: "fresh",
-			admission: preserveWorkerAdmissionRoute(prepared, shared),
+			admission: prepared,
 			...(reuse.releaseAllocation ? { releaseAllocation: reuse.releaseAllocation } : {}),
 		};
 	}

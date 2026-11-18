@@ -87,6 +87,8 @@ const LEGEND_BUDGET_FLOOR_CHARS = 4096;
 const LEGEND_BUDGET_MARGIN = 1;
 
 export interface PathAliasSyncResult {
+	/** Text substitution preserves tool positions, call IDs, error flags and prior enforcement annotations. */
+	preservesToolPolicyIdentity?: true;
 	messages: AgentMessage[];
 	/** Verify advertised aliases against the live table and the cwd this projection used. */
 	verifyPathAliases?: (entries: readonly { id: string; path: string }[]) => boolean;
@@ -431,6 +433,7 @@ export class PathAliasRuntime {
 		const table = this.table;
 		const paused = this.mintingPaused;
 		const result: PathAliasSyncResult = {
+			preservesToolPolicyIdentity: true,
 			messages: rewritten,
 			verifyPathAliases: (entries) => this.verifyRetainedPaths(table.cwd, entries),
 			legendFor: (visibleMessages, visibleTexts) => {

@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import type { SimpleStreamOptions } from "@caupulican/pi-ai";
 import { expect } from "vitest";
+import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import type { Outcome } from "../../../../src/core/delegation/worker-outcome.ts";
 import { subscribeOutcomes } from "../../../../src/core/delegation/worker-outcome.ts";
 import { createGoalState, type GoalState } from "../../../../src/core/goals/goal-state.ts";
@@ -17,6 +18,7 @@ import {
 	saveJ9Profile,
 	scriptRequirementCheckSpawn,
 	taskForInstructions,
+	workerReport,
 } from "./journey-9-shared.ts";
 import { latestBatchResults } from "./shared.ts";
 
@@ -123,6 +125,70 @@ function proveRequirementWithShellSteps(
 export async function runJourney9RerunAndModelMovePhase(world: HarnessWorld): Promise<void> {
 	await runRerunThenModelMoveSubleg(world);
 	await runTimeExhaustedSameThinkingSubleg(world);
+	if (world.systemOne.enabled) await runTaskFitnessFallbackSubleg(world);
+}
+
+async function runTaskFitnessFallbackSubleg(world: HarnessWorld): Promise<void> {
+	const instructions = "Read the limits file and report MAX_RETRIES.";
+	const workerGate = createBarrier();
+	const workerReached = createBarrier();
+	const workerEnded = createBarrier();
+	const { session } = await world.createRootSession("root", {
+		settings: {
+			modelRouter: { enabled: true, fitnessGate: true },
+			workerDelegation: {
+				routeProviders: ["worker-a", "worker-b", "worker-c"].map((id) => `${HARNESS_PROVIDER}/${id}`),
+			},
+		},
+	});
+	const enterFit = (modelId: string, adequacy: number, onAdmit?: () => void): void => {
+		world.systemOne.enterPhase(
+			`j9-fitness-${modelId}`,
+			{
+				worker_task_fit_adequate: { kind: "noul", probability: adequacy },
+				worker_task_fit_sufficient: { kind: "noul", probability: 0.97 },
+			},
+			{
+				expect: ({ state }) => {
+					expect(state).toMatchObject({
+						instructions,
+						model: expect.stringContaining(`${HARNESS_PROVIDER}/${modelId}`),
+						thinkingLevel: "off",
+					});
+				},
+				onAdmit,
+			},
+		);
+	};
+	enterFit("worker-a", 0.02, () => enterFit("worker-b", 0.5, () => enterFit("worker-c", 0.97)));
+	world.provider.enqueue("worker-c", {
+		...workerReport("j9-fitness-worker", { status: "completed", summary: "MAX_RETRIES is 3." }),
+		check: (request) => {
+			expect(carriesTask(instructions)(request)).toBe(true);
+			workerReached.release();
+		},
+		gate: workerGate.promise,
+		onTerminal: () => workerEnded.release(),
+	});
+	try {
+		const started = await withDeadline(
+			world.trace,
+			"J9 fitness fallback admits a worker",
+			session.backgroundLanes.startWorkerDelegation({
+				instructions,
+				authority: { readOnly: true, thinkingLevel: "off" },
+			}),
+		);
+		if (!started.started) throw new Error(`The worker fitness route refused admission: ${started.skipReason}`);
+		await withDeadline(world.trace, "J9 adequate worker reaches its provider", workerReached.promise);
+		expect(Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})).toHaveLength(1);
+		session.backgroundLanes.cancelOwnFleet({ reasonCode: OWNER_STOPPED_REASON, scope: WHOLE_FLEET_STOP_SCOPE });
+		await withDeadline(world.trace, "J9 adequate worker stops", workerEnded.promise);
+	} finally {
+		workerGate.release();
+		expect(await world.disposeSessionInBody(session)).toBeUndefined();
+	}
+	world.trace.mark("root", "j9.worker-task-fitness-fallback");
 }
 
 async function runRerunThenModelMoveSubleg(world: HarnessWorld): Promise<void> {

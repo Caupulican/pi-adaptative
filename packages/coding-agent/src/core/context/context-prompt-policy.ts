@@ -13,7 +13,12 @@
  * place that decides how a tool_output item's PolicyFeatures/HardConstraintFlags are built.
  */
 
-import { auditItemsForPolicy, type ContextAuditItemReport, type ContextAuditReport } from "./context-audit.ts";
+import {
+	auditItemsForPolicy,
+	auditPolicyView,
+	type ContextAuditItemReport,
+	type ContextAuditReport,
+} from "./context-audit.ts";
 import { type ContextGcPackedRecord, type ContextGcReport, contextGcPackReasons } from "./context-gc-report.ts";
 import type { ContextEvidenceRef, ContextItemKind, ContextRetentionClass, ContextSource } from "./context-item.ts";
 import type { RetentionAction } from "./context-retention.ts";
@@ -82,6 +87,25 @@ function projectPolicyItem(entry: ContextAuditItemReport): PromptPolicyItemRepor
 	};
 }
 
+const auditSources = new WeakMap<PromptPolicyShadowReport, ContextAuditReport>();
+const candidateItems = new WeakMap<PromptPolicyShadowReport, readonly PromptPolicyItemReport[]>();
+
+export function policyAuditView(report: PromptPolicyShadowReport) {
+	const source = auditSources.get(report);
+	return source && auditPolicyView(source);
+}
+
+/** Only resolved artifact rows can affect enforcement or relevance curation. */
+export function artifactPolicyItems(report: PromptPolicyShadowReport): readonly PromptPolicyItemReport[] {
+	let items = candidateItems.get(report);
+	if (items) return items;
+	const source = policyAuditView(report);
+	if (!source) return promptPolicyItems(report).filter((item) => item.hasAvailableRetrievalPath);
+	items = source.candidates().map(projectPolicyItem);
+	candidateItems.set(report, items);
+	return items;
+}
+
 const privatePolicyItems = new WeakMap<PromptPolicyShadowReport, () => PromptPolicyItemReport[]>();
 
 /** Internal read-only view. Editing an inspected shadow report cannot change enforcement or GC correlation. */
@@ -107,6 +131,7 @@ export function planPromptPolicy(auditReport: ContextAuditReport, deferItems = f
 		},
 	};
 	privatePolicyItems.set(report, project);
+	auditSources.set(report, auditReport);
 	return report;
 }
 

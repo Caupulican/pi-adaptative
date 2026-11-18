@@ -16,7 +16,7 @@ import type { ExtensionRunner } from "./runner.ts";
 /** What the memory controller supplies to a bound projection: its memory generation and its provider-visibility filter. */
 export interface ExtensionContextBinding {
 	generation(): number;
-	filter(messages: AgentMessage[]): AgentMessage[];
+	filter(messages: AgentMessage[], reuseCertifiedHistory?: boolean): AgentMessage[];
 }
 
 type GuardReport = (action: "restored" | "refused", kind: string) => void;
@@ -156,7 +156,7 @@ async function runContextHandlers(
 
 /**
  * Binds the extension context projection to one memory controller: the function the provider request planner calls on every request.
- * It applies the binding's visibility filter before and after the handlers, and the handlers' output passes the host-record guard.
+ * It applies the visibility filter once when there are no handlers and on both sides of the host-record guard otherwise.
  */
 export function bindExtensionContextProjection(getRunner: () => ExtensionRunner, binding: ExtensionContextBinding) {
 	const reported = new Set<string>();
@@ -169,14 +169,15 @@ export function bindExtensionContextProjection(getRunner: () => ExtensionRunner,
 	return async (messages: AgentMessage[]) => {
 		const runner = getRunner();
 		const generation = binding.generation();
-		const filtered = binding.filter(messages);
-		const projection = runner.hasHandlers("context")
-			? await runContextHandlers(runner, filtered, report)
-			: { messages: filtered, transientMessages: [] as AgentMessage[] };
+		const isCurrent = () => getRunner() === runner && binding.generation() === generation;
+		if (!runner.hasHandlers("context")) {
+			return { messages: binding.filter(messages, true), transientMessages: [], isCurrent };
+		}
+		const projection = await runContextHandlers(runner, binding.filter(messages), report);
 		return {
 			messages: binding.filter(projection.messages),
 			transientMessages: binding.filter(projection.transientMessages),
-			isCurrent: () => getRunner() === runner && binding.generation() === generation,
+			isCurrent,
 		};
 	};
 }

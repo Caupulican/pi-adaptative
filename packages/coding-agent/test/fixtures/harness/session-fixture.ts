@@ -3955,9 +3955,12 @@ export class HarnessWorld {
 		session.runIsolatedCompletion = (...args: Parameters<AgentSession["runIsolatedCompletion"]>) =>
 			this.recordIsolatedCompletion(trace.observe(runIsolatedCompletion(...args)));
 		this.warningSubscriptions.push(
-			session.subscribe((event) => {
-				if (event.type === "warning") this.noteWarnings([event.message], agentDir);
-			}),
+			session.subscribe(
+				(event) => {
+					if (event.type === "warning") this.noteWarnings([event.message], agentDir);
+				},
+				{ publishesMessageEdits: true },
+			),
 		);
 		this.everySession.push(session);
 		this.everySessionManager.push(sessionManager);

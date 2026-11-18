@@ -373,6 +373,8 @@ export class ImmutableMessageHistory {
 	}
 
 	project(source: AgentMessage[], workOwner: object = source): AgentMessage[] {
+		inheritHistoryWork(source, workOwner);
+		inheritHistoryWork(workOwner, this.rows);
 		const nextVersion = structuralHistoryVersion(source);
 		if (this.sourceVersion && (!nextVersion || !sharesHistoryLineage(this.sourceVersion, nextVersion))) {
 			invalidateTrackedPrefix(this.rows);

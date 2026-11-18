@@ -3,6 +3,11 @@
  */
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
+import {
+	type MessageHistoryVersion,
+	messageHistoryVersion,
+	unchangedMessagePrefix,
+} from "../../kernel/message-revision.ts";
 
 export function textContentPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
 	const chunks: string[] = [];
@@ -31,18 +36,45 @@ export function textContentPrefix(content: readonly unknown[], maxChars = Number
 	return chunks.join("");
 }
 
+interface UserPromptTail {
+	readonly version: MessageHistoryVersion;
+	readonly length: number;
+	readonly maxChars: number;
+	readonly text: string;
+}
+
+const userPromptTails = new WeakMap<AgentMessage, UserPromptTail>();
+
 /** Project the latest provider-visible user prompt without rebuilding earlier context. */
 export function latestUserPromptText(messages: readonly AgentMessage[], maxChars = Number.POSITIVE_INFINITY): string {
-	for (let index = messages.length - 1; index >= 0; index--) {
+	const version = messageHistoryVersion(messages);
+	const first = version ? messages[0] : undefined;
+	const previous = first && version ? userPromptTails.get(first) : undefined;
+	const retained =
+		version &&
+		previous &&
+		Object.is(previous.maxChars, maxChars) &&
+		unchangedMessagePrefix(previous.version, version) >= previous.length
+			? previous
+			: undefined;
+	if (retained && retained.version === version) return retained.text;
+
+	let result = retained?.text ?? "";
+	for (let index = messages.length - 1; index >= (retained?.length ?? 0); index--) {
 		const message = messages[index];
 		if (message?.role !== "user") continue;
 		if (typeof message.content === "string") {
-			return message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
+			result = message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
+			break;
 		}
 		const text = textContentPrefix(message.content, maxChars);
-		if (text.length > 0) return text;
+		if (text.length > 0) {
+			result = text;
+			break;
+		}
 	}
-	return "";
+	if (first && version) userPromptTails.set(first, { version, length: messages.length, maxChars, text: result });
+	return result;
 }
 
 /** The latest assistant message, an aborted one included, without copying or reversing session history. */

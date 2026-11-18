@@ -94,6 +94,7 @@ export interface WorkerFitRoutePort {
 	activeAttempt(laneId: string): AttemptRuntimeState | undefined;
 	goalFor(request: WorkerDelegationRequest): GoalState | undefined;
 	isRouteModelAvailable(model: Model<Api> | undefined): boolean;
+	admitNewWorker(request: WorkerDelegationRequest, pinned: WorkerExecutionContract): WorkerAdmission;
 	resolveAdmission(
 		request: WorkerDelegationRequest,
 		pinned?: WorkerExecutionContract,
@@ -193,25 +194,27 @@ export class WorkerFitRoute {
 		record: LaneRecord,
 	): Promise<WorkerTaskFitnessFailure | undefined> {
 		const verdicts: WorkerTaskFitVerdict[] = [];
-		let failure = await this.checkExisting(request, record);
-		while (failure) {
+		let admission = this.existingAdmission(request, record);
+		if (!admission.ok) return failureOfReason(admission.skipReason, FALLBACK_FITNESS_CODE);
+		while (true) {
+			const failure = await this.check(request, admission);
+			if (!failure) return;
 			const attempt = this.port.activeAttempt(record.laneId);
+			if (!attempt || attempt.attemptId !== admission.admittedAttemptId)
+				return { reasonCode: "worker_task_fitness_stale" };
 			if (
-				attempt?.dispatch.modelRouteSource !== "inherited" ||
+				admission.modelRouteSource !== "inherited" ||
 				failure.fit === undefined ||
 				attempt.dispatch.executionContract?.worker.profile.modelPolicy.mode !== "ordered-fallback"
 			)
 				return failure;
-			const judged = this.existingAdmission(request, record);
-			if (!judged.ok) return failure;
 			verdicts.push(failure.fit);
-			this.markUnfit(attempt.attemptId, modelRefOf(judged.shipment.modelBinding));
+			this.markUnfit(attempt.attemptId, modelRefOf(admission.shipment.modelBinding));
 			const next = this.existingAdmission(request, record);
 			if (!next.ok || this.unfit.get(attempt.attemptId)?.has(modelRefOf(next.shipment.modelBinding)))
 				return failureOfReason(exhaustedTaskFitReason(verdicts), FALLBACK_FITNESS_CODE);
-			failure = await this.checkExisting(request, record);
+			admission = next;
 		}
-		return undefined;
 	}
 
 	private markUnfit(attemptId: string, modelRef: string): void {
@@ -231,14 +234,33 @@ export class WorkerFitRoute {
 	hasCurrent(request: WorkerDelegationRequest, record: LaneRecord): boolean {
 		if (!this.enabled()) return true;
 		try {
-			const admission = this.existingAdmission(request, record);
-			return (
-				admission.ok && this.taskFitness.hasAccepted(this.port.routeJudge(), this.fitnessInput(request, admission))
-			);
+			return this.hasAccepted(request, this.existingAdmission(request, record));
 		} catch {
 			// The owned preflight reports the actual failure through the existing cancellation path.
 			return false;
 		}
+	}
+
+	/** Confirm a re-admission still carries the exact inputs accepted before the last asynchronous step. */
+	private hasAccepted(request: WorkerDelegationRequest, admission: WorkerAdmission): boolean {
+		return (
+			!this.enabled() ||
+			(admission.ok && this.taskFitness.hasAccepted(this.port.routeJudge(), this.fitnessInput(request, admission)))
+		);
+	}
+
+	/** Re-admit the isolated fresh start and preserve its route after checking the accepted task/model inputs. */
+	revalidateFreshStart(
+		request: WorkerDelegationRequest,
+		origin: Extract<WorkerAdmission, { ok: true }>,
+	): WorkerAdmission {
+		const prepared = this.port.admitNewWorker(
+			{ ...request, profileId: origin.executionContract.worker.profile.profileId },
+			origin.executionContract,
+		);
+		if (!prepared.ok) return prepared;
+		if (!this.hasAccepted(request, prepared)) return { ok: false, skipReason: "worker_task_fitness_stale" };
+		return preserveWorkerAdmissionRoute(prepared, origin);
 	}
 
 	/**
@@ -327,7 +349,8 @@ export class WorkerFitRoute {
 		)
 			return { reasonCode: "worker_task_fitness_stale" };
 		if (!failure?.detail) return failure;
-		const detail = boundedRedactedDiagnosticText(failure.detail);
-		return { reasonCode: failure.reasonCode, ...(detail ? { detail } : {}) };
+		const { detail, ...verdict } = failure;
+		const diagnostic = boundedRedactedDiagnosticText(detail);
+		return { ...verdict, ...(diagnostic ? { detail: diagnostic } : {}) };
 	}
 }

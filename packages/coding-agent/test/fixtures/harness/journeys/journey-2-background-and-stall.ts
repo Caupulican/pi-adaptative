@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { join } from "node:path";
 import { createEmptyUsage } from "@caupulican/pi-ai";
+import { observeHistoryWork } from "@caupulican/pi-ai/history-work";
 import { expect } from "vitest";
 import {
 	type BackgroundToolTaskRecord,
@@ -14,7 +15,14 @@ import { editPersistedGoal } from "../../../../src/core/goals/goal-lifecycle.ts"
 import type { ObjectiveRoute } from "../../../../src/core/objective-execution/objective-route.ts";
 import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-projection.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
-import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
+import {
+	calls,
+	createBarrier,
+	HARNESS_API,
+	HARNESS_PROVIDER,
+	type ScriptedRequest,
+	text,
+} from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyEvaluationOccupancy } from "./journey-2-evaluation-occupancy.ts";
 
@@ -241,10 +249,40 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 	// bound. The second terminal evicts the first from the cache; a wait on the evicted task still returns its saved record, and the
 	// artifact that record cites reads back whole. The retained second task's wait, answered from the cache, is the control.
 	if (!world.systemOne.enabled) {
+		const manager = world.createSessionManager();
+		manager.appendMessage({ role: "user", content: "List the background tasks as the checks run.", timestamp: 0 });
+		const archivedCount = 96;
+		for (let i = 0; i < archivedCount; i++) {
+			const id = `archived-list-${i}`;
+			manager.appendMessage({
+				role: "assistant",
+				api: HARNESS_API,
+				provider: HARNESS_PROVIDER,
+				model: "root",
+				content: [{ type: "toolCall", id, name: "tool_task", arguments: { action: "list" } }],
+				stopReason: "toolUse",
+				timestamp: 2 * i + 1,
+				usage: createEmptyUsage(),
+			});
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "tool_task",
+				content: [{ type: "text", text: "No active tasks." }],
+				isError: false,
+				timestamp: 2 * i + 2,
+			});
+		}
 		const r40e = await world.createRootSession("root", {
-			sessionManager: world.createSessionManager(),
+			sessionManager: manager,
 			// The world's allow-list leaves artifact_retrieve out, and a task result names no artifact its model cannot read.
-			settings: { defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync", "artifact_retrieve"] },
+			settings: {
+				defaultTools: [...DEFAULT_ACTIVE_TOOL_NAMES, "worktree_sync", "artifact_retrieve"],
+				contextPolicy: {
+					enforcement: { enabled: true, preserveRecentMessages: 1, minChars: 1 },
+					curation: { enabled: true },
+				},
+			},
 			maxRetainedTerminalTasks: 1,
 		});
 		const r40eSession = r40e.session;
@@ -423,6 +461,35 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			listMentionsEvicted: false,
 			artifactTail: "the tail marker",
 		});
+		const relevanceForFirstWait = () =>
+			r40eSession.getPromptEnforcementReport().items.find((entry) => entry.toolCallId === "r40e-wait-1")
+				?.relevanceKey;
+		const archived = r40eSession
+			.getPromptEnforcementReport()
+			.items.filter((entry) => entry.toolCallId.startsWith("archived-list-"));
+		expect(archived).toHaveLength(archivedCount);
+		expect(archived.every((item) => item.skipReason === "not_artifact_backed")).toBe(true);
+		const firstQuery = relevanceForFirstWait();
+		expect(firstQuery, "the foreground computed query-specific visibility for the retained wait").toBeTruthy();
+		const queuedBefore = r40eSession.getContextCurationStatus().telemetry.queued;
+		expect(queuedBefore).toBeGreaterThan(0);
+		const followupWork = observeHistoryWork(r40eSession.messages);
+		world.provider.enqueue("root", text("r40e-new-query", "Both archived outputs are available."));
+		await withDeadline(
+			trace,
+			"R40e revisits the retained evidence for a new owner question",
+			r40eSession.prompt("Which archived check produced the second tail marker?"),
+		);
+		await withDeadline(trace, "R40e changed query settled", r40eSession.waitForForegroundIdle());
+		expect(followupWork.auditSourceRowsVisited).toBeGreaterThan(0);
+		expect(followupWork.auditSourceRowsVisited).toBeLessThan(archivedCount);
+		expect(followupWork.auditRowsMaterialized).toBeGreaterThan(0);
+		expect(followupWork.auditRowsMaterialized).toBeLessThan(archivedCount);
+		expect(followupWork.oldBytesRecompressed).toBe(0);
+		const nextQuery = relevanceForFirstWait();
+		expect(nextQuery).toBeTruthy();
+		expect(nextQuery).not.toBe(firstQuery);
+		expect(r40eSession.getContextCurationStatus().telemetry.queued).toBeGreaterThan(queuedBefore);
 		world.faultMatrix.witness("R40e", { control: false });
 		world.faultMatrix.witness("R40e", { control: true });
 		expect(await world.disposeSessionInBody(r40eSession), "the R40e root disposes cleanly").toBeUndefined();

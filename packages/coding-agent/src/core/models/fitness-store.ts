@@ -20,6 +20,9 @@ export interface StoredFitnessReport {
 	host: HostFingerprint;
 }
 
+/** Exact lookup by the canonical provider/model ID written by calibration. */
+export type FitnessReportLookup = (modelRef: string) => ModelFitnessReport | undefined;
+
 function isFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
@@ -174,6 +177,15 @@ export class FitnessStore {
 	/** Reports for the current host (default) or an explicit host id. */
 	getForHost(hostId?: string): StoredFitnessReport[] {
 		return Object.values(this.storage.getHost(hostId) ?? {});
+	}
+
+	/** Read the current host once on first lookup. Create a new lookup for each decision. */
+	createReportLookup(): FitnessReportLookup {
+		let reports: Readonly<Record<string, StoredFitnessReport>> | undefined;
+		return (modelRef) => {
+			reports ??= this.storage.getHost() ?? {};
+			return Object.hasOwn(reports, modelRef) ? reports[modelRef]?.report : undefined;
+		};
 	}
 
 	/** Every stored report across all hosts (for cross-machine comparisons). */

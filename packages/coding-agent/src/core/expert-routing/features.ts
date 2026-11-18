@@ -6,11 +6,12 @@
 
 import { laneMeetsFitnessBar } from "../model-router/fitness-gate.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
-import type { FitnessStore } from "../models/fitness-store.ts";
+import type { FitnessReportLookup, FitnessStore } from "../models/fitness-store.ts";
 import type {
 	ExpertAdequacyClass,
 	ExpertCandidate,
 	ExpertFeatureVector,
+	ScoredExpertCandidate,
 	WorkerCapabilityRequest,
 } from "./contracts.ts";
 import type { ExpertOutcomeStore } from "./outcome-store.ts";
@@ -28,12 +29,30 @@ export class ExpertFeatureBuilder {
 		this.deps = deps;
 	}
 
+	async buildCandidates(
+		request: WorkerCapabilityRequest,
+		candidates: readonly ExpertCandidate[],
+		fitness: FitnessReportLookup | undefined = this.deps.fitnessStore?.createReportLookup(),
+	): Promise<ScoredExpertCandidate[]> {
+		return Promise.all(
+			candidates.map(async (candidate) => ({
+				candidate,
+				features: await this.build(request, candidate, fitness),
+			})),
+		);
+	}
+
 	/**
 	 * Builds an explainable feature vector for a candidate expert on a given request.
 	 */
-	async build(request: WorkerCapabilityRequest, candidate: ExpertCandidate): Promise<ExpertFeatureVector> {
+	async build(
+		request: WorkerCapabilityRequest,
+		candidate: ExpertCandidate,
+		fitness: FitnessReportLookup | undefined = this.deps.fitnessStore?.createReportLookup(),
+	): Promise<ExpertFeatureVector> {
 		const desc = candidate.descriptor;
 		const state = candidate.state;
+		const modelRef = `${desc.provider}/${desc.model_id}`;
 
 		// 1. Ability Features
 		let capabilityFit = 0.7;
@@ -70,36 +89,20 @@ export class ExpertFeatureBuilder {
 		// able to tell an unprobed expert from one the probes graded as unfit.
 		let roleProbeFitness = 0.5;
 		let adequacyClass: ExpertAdequacyClass = "unprobed";
-		if (this.deps.fitnessStore) {
-			const modelRef = `${desc.provider}/${desc.model_id}`;
-			let matchingReport: any;
-			if (typeof (this.deps.fitnessStore as any).getForHost === "function") {
-				const reports = this.deps.fitnessStore.getForHost();
-				matchingReport = reports.find(
-					(r: any) => r.model === modelRef || r.model === desc.model_id || r.model.endsWith(`/${desc.model_id}`),
-				)?.report;
-			} else if (typeof (this.deps.fitnessStore as any).getReport === "function") {
-				matchingReport =
-					(this.deps.fitnessStore as any).getReport(modelRef) ??
-					(this.deps.fitnessStore as any).getReport(desc.model_id);
+		const report = fitness?.(modelRef);
+		if (report) {
+			let lane = report.worker;
+			if (request.work_class === "investigate" || request.work_class === "retrieve") {
+				lane = report.research;
+			} else if ((request.work_class as string) === "digest" || request.worker_role === "digest") {
+				lane = report.digest;
+			} else if (request.required_tools && request.required_tools.length > 0) {
+				lane = report.toolCall;
 			}
 
-			if (matchingReport) {
-				// Every branch selects the request's lane and nothing else; scoring happens once, below.
-				let lane = matchingReport.worker ?? matchingReport.lanes?.worker;
-				if (request.work_class === "investigate" || request.work_class === "retrieve") {
-					lane = matchingReport.research ?? matchingReport.lanes?.research;
-				} else if ((request.work_class as string) === "digest" || request.worker_role === "digest") {
-					lane = matchingReport.digest ?? matchingReport.lanes?.digest;
-				} else if (request.required_tools && request.required_tools.length > 0) {
-					lane = matchingReport.toolCall ?? matchingReport.lanes?.toolCall;
-				}
-
-				if (lane && lane.total > 0) {
-					const successes = lane.succeeded ?? lane.successes ?? 0;
-					roleProbeFitness = Math.max(0.0, Math.min(1.0, successes / lane.total));
-					adequacyClass = laneMeetsFitnessBar(successes, lane.total) ? "known_fit" : "known_unfit";
-				}
+			if (lane.total > 0) {
+				roleProbeFitness = Math.max(0.0, Math.min(1.0, lane.succeeded / lane.total));
+				adequacyClass = laneMeetsFitnessBar(lane.succeeded, lane.total) ? "known_fit" : "known_unfit";
 			}
 		}
 
@@ -138,7 +141,6 @@ export class ExpertFeatureBuilder {
 
 		// Read real AdaptationStore profiles (HM11-011, HM11-012, HM11-013)
 		if (this.deps.adaptationStore) {
-			const modelRef = `${desc.provider}/${desc.model_id}`;
 			const store = this.deps.adaptationStore as any;
 			const profile =
 				(typeof store.get === "function" ? (store.get(desc.model_id) ?? store.get(modelRef)) : undefined) ??

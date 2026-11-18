@@ -117,6 +117,8 @@ export interface ContextGcOptions extends NormalizedContextGcSettings {
 }
 
 export interface ContextGcResult {
+	/** Packing preserves tool positions, call IDs, error flags and prior enforcement annotations. */
+	preservesToolPolicyIdentity?: true;
 	compressionPolicy?: string;
 	/** Publish packed rows only when the surrounding provider request really ran. */
 	acceptProviderHistory?(): void;
@@ -1139,6 +1141,7 @@ export function applyContextGc(
 	if (options.writePayloads) commit();
 	return {
 		messages: pass.nextMessages ?? messages,
+		preservesToolPolicyIdentity: true,
 		report: baseReport,
 		compressionPolicy,
 		acceptProviderHistory,

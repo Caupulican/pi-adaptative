@@ -31,6 +31,7 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { isImmutableHistoryMessage } from "../../kernel/message-revision.ts";
 import {
 	type ContextRelevanceScope,
 	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
@@ -38,7 +39,12 @@ import {
 	contextRelevanceKey,
 } from "./brain-curator.ts";
 import { type ContextGcReport, packedRecordLookup } from "./context-gc-report.ts";
-import { type PromptPolicyShadowReport, promptPolicyItems } from "./context-prompt-policy.ts";
+import {
+	artifactPolicyItems,
+	type PromptPolicyShadowReport,
+	policyAuditView,
+	promptPolicyItems,
+} from "./context-prompt-policy.ts";
 import {
 	CONTEXT_VISIBILITY_LONG_CHARS,
 	CONTEXT_VISIBILITY_SHORT_CHARS,
@@ -49,7 +55,12 @@ import {
 	contextVisibilityExcerpt,
 	selectContextVisibility,
 } from "./context-query-visibility.ts";
-import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
+import {
+	getToolResultArtifactId,
+	getToolResultPolicyText,
+	getToolResultText,
+	isPromptPolicyEnforced,
+} from "./context-tool-result.ts";
 import { latestUserPromptText } from "./message-text.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./prefix-stability.ts";
 
@@ -128,16 +139,13 @@ export interface PromptEnforcementContext {
 	frozenBelow: number;
 	/** Stable GC retrieval handles for evidence that GC projected out of the prefix. */
 	gcReport: ContextGcReport;
+	/** Versioned durable history with the same tool positions, identities, error and enforcement flags in both projections. */
+	alignedPolicyHistory?: readonly AgentMessage[];
 }
 
 export const CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE = "context_visibility_projection";
 
 const ENFORCEMENT_ABSOLUTE_RECENT_FLOOR = 4;
-
-function isPromptPolicyEnforced(details: unknown): boolean {
-	if (typeof details !== "object" || details === null) return false;
-	return (details as { promptPolicy?: { enforced?: unknown } }).promptPolicy?.enforced === true;
-}
 
 function isContextGcPacked(details: unknown): boolean {
 	if (typeof details !== "object" || details === null) return false;
@@ -244,15 +252,38 @@ export function enforcePromptPolicy(
 	// Advisory evictions may reach inside the recent window but NEVER past this absolute floor:
 	// the last few messages are what the model is actively reasoning over.
 	const absoluteFloorIndex = Math.max(0, sourceMessages.length - ENFORCEMENT_ABSOLUTE_RECENT_FLOOR);
-	const currentQuery = settings.brainRelevance
-		? latestUserPromptText(sourceMessages, CURATION_RELEVANCE_QUERY_MAX_CHARS)
-		: "";
+	const audit = context && policyAuditView(shadowReport);
+	const sparse =
+		audit &&
+		((messages === sourceMessages && audit.matchesSource(sourceMessages)) ||
+			(context?.alignedPolicyHistory && audit.matchesSource(context.alignedPolicyHistory)))
+			? audit
+			: undefined;
+	const planItems = sparse ? artifactPolicyItems(shadowReport) : promptPolicyItems(shadowReport);
+	const currentQuery =
+		planItems.length > 0 && settings.brainRelevance
+			? latestUserPromptText(sourceMessages, CURATION_RELEVANCE_QUERY_MAX_CHARS)
+			: "";
 	let nextMessages: AgentMessage[] | undefined;
 	const transientMessages: AgentMessage[] = [];
 	let getPackedRecord: ReturnType<typeof packedRecordLookup> | undefined;
 	const items: PromptEnforcementItemReport[] = [];
 
-	for (const planItem of promptPolicyItems(shadowReport)) {
+	const queryAware = Boolean(settings.brainRelevance);
+	function preliminarySkip(item: Parameters<typeof skip>[0], isError: boolean, alreadyEnforced: boolean) {
+		const recent = item.messageIndex >= recentCutoffIndex;
+		const floor = recent && item.messageIndex >= absoluteFloorIndex;
+		if (floor || (recent && !queryAware))
+			return skip(item, "within_recent_window", {
+				selectedVisibility: "full",
+				visibilityReason: floor ? "absolute_floor" : "recent_window",
+				candidateVisibilities: floor ? ["full"] : ["hidden", "short", "long", "full"],
+			});
+		if (isError) return skip(item, "errored_tool_result");
+		if (alreadyEnforced) return skip(item, "already_stubbed_or_packed");
+		return undefined;
+	}
+	for (const planItem of planItems) {
 		const sourceMessage = sourceMessages[planItem.messageIndex];
 		const projectedMessage = messages[planItem.messageIndex];
 		if (
@@ -266,28 +297,13 @@ export function enforcePromptPolicy(
 		}
 		const insideRecentWindow = planItem.messageIndex >= recentCutoffIndex;
 		const insideAbsoluteFloor = insideRecentWindow && planItem.messageIndex >= absoluteFloorIndex;
-		if (insideAbsoluteFloor || (insideRecentWindow && !settings.brainRelevance)) {
-			items.push(
-				skip(planItem, "within_recent_window", {
-					selectedVisibility: "full",
-					visibilityReason: insideAbsoluteFloor ? "absolute_floor" : "recent_window",
-					candidateVisibilities: insideAbsoluteFloor ? ["full"] : ["hidden", "short", "long", "full"],
-				}),
-			);
-			continue;
-		}
-		if (sourceMessage.isError) {
-			items.push(skip(planItem, "errored_tool_result"));
-			continue;
-		}
-		if (isPromptPolicyEnforced(projectedMessage.details)) {
-			items.push(skip(planItem, "already_stubbed_or_packed"));
-			continue;
-		}
-		// A diagnostic/direct caller that supplies only the already-packed view has no raw evidence
-		// from which to build a query overlay. Preserve the historical no-op behavior in that case.
-		if (isContextGcPacked(projectedMessage.details) && !context) {
-			items.push(skip(planItem, "already_stubbed_or_packed"));
+		const skipped = preliminarySkip(
+			planItem,
+			sourceMessage.isError,
+			isPromptPolicyEnforced(projectedMessage.details) || (!context && isContextGcPacked(projectedMessage.details)),
+		);
+		if (skipped) {
+			items.push(skipped);
 			continue;
 		}
 		if (!planItem.hasAvailableRetrievalPath) {
@@ -307,8 +323,15 @@ export function enforcePromptPolicy(
 			items.push(skip(planItem, "missing_artifact_id"));
 			continue;
 		}
-		const originalText = getToolResultText(sourceMessage);
-		const originalChars = originalText.length;
+		// Direct callers may supply mutable rows and a verdict callback. Capture their original text before the callback.
+		const mutableText = isImmutableHistoryMessage(sourceMessage) ? undefined : getToolResultText(sourceMessage);
+		const { originalChars, excerpt } =
+			mutableText === undefined
+				? getToolResultPolicyText(sourceMessage)
+				: {
+						originalChars: mutableText.length,
+						excerpt: contextVisibilityExcerpt(mutableText, CURATION_RELEVANCE_CONTENT_MAX_CHARS),
+					};
 		if (originalChars < settings.minChars) {
 			items.push(skip(planItem, "below_min_chars", { artifactId, originalChars }));
 			continue;
@@ -317,7 +340,7 @@ export function enforcePromptPolicy(
 			? {
 					itemId: planItem.itemId,
 					query: currentQuery,
-					content: contextVisibilityExcerpt(originalText, CURATION_RELEVANCE_CONTENT_MAX_CHARS),
+					content: excerpt,
 				}
 			: undefined;
 		const verdict = relevanceScope ? settings.brainRelevance?.(relevanceScope) : undefined;
@@ -359,6 +382,7 @@ export function enforcePromptPolicy(
 				continue;
 			}
 			const deliveredVisibility = gcRetrievalId ? decision.selected : "full";
+			const originalText = mutableText ?? getToolResultText(sourceMessage);
 			const overlayText =
 				deliveredVisibility === "short" || deliveredVisibility === "long"
 					? buildPreviewText(deliveredVisibility, sourceMessage.toolName, originalText, gcRetrievalId as string)
@@ -450,7 +474,12 @@ export function enforcePromptPolicy(
 					text:
 						decision.selected === "hidden"
 							? buildStubText(sourceMessage.toolName, originalChars, artifactId)
-							: buildPreviewText(decision.selected, sourceMessage.toolName, originalText, artifactId),
+							: buildPreviewText(
+									decision.selected,
+									sourceMessage.toolName,
+									mutableText ?? getToolResultText(sourceMessage),
+									artifactId,
+								),
 				},
 			],
 			details: {
@@ -485,8 +514,30 @@ export function enforcePromptPolicy(
 		});
 	}
 
+	let detailed: PromptEnforcementItemReport[] | undefined;
+	const report: PromptEnforcementReport = {
+		turnIndex: shadowReport.turnIndex,
+		get items() {
+			if (!sparse) return items;
+			if (detailed) return detailed;
+			const complete: PromptEnforcementItemReport[] = [];
+			let candidate = 0;
+			for (const identity of sparse.identities()) {
+				if (items[candidate]?.messageIndex === identity.messageIndex) {
+					complete.push(items[candidate++]);
+				} else {
+					complete.push(
+						preliminarySkip(identity, identity.isError, identity.alreadyEnforced) ??
+							skip(identity, "not_artifact_backed"),
+					);
+				}
+			}
+			detailed = complete;
+			return detailed;
+		},
+	};
 	harnessLog.debug("context", "prompt policy checked the tool results", () => ({
-		items: items.length,
+		items: sparse?.count ?? items.length,
 		enforced: items.filter((item) => item.enforced).length,
 		inPlace: items.filter((item) => item.enforced && item.projectionPlacement === "in_place").length,
 		tailOverlays: items.filter((item) => item.projectionPlacement === "tail_overlay").length,
@@ -496,7 +547,7 @@ export function enforcePromptPolicy(
 	return {
 		messages: nextMessages ?? messages,
 		transientMessages,
-		report: { turnIndex: shadowReport.turnIndex, items },
+		report,
 		isCurrent,
 	};
 }

@@ -44,7 +44,10 @@ it.each([100, 1_000, 10_000])(
 		let pipeline: ContextPipeline | undefined;
 		try {
 			const sessionManager = SessionManager.inMemory(ownerSessionStorageRoots(directory), directory);
-			const settings = SettingsManager.inMemory({ contextGc: { enabled: true } });
+			const settings = SettingsManager.inMemory({
+				contextGc: { enabled: true },
+				contextPolicy: { enforcement: { enabled: true }, curation: { enabled: true } },
+			});
 			const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
 			let turnIndex = 1;
 			const contextPipeline = new ContextPipeline({
@@ -72,9 +75,11 @@ it.each([100, 1_000, 10_000])(
 				applyContextGc: (history, write, frozen) => contextPipeline.applyContextGc(history, write, frozen),
 				correlatePromptPolicyWithContextGc: (report, shadow) =>
 					contextPipeline.correlatePromptPolicyWithContextGc(report, shadow),
-				runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport) =>
+				enqueueRelevanceCuration: (history, report) => contextPipeline.enqueueRelevanceCuration(history, report),
+				runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport, alignedPolicyHistory) =>
 					contextPipeline.runPromptEnforcement(history, report, undefined, {
 						sourceMessages,
+						alignedPolicyHistory,
 						frozenBelow,
 						gcReport,
 					}),

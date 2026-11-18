@@ -5,6 +5,7 @@ import { runJourney9FixAndOwnerPhase } from "./journey-9-fix-and-owner.ts";
 import { runJourney9HostCheckPhase } from "./journey-9-host-check.ts";
 import { runJourney9OwnWordsPhase } from "./journey-9-own-words.ts";
 import { runJourney9RerunAndModelMovePhase } from "./journey-9-rerun-and-model-move.ts";
+import { runJourney9RouterFitnessPhase } from "./journey-9-router-fitness.ts";
 import { runJourney9WorktreeRerunPhase } from "./journey-9-worktree-rerun.ts";
 import { LIMITS_PATH, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
 
@@ -17,8 +18,8 @@ import { LIMITS_PATH, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
  * wall-clock timeout reruns (multi-rung thinking raise to ordered-fallback model move, and timeout rerun at unchanged thinking), and
  * worktree-lane reruns (X2 in-place attempt reuse vs X1 fresh-lane superseding rerun with full requirement expansion).
  *
- * System One answers one root turn per leg: the owner request's intake questions. A start that names a read-only profile
- * passes no tool screen, a worker's own turn asks nothing, and no outcome projection asks, so no other judgment is scripted.
+ * The task-fitness leg also checks that an inherited route skips inadequate and open candidates before admitting an
+ * adequate one. It runs only with System One enabled. The other legs leave task fitness off.
  */
 export async function runJourney9(): Promise<void> {
 	await runJourney(
@@ -35,6 +36,7 @@ export async function runJourney9(): Promise<void> {
 			await runJourney9HostCheckPhase(world);
 			await runJourney9RerunAndModelMovePhase(world);
 			await runJourney9WorktreeRerunPhase(world);
+			await runJourney9RouterFitnessPhase(world);
 		},
 	);
 }

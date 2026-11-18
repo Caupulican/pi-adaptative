@@ -37,7 +37,7 @@ import {
 	estimateTokensFromText,
 } from "./context-item.ts";
 import { evaluateRetentionEligibility, type RetentionEligibility } from "./context-retention.ts";
-import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
+import { getToolResultArtifactId, getToolResultText, isPromptPolicyEnforced } from "./context-tool-result.ts";
 import { evaluateHardConstraints } from "./policy-engine.ts";
 import type { HardConstraintFlags, PolicyFeatures, PolicyHardConstraintCode } from "./policy-types.ts";
 import type { SessionToolResultEntrySnapshot } from "./session-tool-result-entries.ts";
@@ -79,10 +79,16 @@ export interface BuiltToolOutputItem {
 	hasResolvedArtifact: boolean;
 }
 
-interface ToolRow {
+interface AuditToolIdentity {
+	itemId: string;
 	toolCallId: string;
-	toolName: string;
 	messageIndex: number;
+	isError: boolean;
+	alreadyEnforced: boolean;
+}
+
+interface ToolRow extends AuditToolIdentity {
+	toolName: string;
 	artifactId: string | undefined;
 	tokenEstimate: number;
 	byteEstimate: number;
@@ -91,6 +97,9 @@ interface ToolRow {
 function measureToolResult(message: ToolResultMessage, messageIndex: number): ToolRow {
 	const text = getToolResultText(message);
 	return {
+		itemId: `tool-output:${message.toolCallId}`,
+		isError: message.isError,
+		alreadyEnforced: isPromptPolicyEnforced(message.details),
 		toolCallId: message.toolCallId,
 		toolName: message.toolName,
 		messageIndex,
@@ -119,7 +128,7 @@ function buildToolOutputItem(
 	}
 
 	const item: ContextItem = {
-		id: `tool-output:${row.toolCallId}`,
+		id: row.itemId,
 		kind: "tool_output",
 		retentionClass: "ephemeral",
 		source: "tool",
@@ -230,16 +239,20 @@ function evaluateRow(
 
 interface AuditIndex {
 	rows: ToolRow[];
+	artifactRows: ToolRow[];
 	artifactIds: Set<string>;
 }
 
 function emptyIndex(): AuditIndex {
-	return { rows: [], artifactIds: new Set() };
+	return { rows: [], artifactRows: [], artifactIds: new Set() };
 }
 
 function appendRow(index: AuditIndex, row: ToolRow): void {
 	index.rows.push(row);
-	if (row.artifactId) index.artifactIds.add(row.artifactId);
+	if (row.artifactId) {
+		index.artifactRows.push(row);
+		index.artifactIds.add(row.artifactId);
+	}
 }
 
 /** A rewrite gets its own index so earlier reports keep their ordering and extent. */
@@ -269,11 +282,22 @@ function indexSuffix(
 	for (const row of appended) appendRow(index, row);
 }
 
-const policyRows = new WeakMap<ContextAuditReport, () => ContextAuditItemReport[]>();
+export interface AuditPolicyView {
+	readonly count: number;
+	all(): ContextAuditItemReport[];
+	candidates(): readonly ContextAuditItemReport[];
+	identities(): Iterable<AuditToolIdentity>;
+	matchesSource(messages: readonly AgentMessage[]): boolean;
+}
+
+const policyRows = new WeakMap<ContextAuditReport, AuditPolicyView>();
+export function auditPolicyView(report: ContextAuditReport): AuditPolicyView | undefined {
+	return policyRows.get(report);
+}
 
 /** Internal policy projections must be independent of edits to published debug rows. */
 export function auditItemsForPolicy(report: ContextAuditReport): readonly ContextAuditItemReport[] {
-	return policyRows.get(report)?.() ?? report.items;
+	return auditPolicyView(report)?.all() ?? report.items;
 }
 
 /** Capture external metadata now. Lazy readers must see the store and transcript as of this request. */
@@ -284,12 +308,12 @@ function captureReport(
 	defer: boolean,
 	transients?: readonly AgentMessage[],
 ): ContextAuditReport {
-	const segments = [{ index, end: index.rows.length }];
+	const segments = [{ index, end: index.rows.length, artifactEnd: index.artifactRows.length }];
 	let artifactIds = index.artifactIds;
 	if (transients?.length) {
 		const tail = emptyIndex();
 		indexSuffix(tail, transients, 0, messages.length, messages);
-		segments.push({ index: tail, end: tail.rows.length });
+		segments.push({ index: tail, end: tail.rows.length, artifactEnd: tail.artifactRows.length });
 		if (artifactStore && tail.artifactIds.size) {
 			artifactIds = new Set(index.artifactIds);
 			for (const id of tail.artifactIds) artifactIds.add(id);
@@ -298,6 +322,11 @@ function captureReport(
 	const storeAvailable = artifactStore !== undefined;
 	const artifacts = artifactStore && artifactIds.size ? readArtifactRefs(artifactStore, artifactIds) : undefined;
 	if (artifacts) countHistoryWork(messages, "auditArtifactRefsChecked", artifactIds.size);
+	function evaluate(row: ToolRow): ContextAuditItemReport {
+		const artifact = row.artifactId ? artifacts?.get(row.artifactId) : undefined;
+		const built = buildToolOutputItem(row, turnIndex, artifact, sessionEntryIdForToolCallId?.(row.toolCallId));
+		return evaluateRow(row, built, turnIndex, storeAvailable);
+	}
 	let canonical: ContextAuditItemReport[] | undefined;
 	function materialize(): ContextAuditItemReport[] {
 		if (canonical) return canonical;
@@ -305,10 +334,7 @@ function captureReport(
 		for (const { index, end } of segments) {
 			countHistoryWork(report, "auditRowsMaterialized", end);
 			for (let i = 0; i < end; i++) {
-				const row = index.rows[i];
-				const artifact = row.artifactId ? artifacts?.get(row.artifactId) : undefined;
-				const built = buildToolOutputItem(row, turnIndex, artifact, sessionEntryIdForToolCallId?.(row.toolCallId));
-				result.push(evaluateRow(row, built, turnIndex, storeAvailable));
+				result.push(evaluate(index.rows[i]));
 			}
 		}
 		canonical = result;
@@ -323,7 +349,33 @@ function captureReport(
 		},
 	};
 	inheritHistoryWork(messages, report);
-	policyRows.set(report, materialize);
+	const sourceVersion = !segments[1]?.end ? messageHistoryVersion(messages) : undefined;
+	let candidates: ContextAuditItemReport[] | undefined;
+	policyRows.set(report, {
+		count: segments.reduce((n, segment) => n + segment.end, 0),
+		all: materialize,
+		matchesSource: (source) => sourceVersion !== undefined && messageHistoryVersion(source) === sourceVersion,
+		*identities() {
+			for (const { index, end } of segments) {
+				for (let i = 0; i < end; i++) yield index.rows[i];
+			}
+		},
+		candidates() {
+			if (candidates) return candidates;
+			const result: ContextAuditItemReport[] = [];
+			if (artifacts?.size) {
+				for (const { index, artifactEnd } of segments) {
+					for (let i = 0; i < artifactEnd; i++) {
+						const row = index.artifactRows[i];
+						if (artifacts.has(row.artifactId!)) result.push(evaluate(row));
+					}
+				}
+			}
+			countHistoryWork(report, "auditRowsMaterialized", result.length);
+			candidates = result;
+			return result;
+		},
+	});
 	if (!defer) materialize();
 	return report;
 }

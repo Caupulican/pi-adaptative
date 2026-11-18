@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { clampThinkingLevel } from "@caupulican/pi-ai/models";
+import type { FitnessReportLookup } from "../models/fitness-store.ts";
 import type { ExpertAdmissionPolicy } from "./admission.ts";
 import { describeModelCard, estimatedTurnMs, type ModelCapabilityCard, withFlashCategory } from "./capability-card.ts";
 import type { ExpertCapacityService } from "./capacity.ts";
@@ -80,6 +81,8 @@ export class ExpertSelectionService {
 			requestText?: string;
 			/** A category System One already judged for this request; it is not asked again. */
 			category?: Extract<CategoryOutcome, { kind: "chosen" }>;
+			/** A host-report snapshot already used by the caller while selecting this route. */
+			fitness?: FitnessReportLookup;
 		},
 	): Promise<ExpertSelectionResult> {
 		if (options?.signal?.aborted) {
@@ -108,12 +111,7 @@ export class ExpertSelectionService {
 		}
 
 		// 4. Feature vector scoring
-		const scored: ScoredExpertCandidate[] = await Promise.all(
-			admitted.map(async (candidate) => ({
-				candidate,
-				features: await this.features.build(request, candidate),
-			})),
-		);
+		const scored = await this.features.buildCandidates(request, admitted, options?.fitness);
 
 		// 5. Ranking and mode selection; System One chooses the primary of a single selection.
 		const mode = options?.mode ?? "single";

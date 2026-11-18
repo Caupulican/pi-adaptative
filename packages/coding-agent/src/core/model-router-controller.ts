@@ -83,9 +83,11 @@ import {
 } from "./model-router/candidate-pool.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
 import {
-	evaluateSurfaceFitness,
-	type FitnessGatedSurface,
-	type FitnessGateVerdict,
+	collectRouterTierFitnessStatuses,
+	evaluateModelFitness,
+	formatFitnessFailure,
+	formatFitnessVerdict,
+	routerSurfaceForTier,
 } from "./model-router/fitness-gate.ts";
 import { type ForegroundRouteSnapshot, foregroundRouteSourceFor } from "./model-router/foreground-route.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
@@ -105,11 +107,10 @@ import {
 	MODEL_ROUTER_DECISION_CUSTOM_TYPE,
 	type ModelRouterDecisionStatus,
 	type ModelRouterFailoverStatus,
-	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
 import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
-import { FitnessStore } from "./models/fitness-store.ts";
+import { type FitnessReportLookup, FitnessStore } from "./models/fitness-store.ts";
 import type {
 	ModelCapabilitySettings,
 	ModelRouterPoolPreference,
@@ -256,11 +257,6 @@ function boundedExpertFailureReason(error: unknown): string {
 	return bounded || "unknown error";
 }
 
-function formatFitnessVerdict(verdict: FitnessGateVerdict): string {
-	if (verdict.fit) return verdict.probed ? "fit" : "unprobed";
-	return verdict.reason === "unprobed" ? "unprobed" : `unfit (${verdict.lane} ${verdict.succeeded}/${verdict.total})`;
-}
-
 /**
  * Owns the model-router turn routing extracted from {@link AgentSession}. See the module header for the
  * drive-path boundary that keeps the agent.prompt()/continue() loop in its foreground lifecycle owner.
@@ -372,22 +368,22 @@ export class ModelRouterController {
 		return notices;
 	}
 
-	private _autoSelectionDeps(): AutoSelectionDeps {
+	private _autoSelectionDeps(fitness: FitnessReportLookup): AutoSelectionDeps {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		return {
 			isSubscription: (model) => this.deps.isUsingSubscription(model),
 			hasConfiguredAuth: (model) => this._hasAccess(model),
 			isExhausted: (model) => this.deps.isModelExhausted(model),
 			toolProbeVerdict: (model) => this.deps.getToolProbeVerdict(model),
-			fitness: (surface, model) => this._evaluateModelFitness(surface, model),
+			fitness: (surface, model) => evaluateModelFitness(surface, model, fitness),
 			fitnessGate: settings.fitnessGate,
 			preference: settings.poolPreference ?? "subscription-first",
 		};
 	}
 
 	/** Deterministic AUTO selection for a tier, bounded to the candidate pool. No provider call. */
-	selectAutoTierModel(tier: AutoSelectionTier): AutoSelectionResult {
-		return selectAutoTierModel(tier, this.deps.getCandidatePool().models, this._autoSelectionDeps());
+	selectAutoTierModel(tier: AutoSelectionTier, fitness = this._createFitnessLookup()): AutoSelectionResult {
+		return selectAutoTierModel(tier, this.deps.getCandidatePool().models, this._autoSelectionDeps(fitness));
 	}
 
 	/** True while the escalation retry turn is running, so the host can suppress its duplicate prompt events. */
@@ -564,49 +560,19 @@ export class ModelRouterController {
 		return this._accessProblem(model) === undefined;
 	}
 
-	private _evaluateModelFitness(surface: FitnessGatedSurface, model: Model<Api>): FitnessGateVerdict {
-		const fitness = FitnessStore.forAgentDir(this.deps.getAgentDir())
-			.getForHost()
-			.find((entry) => entry.model === formatModelRouterModel(model));
-		return evaluateSurfaceFitness(surface, fitness?.report);
-	}
-
-	private _formatFitnessFailure(verdict: Exclude<FitnessGateVerdict, { fit: true }>): string {
-		return verdict.reason === "unprobed" ? "unprobed" : `${verdict.lane} ${verdict.succeeded}/${verdict.total}`;
-	}
-
-	private _routerSurfaceForTier(tier: "cheap" | "medium" | "expensive"): FitnessGatedSurface {
-		return tier === "cheap" ? "router_cheap" : tier === "medium" ? "router_medium" : "router_expensive";
-	}
-
-	private _getRouterTierFitnessStatuses(): ModelRouterFitnessStatuses {
-		const settings = this.deps.getSettingsManager().getModelRouterSettings();
-		const statuses: ModelRouterFitnessStatuses = {};
-		for (const tier of ["cheap", "medium", "expensive"] as const) {
-			const pattern =
-				tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
-			if (!pattern) continue;
-			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
-			if (!resolved.model || !this._hasAccess(resolved.model)) continue;
-			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(tier), resolved.model);
-			statuses[tier] = verdict.fit
-				? { status: verdict.probed ? "fit" : "unprobed" }
-				: verdict.reason === "unprobed"
-					? { status: "unprobed" }
-					: { status: "unfit", lane: verdict.lane, succeeded: verdict.succeeded, total: verdict.total };
-		}
-		return statuses;
+	private _createFitnessLookup(): FitnessReportLookup {
+		return FitnessStore.forAgentDir(this.deps.getAgentDir()).createReportLookup();
 	}
 
 	/**
 	 * The expensive tier's model as the router would pick it now (auto-selected, or the configured
 	 * pattern when available, authed, not exhausted and fit), or why there is none.
 	 */
-	resolveExpensiveModel():
-		| { model: Model<Api>; ref: string; selection: "auto" | "manual"; autoReason?: string }
-		| { skip: string } {
+	resolveExpensiveModel(
+		fitness = this._createFitnessLookup(),
+	): { model: Model<Api>; ref: string; selection: "auto" | "manual"; autoReason?: string } | { skip: string } {
 		if (this.isTierAutoSelected("expensive")) {
-			const auto = this.selectAutoTierModel("expensive");
+			const auto = this.selectAutoTierModel("expensive", fitness);
 			if (!auto.chosen) return { skip: `expensive tier auto-selection: ${auto.reason}` };
 			return { model: auto.chosen.model, ref: auto.chosen.ref, selection: "auto", autoReason: auto.reason };
 		}
@@ -621,9 +587,8 @@ export class ModelRouterController {
 		if (!resolvedExpensive.model) return { skip: "expensive model not configured or not available" };
 		if (this.deps.isModelExhausted(resolvedExpensive.model)) return { skip: "expensive model exhausted: quota" };
 		if (settings.fitnessGate) {
-			const verdict = this._evaluateModelFitness("router_expensive", resolvedExpensive.model);
-			if (!verdict.fit)
-				return { skip: `expensive model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)` };
+			const verdict = evaluateModelFitness("router_expensive", resolvedExpensive.model, fitness);
+			if (!verdict.fit) return { skip: `expensive model unfit: ${formatFitnessFailure(verdict)} (fitness gate)` };
 		}
 		return {
 			model: resolvedExpensive.model,
@@ -636,8 +601,9 @@ export class ModelRouterController {
 		decision: RouteDecision,
 		reasonCode: string,
 		reason: string,
+		fitness: FitnessReportLookup,
 	): { decision: RouteDecision; model: Model<Api> } | undefined {
-		const expensive = this.resolveExpensiveModel();
+		const expensive = this.resolveExpensiveModel(fitness);
 		if ("skip" in expensive) {
 			// A missing configuration is not a skip worth reporting; every other refusal is.
 			this._lastModelRouterSkipReason =
@@ -662,7 +628,10 @@ export class ModelRouterController {
 		return { decision, model: expensive.model };
 	}
 
-	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
+	private _resolveModelRouterTurnRoute(
+		prompt: string,
+		fitness = this._createFitnessLookup(),
+	): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		// Off means "keep the session model"; a session model the owner's policy now disallows is
 		// reallocated anyway, since keeping it is exactly what the owner ruled out.
@@ -696,13 +665,14 @@ export class ModelRouterController {
 		if (reallocate)
 			decision.reasons = [...decision.reasons, "Session model is outside the owner's model policy; reallocated"];
 		if (reallocate || this.isTierAutoSelected(decision.tier)) {
-			const auto = this.selectAutoTierModel(decision.tier);
+			const auto = this.selectAutoTierModel(decision.tier, fitness);
 			if (!auto.chosen) {
 				if (decision.tier === "medium") {
 					const fallback = this._resolveExpensiveFallbackRoute(
 						decision,
 						"medium_unavailable_fallback_expensive",
 						`Medium tier has no eligible candidate (${auto.reason}); falling back to expensive tier`,
+						fitness,
 					);
 					if (fallback) return fallback;
 				}
@@ -721,6 +691,7 @@ export class ModelRouterController {
 				decision,
 				"medium_unavailable_fallback_expensive",
 				"Medium model is unavailable, falling back to expensive model",
+				fitness,
 			);
 			if (fallback) return fallback;
 			this._lastModelRouterSkipReason ??= "medium model and expensive fallback are unavailable";
@@ -754,6 +725,7 @@ export class ModelRouterController {
 					decision,
 					"medium_exhausted_fallback_expensive",
 					"Medium model exhausted: quota; falling back to expensive model",
+					fitness,
 				);
 				if (fallback) return fallback;
 			}
@@ -774,6 +746,7 @@ export class ModelRouterController {
 					decision,
 					"medium_no_tool_path_fallback_expensive",
 					"Medium model has no working tool-call path (native and text-protocol probe both failed); falling back to expensive model",
+					fitness,
 				);
 				if (fallback) return fallback;
 			}
@@ -782,18 +755,19 @@ export class ModelRouterController {
 		}
 
 		if (settings.fitnessGate) {
-			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(decision.tier), resolved.model);
+			const verdict = evaluateModelFitness(routerSurfaceForTier(decision.tier), resolved.model, fitness);
 			if (!verdict.fit) {
 				if (decision.tier === "medium") {
-					const failure = this._formatFitnessFailure(verdict);
+					const failure = formatFitnessFailure(verdict);
 					const fallback = this._resolveExpensiveFallbackRoute(
 						decision,
 						"medium_unfit_fallback_expensive",
 						`Medium model is unfit (${failure}); falling back to expensive model`,
+						fitness,
 					);
 					if (fallback) return fallback;
 				}
-				this._lastModelRouterSkipReason = `${decision.tier} model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)`;
+				this._lastModelRouterSkipReason = `${decision.tier} model unfit: ${formatFitnessFailure(verdict)} (fitness gate)`;
 				return undefined;
 			}
 		}
@@ -826,6 +800,7 @@ export class ModelRouterController {
 		failed: Model<Api>,
 		facts: { hasImages: boolean; contextTokens: number; admits?(model: Model<Api>): boolean },
 	): Model<Api> | undefined {
+		const fitness = this._createFitnessLookup();
 		const usable = (candidate: Model<Api> | undefined): candidate is Model<Api> =>
 			candidate !== undefined &&
 			!modelsAreEqual(candidate, failed) &&
@@ -836,7 +811,7 @@ export class ModelRouterController {
 			const pinned = this._usablePin(tier, facts).model;
 			if (usable(pinned)) return this._quotaFallbackChosen(failed, pinned, tier, "pin");
 			if (!this.isTierAutoSelected(tier)) continue;
-			const auto = this.selectAutoTierModel(tier).candidates.find(
+			const auto = this.selectAutoTierModel(tier, fitness).candidates.find(
 				(entry) => entry.admitted && fitsTurnFacts(entry.model, facts) && usable(entry.model),
 			)?.model;
 			if (auto) return this._quotaFallbackChosen(failed, auto, tier, "pool");
@@ -889,6 +864,7 @@ export class ModelRouterController {
 		signal?: AbortSignal,
 		facts: { hasImages?: boolean; contextTokens?: number } = {},
 		category?: Extract<CategoryOutcome, { kind: "chosen" }>,
+		fitness?: FitnessReportLookup,
 	): Promise<{ model: Model<Api>; thinkingLevel: string; decidedBy?: ExpertSelectionPlan["decidedBy"] } | undefined> {
 		const selector = this.deps.expertSelector;
 		if (!selector) return undefined;
@@ -925,6 +901,7 @@ export class ModelRouterController {
 			const selection = await selector.select(request, {
 				signal,
 				requestText: prompt,
+				fitness,
 				...(category ? { category } : {}),
 			});
 			this._lastExpertSelectionFailure = undefined;
@@ -1033,8 +1010,9 @@ export class ModelRouterController {
 	async resolveTurnRouteJudged(
 		prompt: string,
 		options?: { skipJudge?: boolean; hasImages?: boolean; contextTokens?: number },
+		fitness = this._createFitnessLookup(),
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
-		const baseline = this._resolveModelRouterTurnRoute(prompt);
+		const baseline = this._resolveModelRouterTurnRoute(prompt, fitness);
 		if (!baseline) return undefined;
 		const baselineTier = baseline.decision.tier;
 		// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic route: a
@@ -1100,7 +1078,7 @@ export class ModelRouterController {
 		const pinNote = pinned.reason ? [`${tier} pin not used: ${pinned.reason}`] : [];
 
 		if (this.deps.expertSelector && this.isTierAutoSelected(tier)) {
-			const expert = await this.resolveExpertTurnModel(tier, prompt, signal, facts, category);
+			const expert = await this.resolveExpertTurnModel(tier, prompt, signal, facts, category, fitness);
 			if (expert) {
 				const bySystemOne = expert.decidedBy?.kind === "system_one";
 				const picked = route(
@@ -1121,7 +1099,7 @@ export class ModelRouterController {
 		const baselineFits =
 			fitsTurnFacts(baseline.model, facts) && isModelInRouterPool(this.deps.getCandidatePool(), baseline.model);
 		if ((tier !== baselineTier || !baselineFits) && (this.isTierAutoSelected(tier) || !baselineFits)) {
-			const auto = this.selectAutoTierModel(tier).candidates.find(
+			const auto = this.selectAutoTierModel(tier, fitness).candidates.find(
 				(candidate) => candidate.admitted && fitsTurnFacts(candidate.model, facts),
 			);
 			if (auto) {
@@ -1225,7 +1203,8 @@ export class ModelRouterController {
 		const classified = classifyModelRouterRoute(prompt);
 		const tier = classified.tier;
 		const routable = tier === "cheap" || tier === "medium" || tier === "expensive";
-		const auto = routable && this.isTierAutoSelected(tier) ? this.selectAutoTierModel(tier) : undefined;
+		const fitness = this._createFitnessLookup();
+		const auto = routable && this.isTierAutoSelected(tier) ? this.selectAutoTierModel(tier, fitness) : undefined;
 		const manualPin = routable && !auto ? this._tierPattern(tier) : undefined;
 		const manualPinModel = manualPin
 			? resolveCliModel({ cliModel: manualPin, modelRegistry: registry }).model
@@ -1240,7 +1219,7 @@ export class ModelRouterController {
 		let resolved: { decision: RouteDecision; model: Model<Api> } | undefined;
 		let skipReason: string | undefined;
 		try {
-			resolved = this._resolveModelRouterTurnRoute(prompt);
+			resolved = this._resolveModelRouterTurnRoute(prompt, fitness);
 			skipReason = resolved ? undefined : this._lastModelRouterSkipReason;
 		} finally {
 			this._lastModelRouterSkipReason = previousSkip;
@@ -1248,13 +1227,14 @@ export class ModelRouterController {
 		}
 
 		const chosenFitness = resolved
-			? this._evaluateModelFitness(
-					this._routerSurfaceForTier(
+			? evaluateModelFitness(
+					routerSurfaceForTier(
 						resolved.decision.tier === "cheap" || resolved.decision.tier === "medium"
 							? resolved.decision.tier
 							: "expensive",
 					),
 					resolved.model,
+					fitness,
 				)
 			: undefined;
 		return {
@@ -1286,13 +1266,14 @@ export class ModelRouterController {
 	 * operator request. Inspection only — the session model and sticky status are unchanged.
 	 */
 	async previewRouteLive(prompt: string): Promise<LiveRoutePreview> {
+		const fitness = this._createFitnessLookup();
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const previousSkip = this._lastModelRouterSkipReason;
 		const previousIntent = this._lastModelRouterIntent;
 		let resolved: { decision: RouteDecision; model: Model<Api> } | undefined;
 		let skipReason: string | undefined;
 		try {
-			resolved = await this.resolveTurnRouteJudged(prompt);
+			resolved = await this.resolveTurnRouteJudged(prompt, undefined, fitness);
 			skipReason = resolved ? undefined : this._lastModelRouterSkipReason;
 		} finally {
 			this._lastModelRouterSkipReason = previousSkip;
@@ -1324,7 +1305,7 @@ export class ModelRouterController {
 			selection: resolved.decision.selection,
 			poolPreference: settings.poolPreference ?? "subscription-first",
 			fitness: formatFitnessVerdict(
-				this._evaluateModelFitness(this._routerSurfaceForTier(surfaceTier), resolved.model),
+				evaluateModelFitness(routerSurfaceForTier(surfaceTier), resolved.model, fitness),
 			),
 			reasons: resolved.decision.reasons,
 		};
@@ -1351,7 +1332,15 @@ export class ModelRouterController {
 				historicalDecisions,
 				this._lastModelRouterSkipReason,
 				this._lastModelRouterIntent ?? lastDecision?.intent,
-				settings.fitnessGate ? this._getRouterTierFitnessStatuses() : undefined,
+				settings.fitnessGate
+					? collectRouterTierFitnessStatuses(settings, this._createFitnessLookup(), (pattern) => {
+							const { model } = resolveCliModel({
+								cliModel: pattern,
+								modelRegistry: this.deps.getModelRegistry(),
+							});
+							return model && this._hasAccess(model) ? model : undefined;
+						})
+					: undefined,
 				this.deps.getFailoverStatus(),
 				formatRouterPoolSummary(this.deps.getCandidatePool()),
 			),
