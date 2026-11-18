@@ -809,10 +809,11 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/background-tool-task-controller.ts",
 		journey: 2,
 		phase: "background-and-stall",
-		fault: "the terminal-task cache evicts a finished task whose output is an artifact",
+		fault: "the terminal-task cache evicts a finished task whose output is an artifact, and the retained task temporarily loses its payload",
 		witness:
 			"a wait on the evicted first task returns its saved completed record naming the same artifact, the task list no longer shows it, and the artifact's tail reads back through artifact_retrieve",
-		control: "the retained second task's wait is answered from the cache with its own artifact",
+		control:
+			"the retained task is served from cache. Across payload removal and restoration its retrieval and request policy change together, while the evicted artifact remains readable and the earlier policy snapshot stays valid",
 		estSeconds: 1,
 		status: "covered",
 		// With System One on the idle root turns ask judgments no reading derives, as for R18.

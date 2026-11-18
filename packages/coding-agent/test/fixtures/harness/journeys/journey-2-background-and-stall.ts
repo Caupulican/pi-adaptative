@@ -1,10 +1,12 @@
 import "../builtin-install.ts";
+import { join } from "node:path";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import {
 	type BackgroundToolTaskRecord,
 	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../../../../src/core/background-tool-task-controller.ts";
+import { getContextStoreDir } from "../../../../src/core/context/context-store-retention.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "../../../../src/core/goals/goal-continuation-defaults.ts";
 import { buildObjectiveRoutePrompt } from "../../../../src/core/goals/goal-continuation-prompt.ts";
@@ -246,6 +248,17 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			maxRetainedTerminalTasks: 1,
 		});
 		const r40eSession = r40e.session;
+		const artifactDir = getContextStoreDir(world.agentDir, "artifacts", r40e.sessionManager.getSessionId());
+		const retainedPayload = () => {
+			if (!r40eArtifacts.second) throw new Error("The retained task did not publish an artifact id");
+			return join(artifactDir, `${r40eArtifacts.second}.payload`);
+		};
+		type PolicyReport = ReturnType<typeof r40eSession.getPromptPolicyReport>;
+		let beforeRemoval: PolicyReport | undefined;
+		const waitRetrievability = (report: PolicyReport) =>
+			["r40e-wait-3", "r40e-wait-4"].map(
+				(id) => report.items.find((item) => item.toolCallId === id)?.hasAvailableRetrievalPath,
+			);
 		// 1,300 distinct lines of 30 bytes: over the controller's inline caps (32 KiB, 400 lines) and under the bash tool's own
 		// (50 KiB, 2,000 lines), so the controller sees the whole output and no reducer finds a repeat to collapse.
 		const hex = (value: number): string => ((value * 2654435761) >>> 0).toString(16).padStart(8, "0");
@@ -333,20 +346,48 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 				r40eSeen.evictedDetails = evicted?.details;
 				r40eSeen.retained = retained?.details;
 				r40eSeen.list = list?.text;
+				beforeRemoval = r40eSession.getPromptPolicyReport();
+				const payload = retainedPayload();
+				world.io.renameSync(payload, `${payload}.held`);
 				return [
 					{
 						id: "r40e-retrieve-1",
 						name: "artifact_retrieve",
 						arguments: { artifactId: r40eArtifacts.first, mode: "tail", maxLines: 3 },
 					},
+					{
+						id: "r40e-retrieve-missing",
+						name: "artifact_retrieve",
+						arguments: { artifactId: r40eArtifacts.second, mode: "tail", maxLines: 3 },
+					},
+				];
+			}),
+			dynamicCalls("r40e-restore", (request) => {
+				const [evicted, missing] = batchDetails(request);
+				r40eArtifacts.retrieved = evicted?.text;
+				expect(missing?.details).toMatchObject({ found: false });
+				expect(missing?.text).toContain("Artifact could not be read");
+				expect(waitRetrievability(r40eSession.getPromptPolicyReport())).toEqual([true, false]);
+				expect(beforeRemoval && waitRetrievability(beforeRemoval)).toEqual([true, true]);
+				const payload = retainedPayload();
+				world.io.renameSync(`${payload}.held`, payload);
+				return [
+					{
+						id: "r40e-retrieve-restored",
+						name: "artifact_retrieve",
+						arguments: { artifactId: r40eArtifacts.second, mode: "tail", maxLines: 3 },
+					},
 				];
 			}),
 			{
 				name: "r40e-done",
 				check: (request) => {
-					r40eArtifacts.retrieved = batchDetails(request)[0]?.text;
+					const [restored] = batchDetails(request);
+					expect(restored?.details).toMatchObject({ found: true });
+					expect(restored?.text).toContain("R40E-SECOND-TAIL");
+					expect(waitRetrievability(r40eSession.getPromptPolicyReport())).toEqual([true, true]);
 				},
-				reply: { content: [{ type: "text", text: "The evicted task's output reads back." }] },
+				reply: { content: [{ type: "text", text: "Both task outputs are available again." }] },
 			},
 		);
 		world.systemOne.enterPhase("r40e", {});
