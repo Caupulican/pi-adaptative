@@ -14,6 +14,7 @@ import { awayDayAllowanceUntil } from "../routines/routine-away-spend.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { BoundedReadError, readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { isOwnerTask, isTaskCommand, type OwnerTask, type OwnerTaskCommand } from "./owner-task.ts";
 
 const JOURNAL_VERSION = 1;
 /** Above every bounded list at its largest (128 messages and 32 drafts at their character caps, 4 bytes a character). */
@@ -109,6 +110,7 @@ export interface ChannelBatchRecord {
 
 /** A private chat an owner message was admitted from: where the owner's updates are pushed. */
 export interface ChannelOwnerConversation {
+	readonly selection?: OwnerTask;
 	readonly conversationKey: string;
 	readonly address: string;
 	readonly senderDigest: string;
@@ -179,7 +181,7 @@ export type ChannelHeldCounts = Partial<Record<ChannelHeldReason, number>>;
 export interface ChannelJournalState {
 	version: number;
 	/** The session serving the channel; `away` marks the daemon's host, which any open session takes over. */
-	holder?: { sessionId: string; pid: number; away?: true };
+	holder?: { sessionId: string; pid: number; away?: true; ownerPolicy?: string };
 	pending: ChannelPendingMessage[];
 	seen: { d: string; at: number; outcome: ChannelSeenOutcome }[];
 	held: { sender: string; kind: string; reason: ChannelHeldReason; at: number }[];
@@ -202,6 +204,7 @@ export interface ChannelJournalState {
 	onboarding: { sender: string; at: number; id?: string }[];
 	/** The owner's private chats, newest last, at most `MAX_OWNER_CONVERSATIONS`; absent while there is none. */
 	ownerConversations?: ChannelOwnerConversation[];
+	ownerTaskCommands?: OwnerTaskCommand[];
 	/** Pushes to the owner's chats of the last week, oldest first; absent while there is none. */
 	ownerPushes?: ChannelOwnerPushRecord[];
 	/** Updates the push rate bound kept from the owner's chat since `status` last reported them; absent at zero. */
@@ -299,6 +302,7 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 function isOwnerConversation(value: unknown): value is ChannelOwnerConversation {
 	return (
 		isPlainRecord(value) &&
+		(value.selection === undefined || isOwnerTask(value.selection)) &&
 		isString(value.conversationKey) &&
 		isString(value.address) &&
 		isString(value.senderDigest) &&
@@ -373,7 +377,8 @@ function parseState(text: string): ChannelJournalState {
 			isPlainRecord(holder) &&
 			isString(holder.sessionId) &&
 			isCount(holder.pid) &&
-			(holder.away === undefined || holder.away === true)
+			(holder.away === undefined || holder.away === true) &&
+			(holder.ownerPolicy === undefined || isString(holder.ownerPolicy))
 		)
 	)
 		throw new Error("malformed holder");
@@ -402,6 +407,7 @@ function parseState(text: string): ChannelJournalState {
 			? {
 					sessionId: holder.sessionId as string,
 					pid: holder.pid as number,
+					...(typeof holder.ownerPolicy === "string" ? { ownerPolicy: holder.ownerPolicy } : {}),
 					...(holder.away === true ? { away: true as const } : {}),
 				}
 			: undefined,
@@ -443,6 +449,8 @@ function parseState(text: string): ChannelJournalState {
 		// Absent in a journal written before owner channels, and while each is empty.
 		ownerConversations:
 			value.ownerConversations === undefined ? undefined : list(value.ownerConversations, isOwnerConversation),
+		ownerTaskCommands:
+			value.ownerTaskCommands === undefined ? undefined : list(value.ownerTaskCommands, isTaskCommand),
 		ownerPushes: value.ownerPushes === undefined ? undefined : list(value.ownerPushes, isOwnerPush),
 		ownerPushSuppressed: value.ownerPushSuppressed as number | undefined,
 		ownerNotices: value.ownerNotices === undefined ? undefined : list(value.ownerNotices, isOwnerNotice),
@@ -484,6 +492,10 @@ function prune(state: ChannelJournalState, now: number): void {
 	const conversations = state.ownerConversations?.slice(-MAX_OWNER_CONVERSATIONS);
 	state.ownerConversations = conversations && conversations.length > 0 ? conversations : undefined;
 	if (state.ownerPushSuppressed === 0) state.ownerPushSuppressed = undefined;
+	const commands = state.ownerTaskCommands?.filter(
+		(entry) => entry.state !== "finished" || now - (entry.settledAt ?? entry.admittedAt) < DAY_MS,
+	);
+	state.ownerTaskCommands = commands?.length ? commands : undefined;
 	const notices = state.ownerNotices?.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_OWNER_NOTICES);
 	state.ownerNotices = notices && notices.length > 0 ? notices : undefined;
 }
@@ -698,4 +710,14 @@ export function pendingOfferTimes(
 		offers.set(entry.offeredBatch ?? entry.offeredTo, entry.offeredAt);
 	}
 	return [...offers.values()];
+}
+
+/** Release the complete offer on a pending channel message. */
+export function clearOffer(entry: ChannelPendingMessage): void {
+	entry.offeredTo = undefined;
+	entry.offeredPid = undefined;
+	entry.offeredAt = undefined;
+	entry.offeredBatch = undefined;
+	entry.offeredAway = undefined;
+	entry.offeredUnmetered = undefined;
 }

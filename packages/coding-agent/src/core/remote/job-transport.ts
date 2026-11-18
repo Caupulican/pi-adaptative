@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { type CapabilityFacts, localFacts, offeredCheckouts } from "./capabilities.ts";
 import { recordPeerDown, recordPeerFacts, recordPeerUp } from "./fleet-machines.ts";
-import { acceptsJobsFrom, JobHost } from "./job-host.ts";
+import { acceptsJobsFrom, JobHost, permitsCheckoutReads } from "./job-host.ts";
 import {
 	CAP_FEATURE,
 	digestOutcome,
@@ -362,7 +362,7 @@ export class JobTransport implements LinkPeerListener {
 	private async advertise(peer: LinkPeer): Promise<void> {
 		try {
 			const settings = loadLinkSettings(this.agentDir);
-			const checkouts = await offeredCheckouts(settings);
+			const checkouts = permitsCheckoutReads(peer, settings) ? await offeredCheckouts(settings) : [];
 			const now = Date.now();
 			const facts = localFacts({
 				checkouts: checkouts.map((entry) => entry.fact),

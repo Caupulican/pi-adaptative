@@ -64,7 +64,16 @@ import {
 	parsePlacedJobReference,
 	placedJobReference,
 } from "./job-protocol.ts";
-import { WIRE_ID } from "./protocol.ts";
+import {
+	CANCEL_EXTENSION,
+	parseNamedFile,
+	RECORD_EXTENSION,
+	recordFileName,
+	splitRecordName,
+} from "./job-record-name.ts";
+
+import { createRoutineJob, pruneRoutineJob } from "./routine-job-index.ts";
+import { isRoutineJobScope } from "./routine-job-origin.ts";
 
 /**
  * How a placed job ended on the placer's side without an outcome from the executor. `plan_stopped` is a fleet stop that is
@@ -109,6 +118,8 @@ export interface PlacerJobRecord {
 	readonly executorName: string;
 	/** The session that placed the job and applies its end. */
 	readonly ownerSession: string;
+	/** Digest of the scheduled occurrence and the actual placing bot home. Legacy and unrelated jobs omit it. */
+	readonly routineScope?: string;
 	readonly laneId: string;
 	/** The managed lane's attempt, written at placement. Absent on a record a replayed dispatch wrote, or an older build's. */
 	readonly attemptId?: string;
@@ -250,6 +261,7 @@ function parsePlacerRecord(value: unknown): PlacerJobRecord | undefined {
 		executorId: value.executorId as string,
 		executorName: value.executorName as string,
 		ownerSession: value.ownerSession as string,
+		...(isRoutineJobScope(value.routineScope) ? { routineScope: value.routineScope } : {}),
 		laneId: value.laneId as string,
 		offer,
 		offerDigest: value.offerDigest as string,
@@ -362,49 +374,6 @@ export interface RecordScan<T> {
 
 /** The placed records of one synchronous pass (`JobStore.placedScan`). */
 export type PlacedPass = RecordScan<PlacerJobRecord>;
-
-/** The extension of a record file, and of the cancel marker kept beside it. */
-const RECORD_EXTENSION = "json";
-const CANCEL_EXTENSION = "cancel";
-/** A record or marker file name: the machine id as lowercase hex, the job id, then the extension. */
-const NAMED_FILE = /^((?:[0-9a-f]{2})+)\.([A-Za-z0-9_-]+)\.(json|cancel)$/;
-
-/** The machine id and job id of a logical name `<machineId>.<jobId>`; undefined for a name that holds neither. */
-function splitRecordName(name: string): { readonly machineId: string; readonly jobId: string } | undefined {
-	const separator = name.lastIndexOf(".");
-	if (separator < 0) return undefined;
-	const machineId = name.slice(0, separator);
-	const jobId = name.slice(separator + 1);
-	return WIRE_ID.test(machineId) && WIRE_ID.test(jobId) ? { machineId, jobId } : undefined;
-}
-
-/**
- * The file a logical record name is stored under: `<machineTag>.<jobId>.<extension>`, the machine id as lowercase hex. Hex is a safe
- * file-name part on Windows and Linux (no reserved character, no case folding) and never spells a reserved device name. Neither part
- * holds a dot, so the file name parses back to its machine and job without reading the file (`parseNamedFile`).
- */
-function recordFileName(name: string, extension: string = RECORD_EXTENSION): string {
-	const parts = splitRecordName(name);
-	if (parts === undefined) throw new Error("a job record name is a machine id and a job id");
-	return `${Buffer.from(parts.machineId, "utf8").toString("hex")}.${parts.jobId}.${extension}`;
-}
-
-/**
- * The logical name, machine, job and extension a record or marker file name holds; undefined for a file name this build does not parse.
- */
-function parseNamedFile(
-	file: string,
-):
-	| { readonly name: string; readonly machineId: string; readonly jobId: string; readonly extension: string }
-	| undefined {
-	const match = NAMED_FILE.exec(file);
-	if (!match) return undefined;
-	const machineId = Buffer.from(match[1], "hex").toString("utf8");
-	const jobId = match[2];
-	return WIRE_ID.test(machineId) && WIRE_ID.test(jobId)
-		? { name: `${machineId}.${jobId}`, machineId, jobId, extension: match[3] }
-		: undefined;
-}
 
 /** Record files this build cannot read, already reported by path: each is reported once, until its file reads again. */
 const reportedUnreadable = new Set<string>();
@@ -825,7 +794,11 @@ export class JobStore {
 	 */
 	createPlaced(record: PlacerJobRecord): RecordCreate<PlacerJobRecord> {
 		this.dropPlacedPass();
-		return this.out.create(placedRecordName(record.executorId, record.jobId), record);
+		const name = placedRecordName(record.executorId, record.jobId);
+		const create = () => this.out.create(name, record);
+		return record.routineScope
+			? createRoutineJob(jobsDir(this.agentDir), record.routineScope, name, create)
+			: create();
 	}
 
 	updatePlaced(
@@ -928,8 +901,12 @@ export class JobStore {
 	 */
 	prune(now: number): void {
 		this.dropPlacedPass();
-		for (const [name, record] of this.out.scan().valid)
-			if (record.appliedAt !== undefined && now - record.appliedAt > FINISHED_RETENTION_MS) this.out.remove(name);
+		for (const [name, record] of this.out.scan().valid) {
+			if (record.appliedAt === undefined || now - record.appliedAt <= FINISHED_RETENTION_MS) continue;
+			const remove = () => this.out.remove(name);
+			if (record.routineScope) pruneRoutineJob(jobsDir(this.agentDir), record.routineScope, name, remove);
+			else remove();
+		}
 		for (const record of this.prunable(now)) this.in.remove(executorRecordName(record.placerId, record.jobId));
 	}
 

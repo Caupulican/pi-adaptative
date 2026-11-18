@@ -78,9 +78,9 @@
 			"reason": "the part transport: its callers record the reply first (settleDraft claims the draft through claimThenEffect; deliverReply marks the batch replied before it sends); a draft send journals each accepted part before the next, and a live reply keeps the accepted parts with the draft it leaves on failure"
 		},
 		{
-			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
+			"file": "packages/coding-agent/src/core/channels/owner-control.ts",
 			"transport": "provider.send(",
-			"enclosing": ["sendControlReply"],
+			"enclosing": ["sendOwnerControlReply"],
 			"count": 1,
 			"reason": "control reply: Pi's best-effort answer to an owner control word, sent after the control word is handled; it has no record of its own, and a failed send is warned, not retried"
 		},

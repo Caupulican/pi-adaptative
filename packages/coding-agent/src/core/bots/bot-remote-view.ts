@@ -7,14 +7,18 @@
  * bot's lock here too: the hold each take finds is what the view judges a later change of the lock against, so a host's
  * own take and release of a lock never reads as another host's.
  */
-import { statSync } from "node:fs";
+import { type Stats, statSync } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd } from "../../kernel/session/session-file-reading.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
-import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
+import {
+	type ReadonlySessionManager,
+	SessionManager,
+	type SessionTranscriptView,
+} from "../../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
-import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
+import { FileSnapshotChangedError, sameFileVersion } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName, botHostLockFile } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -24,6 +28,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { sessionStorageRootsOfFile } from "../orchestration-homes.ts";
 import { type HostLockResult, takeProcessLock } from "../remote/host-lock.ts";
 import type { TimerSource } from "../util/timer-port.ts";
+import { followedBotTranscript } from "./bot-chat-chronology.ts";
 import { logBotsFailure } from "./bot-failure-words.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
@@ -50,8 +55,9 @@ export function savedSessionFile(
 	agentDir: string,
 	agentId: string,
 	links: BotSessionLinks,
+	readHeader = readSessionHeaderResult,
 ): { id: string; file: string } | undefined {
-	const choice = botSessionChoice(agentDir, botHomeOf(agentDir, agentId), links);
+	const choice = botSessionChoice(agentDir, botHomeOf(agentDir, agentId), links, readHeader);
 	if (choice.kind === "recorded") return { id: choice.pointer.sessionId, file: choice.path };
 	return choice.newest === undefined ? undefined : { id: choice.newest.sessionId, file: choice.newest.path };
 }
@@ -62,10 +68,14 @@ export function savedSessionFile(
  * undefined while it has none. Another process reads the bot's watches by its id, since they target it. A file that
  * cannot be read is thrown, as {@link botSessionChoice} throws.
  */
-export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
-	const saved = savedSessionFile(agentDir, agentId, "refuse");
+export function botSessionOnDisk(
+	agentDir: string,
+	agentId: string,
+	readHeader = readSessionHeaderResult,
+): SavedBotSession | undefined {
+	const saved = savedSessionFile(agentDir, agentId, "refuse", readHeader);
 	if (!saved) return undefined;
-	const header = readSessionHeaderResult(saved.file);
+	const header = readHeader(saved.file);
 	if (!header.ok && header.reason === "unreadable" && !isMissingFileError(header.cause)) throw header.cause;
 	return { ...saved, cwd: header.ok ? getSessionHeaderCwd(header.header) : undefined };
 }
@@ -78,6 +88,9 @@ function isSessionChange(file: string): boolean {
 /** How many times a transcript read is opened again when a write changed the file under it. */
 const SNAPSHOT_READS = 3;
 
+/** Keep hot views for several bots while bounding the number of retained session indexes. */
+const MAX_TRANSCRIPT_VIEWS = 8;
+
 /** A session transcript's messages, read without opening it for writing (see {@link readSessionSnapshot}). */
 export function readTranscriptMessages(file: string, agentDir: string): AgentMessage[] {
 	return readSessionSnapshot(file, agentDir, (view) => view.buildSessionContext().messages);
@@ -89,9 +102,13 @@ export function readTranscriptMessages(file: string, agentDir: string): AgentMes
  * times at most, after which the change is reported as the failure it is.
  */
 export function readSessionSnapshot<T>(file: string, agentDir: string, read: (view: ReadonlySessionManager) => T): T {
+	return retrySnapshot(() => read(SessionManager.openReadOnly(file, sessionStorageRootsOfFile(agentDir, file))));
+}
+
+function retrySnapshot<T>(read: () => T): T {
 	for (let attempt = 1; ; attempt++) {
 		try {
-			return read(SessionManager.openReadOnly(file, sessionStorageRootsOfFile(agentDir, file)));
+			return read();
 		} catch (error) {
 			if (!(error instanceof FileSnapshotChangedError) || attempt >= SNAPSHOT_READS) throw error;
 		}
@@ -147,15 +164,9 @@ export class BotRemoteView {
 	private readonly holds = new Map<string, JudgedHold>();
 	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
 	private readonly saved = new Map<string, SavedBotSession | undefined>();
-	/** The conversation of the one bot whose chat was read last, with the file state it was read at. */
-	private transcriptCache:
-		| { agentId: string; file: string; mtimeMs: number; size: number; messages: AgentMessage[] }
-		| undefined;
+	private readonly transcripts = new Map<string, SessionTranscriptView>();
 	/** The goal each bot's saved session file holds, with the file state it was read at. */
-	private readonly goals = new Map<
-		string,
-		{ file: string; mtimeMs: number; size: number; goal: GoalState | undefined }
-	>();
+	private readonly goals = new Map<string, { file: string; stat: Stats; goal: GoalState | undefined }>();
 	private homeWatch: (() => void) | undefined;
 	/** The home watch failed: other hosts' changes are read from disk each time instead. */
 	private homeWatchFailed = false;
@@ -334,8 +345,9 @@ export class BotRemoteView {
 	/** The bot's own session as its home holds it now (see {@link botSessionOnDisk}). */
 	savedSessionOf(agentId: string): SavedBotSession | undefined {
 		this.watch();
-		if (!this.homeWatch) return botSessionOnDisk(this.ports.agentDir(), agentId);
-		if (!this.saved.has(agentId)) this.saved.set(agentId, botSessionOnDisk(this.ports.agentDir(), agentId));
+		if (!this.homeWatch) return botSessionOnDisk(this.ports.agentDir(), agentId, this.headerReader(agentId));
+		if (!this.saved.has(agentId))
+			this.saved.set(agentId, botSessionOnDisk(this.ports.agentDir(), agentId, this.headerReader(agentId)));
 		return this.saved.get(agentId);
 	}
 
@@ -344,24 +356,33 @@ export class BotRemoteView {
 	 * writing, and read again only once the file changed. Undefined when the bot has no session of its own yet, or its
 	 * recorded session wrote nothing yet.
 	 */
-	readMessages(agentId: string): AgentMessage[] | undefined {
+	readMessages(agentId: string): readonly AgentMessage[] | undefined {
 		this.watch();
-		const agentDir = this.ports.agentDir();
-		const file = savedSessionFile(agentDir, agentId, "refuse")?.file;
+		const file = savedSessionFile(this.ports.agentDir(), agentId, "refuse", this.headerReader(agentId))?.file;
 		if (!file) return undefined;
-		const stat = statSync(file, { throwIfNoEntry: false });
-		if (!stat) return undefined;
-		const cached = this.transcriptCache;
-		if (
-			cached?.agentId === agentId &&
-			cached.file === file &&
-			cached.mtimeMs === stat.mtimeMs &&
-			cached.size === stat.size
-		)
-			return [...cached.messages];
-		const messages = readTranscriptMessages(file, agentDir);
-		this.transcriptCache = { agentId, file, mtimeMs: stat.mtimeMs, size: stat.size, messages };
-		return [...messages];
+		try {
+			return this.transcript(agentId, file).readSessionContext(({ messages }) => followedBotTranscript(messages));
+		} catch (error) {
+			if (isMissingFileError(error)) return undefined;
+			throw error;
+		}
+	}
+
+	private headerReader(agentId: string): typeof readSessionHeaderResult {
+		return (file) => {
+			const header = this.transcripts.get(agentId)?.followedHeader(file);
+			return header ? { ok: true, header } : readSessionHeaderResult(file);
+		};
+	}
+
+	private transcript(agentId: string, file: string): SessionTranscriptView {
+		const prior = this.transcripts.get(agentId);
+		this.transcripts.delete(agentId);
+		const roots = () => sessionStorageRootsOfFile(this.ports.agentDir(), file);
+		const view = retrySnapshot(() => SessionManager.followTranscript(file, roots, prior));
+		this.transcripts.set(agentId, view);
+		if (this.transcripts.size > MAX_TRANSCRIPT_VIEWS) this.transcripts.delete(this.transcripts.keys().next().value!);
+		return view;
 	}
 
 	/**
@@ -377,13 +398,12 @@ export class BotRemoteView {
 		const stat = statSync(saved.file, { throwIfNoEntry: false });
 		if (!stat) return undefined;
 		// Taken before the read: a write landing during it leaves a size or time the next ask finds changed.
-		const state = { file: saved.file, mtimeMs: stat.mtimeMs, size: stat.size };
+		const state = { file: saved.file, stat };
 		const cached = this.goals.get(agentId);
-		if (cached?.file === state.file && cached.mtimeMs === state.mtimeMs && cached.size === state.size)
-			return cached.goal;
+		if (cached?.file === state.file && sameFileVersion(cached.stat, stat)) return cached.goal;
 		let goal: GoalState | undefined;
 		try {
-			goal = readSessionSnapshot(saved.file, this.ports.agentDir(), getLatestGoalStateSnapshot);
+			goal = getLatestGoalStateSnapshot(this.transcript(agentId, saved.file));
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			harnessLog.warn("bots", "a bot's saved goal was not read", { agentId, file: saved.file, reason });
@@ -440,7 +460,7 @@ export class BotRemoteView {
 		this.remote.clear();
 		this.saved.clear();
 		this.holds.clear();
-		this.transcriptCache = undefined;
+		this.transcripts.clear();
 		this.goals.clear();
 	}
 }

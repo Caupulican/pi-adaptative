@@ -153,6 +153,15 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		this.submit(text, text.slice(header + 1), false, origin, live, onAccepted);
 	}
 
+	/** A task-targeted owner message, awaited by the bot inbox until its foreground submission ends. */
+	async deliverTask(text: string, words: string, origin: OwnerChannelOrigin, live: () => boolean): Promise<boolean> {
+		let accepted = false;
+		await this.submit(text, words, false, origin, live, (value) => {
+			accepted = value;
+		});
+		return accepted;
+	}
+
 	deliverApproval(
 		text: string,
 		origin: OwnerChannelOrigin,
@@ -200,6 +209,19 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	 */
 	abortRun(ref: string): void {
 		if (!this.isRunning(ref)) return;
+		this.abortForeground();
+	}
+
+	/** Interrupt only a foreground delivery whose exact origin a task stop captured. */
+	abortTask(refs: ReadonlySet<string>): boolean {
+		const source = this.getForeground().turnOrigin;
+		const ref = source.deliveryRef();
+		if (!source.isActive() || !ref || !refs.has(ref)) return false;
+		this.abortForeground();
+		return true;
+	}
+
+	private abortForeground(): void {
 		const reason = "owner channel stop";
 		this.abortPromptSubmission(reason);
 		const foreground = this.getForeground();
@@ -255,7 +277,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		origin: OwnerChannelOrigin,
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
-	): void {
+	): Promise<void> | undefined {
 		const run =
 			this.isClosed() || this.runs.has(origin.ref) || !answersLive(live) ? undefined : this.keep(origin, live);
 		if (run === undefined) {
@@ -280,7 +302,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 			delivered = true;
 			run.approvalPending = false;
 		};
-		void this.host
+		return this.host
 			.prompt(text, {
 				streamingBehavior: "followUp",
 				ownerChannel: {

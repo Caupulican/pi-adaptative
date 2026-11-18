@@ -188,7 +188,7 @@ function ownerOfferCharges(
  */
 export function ownerChannelCharges(
 	channel: string,
-	state: Pick<ChannelJournalState, "batches" | "pending">,
+	state: Pick<ChannelJournalState, "batches" | "pending" | "ownerTaskCommands">,
 	policy: Pick<ResolvedChannelPolicy, "ownerMaxUsdPerTurn">,
 	now: number,
 	unmetered = false,
@@ -197,6 +197,12 @@ export function ownerChannelCharges(
 	for (const batch of state.batches) {
 		const charge = ownerBatchCharge(channel, batch, policy.ownerMaxUsdPerTurn, now);
 		if (charge) charges.push(charge);
+	}
+	for (const command of state.ownerTaskCommands ?? []) {
+		if (!command.spend || command.admittedAt + DAY_MS <= now) continue;
+		const usd =
+			command.state === "finished" ? command.spend.usd : Math.max(command.spend.usd, command.spend.reserved);
+		charges.push({ pool: `owner:${channel}`, micros: awaySpendMicros(usd), until: command.admittedAt + DAY_MS });
 	}
 	if (!unmetered) charges.push(...ownerOfferCharges(channel, state.pending, policy.ownerMaxUsdPerTurn, now));
 	return charges;
@@ -224,7 +230,7 @@ function heldMicros(charges: readonly OwnerChannelCharge[]): number {
 
 export function ownerRoom(
 	channel: string,
-	state: Pick<ChannelJournalState, "batches" | "pending">,
+	state: Pick<ChannelJournalState, "batches" | "pending" | "ownerTaskCommands">,
 	policy: ResolvedChannelPolicy,
 	now: number,
 	unmetered = false,
@@ -243,7 +249,7 @@ export function ownerRoom(
  */
 export function ownerMoveFits(
 	channel: string,
-	state: Pick<ChannelJournalState, "batches" | "pending">,
+	state: Pick<ChannelJournalState, "batches" | "pending" | "ownerTaskCommands">,
 	policy: ResolvedChannelPolicy,
 	now: number,
 	turns: number,
@@ -352,4 +358,11 @@ export function turnUsageHold(source: Pick<SessionChannelsOwnerDeps, "turnAllowa
 	}
 	if (quota?.kind !== "exhausted") return undefined;
 	return { cause: quota.cause, ...(quota.retryAt !== undefined ? { retryAt: quota.retryAt } : {}) };
+}
+
+/** The session wiring handed in all three owner dependencies; an absent one fails closed (third-party path). */
+export function ownerChannelWired(deps: SessionChannelsOwnerDeps): boolean {
+	return (
+		deps.ownerDelivery !== undefined && deps.ownerControl !== undefined && deps.isEmergencyStopEngaged !== undefined
+	);
 }

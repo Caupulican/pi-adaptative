@@ -23,7 +23,9 @@ import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
+import { routineJobStatusLines } from "../../core/remote/routine-job-results.ts";
 import type { AwayService } from "../../core/routines/away-service.ts";
+import type { RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { describeBotDaemonStatusLines } from "./bot-daemon-status.ts";
@@ -67,6 +69,8 @@ export interface BotTeamChatSessionPort {
 	stopPersistentBotDaemon?(): BotDaemonStopResult;
 	/** The session's background lanes: the always-on service of its agent directory and its channels served away. */
 	readonly backgroundLanes?: {
+		readonly botChat?: { viewBotChatMessages(agentId: string): readonly AgentMessage[] };
+		routineAwayReader?(): (routine: RoutineDefinitionView) => string;
 		getAwayService(): AwayService;
 		readAwayChannelStatus(): readonly AwayChannelStatus[];
 		getRemoteHub(): RemoteHubController;
@@ -562,7 +566,7 @@ export class BotTeamChatController {
 		const port = this.host.getSessionPort();
 		port.getBotTeamStore?.().acknowledgeBotInbox(agentId);
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId);
-		const messages = port.readBotChatMessages(agentId);
+		const messages = port.backgroundLanes?.botChat?.viewBotChatMessages(agentId) ?? port.readBotChatMessages(agentId);
 		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
 			(r) => r.target.kind === "bot" && r.target.agentId === agentId,
 		);
@@ -1013,7 +1017,12 @@ export class BotTeamChatController {
 			const routines = store
 				.listRoutines()
 				.filter((r) => (kind === "team" ? r.target.kind === "team" : r.target.kind !== "session"));
-			this.host.showStatus(formatRoutineList(routines));
+			const latest = store.latestBotOccurrenceIds();
+			this.host.showStatus(
+				formatRoutineList(routines, port.backgroundLanes?.routineAwayReader?.(), (routine) =>
+					routineJobStatusLines(store, routine, latest),
+				),
+			);
 			return;
 		}
 		if (sub === "rm" || sub === "delete") {
@@ -1064,8 +1073,13 @@ export class BotTeamChatController {
 					schedule: { kind: "interval", intervalMs },
 					prompt,
 				});
+				const saved = interfaceText().botTeam.routineScheduledBot(
+					routine.routineId,
+					agentId,
+					routineScheduleLabel(routine),
+				);
 				this.host.showStatus(
-					interfaceText().botTeam.routineScheduledBot(routine.routineId, agentId, routineScheduleLabel(routine)),
+					`${saved}\n${formatRoutineList([routine], port.backgroundLanes?.routineAwayReader?.())}`,
 				);
 			} else {
 				const teamId = normalizeBotOrTeamId(rawTargetId, "teamId");

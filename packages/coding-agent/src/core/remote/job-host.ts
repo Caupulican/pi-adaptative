@@ -26,6 +26,11 @@ export function acceptsJobsFrom(peer: Pick<LinkPeer, "machineId" | "role">, sett
 	return settings.peers[peer.machineId]?.acceptsJobs ?? peer.role === "hub";
 }
 
+/** A checkout may be offered to this peer only when the same policy admits a read there. */
+export function permitsCheckoutReads(peer: Pick<LinkPeer, "machineId">, settings: LinkSettings): boolean {
+	return settings.peers[peer.machineId]?.trust !== "answers";
+}
+
 export class JobHost {
 	private readonly store: JobStore;
 	private readonly selfId: string;
@@ -64,8 +69,7 @@ export class JobHost {
 		if (offer.hops.at(-1) !== peer.machineId) return { refusal: "bad_offer" };
 		if (!acceptsJobsFrom(peer, settings)) return { refusal: "jobs_disabled" };
 		if (offer.envelope.writes) return { refusal: "writes_disabled" };
-		const trust = settings.peers[peer.machineId]?.trust ?? "changes";
-		if (offer.repo && trust === "answers") return { refusal: "envelope_exceeds_ceiling" };
+		if (offer.repo && !permitsCheckoutReads(peer, settings)) return { refusal: "envelope_exceeds_ceiling" };
 		const runner = readRunner(this.store.agentDir);
 		if (!runner) return { refusal: "no_room" };
 		if (runner.models.length === 0) return { refusal: "no_model" };

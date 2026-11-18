@@ -71,7 +71,11 @@ export function formatTeamList(teams: readonly PersistentTeamRecord[]): string {
  * The scheduled routines, one line each: what it runs, where, when it runs next, how its last run ended and where it
  * stood. The progress of a run is the same text the routine tool gives the model, so it stays as that tool wrote it.
  */
-export function formatRoutineList(routines: readonly RoutineDefinitionView[]): string {
+export function formatRoutineList(
+	routines: readonly RoutineDefinitionView[],
+	unattended?: (routine: RoutineDefinitionView) => string,
+	jobResults?: (routine: RoutineDefinitionView) => readonly string[],
+): string {
 	const words = interfaceText().botTeam;
 	if (routines.length === 0) return words.routinesEmpty;
 	return routines
@@ -98,7 +102,8 @@ export function formatRoutineList(routines: readonly RoutineDefinitionView[]): s
 					: routine.schedule.kind === "event"
 						? words.nextOnEvent
 						: words.nextComplete;
-			return `${routine.routineId} → ${target} · ${routineScheduleLabel(routine)} · ${words.nextRun(nextAt)}${status}${stood} · "${routine.prompt}"`;
+			const heading = `${routine.routineId} → ${target} · ${routineScheduleLabel(routine)} · ${words.nextRun(nextAt)}${status}${stood} · "${routine.prompt}"${unattended ? ` · ${unattended(routine)}` : ""}`;
+			return [heading, ...(jobResults?.(routine) ?? [])].join("\n");
 		})
 		.join("\n");
 }

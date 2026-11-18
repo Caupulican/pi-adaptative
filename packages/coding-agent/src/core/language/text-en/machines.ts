@@ -7,7 +7,7 @@
 export const MACHINES = {
 	remote: {
 		usage: (jobUsage: string) =>
-			`Usage: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${jobUsage}`,
+			`Usage: /remote [status] | /remote pair <name> <host:port> | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${jobUsage}`,
 		/** How a join stands. The state itself is an identifier. */
 		connected: "connected",
 		connectedUnsealed: "connected, not sealed",
@@ -17,7 +17,10 @@ export const MACHINES = {
 			hostedBy: (where: string) => `Hub: hosted by ${where}; this session uses it.`,
 			notListening: "Hub: not listening (/remote listen [port] [host]).",
 			machineRevoked: "revoked",
-			machineConnectedSealed: "connected",
+			machineConnectedSealed: "connected (sealed)",
+			jobsOff: ", jobs disabled",
+			readScope: (projects: string, room: number) =>
+				`, ${projects ? `read-only projects ${projects}` : "answers only"}, ${room} free`,
 			machineConnectedUnsealed: "connected (not sealed)",
 			machineOffline: "offline",
 			machinesSome: (list: string) => `Machines: ${list}.`,
@@ -35,18 +38,22 @@ export const MACHINES = {
 			stopped: "The hub stopped listening. Joined machines stay known and reconnect when it listens again.",
 		},
 		add: {
+			pairUsage:
+				"Usage: /remote pair <name> <private-host:port>. Use the LAN or VPN address other machines can reach, or loopback with an SSH tunnel.",
+			differentListener: (host: string, port: number) =>
+				`The hub already listens on ${host}:${port}. Pair there, or use /remote listen to change it.`,
 			usage: (usage: string) => `Usage: /remote add <name> (lowercase letters, digits, dashes). ${usage}`,
 			added: (args: { name: string; address: string; token: string; listening: boolean }) =>
-				`${args.name} can join now, as a bot named ${args.name}. On that machine run:\n/remote join ${args.address} ${args.token}\nThe token is shown once; keep it private.${
+				`${args.name} can join now, as a bot named ${args.name}. On that machine run:\n/remote join ${args.address} ${args.token}\nThis private invitation expires in 10 minutes and is consumed at the first sealed connection.${
 					args.listening ? "" : "\nThis hub is not listening yet: run /remote listen."
 				}`,
 			revoked: (name: string) => `${name} was cut off and its bot retired.`,
 			unknown: (name: string) => `No machine named ${name}.`,
 		},
 		join: {
-			usage: "Usage: /remote join <host:port> <token>",
+			usage: "Usage: /remote join <host:port> <invitation> (add --legacy for a token issued by an older hub).",
 			joined: (args: { hubName: string; address: string; name: string }) =>
-				`Joined ${args.hubName} at ${args.address} as ${args.name}. Its messages reach this session as a peer's words, never as yours.`,
+				`Connecting to ${args.hubName} at ${args.address} as ${args.name}. Check /remote status for the handshake result.`,
 			left: "Left that hub.",
 			notJoined: "No hub joined at that address.",
 		},
@@ -81,7 +88,7 @@ export const MACHINES = {
 		noCheckout: "as a question without a checkout (it does not offer this project)",
 		rotateUnknown: (name: string) => `No machine named ${name} joined this hub.`,
 		rotated: (name: string, token: string) =>
-			`${name} has a new secret and was disconnected; its jobs are kept. On that machine run /remote leave, then:\n/remote join <this-hub-address> ${token}\nThe token is shown once; keep it private.`,
+			`${name} has a new secret and was disconnected; its jobs are kept. On that machine run /remote leave, then:\n/remote join <this-hub-address> ${token}\nThis private invitation expires in 10 minutes and is consumed at the first sealed connection.`,
 		unknownMachine: (name: string, jobUsage: string) =>
 			`No linked machine named ${name} has connected yet. Usage: ${jobUsage}`,
 		runUsage: "Usage: /remote run <name> <task>",

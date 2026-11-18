@@ -11,6 +11,7 @@ import type { RoutineCallFacts } from "../tool-capability-policy.ts";
 import type { NestedCallAdmission, NestedCallAdmitter } from "../tools/nested-tool-call.ts";
 import { type TurnAuthority, turnAuthorityCovers } from "../turn-origin.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
+import { type RoutineAwayHostFacts, routineAwayReadiness } from "./routine-away-readiness.ts";
 import {
 	nextRoutineAt,
 	ROUTINE_UNFINISHED_PHASES,
@@ -50,6 +51,7 @@ import { routineWorkerAuthority, type WorkerWatchAuthority, watchCheckRefusal } 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
 	readonly scheduler: RoutineSchedulerController;
+	awayHost(): RoutineAwayHostFacts;
 	readonly parentSessionId: string;
 	capture(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<WorkerSavedIntent>;
 	/** The session's current position, captured for a watch, which saves no worker authority since no worker runs for it. */
@@ -95,7 +97,12 @@ export function routineIntakeRoutineId(origin: RoutineIntakeOrigin): string {
 	return `owner-${origin.key.slice(0, 16)}`;
 }
 
-function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolSummary {
+function summary(
+	routine: RoutineDefinitionView,
+	store: RoutineStorePort,
+	host: RoutineAwayHostFacts,
+): RoutineToolSummary {
+	const nowMs = host.now;
 	const unschedulable = routineZoneUnsupported(routine.schedule);
 	const nextRunAt =
 		unschedulable === undefined && !routine.conditionMet
@@ -113,6 +120,7 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 	return {
 		routineId: routine.routineId,
 		revision: routine.revision,
+		unattended: routineAwayReadiness(routine, host),
 		enabled: routine.enabled,
 		schedule: routineScheduleInputOf(routine.schedule),
 		...(routine.schedule.kind === "event" && routine.schedule.source === "watch"
@@ -128,7 +136,7 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 	};
 }
 
-function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
+function view(routine: RoutineDefinitionView, store: RoutineStorePort, host: RoutineAwayHostFacts): RoutineToolView {
 	const progress = describeRoutineProgress(routineProgressLine(routine.progress), englishText().chat.routineProgress);
 	const originLoss = latestOriginSettlements(
 		store
@@ -138,7 +146,7 @@ function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: nu
 	// A watch runs no worker and a save of one takes no worker preferences, so an older watch's saved ones are not shown.
 	const preferences = routineRunsWorkers(routine.schedule) ? routine.executionSnapshot : undefined;
 	return {
-		...summary(routine, store, nowMs),
+		...summary(routine, store, host),
 		prompt: routine.prompt,
 		...(routine.lastSummary === undefined
 			? {}
@@ -212,8 +220,9 @@ export class RoutineSessionController implements RoutineToolPort {
 					.slice(0, LISTED_RETIRED_ROUTINES)
 					.map(retiredSummary)
 			: [];
+		const host = this.deps.awayHost();
 		return {
-			routines: page.map((routine) => summary(routine, this.deps.store, this.deps.now())),
+			routines: page.map((routine) => summary(routine, this.deps.store, host)),
 			...(retired.length > 0 ? { retired } : {}),
 			...(last ? {} : { next: page.at(-1)!.routineId }),
 		};
@@ -222,7 +231,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	async get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | RoutineToolRetired | undefined> {
 		this.check(signal);
 		const routine = this.deps.store.getRoutine(routineId);
-		if (routine) return this.owns(routine) ? view(routine, this.deps.store, this.deps.now()) : undefined;
+		if (routine) return this.owns(routine) ? view(routine, this.deps.store, this.deps.awayHost()) : undefined;
 		const retired = this.deps.store
 			.listRetiredRoutines(this.deps.parentSessionId)
 			.find((record) => record.routineId === routineId.trim());
@@ -310,7 +319,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			routineId,
 			revision: saved.revision,
 		}));
-		return view(saved, this.deps.store, this.deps.now());
+		return view(saved, this.deps.store, this.deps.awayHost());
 	}
 
 	async delete(routineId: string, expectedRevision: number, signal?: AbortSignal): Promise<void> {
@@ -344,7 +353,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		this.requireOwned(routineId);
 		const saved = this.deps.store.noteRoutineProgress({ routineId, text, nowMs: this.deps.now() });
 		harnessLog.info("routines", "the owner noted where a routine's task stands", { routineId });
-		return view(saved, this.deps.store, this.deps.now());
+		return view(saved, this.deps.store, this.deps.awayHost());
 	}
 
 	async resetProgress(routineId: string, signal?: AbortSignal): Promise<RoutineToolView> {
@@ -353,7 +362,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		this.requireOwned(routineId);
 		const saved = this.deps.store.resetRoutineProgress({ routineId });
 		harnessLog.info("routines", "a routine's progress was reset", { routineId });
-		return view(saved, this.deps.store, this.deps.now());
+		return view(saved, this.deps.store, this.deps.awayHost());
 	}
 
 	/**
@@ -656,7 +665,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			schedule: input.schedule.kind,
 			revision: saved.revision,
 		}));
-		return view(saved, this.deps.store, this.deps.now());
+		return view(saved, this.deps.store, this.deps.awayHost());
 	}
 
 	/**

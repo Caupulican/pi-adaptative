@@ -28,7 +28,7 @@
  * process tools are refused the bot homes.
  */
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	isRecordedDeliveryOrigin,
@@ -37,6 +37,7 @@ import {
 } from "../../kernel/turn-origin-stamp.ts";
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
+import { isOwnerChannelName } from "../channels/channel-policy.ts";
 import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
@@ -64,6 +65,8 @@ const SCOPED_STOP = /^\d{15}-[0-9a-f-]{36}\.scoped\.stop\.json$/;
 const MAIL_WAITING = /^\d{15}-[0-9a-f-]{36}\.mail\.json$/;
 const MAIL_REFUSED = /^\d{15}-[0-9a-f-]{36}\.mail\.refused\.json$/;
 /** A mail record the bot's session took, kept until the turn that took it ends (`markBotInboxMailGiven`). */
+const PHONE_WAITING = /^\d{15}-[0-9a-f-]{36}\.phone\.json$/;
+const PHONE_REFUSED = /^\d{15}-[0-9a-f-]{36}\.phone\.refused\.json$/;
 const MAIL_GIVEN = /^\d{15}-[0-9a-f-]{36}\.mail\.given\.json$/;
 /** Either kind of stop. */
 const ANY_STOP = /^\d{15}-[0-9a-f-]{36}\.(?:scoped\.)?stop\.json$/;
@@ -78,12 +81,30 @@ export interface BotInboxSender {
 	readonly cwd: string;
 }
 
+export interface BotPhoneCommand {
+	readonly channel: string;
+	readonly command: string;
+	readonly action: "stop" | "steer";
+}
+
+function validPhoneCommand(value: unknown): value is BotPhoneCommand {
+	return (
+		isPlainRecord(value) &&
+		typeof value.channel === "string" &&
+		isOwnerChannelName(value.channel) &&
+		(value.action === "stop" || value.action === "steer") &&
+		typeof value.command === "string" &&
+		/^[a-f0-9]{64}$/.test(value.command)
+	);
+}
+
 export interface BotInboxMessage {
 	readonly version: 1;
 	readonly id: string;
 	readonly agentId: string;
 	readonly text: string;
 	readonly mode?: BotInboxMode;
+	readonly phone?: BotPhoneCommand;
 	readonly at: number;
 	readonly from: BotInboxSender;
 	/** The origin the sending host recorded for the words (a `.mail.json` record); absent for the owner's words. */
@@ -128,25 +149,28 @@ function parseSender(value: unknown): BotInboxSender | undefined {
  * A record's words: the owner's in a plain record, under a recorded origin in a mail record. A mail record's origin must
  * be one the host records (`isRecordedDeliveryOrigin`): no file in the inbox names the owner's words as its origin.
  */
-function parseMessage(value: unknown, agentId: string, mail: boolean): BotInboxMessage | undefined {
+function parseMessage(value: unknown, agentId: string, mail: boolean, phone = false): BotInboxMessage | undefined {
 	const parsed = parseHomeRecordHead(value, agentId);
 	if (!parsed) return undefined;
 	const { mode } = parsed.record;
 	if (mode !== undefined && mode !== "follow_up" && mode !== "queue" && mode !== "start") return undefined;
 	const from = parseSender(parsed.record.from);
 	if (!from) return undefined;
+	const command = parsed.record.phone;
+	if (phone ? !validPhoneCommand(command) : command !== undefined) return undefined;
 	const origin = mail ? parseTurnOriginRecord(parsed.record.origin) : undefined;
 	if (mail && (!origin || !isRecordedDeliveryOrigin(origin))) return undefined;
 	return {
 		...parsed.head,
+		...(phone ? { phone: command as BotPhoneCommand } : {}),
 		from,
 		...(mode !== undefined ? { mode: mode as BotInboxMode } : {}),
 		...(origin ? { origin } : {}),
 	};
 }
 
-function parseRefusal(value: unknown, agentId: string, mail: boolean): BotInboxRefusal | undefined {
-	const message = parseMessage(value, agentId, mail);
+function parseRefusal(value: unknown, agentId: string, mail: boolean, phone = false): BotInboxRefusal | undefined {
+	const message = parseMessage(value, agentId, mail, phone);
 	if (!message || !isPlainRecord(value) || typeof value.refusedAt !== "number" || typeof value.reason !== "string")
 		return undefined;
 	return { ...message, refusedAt: value.refusedAt, reason: value.reason };
@@ -212,8 +236,13 @@ export function readBotInbox(
 	const dir = botInboxDir(agentDir, agentId);
 	return [
 		...readHomeRecords(dir, WAITING, (value) => parseMessage(value, agentId, false), unreadable),
+		...readHomeRecords(dir, PHONE_WAITING, (value) => parseMessage(value, agentId, false, true), unreadable),
 		...readHomeRecords(dir, MAIL_WAITING, (value) => parseMessage(value, agentId, true), unreadable),
-	].sort((a, b) => a.message.at - b.message.at);
+	].sort(
+		(a, b) =>
+			Number(b.message.phone?.action === "stop") - Number(a.message.phone?.action === "stop") ||
+			a.message.at - b.message.at,
+	);
 }
 
 /** The messages the bot's session refused, oldest first (the newest {@link MAX_REFUSED_KEPT} of each kind). */
@@ -225,6 +254,7 @@ export function readBotInboxRefusals(
 	const dir = botInboxDir(agentDir, agentId);
 	return [
 		...readHomeRecords(dir, REFUSED, (value) => parseRefusal(value, agentId, false), unreadable),
+		...readHomeRecords(dir, PHONE_REFUSED, (value) => parseRefusal(value, agentId, false, true), unreadable),
 		...readHomeRecords(dir, MAIL_REFUSED, (value) => parseRefusal(value, agentId, true), unreadable),
 	].sort((a, b) => a.message.at - b.message.at);
 }
@@ -234,6 +264,7 @@ function waitingNames(dir: string): string[] {
 	return [
 		...homeRecordNames(dir, WAITING),
 		...homeRecordNames(dir, MAIL_WAITING),
+		...homeRecordNames(dir, PHONE_WAITING),
 		...homeRecordNames(dir, MAIL_GIVEN),
 	];
 }
@@ -379,16 +410,24 @@ export function enqueueBotInbox(
 		agentId: string;
 		text: string;
 		mode?: BotInboxMode;
+		phone?: BotPhoneCommand;
+		wakeExisting?: boolean;
 		from: BotInboxSender;
 		at: number;
 		origin?: TurnOriginRecord;
 	},
 ): BotInboxItem {
 	const dir = botInboxDir(agentDir, input.agentId);
-	const waiting = waitingNames(dir).map((name) => join(dir, name));
+	if (input.phone && (!validPhoneCommand(input.phone) || input.origin !== undefined))
+		throw new TypeError("An authenticated phone command has its own inbox record.");
+	const key = input.phone?.command.slice(0, 32);
+	const id = key
+		? [key.slice(0, 8), key.slice(8, 12), key.slice(12, 16), key.slice(16, 20), key.slice(20)].join("-")
+		: randomUUID();
 	const message: BotInboxMessage = {
 		version: 1,
-		id: randomUUID(),
+		id,
+		...(input.phone ? { phone: input.phone } : {}),
 		agentId: input.agentId,
 		text: input.text,
 		at: input.at,
@@ -399,11 +438,19 @@ export function enqueueBotInbox(
 	if (input.origin !== undefined && !isRecordedDeliveryOrigin(input.origin))
 		throw new TypeError("An inbox record's origin must be one the host records.");
 	const text = `${JSON.stringify(message)}\n`;
-	const bytes = waiting.reduce((sum, file) => sum + (statSync(file, { throwIfNoEntry: false })?.size ?? 0), 0);
-	if (waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
-		throw new BotInboxFullError((text) => text.botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
-	const suffix = input.origin === undefined ? ".json" : ".mail.json";
+	const suffix = input.phone ? ".phone.json" : input.origin === undefined ? ".json" : ".mail.json";
 	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}${suffix}`);
+	if (input.phone && existsSync(file)) {
+		if (input.wakeExisting) writeFileAtomicSync(file, text, { mode: 0o600 });
+		return { file, message };
+	}
+	const waiting = waitingNames(dir).map((name) => join(dir, name));
+	const bytes = waiting.reduce((sum, file) => sum + (statSync(file, { throwIfNoEntry: false })?.size ?? 0), 0);
+	if (
+		input.phone?.action !== "stop" &&
+		(waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
+	)
+		throw new BotInboxFullError((text) => text.botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
 	writeFileAtomicSync(file, text, { mode: 0o600 });
 	return { file, message };
 }
@@ -452,6 +499,6 @@ export function refuseBotInboxMessage(agentDir: string, item: BotInboxItem, reas
 	const refusal: BotInboxRefusal = { ...item.message, refusedAt, reason };
 	writeFileAtomicSync(item.file.replace(/\.json$/, ".refused.json"), `${JSON.stringify(refusal)}\n`, { mode: 0o600 });
 	rmSync(item.file, { force: true });
-	const kind = item.message.origin === undefined ? REFUSED : MAIL_REFUSED;
+	const kind = item.message.phone ? PHONE_REFUSED : item.message.origin === undefined ? REFUSED : MAIL_REFUSED;
 	keepNewestHomeRecords(botInboxDir(agentDir, item.message.agentId), kind, MAX_REFUSED_KEPT);
 }

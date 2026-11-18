@@ -54,6 +54,7 @@ import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
+import { liveBotTranscript } from "./bot-chat-chronology.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText, inOwnerWords, logBotsFailure } from "./bot-failure-words.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
@@ -81,6 +82,7 @@ import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { botOpenFailure } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
+import { admitBotPhoneCommand } from "./bot-phone-command.ts";
 import { BotRelease } from "./bot-release.ts";
 import { BotRemoteView, remoteHostActive, savedSessionFile } from "./bot-remote-view.ts";
 import { BotSessionAdmission } from "./bot-session-admission.ts";
@@ -548,6 +550,17 @@ export class BotSessionHost {
 	private async giveRecord(agentId: string, message: BotInboxMessage): Promise<BotInboxGiven> {
 		const entry = this.entries.get(agentId);
 		if (!entry || this.stopped) return "gone";
+		if (message.phone)
+			return admitBotPhoneCommand(
+				entry,
+				this.ports.agentDir(),
+				this.ports.store(),
+				message.phone,
+				() => this.idleTimers().now(),
+				this.isBusy(entry),
+				() => this.settle(entry),
+				(message) => this.ports.warn(message),
+			);
 		const { origin } = message;
 		// Its transcript took it already: a returned mail whose turn ended where no answer was sent is answered now.
 		if (origin?.ref !== undefined && branchHoldsTurnRef(entry.sessionManager.getBranch(), origin.ref)) {
@@ -736,12 +749,7 @@ export class BotSessionHost {
 	private settle(entry: BotSessionEntry): void {
 		if (this.entries.get(entry.agentId) !== entry) return;
 		// Mail that waited for the turn to end is given now (`giveRecord`).
-		if (!this.isBusy(entry) && botInboxWaiting(this.ports.agentDir(), entry.agentId))
-			void this.inbox
-				.drain(entry.agentId)
-				.catch((error: unknown) =>
-					this.ports.warn(interfaceText().botTeam.botInboxNotTaken(entry.agentId, errorText(error))),
-				);
+		if (!this.isBusy(entry) && botInboxWaiting(this.ports.agentDir(), entry.agentId)) this.takeInbox(entry.agentId);
 		if (this.holdsLoaded(entry)) this.touch(entry);
 		else this.armIdle(entry);
 		this.publishState(entry);
@@ -1152,9 +1160,9 @@ export class BotSessionHost {
 	 * The bot's own conversation: its loaded session's messages (a running turn included), else the newest session file of
 	 * its home read without opening it for writing. Undefined when the bot has no session of its own yet.
 	 */
-	readMessages(agentId: string): AgentMessage[] | undefined {
+	readMessages(agentId: string): readonly AgentMessage[] | undefined {
 		const entry = this.entries.get(agentId);
-		return entry ? [...entry.session.messages] : this.view.readMessages(agentId);
+		return entry ? liveBotTranscript(entry.session.messages) : this.view.readMessages(agentId);
 	}
 
 	/**

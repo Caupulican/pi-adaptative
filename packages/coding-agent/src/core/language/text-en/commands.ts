@@ -41,8 +41,7 @@ export const COMMANDS = {
 	chat: "Switch live chat view between Brain (root), a persistent bot, or a team (/chat [root|<bot>|team:<id>])",
 	bot: "Manage and message persistent bots directly (/bot [list|new <id> [--write] [model] [soul]|soul <id>|open <id>|msg <id> <text>|stop <id>|retire <id>])",
 	lead: "See the goals handed to leaders, and cancel, pause or resume one (/lead [list|show <leader>|cancel <leader>|pause <leader>|resume <leader>])",
-	remote:
-		"Link machines: any machine can host (/remote listen, add <name>) or join (/remote join <host:port> <token>); a joined machine shows up as a bot with a remote mark",
+	remote: "Pair another machine with /remote pair <name> <host:port>. The joining machine appears as a remote bot.",
 	bots: "Open live Bot & Team chat switcher (/bots or /bot)",
 	team: "Manage and message multi-bot teams (/team [list|create <id> <bots> [desc]|members <id> <bots>|open <id>|msg <id> <text>|delete <id>])",
 	teams: "Alias for /team",

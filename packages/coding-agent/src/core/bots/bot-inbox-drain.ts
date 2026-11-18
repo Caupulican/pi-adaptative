@@ -140,6 +140,10 @@ export class BotInboxDrain {
 			if (given === "given") markBotInboxMailGiven(item);
 			else takeBotInboxMessage(item);
 			this.ports.changed(agentId);
+			if (item.message.phone?.action === "stop") {
+				this.passes.get(agentId)!.again = true;
+				break; // The scoped stop may have removed other waiting records from this snapshot.
+			}
 		}
 		return true;
 	}

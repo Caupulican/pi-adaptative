@@ -536,6 +536,13 @@ export function readDaemonLeaseStatus(
 	};
 }
 
+/** Reads only the daemon lease for a single routine or a page of routines, independent of occurrence history. */
+export function routineDaemonState(storeFilePath: string, nowMs: number): "running" | "starting" | "stopped" {
+	const lease = readDaemonLease(daemonLeasePath(storeFilePath));
+	if (!lease || !isDaemonLeaseHeld(lease, nowMs)) return "stopped";
+	return lease.lastHeartbeatAt === undefined ? "starting" : "running";
+}
+
 /** How the last daemon ended, while its released lease is still the current record (no later claim). */
 export function readDaemonEnd(storeFilePath: string): BotDaemonEnd | undefined {
 	const parsed = readLeaseJson(daemonLeasePath(storeFilePath));

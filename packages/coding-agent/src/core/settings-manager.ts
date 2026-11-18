@@ -2797,8 +2797,8 @@ export class SettingsManager {
 		);
 	}
 
-	getProactivitySettings(): ResolvedProactivitySettings {
-		return resolveProactivitySettings(this.settings);
+	getProactivitySettings(scope?: "global"): ResolvedProactivitySettings {
+		return resolveProactivitySettings(scope === "global" ? this.globalSettings : this.settings);
 	}
 
 	/**
@@ -2861,8 +2861,8 @@ export class SettingsManager {
 	}
 
 	/** Bounds of routines run away; the daemon reads them for the whole agent dir. */
-	getRoutineAwaySettings(): ResolvedRoutineAwaySettings {
-		return resolveRoutineAwaySettings(this.settings);
+	getRoutineAwaySettings(scope?: "global"): ResolvedRoutineAwaySettings {
+		return resolveRoutineAwaySettings(scope === "global" ? this.globalSettings : this.settings);
 	}
 
 	/**

@@ -46,27 +46,9 @@ export function advanceSessionContextCache(
 	entry: SessionEntry,
 ): SessionContextCache | undefined {
 	if (!cached || cached.leafId !== entry.parentId || entry.type === "compaction") return undefined;
+	const message = sessionContextMessage(entry);
+	if (message) cached.context.messages.push(message);
 	switch (entry.type) {
-		case "message":
-			cached.context.messages.push(entry.message);
-			break;
-		case "custom_message":
-			cached.context.messages.push(
-				retainSynthesizedSessionContextMessage(
-					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-					entry,
-				),
-			);
-			break;
-		case "branch_summary":
-			if (entry.summary) {
-				cached.context.messages.push(
-					retainSynthesizedSessionContextMessage(
-						createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
-					),
-				);
-			}
-			break;
 		case "thinking_level_change":
 			cached.context.thinkingLevel = entry.thinkingLevel;
 			break;

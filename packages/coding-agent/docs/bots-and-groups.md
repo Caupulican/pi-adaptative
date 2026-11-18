@@ -307,8 +307,8 @@ tool a session does not hold, or sets a token, wall-clock, attempt or tool-call 
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it
 for the message and for the bot's host alike: a bot whose record leaves the session path (it becomes a leader, a leader's,
 or its profile now needs a worker) has its idle session closed and its watches dropped, and no session of it is opened
-again, so it never answers in two conversations at once. A bot's session has no subagents, routines or `bot` tool yet (its only routine tool is `task_watch`); it holds
-`bot_mail` to write to the other bots (see [Bots mail each other](#bots-mail-each-other)). A bot that only ever talked through those
+again, so it never answers in two conversations at once. A bot with its own native session can delegate work, assign it and follow a plan. A profile controls its own tool set. The bot uses
+`task_watch` to wait and `bot_mail` to write to other bots (see [Bots mail each other](#bots-mail-each-other)). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 
@@ -318,6 +318,12 @@ bot go and as the root closes. With `routines.away.enabled` off the daemon hosts
 waits for a session opening where the bot works; a bot made from a profile always waits for a root session. The daemon starts
 a bot's watched commands from the environment a root session last recorded for the bot's directory, its own where none did;
 see [Scheduled work](proactivity.md#scheduled-work).
+
+### Named schedules across devices
+
+Use `/bot schedule add <routine-id> <bot-id> <interval> <prompt>` to schedule a named bot. The confirmation and `/bot schedule list` show its next slot and unattended readiness. An open root session dispatches these schedules. If every terminal closes before a slot, the daemon queues it for a root to dispatch. The daemon can still host a bot with work already in its inbox.
+
+A verified owner can select the same bot and schedule from the phone. After a scheduled bot places a job on a paired machine, status on either device reads that occurrence's machine, job ID and result. See [phone task commands](channels.md#control-a-named-bot-task).
 
 ## Bot names
 
@@ -421,6 +427,12 @@ Any machine can host a hub, join a hub, or do both; nothing is tied to one machi
 as a bot with a computer mark (💻 remote) and the machine's name. You message it like any bot (`/bot msg <name> ...`, its
 chat, a group), and its answers come back into its chat.
 
+Run `/remote pair <name> <private-host:port>` on the hub using its LAN or VPN address, or loopback with an SSH tunnel.
+It starts the listener if needed and prints the command to paste on the joining machine. The invitation lasts ten minutes
+and enrolls one installation. Both machines derive a separate reconnect key and require a sealed connection thereafter.
+Use `/remote status` to see the handshake result, read-only project fingerprints, and available job slots. If the
+invitation expires, `/remote rotate <name>` issues another and retains that machine's job history.
+
 On the hub: `/remote listen [port] [host]` turns the hub on (loopback by default), `/remote add <name>` lets a machine join
 as a bot named `<name>` and prints a join token once. `root` and `owner` cannot be a new machine's name: they name who creates a
 bot, so `/remote add` refuses them and suggests another name. A machine already named so keeps working: `@root` still addresses the orchestrator, so message that machine with `/bot msg root <text>`. `/remote revoke <name>` cuts it off and retires its bot, and
@@ -435,12 +447,9 @@ How it holds together:
   nonces, one key per direction, and each frame carries the next number of its direction. A frame that was changed,
   replayed, reordered, dropped or sent back to its sender does not open, and the connection closes. `/remote status`
   says "not sealed" beside a link that is not.
-- A machine on an older build links unsealed, as before. Sealing is guaranteed only when both machines are current
-  and at least one refuses unsealed links: someone able to change the traffic between two current builds can remove
-  the offer to seal from the handshake and leave the link unsealed. To refuse unsealed links, write
-  `{ "requireSealed": true }` to `<agent dir>/remote/settings.json`: a hub then refuses a joiner that does not seal, and
-  a joining machine refuses a hub that does not. It is off by default so older builds keep linking. For another
-  machine, prefer a private network (Tailscale, WireGuard) or an SSH tunnel either way.
+- Saved legacy links retain their previous sealing policy. Add `{"requireSealed":true}` to `remote/settings.json`
+  to require sealing for those links too. Joining an older hub using an old-style token requires the explicit
+  `/remote join <host:port> <token> --legacy` command.
 - A joined machine's root session receives the hub's words as a peer's words under the `link` channel's usual bounds
   (wakes and spend per day), never as its owner's. Settings may replace the implied policy with `channels.link`. Its
   conversation with a hub is keyed by the hub's install id, so two hubs with the same name keep separate conversations.
@@ -489,10 +498,7 @@ never offered a job. Job frames never become a turn on either side: they move wo
   of the same project match on any machine and under any path. A machine offers only the checkouts the owner listed
   under `repos` in `remote/settings.json` (absolute paths, `ready` once set up).
 - **Read-only first.** A placed job runs on the other machine as a native read-only worker through that session's own
-  worker path, in the offered checkout when the job names one. Jobs that change files are not placed yet. The worker's
-  reads are a local read-only worker's: the offered checkout is where it starts, not a fence. It can read other files
-  on that machine the read-only rules allow (the machine credential stores and secret files stay denied), so link only
-  machines whose files the other side may read.
+  worker path, in the offered checkout when the job names one. Jobs that change files are not placed yet. Read tools are scoped to the offered checkout. An answer-only job receives no filesystem read scope.
 - **Exactly once.** The placer gives each job an id derived from its own install id and the dispatch's idempotency key.
   The executor admits a job id at most once (`remote/jobs/in/`); an offer sent again is answered the same way, a
   different offer under the same id is refused. The outcome waits in the executor's outbox until the placer persists it

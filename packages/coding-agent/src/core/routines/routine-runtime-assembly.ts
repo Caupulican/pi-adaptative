@@ -45,7 +45,14 @@ import {
 import { SessionWatchService } from "../watches/session-watch-service.ts";
 import type { AutoArmContext, SessionAutoWatchPort, WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
-import { ROUTINE_FAILURE_PAUSE_THRESHOLD, type RoutineDelivery, type RoutineOccurrence } from "./routine-contract.ts";
+import { readRoutineAwayHost } from "./routine-away-host-facts.ts";
+import { describeRoutineAway, routineAwayReadiness } from "./routine-away-readiness.ts";
+import {
+	ROUTINE_FAILURE_PAUSE_THRESHOLD,
+	type RoutineDefinitionView,
+	type RoutineDelivery,
+	type RoutineOccurrence,
+} from "./routine-contract.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import { routineOriginReach } from "./routine-origin-reach.ts";
@@ -162,6 +169,18 @@ export class RoutineRuntimeAssembly {
 	constructor(deps: BackgroundLaneControllerDeps, host: RoutineAssemblyHost) {
 		this.deps = deps;
 		this.host = host;
+	}
+
+	/** Shares the daemon probe across the requested schedules. */
+	awayReader(store: PersistentBotTeamStore): (routine: RoutineDefinitionView) => string {
+		const facts = readRoutineAwayHost(this.deps, store, this.deps.botAgentId);
+		return (routine) =>
+			describeRoutineAway(
+				routineAwayReadiness(
+					routine,
+					routine.target.kind === "bot" ? { ...facts, bot: store.getBot(routine.target.agentId) } : facts,
+				),
+			);
 	}
 
 	/**
@@ -703,6 +722,7 @@ export class RoutineRuntimeAssembly {
 			warn: (message) => this.host.warn(message),
 		});
 		const session = new RoutineSessionController({
+			awayHost: () => readRoutineAwayHost(this.deps, store, bot),
 			store,
 			scheduler,
 			parentSessionId,

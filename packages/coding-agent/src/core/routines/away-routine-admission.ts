@@ -11,6 +11,8 @@ import type { HarnessCapability } from "../capability-contract.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 
+import type { PersistentRoutineDefinition } from "./routine-contract.ts";
+
 /**
  * Capabilities that observe without changing anything a run away could not answer for. Excluded on purpose:
  * `skill.read` (no skill broker away), `research.execute` (model_fitness probes spend outside the attempt's
@@ -91,4 +93,17 @@ export function awayRunRefusal(intent: WorkerSavedIntent, models?: AwayModelSour
 				return `its pinned model ${modelBinding.provider}/${modelBinding.modelId} is unknown here or has no declared prices, so its spend cannot be bounded away; it waits for the session to open.`;
 		}
 	return undefined;
+}
+
+/** The closed-session worker admission shared by the daemon and the routine's operator view. */
+export function awaySavedRoutineRefusal(
+	routine: PersistentRoutineDefinition,
+	models?: AwayModelSource,
+): string | undefined {
+	const intent = routine.executionSnapshot?.savedIntent;
+	if (!intent) return AWAY_UNPINNED_REASON;
+	return (
+		awayRunRefusal(intent, models) ??
+		(intent.receiptOrigin.sessionFile === undefined ? AWAY_NO_SESSION_FILE_REASON : undefined)
+	);
 }

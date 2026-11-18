@@ -220,3 +220,14 @@ export function resolveChannelPolicies(layers: readonly unknown[]): ReadonlyMap<
 	}
 	return resolved;
 }
+
+/** The channels with an explicit policy and a valid name, with the policy each runs under. */
+export function explicitChannels(
+	policies: ReadonlyMap<string, ChannelPolicyResolution>,
+): [string, ResolvedChannelPolicy][] {
+	const channels: [string, ResolvedChannelPolicy][] = [];
+	for (const [name, resolution] of policies)
+		if (resolution.kind === "policy" && resolution.policy.mode === "explicit" && isValidChannelName(name))
+			channels.push([name, resolution.policy]);
+	return channels;
+}

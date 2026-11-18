@@ -258,17 +258,19 @@ function offerWrite(prepared: Extract<PreparedOffer, { readonly kind: "offer" }>
  * Ends the placed job `jobId` on `machineId` in its record, unless it already ended, applied or was refused: the executor
  * is told from the record, by the process following it. True when this call ended it.
  */
-function endPlacedRecord(
+export function endPlacedRecord(
 	agentDir: string,
 	store: JobStore,
 	machineId: string,
 	jobId: string,
 	ending: PlacerEnding,
 	cancel: JobCancelReason,
+	routineScope?: string,
 ): boolean {
 	let ended = false;
 	store.updatePlaced(machineId, jobId, (current) => {
-		if (!placedRecordEndable(current)) return undefined;
+		if (!placedRecordEndable(current) || (routineScope !== undefined && current.routineScope !== routineScope))
+			return undefined;
 		ended = true;
 		return { ...current, state: "ended", ending, cancel };
 	});
@@ -336,6 +338,7 @@ export class RemoteJobClient {
 	private readonly selfId: () => string;
 	private readonly sessionId: () => string;
 	private readonly session: RemotePlacementSession;
+	private readonly routineJobScope?: (receipt: WorkerReceiptOrigin) => string | undefined;
 	private readonly machines: FleetMachines;
 	private readonly timers: TimerPort;
 	private readonly store: JobStore;
@@ -359,6 +362,7 @@ export class RemoteJobClient {
 		selfId: () => string;
 		sessionId: () => string;
 		session: RemotePlacementSession;
+		routineJobScope?: (receipt: WorkerReceiptOrigin) => string | undefined;
 		machines: FleetMachines;
 		timers?: TimerPort;
 	}) {
@@ -366,6 +370,7 @@ export class RemoteJobClient {
 		this.selfId = options.selfId;
 		this.sessionId = options.sessionId;
 		this.session = options.session;
+		this.routineJobScope = options.routineJobScope;
 		this.machines = options.machines;
 		this.timers = options.timers ?? SYSTEM_TIMER_PORT;
 		this.store = new JobStore(options.agentDir);
@@ -742,7 +747,9 @@ export class RemoteJobClient {
 			return { kind: "refused", code: "lane_ended", reason: "the job's lane ended while it was being placed" };
 		let created: RecordCreate<PlacerJobRecord>;
 		try {
+			const routineScope = input.receiptOrigin && this.routineJobScope?.(input.receiptOrigin);
 			created = this.store.createPlaced({
+				...(routineScope ? { routineScope } : {}),
 				v: 1,
 				jobId,
 				executorId: machine.machineId,

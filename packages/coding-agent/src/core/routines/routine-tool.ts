@@ -11,6 +11,7 @@ import {
 } from "../memory/knowledge-grant.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import type { RoutineAwayReadiness } from "./routine-away-readiness.ts";
 import {
 	parseRoutineAuthoringInput,
 	type RoutineAuthoringInput,
@@ -31,6 +32,7 @@ export interface RoutineToolInput extends RoutineAuthoringInput {
 export interface RoutineToolSummary {
 	readonly routineId: string;
 	readonly revision: number;
+	readonly unattended: RoutineAwayReadiness;
 	readonly enabled: boolean;
 	readonly schedule: RoutineScheduleInput;
 	/** A watch routine's condition in the owner's words ('watching notes.txt for changes'); absent for other schedules. */

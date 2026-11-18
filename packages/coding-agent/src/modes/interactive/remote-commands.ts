@@ -7,14 +7,7 @@ import { interfaceText } from "../../core/language/interface-text.ts";
 import { hostDescription, type RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type JoinLinkState, joinStateFor } from "../../core/remote/link-context.ts";
 import { isMachineName } from "../../core/remote/protocol.ts";
-import {
-	listJoins,
-	parseAddress,
-	parseJoinToken,
-	removeJoin,
-	renameIdentity,
-	saveJoin,
-} from "../../core/remote/registry.ts";
+import { enrollJoin, listJoins, parseAddress, removeJoin, renameIdentity } from "../../core/remote/registry.ts";
 import { SEALED_FEATURE } from "../../core/remote/session-keys.ts";
 import { isJobCommand, runJobCommand } from "./remote-job-commands.ts";
 
@@ -44,6 +37,7 @@ function statusText(port: RemoteCommandPort): string {
 	const { hub } = port;
 	const status = hub.status();
 	const joins = listJoins(hub.agentDir);
+	const fleet = new Map(hub.jobs?.machines.list().map((machine) => [machine.name, machine]));
 	const machines =
 		status.machines.length > 0
 			? words.status.machinesSome(
@@ -55,7 +49,7 @@ function statusText(port: RemoteCommandPort): string {
 										? words.status.machineRevoked
 										: m.connected
 											? m.sealed
-												? words.status.machineConnectedSealed
+												? words.status.machineConnectedSealed + jobScope(m.name)
 												: words.status.machineConnectedUnsealed
 											: words.status.machineOffline
 								}`,
@@ -63,6 +57,12 @@ function statusText(port: RemoteCommandPort): string {
 						.join(", "),
 				)
 			: words.status.machinesNone;
+	function jobScope(name: string): string {
+		const facts = fleet.get(name)?.facts;
+		if (!facts) return "";
+		if (!facts.accepts.jobs) return words.status.jobsOff;
+		return words.status.readScope(facts.checkouts.map((c) => c.repoKey.slice(0, 12)).join(", "), facts.room);
+	}
 	const joined =
 		joins.length > 0
 			? words.status.joinedSome(
@@ -119,16 +119,33 @@ export async function runRemoteCommand(
 				await hub.stopListening();
 				host.showStatus(words.listen.stopped);
 				return;
+			case "pair": {
+				const [name, address = ""] = rest;
+				const endpoint = parseAddress(address);
+				if (
+					rest.length !== 2 ||
+					!isMachineName(name) ||
+					!endpoint ||
+					endpoint.host === "0.0.0.0" ||
+					endpoint.host === "::"
+				)
+					return host.showWarning(words.add.pairUsage);
+				const where = hub.status().listening;
+				if (
+					where &&
+					(where.port !== endpoint.port ||
+						(where.host !== endpoint.host && where.host !== "0.0.0.0" && where.host !== "::"))
+				)
+					return host.showWarning(words.add.differentListener(where.host, where.port));
+				if (!where) await hub.listen(endpoint.host, endpoint.port);
+				const { token } = hub.add(name);
+				host.showStatus(words.add.added({ name, address, token, listening: true }));
+				return;
+			}
 			case "add": {
 				const name = rest[0] ?? "";
 				if (!isMachineName(name)) return host.showWarning(words.add.usage(usage));
-				let added: { token: string; address: string };
-				try {
-					added = hub.add(name);
-				} catch (error) {
-					return host.showWarning(error instanceof Error ? error.message : String(error));
-				}
-				const { token, address } = added;
+				const { token, address } = hub.add(name);
 				host.showStatus(words.add.added({ name, address, token, listening: Boolean(hub.status().listening) }));
 				return;
 			}
@@ -139,9 +156,9 @@ export async function runRemoteCommand(
 			}
 			case "join": {
 				const address = rest[0] ?? "";
-				const token = parseJoinToken(rest[1] ?? "");
-				if (!parseAddress(address) || !token) return host.showWarning(words.join.usage);
-				saveJoin(hub.agentDir, { address, name: token.name, hubName: token.hubName, secret: token.secret });
+				const legacy = rest.length === 3 && rest[2] === "--legacy";
+				const token = rest.length === 2 || legacy ? enrollJoin(hub.agentDir, address, rest[1]!, legacy) : undefined;
+				if (!token) return host.showWarning(words.join.usage);
 				port.reloadChannels();
 				// A joined machine runs the hub's jobs by default: placement and the runner start now, not at the next start.
 				hub.jobs?.start();

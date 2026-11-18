@@ -1718,6 +1718,14 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				profileId: profile.profileId,
 			}),
 		);
+		const derivedRead = routineOf(
+			await command("routine-ready-derived-get", { action: "get", routineId: derivedId }),
+		);
+		expect(derivedRead.unattended.state, "get evaluates the same saved authority as creation").toBe(
+			derivedCreated.unattended.state,
+		);
+		expect(derivedRead.unattended.reason).toBe(derivedCreated.unattended.reason);
+		expect(derivedRead.nextRunAt, "a status read leaves the slot untouched").toBe(derivedCreated.nextRunAt);
 		const derivedSlot = derivedCreated.nextRunAt!;
 		expect(derivedCreated.startsFrom, "before any measured run the lead is 15 minutes").toBe(derivedSlot - 900_000);
 		const derivedGate = createBarrier();

@@ -1608,6 +1608,21 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			systemOneEnabled: false,
 			settings,
 		});
+		const deskBot = "release-reader";
+		const deskTask = "release-check";
+		opener.session.upsertPersistentBot({
+			agentId: deskBot,
+			displayName: "Release reader",
+			provider: HARNESS_PROVIDER,
+			modelId: "worker-a",
+			createdBy: "owner",
+		});
+		const savedTask = opener.session.getBotTeamStore().upsertRoutine({
+			routineId: deskTask,
+			target: { kind: "bot", agentId: deskBot },
+			prompt: "Read the scheduled release check.",
+			schedule: { kind: "interval", intervalMs: DAY_MS },
+		});
 		const daemon = await withDeadline(trace, "a session start launches the daemon for the phone", launched);
 		await withDeadline(trace, "the channel's first poll", firstPoll);
 		expect(await world.disposeSessionInBody(opener.session), "the opening session closes").toBeUndefined();
@@ -1750,6 +1765,20 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		).toEqual(["channel-host"]);
 		trace.mark("root", "telegram-daemon.refused");
 
+		// A phone control addresses the named bot without opening a new model turn for status.
+		const phoneCommand = async (id: number, command: string): Promise<string> => {
+			const previous = api.sent.length;
+			api.deliver(ownerLegUpdate(id, OWNER_ID, command));
+			await withDeadline(trace, `the phone replies to ${command}`, api.untilSent(previous + 1));
+			return api.texts()[previous]!;
+		};
+		const beforeStatus = world.provider.requests.length;
+		expect(await phoneCommand(3, `select ${deskBot} ${deskTask}`)).toContain(deskTask);
+		const taskStatus = await phoneCommand(4, "status");
+		expect(taskStatus).toContain(deskBot);
+		expect(taskStatus).toContain(deskTask);
+		expect(world.provider.requests.length, "select and status take no model request").toBe(beforeStatus);
+		expect(await phoneCommand(5, "stop task")).toContain(deskTask);
 		// Stopping the daemon gives the channel and the phone session up; the terminal then opens the phone session.
 		expect(await withDeadline(trace, "the daemon stops", daemon.stop()), "the daemon exits cleanly").toBe(0);
 		expect(journal().holder, "a stopped daemon serves nothing").toBeUndefined();
@@ -1809,6 +1838,14 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		});
 		expect(opened.sessionManager.getSessionId(), "the terminal opens the phone session itself").toBe(sessionId);
 		expect(opened.sessionManager.getSessionName()).toBe("Phone: telegram");
+		expect(
+			opened.session.getBotTeamStore().getRoutine(deskTask),
+			"the desktop sees the exact schedule stopped by the phone",
+		).toMatchObject({
+			incarnationId: savedTask.incarnationId,
+			target: { kind: "bot", agentId: deskBot },
+			enabled: false,
+		});
 		expect(await world.disposeSessionInBody(opened.session), "the reopened phone session closes").toBeUndefined();
 
 		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);

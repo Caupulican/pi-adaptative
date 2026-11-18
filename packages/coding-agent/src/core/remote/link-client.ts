@@ -51,6 +51,7 @@ interface CloseReason {
 /** Refusals that retrying cannot change: they wait for the owner. */
 const PERMANENT_REFUSALS: ReadonlySet<LinkRefusal> = new Set([
 	"unknown_machine",
+	"invitation_expired",
 	"bad_proof",
 	"revoked",
 	"would_loop",
@@ -251,6 +252,7 @@ export class LinkClient {
 						socket.write(
 							encodeFrame({
 								t: "hello",
+								...(this.join.pairingKey ? { pairingKey: this.join.pairingKey } : {}),
 								machineId: this.identity.machineId,
 								name: this.join.name,
 								nonce: ownNonce,
@@ -298,7 +300,7 @@ export class LinkClient {
 							);
 							return failed("the hub offered a sealed link and its answer did not confirm it");
 						}
-						if (!sealed && this.requireSealed())
+						if (!sealed && (this.join.pairingKey || this.requireSealed()))
 							return failed("the hub does not seal the link, and this machine requires a sealed link", true);
 						this.framing = new LinkFraming(
 							sealed

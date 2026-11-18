@@ -4,9 +4,11 @@
  * routine-contract types; the store decides when they are written.
  */
 import {
+	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_SUMMARY_CHARS,
 	type RoutineDefinitionView,
 	type RoutineOccurrence,
+	type RoutineOccurrenceListFilter,
 	routineTriggerAt,
 } from "../routines/routine-contract.ts";
 import { NO_SUMMARY_TEXT, renderRoutineProgressBrief } from "../routines/routine-progress.ts";
@@ -72,4 +74,40 @@ export function admittedProgressFields(
 /** A result's summary as the store keeps it: cleaned, redacted and bounded before it is cut, or the no-summary text. */
 export function resultSummaryText(raw: string): string {
 	return cleanRedactBound(raw, MAX_ROUTINE_SUMMARY_CHARS, { lines: true }) || NO_SUMMARY_TEXT;
+}
+
+export function listedRoutineOccurrences(
+	occurrences: Iterable<RoutineOccurrence>,
+	filter: RoutineOccurrenceListFilter,
+): RoutineOccurrence[] {
+	return Array.from(occurrences)
+		.filter(
+			(item) =>
+				(!filter.routineId || item.routineId === filter.routineId) &&
+				(!filter.parentSessionId || item.parentOrigin.sessionId === filter.parentSessionId) &&
+				(!filter.phases || filter.phases.includes(item.phase)),
+		)
+		.sort((a, b) => a.createdAt - b.createdAt)
+		.slice(-Math.max(1, Math.min(filter.limit ?? MAX_ROUTINE_OCCURRENCES, MAX_ROUTINE_OCCURRENCES)))
+		.map((item) => structuredClone(item));
+}
+
+/** Index only the identity of each bot's latest claimed occurrence. Ignore queued or replaced incarnations. */
+export function latestBotOccurrenceIds(
+	occurrences: Iterable<RoutineOccurrence>,
+	routines: ReadonlyMap<string, RoutineDefinitionView>,
+): ReadonlyMap<string, string> {
+	const result = new Map<string, string>();
+	for (const item of occurrences) {
+		const routine = routines.get(item.routineId);
+		if (
+			item.target.kind === "bot" &&
+			routine?.target.kind === "bot" &&
+			item.target.agentId === routine.target.agentId &&
+			item.definition.incarnationId === routine.incarnationId &&
+			routineTriggerAt(item.trigger) === routine.lastRunAt
+		)
+			result.set(routine.incarnationId, item.occurrenceId);
+	}
+	return result;
 }

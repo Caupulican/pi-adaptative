@@ -43,11 +43,10 @@ import {
 import { type AwayParentContext, AwayParentUnavailable, openAwayParentContext } from "./away-parent-context.ts";
 import {
 	AWAY_LEASES_UNREADABLE_REASON,
-	AWAY_NO_SESSION_FILE_REASON,
 	AWAY_OFF_BRANCH_REASON,
-	AWAY_UNPINNED_REASON,
 	awayRunMetered,
 	awayRunRefusal,
+	awaySavedRoutineRefusal,
 } from "./away-routine-admission.ts";
 import {
 	type RoutineAwayChargesRead,
@@ -386,10 +385,7 @@ export class AwayRoutineSupervisor {
 			if (routineEnded(routine, nowMs) !== undefined) continue;
 			const snapshot = routine.executionSnapshot;
 			const sessionFile = snapshot?.savedIntent.receiptOrigin.sessionFile;
-			const reason = !snapshot
-				? AWAY_UNPINNED_REASON
-				: (awayRunRefusal(snapshot.savedIntent, this.deps.modelRegistry) ??
-					(sessionFile === undefined ? AWAY_NO_SESSION_FILE_REASON : undefined));
+			const reason = awaySavedRoutineRefusal(routine, this.deps.modelRegistry);
 			// An event routine is due whenever its source delivers: its parent's feed decides it, no slot is due here. With
 			// no sources or CI events off (the owner's own switch, which stops CI in the session too) nothing is followed.
 			if (routine.schedule.kind === "event") {

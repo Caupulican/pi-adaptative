@@ -30,14 +30,12 @@ import { JobTransport } from "./job-transport.ts";
 import { type HubMachineLinkState, hubMachinesFor, provideLinkContext } from "./link-context.ts";
 import { MachineChatLog } from "./machine-chat-log.ts";
 import {
-	addHubMachine,
-	formatJoinToken,
 	type HubMachineRecord,
+	inviteHubMachine,
 	listHubMachines,
 	loadIdentity,
 	type MachineIdentity,
-	rotateHubMachine,
-	updateHubMachine,
+	revokeHubMachine,
 } from "./registry.ts";
 import { type RemoteJobPorts, RemoteJobs, type RemoteRosterWords } from "./remote-jobs.ts";
 import { SEALED_FEATURE } from "./session-keys.ts";
@@ -76,7 +74,7 @@ export class RemoteHubController {
 	private stopWatchingHost: (() => void) | undefined;
 	private transport: JobTransport | undefined;
 	/** Withdraws this controller's link context when the session closes (see `provideLinkContext`). */
-	private readonly withdrawLinkContext: () => void;
+	private readonly withdrawLinkContext?: () => void;
 	/** The session's remote work placement, when it has worker ports. */
 	readonly jobs: RemoteJobs | undefined;
 
@@ -93,10 +91,11 @@ export class RemoteHubController {
 					() => this.notify("all"),
 				)
 			: undefined;
-		this.withdrawLinkContext = provideLinkContext(deps.agentDir, {
-			subtree: () => this.reachableIds(),
-			depth: () => this.chainDepth(),
-		});
+		if (!deps.jobs?.placementOnly)
+			this.withdrawLinkContext = provideLinkContext(deps.agentDir, {
+				subtree: () => this.reachableIds(),
+				depth: () => this.chainDepth(),
+			});
 	}
 
 	get machineName(): string {
@@ -113,6 +112,10 @@ export class RemoteHubController {
 	 * names the hosting session, and this session takes the hub over when that one lets it go.
 	 */
 	async start(): Promise<string | undefined> {
+		if (this.deps.jobs?.placementOnly) {
+			if (RemoteJobs.linked(this.deps.agentDir)) this.jobs?.start();
+			return undefined;
+		}
 		for (const machine of listHubMachines(this.deps.agentDir)) if (!machine.revoked) this.queuePreview(machine.name);
 		const config = this.readConfig();
 		// Placement and the job runner start only on a machine the owner linked (a hub on, a hub joined).
@@ -145,7 +148,7 @@ export class RemoteHubController {
 		this.listeners.clear();
 		const closing = this.closeListening();
 		this.jobs?.dispose();
-		this.withdrawLinkContext();
+		this.withdrawLinkContext?.();
 		await closing;
 	}
 
@@ -337,7 +340,9 @@ export class RemoteHubController {
 			throw new Error(
 				`"${name}" is reserved: it names who creates a bot (the orchestrator or the owner), so no machine can take it. Use another name, for example ${name}-box: /remote add ${name}-box`,
 			);
-		const { record } = addHubMachine(this.deps.agentDir, name);
+		if (this.deps.getStore().getBot(name)) throw new Error(`A bot already uses the name ${name}.`);
+		const token = inviteHubMachine(this.deps.agentDir, this.identity.name, name);
+		if (!token) throw new Error("The machine invitation could not be issued.");
 		this.deps.getStore().upsertBot({
 			agentId: name,
 			displayName: name,
@@ -352,14 +357,14 @@ export class RemoteHubController {
 				? "<this-machine-address>"
 				: this.listeningOn.host;
 		return {
-			token: formatJoinToken(this.identity.name, name, record.secret),
+			token,
 			address: `${host}:${this.listeningOn?.port ?? readPort(this.readConfig())}`,
 		};
 	}
 
 	/** Cuts a machine off and retires its bot; its chat log stays. */
 	revoke(name: string): boolean {
-		const record = updateHubMachine(this.deps.agentDir, name, { revoked: true });
+		const record = revokeHubMachine(this.deps.agentDir, name);
 		if (!record) return false;
 		this.hub?.disconnect(name);
 		this.deps.getStore().retireBot(name);
@@ -373,11 +378,11 @@ export class RemoteHubController {
 	 * kept, so its jobs survive. The token goes to the owner once.
 	 */
 	rotate(name: string): { token: string } | undefined {
-		const record = rotateHubMachine(this.deps.agentDir, name);
-		if (!record) return undefined;
+		const token = inviteHubMachine(this.deps.agentDir, this.identity.name, name, true);
+		if (!token) return undefined;
 		this.hub?.disconnect(name);
 		harnessLog.info("link", "a joined machine's secret was rotated", { machine: name });
-		return { token: formatJoinToken(this.identity.name, name, record.secret) };
+		return { token };
 	}
 
 	private requireHub(name: string): RemoteHub {

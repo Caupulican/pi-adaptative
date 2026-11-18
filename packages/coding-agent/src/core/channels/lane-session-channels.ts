@@ -7,6 +7,7 @@
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { withLinkPolicy } from "../remote/link-policy.ts";
+import type { OwnerTaskPort } from "./owner-task.ts";
 import { SessionChannels } from "./session-channels.ts";
 
 /** The controller deps the lanes' channels core reads, declared by this module. */
@@ -31,8 +32,10 @@ export type LaneSessionChannelsDeps = Pick<
 export function createLaneSessionChannels(
 	deps: LaneSessionChannelsDeps,
 	warn: (message: string) => void,
+	ownerTasks: OwnerTaskPort,
 ): SessionChannels {
 	return new SessionChannels({
+		ownerTasks,
 		getAgentDir: () => deps.getAgentDir(),
 		getSessionManager: () => deps.getSessionManager(),
 		getChannelPolicies: () => withLinkPolicy(deps.getSettingsManager().getChannelPolicies(), deps.getAgentDir()),

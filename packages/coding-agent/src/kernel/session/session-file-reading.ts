@@ -84,7 +84,7 @@ export interface SessionEntryFileLocation {
 
 export function loadEntriesFromFileInternal(
 	filePath: string,
-	options?: { maxLineChars?: number; requireComplete?: boolean },
+	options?: { maxLineChars?: number; requireComplete?: boolean; after?: Stats },
 	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
 ): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean; revision?: Stats } {
 	const resolvedFilePath = normalizePath(filePath);
@@ -109,8 +109,9 @@ export function loadEntriesFromFileInternal(
 		entries.push(entry);
 	};
 	const fd = openSync(resolvedFilePath, "r");
-	let indexedBytes = 0;
-	let lineOffset = 0;
+	const start = options?.after?.size ?? 0;
+	let indexedBytes = start;
+	let lineOffset = start;
 	let lineLength = 0;
 	let unterminatedTail = false;
 	try {
@@ -118,7 +119,9 @@ export function loadEntriesFromFileInternal(
 			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		// The preliminary path check can observe a different file. Validate the first
 		// physical record on this descriptor before the permissive row parser runs.
-		if (revision.size > 0 && !readSessionHeaderFromDescriptor(fd, MAX_SESSION_HEADER_BYTES).ok) {
+		if (options?.after && !grownFrom(options.after, revision))
+			throw new FileSnapshotChangedError("Session file was replaced or truncated before reading its suffix.");
+		if (start === 0 && revision.size > 0 && !readSessionHeaderFromDescriptor(fd, MAX_SESSION_HEADER_BYTES).ok) {
 			return { entries: [], indexedBytes: revision.size, revision };
 		}
 		const decoder = new StringDecoder("utf8");
@@ -129,10 +132,10 @@ export function loadEntriesFromFileInternal(
 			overflow: options?.requireComplete ? "throw" : "skip",
 			lineEndings: "lf",
 		});
-		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+		const buffer = Buffer.allocUnsafe(Math.min(SESSION_READ_BUFFER_SIZE, Math.max(1, revision.size - start)));
 
-		while (true) {
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+		while (indexedBytes < revision.size) {
+			const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, revision.size - indexedBytes), indexedBytes);
 			if (bytesRead === 0) break;
 			unterminatedTail = buffer[bytesRead - 1] !== 0x0a;
 			const chunkOffset = indexedBytes;
@@ -168,7 +171,11 @@ export function loadEntriesFromFileInternal(
 		for (const line of lines.push(strictDecoder ? strictDecoder.decode() : decoder.end())) appendLine(line);
 		const finalLine = lines.finish();
 		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
-		if (!sameFileVersion(revision, fstatSync(fd)) || !sameFileVersion(revision, statSync(resolvedFilePath)))
+		if (
+			indexedBytes !== revision.size ||
+			!sameFileVersion(revision, fstatSync(fd)) ||
+			!sameFileVersion(revision, statSync(resolvedFilePath))
+		)
 			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
 		if (options?.requireComplete && unterminatedTail)
 			throw new Error("Session history ends with an incomplete JSONL record; its write remains unresolved.");
@@ -177,13 +184,49 @@ export function loadEntriesFromFileInternal(
 	}
 
 	// Validate session header
-	if (entries.length === 0) return { entries, indexedBytes, unterminatedTail, revision };
+	if (start > 0 || entries.length === 0) return { entries, indexedBytes, unterminatedTail, revision };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return { entries: [], indexedBytes, unterminatedTail, revision };
 	}
 
 	return { entries, indexedBytes, unterminatedTail, revision };
+}
+
+/** Read and validate a contiguous transcript suffix. A branch or checkpoint needs a fresh view of its ancestry. */
+export function readLinearTranscriptAppend(
+	file: string,
+	before: Stats,
+	parent: string | null,
+	known: ReadonlyMap<string, SessionEntry>,
+) {
+	const locations = new Map<string, SessionEntryFileLocation>();
+	const loaded = loadEntriesFromFileInternal(file, { after: before }, (entry, offset, length) => {
+		if (entry.type === "message" && offset !== undefined && length !== undefined)
+			locations.set(entry.id, { offset, length });
+	});
+	if (loaded.unterminatedTail || !loaded.revision) return undefined;
+	validateLoadedLifecycleEntries(loaded.entries);
+
+	const ids = new Set<string>();
+	const suffix: SessionEntry[] = [];
+	for (const entry of loaded.entries) {
+		if (
+			entry.type === "session" ||
+			entry.type === "compaction" ||
+			entry.type === "label" ||
+			typeof entry.id !== "string" ||
+			!entry.id ||
+			entry.parentId !== parent ||
+			ids.has(entry.id) ||
+			known.has(entry.id)
+		)
+			return undefined;
+		parent = entry.id;
+		ids.add(parent);
+		suffix.push(entry);
+	}
+	return { entries: suffix, locations, revision: loaded.revision };
 }
 
 /** Exported for testing */

@@ -12,6 +12,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { MAX_CALENDAR_MISSED_COUNT } from "./calendar-schedule.ts";
+import { ROUTINE_BOT_CHANNEL, routineBotOccurrenceRef } from "./routine-bot-reference.ts";
 import {
 	MAX_ROUTINE_EVENT_MISSED_COUNT,
 	MAX_ROUTINE_OCCURRENCES,
@@ -71,7 +72,7 @@ export function routineTurnOrigin(
 }
 
 /** The channel a routine's prompt to a bot's own session is recorded as having come by. */
-export const ROUTINE_BOT_CHANNEL = "routine";
+export { ROUTINE_BOT_CHANNEL } from "./routine-bot-reference.ts";
 
 /**
  * The origin a routine's prompt carries into a bot's own session: the routine's (the owner's automation, never the owner's
@@ -85,7 +86,7 @@ export function routineBotMessageOrigin(
 	const record = parseTurnOriginRecord({
 		...(routineTurnOrigin(occurrence) ?? { v: 1, k: "routine" }),
 		channel: ROUTINE_BOT_CHANNEL,
-		ref: `routine:${createHash("sha256").update(occurrence.occurrenceId).digest("hex").slice(0, 32)}`,
+		ref: routineBotOccurrenceRef(occurrence.occurrenceId),
 		...(prompt.trim().length > 0 ? { shown: prompt.slice(0, MAX_TURN_ORIGIN_SHOWN_CHARS) } : {}),
 	});
 	if (!record) throw new TypeError("A routine's turn origin is invalid.");

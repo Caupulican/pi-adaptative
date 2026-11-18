@@ -174,6 +174,8 @@ import type { PlacedLateCharge, PlacedLateReceipt } from "./remote/abandoned-pla
 import { RemoteHubController } from "./remote/hub-controller.ts";
 import { finishedPlacedJobReferences } from "./remote/job-store.ts";
 import { PlacedJobTerminalAcks } from "./remote/placed-job-terminal-acks.ts";
+import { RemoteJobs } from "./remote/remote-jobs.ts";
+import { placedRoutineJobScope } from "./remote/routine-job-origin.ts";
 import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
@@ -264,7 +266,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: BackgroundLaneControllerDeps;
 	/** The delegated owners of the bot chat, the operator dispatch, the bot lifecycle, the attempt waits and the routine runtime. */
-	private readonly _botChat: BotChatTranscript;
+	readonly botChat: BotChatTranscript;
 	private readonly _botDispatch: BotOperatorDispatch;
 	private readonly _botLifecycle: BotLifecycleController;
 	/** The orchestrator's `bot` tool and the bots' replies to its asks. */
@@ -285,7 +287,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
-		this.channels = createLaneSessionChannels(deps, (message) => this._safeWarn(message));
+		this.channels = createLaneSessionChannels(deps, (message) => this._safeWarn(message), this);
 		this._botHost = attachBotSessions(deps, {
 			store: () => this.getBotTeamStore(),
 			warn: (message) => this._safeWarn(message),
@@ -304,7 +306,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			botSessions: this._botHost.host,
 		});
 		this._botHost.subscribe(() => this._botRoster.invalidate());
-		this._botChat = new BotChatTranscript(this.botBindings, {
+		this.botChat = new BotChatTranscript(this.botBindings, {
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
 			openWorkerTranscript: (agentId) => this.openWorkerTranscript(agentId),
@@ -548,7 +550,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._getWorkerLifecycle(),
 			new WorkerLaneIsolation(this._worktreeLaneHostDeps()),
 		);
-		// The fleet exists now: a joined machine's room reaches it, so a plan node or a placed job can name that machine.
 		this._remoteHub?.jobs?.attachFleet(this._workers.getFleet());
 		return this._workers;
 	}
@@ -1438,9 +1439,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				this._leaderRows = undefined;
 				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
 				if (this._routines.isStarted && this._daemonKeeper.routinesChanged()) this._daemonKeeper.ensure();
-				// A routine run away commits its occurrence after recording its parent writes; this store's change is the
-				// cross-process signal, so an open parent lands those writes now, before its scheduler (subscribed after
-				// this listener) delivers the run's result.
+				// Land the away run's parent writes on its occurrence commit, before the scheduler delivers the result.
 				const lifecycle = this._workerLifecycle;
 				if (!lifecycle || this.deps.isDisposed()) return;
 				try {
@@ -1455,6 +1454,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 		return this._botTeamStore;
 	}
+
+	readonly routineAwayReader = () => this._routineAssembly.awayReader(this.getBotTeamStore());
 
 	/** What the session's routine runtime holds (`routines/routine-holder.ts`); undefined where it holds none. */
 	routineScope(): RoutineScope | undefined {
@@ -1475,7 +1476,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
-		// The rest follow the standing: a bot's own session starts only its routines (its watches).
 		const { standing } = this.deps;
 		if (standing.ownsProcessSingletons)
 			void this.getRemoteHub()
@@ -1806,17 +1806,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _remoteHub: RemoteHubController | undefined;
 
-	/** This session's hub: the machines joined to it, shown as bots with a remote mark. */
 	getRemoteHub(): RemoteHubController {
 		if (!this._remoteHub) {
 			this._remoteHub = new RemoteHubController({
 				agentDir: this.deps.getAgentDir(),
 				getStore: () => this.getBotTeamStore(),
 				timers: this.deps.getTimers().port("orchestration"),
-				// Remote work placement runs a placed job through this session's own worker start path and records the jobs
-				// it places as managed lanes; nothing here is read until the owner linked this machine.
 				jobs: {
 					session: this,
+					placementOnly: !this.deps.standing.ownsProcessSingletons,
+					routineJobScope: (receipt) => placedRoutineJobScope(this.deps.getSessionManager(), receipt),
 					sessionId: () => this.deps.getSessionId(),
 					cwd: () => this.deps.getCwd(),
 					models: () => this.deps.getModelRegistry().getAvailable(),
@@ -1829,7 +1828,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			});
 			this._remoteHub.subscribe(() => this._botRoster.invalidate());
 		}
-		// A hub made after the fleet exists gives it the room at once; one made before gets it when the fleet is built.
 		if (this._workers) this._remoteHub.jobs?.attachFleet(this._workers.getFleet());
 		return this._remoteHub;
 	}
@@ -1861,7 +1859,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		].filter((definition): definition is ToolDefinition => definition !== undefined);
 	}
 
-	/** The root's plan executor; reaching it builds the worker runtime that composes it. */
 	private _getPlanExecutor(): PlanExecutorPort | undefined {
 		if (!this.deps.standing.directsWorkers || this.deps.isDisposed()) return undefined;
 		this._getWorkerLifecycle();
@@ -1876,7 +1873,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const executor = new PlanExecutor({
 			runtime: () => lifecycle.ledger.runtime,
 			subscribeStore: (listener) => store.subscribe(listener),
-			fleet: () => this._getWorkerController().getFleet(),
+			fleet: () => {
+				if (RemoteJobs.directorLinked(this.deps, this._remoteHub?.jobs)) this.getRemoteHub().jobs?.start();
+				return this._getWorkerController().getFleet();
+			},
 			workerWrites: () => ({ ceiling: workerCeilingOf(this.deps.standing, this.deps), cwd: this.deps.getCwd() }),
 			engine: () => this.deps.systemOne.semanticDecisionEngine(),
 			goal: () => this.deps.getGoalStateSnapshot(),
@@ -2107,11 +2107,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
-		return this._botChat.readBotChatMessages(agentId, teamId);
+		return this.botChat.readBotChatMessages(agentId, teamId);
 	}
 
 	readTeamChatMessages(teamId: string): AgentMessage[] {
-		return this._botChat.readTeamChatMessages(teamId);
+		return this.botChat.readTeamChatMessages(teamId);
 	}
 
 	subscribeOrchestrationStore(listener: () => void): () => void {

@@ -43,6 +43,7 @@ import { englishText } from "./language/interface-text.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
 import type { SessionCapabilities } from "./session-standing.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "./tools/nested-tool-call.ts";
+import { isToolBridgeToolName } from "./tools/tool-bridge-policy.ts";
 import {
 	entryTurnOrigin,
 	isRemoteOwnerOrigin,
@@ -903,6 +904,10 @@ async function enforceRemoteOwnerEdge(
 ): Promise<BeforeToolCallResult | undefined> {
 	const ended = remoteOwnerEnded(deps, origin, toolName);
 	if (ended) return { block: true, ...ended };
+	if (origin.routineRef && !isToolBridgeToolName(toolName)) {
+		const reason = "phone task follow-ups can use only the foreground file and repository tools";
+		return { block: true, ...remoteOwnerTypedOnly(deps, toolName, reason) };
+	}
 	const scopeCwd = deps.getCwd();
 	// The hardline and the owner's `edge.deny` patterns, in every mode: a block is refused, a confirmation is held.
 	const boundary = classifyYoloBoundary({

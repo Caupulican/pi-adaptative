@@ -132,7 +132,12 @@ import {
 	withResult,
 } from "./routine-result-writes.ts";
 import { assertRoutineRevision } from "./routine-revision.ts";
-import { awaySettlement, resultSummaryText } from "./routine-run-state.ts";
+import {
+	awaySettlement,
+	latestBotOccurrenceIds,
+	listedRoutineOccurrences,
+	resultSummaryText,
+} from "./routine-run-state.ts";
 import { type RoutineSaveRevertInput, revertRoutineSave, routineViewAfterSave } from "./routine-save-writes.ts";
 import { claimManualRoutineOccurrence, observeWatch, retireEndedRoutines } from "./routine-trigger-writes.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
@@ -1429,16 +1434,11 @@ export class PersistentBotTeamStore {
 	}
 
 	listRoutineOccurrences(filter: RoutineOccurrenceListFilter = {}): RoutineOccurrence[] {
-		return Array.from(this.routineOccurrences.values())
-			.filter(
-				(item) =>
-					(!filter.routineId || item.routineId === filter.routineId) &&
-					(!filter.parentSessionId || item.parentOrigin.sessionId === filter.parentSessionId) &&
-					(!filter.phases || filter.phases.includes(item.phase)),
-			)
-			.sort((a, b) => a.createdAt - b.createdAt)
-			.slice(-Math.max(1, Math.min(filter.limit ?? MAX_ROUTINE_OCCURRENCES, MAX_ROUTINE_OCCURRENCES)))
-			.map((item) => structuredClone(item));
+		return listedRoutineOccurrences(this.routineOccurrences.values(), filter);
+	}
+
+	latestBotOccurrenceIds(): ReadonlyMap<string, string> {
+		return latestBotOccurrenceIds(this.routineOccurrences.values(), this.routines);
 	}
 
 	markRoutineDispatching(input: {

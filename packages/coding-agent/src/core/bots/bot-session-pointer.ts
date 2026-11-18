@@ -114,8 +114,9 @@ function pointedFileFault(
 	path: string,
 	pointer: BotSessionPointer,
 	links: BotSessionLinks,
+	readHeader: typeof readSessionHeaderResult,
 ): BotPointerSetAsideReason | undefined {
-	const header = readSessionHeaderResult(botFileReadPath(path, links));
+	const header = readHeader(botFileReadPath(path, links));
 	if (header.ok)
 		return header.header.id === pointer.sessionId
 			? undefined
@@ -139,7 +140,12 @@ function pointedFileFault(
  * pointer, its file, a tombstone or the home's session files is thrown to the reader: the home is not judged on what it
  * could not read.
  */
-export function botSessionChoice(agentDir: string, home: BotHome, links: BotSessionLinks): BotSessionChoice {
+export function botSessionChoice(
+	agentDir: string,
+	home: BotHome,
+	links: BotSessionLinks,
+	readHeader = readSessionHeaderResult,
+): BotSessionChoice {
 	const chosen = (setAside?: BotPointerSetAsideReason): BotSessionChoice => {
 		let newest: ReturnType<typeof newestSessionFileIn>;
 		try {
@@ -170,7 +176,7 @@ export function botSessionChoice(agentDir: string, home: BotHome, links: BotSess
 	const pointer = parsePointer(text);
 	if (!pointer) return chosen({ kind: "not-a-pointer" });
 	const path = join(home.sessionsDir, pointer.file);
-	const fault = pointedFileFault(path, pointer, links);
+	const fault = pointedFileFault(path, pointer, links, readHeader);
 	if (fault) return chosen(fault);
 	if (deleted(agentDir, home, pointer.sessionId)) return chosen({ kind: "deleted", sessionId: pointer.sessionId });
 	return { kind: "recorded", pointer, path };

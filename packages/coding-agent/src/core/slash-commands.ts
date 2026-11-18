@@ -132,7 +132,7 @@ export const BUILTIN_SLASH_COMMANDS = [
 		name: "remote",
 		duringWork: "local",
 		description:
-			"Link machines: any machine can host (/remote listen, add <name>) or join (/remote join <host:port> <token>); a joined machine shows up as a bot with a remote mark",
+			"Pair another machine with /remote pair <name> <host:port>. The joining machine appears as a remote bot.",
 	},
 	{
 		name: "bots",

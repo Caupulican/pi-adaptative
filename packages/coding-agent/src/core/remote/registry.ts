@@ -15,7 +15,15 @@ import { hostTransitionsFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { restrictWindowsToCurrentUser } from "../util/windows-user-acl.ts";
-import { isMachineName, newSecret } from "./protocol.ts";
+import {
+	createPairing,
+	isPairingKey,
+	type PendingPairing,
+	pairingId,
+	parsePairingToken,
+	preparePairing,
+} from "./pairing.ts";
+import { isMachineName, type LinkRefusal } from "./protocol.ts";
 
 export interface MachineIdentity {
 	readonly machineId: string;
@@ -30,10 +38,15 @@ export interface HubMachineRecord {
 	/** The install id bound at the first successful join. */
 	readonly machineId?: string;
 	readonly revoked?: boolean;
+	readonly requireSealed?: true;
+	/** Before first admission secret holds a private ECDH key, erased when the invitation is consumed. */
+	readonly pairing?: PendingPairing;
 }
 
 /** A hub this machine joins. */
 export interface JoinRecord {
+	readonly pairingKey?: string;
+	readonly invitationId?: string;
 	readonly address: string;
 	/** The name the hub gave this machine. */
 	readonly name: string;
@@ -275,22 +288,38 @@ export function readHubMachines(agentDir: string): HubMachineRecord[] | undefine
 		return undefined;
 	}
 	if (!Array.isArray(stored)) return undefined;
-	return stored.flatMap((entry): HubMachineRecord[] =>
-		isPlainRecord(entry) &&
-		isMachineName(entry.name) &&
-		typeof entry.secret === "string" &&
-		typeof entry.createdAt === "string"
-			? [
-					{
-						name: entry.name,
-						secret: entry.secret,
-						createdAt: entry.createdAt,
-						...(typeof entry.machineId === "string" ? { machineId: entry.machineId } : {}),
-						...(entry.revoked === true ? { revoked: true } : {}),
-					},
-				]
-			: [],
-	);
+	const records: HubMachineRecord[] = [];
+	for (const entry of stored) {
+		if (
+			!isPlainRecord(entry) ||
+			!isMachineName(entry.name) ||
+			typeof entry.secret !== "string" ||
+			typeof entry.createdAt !== "string"
+		)
+			return undefined;
+		let pairing: PendingPairing | undefined;
+		if (entry.pairing !== undefined) {
+			const value = entry.pairing;
+			if (
+				!isPlainRecord(value) ||
+				typeof value.salt !== "string" ||
+				typeof value.expiresAt !== "number" ||
+				!Number.isSafeInteger(value.expiresAt)
+			)
+				return undefined;
+			pairing = { salt: value.salt, expiresAt: value.expiresAt };
+		}
+		records.push({
+			name: entry.name,
+			secret: entry.secret,
+			createdAt: entry.createdAt,
+			...(entry.requireSealed === true ? { requireSealed: true } : {}),
+			...(pairing ? { pairing } : {}),
+			...(typeof entry.machineId === "string" ? { machineId: entry.machineId } : {}),
+			...(entry.revoked === true ? { revoked: true } : {}),
+		});
+	}
+	return records;
 }
 
 /** The hub's machine records; an unreadable file reads as none (see `readHubMachines` for the case that must be told apart). */
@@ -298,51 +327,80 @@ export function listHubMachines(agentDir: string): HubMachineRecord[] {
 	return readHubMachines(agentDir) ?? [];
 }
 
-function saveHubMachines(agentDir: string, machines: readonly HubMachineRecord[]): void {
-	writeLinkFile(agentDir, "machines.json", machines);
-}
-
-/** The other name already bound to `machineId` (not revoked), when an install would join this hub under a second name. */
-export function nameBoundTo(agentDir: string, machineId: string, except: string): string | undefined {
-	return listHubMachines(agentDir).find(
-		(machine) => machine.machineId === machineId && machine.name !== except && machine.revoked !== true,
-	)?.name;
-}
-
-/** Lets a machine join this hub under `name`; the secret is returned once, here, for the owner to carry over. */
-export function addHubMachine(agentDir: string, name: string): { record: HubMachineRecord } {
-	if (!isMachineName(name)) throw new Error("A machine name is lowercase letters, digits and dashes (up to 63).");
-	const machines = listHubMachines(agentDir);
-	if (machines.some((machine) => machine.name === name)) throw new Error(`A machine named ${name} already exists.`);
-	const record: HubMachineRecord = { name, secret: newSecret(), createdAt: new Date().toISOString() };
-	saveHubMachines(agentDir, [...machines, record]);
-	return { record };
-}
-
-export function updateHubMachine(
+/** Serialize enrollment, rotation and revocation, including competing terminal sessions. */
+function changeLinkRecords<T, R>(
 	agentDir: string,
-	name: string,
-	change: Partial<HubMachineRecord>,
-): HubMachineRecord | undefined {
-	const machines = listHubMachines(agentDir);
-	const index = machines.findIndex((machine) => machine.name === name);
-	if (index < 0) return undefined;
-	const next = { ...machines[index]!, ...change, name };
-	saveHubMachines(
-		agentDir,
-		machines.map((machine, i) => (i === index ? next : machine)),
-	);
-	return next;
+	file: string,
+	read: (dir: string) => R[] | undefined,
+	change: (records: R[]) => { records?: R[]; result: T },
+): T {
+	const dir = dirOf(agentDir);
+	mkdirSync(dir, { recursive: true });
+	return withFileLockSync(join(dir, file), () => {
+		const current = read(agentDir);
+		if (!current) throw new Error(`The link registry ${file} could not be read.`);
+		const next = change(current);
+		if (next.records) writeLinkFile(agentDir, file, next.records);
+		return next.result;
+	});
 }
 
-/**
- * Gives a joined machine a new secret under the same name and install id: the old secret stops proving anything at the
- * next handshake, and every job keyed by the machine's id survives. The secret is returned once, for the owner to carry.
- */
-export function rotateHubMachine(agentDir: string, name: string): HubMachineRecord | undefined {
-	const current = listHubMachines(agentDir).find((machine) => machine.name === name);
-	if (!current || current.revoked) return undefined;
-	return updateHubMachine(agentDir, name, { secret: newSecret() });
+/** Issue a first invitation or replace the key of a known machine, keeping its bound install id. */
+export function inviteHubMachine(agentDir: string, hubName: string, name: string, rotate = false): string | undefined {
+	if (!isMachineName(name)) throw new Error("A machine name is lowercase letters, digits and dashes (up to 63).");
+	return changeLinkRecords(agentDir, "machines.json", readHubMachines, (records) => {
+		const current = records.find((record) => record.name === name);
+		if (rotate && (!current || current.revoked)) return { result: undefined };
+		if (!rotate && current) throw new Error(`A machine named ${name} already exists.`);
+		const invite = createPairing(hubName, name);
+		const next: HubMachineRecord = {
+			...current,
+			name,
+			createdAt: current?.createdAt ?? new Date().toISOString(),
+			secret: invite.privateKey,
+			pairing: invite.pending,
+			requireSealed: true,
+		};
+		return { records: [...records.filter((record) => record !== current), next], result: invite.token };
+	});
+}
+
+export function revokeHubMachine(agentDir: string, name: string): HubMachineRecord | undefined {
+	return changeLinkRecords(agentDir, "machines.json", readHubMachines, (records) => {
+		const current = records.find((record) => record.name === name);
+		if (!current || current.revoked) return { result: current };
+		const revoked = { ...current, revoked: true };
+		return { records: records.map((record) => (record === current ? revoked : record)), result: revoked };
+	});
+}
+
+/** Compare the credentials proved by this hello with the current record under the same lock as revoke and rotate. */
+export function bindHubMachine(
+	agentDir: string,
+	proven: HubMachineRecord,
+	machineId: string,
+	secret: string,
+): LinkRefusal | undefined {
+	return changeLinkRecords<LinkRefusal | undefined, HubMachineRecord>(
+		agentDir,
+		"machines.json",
+		readHubMachines,
+		(records) => {
+			const current = records.find((record) => record.name === proven.name);
+			if (!current || current.secret !== proven.secret) return { result: "bad_proof" };
+			if (current.revoked) return { result: "revoked" };
+			if (current.pairing && current.pairing.expiresAt <= Date.now()) return { result: "invitation_expired" };
+			if (current.machineId && current.machineId !== machineId) return { result: "machine_changed" };
+			if (current.machineId === machineId && !current.pairing) return { result: undefined };
+			if (records.some((r) => !r.revoked && r.name !== current.name && r.machineId === machineId))
+				return { result: "machine_taken" };
+			const { pairing: _consumed, ...admitted } = current;
+			return {
+				records: records.map((r) => (r === current ? { ...admitted, machineId, secret } : r)),
+				result: undefined,
+			};
+		},
+	);
 }
 
 /** Whether the owner turned this machine's hub on (`hub.json`): a machine with a hub on is linked, joined or not. */
@@ -351,31 +409,64 @@ export function hubTurnedOn(agentDir: string): boolean {
 	return isPlainRecord(stored) && stored.enabled === true;
 }
 
-export function listJoins(agentDir: string): JoinRecord[] {
-	const stored = readJson(join(dirOf(agentDir), "joins.json"));
-	if (!Array.isArray(stored)) return [];
-	return stored.flatMap((entry): JoinRecord[] =>
-		isPlainRecord(entry) &&
-		typeof entry.address === "string" &&
-		isMachineName(entry.name) &&
-		isMachineName(entry.hubName) &&
-		typeof entry.secret === "string"
-			? [{ address: entry.address, name: entry.name, hubName: entry.hubName, secret: entry.secret }]
-			: [],
-	);
+function readJoins(agentDir: string): JoinRecord[] | undefined {
+	const path = join(dirOf(agentDir), "joins.json");
+	if (!existsSync(path)) return [];
+	const stored = readJson(path);
+	if (!Array.isArray(stored)) return undefined;
+	const records: JoinRecord[] = [];
+	for (const entry of stored) {
+		if (
+			!isPlainRecord(entry) ||
+			typeof entry.address !== "string" ||
+			!isMachineName(entry.name) ||
+			!isMachineName(entry.hubName) ||
+			typeof entry.secret !== "string"
+		)
+			return undefined;
+		const common = { address: entry.address, name: entry.name, hubName: entry.hubName, secret: entry.secret };
+		if (entry.pairingKey === undefined && entry.invitationId === undefined) records.push(common);
+		else if (isPairingKey(entry.pairingKey) && typeof entry.invitationId === "string")
+			records.push({ ...common, pairingKey: entry.pairingKey, invitationId: entry.invitationId });
+		else return undefined;
+	}
+	return records;
 }
 
-export function saveJoin(agentDir: string, join_: JoinRecord): void {
-	const joins = listJoins(agentDir).filter((entry) => !(entry.address === join_.address && entry.name === join_.name));
-	writeLinkFile(agentDir, "joins.json", [...joins, join_]);
+export function listJoins(agentDir: string): JoinRecord[] {
+	return readJoins(agentDir) ?? [];
+}
+
+/** Save the reconnect key before dialing. Repeating an invitation keeps the key of the first attempt. */
+export function enrollJoin(agentDir: string, address: string, raw: string, legacy = false): JoinRecord | undefined {
+	if (!parseAddress(address)) return undefined;
+	const token = parsePairingToken(raw) ?? (legacy ? parseLegacyToken(raw) : undefined);
+	if (!token) return undefined;
+	return changeLinkRecords(agentDir, "joins.json", readJoins, (records) => {
+		const current = records.find((entry) => entry.address === address && entry.name === token.name);
+		const id = "salt" in token ? pairingId(token) : undefined;
+		const enrolled = id ? records.find((entry) => entry.invitationId === id) : undefined;
+		if (enrolled) {
+			if (enrolled.address === address) return { result: enrolled };
+			if (current) throw new Error("Another enrollment already uses that machine name at the requested address.");
+			const moved = { ...enrolled, address };
+			return { records: records.map((entry) => (entry === enrolled ? moved : entry)), result: moved };
+		}
+		const next: JoinRecord = {
+			address,
+			name: token.name,
+			hubName: token.hubName,
+			...("salt" in token ? { ...preparePairing(token), invitationId: id } : { secret: token.secret }),
+		};
+		return { records: [...records.filter((entry) => entry !== current), next], result: next };
+	});
 }
 
 export function removeJoin(agentDir: string, address: string): boolean {
-	const joins = listJoins(agentDir);
-	const kept = joins.filter((entry) => entry.address !== address);
-	if (kept.length === joins.length) return false;
-	writeLinkFile(agentDir, "joins.json", kept);
-	return true;
+	return changeLinkRecords(agentDir, "joins.json", readJoins, (records) => {
+		const kept = records.filter((entry) => entry.address !== address);
+		return kept.length === records.length ? { result: false } : { records: kept, result: true };
+	});
 }
 
 /** `host:port` (a bracketed IPv6 host allowed), or undefined. */
@@ -386,12 +477,8 @@ export function parseAddress(raw: string): { host: string; port: number } | unde
 	return port >= 1 && port <= 65535 ? { host: match[1] ?? match[2]!, port } : undefined;
 }
 
-/** The join string `/remote add` prints and `/remote join` reads: the hub's name, this machine's name and the secret. */
-export function formatJoinToken(hubName: string, name: string, secret: string): string {
-	return `${hubName}.${name}.${secret}`;
-}
-
-export function parseJoinToken(raw: string): { hubName: string; name: string; secret: string } | undefined {
+/** Previously issued long-lived tokens can still enroll on a legacy hub. */
+function parseLegacyToken(raw: string): { hubName: string; name: string; secret: string } | undefined {
 	const parts = raw.trim().split(".");
 	if (parts.length !== 3) return undefined;
 	const [hubName, name, secret] = parts as [string, string, string];

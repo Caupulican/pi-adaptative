@@ -34,6 +34,7 @@ export type LinkFrame =
 	  }
 	| {
 			readonly t: "hello";
+			readonly pairingKey?: string;
 			readonly machineId: string;
 			readonly name: string;
 			readonly nonce: string;
@@ -76,6 +77,8 @@ export type LinkRefusal =
 	| "unknown_machine"
 	| "bad_proof"
 	| "revoked"
+	| "registry_unavailable"
+	| "invitation_expired"
 	| "machine_changed"
 	| "would_loop"
 	| "too_deep"
@@ -84,7 +87,9 @@ export type LinkRefusal =
 
 export const REFUSAL_TEXT: Readonly<Record<LinkRefusal, string>> = {
 	unknown_machine: "the hub does not know this machine name (create it there with /remote add)",
-	bad_proof: "the join token does not match",
+	bad_proof: "the join credential does not match",
+	registry_unavailable: "the hub could not commit this admission; waiting to retry",
+	invitation_expired: "the invitation expired; run /remote rotate <name> on the hub for a new one",
 	revoked: "the hub revoked this machine",
 	machine_changed: "the hub has this name bound to another install",
 	would_loop: "joining would make a loop of hubs",
@@ -154,6 +159,7 @@ export function parseFrame(line: string): LinkFrame | undefined {
 			const offered = features(value.features);
 			if (
 				offered === null ||
+				(value.pairingKey !== undefined && !text(value.pairingKey, 44)) ||
 				typeof value.machineId !== "string" ||
 				!WIRE_ID.test(value.machineId) ||
 				!isMachineName(value.name) ||
@@ -170,6 +176,7 @@ export function parseFrame(line: string): LinkFrame | undefined {
 				return undefined;
 			return {
 				t: "hello",
+				...(typeof value.pairingKey === "string" ? { pairingKey: value.pairingKey } : {}),
 				machineId: value.machineId,
 				name: value.name,
 				nonce: value.nonce,

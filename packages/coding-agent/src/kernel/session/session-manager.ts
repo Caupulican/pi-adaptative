@@ -110,6 +110,7 @@ import {
 	loadEntriesFromFile,
 	loadEntriesFromFileInternal,
 	parseSessionEntryLine,
+	readLinearTranscriptAppend,
 	readSessionHeader,
 	retainedStringChars,
 	type SessionEntryFileLocation,
@@ -141,7 +142,7 @@ import type {
 	SessionObserverErrorListener,
 	SessionTreeNode,
 } from "./session-manager-types.ts";
-import { invalidSessionParentCycle, visitSessionAncestry } from "./session-tree.ts";
+import { indexSessionTree, visitSessionAncestry } from "./session-tree.ts";
 import {
 	CURRENT_SESSION_VERSION,
 	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
@@ -268,6 +269,12 @@ export type ReadonlySessionManager = Pick<
 	| "planSessionLifecycleRepair"
 >;
 
+/** A process-local cursor over a saved session shown by another host. Reuse only synchronously. */
+export type SessionTranscriptView = Pick<
+	SessionManager,
+	"getLatestCustomEntryOnBranch" | "readSessionContext" | "followedHeader"
+>;
+
 export { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
 
 /**
@@ -299,6 +306,7 @@ export class SessionManager {
 	private readonly canonicalOnly: boolean;
 	private payloadsHaveStoredIds = true;
 	private storageRevision: Stats | undefined;
+	private canFollowTranscript = false;
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private entries: SessionEntry[] = [];
@@ -529,6 +537,12 @@ export class SessionManager {
 			// Validate and index the complete parent graph before a migration rewrite can
 			// mutate the source file. Malformed cycles must fail synchronously on cold open.
 			this._buildIndex();
+			this.canFollowTranscript =
+				this.readOnly &&
+				!loaded.unterminatedTail &&
+				!migrated &&
+				loadedHeader.version === CURRENT_SESSION_VERSION &&
+				!this.entries.some((entry) => entry.parentId !== null && !this.byId.has(entry.parentId));
 			// An in-memory manager writes no file: the tail stays as it is, as a migration is not rewritten (`_rewriteFile`).
 			if (loaded.unterminatedTail && this.persist && !this.readOnly) {
 				sourceRevision = withSessionFileMutation(
@@ -612,52 +626,7 @@ export class SessionManager {
 
 	private _buildIndex(): void {
 		this._invalidateSessionContextCache();
-		const entries: SessionEntry[] = [];
-		const byId = new Map<string, SessionEntry>();
-		const labelsById = new Map<string, string>();
-		const labelTimestampsById = new Map<string, string>();
-		let leafId: string | null = null;
-		for (const entry of this.fileEntries) {
-			if (entry.type === "session") continue;
-			if (typeof entry.id !== "string" || entry.id.length === 0) {
-				throw new Error("Invalid session entry graph: every entry requires a non-empty string id.");
-			}
-			if (byId.has(entry.id)) {
-				throw new Error(`Invalid session entry graph: duplicate entry id "${entry.id}".`);
-			}
-			if (entry.parentId !== null && typeof entry.parentId !== "string") {
-				throw new Error(`Invalid session entry graph: entry "${entry.id}" has a malformed parent id.`);
-			}
-			entries.push(entry);
-			byId.set(entry.id, entry);
-			leafId = entry.id;
-			if (entry.type === "label") {
-				if (entry.label) {
-					labelsById.set(entry.targetId, entry.label);
-					labelTimestampsById.set(entry.targetId, entry.timestamp);
-				} else {
-					labelsById.delete(entry.targetId);
-					labelTimestampsById.delete(entry.targetId);
-				}
-			}
-		}
-
-		const settledEntryIds = new Set<string>();
-		for (const entry of entries) {
-			if (settledEntryIds.has(entry.id)) continue;
-			const activeEntryIds = new Set<string>();
-			const traversedEntryIds: string[] = [];
-			visitSessionAncestry(entry, byId, (current) => {
-				if (settledEntryIds.has(current.id)) return false;
-				if (activeEntryIds.has(current.id)) {
-					throw invalidSessionParentCycle(current.id);
-				}
-				activeEntryIds.add(current.id);
-				traversedEntryIds.push(current.id);
-			});
-			for (const entryId of traversedEntryIds) settledEntryIds.add(entryId);
-		}
-
+		const { entries, byId, labelsById, labelTimestampsById, leafId } = indexSessionTree(this.fileEntries);
 		this.entries = entries;
 		this.byId = byId;
 		this.labelsById = labelsById;
@@ -1235,6 +1204,13 @@ export class SessionManager {
 		if (result) this._emitEntriesPersisted(result.event);
 	}
 
+	private _indexAppendedEntry(entry: SessionEntry): void {
+		this.fileEntries.push(entry);
+		this.entries.push(entry);
+		this.byId.set(entry.id, entry);
+		this.leafId = entry.id;
+	}
+
 	private _appendEntries(
 		entries: readonly SessionEntry[],
 		preencodedEntries?: readonly string[],
@@ -1277,12 +1253,7 @@ export class SessionManager {
 			signal?.throwIfAborted();
 		}
 		assertCurrent();
-		for (const entry of entries) {
-			this.fileEntries.push(entry);
-			this.entries.push(entry);
-			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
-		}
+		for (const entry of entries) this._indexAppendedEntry(entry);
 		const assertPublishedContext = this._capturePersistenceContext();
 		const publishedFileEntries = this.fileEntries;
 		const publishedById = this.byId;
@@ -3202,6 +3173,63 @@ export class SessionManager {
 		const manager = SessionManager._open(path, roots, sessionDir, cwd, false, false, { id });
 		if (manager.getSessionId() !== id) throw new Error(`Session file ${path} holds another session than ${id}.`);
 		return manager;
+	}
+
+	/**
+	 * Follow a saved conversation without reopening its prefix. A replacement file, changed branch,
+	 * checkpoint or legacy file goes through the complete read-only open and its graph validation.
+	 */
+	static followTranscript(
+		path: string,
+		roots: () => SessionStorageRoots,
+		previous?: SessionTranscriptView,
+	): SessionTranscriptView {
+		const file = resolvePath(path);
+		if (previous instanceof SessionManager) {
+			const change = previous._transcriptChange(file);
+			if (
+				change === "same" ||
+				(change === "append" && previous._followTranscriptAppend(file, previous.storageRevision!))
+			)
+				return previous;
+		}
+		return SessionManager._open(path, roots(), undefined, undefined, true, false);
+	}
+
+	private _transcriptChange(file: string): "same" | "append" | undefined {
+		const before = this.storageRevision;
+		if (!before || !this.readOnly || this.sessionFile !== file) return undefined;
+		const now = statSync(file, { throwIfNoEntry: false });
+		if (!now) return undefined;
+		if (sameFileVersion(before, now)) return "same";
+		if (this.canFollowTranscript && before.dev === now.dev && before.ino === now.ino && now.size > before.size)
+			return "append";
+		return undefined;
+	}
+
+	/** The validated header of an unchanged or appended file. A changed file must read its own. */
+	followedHeader(path: string): SessionHeader | null {
+		return this._transcriptChange(resolvePath(path)) ? this.getHeader() : null;
+	}
+
+	private _followTranscriptAppend(file: string, before: Stats): boolean {
+		const loaded = readLinearTranscriptAppend(file, before, this.leafId, this.byId);
+		if (!loaded) return false;
+		for (const entry of loaded.entries) {
+			if (entry.type === "message") {
+				const location = loaded.locations.get(entry.id);
+				if (location) {
+					this._releaseMessageProperty(entry, "content");
+					this._releaseMessageProperty(entry, "output");
+					if (this.coldPayloadEntryIds.has(entry.id)) this.entryFileLocations.set(entry.id, location);
+				}
+				compactToolResultDetailsForRetention(entry.message);
+			}
+			this._indexAppendedEntry(entry);
+			this.sessionContextCache = advanceSessionContextCache(this.sessionContextCache, entry);
+		}
+		this.storageRevision = loaded.revision;
+		return true;
 	}
 
 	/** Inspect existing history without repairing, migrating or creating any file on disk. */

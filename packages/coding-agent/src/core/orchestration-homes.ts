@@ -71,7 +71,7 @@ function foldCase(path: string): string {
  * bot directory, or its `sessions/` or `orchestration/`, may be a symlink to a place outside `bots/`), then by real
  * path (a symlinked or differently spelled agent directory), each resolved once.
  */
-function botHomeOfDir(agentDir: string, dir: string): OrchestrationHome | undefined {
+export function botHomeOfDir(agentDir: string, dir: string): OrchestrationHome | undefined {
 	const bots = botsDir(agentDir);
 	const written = resolve(dir);
 	const byText = botHomeAt(bots, resolve(bots), written, written);

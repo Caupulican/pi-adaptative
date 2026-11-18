@@ -12,6 +12,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { BotChatChronology, mergeByTime } from "../bots/bot-chat-chronology.ts";
 import type { BotHistoryRead } from "../bots/bot-history.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -40,28 +41,11 @@ export interface BotChatHost {
 	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory" | "readInbox" | "readNotices">;
 }
 
-/** The messages of two chronological lists in time order, each list's own order kept (an untimed message keeps its place). */
-function mergeByTime(first: readonly AgentMessage[], second: readonly AgentMessage[]): AgentMessage[] {
-	const timed = (list: readonly AgentMessage[]): number[] => {
-		let last = 0;
-		return list.map((message) => (last = message.timestamp ?? last));
-	};
-	const firstTimes = timed(first);
-	const secondTimes = timed(second);
-	const merged: AgentMessage[] = [];
-	let i = 0;
-	let j = 0;
-	while (i < first.length || j < second.length) {
-		const takeFirst = j >= second.length || (i < first.length && firstTimes[i]! <= secondTimes[j]!);
-		merged.push(takeFirst ? first[i++]! : second[j++]!);
-	}
-	return merged;
-}
-
 /** Reads the chat of a bot (its own generation, or a group's) and the message log of a group. */
 export class BotChatTranscript {
 	private readonly botBindings: Pick<BotRuntimeBindings, "runtime">;
 	private readonly host: BotChatHost;
+	private readonly chronology = new BotChatChronology();
 	/** Each history read as the chat draws it: kept while the history returns the same read (nothing it holds changed). */
 	private readonly shapedHistory = new WeakMap<BotHistoryRead, AgentMessage[]>();
 
@@ -92,6 +76,10 @@ export class BotChatTranscript {
 
 	/** The bot's chat with the owner: its own session's conversation, after what ran as a worker before or beside it. */
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
+		return this.viewBotChatMessages(agentId, teamId).slice();
+	}
+
+	viewBotChatMessages(agentId: string, teamId?: string): readonly AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		const bot = this.host.getBotTeamStore().getBot(normId);
 		if (bot?.remote) return this.host.getRemoteHub().chat(normId);
@@ -107,10 +95,9 @@ export class BotChatTranscript {
 			);
 			this.shapedHistory.set(history, earlier);
 		}
-		const chat = mergeByTime(
-			mergeByTime(earlier, this.host.botSessions.readMessages(normId) ?? []),
-			this.inboxMessages(normId),
-		);
+		const current = this.host.botSessions.readMessages(normId) ?? [];
+		const inbox = this.inboxMessages(normId);
+		const chat = this.chronology.view(earlier, current, inbox);
 		return chat.length === 0 && bot?.lastSummary
 			? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]
 			: chat;

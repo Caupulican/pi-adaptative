@@ -3,6 +3,7 @@ import { boundedLine, boundedText } from "../util/bounded-line.ts";
 /** High-confidence credential shapes shared by outbound-query gates and diagnostic redaction. */
 /** Provider-issued token and key formats that are unambiguous in any text, source code included. */
 const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
+	/\bpair1\.[a-z0-9-]{1,63}\.[a-z0-9-]{1,63}\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{44}(?![A-Za-z0-9_-])/,
 	/\bsk-(?:proj-|ant-)?[A-Za-z0-9._-]{8,}\b/i,
 	/\bsk_(?:live|test)_[A-Za-z0-9]{8,}\b/i,
 	/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/i,

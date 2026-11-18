@@ -17,7 +17,9 @@ import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
 import { OWNER_STOPPED_REASON } from "../delegation/worker-fleet-stop.ts";
 import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
+import type { SessionCapabilities } from "../session-standing.ts";
 import type { RemotePlacementSession } from "./abandoned-placements.ts";
 import { isOneOf, MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts";
 import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
@@ -44,6 +46,8 @@ export interface RemoteJobPorts {
 	readonly onJobsChanged?: () => void;
 	readonly session: RemoteJobSession;
 	readonly sessionId: () => string;
+	readonly placementOnly?: boolean;
+	readonly routineJobScope?: (receipt: WorkerReceiptOrigin) => string | undefined;
 	/** The session's directory: a job placed without one names this project, when the peer has it checked out. */
 	readonly cwd: () => string;
 	/** The models this session can run, for the advert's provider classes (never an account or a key). */
@@ -155,11 +159,25 @@ export class RemoteJobs {
 			agentDir,
 			selfId: () => identity().machineId,
 			sessionId: ports.sessionId,
+			routineJobScope: ports.routineJobScope,
 			session: ports.session,
 			machines: this.machines,
 			timers: this.timers,
 		});
 		this.onRosterChange = onRosterChange;
+	}
+
+	/** A bot directing a plan places through its own fleet while the disk-backed link stays with the hosting session. */
+	static directorLinked(
+		owner: { standing: Pick<SessionCapabilities, "directsWorkers" | "ownsProcessSingletons">; getAgentDir(): string },
+		existing?: RemoteJobs,
+	): boolean {
+		return (
+			owner.standing.directsWorkers &&
+			!owner.standing.ownsProcessSingletons &&
+			!existing?.started &&
+			RemoteJobs.linked(owner.getAgentDir())
+		);
 	}
 
 	/** Whether the owner linked this machine at all: a hub on, a hub joined, or a peer allowed to place jobs here. */
@@ -202,7 +220,7 @@ export class RemoteJobs {
 	 */
 	refreshLink(): void {
 		if (!this.started) return;
-		if (RemoteJobs.linked(this.agentDir)) this.armRunner();
+		if (!this.ports.placementOnly && RemoteJobs.linked(this.agentDir)) this.armRunner();
 		else this.runner?.retire();
 		this.syncBackend();
 	}

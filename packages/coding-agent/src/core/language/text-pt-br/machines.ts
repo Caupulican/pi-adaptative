@@ -10,7 +10,7 @@ import type { InterfaceText } from "../interface-text.ts";
 export const MACHINES = {
 	remote: {
 		usage: (jobUsage: string) =>
-			`Uso: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${jobUsage}`,
+			`Uso: /remote [status] | /remote pair <name> <host:port> | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${jobUsage}`,
 		connected: "conectado",
 		connectedUnsealed: "conectado, sem selo",
 		status: {
@@ -19,7 +19,10 @@ export const MACHINES = {
 			hostedBy: (where: string) => `Hub: hospedado por ${where}; esta sessão usa esse hub.`,
 			notListening: "Hub: não está escutando (/remote listen [port] [host]).",
 			machineRevoked: "revogada",
-			machineConnectedSealed: "conectada",
+			machineConnectedSealed: "conectada (selada)",
+			jobsOff: ", jobs desativados",
+			readScope: (projects: string, room: number) =>
+				`, ${projects ? `projetos somente leitura ${projects}` : "somente respostas"}, ${room} vagas`,
 			machineConnectedUnsealed: "conectada (sem selo)",
 			machineOffline: "offline",
 			machinesSome: (list: string) => `Máquinas: ${list}.`,
@@ -39,18 +42,22 @@ export const MACHINES = {
 				"O hub parou de escutar. As máquinas conectadas continuam conhecidas e se reconectam quando ele voltar.",
 		},
 		add: {
+			pairUsage:
+				"Uso: /remote pair <nome> <host-privado:porta>. Use o endereço da LAN ou VPN acessível às outras máquinas, ou loopback com um túnel SSH.",
+			differentListener: (host: string, port: number) =>
+				`O hub já escuta em ${host}:${port}. Pareie nesse endereço ou altere-o com /remote listen.`,
 			usage: (usage: string) => `Uso: /remote add <name> (letras minúsculas, dígitos, hífens). ${usage}`,
 			added: (args: { name: string; address: string; token: string; listening: boolean }) =>
-				`${args.name} já pode entrar, como um bot chamado ${args.name}. Naquela máquina rode:\n/remote join ${args.address} ${args.token}\nO token é mostrado uma vez; mantenha-o em segredo.${
+				`${args.name} já pode entrar, como um bot chamado ${args.name}. Naquela máquina rode:\n/remote join ${args.address} ${args.token}\nEste convite privado expira em 10 minutos e é consumido na primeira conexão selada.${
 					args.listening ? "" : "\nEste hub ainda não está escutando: rode /remote listen."
 				}`,
 			revoked: (name: string) => `${name} foi desconectada e o bot dela foi aposentado.`,
 			unknown: (name: string) => `Nenhuma máquina chamada ${name}.`,
 		},
 		join: {
-			usage: "Uso: /remote join <host:port> <token>",
+			usage: "Uso: /remote join <host:porta> <convite> (acrescente --legacy para um token emitido por um hub antigo).",
 			joined: (args: { hubName: string; address: string; name: string }) =>
-				`Conectado a ${args.hubName} em ${args.address} como ${args.name}. As mensagens dele chegam a esta sessão como palavras de um peer, nunca como suas.`,
+				`Conectando a ${args.hubName} em ${args.address} como ${args.name}. Veja o resultado em /remote status.`,
 			left: "Saiu daquele hub.",
 			notJoined: "Nenhum hub conectado naquele endereço.",
 		},
@@ -83,7 +90,7 @@ export const MACHINES = {
 		noCheckout: "como uma pergunta sem checkout (ela não oferece este projeto)",
 		rotateUnknown: (name: string) => `Nenhuma máquina chamada ${name} entrou neste hub.`,
 		rotated: (name: string, token: string) =>
-			`${name} tem um segredo novo e foi desconectada; os jobs dela são mantidos. Naquela máquina rode /remote leave e depois:\n/remote join <this-hub-address> ${token}\nO token é mostrado uma vez; mantenha-o em segredo.`,
+			`${name} tem um segredo novo e foi desconectada; os jobs dela são mantidos. Naquela máquina rode /remote leave e depois:\n/remote join <this-hub-address> ${token}\nEste convite privado expira em 10 minutos e é consumido na primeira conexão selada.`,
 		unknownMachine: (name: string, jobUsage: string) =>
 			`Nenhuma máquina conectada chamada ${name} se conectou ainda. Uso: ${jobUsage}`,
 		runUsage: "Uso: /remote run <name> <task>",
@@ -134,12 +141,12 @@ export const MACHINES = {
 		heldBack: "Retido:",
 		updatesSent: (count: number) => `Atualizações enviadas: ${count}`,
 		ledNothing: (name: string) => `${name} é líder e ainda não liderou nenhum objetivo.`,
-		actionDone: (name: string, state: string) => `${name}: ${state}.`,
+		actionDone: (name, state) => `${name}: ${state}.`,
 	},
 	load: {
 		usage: "/load",
 		estopUsage: "/estop [status] · /estop on [reason] · /estop off",
-		estopStatusOn: (args: { reason?: string; engagedAt?: string; usage: string }) =>
+		estopStatusOn: (args) =>
 			`Parada de emergência: acionada${args.reason ? ` (${args.reason})` : ""}${args.engagedAt ? ` desde ${args.engagedAt}` : ""}; novas requisições de worker e de segundo plano ficam retidas nesta máquina. ${args.usage}`,
 		estopStatusOff: (usage: string) => `Parada de emergência: desligada. ${usage}`,
 		estopEngaged: (reason?: string) =>
@@ -150,16 +157,7 @@ export const MACHINES = {
 		view: {
 			header: (count: number) =>
 				`Carga dos provedores: ${count} ${count === 1 ? "requisição" : "requisições"} em andamento na máquina`,
-			provider: (args: {
-				account: string;
-				inFlight: number;
-				foreground: number;
-				worker: number;
-				background: number;
-				processes: number;
-				limit?: number;
-				oldest: string;
-			}) =>
+			provider: (args) =>
 				`  ${args.account}: ${args.inFlight} em andamento (${args.foreground} primeiro plano, ${args.worker} worker, ${args.background} segundo plano) ` +
 				`em ${args.processes} processo${args.processes === 1 ? "" : "s"}${args.limit ? `, limite ${args.limit}` : ""}, a mais antiga há ${args.oldest}`,
 			limitedHeader: "Limitados:",

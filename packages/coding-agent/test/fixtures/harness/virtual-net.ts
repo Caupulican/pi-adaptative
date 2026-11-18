@@ -30,8 +30,11 @@ export interface VirtualNetworkOptions {
 class VirtualSocket extends Duplex {
 	peer: VirtualSocket | undefined;
 
-	constructor() {
+	private readonly disconnectBeforeWrite?: (chunk: Buffer | string) => boolean;
+
+	constructor(disconnectBeforeWrite?: (chunk: Buffer | string) => boolean) {
 		super({ allowHalfOpen: false });
+		this.disconnectBeforeWrite = disconnectBeforeWrite;
 	}
 
 	setNoDelay(_noDelay?: boolean): this {
@@ -54,7 +57,8 @@ class VirtualSocket extends Duplex {
 
 	override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
 		const peer = this.peer;
-		if (peer && !peer.destroyed) peer.push(chunk);
+		if (this.disconnectBeforeWrite?.(chunk)) this.destroy();
+		else if (peer && !peer.destroyed) peer.push(chunk);
 		callback();
 	}
 
@@ -169,6 +173,21 @@ class VirtualServer extends EventEmitter {
 }
 
 export class VirtualNetwork {
+	private dropServerFrame?: (chunk: Buffer | string) => boolean;
+
+	/** Lose one server write after its producer committed, before any bytes reach the client. */
+	disconnectOnServerWrite(matches: (chunk: Buffer | string) => boolean): Promise<void> {
+		if (this.dropServerFrame) throw new Error("A server-write disconnect is already armed.");
+		return new Promise((resolve) => {
+			this.dropServerFrame = (chunk) => {
+				if (!matches(chunk)) return false;
+				this.dropServerFrame = undefined;
+				resolve();
+				return true;
+			};
+		});
+	}
+
 	private readonly servers = new Map<string, VirtualServer>();
 	private readonly options: VirtualNetworkOptions;
 	private liveSockets = 0;
@@ -229,7 +248,7 @@ export class VirtualNetwork {
 	): VirtualSocket => {
 		const onConnect = typeof second === "function" ? second : third;
 		const client = new VirtualSocket();
-		const served = new VirtualSocket();
+		const served = new VirtualSocket((chunk) => this.dropServerFrame?.(chunk) ?? false);
 		if (onConnect) client.once("connect", onConnect);
 		client.peer = served;
 		served.peer = client;

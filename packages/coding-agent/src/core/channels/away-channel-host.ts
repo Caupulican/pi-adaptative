@@ -701,6 +701,7 @@ export class AwayChannelHosts {
 			...(owner
 				? {
 						ownerDelivery: owner.session.ownerChannel,
+						ownerTasks: owner.session.backgroundLanes,
 						ownerControl: () => owner.session.ownerChannel.control(),
 						isEmergencyStopEngaged: () => isEmergencyStopEngaged(agentDir),
 						subscribeEmergencyStop: (listener: () => void) => subscribeEmergencyStop(agentDir, listener),

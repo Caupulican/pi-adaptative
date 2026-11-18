@@ -237,10 +237,18 @@ export function isThirdPartyWords(origin: SendUserMessageOrigin | undefined): bo
  * `OwnerChannelDelivery`); an extension's message shape cannot express it. A record that does not parse is unreadable,
  * and an unreadable origin is third-party, so a mistake here never gains authority.
  */
-export function ownerChannelTurnOrigin(origin: Pick<OwnerChannelOrigin, "channel" | "ref">): TurnOriginRecord {
+export function ownerChannelTurnOrigin(
+	origin: Pick<OwnerChannelOrigin, "channel" | "ref" | "routineRef">,
+): TurnOriginRecord {
 	return (
-		parseTurnOriginRecord({ v: 1, k: "owner-channel", channel: origin.channel, verified: true, ref: origin.ref }) ??
-		UNREADABLE_TURN_ORIGIN
+		parseTurnOriginRecord({
+			v: 1,
+			k: "owner-channel",
+			channel: origin.channel,
+			verified: true,
+			ref: origin.ref,
+			routineRef: origin.routineRef,
+		}) ?? UNREADABLE_TURN_ORIGIN
 	);
 }
 
@@ -618,6 +626,8 @@ export interface LiveRunOrigin {
 export class RunTurnOrigin {
 	private active = false;
 	private latest: TurnOriginRecord | undefined;
+	/** The latest addressed user input taken by this run, even a scheduled delivery that grants no authority. */
+	private addressedRef: string | undefined;
 	/** Whether `latest` was set by a message this run took in, not read from the branch at `begin`. */
 	private decidedInRun = false;
 	/** The messages the run opened with, until its first message ends (`opening`). */
@@ -630,6 +640,7 @@ export class RunTurnOrigin {
 	 */
 	begin(opening: readonly AgentMessage[], branch: readonly SessionEntry[]): void {
 		this.active = true;
+		this.addressedRef = undefined;
 		this.latest = latestDecisiveEntry(branch)?.origin;
 		this.decidedInRun = false;
 		for (const message of opening) this.note(message);
@@ -644,6 +655,7 @@ export class RunTurnOrigin {
 		this.openedWith = [];
 		if (!this.active) return;
 		const origin = turnOriginOf(message);
+		if (message.role === "user" || (origin && isDecisiveOrigin(origin))) this.addressedRef = origin?.ref;
 		if (origin && isDecisiveOrigin(origin)) {
 			this.latest = origin;
 			this.decidedInRun = true;
@@ -652,6 +664,7 @@ export class RunTurnOrigin {
 
 	end(): void {
 		this.active = false;
+		this.addressedRef = undefined;
 		this.latest = undefined;
 		this.decidedInRun = false;
 		this.openedWith = [];
@@ -675,6 +688,11 @@ export class RunTurnOrigin {
 	/** True while a run is in progress (between `begin` and `end`). */
 	isActive(): boolean {
 		return this.active;
+	}
+
+	/** A bot-task stop matches this delivery across tool calls and loses it when another user's input takes over. */
+	deliveryRef(): string | undefined {
+		return this.addressedRef;
 	}
 
 	/** The decisive origin of the run in progress, if any. */

@@ -3,6 +3,7 @@
  */
 
 import { Container, Spacer, Text } from "@caupulican/pi-tui";
+import { isFollowedBotTranscript } from "../../core/bots/bot-chat-chronology.ts";
 import type { ActiveChatTarget } from "../../core/delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
@@ -46,6 +47,7 @@ export interface TargetChatView {
 	lastFooterSignature?: string;
 	/** One key per rendered message, so an append is recognised without re-walking the transcript. */
 	renderedMessageKeys: string[];
+	followedTranscript?: WeakRef<readonly AgentMessage[]>;
 	headerTextComponent?: Text;
 	emptyHintComponent?: Text;
 	footerComponents: Text[];
@@ -180,40 +182,37 @@ export class TargetChatViewRegistry {
 	): void {
 		const view = this.getOrCreate(key);
 		const footerSignature = JSON.stringify(footer);
-		const keys: string[] = [];
-		for (const message of messages) keys.push(messageKey(message));
-		const count = keys.length;
 		const rendered = view.renderedMessageKeys;
-
-		// 1. Nothing changed for this target: reuse the cached Container without touching it.
+		const renderedCount = rendered.length;
+		const stablePrefix = view.followedTranscript?.deref() === messages && messages.length >= renderedCount;
+		// A failing key or renderer leaves the next refresh to rebuild the partially updated container.
+		if (stablePrefix && messages.length > renderedCount) view.renderedMessageKeys = [];
+		const keys = stablePrefix ? rendered : [];
+		for (let i = keys.length; i < messages.length; i++) keys.push(messageKey(messages[i]!));
+		const count = keys.length;
+		const canAppend = count >= renderedCount && (stablePrefix || rendered.every((key, index) => key === keys[index]));
+		if (!stablePrefix)
+			view.followedTranscript = isFollowedBotTranscript(messages) ? new WeakRef(messages) : undefined;
 		if (
 			view.lastHeaderSignature === headerSignature &&
 			view.lastFooterSignature === footerSignature &&
-			rendered.length === count &&
-			rendered.every((key, index) => key === keys[index])
-		) {
+			count === renderedCount &&
+			canAppend
+		)
 			return;
-		}
 
-		// 2. Only new messages were appended (and no rendered one changed): append the new tail and
-		// update the header/footer in place, so a working-status or member change never rebuilds.
-		let canAppend = rendered.length > 0 && count >= rendered.length;
-		for (let index = 0; canAppend && index < rendered.length; index++) {
-			if (rendered[index] !== keys[index]) canAppend = false;
-		}
-
-		if (canAppend) {
+		if (canAppend && renderedCount > 0) {
 			if (view.lastHeaderSignature !== headerSignature && view.headerTextComponent) {
 				view.headerTextComponent.setText(header.join("\n"));
 				view.lastHeaderSignature = headerSignature;
 			}
 
-			if (count > rendered.length) {
+			if (count > renderedCount) {
 				if (view.emptyHintComponent) {
 					view.container.removeChild(view.emptyHintComponent);
 					view.emptyHintComponent = undefined;
 				}
-				for (let index = rendered.length; index < count; index++) {
+				for (let index = renderedCount; index < count; index++) {
 					renderMessage(view.container, view.pendingToolCalls, messages[index]!, view.bylines);
 				}
 			}

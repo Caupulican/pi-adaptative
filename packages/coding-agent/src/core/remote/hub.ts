@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { JobFrame, LinkPeerListener } from "./job-protocol.ts";
 import { type HubMachineLinkState, reportHubMachines } from "./link-context.ts";
+import { offeredPairingSecret } from "./pairing.ts";
 import {
 	encodeFrame,
 	hubFeatureProof,
@@ -30,12 +31,11 @@ import {
 	proofsMatch,
 } from "./protocol.ts";
 import {
+	bindHubMachine,
 	listHubMachines,
 	loadLinkSettings,
 	type MachineIdentity,
-	nameBoundTo,
 	readHubMachines,
-	updateHubMachine,
 } from "./registry.ts";
 import { LINK_FEATURES, LinkFraming, negotiateFeatures, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
 
@@ -323,36 +323,45 @@ export class RemoteHub {
 	private handshake(hello: Extract<LinkFrame, { t: "hello" }>, nonce: string, socket: Socket): Live | LinkRefusal {
 		const record = listHubMachines(this.agentDir).find((machine) => machine.name === hello.name);
 		if (!record) return "unknown_machine";
-		const expected = joinProof(record.secret, nonce, hello.machineId, hello.name, hello.nonce);
+		if (record.pairing && record.pairing.expiresAt <= Date.now()) return "invitation_expired";
+		const secret = record.pairing
+			? offeredPairingSecret(record.secret, record.pairing, hello.pairingKey ?? "")
+			: record.secret;
+		if (!secret) return "bad_proof";
+		const expected = joinProof(secret, nonce, hello.machineId, hello.name, hello.nonce);
 		if (!proofsMatch(expected, hello.proof)) return "bad_proof";
 		if (record.revoked) return "revoked";
 		if (record.machineId !== undefined && record.machineId !== hello.machineId) return "machine_changed";
-		// One install is one machine here: a second name for it would make two bots fight over one connection.
-		if (nameBoundTo(this.agentDir, hello.machineId, record.name) !== undefined) return "machine_taken";
 		if (hello.machineId === this.identity.machineId || hello.subtree.includes(this.identity.machineId))
 			return "would_loop";
 		if (hello.depth + 1 > MAX_LINK_DEPTH) return "too_deep";
 		const active = hello.features ? negotiateFeatures(LINK_FEATURES, hello.features) : [];
 		const sealed = active.includes(SEALED_FEATURE);
 		// "protocol" is a refusal every build can read, so a machine on an older build still says why.
-		if (!sealed && loadLinkSettings(this.agentDir).requireSealed) return "protocol";
-		if (record.machineId === undefined) updateHubMachine(this.agentDir, record.name, { machineId: hello.machineId });
+		if (!sealed && (record.requireSealed || record.pairing || loadLinkSettings(this.agentDir).requireSealed))
+			return "protocol";
+		try {
+			const refusal = bindHubMachine(this.agentDir, record, hello.machineId, secret);
+			if (refusal) return refusal;
+		} catch {
+			return "registry_unavailable";
+		}
 		socket.write(
 			encodeFrame(
 				hello.features
 					? {
 							t: "welcome",
-							proof: hubFeatureProof(record.secret, hello.nonce, this.identity.machineId, active),
+							proof: hubFeatureProof(secret, hello.nonce, this.identity.machineId, active),
 							features: active,
 						}
-					: { t: "welcome", proof: hubProof(record.secret, hello.nonce, this.identity.machineId) },
+					: { t: "welcome", proof: hubProof(secret, hello.nonce, this.identity.machineId) },
 			),
 		);
 		const framing = new LinkFraming(
 			sealed
 				? new SealedLink(
 						{
-							secret: record.secret,
+							secret,
 							hubNonce: nonce,
 							joinerNonce: hello.nonce,
 							hubId: this.identity.machineId,
@@ -369,7 +378,7 @@ export class RemoteHub {
 			socket,
 			machineId: hello.machineId,
 			name: record.name,
-			secret: record.secret,
+			secret,
 			subtree: hello.subtree,
 			depth: hello.depth,
 			features: active,

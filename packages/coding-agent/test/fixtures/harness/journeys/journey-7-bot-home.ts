@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import {
+	appendFileSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
@@ -129,6 +130,7 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
 	let ownerBundle: string;
 	try {
+		verifyBotTranscriptAppends(world, session);
 		ownerBundle = await runLeg(world, session);
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the root session disposes cleanly").toBeUndefined();
@@ -136,6 +138,76 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 	await replacedHostTellsNothing(world, ownerBundle);
 	await owedReleaseTakenUp(world);
 	world.trace.mark("root", "j7.bot-home");
+}
+
+/** Read two saved bot chats in turn. Count actual descriptor bytes on the session files. */
+function verifyBotTranscriptAppends(world: HarnessWorld, session: AgentSession): void {
+	const chat = session.backgroundLanes.botChat;
+	const timestamp = new Date().toISOString();
+	const row = (index: number, parentId: string | null, content: string) =>
+		`${JSON.stringify({
+			type: "message",
+			id: String(index),
+			parentId,
+			timestamp,
+			message: { role: "user", content, timestamp: index },
+		})}\n`;
+	for (const length of [100, 1000, 10000]) {
+		const bots = ["a", "b"].map((suffix) => {
+			const name = `history-${length}-${suffix}`;
+			const home = botHomeOf(world.agentDir, name);
+			mkdirSync(home.sessionsDir, { recursive: true });
+			const id = createSessionId();
+			const file = `${id}.jsonl`;
+			const path = join(home.sessionsDir, file);
+			writeFileSync(home.pointerFile, JSON.stringify({ version: 1, sessionId: id, file }));
+			const header = JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id,
+				timestamp,
+				cwd: HARNESS_PROJECT_CWD,
+			});
+			const rows = Array.from({ length }, (_, index) => row(index, index === 0 ? null : String(index - 1), name));
+			writeFileSync(path, `${header}\n${rows.join("")}`);
+			const messages = chat.viewBotChatMessages(name);
+			expect(messages).toHaveLength(length);
+			return { name, path, messages, header };
+		});
+		for (const { name, path, messages, header } of bots) {
+			const mark = world.io.operations.length;
+			expect(chat.viewBotChatMessages(name)).toBe(messages);
+			const suffix = row(length, String(length - 1), "new line");
+			appendFileSync(path, suffix);
+			const next = chat.viewBotChatMessages(name);
+			expect(next).toBe(messages);
+			expect(next.at(-1)).toMatchObject({ role: "user", content: "new line" });
+			const bytes = world.io.operations
+				.slice(mark)
+				.reduce((sum, op) => (op.path === path ? sum + (op.bytesRead ?? 0) : sum), 0);
+			expect(bytes, `unchanged, switch and append in a ${length}-row bot chat read only the appended bytes`).toBe(
+				Buffer.byteLength(suffix),
+			);
+			appendFileSync(path, row(length + 1, "0", "other branch"));
+			const branch = chat.viewBotChatMessages(name);
+			expect(branch).not.toBe(messages);
+			expect(branch).toHaveLength(2);
+			expect(branch.at(-1)).toMatchObject({ content: "other branch" });
+			if (length === 100 && name.endsWith("-a")) {
+				const pending = row(length + 2, String(length + 1), "completed after partial write");
+				appendFileSync(path, pending.slice(0, 20));
+				expect(chat.viewBotChatMessages(name)).toHaveLength(2);
+				appendFileSync(path, pending.slice(20));
+				expect(chat.viewBotChatMessages(name).at(-1)).toMatchObject({ content: "completed after partial write" });
+				writeFileSync(path, `${header}\n`);
+				expect(chat.viewBotChatMessages(name)).toHaveLength(0);
+				const replacement = `${path}.new`;
+				writeFileSync(replacement, `${header}\n${row(0, null, "replacement transcript")}`);
+				renameSync(replacement, path);
+				expect(chat.viewBotChatMessages(name)).toMatchObject([{ content: "replacement transcript" }]);
+			}
+		}
+	}
 }
 
 /**

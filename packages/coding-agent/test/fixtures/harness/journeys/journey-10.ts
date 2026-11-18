@@ -20,24 +20,28 @@ import {
 import { JobTransport } from "../../../../src/core/remote/job-transport.ts";
 import { LinkClient, type LinkState } from "../../../../src/core/remote/link-client.ts";
 import { hubMachinesFor } from "../../../../src/core/remote/link-context.ts";
-import { REFUSAL_TEXT } from "../../../../src/core/remote/protocol.ts";
+import { type LinkRefusal, REFUSAL_TEXT } from "../../../../src/core/remote/protocol.ts";
 import {
 	DEFAULT_OFFLINE_HOLD_MS,
+	enrollJoin,
+	type JoinRecord,
 	listHubMachines,
 	loadIdentity,
-	parseJoinToken,
+	type MachineIdentity,
 	renameIdentity,
-	saveJoin,
 	updateLinkPeerSettings,
 } from "../../../../src/core/remote/registry.ts";
 import { RemoteJobs } from "../../../../src/core/remote/remote-jobs.ts";
 import { resolveRepoIdentity } from "../../../../src/core/remote/repo-identity.ts";
 import { SEALED_FEATURE } from "../../../../src/core/remote/session-keys.ts";
 import { DirectoryWatch } from "../../../../src/core/remote/store-watch.ts";
+import { redactKnownSecrets } from "../../../../src/core/security/secret-text.ts";
 import { THIRD_PARTY_MEMORY_WITHHELD } from "../../../../src/core/system-prompt-builder.ts";
 import { acquireFileLockSync, isFileLockContentionError } from "../../../../src/kernel/storage/atomic-file.ts";
+import { runRemoteCommand } from "../../../../src/modes/interactive/remote-commands.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { scheduledBotJob } from "./journey-10-bot-scheduled-job.ts";
 import {
 	batchResultById,
 	enqueueHubRoot,
@@ -280,6 +284,34 @@ async function runTimedOfflineHoldWitness(world: HarnessWorld): Promise<void> {
 	}
 }
 
+async function requireJoinRefusal(
+	world: HarnessWorld,
+	join: JoinRecord,
+	identity: MachineIdentity,
+	reason: LinkRefusal,
+): Promise<void> {
+	const refused = createBarrier();
+	const states: LinkState[] = [];
+	const client = new LinkClient({
+		join,
+		identity,
+		events: {
+			state: (state) => {
+				states.push(state);
+				if (state.state === "waiting") refused.release();
+			},
+			message: () => {},
+		},
+	});
+	try {
+		client.start();
+		await withDeadline(world.trace, `J10 join refused: ${reason}`, refused.promise);
+		expect(states).toEqual([{ state: "waiting", reason: REFUSAL_TEXT[reason] }]);
+	} finally {
+		client.stop();
+	}
+}
+
 async function runJourney10Body(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
 	const warningsBefore = world.warnings.length;
@@ -308,20 +340,85 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		expect(port, "ephemeral TCP port allocated on VirtualNetwork").toBeGreaterThanOrEqual(40_000);
 		expect(hub.status().listening).toEqual({ host: "127.0.0.1", port });
 
-		const { token } = hub.add(JOINER_MACHINE_NAME);
-		const parsedToken = parseJoinToken(token);
-		expect(parsedToken).toMatchObject({ hubName: HUB_MACHINE_NAME, name: JOINER_MACHINE_NAME });
-		if (!parsedToken) throw new Error("Join token failed to parse");
-
 		const hubAddress = `127.0.0.1:${port}`;
-		saveJoin(agentDirJoiner, {
-			address: hubAddress,
-			name: parsedToken.name,
-			hubName: parsedToken.hubName,
-			secret: parsedToken.secret,
+		const command = async (input: string): Promise<string> => {
+			let output = "";
+			await runRemoteCommand(
+				input,
+				{ hub, reloadChannels: () => {} },
+				{
+					showStatus: (text) => {
+						output = text;
+					},
+					showWarning: (text) => {
+						throw new Error(text);
+					},
+				},
+			);
+			return output;
+		};
+		const instructions = await command(`/remote pair ${JOINER_MACHINE_NAME} ${hubAddress}`);
+		const suggested = instructions
+			.split("\n")
+			.find((line) => line.startsWith("/remote join "))
+			?.split(/\s+/);
+		expect(suggested?.slice(0, 3)).toEqual(["/remote", "join", hubAddress]);
+		const initialToken = suggested?.[3];
+		if (!initialToken) throw new Error("The pairing command did not provide an invitation");
+		expect(redactKnownSecrets(initialToken), "a pasted invitation is kept out of diagnostics").toBe("[REDACTED]");
+		const records = listHubMachines(agentDirHub);
+		const offered = records.find((m) => m.name === JOINER_MACHINE_NAME);
+		if (!offered?.pairing) throw new Error("Missing pending invitation");
+		expect(offered.pairing.expiresAt).toBeGreaterThan(Date.now());
+		// Move only the persisted expiry across its boundary, keeping the rest of the production handshake intact.
+		world.io.seed(
+			projectPath(agentDirHub, "remote", "machines.json"),
+			JSON.stringify(
+				records.map((record) =>
+					record === offered ? { ...record, pairing: { ...offered.pairing, expiresAt: Date.now() - 1 } } : record,
+				),
+			),
+		);
+		const expired = enrollJoin(agentDirJoiner, hubAddress, initialToken);
+		if (!expired) throw new Error("Joining machine failed to prepare the expiring invitation");
+		await requireJoinRefusal(world, expired, joinerIdentity, "invitation_expired");
+		const token = hub.rotate(JOINER_MACHINE_NAME)?.token;
+		if (!token) throw new Error("Could not replace expired invitation");
+		const enrollment = enrollJoin(agentDirJoiner, hubAddress, token);
+		if (!enrollment) throw new Error("Pairing invitation failed to enroll");
+		expect(enrollment).toMatchObject({ hubName: HUB_MACHINE_NAME, name: JOINER_MACHINE_NAME });
+		expect(token.includes(enrollment.secret), "the invitation never contains the reconnect credential").toBe(false);
+		expect(
+			enrollJoin(agentDirJoiner, hubAddress, token),
+			"retry before dialing retains the prepared credential",
+		).toEqual(enrollment);
+		const lostWelcome = world.network.disconnectOnServerWrite((chunk) => String(chunk).startsWith('{"t":"welcome",'));
+		const firstStates: LinkState[] = [];
+		const firstDial = new LinkClient({
+			join: enrollment,
+			identity: joinerIdentity,
+			events: { state: (state) => firstStates.push(state), message: () => {} },
 		});
+		try {
+			firstDial.start();
+			await withDeadline(trace, "J10 enrollment welcome lost after redemption", lostWelcome);
+			expect(firstStates.some((s) => s.state === "connected")).toBe(false);
+			const redeemed = listHubMachines(agentDirHub).filter((m) => m.name === JOINER_MACHINE_NAME);
+			expect(redeemed).toHaveLength(1);
+			expect(redeemed[0]?.pairing).toBeUndefined();
+			expect(redeemed[0]?.machineId).toBe(joinerIdentity.machineId);
+		} finally {
+			firstDial.stop();
+		}
+		expect(enrollJoin(agentDirJoiner, `localhost:${port}`, token)).toEqual({
+			...enrollment,
+			address: `localhost:${port}`,
+		});
+		expect(enrollJoin(agentDirJoiner, hubAddress, token), "changing the address preserves the redeemed key").toEqual(
+			enrollment,
+		);
 		writeRemoteSettings(world, agentDirJoiner, {
-			requireSealed: true,
+			requireSealed: false,
 			repos: [{ path: HARNESS_PROJECT_CWD, ready: true }],
 			jobRoom: 2,
 		});
@@ -371,42 +468,27 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 				checkouts: [{ repoKey: repoIdentity?.repoKey, ready: true }],
 			},
 		});
+		const modelCalls = world.provider.reached.length;
+		const status = await command("/remote status");
+		expect(status).toContain(`${JOINER_MACHINE_NAME} connected (sealed)`);
+		expect(status).toContain(`read-only projects ${repoIdentity!.repoKey.slice(0, 12)}, 2 free`);
+		expect(world.provider.reached.length, "checking link readiness does not call a model").toBe(modelCalls);
 		expect(hub.rosterWords(JOINER_MACHINE_NAME)).toEqual({ state: "idle", currentSummary: "ready, 2 free" });
 		expect(
 			listHubMachines(agentDirHub).find((m) => m.name === JOINER_MACHINE_NAME)?.machineId,
 			"first handshake binds the one-time token slot to joiner's machineId",
 		).toBe(joinerIdentity.machineId);
 
-		// Second replay of the same one-time join token from a distinct machine identity is rejected.
+		const admitted = listHubMachines(agentDirHub).find((machine) => machine.name === JOINER_MACHINE_NAME);
+		expect(admitted?.pairing, "successful admission consumes the invitation").toBeUndefined();
+		expect(admitted?.secret === enrollment.secret, "both installations retained the same reconnect credential").toBe(
+			true,
+		);
+		// Re-enrolling on a second installation with even a copied machine ID cannot recreate the reconnect credential.
 		const rogueIdentity = renameIdentity(`${world.agentDir}-rogue`, ROGUE_MACHINE_NAME);
-		const rogueDone = createBarrier();
-		const rogueStates: LinkState[] = [];
-		const rogueClient = new LinkClient({
-			join: {
-				address: hubAddress,
-				name: parsedToken.name,
-				hubName: parsedToken.hubName,
-				secret: parsedToken.secret,
-			},
-			identity: rogueIdentity,
-			requireSealed: () => true,
-			events: {
-				state: (state) => {
-					rogueStates.push(state);
-					if (state.state === "waiting") rogueDone.release();
-				},
-				message: () => {},
-			},
-		});
-		try {
-			rogueClient.start();
-			await withDeadline(trace, "J10 leg 1: rogue replay refused", rogueDone.promise);
-		} finally {
-			rogueClient.stop();
-		}
-		expect(rogueStates, "rogue replay never reaches connected and is refused as machine_changed").toEqual([
-			{ state: "waiting", reason: REFUSAL_TEXT.machine_changed },
-		]);
+		const replay = enrollJoin(`${world.agentDir}-rogue`, hubAddress, token);
+		if (!replay) throw new Error("A second installation could not prepare the invitation");
+		await requireJoinRefusal(world, replay, { ...rogueIdentity, machineId: joinerIdentity.machineId }, "bad_proof");
 		expect(
 			listHubMachines(agentDirHub).find((m) => m.name === JOINER_MACHINE_NAME)?.machineId,
 			"token slot stays bound to the legitimate joiner",
@@ -853,6 +935,7 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 			holdRemoteStep.release();
 		}
 		trace.mark("root", "j10.leg3-plan-placement-p28-and-cancel");
+		await scheduledBotJob(world, sessionHub, hub, port, joinerMachine.machineId);
 
 		// ---- Leg 4: ask Lane over RemoteHubController + Clean Teardown ----
 		world.systemOne.enterPhase("j10-leg4-ask-and-offline", {});

@@ -3,6 +3,7 @@ import { loadPhoton } from "../../../../src/utils/photon.ts";
 import { runJourney4AwayChannelsPhase, runJourney4ChannelsPhase } from "./journey-4-channels.ts";
 import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
+import { runJourney4PhoneTaskControls } from "./journey-4-phone-tasks.ts";
 import { runJourney4PiToolsBridgePhase } from "./journey-4-pi-tools-bridge.ts";
 import { runJourney4RoutineProgressPhase } from "./journey-4-routine-progress.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
@@ -47,6 +48,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4ChannelsPhase(world);
 			await runJourney4TelegramPhase(world);
 			await runJourney4TelegramOwnerPhase(world);
+			await runJourney4PhoneTaskControls(world);
 			await runJourney4TelegramBoundsPhase(world);
 			await runJourney4TelegramQuotaPhase(world);
 			await runJourney4TelegramDaemonPhase(world);

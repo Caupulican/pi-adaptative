@@ -43,8 +43,7 @@ export const COMMANDS = {
 	chat: "Trocar o chat ativo entre a Mente (raiz), um bot persistente ou uma equipe (/chat [root|<bot>|team:<id>])",
 	bot: "Gerenciar os bots persistentes e falar direto com eles (/bot [list|new <id> [--write] [model] [soul]|soul <id>|open <id>|msg <id> <text>|stop <id>|retire <id>])",
 	lead: "Ver os objetivos entregues aos líderes, e cancelar, pausar ou retomar um (/lead [list|show <leader>|cancel <leader>|pause <leader>|resume <leader>])",
-	remote:
-		"Conectar máquinas: qualquer máquina pode hospedar (/remote listen, add <name>) ou entrar (/remote join <host:port> <token>); uma máquina conectada aparece como um bot marcado como remoto",
+	remote: "Pareie outra máquina com /remote pair <nome> <host:porta>. A máquina conectada aparece como um bot remoto.",
 	bots: "Abrir o seletor de chat de bots e equipes (/bots ou /bot)",
 	team: "Gerenciar equipes de vários bots e falar com elas (/team [list|create <id> <bots> [desc]|members <id> <bots>|open <id>|msg <id> <text>|delete <id>])",
 	teams: "Apelido de /team",

@@ -6,11 +6,13 @@
  */
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
-import type { ChannelChoice } from "../gateways/channel-provider.ts";
+import type { ChannelChoice, ChannelProvider } from "../gateways/channel-provider.ts";
 import { englishText, type InterfaceText } from "../language/interface-text.ts";
-import { hasMaskableSecretText } from "../security/secret-text.ts";
+import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
+import { isShippedChannelProvider } from "./built-in-providers.ts";
 import { digest } from "./channel-journal.ts";
+import type { InboundChannelEvent } from "./channel-message.ts";
 import type { OwnerChannelControl, OwnerControl, OwnerDecisionBy, OwnerDraftView } from "./owner-channel-types.ts";
 
 const DRAFT_ID = /^draft-[0-9a-f]{16}$/;
@@ -204,4 +206,34 @@ export function decideOwnerDraft(control: OwnerControl, facts: OwnerDecisionFact
 	const result = handle.approve(id, facts.by, { terminalOnlyClasses: facts.terminalOnlyClasses });
 	if (result !== "approved") return { reply: stateReply(id, result) };
 	return { reply: `Approved draft ${id}; a turn performs it now.`, approved: view };
+}
+
+const MAX_CONTROL_REPLY_CHARS = 1500;
+/** A control reply: Pi's own words, bounded, to the chat it came from, never a secret; `final` ends a hub's ask. */
+export async function sendOwnerControlReply(
+	warn: (message: string) => void,
+	name: string,
+	provider: ChannelProvider,
+	event: Pick<InboundChannelEvent, "address" | "conversationKey">,
+	key: string,
+	text: string,
+	final = false,
+): Promise<void> {
+	if (!text || hasMaskableSecretText(text)) return;
+	const bounded = text.length > MAX_CONTROL_REPLY_CHARS ? `${text.slice(0, MAX_CONTROL_REPLY_CHARS - 1)}…` : text;
+	try {
+		await provider.send({
+			conversationKey: event.conversationKey,
+			address: event.address,
+			text: bounded,
+			kind: "message",
+			eventId: `control:${digest(key).slice(0, 16)}`,
+			...(final ? { final: true } : {}),
+		});
+	} catch (error) {
+		const said = isShippedChannelProvider(provider)
+			? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
+			: undefined;
+		warn(`Channel ${name}: a reply to an owner control word was not sent${said ? ` (${said})` : ""}.`);
+	}
 }

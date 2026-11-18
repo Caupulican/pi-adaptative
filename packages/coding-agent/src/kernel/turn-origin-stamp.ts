@@ -44,6 +44,8 @@ export interface TurnOriginRecord {
 	readonly thirdParty?: true;
 	/** The sender's own id for this delivery (a channel's batch id), so it finds the turn that carried it. */
 	readonly ref?: string;
+	/** Scheduled occurrence selected by the verified owner whose phone command opened this turn. */
+	readonly routineRef?: string;
 	/**
 	 * The third party's words as the owner reads them, without the frame written for the model. The screen shows this, never
 	 * the framed text.
@@ -53,6 +55,10 @@ export interface TurnOriginRecord {
 	readonly from?: string;
 	/** Mail only: its place in its chain of mails, from 1 (the first mail after words from outside the agents) to `MAX_TURN_ORIGIN_HOP`. */
 	readonly hop?: number;
+}
+
+export function isRoutineBotOccurrenceRef(value: unknown): value is string {
+	return typeof value === "string" && /^routine:[a-f0-9]{32}$/.test(value);
 }
 
 export const MAX_TURN_ORIGIN_CHANNEL_CHARS = 128;
@@ -120,6 +126,11 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 		return undefined;
 	// A sender and a place in a chain come together, only on mail: an agent's own (never a third party's) or one a third party's words reached.
 	if ((record.from === undefined) !== (record.hop === undefined)) return undefined;
+	if (
+		record.routineRef !== undefined &&
+		(record.k !== "owner-channel" || !isRoutineBotOccurrenceRef(record.routineRef))
+	)
+		return undefined;
 	if (record.k === "agent-mail" && (record.from === undefined || record.thirdParty !== undefined)) return undefined;
 	if (record.from !== undefined && record.k !== "agent-mail" && record.thirdParty !== true) return undefined;
 	if (
@@ -138,6 +149,7 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 		...(record.verified === true ? { verified: true as const } : {}),
 		...(record.thirdParty === true ? { thirdParty: true as const } : {}),
 		...(record.ref !== undefined ? { ref: record.ref as string } : {}),
+		...(typeof record.routineRef === "string" ? { routineRef: record.routineRef } : {}),
 		...(record.shown !== undefined ? { shown: record.shown as string } : {}),
 		...(record.from !== undefined ? { from: record.from as string, hop: record.hop as number } : {}),
 	};
