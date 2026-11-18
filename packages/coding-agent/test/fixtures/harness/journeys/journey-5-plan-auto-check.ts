@@ -16,7 +16,6 @@ import {
 	stepTaskLines,
 	stepTrack,
 } from "./journey-5-shared.ts";
-import { latestBatchResults } from "./shared.ts";
 
 const TITLE = "Count the uses of the retry limit and state the count";
 const COUNT = "grep -c MAX_RETRIES src/limits.ts";
@@ -81,10 +80,18 @@ export async function runJourney5PlanAutoCheckPhase(world: HarnessWorld, session
 				checks: [{ command: COUNT, result: "passed" }],
 			}),
 			check: (request) => {
-				const recount = latestBatchResults(request).find((result) => result.toolName === "bash");
-				if (recount?.isError || recount?.text.trim() !== "1") {
-					throw new Error(`the verifier's own count did not run: ${recount?.text ?? "no result"}`);
-				}
+				const recount = request.context.messages.findLast(
+					(message) => message.role === "toolResult" && message.toolCallId === "j5-auto-recount-1",
+				);
+				if (recount?.role !== "toolResult") throw new Error("the verifier's own count did not run");
+				expect(recount.toolName).toBe("bash");
+				expect(recount.isError).toBe(false);
+				expect(recount.content).toHaveLength(2);
+				const [stdout, receipt] = recount.content;
+				expect(stdout?.type === "text" && stdout.text.trim()).toBe("1");
+				expect(receipt?.type === "text" && receipt.text).toMatch(
+					/^Host command receipt\. For submit_report\.checks, use \{"receiptId":"c-[0-9a-f]{12}","result":"passed"\}$/,
+				);
 			},
 		},
 	);
