@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import { expect } from "vitest";
+import { continuousChatSpendFile } from "../../../../src/core/agent-paths.ts";
+import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import {
 	type CiAttemptTerminalEvent,
 	type CiCurrentObservation,
@@ -39,6 +41,7 @@ import { runJourney1HostEventWorkersPhase } from "./journey-1-host-event-workers
 import {
 	icmContinuousSettings,
 	icmContinuousStore,
+	icmReadContinuousNodes,
 	icmReadContinuousRecords,
 	icmWaitForChatIdle,
 	latestBatchResults,
@@ -285,6 +288,22 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			const off = routineStore().subscribe(check);
 			check();
 		});
+	// A host wake can queue another compaction while the preceding physical summary still owns the accounting slot.
+	// Classify only this owner's actual overlap, after its exact charge and published leaf have been observed.
+	const holdLine = "Memory summaries wait for response usage accounting to recover.";
+	const warningMark = world.warnings.length;
+	const holds: Array<{ token?: string; leaf: number }> = [];
+	const observeHold = owner.session.subscribe((event) => {
+		if (event.type !== "warning" || event.message !== holdLine) return;
+		const step = /^host-events-compaction-(\d+)\+1:host-events-compaction-\1\+1$/.exec(
+			world.provider.reached.at(-1) ?? "",
+		);
+		if (!step) return;
+		const raw = world.io.peekFile(continuousChatSpendFile(agentDir));
+		const state = raw && (JSON.parse(raw) as { circuits: Record<string, { status: string; token: string }> });
+		const flights = state ? Object.values(state.circuits).filter((circuit) => circuit.status === "flight") : [];
+		holds.push({ token: flights.length === 1 ? flights[0]?.token : undefined, leaf: Number(step[1]) });
+	});
 	const initialRequests = rootRequests();
 	try {
 		await runJourney1CiCommandPhase(world, subject);
@@ -768,6 +787,29 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await icmWaitForChatIdle(world, agentDir, 8, (records) =>
 			records.some((record) => record.kind === "work" && record.text.includes(success.eventId)),
 		);
+		for (const { token, leaf } of holds) {
+			expect(token, "an accounting overlap belongs to a live physical summary").toBeDefined();
+			expect(
+				holds.filter((hold) => hold.token === token),
+				"the same charge produces one hold warning",
+			).toHaveLength(1);
+			const receipts = owner.sessionManager.getEntries().filter((entry) => {
+				const report = resolveSemanticUsageEntry(entry)?.report;
+				return (
+					report?.route === "history_summary" &&
+					report.reportId === token &&
+					owner.sessionManager.isEntryPersisted(entry.id)
+				);
+			});
+			expect(receipts, "the held flight has exactly one persisted receipt").toHaveLength(1);
+			expect(icmReadContinuousNodes(world, icmContinuousStore(agentDir))).toContainEqual(
+				expect.objectContaining({ level: 0, ordinal: leaf }),
+			);
+			const index = world.warnings.indexOf(holdLine, warningMark);
+			expect(index).toBeGreaterThanOrEqual(warningMark);
+			world.warnings.splice(index, 1);
+		}
+		observeHold();
 		const rememberedEvents = icmReadContinuousRecords(world, icmContinuousStore(agentDir)).filter(
 			(record) => record.text.includes(currentFailure.eventId) || record.text.includes(success.eventId),
 		);
@@ -823,6 +865,7 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await runJourney1GithubRoutinesPhase(world, { paths, repository });
 		await runJourney1GithubRoutineProgressPhase(world, { paths, repository });
 	} finally {
+		observeHold();
 		expectedSeal?.release.release();
 		abort.abort();
 		await runtime.source.stop();
