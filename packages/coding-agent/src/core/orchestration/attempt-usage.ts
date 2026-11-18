@@ -41,7 +41,7 @@ export function projectAttemptUsage(
 	return usage && structuredClone(usage);
 }
 
-/** Generation accounting owns late receipts. A legacy checkpoint and terminal result report overlapping cost
+/** Generation accounting owns late receipts. A checkpoint and terminal result report overlapping cost
  * for the same attempt; the strongest recorded amount includes work after a checkpoint without counting it twice. */
 export function recordedAttemptCostUsd(
 	attempt: Pick<AttemptRuntimeState, "checkpointIds" | "usageAccounting" | "result">,
