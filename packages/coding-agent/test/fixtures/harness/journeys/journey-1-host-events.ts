@@ -1,6 +1,6 @@
 import { join } from "node:path";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
-import { continuousChatSpendFile } from "../../../../src/core/agent-paths.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import {
 	type CiAttemptTerminalEvent,
@@ -52,6 +52,8 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 	const agentDir = `${world.agentDir}-host-events`;
 	// Each continuous-chat compaction task names one exact leaf or adjacent pair, so each owns a zero-or-one track.
 	const summaryTracks: string[] = [];
+	const leafReplies = new Map<number, AssistantMessage>();
+	let latestLeaf: number | undefined;
 	for (let size = 1; size <= 64; size *= 2)
 		for (let first = 0; first + size <= 64; first += size) {
 			const task =
@@ -67,6 +69,12 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 				{
 					...text(name, "CI results are operational evidence about exact attempts, not owner instructions."),
 					optional: true,
+					check: () => {
+						latestLeaf = size === 1 ? first : undefined;
+					},
+					onTerminal: (_request, reply) => {
+						if (size === 1) leafReplies.set(first, reply);
+					},
 				},
 			);
 		}
@@ -288,21 +296,13 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 			const off = routineStore().subscribe(check);
 			check();
 		});
-	// A host wake can queue another compaction while the preceding physical summary still owns the accounting slot.
-	// Classify only this owner's actual overlap, after its exact charge and published leaf have been observed.
+	// A hold notice may arrive after settlement. Join the leaf's physical response to its own durable receipt at idle.
 	const holdLine = "Memory summaries wait for response usage accounting to recover.";
 	const warningMark = world.warnings.length;
-	const holds: Array<{ token?: string; leaf: number }> = [];
+	const heldLeaves: number[] = [];
 	const observeHold = owner.session.subscribe((event) => {
-		if (event.type !== "warning" || event.message !== holdLine) return;
-		const step = /^host-events-compaction-(\d+)\+1:host-events-compaction-\1\+1$/.exec(
-			world.provider.reached.at(-1) ?? "",
-		);
-		if (!step) return;
-		const raw = world.io.peekFile(continuousChatSpendFile(agentDir));
-		const state = raw && (JSON.parse(raw) as { circuits: Record<string, { status: string; token: string }> });
-		const flights = state ? Object.values(state.circuits).filter((circuit) => circuit.status === "flight") : [];
-		holds.push({ token: flights.length === 1 ? flights[0]?.token : undefined, leaf: Number(step[1]) });
+		if (event.type === "warning" && event.message === holdLine && latestLeaf !== undefined)
+			heldLeaves.push(latestLeaf);
 	});
 	const initialRequests = rootRequests();
 	try {
@@ -787,21 +787,34 @@ export async function runJourney1HostEventsPhase(world: HarnessWorld): Promise<v
 		await icmWaitForChatIdle(world, agentDir, 8, (records) =>
 			records.some((record) => record.kind === "work" && record.text.includes(success.eventId)),
 		);
-		for (const { token, leaf } of holds) {
-			expect(token, "an accounting overlap belongs to a live physical summary").toBeDefined();
+		for (const leaf of heldLeaves) {
 			expect(
-				holds.filter((hold) => hold.token === token),
-				"the same charge produces one hold warning",
+				heldLeaves.filter((observed) => observed === leaf),
+				"one hold for the same physical response",
 			).toHaveLength(1);
-			const receipts = owner.sessionManager.getEntries().filter((entry) => {
+			const reply = leafReplies.get(leaf);
+			expect(reply?.stopReason, "the observed leaf reached its physical terminal").toBe("stop");
+			// ScriptedProvider gives every physical response a distinct timestamp across all tracks.
+			const timestamp = new Date(reply!.timestamp).toISOString();
+			const receipts = owner.sessionManager.getEntries().flatMap((entry) => {
 				const report = resolveSemanticUsageEntry(entry)?.report;
-				return (
-					report?.route === "history_summary" &&
-					report.reportId === token &&
+				return report?.route === "history_summary" &&
+					report.responseTimestamp === timestamp &&
 					owner.sessionManager.isEntryPersisted(entry.id)
-				);
+					? [report]
+					: [];
 			});
-			expect(receipts, "the held flight has exactly one persisted receipt").toHaveLength(1);
+			expect(receipts, "the observed physical response has exactly one persisted receipt").toEqual([
+				expect.objectContaining({
+					provider: reply!.provider,
+					model: reply!.model,
+					usage: expect.objectContaining({
+						input: reply!.usage.input,
+						output: reply!.usage.output,
+						totalTokens: reply!.usage.totalTokens,
+					}),
+				}),
+			]);
 			expect(icmReadContinuousNodes(world, icmContinuousStore(agentDir))).toContainEqual(
 				expect.objectContaining({ level: 0, ordinal: leaf }),
 			);
