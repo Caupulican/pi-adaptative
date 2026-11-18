@@ -42,6 +42,7 @@ interface HostLockRecord extends ProcessOwner {
 export interface LinkHostOwner {
 	readonly pid: number;
 	readonly standing: OwnerStanding;
+	readonly away?: boolean;
 }
 
 export type HostLockResult =
@@ -108,8 +109,8 @@ export class HostLock {
  * atomic replace under the file's lock), so a lock file that names no readable owner was never a session's hold and
  * is replaced.
  */
-export function takeHostLock(agentDir: string, name = LOCK_FILE): HostLockResult {
-	return takeProcessLock(lockPath(agentDir, name));
+export function takeHostLock(agentDir: string, name = LOCK_FILE, away = false): HostLockResult {
+	return takeProcessLock(lockPath(agentDir, name), away ? "away" : undefined);
 }
 
 /**
@@ -174,12 +175,14 @@ export function processLockHolder(path: string):
 		: { owner: record, standing, token: record.token, ...(record.holder ? { holder: record.holder } : {}) };
 }
 
-/** The session hosting the link here, when one other than this process holds the lock. */
+/** The holder of the listener, including another session simulated in the same process. */
 export function linkHostOwner(agentDir: string, name = LOCK_FILE): LinkHostOwner | undefined {
 	const record = readRecord(lockPath(agentDir, name));
-	if (!record || record.pid === process.pid) return undefined;
+	if (!record) return undefined;
 	const standing = judgeOwner(record);
-	return standing === "dead" ? undefined : { pid: record.pid, standing };
+	return standing === "dead"
+		? undefined
+		: { pid: record.pid, standing, ...(record.holder === "away" ? { away: true } : {}) };
 }
 
 /**

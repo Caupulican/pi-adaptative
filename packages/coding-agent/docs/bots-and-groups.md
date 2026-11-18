@@ -321,7 +321,9 @@ see [Scheduled work](proactivity.md#scheduled-work).
 
 ### Named schedules across devices
 
-Use `/bot schedule add <routine-id> <bot-id> <interval> <prompt>` to schedule a named bot. The confirmation and `/bot schedule list` show its next slot and unattended readiness. An open root session dispatches these schedules. If every terminal closes before a slot, the daemon queues it for a root to dispatch. The daemon can still host a bot with work already in its inbox.
+Use `/bot schedule add <routine-id> <bot-id> <interval> <prompt>` to schedule a named bot. The confirmation and `/bot schedule list` show its next slot and unattended readiness. The schedule records the project and the session that saved it. With unattended execution enabled, the daemon can deliver a due slot to the named bot and run it in that project after the last terminal closes. The bot uses its existing unattended spend allowance. A bot that needs a profile waits for a root session. For a schedule saved before project capture, use `/bot schedule set` from its intended project to enable unattended dispatch.
+
+A running daemon can keep a previously enabled `/remote listen` address available while the coordinator desktop is closed. The paired executor must remain online to run the job. The returning desktop takes the listener back on the same address.
 
 A verified owner can select the same bot and schedule from the phone. After a scheduled bot places a job on a paired machine, status on either device reads that occurrence's machine, job ID and result. See [phone task commands](channels.md#control-a-named-bot-task).
 
@@ -463,6 +465,11 @@ How it holds together:
   messages, `/remote listen` and `/remote stop` go through that session. When the hosting session stops the hub or
   closes, a waiting session takes the hub over; a lock left by a session that crashed is replaced at the next start,
   once that session's process is proven gone. A revoke from any session cuts the machine at once.
+- With `routines.away.enabled` on, an enabled listener also keeps the detached daemon running. After the last desktop
+  closes, the daemon takes the saved address and lock on its next renewal (every ten seconds). Paired machines reconnect
+  with their existing credentials. The daemon carries replies and job frames. The session that placed the work applies
+  its recorded outcome when it returns. Opening a desktop gives it the listener on the next renewal. `/remote stop`
+  switches off the saved listener for both hosts.
 - State lives under `<agent dir>/remote/`: this machine's id and name, the machines allowed to join, the hubs joined, each
   machine's chat log, the host lock, and where each link stands (`links.json`: `joins` by hub address with the hub's id
   and the active features, `machines` by install id with the name and the active features). Secrets are stored for the

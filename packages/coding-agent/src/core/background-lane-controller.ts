@@ -1456,24 +1456,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	readonly routineAwayReader = () => this._routineAssembly.awayReader(this.getBotTeamStore());
+	readonly captureBotScheduleOrigin = () => ({
+		receiptOrigin: captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+		botProjectCwd: this.deps.getCwd(),
+	});
 
 	/** What the session's routine runtime holds (`routines/routine-holder.ts`); undefined where it holds none. */
 	routineScope(): RoutineScope | undefined {
 		return this._routines.scope();
 	}
 
-	/**
-	 * The bot daemon's channel host serves this session's channels (`hostedChannels: "daemon"`, set before the inputs
-	 * start): the session starts no channel, takes no hold, and never launches or reconciles the daemon.
-	 */
+	/** The daemon hosts this phone session's channels and remote listener. Set before session inputs start. */
 	hostChannelsInDaemon(): void {
 		this._channelsHostedByDaemon = true;
 	}
 
-	/**
-	 * The hands-off inputs a root session starts once it binds: persistent routines, the registered channels and acting
-	 * ahead on the checkout's failing CI.
-	 */
+	/** Starts the persistent routines, remote hub, channels and failing-CI review owned by this session. */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
 		const { standing } = this.deps;
@@ -1809,12 +1807,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	getRemoteHub(): RemoteHubController {
 		if (!this._remoteHub) {
 			this._remoteHub = new RemoteHubController({
+				onConfigChanged: () => this._daemonKeeper.ensure(),
 				agentDir: this.deps.getAgentDir(),
 				getStore: () => this.getBotTeamStore(),
 				timers: this.deps.getTimers().port("orchestration"),
 				jobs: {
 					session: this,
-					placementOnly: !this.deps.standing.ownsProcessSingletons,
+					placementOnly: !this.deps.standing.ownsProcessSingletons || this._channelsHostedByDaemon,
 					routineJobScope: (receipt) => placedRoutineJobScope(this.deps.getSessionManager(), receipt),
 					sessionId: () => this.deps.getSessionId(),
 					cwd: () => this.deps.getCwd(),

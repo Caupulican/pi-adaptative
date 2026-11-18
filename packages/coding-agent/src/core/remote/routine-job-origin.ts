@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { visitSessionAncestry } from "../../kernel/session/session-tree.ts";
 import { isRoutineBotOccurrenceRef, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { botHomeName } from "../agent-paths.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -47,25 +48,26 @@ export function placedRoutineJobScope(manager: SessionManager, receipt: WorkerRe
 		return undefined;
 	const home = botHomeOfDir(manager.getStorageRoots().agentDir, dirname(receipt.sessionFile));
 	if (!home) return undefined;
-	let id: string | null = receipt.leafId;
 	let ref: string | null = null;
 	const visited: SessionEntry[] = [];
-	while (id) {
-		const entry = manager.getEntry(id);
-		if (!entry) break;
-		const cached = receiptSources.get(entry);
-		if (cached !== undefined) {
-			ref = cached;
-			break;
-		}
-		visited.push(entry);
-		const origin = entryTurnOrigin(entry);
-		if (isAddressedInput(entry.type === "message" ? entry.message.role : undefined, origin)) {
-			ref = sourceRef(origin) ?? null;
-			break;
-		}
-		id = entry.parentId;
-	}
+	visitSessionAncestry(
+		manager.getEntry(receipt.leafId),
+		{ size: manager.getEntryCount(), get: (id) => manager.getEntry(id) },
+		(entry) => {
+			const cached = receiptSources.get(entry);
+			if (cached !== undefined) {
+				ref = cached;
+				return false;
+			}
+			visited.push(entry);
+			const origin = entryTurnOrigin(entry);
+			if (isAddressedInput(entry.type === "message" ? entry.message.role : undefined, origin)) {
+				ref = sourceRef(origin) ?? null;
+				return false;
+			}
+			return undefined;
+		},
+	);
 	for (const entry of visited) receiptSources.set(entry, ref);
 	return ref ? scope(basename(home.homeDir), ref) : undefined;
 }

@@ -36,18 +36,28 @@ export function routineAwayReadiness(routine: RoutineDefinitionView, host: Routi
 			reason: routine.enabled ? "The schedule has ended." : "The schedule is paused.",
 		};
 	const reason = blockedAway(routine, host);
-	return reason ? { ...facts, state: "waiting", reason } : { ...facts, state: "eligible" };
+	if (reason) return { ...facts, state: "waiting", reason };
+	return {
+		...facts,
+		state: "eligible",
+		...(routine.target.kind === "bot"
+			? {
+					reason:
+						"Ready for inbox delivery. The bot checks model access and its spend allowance before starting the turn.",
+				}
+			: {}),
+	};
 }
 
 function blockedAway(routine: RoutineDefinitionView, host: RoutineAwayHostFacts): string | undefined {
 	if (!host.enabled) return "Unattended execution is off in the owner's settings.";
 	if (routine.target.kind === "team") return "A root session dispatches group schedules.";
-	if (host.bot?.profileId) return `A root session must open the bot's profile ${host.bot.profileId}.`;
-	if (routine.target.kind === "bot") return "The daemon queues this schedule for a root session to dispatch.";
+	if (routine.target.kind !== "bot" && host.bot?.profileId)
+		return `A root session must open the bot's profile ${host.bot.profileId}.`;
 	if (routine.schedule.kind === "event" && routine.schedule.source === "watch") {
 		if (!host.bot) return "The session that armed this watch must be open to evaluate it.";
 	} else {
-		const reason = awaySavedRoutineRefusal(routine, host.models);
+		const reason = awaySavedRoutineRefusal(routine, host.models, host.bot);
 		if (reason) return reason;
 		if (routine.schedule.kind === "event" && !host.ciEvents) return "The event feed is disabled.";
 	}

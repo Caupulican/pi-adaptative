@@ -7,6 +7,7 @@ import type { RemoteHubController } from "../../../../src/core/remote/hub-contro
 import { JobStore } from "../../../../src/core/remote/job-store.ts";
 import { routineJobScope } from "../../../../src/core/remote/routine-job-origin.ts";
 import { readRoutineBotJobResults, routineJobStatusLines } from "../../../../src/core/remote/routine-job-results.ts";
+import { routineAwayReadiness } from "../../../../src/core/routines/routine-away-readiness.ts";
 import { formatRoutineList } from "../../../../src/modes/interactive/bot-team-lines.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -84,6 +85,18 @@ export async function scheduledBotJob(
 	const now = world.timers.port("routines").now();
 	const sibling = add("later-limit-check", now + 86_400_000);
 	const routine = add("paired-limit-check", now + 1_000);
+	const awayFacts = { daemon: "running" as const, autostart: "off" as const, enabled: true, ciEvents: true, now };
+	expect(routineAwayReadiness(routine, awayFacts)).toMatchObject({
+		state: "waiting",
+		reason: expect.stringContaining("saved project"),
+	});
+	const botRecord = store.getBot(name)!;
+	const pinned = { ...routine, ...root.backgroundLanes.captureBotScheduleOrigin() };
+	expect(routineAwayReadiness(pinned, { ...awayFacts, bot: botRecord }).state).toBe("eligible");
+	expect(routineAwayReadiness(pinned, { ...awayFacts, bot: { ...botRecord, profileId: "reviewer" } })).toMatchObject({
+		state: "waiting",
+		reason: expect.stringContaining("reviewer"),
+	});
 	const rootWake = createBarrier();
 	enqueueHubRoot(world, {
 		name: "j10-scheduled-routine-receipt",

@@ -1,6 +1,7 @@
 /** The host of a named bot executes a verified channel command on that bot's existing session. Its inbox holds only a
  * pointer. Identity, target, words and spend reservation come from the channel's private journal. */
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { readBatchOutcome } from "../channels/batch-outcome.ts";
 import { type ChannelBatchRecord, ChannelJournal, DAY_MS, digest } from "../channels/channel-journal.ts";
 import {
@@ -86,6 +87,10 @@ async function givePhoneCommand(
 				item.reply = reply;
 			}
 		});
+	if (command.projectBound && realPathIdentity(command.cwd) !== realPathIdentity(entry.builtFor.cwd())) {
+		finish("The selected occurrence belongs to a different project. Check its status before steering again.");
+		return;
+	}
 	const settings = entry.builtFor.settings();
 	const delivery = entry.session.ownerChannel;
 	const { selection, sender, policyHash } = command;

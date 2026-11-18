@@ -37,6 +37,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type {
 	BotDeliveryOptions,
 	BotDeliveryOrigin,
@@ -48,7 +49,6 @@ import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/work
 import { type GoalProgress, unfinishedGoalProgress } from "../goals/goal-progress.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import { createBotMailToolDefinition } from "../tools/bot-mail.ts";
 import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -92,7 +92,7 @@ import {
 	type BotSessionHostPorts,
 	inboxSender,
 } from "./bot-session-host-ports.ts";
-import { type BotSessionEntry, BotSessionLoader } from "./bot-session-load.ts";
+import { type BotSessionEntry, BotSessionLoader, botWorkHoldsSession } from "./bot-session-load.ts";
 import { BotOwedWork, owesWatchWork } from "./bot-session-owed-work.ts";
 import { botMayRunAsSession, profileBotSession } from "./bot-session-profile.ts";
 import type { BotMeteredRuns } from "./bot-spend-window.ts";
@@ -550,6 +550,11 @@ export class BotSessionHost {
 	private async giveRecord(agentId: string, message: BotInboxMessage): Promise<BotInboxGiven> {
 		const entry = this.entries.get(agentId);
 		if (!entry || this.stopped) return "gone";
+		if (message.projectBound && realPathIdentity(entry.builtFor.cwd()) !== realPathIdentity(message.from.cwd)) {
+			if (!this.isBusy(entry) && !unfinishedGoalProgress(entry.session.getGoalStateSnapshot()))
+				this.closeIfIdle(entry, true);
+			return this.entries.has(agentId) ? "keep" : "gone";
+		}
 		if (message.phone)
 			return admitBotPhoneCommand(
 				entry,
@@ -568,6 +573,7 @@ export class BotSessionHost {
 			if (this.isBusy(entry)) return "keep";
 			return this.answers.settle(entry, origin) ? "take" : "keep";
 		}
+
 		if (origin !== undefined && this.isBusy(entry)) return "keep";
 		await this.give(entry, message.text, message.mode, origin ?? "owner");
 		return origin === undefined ? "take" : "given";
@@ -774,15 +780,7 @@ export class BotSessionHost {
 	 * idleness every change of the loaded session waits on: its idle close, a record change, a refusal's retake, a release.
 	 */
 	private holdsLoaded(entry: BotSessionEntry): boolean {
-		const state = entry.session.getSessionWorkState();
-		const closesAt = this.idleTimers().now() + BOT_SESSION_IDLE_BOUND_MS;
-		return (
-			entry.inFlight > 0 ||
-			entry.session.deliverablePendingMessageCount > 0 ||
-			state.busyBesideWorkers ||
-			state.hasRunningWorker ||
-			!onlyWorkerRetriesWaitBeyond(state, closesAt)
-		);
+		return botWorkHoldsSession(entry, this.idleTimers().now() + BOT_SESSION_IDLE_BOUND_MS);
 	}
 
 	private touch(entry: BotSessionEntry): void {
@@ -813,11 +811,14 @@ export class BotSessionHost {
 	}
 
 	/** The idle bound ended: the session closes unless its work, its inbox, a record change or what it is owed keeps it. */
-	private closeIfIdle(entry: BotSessionEntry): void {
+	private closeIfIdle(entry: BotSessionEntry, projectHandoff = false): void {
 		if (this.entries.get(entry.agentId) !== entry || this.holdsLoaded(entry)) return;
 		// A message or a stop another process sent is taken before the session may close (the watch may have missed it).
 		const agentDir = this.ports.agentDir();
-		if (botInboxWaiting(agentDir, entry.agentId) || botInboxStopWaiting(agentDir, entry.agentId)) {
+		if (
+			(!projectHandoff && botInboxWaiting(agentDir, entry.agentId)) ||
+			botInboxStopWaiting(agentDir, entry.agentId)
+		) {
 			this.takeInbox(entry.agentId);
 			this.armIdle(entry);
 			return;

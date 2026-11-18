@@ -117,7 +117,7 @@ export function admitClockRoutine(
 	const schedule = stored.schedule;
 	const unchanged = { changed: false, journalFull: false };
 	if (schedule.kind === "event") return unchanged;
-	const parentOrigin = stored.target.kind === "session" ? routineReceiptOrigin(stored) : input.receiptOrigin;
+	const parentOrigin = routineReceiptOrigin(stored) ?? input.receiptOrigin;
 	if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) return unchanged;
 	const unsupported = routineZoneUnsupported(schedule);
 	if (unsupported !== undefined) {
@@ -550,6 +550,7 @@ export function claimDueRoutineOccurrences(
 		if (output.length >= limit) break;
 		if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
 		if (eligible && !eligible.has(id)) continue;
+		if (input.namedBotRevisions && input.namedBotRevisions.get(id) !== stored.revision) continue;
 		// An ended routine starts nothing more; `retireEndedRoutines` removes it once its runs are delivered.
 		if (routineEnded(stored, input.nowMs)) continue;
 		if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;

@@ -18,6 +18,7 @@ import type { HostLock } from "../remote/host-lock.ts";
 import type { AwayMeteredRunHold } from "../routines/away-metered-runs.ts";
 import { runAdmissionRefusal } from "../run-admission.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
+import { onlyWorkerRetriesWaitBeyond } from "../session-work-state.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
@@ -346,4 +347,16 @@ export class BotSessionLoader {
 			throw storeFailure(agentId, error, storeWithin);
 		}
 	}
+}
+
+/** Whether the loaded bot must retain its project and lock past this idle deadline. */
+export function botWorkHoldsSession(entry: BotSessionEntry, closesAt: number): boolean {
+	const state = entry.session.getSessionWorkState();
+	return (
+		entry.inFlight > 0 ||
+		entry.session.deliverablePendingMessageCount > 0 ||
+		state.busyBesideWorkers ||
+		state.hasRunningWorker ||
+		!onlyWorkerRetriesWaitBeyond(state, closesAt)
+	);
 }

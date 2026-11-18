@@ -403,10 +403,21 @@ export function bindHubMachine(
 	);
 }
 
-/** Whether the owner turned this machine's hub on (`hub.json`): a machine with a hub on is linked, joined or not. */
-export function hubTurnedOn(agentDir: string): boolean {
-	const stored = readJson(join(dirOf(agentDir), "hub.json"), false);
-	return isPlainRecord(stored) && stored.enabled === true;
+/** The address the owner configured with /remote listen, including whether it is still enabled. */
+export interface HubConfig {
+	readonly host: string;
+	readonly port: number;
+	readonly enabled: boolean;
+}
+
+export function readHubConfig(agentDir: string): HubConfig | undefined {
+	const value = readJson(join(dirOf(agentDir), "hub.json"), false);
+	return isPlainRecord(value) &&
+		typeof value.host === "string" &&
+		value.host.trim().length > 0 &&
+		isLinkPort(value.port)
+		? { host: value.host, port: value.port, enabled: value.enabled === true }
+		: undefined;
 }
 
 function readJoins(agentDir: string): JoinRecord[] | undefined {
@@ -469,12 +480,16 @@ export function removeJoin(agentDir: string, address: string): boolean {
 	});
 }
 
+function isLinkPort(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
 /** `host:port` (a bracketed IPv6 host allowed), or undefined. */
 export function parseAddress(raw: string): { host: string; port: number } | undefined {
 	const match = /^(?:\[([^\]]+)\]|([^:\s]+)):(\d{1,5})$/.exec(raw.trim());
 	if (!match) return undefined;
 	const port = Number(match[3]);
-	return port >= 1 && port <= 65535 ? { host: match[1] ?? match[2]!, port } : undefined;
+	return isLinkPort(port) ? { host: match[1] ?? match[2]!, port } : undefined;
 }
 
 /** Previously issued long-lived tokens can still enroll on a legacy hub. */

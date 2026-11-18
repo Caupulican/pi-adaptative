@@ -9,6 +9,7 @@
  * session are not held by anyone.
  */
 import type { RoutineDefinitionView } from "./routine-contract.ts";
+import { routineParentId } from "./routine-save-origin.ts";
 import { isWatchSchedule, liveWatches } from "./routine-watch-arming.ts";
 
 export type RoutineScope = "session" | "own-watches";
@@ -20,14 +21,13 @@ export interface RoutineHolder {
 
 /** Whether `holder`'s runtime holds `routine` (see the module comment). */
 export function holdsRoutine(
-	routine: Pick<RoutineDefinitionView, "target" | "schedule">,
+	routine: Pick<RoutineDefinitionView, "target" | "schedule" | "receiptOrigin">,
 	holder: RoutineHolder,
 ): boolean {
+	const parent = routineParentId(routine);
+	if (parent !== undefined && parent !== holder.sessionId) return false;
 	if (routine.target.kind !== "session") return holder.scope === "session";
-	return (
-		routine.target.parentSessionId === holder.sessionId &&
-		(holder.scope === "session" || isWatchSchedule(routine.schedule))
-	);
+	return holder.scope === "session" || isWatchSchedule(routine.schedule);
 }
 
 /**

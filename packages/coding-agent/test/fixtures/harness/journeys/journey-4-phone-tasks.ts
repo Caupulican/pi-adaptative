@@ -54,7 +54,8 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 		expect(journal.read().result.ownerTaskCommands?.filter((row) => row.action === "stop")).toHaveLength(1);
 		const paused = store.getRoutine("Review")!;
 		store.deleteRoutine("Review", paused.revision);
-		const replacement = store.upsertRoutine({ ...definition, createOnly: true });
+		const pinned = session.backgroundLanes.captureBotScheduleOrigin();
+		const replacement = store.upsertRoutine({ ...definition, ...pinned, createOnly: true });
 		expect(replacement.incarnationId).not.toBe(original.incarnationId);
 		await send(4, OWNER_ID, "stop task");
 		expect(api.texts().at(-1)).toContain("unavailable");
@@ -131,6 +132,11 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 		expect(api.texts().at(-1)).toContain("Checked the open blocker.");
 		// Model a backlog left by an earlier host with every steering slot and its daily allowance in use.
 		const retained = journal.read().result.ownerTaskCommands!.find((c) => c.action === "steer")!;
+		expect(retained).toMatchObject({
+			projectBound: true,
+			cwd: pinned.botProjectCwd,
+			occurrenceIds: [occurrence.occurrenceId],
+		});
 		journal.update(retained.admittedAt, (state) => {
 			state.ownerTaskCommands = Array.from({ length: MAX_PHONE_TASK_COMMANDS }, (_, i) => ({
 				...retained,

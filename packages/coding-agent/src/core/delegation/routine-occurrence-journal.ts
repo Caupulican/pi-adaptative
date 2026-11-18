@@ -151,6 +151,7 @@ export function createPendingOccurrence(
 		enabled: definition.enabled,
 		...(definition.executionSnapshot ? { executionSnapshot: definition.executionSnapshot } : {}),
 		...(definition.receiptOrigin ? { receiptOrigin: definition.receiptOrigin } : {}),
+		...(definition.botProjectCwd ? { botProjectCwd: definition.botProjectCwd } : {}),
 		...(definition.origin ? { origin: definition.origin } : {}),
 		...(definition.armedBy ? { armedBy: definition.armedBy } : {}),
 		...(definition.wake ? { wake: definition.wake } : {}),

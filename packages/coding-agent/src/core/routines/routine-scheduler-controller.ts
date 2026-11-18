@@ -10,6 +10,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { boundedRedactedDiagnosticText, cleanRedactBound } from "../security/secret-text.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { AWAY_OFF_BRANCH_REASON, AWAY_UNPINNED_REASON } from "./away-routine-admission.ts";
+import { type NamedBotScheduleClock, namedBotClockClaim } from "./named-bot-schedule.ts";
 import type { RoutineAwayClaimGate } from "./routine-away-spend.ts";
 import {
 	decideRoutineEvents,
@@ -38,14 +39,18 @@ import {
 import type { RoutineHolder, RoutineScope } from "./routine-holder.ts";
 import type { RoutineOriginLoss } from "./routine-origin-reach.ts";
 import { lostOriginRoutines, settleUndeliverableResults } from "./routine-origin-settlement.ts";
-import { type RoutineDeliveryReceipt, routineTurnOrigin } from "./routine-parent-input.ts";
-import type { RoutineRunFacts } from "./routine-progress.ts";
-import { routineInstructions } from "./routine-run-brief.ts";
+import type { RoutineDeliveryReceipt } from "./routine-parent-input.ts";
 import { routineReceiptOrigin } from "./routine-save-origin.ts";
 import { type RoutineNoticePort, RoutineStateNotices } from "./routine-state-notices.ts";
 import type { RoutineMessageResult, RoutineStorePort } from "./routine-store-port.ts";
 import { WATCH_WAKE_SUMMARY } from "./routine-watch-wake.ts";
-import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
+import {
+	type RoutineWorkerExecutor,
+	type RoutineWorkerRequest,
+	type RoutineWorkerState,
+	routineRunFacts,
+	routineWorkerRequest,
+} from "./routine-worker-executor.ts";
 
 const CLAIM_LEASE_MS = 120_000;
 const RETRY_DELAY_MS = 5_000;
@@ -53,35 +58,6 @@ const CLAIM_BATCH_SIZE = 8;
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** The one shape of a routine run's dispatch identity, also read back to find its attempts. */
-export function routineWorkerRequest(
-	occurrence: RoutineOccurrence,
-	intent: RoutineWorkerRequest["intent"],
-	dispatchKey: string,
-): RoutineWorkerRequest {
-	const turnOrigin = routineTurnOrigin(occurrence);
-	return {
-		intent,
-		instructions: routineInstructions(occurrence),
-		dispatchKey,
-		...(turnOrigin ? { turnOrigin } : {}),
-	};
-}
-
-/**
- * What a finished worker run tells its routine's progress record beyond outcome and summary: code facts only (the
- * result's reason code and its first error's code, never their text) and the run's own report.
- */
-function routineRunFacts(execution: RoutineWorkerState): RoutineRunFacts {
-	const step = execution.result?.errors[0]?.code;
-	const report = execution.result?.progress;
-	return {
-		reasonCode: execution.result?.reasonCode ?? execution.record.reasonCode ?? execution.record.status,
-		...(step ? { step } : {}),
-		...(report ? { report } : {}),
-	};
 }
 
 /**
@@ -233,6 +209,8 @@ interface RoutineSchedulerDeps {
 	readonly parentSessionId: string;
 	/** What this runtime holds of the saved routines (`routine-holder.ts`): a bot's own session, only its watches. */
 	readonly scope: RoutineScope;
+	readonly namedBotClock?: NamedBotScheduleClock;
+	projectBotFallback?(routine: RoutineDefinitionView): boolean;
 	readonly owner: string;
 	isDisposed(): boolean;
 	canDispatch(): boolean;
@@ -280,6 +258,7 @@ export class RoutineSchedulerController {
 	private unsubscribeCapacity: (() => void) | undefined;
 	private alarm: WallAlarm | undefined;
 	private pass: Promise<RoutineTickResult> | undefined;
+	private nextBotSlot = Number.POSITIVE_INFINITY;
 	private scheduled = false;
 	private dirty = false;
 	private disposed = false;
@@ -366,6 +345,8 @@ export class RoutineSchedulerController {
 	run(routineId: string, expectedRevision: number | undefined, commandId: string): string {
 		if (!this.active) throw new Error("Routine scheduler is disposed.");
 		const definition = this.deps.store.getRoutine(routineId);
+		const named = definition && this.deps.namedBotClock?.manual(definition, expectedRevision, commandId);
+		if (named) return named;
 		const saved = definition && routineReceiptOrigin(definition);
 		if (saved) this.deps.captureOriginGuard(saved)();
 		const occurrence = this.deps.store.claimManualRoutineOccurrence({
@@ -448,7 +429,7 @@ export class RoutineSchedulerController {
 
 	private assertClaim(occurrence: RoutineOccurrence): void {
 		if (!this.active) throw new Error("Routine execution owner is no longer active.");
-		this.deps.store.reload();
+		this.deps.store.reload(true);
 		const current = this.occurrences().find((entry) => entry.occurrenceId === occurrence.occurrenceId);
 		if (
 			!current?.claim ||
@@ -467,7 +448,14 @@ export class RoutineSchedulerController {
 	private async runPass(): Promise<RoutineTickResult> {
 		const result: RoutineTickResult = { dispatched: [], failed: [] };
 		this.stepFailed = false;
-		this.deps.store.reload();
+		this.deps.store.reload(true);
+		if (this.deps.namedBotClock)
+			this.attempt("named-bots", () => {
+				const pass = this.deps.namedBotClock!.advance();
+				this.nextBotSlot = pass.next;
+				result.dispatched.push(...pass.dispatched);
+				result.failed.push(...pass.failed);
+			});
 		this.attempt("undeliverable", () => this.settleUndeliverable());
 		this.attempt("delivery", () => this.deliverPending());
 		// A fault about an occurrence or routine that no longer exists is forgotten.
@@ -637,6 +625,8 @@ export class RoutineSchedulerController {
 		// runs it or releases it, so no run away is left holding its host and its charge.
 		const recoverable = this.occurrences().filter(
 			(entry) =>
+				(!entry.definition.botProjectCwd ||
+					(!namedBotClockClaim(entry) && !this.deps.namedBotClock?.owns(entry.definition))) &&
 				this.deferred.get(entry.occurrenceId) !== this.capacityRevision &&
 				(this.claimedAway(entry) ||
 					(this.deps.canUseOrigin(entry.parentOrigin) &&
@@ -734,6 +724,7 @@ export class RoutineSchedulerController {
 	}
 
 	private reconcile(occurrence: RoutineOccurrence): void {
+		if (namedBotClockClaim(occurrence)) return;
 		if (occurrence.target.kind === "session") {
 			const execution = this.deps.worker.find(this.request(occurrence));
 			if (execution) {
@@ -1094,7 +1085,7 @@ export class RoutineSchedulerController {
 		try {
 			const nowMs = this.deps.timers.now();
 			const waiting = new Set([...this.shareWait, ...(this.awayWait?.routines ?? []), ...this.awayHeld]);
-			let next = this.nextScheduledAt(nowMs, this.journalFull, waiting);
+			let next = Math.min(this.nextBotSlot, this.nextScheduledAt(nowMs, this.journalFull, waiting));
 			if (this.awayWait?.retryAt !== undefined) next = Math.min(next, this.awayWait.retryAt);
 			for (const occurrence of this.occurrences())
 				if (
@@ -1162,6 +1153,7 @@ export class RoutineSchedulerController {
 	 * pinned session clock routine.
 	 */
 	private schedulable(routine: RoutineDefinitionView): boolean {
+		if (routine.botProjectCwd && !this.deps.projectBotFallback?.(routine)) return false;
 		const origin = routineReceiptOrigin(routine);
 		if (origin && !this.deps.canUseOrigin(origin)) return false;
 		const away = this.deps.away;

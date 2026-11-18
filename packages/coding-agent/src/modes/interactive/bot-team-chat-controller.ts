@@ -22,6 +22,7 @@ import {
 import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
+import type { WorkerReceiptOrigin } from "../../core/orchestration/worker-receipt-origin.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { routineJobStatusLines } from "../../core/remote/routine-job-results.ts";
 import type { AwayService } from "../../core/routines/away-service.ts";
@@ -70,6 +71,7 @@ export interface BotTeamChatSessionPort {
 	/** The session's background lanes: the always-on service of its agent directory and its channels served away. */
 	readonly backgroundLanes?: {
 		readonly botChat?: { viewBotChatMessages(agentId: string): readonly AgentMessage[] };
+		captureBotScheduleOrigin?(): { receiptOrigin: WorkerReceiptOrigin; botProjectCwd: string };
 		routineAwayReader?(): (routine: RoutineDefinitionView) => string;
 		getAwayService(): AwayService;
 		readAwayChannelStatus(): readonly AwayChannelStatus[];
@@ -1070,6 +1072,7 @@ export class BotTeamChatController {
 					...revision,
 					routineId: rawRoutineId,
 					target: { kind: "bot", agentId },
+					...port.backgroundLanes?.captureBotScheduleOrigin?.(),
 					schedule: { kind: "interval", intervalMs },
 					prompt,
 				});

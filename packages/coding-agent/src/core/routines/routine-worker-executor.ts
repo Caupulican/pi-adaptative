@@ -8,6 +8,10 @@ import type { AttemptStatus, WorkerResultContract } from "../orchestration/contr
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { verificationSubjectAttempt } from "../orchestration/verification-identity.ts";
 import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
+import type { RoutineOccurrence } from "./routine-contract.ts";
+import { routineTurnOrigin } from "./routine-parent-input.ts";
+import type { RoutineRunFacts } from "./routine-progress.ts";
+import { routineInstructions } from "./routine-run-brief.ts";
 
 /** Attempt states that can still spend: a settled run away reads only attempts past them. */
 const LIVE_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set(["queued", "leased", "running", "suspended"]);
@@ -140,4 +144,33 @@ export class RoutineWorkerExecutor {
 		if (!state) throw new Error("Routine worker start returned without its durable dispatch identity.");
 		return { started: true, state };
 	}
+}
+
+/** The one shape of a routine run's dispatch identity, also read back to find its attempts. */
+export function routineWorkerRequest(
+	occurrence: RoutineOccurrence,
+	intent: RoutineWorkerRequest["intent"],
+	dispatchKey: string,
+): RoutineWorkerRequest {
+	const turnOrigin = routineTurnOrigin(occurrence);
+	return {
+		intent,
+		instructions: routineInstructions(occurrence),
+		dispatchKey,
+		...(turnOrigin ? { turnOrigin } : {}),
+	};
+}
+
+/**
+ * What a finished worker run tells its routine's progress record beyond outcome and summary: code facts only (the
+ * result's reason code and its first error's code, never their text) and the run's own report.
+ */
+export function routineRunFacts(execution: RoutineWorkerState): RoutineRunFacts {
+	const step = execution.result?.errors[0]?.code;
+	const report = execution.result?.progress;
+	return {
+		reasonCode: execution.result?.reasonCode ?? execution.record.reasonCode ?? execution.record.status,
+		...(step ? { step } : {}),
+		...(report ? { report } : {}),
+	};
 }

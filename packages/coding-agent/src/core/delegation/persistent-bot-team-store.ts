@@ -9,6 +9,7 @@ import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { HOST_EVENT_LISTENER_LIMITS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+import { namedBotClockWork } from "../routines/named-bot-schedule.ts";
 import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
@@ -53,7 +54,7 @@ import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from
 import { creationProvenance, routineWakeRefusal } from "../routines/routine-provenance.ts";
 import type { RoutineRetireInput } from "../routines/routine-retired.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
-import { parseRoutineSaveOrigin, routineSaveOriginRefusal } from "../routines/routine-save-origin.ts";
+import { routineSaveOriginRefusal, savedRoutineOrigin } from "../routines/routine-save-origin.ts";
 import { ROUTINE_STORE_VERSIONS, routineStoreFormatVersion } from "../routines/routine-store-format.ts";
 import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "../routines/routine-watch-edge.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
@@ -100,6 +101,7 @@ import {
 	botLiveState,
 	compareBotViews,
 	type PersistentBotView,
+	parseModelRef,
 	teamIdsOf,
 	workerLaneByAgentId,
 } from "./persistent-bot-view-state.ts";
@@ -375,27 +377,6 @@ export function parseDirectChatAddress(
 	}
 
 	return undefined;
-}
-
-function parseModelRef(rawRef: string): { provider: string; modelId: string } {
-	const trimmed = rawRef.trim();
-	const slashIndex = trimmed.indexOf("/");
-	if (slashIndex > 0 && slashIndex < trimmed.length - 1) {
-		return {
-			provider: trimmed.slice(0, slashIndex),
-			modelId: trimmed.slice(slashIndex + 1),
-		};
-	}
-	if (slashIndex === 0) {
-		return {
-			provider: "unknown",
-			modelId: trimmed.slice(1) || "default",
-		};
-	}
-	return {
-		provider: "unknown",
-		modelId: trimmed || "default",
-	};
 }
 
 export class PersistentBotTeamStore {
@@ -703,7 +684,10 @@ export class PersistentBotTeamStore {
 			// An earlier build ignores this key and drops it on its next write: the records are advisory, never schedule state.
 			...(this.retiredRoutines.size > 0 ? { routineRetired: Array.from(this.retiredRoutines.values()) } : {}),
 		};
-		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
+		const raw = JSON.stringify(data, null, 2);
+		writeFileAtomicSync(this.filePath, raw);
+		this.loadedDigest = createHash("sha256").update(raw).digest("hex");
+		this.botClockWork = undefined;
 		this._cachedTeamList = undefined;
 		this.mutationChanged = true;
 	}
@@ -730,6 +714,11 @@ export class PersistentBotTeamStore {
 	}
 
 	private _cachedTeamList?: PersistentTeamRecord[];
+	private botClockWork?: ReturnType<typeof namedBotClockWork>;
+	namedBotWork() {
+		this.botClockWork ??= namedBotClockWork(this.routines.values(), this.routineOccurrences.values());
+		return this.botClockWork;
+	}
 
 	/** Re-reads the shared store file. Every mutation starts here so another session's changes are not overwritten. */
 	reload(observeOnly = false): boolean {
@@ -770,6 +759,7 @@ export class PersistentBotTeamStore {
 			legacyRoutinesExposed: this.legacyRoutinesExposed,
 			cachedTeamList: this._cachedTeamList,
 		};
+		this.botClockWork = undefined;
 		this._cachedTeamList = undefined;
 		this.bots.clear();
 		this.teams.clear();
@@ -1296,6 +1286,7 @@ export class PersistentBotTeamStore {
 				throw new Error("Routine revision counter is exhausted.");
 			const revision = this.routineRevisionCounter + 1;
 			this.routineRevisionCounter = revision;
+
 			const definition: PersistentRoutineDefinition = {
 				routineId: normalizedId,
 				incarnationId: existing?.incarnationId ?? randomUUID(),
@@ -1304,7 +1295,7 @@ export class PersistentBotTeamStore {
 				prompt: input.prompt.trim(),
 				schedule,
 				enabled: input.enabled ?? existing?.enabled ?? true,
-				...parseRoutineSaveOrigin(input),
+				...savedRoutineOrigin(input, existing),
 				...creationProvenance(existing, intake, input.armedBy, input.wake, input.workerScope),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
@@ -1907,6 +1898,7 @@ export class PersistentBotTeamStore {
 			for (const routine of [...this.routines.values()]) {
 				if (
 					routine.target.kind === "session" ||
+					routine.receiptOrigin !== undefined ||
 					!routine.enabled ||
 					routine.nextRunAt > nowMs ||
 					routine.lastStatus === "queued"

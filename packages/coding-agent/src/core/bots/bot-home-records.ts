@@ -141,7 +141,7 @@ function forgetLeftover(dir: string, name: string): void {
 export function readHomeRecords<T>(
 	dir: string,
 	pattern: RegExp,
-	parse: (value: unknown) => T | undefined,
+	parse: (value: unknown, name: string) => T | undefined,
 	unreadable: (file: string, reason: string, setAside: boolean) => void,
 ): BotHomeRecord<T>[] {
 	const records: BotHomeRecord<T>[] = [];
@@ -150,7 +150,7 @@ export function readHomeRecords<T>(
 		let message: T | undefined;
 		let reason = "not a record";
 		try {
-			message = parse(JSON.parse(readFileSync(file, "utf8")));
+			message = parse(JSON.parse(readFileSync(file, "utf8")), name);
 		} catch (error) {
 			// Taken (deleted) by its host while it was listed: it is gone, not unreadable.
 			if (fileIdentity(file) === undefined) {

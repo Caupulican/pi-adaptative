@@ -49,7 +49,7 @@ export interface RemoteHubEvents {
 	 * A machine's answer to a message this hub sent; `machine` is its name, `id` the message's id. `final` is false for an
 	 * interim answer; absent is final (a machine on a build without the field).
 	 */
-	reply(machine: string, id: string, text: string, final?: boolean): void;
+	reply(machine: string, id: string, text: string, final: boolean | undefined, machineId: string): void;
 	/** A machine arrived (true) or left (false), by name. */
 	presence(machine: string, connected: boolean): void;
 }
@@ -77,6 +77,7 @@ export class RemoteHub {
 	private server: Server | undefined;
 	/** Joined machines by install id. */
 	private readonly live = new Map<string, Live>();
+	private readonly handshakes = new Set<Socket>();
 	private ticker: ReturnType<typeof setInterval> | undefined;
 	private recordsWatcher: FSWatcher | undefined;
 
@@ -119,6 +120,8 @@ export class RemoteHub {
 		this.ticker = undefined;
 		this.recordsWatcher?.close();
 		this.recordsWatcher = undefined;
+		for (const socket of this.handshakes) socket.destroy();
+		this.handshakes.clear();
 		for (const [machineId, entry] of this.live) {
 			entry.socket.destroy();
 			this.live.delete(machineId);
@@ -127,8 +130,8 @@ export class RemoteHub {
 		const server = this.server;
 		this.server = undefined;
 		if (server) {
-			await new Promise<void>((resolve) => server.close(() => resolve()));
 			this.report();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
 		}
 	}
 
@@ -250,6 +253,7 @@ export class RemoteHub {
 	}
 
 	private accept(socket: Socket): void {
+		this.handshakes.add(socket);
 		socket.setEncoding("utf8");
 		socket.setNoDelay(true);
 		const lines = new LineBuffer();
@@ -264,6 +268,7 @@ export class RemoteHub {
 		};
 		socket.on("error", () => {});
 		socket.on("close", () => {
+			this.handshakes.delete(socket);
 			clearTimeout(timer);
 			if (entry !== undefined && this.live.get(entry.machineId)?.socket === socket) {
 				this.live.delete(entry.machineId);
@@ -283,6 +288,7 @@ export class RemoteHub {
 			}),
 		);
 		socket.on("data", (chunk: string) => {
+			if (socket.destroyed) return;
 			const received = lines.push(chunk);
 			if (!received) {
 				socket.destroy();
@@ -296,6 +302,7 @@ export class RemoteHub {
 					if (typeof joined === "string") return refuse(joined, frame.name);
 					entry = joined;
 					clearTimeout(timer);
+					this.handshakes.delete(socket);
 					this.admit(joined);
 					continue;
 				}
@@ -313,7 +320,8 @@ export class RemoteHub {
 				}
 				entry.lastSeen = Date.now();
 				if (!isChatFrame(inner)) this.peers?.receive(entry.machineId, inner);
-				else if (inner.t === "reply") this.events.reply(entry.name, inner.id, inner.text, inner.final);
+				else if (inner.t === "reply")
+					this.events.reply(entry.name, inner.id, inner.text, inner.final, entry.machineId);
 				else if (inner.t === "ping") this.write(entry, { t: "pong" });
 			}
 		});

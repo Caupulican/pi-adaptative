@@ -37,12 +37,14 @@ import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/own
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { type BotDaemonHost, startBotDaemonHost } from "../bots/bot-daemon-host.ts";
+import { BotRootHostReader } from "../bots/bot-root-hosts.ts";
 import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
 
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { applyInterfaceLanguage, bindInterfaceLanguage } from "../language/language-binding.ts";
 import { ModelRegistry } from "../model-registry.ts";
+import { AwayRemoteHub } from "../remote/away-remote-hub.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
@@ -164,6 +166,32 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	// The bots owed work while no root session takes them (`bot-daemon-host.ts`), hosted only with the credentials to run
 	// them. Hosting them is a duty beside the routines and channels, never their end: a start that fails is reported once per
 	// cause and tried again at the next tick.
+	// Read root records at most once per renewal for both handovers. An unreadable directory never grants a new listener.
+	const rootHosts = new BotRootHostReader(agentDir, report);
+	let places: ReadonlySet<string> | undefined;
+	let placesRead = false;
+	let placesTold: string | undefined;
+	const rootPlaces = (): ReadonlySet<string> | undefined => {
+		if (placesRead) return places;
+		placesRead = true;
+		try {
+			places = rootHosts.places();
+			placesTold = undefined;
+		} catch (error) {
+			places = undefined;
+			const told = interfaceText().botTeam.daemonRootHostsUnread(errorText(error));
+			if (placesTold !== told) report(told);
+			placesTold = told;
+		}
+		return places;
+	};
+	const remoteHub = new AwayRemoteHub({
+		agentDir,
+		getStore: () => routineStore,
+		timers: timers.port("orchestration"),
+		rootPresent: () => rootPlaces()?.size !== 0,
+		report,
+	});
 	const { authStorage, modelRegistry } = input;
 	let bots: BotDaemonHost | undefined;
 	let botsStarting: Promise<void> | undefined;
@@ -171,6 +199,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	const startBots = (): void => {
 		if (!authStorage || !modelRegistry || bots || botsStarting || stopping) return;
 		botsStarting = startBotDaemonHost({
+			rootPlaces,
 			agentDir,
 			store: routineStore,
 			authStorage,
@@ -247,6 +276,12 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			let ended = end;
 			await reloading;
 			try {
+				await remoteHub.close();
+			} catch (error) {
+				code = 1;
+				ended = { reason: "failed", detail: `the away hub did not close: ${errorText(error)}` };
+			}
+			try {
 				await supervisor.close();
 			} catch (error) {
 				code = 1;
@@ -313,14 +348,19 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 			.reload()
 			.then(() => {
 				if (stopping) return;
+				placesRead = false;
+				const listening = remoteHub.sync(settings.getRoutineAwaySettings().enabled);
 				supervisor.wake();
 				channelHosts?.sync(credentialStamp);
 				startBots();
 				const credentials = botCredentialsChanged;
 				botCredentialsChanged = false;
-				return bots
-					?.refresh(credentials)
-					.catch((error: unknown) => report(interfaceText().botTeam.daemonBotSourcesNotRead(errorText(error))));
+				return Promise.all([
+					listening,
+					bots
+						?.refresh(credentials)
+						.catch((error: unknown) => report(interfaceText().botTeam.daemonBotSourcesNotRead(errorText(error)))),
+				]).then(() => {});
 			}, fail)
 			.finally(() => {
 				reloading = undefined;

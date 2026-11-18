@@ -838,6 +838,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 			});
 			constructed = session;
+			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			sessionRef.current = session;
 			// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
 			const getExtensionRunner = (): ExtensionRunner => {
@@ -1216,7 +1217,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// that never calls bindExtensions still has the requested `memory` tool when the grant allows it.
 			await session.initializeMemory();
 			const extensionsResult = resourceLoader.getExtensions();
-			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			if (options.backgroundInputStartup !== "host") session.startBackgroundInputs();
 			observeSessionCleanupRelease(session, sessionManager);
 

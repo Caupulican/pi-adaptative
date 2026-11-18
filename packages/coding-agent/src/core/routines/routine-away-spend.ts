@@ -69,14 +69,16 @@ export interface RoutineAwayClaimGate {
 }
 
 /** What a run's metered kind is read from: its routine's pinned execution snapshot. */
-export type RoutineAwaySpendDefinition = Pick<PersistentRoutineDefinition, "executionSnapshot">;
+export type RoutineAwaySpendDefinition = Pick<PersistentRoutineDefinition, "executionSnapshot"> &
+	Partial<Pick<PersistentRoutineDefinition, "target">>;
 
 /** Whether a run of this definition is charged the away spend bound: unless the gate reads its spend as not metered. */
 export function routineAwayRunMetered(
 	gate: Pick<RoutineAwayClaimGate, "spendsMetered">,
 	definition: RoutineAwaySpendDefinition,
 ): boolean {
-	return gate.spendsMetered?.(definition) !== false;
+	// A bot inbox delivery makes no model call. The bot host admits and charges its own turn.
+	return definition.target?.kind !== "bot" && gate.spendsMetered?.(definition) !== false;
 }
 
 /** Whether a run away is charged the bound's per-run reservation: its definition spends metered, or it was reserved. */

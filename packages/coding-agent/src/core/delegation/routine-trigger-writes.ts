@@ -83,7 +83,7 @@ export function retireEndedRoutines(
 					}
 				: undefined;
 		if (trigger) {
-			const parentOrigin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : ask.receiptOrigin;
+			const parentOrigin = routineReceiptOrigin(routine) ?? ask.receiptOrigin;
 			if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
 			if (!routineJournalHasRoom(state, input.nowMs)) {
 				journalFull = true;
@@ -237,7 +237,7 @@ export function claimManualRoutineOccurrence(
 	if (existing) return structuredClone(existing);
 	if (state.replayTombstones.has(id))
 		throw new Error("This manual request was already consumed and has expired from the bounded replay journal.");
-	const origin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : input.receiptOrigin;
+	const origin = routineReceiptOrigin(routine) ?? input.receiptOrigin;
 	if (!origin || (input.parentSessionId && origin.sessionId !== input.parentSessionId))
 		throw new Error("Routine parent receipt origin is unavailable.");
 	if (!routineHasJournalShare(state, routine.routineId, input.nowMs))

@@ -6,7 +6,7 @@ import { runJourney7BotMailPhase, runJourney7WorkerMailPhase } from "./journey-7
 import { runJourney7BotPlanPhase } from "./journey-7-bot-plan.ts";
 import { runJourney7BotSpendPhase } from "./journey-7-bot-spend.ts";
 import { runJourney7BotWatchPhase } from "./journey-7-bot-watch.ts";
-import { runJourney7DaemonBotPhase } from "./journey-7-daemon-bot.ts";
+import { runJourney7DaemonBotPhase, runJourney7ProjectBotSchedules } from "./journey-7-daemon-bot.ts";
 import { runJourney7DepthPhase } from "./journey-7-depth.ts";
 import { runJourney7LeaderPhase } from "./journey-7-leader.ts";
 import { runJourney7LifecyclePhase } from "./journey-7-lifecycle.ts";
@@ -37,6 +37,7 @@ export async function runJourney7(): Promise<void> {
 			await runJourney7BotMailPhase(world);
 			await runJourney7WorkerMailPhase(world);
 			await runJourney7DaemonBotPhase(world);
+			await runJourney7ProjectBotSchedules(world);
 			await runJourney7BotSpendPhase(world);
 			await runJourney7BotWatchPhase(world);
 			await runJourney7BotDelegatePhase(world);

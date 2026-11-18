@@ -320,8 +320,8 @@ export function ownedFilesManifest(
 }
 
 /** A session file that is already written, so a notice is saved when it is observed. */
-export function flushedSessionManager(world: HarnessWorld, agentDir: string): SessionManager {
-	const manager = world.createSessionManager(agentDir);
+export function flushedSessionManager(world: HarnessWorld, agentDir: string, cwd?: string): SessionManager {
+	const manager = world.createSessionManager(agentDir, cwd);
 	const model = world.provider.model("root");
 	manager.appendMessage({ role: "user", content: "Hello.", timestamp: Date.now() });
 	manager.appendMessage({

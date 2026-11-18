@@ -24,7 +24,7 @@ import {
 	type HostEventScopeKey,
 	hostEventListenerRefusal,
 } from "../events/host-event-kinds.ts";
-import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
+import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { type RoutineAwayClaimGate, routineAwayCharge, routineAwayCharged } from "./routine-away-spend.ts";
 
@@ -47,7 +47,7 @@ import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutinePro
 import { parseRoutineArmAuthority, type RoutineArmAuthority, routineWakeRefusal } from "./routine-provenance.ts";
 import {
 	parseRoutineSaveOrigin,
-	type RoutineExecutionSnapshot,
+	type RoutineSaveOrigin,
 	routineReceiptOrigin,
 	routineSaveOriginRefusal,
 } from "./routine-save-origin.ts";
@@ -637,7 +637,7 @@ export class RoutineAdmissionRefused extends Error {
 	}
 }
 
-export interface PersistentRoutineDefinition {
+export interface PersistentRoutineDefinition extends RoutineSaveOrigin {
 	readonly routineId: string;
 	readonly incarnationId: string;
 	readonly revision: number;
@@ -645,9 +645,6 @@ export interface PersistentRoutineDefinition {
 	readonly prompt: string;
 	readonly schedule: RoutineSchedule;
 	readonly enabled: boolean;
-	readonly executionSnapshot?: RoutineExecutionSnapshot;
-	/** Where a watch with no execution snapshot was saved in its session (`routine-save-origin.ts`); a snapshot carries its own. */
-	readonly receiptOrigin?: WorkerReceiptOrigin;
 	readonly origin?: RoutineOrigin;
 	/** The authority the model's own tool call armed it under (`routine-provenance.ts`); an occurrence's frozen definition keeps it, so a wake reads its plan under the authority it was written. */
 	readonly armedBy?: RoutineArmAuthority;
@@ -660,15 +657,12 @@ export interface PersistentRoutineDefinition {
 }
 
 /** Store input is host-authored. Tool callers provide RoutineAuthoringInput, never a target or snapshot. */
-export interface UpsertPersistentRoutineInput {
+export interface UpsertPersistentRoutineInput extends RoutineSaveOrigin {
 	readonly routineId: string;
 	readonly target: PersistentRoutineTarget;
 	readonly prompt: string;
 	readonly schedule: RoutineScheduleInput;
 	readonly enabled?: boolean;
-	readonly executionSnapshot?: RoutineExecutionSnapshot;
-	/** A watch's save position in its session, in place of an execution snapshot (`routine-save-origin.ts`). */
-	readonly receiptOrigin?: WorkerReceiptOrigin;
 	/** A tool creation's arming authority, stamped once at creation; an update never changes the saved one. */
 	readonly armedBy?: RoutineArmAuthority;
 	/** Whom a watch created here wakes, stamped once at creation from the saving caller; an update never changes it. */
@@ -1069,6 +1063,8 @@ export interface RoutineOccurrenceClaimInput {
 	readonly parentSessionId?: string;
 	readonly receiptOrigin?: WorkerSavedIntent["receiptOrigin"];
 	readonly eligibleRoutineIds?: readonly string[];
+	/** Snapshot of named schedule revisions a project clock admitted, rechecked under the claim lock. */
+	readonly namedBotRevisions?: ReadonlyMap<string, number>;
 	readonly eligibleOccurrenceIds?: readonly string[];
 	readonly routineId?: string;
 	/** Retained host events of the claiming session; event routines are decided only when present. */
@@ -1702,6 +1698,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"enabled",
 			"executionSnapshot",
 			"receiptOrigin",
+			"botProjectCwd",
 			"origin",
 			"armedBy",
 			"wake",
@@ -2117,12 +2114,8 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		if (target.kind !== "session" && (trigger.kind === "event" || trigger.kind === "watch")) return undefined;
 		if (value.occurrenceId !== routineOccurrenceId(definition, trigger)) return undefined;
 		const parentOrigin = workerReceiptOriginFromValue(value.parentOrigin);
-		if (
-			target.kind === "session" &&
-			(target.parentSessionId !== parentOrigin.sessionId ||
-				!isDeepStrictEqual(routineReceiptOrigin(definition), parentOrigin))
-		)
-			return undefined;
+		const pinnedOrigin = routineReceiptOrigin(definition);
+		if (pinnedOrigin && !isDeepStrictEqual(pinnedOrigin, parentOrigin)) return undefined;
 		let claim: RoutineOccurrence["claim"];
 		if (value.claim !== undefined) {
 			if (

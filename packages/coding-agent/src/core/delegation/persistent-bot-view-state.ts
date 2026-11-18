@@ -109,3 +109,25 @@ export function compareBotViews(a: PersistentBotView, b: PersistentBotView): num
 	if (a.persistent !== b.persistent) return a.persistent ? -1 : 1;
 	return b.updatedAt.localeCompare(a.updatedAt);
 }
+
+/** Reads a saved bot model label for its roster view, including older labels without a provider. */
+export function parseModelRef(rawRef: string): { provider: string; modelId: string } {
+	const trimmed = rawRef.trim();
+	const slashIndex = trimmed.indexOf("/");
+	if (slashIndex > 0 && slashIndex < trimmed.length - 1) {
+		return {
+			provider: trimmed.slice(0, slashIndex),
+			modelId: trimmed.slice(slashIndex + 1),
+		};
+	}
+	if (slashIndex === 0) {
+		return {
+			provider: "unknown",
+			modelId: trimmed.slice(1) || "default",
+		};
+	}
+	return {
+		provider: "unknown",
+		modelId: trimmed || "default",
+	};
+}

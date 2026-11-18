@@ -1,5 +1,6 @@
 /** A phone selects one generation of a bot's scheduled task. The routine store owns its state and revision. */
 
+import { isAbsolute } from "node:path";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { routineJobStatusLines } from "../remote/routine-job-results.ts";
 import { isRoutineId, type RoutineDefinitionView, routineScheduleInputOf } from "../routines/routine-contract.ts";
@@ -133,6 +134,8 @@ export interface OwnerTaskCommand {
 	readonly admittedAt: number;
 	readonly policyHash: string;
 	readonly cwd: string;
+	/** Steering a project-bound occurrence keeps its original checkout across retries and channel handovers. */
+	readonly projectBound?: true;
 	readonly revision: number;
 	readonly action: "steer" | "stop";
 	readonly occurrenceIds: readonly string[];
@@ -162,6 +165,7 @@ export function isTaskCommand(v: unknown): v is OwnerTaskCommand {
 		typeof v.address === "string" &&
 		typeof v.cwd === "string" &&
 		v.cwd.length > 0 &&
+		(v.projectBound === undefined || (v.projectBound === true && v.action === "steer" && isAbsolute(v.cwd))) &&
 		typeof v.policyHash === "string" &&
 		/^[a-f0-9]{64}$/.test(v.policyHash) &&
 		Number.isSafeInteger(v.admittedAt) &&

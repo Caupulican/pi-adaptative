@@ -19,14 +19,17 @@
 
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { redactKnownSecrets } from "../security/secret-text.ts";
 import { type CapabilityFacts, localFacts, offeredCheckouts } from "./capabilities.ts";
 import { recordPeerDown, recordPeerFacts, recordPeerUp } from "./fleet-machines.ts";
 import { acceptsJobsFrom, JobHost, permitsCheckoutReads } from "./job-host.ts";
 import {
+	boundedJobSummary,
 	CAP_FEATURE,
 	digestOutcome,
 	JOBS_FEATURE,
 	type JobFrame,
+	type JobOutcome,
 	type JobResumeEntry,
 	type LinkPeer,
 	type LinkPeerListener,
@@ -234,6 +237,30 @@ export class JobTransport implements LinkPeerListener {
 				return;
 			}
 		}
+	}
+
+	/** A final chat reply can finish only an ask placed on its proven peer. The owning session watches the record to apply the lane end. */
+	completeAsk(machineId: string, jobId: string, text: string): void {
+		const peer = this.peers.get(machineId);
+		if (!peer) return;
+		this.placerFrame(peer, jobId, (record) => {
+			if (
+				record.executorId !== machineId ||
+				record.offer.kind !== "ask" ||
+				record.state !== "accepted" ||
+				record.ending ||
+				record.appliedAt !== undefined
+			)
+				return undefined;
+			const outcome: JobOutcome = {
+				status: "succeeded",
+				summary: boundedJobSummary(
+					redactKnownSecrets(text),
+					`\n\nThe reply was cut here: it is longer than this summary. The full reply is in the chat with ${peer.name}.`,
+				),
+			};
+			return { ...record, state: "terminal", outcome, outcomeDigest: digestOutcome(outcome) };
+		});
 	}
 
 	dispose(): void {

@@ -34,7 +34,7 @@ import {
 	type PlacerJobRecord,
 	unreadableHoldingRoom,
 } from "./job-store.ts";
-import { hubTurnedOn, listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
+import { listJoins, loadLinkSettings, type MachineIdentity, readHubConfig } from "./registry.ts";
 import { resolveRepoIdentity } from "./repo-identity.ts";
 import { DirectoryWatch } from "./store-watch.ts";
 
@@ -184,7 +184,7 @@ export class RemoteJobs {
 	static linked(agentDir: string): boolean {
 		const settings = loadLinkSettings(agentDir);
 		return (
-			hubTurnedOn(agentDir) ||
+			readHubConfig(agentDir)?.enabled ||
 			listJoins(agentDir).length > 0 ||
 			Object.values(settings.peers).some((peer) => peer.acceptsJobs === true)
 		);

@@ -6,7 +6,6 @@
  * work placement (`remote-jobs.ts`): the hosting session's hub carries the job frames of its joined machines.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AssistantMessage, UserMessage } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
@@ -22,19 +21,20 @@ import {
 	type PersistentBotTeamStore,
 	RESERVED_BOT_CREATOR_IDS,
 } from "../delegation/persistent-bot-team-store.ts";
-import { isFileLockContentionError } from "../util/atomic-file.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
+import { isFileLockContentionError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { type HostLock, type LinkHostOwner, linkHostOwner, takeHostLock, watchHostLockRelease } from "./host-lock.ts";
 import { RemoteHub } from "./hub.ts";
 import { JobTransport } from "./job-transport.ts";
 import { type HubMachineLinkState, hubMachinesFor, provideLinkContext } from "./link-context.ts";
 import { MachineChatLog } from "./machine-chat-log.ts";
 import {
+	type HubConfig,
 	type HubMachineRecord,
 	inviteHubMachine,
 	listHubMachines,
 	loadIdentity,
 	type MachineIdentity,
+	readHubConfig,
 	revokeHubMachine,
 } from "./registry.ts";
 import { type RemoteJobPorts, RemoteJobs, type RemoteRosterWords } from "./remote-jobs.ts";
@@ -43,16 +43,12 @@ import { SEALED_FEATURE } from "./session-keys.ts";
 const DEFAULT_PORT = 7788;
 const DEFAULT_HOST = "127.0.0.1";
 
-interface HubConfig {
-	readonly host: string;
-	readonly port: number;
-	readonly enabled: boolean;
-}
-
 export interface RemoteHubControllerDeps {
 	readonly agentDir: string;
 	readonly getStore: () => PersistentBotTeamStore;
 	readonly timers?: TimerPort;
+	/** A desktop changing the saved listener updates whether the daemon has away work to keep. */
+	readonly onConfigChanged?: () => void;
 	/** The session's worker ports for remote work placement; absent, this session neither places nor runs jobs. */
 	readonly jobs?: RemoteJobPorts;
 }
@@ -69,6 +65,9 @@ export class RemoteHubController {
 	private readonly timers: TimerPort;
 	private previewTimer: unknown;
 	private stopped = false;
+	private starting?: Promise<string | undefined>;
+	private reconfiguring?: Promise<unknown>;
+	private endAwayWait?: () => void;
 	private upSubtree: () => readonly string[] = () => [];
 	private hostLock: HostLock | undefined;
 	private stopWatchingHost: (() => void) | undefined;
@@ -111,26 +110,27 @@ export class RemoteHubController {
 	 * another session on this agent directory hosts the hub, this one does not bind and says nothing: `/remote status`
 	 * names the hosting session, and this session takes the hub over when that one lets it go.
 	 */
-	async start(): Promise<string | undefined> {
+	start(): Promise<string | undefined> {
+		if (this.stopped || this.hub || this.reconfiguring) return Promise.resolve(undefined);
+		this.starting ??= this.startConfigured().finally(() => {
+			this.starting = undefined;
+		});
+		return this.starting;
+	}
+
+	private async startConfigured(): Promise<string | undefined> {
 		if (this.deps.jobs?.placementOnly) {
 			if (RemoteJobs.linked(this.deps.agentDir)) this.jobs?.start();
 			return undefined;
 		}
 		for (const machine of listHubMachines(this.deps.agentDir)) if (!machine.revoked) this.queuePreview(machine.name);
-		const config = this.readConfig();
+		const config = readHubConfig(this.deps.agentDir);
 		// Placement and the job runner start only on a machine the owner linked (a hub on, a hub joined).
 		if (config?.enabled || RemoteJobs.linked(this.deps.agentDir)) this.jobs?.start();
 		// A hub the owner never turned on has nothing to host and nothing to wait for: no lock, no watch, no OS lookup.
 		if (!config?.enabled) return undefined;
 		try {
-			// Off Linux the OS machine id is read asynchronously; until it is, a recorded host lock cannot be judged.
-			await warmHostIdentity();
-			if (!this.takeHost()) {
-				// Not hosting: wait for the hosting session (or one started later) to let the hub go.
-				this.watchHost();
-				return undefined;
-			}
-			await this.listen(config.host, config.port);
+			await this.resumeSaved(true, config);
 			return undefined;
 		} catch (error) {
 			const where = config ? ` on ${config.host}:${config.port}` : "";
@@ -141,11 +141,14 @@ export class RemoteHubController {
 	/** Ends the session's hub and its job layer (the session is closing). */
 	async stop(): Promise<void> {
 		this.stopped = true;
+		this.endAwayWait?.();
 		if (this.previewTimer !== undefined) this.timers.clearTimeout(this.previewTimer);
 		this.previewTimer = undefined;
 		this.pendingPreviews.clear();
 		this.previewFailures.clear();
 		this.listeners.clear();
+		if (this.reconfiguring) await this.reconfiguring.catch(() => {});
+		if (this.starting) await this.starting;
 		const closing = this.closeListening();
 		this.jobs?.dispose();
 		this.withdrawLinkContext?.();
@@ -159,8 +162,7 @@ export class RemoteHubController {
 	private closeListening(): Promise<void> {
 		this.stopWatchingHost?.();
 		this.stopWatchingHost = undefined;
-		// The hub stops accepting as soon as its close starts, so the host is let go then: a session closing fast
-		// still removes the lock and wakes the session waiting to take over.
+		// closeHub stops accepting and publishes disconnection synchronously, before another host takes the lease.
 		const closing = this.closeHub();
 		this.hostLock?.release();
 		this.hostLock = undefined;
@@ -176,10 +178,10 @@ export class RemoteHubController {
 	}
 
 	/** Holds the link host for this agent directory (keeping a hold this session already has); false when another does. */
-	private takeHost(): boolean {
+	private takeHost(away = false): boolean {
 		if (this.hostLock?.stillHeld()) return true;
 		this.hostLock = undefined;
-		const taken = takeHostLock(this.deps.agentDir);
+		const taken = takeHostLock(this.deps.agentDir, undefined, away);
 		if (!taken.held) return false;
 		this.hostLock = taken.lock;
 		this.stopWatchingHost?.();
@@ -201,7 +203,7 @@ export class RemoteHubController {
 
 	/** The other session hosting the hub here, when this one does not. */
 	private hostedElsewhere(): LinkHostOwner | undefined {
-		return this.hub ? undefined : linkHostOwner(this.deps.agentDir);
+		return this.hub || this.hostLock?.stillHeld() ? undefined : linkHostOwner(this.deps.agentDir);
 	}
 
 	/** The machines the hosting session has joined right now, by name, when that session is another one. */
@@ -234,10 +236,68 @@ export class RemoteHubController {
 		);
 	}
 
-	async listen(host = DEFAULT_HOST, port = DEFAULT_PORT): Promise<number> {
+	/** A desktop waits for the holder to release. The daemon retries on its renewal only while the desktop is away. */
+	async resumeSaved(waitForRelease: boolean, saved: HubConfig): Promise<void> {
+		if (this.stopped || (this.listeningOn?.host === saved.host && this.listeningOn.port === saved.port)) return;
+		if (this.hub) await this.closeHub();
+		await warmHostIdentity();
+		if (this.stopped) return;
+		// Subscribe before inspecting the lock so a simultaneous desktop/daemon handback cannot be missed.
+		if (waitForRelease) this.watchHost();
+		if (!this.takeHost(!waitForRelease)) return;
+		// A previous holder may have changed or disabled the address since the first read.
+		const config = readHubConfig(this.deps.agentDir);
+		if (!config?.enabled) {
+			await this.closeListening();
+			return;
+		}
+		await this.bind(config.host, config.port);
+	}
+
+	/** A desktop command issued during handback waits for the daemon's renewal, bounded even if its process stalls. */
+	private async waitForAwayRelease(): Promise<void> {
+		if (this.stopped || !this.hostedElsewhere()?.away) return;
+		await new Promise<void>((resolve) => {
+			const done = () => {
+				this.endAwayWait = undefined;
+				close();
+				this.timers.clearTimeout(timeout);
+				resolve();
+			};
+			const timeout = this.timers.setTimeout(done, 30_000);
+			const close = watchHostLockRelease(this.deps.agentDir, done);
+			this.endAwayWait = done;
+			if (!this.hostedElsewhere()?.away) done();
+		});
+	}
+
+	/** Keep concurrent owner changes in order and let teardown join a bind already in flight. */
+	private configure<T>(change: () => Promise<T>): Promise<T> {
+		const previous = this.reconfiguring ?? this.starting;
+		const changed = previous ? previous.then(change, change) : change();
+		this.reconfiguring = changed;
+		return changed.finally(() => {
+			if (this.reconfiguring === changed) this.reconfiguring = undefined;
+		});
+	}
+
+	listen(host = DEFAULT_HOST, port = DEFAULT_PORT): Promise<number> {
+		return this.configure(() => this.configureListener(host, port));
+	}
+
+	private async configureListener(host: string, port: number): Promise<number> {
 		await this.closeHub();
 		await warmHostIdentity();
-		if (!this.takeHost()) throw new Error(hostedElsewhereText(linkHostOwner(this.deps.agentDir), "listen there"));
+		await this.waitForAwayRelease();
+		if (this.stopped || !this.takeHost())
+			throw new Error(hostedElsewhereText(linkHostOwner(this.deps.agentDir), "listen there"));
+		const bound = await this.bind(host, port);
+		this.writeConfig({ host, port: bound, enabled: true });
+		this.deps.onConfigChanged?.();
+		return bound;
+	}
+
+	private async bind(host: string, port: number): Promise<number> {
 		this.jobs?.start();
 		const transport = new JobTransport({
 			agentDir: this.deps.agentDir,
@@ -251,7 +311,9 @@ export class RemoteHubController {
 			upSubtree: () => this.upSubtree(),
 			peers: transport,
 			events: {
-				reply: (machine, id, text, final) => this.received(machine, id, text, final),
+				reply: (machine, id, text, final, machineId) => {
+					this.received(machine, id, text, final, machineId, transport);
+				},
 				presence: (machine) => this.notify([machine]),
 			},
 		});
@@ -269,16 +331,23 @@ export class RemoteHubController {
 		harnessLog.info("link", "the hub is listening", { host, port: bound });
 		this.hub = hub;
 		this.listeningOn = { host, port: bound };
-		this.writeConfig({ host, port: bound, enabled: true });
 		return bound;
 	}
 
-	async stopListening(): Promise<void> {
-		const elsewhere = this.hostedElsewhere();
-		if (elsewhere) throw new Error(hostedElsewhereText(elsewhere, "stop it there"));
-		// Turned off before the host is let go, so a session watching for the hub does not take it back up.
-		const config = this.readConfig();
-		if (config) this.writeConfig({ ...config, enabled: false });
+	stopListening(): Promise<void> {
+		return this.configure(() => this.disableListener());
+	}
+
+	private async disableListener(): Promise<void> {
+		await this.waitForAwayRelease();
+		if (this.stopped) return;
+		// Disable under the same lease as bind, before waking a desktop that may be waiting on the saved address.
+		const config = readHubConfig(this.deps.agentDir);
+		if (config) {
+			if (!this.takeHost()) throw new Error(hostedElsewhereText(this.hostedElsewhere(), "stop it there"));
+			this.writeConfig({ ...config, enabled: false });
+			this.deps.onConfigChanged?.();
+		}
 		await this.closeListening();
 		// Turning the hub off unlinks the machine only when nothing else links it; a running job keeps the runner until it ends.
 		this.jobs?.refreshLink();
@@ -358,7 +427,7 @@ export class RemoteHubController {
 				: this.listeningOn.host;
 		return {
 			token,
-			address: `${host}:${this.listeningOn?.port ?? readPort(this.readConfig())}`,
+			address: `${host}:${this.listeningOn?.port ?? readPort(readHubConfig(this.deps.agentDir))}`,
 		};
 	}
 
@@ -451,13 +520,17 @@ export class RemoteHubController {
 	 * A machine's answer: always chat. Only a final answer to a conversation turn the orchestrator placed ends that lane;
 	 * an interim one (`final` false) leaves it open for the answer that follows.
 	 */
-	private received(machine: string, id: string, text: string, final: boolean | undefined): void {
+	private received(
+		machine: string,
+		id: string,
+		text: string,
+		final: boolean | undefined,
+		machineId: string,
+		transport: JobTransport,
+	): void {
 		harnessLog.debug("link", "a machine answered", { machine, chars: text.length, interim: final === false });
 		this.chats.append(machine, { at: Date.now(), from: "machine", text, id });
-		if (final !== false) {
-			const machineId = this.jobs?.machines.byName(machine)?.machineId;
-			if (machineId) this.jobs?.client.completeAsk(machineId, id, text);
-		}
+		if (final !== false) transport.completeAsk(machineId, id, text);
 		this.notify([machine]);
 		this.queuePreview(machine);
 	}
@@ -517,24 +590,15 @@ export class RemoteHubController {
 		}
 	}
 
-	private readConfig(): HubConfig | undefined {
-		const path = join(this.deps.agentDir, "remote", "hub.json");
-		if (!existsSync(path)) return undefined;
-		try {
-			const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-			return isPlainRecord(value) && typeof value.host === "string" && typeof value.port === "number"
-				? { host: value.host, port: value.port, enabled: value.enabled === true }
-				: undefined;
-		} catch {
-			return undefined;
-		}
-	}
-
 	private writeConfig(config: HubConfig): void {
-		mkdirSync(join(this.deps.agentDir, "remote"), { recursive: true });
 		const path = join(this.deps.agentDir, "remote", "hub.json");
 		const content = `${JSON.stringify(config, null, 1)}\n`;
-		withHostFileWrite(path, content, () => writeFileSync(path, content), hostTransitionsFile(this.deps.agentDir));
+		withHostFileWrite(
+			path,
+			content,
+			() => writeFileAtomicSync(path, content, { mode: 0o600 }),
+			hostTransitionsFile(this.deps.agentDir),
+		);
 	}
 }
 
@@ -550,6 +614,7 @@ export function hostedElsewhereText(owner: LinkHostOwner | undefined, then: stri
 
 /** The hosting session in the owner's words; one whose process cannot be checked is said to be so. */
 export function hostDescription(owner: LinkHostOwner): string {
+	if (owner.away) return `the away daemon (process ${owner.pid})`;
 	if (owner.standing === "foreign") return "a session on another host";
 	if (owner.standing === "unknown") return `a session whose process (${owner.pid}) could not be checked`;
 	return `another session on this machine (process ${owner.pid})`;

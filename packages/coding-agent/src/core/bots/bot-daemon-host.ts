@@ -16,7 +16,6 @@
 import type { AuthStorage } from "../auth-storage.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { readAwayCharges } from "../routines/away-spend-charges.ts";
 import {
@@ -26,14 +25,14 @@ import {
 } from "../routines/routine-away-spend.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { TimerSource } from "../util/timer-port.ts";
-import { errorText } from "./bot-error-text.ts";
 import { type BotAwayRunAside, botProcessSources } from "./bot-process-sources.ts";
-import { BotRootHostReader } from "./bot-root-hosts.ts";
 import { rootlessBotSessionHost } from "./bot-session-registry.ts";
 
 export interface BotDaemonHostInput {
 	readonly agentDir: string;
 	readonly store: PersistentBotTeamStore;
+	/** Root host snapshot shared with the remote listener on this renewal. */
+	rootPlaces(): ReadonlySet<string> | undefined;
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
 	readonly timers: TimerSource;
@@ -61,23 +60,8 @@ export interface BotDaemonHost {
 /** Starts hosting the bots owed work (see the module comment). */
 export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<BotDaemonHost> {
 	const { agentDir, settings } = input;
-	let places = new Set<string>();
-	let placesTold: string | undefined;
+	let places: ReadonlySet<string> = new Set();
 	let awayOn = settings.getRoutineAwaySettings().enabled;
-	const rootHosts = new BotRootHostReader(agentDir, (message) => input.report(message));
-	const readPlaces = (): Set<string> => {
-		try {
-			const read = rootHosts.places();
-			placesTold = undefined;
-			return read;
-		} catch (error) {
-			// The bots stay where they are until the records read again; said once per cause.
-			const told = interfaceText().botTeam.daemonRootHostsUnread(errorText(error));
-			if (placesTold !== told) input.report(told);
-			placesTold = told;
-			return places;
-		}
-	};
 	/**
 	 * The metered runs of the bots working now (their metered turns and metered workers, a turn and a worker serving one
 	 * window as one run), each at the bound of one run, but the run `aside` names (`BotAwayRunAside`).
@@ -107,7 +91,7 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 		leavesTo: (cwd) => !awayOn || places.has(realPathIdentity(cwd)),
 	});
 	await sources.refresh(true);
-	places = readPlaces();
+	places = input.rootPlaces() ?? places;
 	const { host, stop } = rootlessBotSessionHost(sources.ports);
 	try {
 		host.openOwed();
@@ -122,7 +106,7 @@ export async function startBotDaemonHost(input: BotDaemonHostInput): Promise<Bot
 			await sources.refresh(credentials);
 			const before = places;
 			const wasOn = awayOn;
-			places = readPlaces();
+			places = input.rootPlaces() ?? places;
 			awayOn = settings.getRoutineAwaySettings().enabled;
 			host.leaveIdleToRoots();
 			if ((awayOn && !wasOn) || [...before].some((place) => !places.has(place))) host.askOwed();

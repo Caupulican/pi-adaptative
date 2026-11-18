@@ -31,12 +31,9 @@ import {
 } from "./abandoned-placements.ts";
 import type { FleetMachine, FleetMachines } from "./fleet-machines.ts";
 import {
-	boundedJobSummary,
 	digestOffer,
-	digestOutcome,
 	type JobCancelReason,
 	type JobOffer,
-	type JobOutcome,
 	type JobPhase,
 	MAX_JOB_DEADLINE_MS,
 	MAX_JOB_INSTRUCTIONS_BYTES,
@@ -211,17 +208,6 @@ function placementKeyOf(dispatch: Pick<FleetDispatch, "idempotencyKey" | "plan">
 				}
 			: {}),
 	};
-}
-
-/**
- * A machine's reply as the ask lane's summary: the whole reply when it fits the summary bound, else the part that fits with
- * a plain note that the reply was cut and where the full reply is (the machine's chat). The cut is decided by bytes.
- */
-export function boundedReplySummary(reply: string, machineName: string): string {
-	return boundedJobSummary(
-		reply,
-		`\n\nThe reply was cut here: it is longer than this summary. The full reply is in the chat with ${machineName}.`,
-	);
 }
 
 function runtimeRetry<T>(run: () => T): Promise<T> {
@@ -652,34 +638,6 @@ export class RemoteJobClient {
 			};
 		}
 		return { kind: "placed", handle: this.handle(record) };
-	}
-
-	/**
-	 * The machine's reply to a conversation turn is that turn's outcome. False when the reply answers nothing placed
-	 * here (an ordinary chat reply), so the caller keeps it as chat only; a turn already ended keeps its first end.
-	 */
-	completeAsk(machineId: string, jobId: string, text: string): boolean {
-		const known = this.store.placedState(machineId, jobId);
-		if (known.kind === "unreadable") {
-			harnessLog.warn("placement", "a reply to a placed job whose record cannot be read was kept as chat", {
-				jobId,
-			});
-			return false;
-		}
-		if (known.kind !== "valid" || known.record.offer.kind !== "ask" || known.record.executorId !== machineId)
-			return false;
-		const outcome: JobOutcome = {
-			status: "succeeded",
-			summary: boundedReplySummary(redactKnownSecrets(text), this.machines.get(machineId)?.name ?? "the machine"),
-		};
-		this.store.updatePlaced(machineId, jobId, (current) =>
-			current.appliedAt !== undefined || current.ending || current.state === "terminal" || current.state === "ended"
-				? undefined
-				: { ...current, state: "terminal", outcome, outcomeDigest: digestOutcome(outcome) },
-		);
-		journalJob(this.agentDir, { side: "placer", jobId, peer: machineId, event: "answered" });
-		this.reconcile();
-		return true;
 	}
 
 	/**

@@ -4,6 +4,7 @@
  * undispatched runs. The functions change the routine state they are given and never save; the store persists.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { routineBotOccurrenceRef } from "../routines/routine-bot-reference.ts";
 import {
 	ROUTINE_FAILURE_PAUSE_THRESHOLD,
 	type RoutineOccurrence,
@@ -38,7 +39,11 @@ export function withResult(
 			outcome,
 			summary,
 			digest,
-			delivery: "pending",
+			...(occurrence.definition.botProjectCwd &&
+			outcome === "succeeded" &&
+			facts?.reasonCode === "bot_inbox_accepted"
+				? { delivery: "acknowledged" as const, deliveryMarker: routineBotOccurrenceRef(occurrence.occurrenceId) }
+				: { delivery: "pending" as const }),
 			recipient,
 			...(ownerUpdate ? { ownerUpdate } : {}),
 			...(conditionMet ? { conditionMet } : {}),

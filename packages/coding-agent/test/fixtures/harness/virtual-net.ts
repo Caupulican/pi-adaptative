@@ -151,6 +151,10 @@ class VirtualServer extends EventEmitter {
 		this.emit("connection", socket);
 	}
 
+	disconnectClients(): void {
+		for (const socket of this.connections) socket.destroy();
+	}
+
 	close(callback?: () => void): this {
 		if (this.endpoint !== undefined) {
 			const bound = this.endpoint;
@@ -163,7 +167,7 @@ class VirtualServer extends EventEmitter {
 			}
 		}
 		this.listening = false;
-		for (const socket of [...this.connections]) socket.destroy();
+		this.disconnectClients();
 		setImmediate(() => {
 			this.emit("close");
 			callback?.();
@@ -236,6 +240,13 @@ export class VirtualNetwork {
 			return this.servers.get(`tcp:127.0.0.1:${port}`) ?? this.servers.get(`tcp:0.0.0.0:${port}`);
 		}
 		return this.servers.get(`tcp:0.0.0.0:${port}`);
+	}
+
+	/** Drop the established TCP connections while keeping their server bound for reconnect. */
+	disconnectClients(host: string, port: number): void {
+		const server = this.resolveTcpServer(host, port);
+		if (!server) throw new Error(`No listener on ${host}:${port}`);
+		server.disconnectClients();
 	}
 
 	readonly createServer = (onConnection?: (socket: VirtualSocket) => void): VirtualServer =>

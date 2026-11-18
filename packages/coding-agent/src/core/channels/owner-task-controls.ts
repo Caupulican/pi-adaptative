@@ -92,7 +92,7 @@ function admitTaskControl(
 			throw new Error("Phone stop queue is busy; redeliver this event.");
 		} else return { conversation, reply: "The phone steering queue is full. Task stops remain available." };
 	}
-	const occurrenceIds = store
+	const occurrences = store
 		.listRoutineOccurrences({ routineId: selection.routine, ...(action.kind === "steer" ? { limit: 1 } : {}) })
 		.filter(
 			(o) =>
@@ -100,8 +100,9 @@ function admitTaskControl(
 				o.target.kind === "bot" &&
 				o.target.agentId === selection.bot &&
 				(stop || o.phase === "running" || o.result?.outcome === "succeeded"),
-		)
-		.map((o) => o.occurrenceId);
+		);
+	const occurrenceIds = occurrences.map((o) => o.occurrenceId);
+	const project = action.kind === "steer" ? occurrences.at(-1)?.definition.botProjectCwd : undefined;
 	if (!stop && !occurrenceIds.length)
 		return { conversation, reply: "This schedule has not run yet or its latest run did not reach the bot." };
 	const refs =
@@ -128,7 +129,8 @@ function admitTaskControl(
 		address: conversation.address,
 		admittedAt: conversation.at,
 		revision: routine.revision,
-		cwd,
+		cwd: project ?? cwd,
+		...(project ? { projectBound: true } : {}),
 		policyHash: digest(policyFingerprint(policy)),
 		action: action.kind === "taskStop" ? "stop" : "steer",
 		...(action.kind === "steer" ? { words: action.words } : {}),
@@ -196,7 +198,11 @@ export async function drainTaskControls(
 					agentId: task.bot,
 					text: `Phone ${command.action} for task ${task.routine}`,
 					at: command.admittedAt,
-					from: { pid: process.pid, cwd: botSessionOnDisk(agentDir, task.bot)?.cwd ?? command.cwd },
+					from: {
+						pid: process.pid,
+						cwd: command.projectBound ? command.cwd : (botSessionOnDisk(agentDir, task.bot)?.cwd ?? command.cwd),
+					},
+					...(command.projectBound ? { projectBound: true } : {}),
 					phone: { channel, command: command.id, action: command.action },
 					wakeExisting: resignal,
 				});

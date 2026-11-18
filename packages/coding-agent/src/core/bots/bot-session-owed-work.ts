@@ -43,6 +43,7 @@ import {
 	UnrunWakeLedger,
 	WorkerWorkLedger,
 } from "./bot-owed-ledgers.ts";
+import { type OwedTerms, owedProjects, owesNow, owesOnlyGoal, type WorkedSession } from "./bot-owed-projects.ts";
 import { remoteHostActive, type SavedBotSession } from "./bot-remote-view.ts";
 import { BotRootHostReader } from "./bot-root-hosts.ts";
 import type { BotSender } from "./bot-session-host-ports.ts";
@@ -168,37 +169,6 @@ export interface BotOwedWorkPorts {
 	usageRules(): SavedUsageResumeRules;
 	/** Whether the settings a session opened for `sender` reads continue a goal on their own (`goalAutoContinue`). */
 	goalAutoContinue(sender: BotSender): boolean;
-}
-
-/** A bot's saved session that ran in a directory. */
-type WorkedSession = SavedBotSession & { readonly cwd: string };
-
-/**
- * What a bot no process hosts is owed ({@link BotOwedWork.owedTerms}): live watch work, its workers' execution or an item
- * they hold to deliver it was not offered, and the next time they come due, a usage wait that ended, an unfinished goal
- * its load takes up (`goal`, continued only where the settings it opens with continue a goal on their own), the wakes its
- * file holds unrun, and the messages waiting in its inbox; `unread`: one of those reads failed (its watch ledger, its
- * workers' bundle, its file's wakes), so what it is owed may be more than this says.
- */
-interface OwedTerms {
-	readonly watching: boolean;
-	readonly workers: boolean;
-	readonly workersDueAt: number | undefined;
-	readonly usage: boolean;
-	readonly goal: boolean;
-	readonly unrun: string;
-	readonly unread: boolean;
-	readonly waiting: readonly BotInboxItem[];
-}
-
-/** Whether what the bot is owed opens its session now (an unfinished goal alone, where its settings continue goals). */
-function owesNow(owed: OwedTerms): boolean {
-	return owed.watching || owed.workers || owed.usage || owed.goal || owed.unrun !== "" || owed.waiting.length > 0;
-}
-
-/** Whether an unfinished goal is all the bot is owed: it opens only where the settings it opens with continue goals. */
-function owesOnlyGoal(owed: OwedTerms): boolean {
-	return owed.goal && !owed.watching && !owed.workers && !owed.usage && owed.unrun === "" && owed.waiting.length === 0;
 }
 
 /** One running ask to open a bot, and the asks gathered while it runs (see {@link BotOwedWork.openIfOwed}). */
@@ -852,13 +822,13 @@ export class BotOwedWork {
 		const owed = this.owedTerms(agentId, worked, false, (error) =>
 			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute),
 		);
-		const later =
-			worked !== undefined && (owed.workersDueAt !== undefined || this.usageResumeAt(agentId, worked) !== undefined);
+		const usageResumeAt = this.usageResumeAt(agentId, worked);
+		const later = worked !== undefined && (owed.workersDueAt !== undefined || usageResumeAt !== undefined);
 		// A goal alone is continued only where goals continue on their own, as the daemon's ask opens it (`askOpen`).
 		const owedNow = owesNow(owed) && (goalsContinue || !owesOnlyGoal(owed));
 		if (!owedNow && !later) return false;
 		// A root hosting bots opens those working where it works: one of this host's own while it runs, another's (`places`).
-		const cwds = [...(worked ? [worked.cwd] : []), ...owed.waiting.map((item) => item.message.from.cwd)];
+		const cwds = owedProjects(owed, worked, usageResumeAt);
 		return !cwds.some(
 			(cwd) => places.has(realPathIdentity(cwd)) || (!ports.stopped() && ports.senderIn(cwd) !== undefined),
 		);
@@ -998,7 +968,8 @@ export class BotOwedWork {
 			owedNothing();
 			return;
 		}
-		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
+		// A saved bot session can move between projects. A pinned inbox item chooses its project when opening.
+		const cwds = owedProjects(owed, worked, this.usageResumeAt(agentId, worked));
 		// A root session of another process working in one of those directories opens it there: it is left to that root.
 		if (cwds.some((cwd) => ports.leavesTo(cwd))) return;
 		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,

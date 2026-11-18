@@ -15,6 +15,7 @@ import { errorText } from "../bots/bot-error-text.ts";
 import { botFailureCause } from "../bots/bot-failure-words.ts";
 import { awayChannels, awayChannelsKey } from "../channels/away-channels.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { readHubConfig } from "../remote/registry.ts";
 import type { AwayService } from "../routines/away-service.ts";
 import { getSessionRole } from "../session-role.ts";
 import { resolveAutonomySettings } from "../settings/autonomy-edge-settings.ts";
@@ -75,6 +76,7 @@ export class BotDaemonKeeper {
 	private ensureFailures = 0;
 	/** The channels served away (name and directory) the daemon was last ensured for: a settings change naming others ensures it again. */
 	private channelsKey: string | undefined;
+	private awayEnabled: boolean | undefined;
 	/** Whether the owner was told the bots' owed work waits for a session because away work is off: once, until none is owed. */
 	private awayOffTold = false;
 	/** An ensure is queued for the bots another host let go: one for the whole batch. */
@@ -91,7 +93,7 @@ export class BotDaemonKeeper {
 
 	/** Whether the channels served away changed since the daemon was last ensured. */
 	awayChannelsChanged(): boolean {
-		return awayChannelsKey(this.ports.settings()) !== this.channelsKey;
+		return this.awayOn() !== this.awayEnabled || awayChannelsKey(this.ports.settings()) !== this.channelsKey;
 	}
 
 	/**
@@ -242,7 +244,9 @@ export class BotDaemonKeeper {
 			const lastRenewedAt = status.lastHeartbeatAt ?? (status.startedAt ? Date.parse(status.startedAt) : Number.NaN);
 			if (status.running && Number.isFinite(lastRenewedAt)) leaseHeldUntil = lastRenewedAt + DAEMON_STALE_MS;
 			this.channelsKey = awayChannelsKey(ports.settings());
-			awayWork = status.activeRoutines + awayChannels(ports.settings()).length + (bots ?? 0);
+			this.awayEnabled = this.awayOn();
+			const hub = this.awayEnabled && readHubConfig(store.getAgentDir())?.enabled;
+			awayWork = status.activeRoutines + awayChannels(ports.settings()).length + (hub ? 1 : 0) + (bots ?? 0);
 			// A daemon of an older build is replaced (an upgrade), unless this runtime launched it: then the pi on disk is
 			// older than this session, and a relaunch would run the same build again.
 			const ownLaunch = this.launchedToken !== undefined && store.daemonLeaseBelongsTo(this.launchedToken);

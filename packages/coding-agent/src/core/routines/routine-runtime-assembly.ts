@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { botInboxStopWaiting } from "../bots/bot-inbox.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
@@ -45,6 +46,8 @@ import {
 import { SessionWatchService } from "../watches/session-watch-service.ts";
 import type { AutoArmContext, SessionAutoWatchPort, WatchAutoArmPort } from "../watches/watch-auto-arm.ts";
 import type { SessionWatchPort } from "../watches/watch-tool.ts";
+import { namedBotSessionRefusal } from "./away-routine-admission.ts";
+import { botScheduleAccepted, NamedBotScheduleClock } from "./named-bot-schedule.ts";
 import { readRoutineAwayHost } from "./routine-away-host-facts.ts";
 import { describeRoutineAway, routineAwayReadiness } from "./routine-away-readiness.ts";
 import {
@@ -73,7 +76,6 @@ import {
 	RoutineSchedulerController,
 	routineCiWorkflowPaths,
 	routineEventAnchor,
-	routineWorkerRequest,
 } from "./routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routine-session-controller.ts";
 import type { RoutineMessageResult } from "./routine-store-port.ts";
@@ -93,7 +95,7 @@ import {
 	routineWatchPlan,
 	watchFailingWakeText,
 } from "./routine-watch-wake.ts";
-import { RoutineWorkerExecutor } from "./routine-worker-executor.ts";
+import { RoutineWorkerExecutor, routineWorkerRequest } from "./routine-worker-executor.ts";
 import {
 	WORKER_WAKE_PLAN_CHARS,
 	WORKER_WAKE_RETRY_MS,
@@ -199,11 +201,7 @@ export class RoutineRuntimeAssembly {
 			try {
 				const result = await this.host.sendOperatorMessageToBot(target.agentId, prompt, { fromRoutine: origin });
 				notice("clear");
-				return {
-					outcome: "succeeded",
-					summary: `Prompt accepted by bot ${target.agentId} (${result.mode}); the bot's answer is not part of this run.`,
-					facts: { reasonCode: "delivered" },
-				};
+				return botScheduleAccepted(target.agentId, result.mode);
 			} catch (error) {
 				if (!(error instanceof BotUnreachableError)) throw error;
 				const { agentId, state } = error;
@@ -547,6 +545,20 @@ export class RoutineRuntimeAssembly {
 			isMeteredAttempt: (attempt) => this.host.workerController().attemptIsMetered(attempt),
 		});
 		const scheduler = new RoutineSchedulerController({
+			...(scope === "session"
+				? {
+						namedBotClock: new NamedBotScheduleClock({
+							agentDir: this.deps.getAgentDir(),
+							store,
+							now: () => this.deps.getTimers().port("routines").now(),
+							serves: (cwd) => realPathIdentity(cwd) === realPathIdentity(this.deps.getCwd()),
+						}),
+						projectBotFallback: (routine: RoutineDefinitionView) =>
+							routine.target.kind === "bot" &&
+							!!namedBotSessionRefusal(store.getBot(routine.target.agentId)) &&
+							realPathIdentity(routine.botProjectCwd!) === realPathIdentity(this.deps.getCwd()),
+					}
+				: {}),
 			store,
 			worker,
 			parentSessionId,

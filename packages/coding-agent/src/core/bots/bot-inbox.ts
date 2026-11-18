@@ -29,7 +29,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
 	isRecordedDeliveryOrigin,
 	parseTurnOriginRecord,
@@ -39,6 +39,7 @@ import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { isOwnerChannelName } from "../channels/channel-policy.ts";
 import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
+import { routineBotOccurrenceRef } from "../routines/routine-bot-reference.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
 	type BotHomeRecord,
@@ -56,18 +57,19 @@ export const MAX_BOT_INBOX_MESSAGES = 32;
 export const MAX_BOT_INBOX_BYTES = 1024 * 1024;
 /** Refused records kept, the newest: what the chat shows of messages that did not reach the bot. */
 const MAX_REFUSED_KEPT = 8;
+const PROJECT_TAKEN = /^\d{15}-[0-9a-f-]{36}\.project\.mail\.taken\.json$/;
 
 const WAITING = /^\d{15}-[0-9a-f-]{36}\.json$/;
 const REFUSED = /^\d{15}-[0-9a-f-]{36}\.refused\.json$/;
 const STOP = /^\d{15}-[0-9a-f-]{36}\.stop\.json$/;
 const SCOPED_STOP = /^\d{15}-[0-9a-f-]{36}\.scoped\.stop\.json$/;
 /** Words under a recorded origin: a suffix of their own, so a build that knows no such origin never gives them as the owner's. */
-const MAIL_WAITING = /^\d{15}-[0-9a-f-]{36}\.mail\.json$/;
-const MAIL_REFUSED = /^\d{15}-[0-9a-f-]{36}\.mail\.refused\.json$/;
+const MAIL_WAITING = /^\d{15}-[0-9a-f-]{36}(?:\.project)?\.mail\.json$/;
+const MAIL_REFUSED = /^\d{15}-[0-9a-f-]{36}(?:\.project)?\.mail\.refused\.json$/;
 /** A mail record the bot's session took, kept until the turn that took it ends (`markBotInboxMailGiven`). */
-const PHONE_WAITING = /^\d{15}-[0-9a-f-]{36}\.phone\.json$/;
-const PHONE_REFUSED = /^\d{15}-[0-9a-f-]{36}\.phone\.refused\.json$/;
-const MAIL_GIVEN = /^\d{15}-[0-9a-f-]{36}\.mail\.given\.json$/;
+const PHONE_WAITING = /^\d{15}-[0-9a-f-]{36}(?:\.project)?\.phone\.json$/;
+const PHONE_REFUSED = /^\d{15}-[0-9a-f-]{36}(?:\.project)?\.phone\.refused\.json$/;
+const MAIL_GIVEN = /^\d{15}-[0-9a-f-]{36}(?:\.project)?\.mail\.given\.json$/;
 /** Either kind of stop. */
 const ANY_STOP = /^\d{15}-[0-9a-f-]{36}\.(?:scoped\.)?stop\.json$/;
 
@@ -104,6 +106,8 @@ export interface BotInboxMessage {
 	readonly agentId: string;
 	readonly text: string;
 	readonly mode?: BotInboxMode;
+	/** A scheduled delivery that can run only in the sending project. */
+	readonly projectBound?: true;
 	readonly phone?: BotPhoneCommand;
 	readonly at: number;
 	readonly from: BotInboxSender;
@@ -149,7 +153,13 @@ function parseSender(value: unknown): BotInboxSender | undefined {
  * A record's words: the owner's in a plain record, under a recorded origin in a mail record. A mail record's origin must
  * be one the host records (`isRecordedDeliveryOrigin`): no file in the inbox names the owner's words as its origin.
  */
-function parseMessage(value: unknown, agentId: string, mail: boolean, phone = false): BotInboxMessage | undefined {
+function parseMessage(
+	value: unknown,
+	agentId: string,
+	mail: boolean,
+	phone = false,
+	boundFile = false,
+): BotInboxMessage | undefined {
 	const parsed = parseHomeRecordHead(value, agentId);
 	if (!parsed) return undefined;
 	const { mode } = parsed.record;
@@ -160,17 +170,27 @@ function parseMessage(value: unknown, agentId: string, mail: boolean, phone = fa
 	if (phone ? !validPhoneCommand(command) : command !== undefined) return undefined;
 	const origin = mail ? parseTurnOriginRecord(parsed.record.origin) : undefined;
 	if (mail && (!origin || !isRecordedDeliveryOrigin(origin))) return undefined;
+	const bound = parsed.record.projectBound;
+	if (bound !== (boundFile ? true : undefined)) return undefined;
+	if (boundFile && !origin && !(phone && validPhoneCommand(command) && command.action === "steer")) return undefined;
 	return {
 		...parsed.head,
 		...(phone ? { phone: command as BotPhoneCommand } : {}),
+		...(bound ? { projectBound: true as const } : {}),
 		from,
 		...(mode !== undefined ? { mode: mode as BotInboxMode } : {}),
 		...(origin ? { origin } : {}),
 	};
 }
 
-function parseRefusal(value: unknown, agentId: string, mail: boolean, phone = false): BotInboxRefusal | undefined {
-	const message = parseMessage(value, agentId, mail, phone);
+function parseRefusal(
+	value: unknown,
+	agentId: string,
+	mail: boolean,
+	phone = false,
+	boundFile = false,
+): BotInboxRefusal | undefined {
+	const message = parseMessage(value, agentId, mail, phone, boundFile);
 	if (!message || !isPlainRecord(value) || typeof value.refusedAt !== "number" || typeof value.reason !== "string")
 		return undefined;
 	return { ...message, refusedAt: value.refusedAt, reason: value.reason };
@@ -236,8 +256,18 @@ export function readBotInbox(
 	const dir = botInboxDir(agentDir, agentId);
 	return [
 		...readHomeRecords(dir, WAITING, (value) => parseMessage(value, agentId, false), unreadable),
-		...readHomeRecords(dir, PHONE_WAITING, (value) => parseMessage(value, agentId, false, true), unreadable),
-		...readHomeRecords(dir, MAIL_WAITING, (value) => parseMessage(value, agentId, true), unreadable),
+		...readHomeRecords(
+			dir,
+			PHONE_WAITING,
+			(value, name) => parseMessage(value, agentId, false, true, name.includes(".project.phone.")),
+			unreadable,
+		),
+		...readHomeRecords(
+			dir,
+			MAIL_WAITING,
+			(value, name) => parseMessage(value, agentId, true, false, name.includes(".project.mail.")),
+			unreadable,
+		),
 	].sort(
 		(a, b) =>
 			Number(b.message.phone?.action === "stop") - Number(a.message.phone?.action === "stop") ||
@@ -254,8 +284,18 @@ export function readBotInboxRefusals(
 	const dir = botInboxDir(agentDir, agentId);
 	return [
 		...readHomeRecords(dir, REFUSED, (value) => parseRefusal(value, agentId, false), unreadable),
-		...readHomeRecords(dir, PHONE_REFUSED, (value) => parseRefusal(value, agentId, false, true), unreadable),
-		...readHomeRecords(dir, MAIL_REFUSED, (value) => parseRefusal(value, agentId, true), unreadable),
+		...readHomeRecords(
+			dir,
+			PHONE_REFUSED,
+			(value, name) => parseRefusal(value, agentId, false, true, name.includes(".project.phone.")),
+			unreadable,
+		),
+		...readHomeRecords(
+			dir,
+			MAIL_REFUSED,
+			(value, name) => parseRefusal(value, agentId, true, false, name.includes(".project.mail.")),
+			unreadable,
+		),
 	].sort((a, b) => a.message.at - b.message.at);
 }
 
@@ -399,6 +439,14 @@ export class BotInboxFullError extends BotOwnerError {
 	override readonly name = "BotInboxFullError";
 }
 
+function messageIdFromKey(key: string): string {
+	return [key.slice(0, 8), key.slice(8, 12), key.slice(12, 16), key.slice(16, 20), key.slice(20)].join("-");
+}
+
+function messageStem(at: number, id: string): string {
+	return `${String(at).padStart(15, "0")}-${id}`;
+}
+
 /**
  * Writes the owner's message, or words under a recorded `origin` (a mail record), for the process hosting the bot's
  * session. Refused in the owner's words (`BotInboxFullError`) when the queue is full (by count or by bytes, both kinds
@@ -410,6 +458,9 @@ export function enqueueBotInbox(
 		agentId: string;
 		text: string;
 		mode?: BotInboxMode;
+		projectBound?: true;
+		/** Occurrence creation time identifies its mailbox file; at remains the owner-stop clock. */
+		occurrenceCreatedAt?: number;
 		phone?: BotPhoneCommand;
 		wakeExisting?: boolean;
 		from: BotInboxSender;
@@ -420,14 +471,16 @@ export function enqueueBotInbox(
 	const dir = botInboxDir(agentDir, input.agentId);
 	if (input.phone && (!validPhoneCommand(input.phone) || input.origin !== undefined))
 		throw new TypeError("An authenticated phone command has its own inbox record.");
-	const key = input.phone?.command.slice(0, 32);
-	const id = key
-		? [key.slice(0, 8), key.slice(8, 12), key.slice(12, 16), key.slice(16, 20), key.slice(20)].join("-")
-		: randomUUID();
+	const key =
+		input.phone?.command.slice(0, 32) ??
+		(input.projectBound ? input.origin?.ref?.match(/^routine:([a-f0-9]{32})$/)?.[1] : undefined);
+	if (input.projectBound && !key) throw new Error("A project-bound delivery requires a routine occurrence reference.");
+	const id = key ? messageIdFromKey(key) : randomUUID();
 	const message: BotInboxMessage = {
 		version: 1,
 		id,
 		...(input.phone ? { phone: input.phone } : {}),
+		...(input.projectBound ? { projectBound: true as const } : {}),
 		agentId: input.agentId,
 		text: input.text,
 		at: input.at,
@@ -438,8 +491,10 @@ export function enqueueBotInbox(
 	if (input.origin !== undefined && !isRecordedDeliveryOrigin(input.origin))
 		throw new TypeError("An inbox record's origin must be one the host records.");
 	const text = `${JSON.stringify(message)}\n`;
-	const suffix = input.phone ? ".phone.json" : input.origin === undefined ? ".json" : ".mail.json";
-	const file = join(dir, `${String(input.at).padStart(15, "0")}-${message.id}${suffix}`);
+	if (input.projectBound && !input.origin && input.phone?.action !== "steer")
+		throw new Error("A project-bound command must steer a task or deliver a scheduled prompt.");
+	const suffix = `${input.projectBound ? ".project" : ""}${input.phone ? ".phone" : input.origin ? ".mail" : ""}.json`;
+	const file = join(dir, `${messageStem(input.occurrenceCreatedAt ?? input.at, message.id)}${suffix}`);
 	if (input.phone && existsSync(file)) {
 		if (input.wakeExisting) writeFileAtomicSync(file, text, { mode: 0o600 });
 		return { file, message };
@@ -455,8 +510,43 @@ export function enqueueBotInbox(
 	return { file, message };
 }
 
+/** Exact evidence that the inbox accepted one project-bound occurrence, including a turn refused or already taken. */
+export function hasNamedBotReceipt(
+	agentDir: string,
+	agentId: string,
+	occurrenceId: string,
+	createdAt: number,
+	cwd: string,
+): boolean {
+	const ref = routineBotOccurrenceRef(occurrenceId);
+	const id = messageIdFromKey(ref.slice("routine:".length));
+	const stem = join(botInboxDir(agentDir, agentId), `${messageStem(createdAt, id)}.project.mail`);
+	for (const status of ["", ".given", ".refused", ".taken"]) {
+		try {
+			const item = parseMessage(
+				JSON.parse(readFileSync(`${stem}${status}.json`, "utf8")),
+				agentId,
+				true,
+				false,
+				true,
+			);
+			if (item?.id === id && item.origin?.ref === ref && item.from.cwd === cwd) return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+	}
+	return false;
+}
+
 /** The bot's session accepted the message: it leaves the queue. */
 export function takeBotInboxMessage(item: BotInboxItem): void {
+	if (item.message.projectBound && !item.message.phone) {
+		// Retain a bounded receipt so a scheduler killed after enqueue can prove acceptance without repeating the turn.
+		const receipt = item.file.replace(/\.mail(?:\.given)?\.json$/, ".mail.taken.json");
+		renameSync(item.file, receipt);
+		keepNewestHomeRecords(dirname(item.file), PROJECT_TAKEN, MAX_BOT_INBOX_MESSAGES);
+		return;
+	}
 	rmSync(item.file, { force: true });
 }
 
@@ -478,7 +568,7 @@ export function readBotInboxGiven(
 	return readHomeRecords(
 		botInboxDir(agentDir, agentId),
 		MAIL_GIVEN,
-		(value) => parseMessage(value, agentId, true),
+		(value, name) => parseMessage(value, agentId, true, false, name.includes(".project.mail.")),
 		unreadable,
 	);
 }

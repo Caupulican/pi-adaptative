@@ -23,7 +23,10 @@ import { statSync } from "node:fs";
 import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { awayMeteredRunsFile, configFile } from "../agent-paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
+import { BotRootHostReader } from "../bots/bot-root-hosts.ts";
 import { AwayParentWriteRefusal } from "../delegation/away-parent-writes.ts";
+import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -48,6 +51,7 @@ import {
 	awayRunRefusal,
 	awaySavedRoutineRefusal,
 } from "./away-routine-admission.ts";
+import { NamedBotScheduleClock } from "./named-bot-schedule.ts";
 import {
 	type RoutineAwayChargesRead,
 	type RoutineAwayClaimGate,
@@ -76,7 +80,7 @@ const MIN_ALARM_DELAY_MS = 1_000;
 
 export interface AwayRoutineSupervisorDeps {
 	/** The agent directory's shared routine store. */
-	readonly store: RoutineStorePort;
+	readonly store: RoutineStorePort & Pick<PersistentBotTeamStore, "getBot" | "namedBotWork">;
 	readonly agentDir: string;
 	readonly timers: TimerSource;
 	/** The machine facts each closed parent's fleet reads (memory and heap); absent reads the real machine. */
@@ -274,6 +278,9 @@ export class AwayRoutineSupervisor {
 	private readonly retryAt = new Map<string, number>();
 	/** The message last reported per cause; a cause reports again only after it cleared or its message changed. */
 	private readonly reported = new Map<string, string>();
+	private readonly namedBotClock: NamedBotScheduleClock;
+	private rootPlaces: Set<string> | undefined;
+	private readonly botRoots: BotRootHostReader;
 	private readonly unsubscribe: () => void;
 	private alarm: WallAlarm | undefined;
 	private pass: Promise<void> | undefined;
@@ -281,6 +288,17 @@ export class AwayRoutineSupervisor {
 	private disposed = false;
 
 	constructor(deps: AwayRoutineSupervisorDeps) {
+		this.botRoots = new BotRootHostReader(deps.agentDir, deps.report);
+		this.namedBotClock = new NamedBotScheduleClock({
+			agentDir: deps.agentDir,
+			store: deps.store,
+			now: () => deps.timers.port("routines").now(),
+			away: () => this.gate(),
+			serves: (cwd) => {
+				this.rootPlaces ??= this.botRoots.places();
+				return !this.rootPlaces.has(realPathIdentity(cwd));
+			},
+		});
 		this.deps = deps;
 		this.unsubscribe = deps.store.subscribe(() => this.wake());
 	}
@@ -337,7 +355,7 @@ export class AwayRoutineSupervisor {
 	private async runPass(): Promise<void> {
 		const { store } = this.deps;
 		const clock = this.deps.timers.port("routines");
-		store.reload();
+		store.reload(true);
 		const settings = this.deps.settings();
 		if (!settings.enabled) {
 			this.alarm?.stop();
@@ -377,7 +395,8 @@ export class AwayRoutineSupervisor {
 			return entry;
 		};
 		const refusals: { routineId: string; reason: string }[] = [];
-		let next = Number.POSITIVE_INFINITY;
+		this.rootPlaces = undefined;
+		let next = this.namedBotClock.advance().next;
 		let waitingForRoom = false;
 
 		for (const routine of store.listRoutines()) {
@@ -752,7 +771,7 @@ export class AwayRoutineSupervisor {
 
 	/** Whether the host still holds a run of its parent: an admitted run away not finished, or a live attempt. */
 	private holdsWork(host: AwayRoutineHost): boolean {
-		this.deps.store.reload();
+		this.deps.store.reload(true);
 		return (
 			host.context.hasLiveRun() ||
 			this.deps.store

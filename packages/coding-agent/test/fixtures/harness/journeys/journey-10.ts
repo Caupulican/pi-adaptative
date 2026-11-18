@@ -41,6 +41,7 @@ import { acquireFileLockSync, isFileLockContentionError } from "../../../../src/
 import { runRemoteCommand } from "../../../../src/modes/interactive/remote-commands.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { awayScheduledJob } from "./journey-10-away-scheduled-job.ts";
 import { scheduledBotJob } from "./journey-10-bot-scheduled-job.ts";
 import {
 	batchResultById,
@@ -1215,6 +1216,7 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		expect(await world.disposeSessionInBody(sessionHub), "Hub session disposes cleanly").toBeUndefined();
 	}
 
+	await awayScheduledJob(world);
 	expect(world.network?.open, "zero leaked virtual TCP sockets or servers after closing link").toBe(0);
 
 	// Prove RemoteJobPorts.timers (world.timers.port("orchestration")) drives offline-hold expiry deterministically.
@@ -1227,7 +1229,8 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
  * Journey 10: Linked Machines — mutual-auth `sealed/1` + `cap/1` + `jobs/1` over virtual TCP, one-time token replay
  * refusal, direct read-only job placement (isolated worker prompt + silent Joiner foreground), plan/fleet remote
  * placement + closed-gate local fallback + plan-scope remote cancel propagation, `RemoteHubController.ask`
- * round-trip (`THIRD_PARTY_MEMORY_WITHHELD`), and `TimerPort`-driven offline-hold expiry.
+ * round-trip (`THIRD_PARTY_MEMORY_WITHHELD`), a phone-tracked scheduled job with its desktop closed and reopened,
+ * and `TimerPort`-driven offline-hold expiry.
  */
 export async function runJourney10(): Promise<void> {
 	await runJourney(

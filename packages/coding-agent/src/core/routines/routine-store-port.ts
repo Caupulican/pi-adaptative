@@ -30,7 +30,7 @@ export interface RoutineMessageResult {
 
 /** The existing persistent store implements this boundary; scheduling owns no second registry. */
 export interface RoutineStorePort {
-	reload(): void;
+	reload(observeOnly?: boolean): void;
 	subscribe(listener: () => void): () => void;
 	/** Every saved routine, or with `holder` only those its runtime holds (`routine-holder.ts`). */
 	listRoutines(holder?: RoutineHolder): readonly RoutineDefinitionView[];

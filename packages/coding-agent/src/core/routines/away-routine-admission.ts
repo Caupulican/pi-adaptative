@@ -7,7 +7,9 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import { botMayRunAsSession } from "../bots/bot-session-profile.ts";
 import type { HarnessCapability } from "../capability-contract.ts";
+import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { isMeteredSpend, type ModelBilling } from "../orchestration/risk-budget.ts";
 
@@ -95,11 +97,26 @@ export function awayRunRefusal(intent: WorkerSavedIntent, models?: AwayModelSour
 	return undefined;
 }
 
+/** A native named bot can read its project-bound inbox without a root compiling or routing its turn. */
+export function namedBotSessionRefusal(bot: PersistentBotRecord | undefined): string | undefined {
+	if (!bot || bot.retired) return "The scheduled bot is missing or retired.";
+	if (bot.profileId) return `A root session must open the bot's profile ${bot.profileId}.`;
+	if (bot.remote || !botMayRunAsSession(bot)) return "A root session must dispatch to this bot.";
+	return undefined;
+}
+
 /** The closed-session worker admission shared by the daemon and the routine's operator view. */
 export function awaySavedRoutineRefusal(
 	routine: PersistentRoutineDefinition,
 	models?: AwayModelSource,
+	bot?: PersistentBotRecord,
 ): string | undefined {
+	if (routine.target.kind === "bot") {
+		if (!routine.receiptOrigin)
+			return "This schedule has no saved project. Save it again in its project to run unattended.";
+		if (!routine.receiptOrigin.sessionFile) return AWAY_NO_SESSION_FILE_REASON;
+		return namedBotSessionRefusal(bot);
+	}
 	const intent = routine.executionSnapshot?.savedIntent;
 	if (!intent) return AWAY_UNPINNED_REASON;
 	return (
