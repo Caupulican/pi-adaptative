@@ -3,12 +3,14 @@ import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { isRequestSpendRefusal, type RequestSpendBudget, RequestSpendRefusal } from "../cost/request-spend-budget.ts";
 import {
+	SemanticResponseError,
 	SystemOneInvalidResponseError,
 	SystemOneObserverError,
 	type SystemOneReceipt,
 	SystemOneReviewError,
 	type SystemOneReviewResponseObserver,
 	SystemOneUsageRefusal,
+	semanticFailureReceipts,
 } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
 import { type SystemOneAccessResolver, SystemOneDisabledError } from "./access.ts";
@@ -100,11 +102,9 @@ export class SystemOnePreSendError extends Error {
 	}
 }
 
-export class JevAdapterFailure extends Error {
+export class JevAdapterFailure extends SemanticResponseError {
 	readonly kind: JevFailureKind;
 	readonly originalMessage: string;
-	/** Paid provider responses the failure carries, so a caller can settle their receipts. Empty when none were paid. */
-	readonly receipts: readonly SystemOneReceipt[];
 
 	constructor(
 		kind: JevFailureKind,
@@ -113,14 +113,14 @@ export class JevAdapterFailure extends Error {
 		cause?: unknown,
 		receipts?: readonly SystemOneReceipt[],
 	) {
-		super(`System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
+		super(
+			`System One ${kind} for impact '${impact}': ${originalMessage}`,
+			receipts ?? semanticFailureReceipts(cause),
+			{ cause },
+		);
 		this.name = "JevAdapterFailure";
 		this.kind = kind;
 		this.originalMessage = originalMessage;
-		// A failure raised after a paid response was received (drift, an incomplete answer) carries that response's receipts.
-		this.receipts =
-			receipts ??
-			(cause instanceof SystemOneReviewError || cause instanceof SystemOneObserverError ? cause.receipts : []);
 	}
 }
 
@@ -314,6 +314,9 @@ export class SystemOneJevAdapter implements JevAdapter {
 					options?.onRequestAdmitted,
 				);
 
+				const receipts = owedReceipts.length
+					? [...owedReceipts, ...(result.receipts ?? [])]
+					: (result.receipts ?? []);
 				const returnedModel = result.response.model;
 				const latency_ms = result.elapsedMs ?? Date.now() - started;
 
@@ -325,7 +328,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 						`Model drift detected: requested pinned model '${targetModel}', but the System One endpoint returned '${returnedModel}' (R-007)`,
 						impact,
 						undefined,
-						result.receipts ?? [],
+						receipts,
 					);
 				}
 
@@ -339,7 +342,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 							`Incomplete System One answers: missing '${missing[0]}'`,
 							impact,
 							undefined,
-							result.receipts ?? [],
+							receipts,
 						);
 					}
 				}
@@ -350,7 +353,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 					answers,
 					usage: result.response.usage,
 					latency_ms,
-					receipts: result.receipts ?? [],
+					receipts,
 				};
 			} catch (error) {
 				lastError = error;
@@ -358,13 +361,15 @@ export class SystemOneJevAdapter implements JevAdapter {
 					if (owedReceipts.length > 0)
 						throw new SystemOneObserverError("System One spending suspended", error, [
 							...owedReceipts,
-							...(error instanceof SystemOneObserverError ? error.receipts : []),
+							...semanticFailureReceipts(error),
 						]);
 					throw error;
 				}
 				// A usage lease refused before payment is not an outage: nothing was sent, so it is neither classified nor retried.
-				if (error instanceof SystemOneUsageRefusal || error instanceof SystemOneDisabledError)
+				if (error instanceof SystemOneUsageRefusal || error instanceof SystemOneDisabledError) {
+					if (owedReceipts.length) throw new SystemOneObserverError(error.message, error, owedReceipts);
 					throw new SystemOnePreSendError(error.message);
+				}
 				if (error instanceof SystemOneReviewError || error instanceof SystemOneObserverError) {
 					owedReceipts = [...owedReceipts, ...error.receipts];
 				}

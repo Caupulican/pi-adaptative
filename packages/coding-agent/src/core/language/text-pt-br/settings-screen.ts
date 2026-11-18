@@ -903,7 +903,7 @@ export const SETTINGS_SCREEN = {
 		preview: {
 			label: "Prévia de rota",
 			description:
-				"Digite uma tarefa de exemplo. A prévia determinística não faz chamada ao provedor; a prévia ao vivo (juiz/H-MoE) é uma ação explícita separada.",
+				"Compare o modelo atual da conversa com a recomendação do roteador para uma tarefa. A prévia padrão é local.",
 			title: "Prévia de rota",
 			taskDescription:
 				"Digite uma tarefa de exemplo. Enter mostra a prévia determinística (sem chamada ao provedor). Prefixe com `live:` para rodar o caminho do juiz/H-MoE.",

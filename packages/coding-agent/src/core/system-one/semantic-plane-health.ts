@@ -18,6 +18,7 @@ import type { Consequence } from "../decision/primitives.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { systemOneFailureReasons } from "../review/system-one-failure-diagnostics.ts";
+import { semanticFailureReceipts } from "../review/system-one-review-port.ts";
 import {
 	type ResolveSemanticDoubtInput,
 	type ResolveSemanticDoubtResult,
@@ -35,6 +36,7 @@ import {
 	type SemanticEvaluationScope,
 	type SemanticEvaluationStart,
 	type SemanticQuestionState,
+	type SemanticResponseEvidence,
 	semanticEvaluationLabel,
 	semanticQuestionNamespace,
 } from "./semantic-evaluation-ledger.ts";
@@ -70,7 +72,7 @@ export interface SemanticEvaluationDurableSink {
 	readEvaluations?(): readonly SemanticEvaluationRecord[];
 	readDoubtDecisions?(): readonly SemanticDoubtDecision[];
 	recordDoubtDecision?(decision: SemanticDoubtDecision): void;
-	start(record: SemanticEvaluationStart & { readonly model?: string }): void;
+	start(record: SemanticEvaluationStart): void;
 	settle(record: SemanticEvaluationRecord): void;
 	noteVerdict(
 		evaluationId: string,
@@ -136,6 +138,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			evaluationScope: input.evaluationScope ?? { kind: "session", id: this.sessionId ?? "process-local" },
 			occupancy: input.occupancy ?? "foreground",
 			...(input.consequence ? { consequence: input.consequence } : {}),
+			...(input.model ? { model: input.model } : {}),
 			startedAt: this.now(),
 		};
 		this.open.set(record.evaluationId, record);
@@ -143,8 +146,27 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		const sink = this.durable?.();
 		this.evaluationSinks.set(record.evaluationId, sink);
 		this.doubts.start(record.evaluationId, record.programId, record.evaluationScope, record.questionNamespace);
-		this.toDurable((sink) => sink.start({ ...record, ...(input.model ? { model: input.model } : {}) }), sink);
+		this.toDurable((sink) => sink.start(record), sink);
 		return record.evaluationId;
+	}
+
+	noteResponse(evaluationId: string, response: SemanticResponseEvidence): void {
+		const record = this.open.get(evaluationId);
+		if (!record) return;
+		const refs = new Map(record.usageRefs?.map((ref) => [ref.reportId, ref]));
+		for (const { reportId, attempt, payload } of response.receipts ?? []) {
+			refs.set(reportId, { reportId, attempt, provider: payload.provider, model: payload.model });
+		}
+		const received = response.receipts?.at(-1)?.payload;
+		const model = response.model ?? received?.model;
+		const provider = response.provider ?? received?.provider;
+		this.open.set(evaluationId, {
+			...record,
+			...(model ? { model } : {}),
+			// A local fallback can answer after a paid remote attempt; only its own provider belongs on the verdict.
+			...(model ? { provider } : {}),
+			...(refs.size ? { usageRefs: [...refs.values()] } : {}),
+		});
 	}
 
 	settleOk(
@@ -152,6 +174,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		verdict?: string,
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
+		certificateId?: string,
 	): void {
 		const start = this.take(evaluationId);
 		if (!start) return;
@@ -162,10 +185,11 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			this.lastFailedLabel = undefined;
 			this.lastFailureKind = undefined;
 		}
-		this.push(start, "ok", verdict, reasons, questionStates);
+		this.push(start, "ok", verdict, reasons, questionStates, certificateId);
 	}
 
 	settleFailed(evaluationId: string, error: unknown): void {
+		this.noteFailureReceipts(evaluationId, error);
 		const start = this.take(evaluationId);
 		if (!start) return;
 		const reasons = systemOneFailureReasons(error);
@@ -187,10 +211,16 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	 * returns to whatever it was before the evaluation started. The record is still kept, so the
 	 * pane can show that System One was interrupted.
 	 */
-	settleCancelled(evaluationId: string): void {
+	settleCancelled(evaluationId: string, error?: unknown): void {
+		this.noteFailureReceipts(evaluationId, error);
 		const start = this.take(evaluationId);
 		if (!start) return;
 		this.push(start, "cancelled");
+	}
+
+	private noteFailureReceipts(evaluationId: string, error: unknown): void {
+		const receipts = semanticFailureReceipts(error);
+		if (receipts.length) this.noteResponse(evaluationId, { receipts });
 	}
 
 	noteVerdict(
@@ -448,12 +478,14 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		verdict?: string,
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
+		certificateId?: string,
 	): void {
 		const endedAt = this.now();
 		const trace = this.pendingTraces.get(start.evaluationId);
 		this.pendingTraces.delete(start.evaluationId);
 		const record: SemanticEvaluationRecord = {
 			...start,
+			...(certificateId ? { certificateId } : {}),
 			endedAt,
 			durationMs: Math.max(0, endedAt - start.startedAt),
 			outcome,

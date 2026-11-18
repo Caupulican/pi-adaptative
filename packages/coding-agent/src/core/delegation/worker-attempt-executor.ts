@@ -1,4 +1,3 @@
-import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { compact, estimateContextTokens } from "../../kernel/compaction/compaction.ts";
@@ -17,7 +16,6 @@ import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../age
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerCommandReceipt, WorkerHostVerdict, WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
-import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
 import { frozenPrefixLength } from "../context/prefix-stability.ts";
 import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
@@ -49,6 +47,7 @@ import { readWorkerFollowUp } from "./worker-follow-up-read.ts";
 import { createWorkerHostTools, WORKER_HOST_TOOL_NAMES } from "./worker-host-tools.ts";
 import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { WorkerMutationEvidence } from "./worker-mutation-evidence.ts";
 import { runProviderCompletionWithBackoff } from "./worker-provider-backoff.ts";
 import {
 	callbackEvidencedCompletion,
@@ -94,6 +93,7 @@ export interface RecoveredWorkerTerminalCompletion {
 export interface WorkerAttemptExecutionLedger {
 	changedFiles: Set<string>;
 	sealChangedFiles(): readonly string[];
+	mutationFinding(): ReturnType<WorkerMutationEvidence["finding"]> | undefined;
 	getUsage(): AttemptUsageSnapshot;
 }
 
@@ -366,8 +366,19 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		void physicalWait.catch(() => undefined);
 		return physicalWait;
 	};
-	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
+	const mutations = new WorkerMutationEvidence({
+		attemptId: options.durableHandle.attemptId,
+		cwd: options.cwd,
+		shellReadOnly: options.executionPlan.shellReadOnly,
+		store: options.conversation,
+		onOwnedWrite: (path) => options.recordObjectiveMutation?.({ kind: "owned_write", cwd: options.cwd, path }),
+		onPersistenceFailure: (message) => {
+			toolIssues.add("worker mutation progress could not be persisted; parent review is required");
+			options.warn(message);
+		},
+	});
+	const { changedFiles } = mutations;
 	const attemptStartedAt = Date.now();
 	/** Where this attempt's messages begin, set when it runs: a reused specialist's earlier tasks are not its own. */
 	let attemptTranscriptStart = 0;
@@ -486,58 +497,15 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			.then(() => options.observeWorkerProgress?.(observation, options.signal))
 			.catch(() => undefined);
 	};
-	const recordChangedFile = (filePath: string): void => {
-		changedFiles.add(filePath);
-		try {
-			options.conversation.recordChangedFile(options.durableHandle.attemptId, filePath);
-		} catch (error) {
-			toolIssues.add("worker changed-file progress could not be persisted; parent review is required");
-			options.warn(
-				`Worker changed-file progress persistence failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	};
-	const mutationTarget = (toolName: string, args: unknown): string | undefined => {
-		if ((toolName !== "write" && toolName !== "edit") || !args || typeof args !== "object" || Array.isArray(args)) {
-			return undefined;
-		}
-		const rawPath = (args as Record<string, unknown>).path;
-		if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
-		const absolutePath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(options.cwd, rawPath);
-		let canonicalPath = absolutePath;
-		try {
-			canonicalPath = safeRealpathSync(absolutePath);
-		} catch {
-			// A not-yet-created write target still needs a conservative lexical identity at cancellation.
-		}
-		return path.relative(options.cwd, canonicalPath).split(path.sep).join("/");
-	};
-	const recordMutationTarget = (filePath: string): void => {
-		recordChangedFile(filePath);
-		options.recordObjectiveMutation?.({
-			kind: "owned_write",
-			path: filePath,
-			cwd: options.cwd,
-		});
-	};
-	const admittedMutationTargets = new Map<string, string>();
 	const admittedToolSelectionIds = new Set<string>();
 	let callbackBoundarySealed = false;
 	const sealChangedFiles = (): readonly string[] => {
 		if (!callbackBoundarySealed) {
 			callbackBoundarySealed = true;
-			const unresolvedTargets = [...admittedMutationTargets.values()];
-			admittedMutationTargets.clear();
+			mutations.seal();
 			const unresolvedSelectionIds = [...admittedToolSelectionIds];
 			admittedToolSelectionIds.clear();
 			let failure: { error: unknown } | undefined;
-			for (const filePath of unresolvedTargets) {
-				try {
-					recordMutationTarget(filePath);
-				} catch (error) {
-					failure ??= { error };
-				}
-			}
 			for (const toolCallId of unresolvedSelectionIds) {
 				try {
 					options.toolSelection?.discard(toolCallId);
@@ -559,6 +527,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				fencingToken: options.durableHandle.fencingToken,
 			})
 		: undefined;
+	if (actionJournal)
+		mutations.restoreActions({
+			orchestrationHome: options.orchestrationHome,
+			parentSessionId: options.parentSessionId,
+			taskId: options.durableHandle.taskId,
+		});
 	const projectCompletion = (
 		done: { text: string; stopReason: unknown; errorMessage?: string },
 		costUsd: number,
@@ -810,6 +784,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const ledger: WorkerAttemptExecutionLedger = {
 		changedFiles,
 		sealChangedFiles,
+		mutationFinding: () => mutations.finding(),
 		getUsage: currentUsage,
 	};
 
@@ -874,7 +849,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						? {
 								applyActions: (actions: readonly WorkerAction[]) => {
 									const report = options.applyActions!(actions, actionJournal);
-									for (const filePath of report.changedFiles) recordChangedFile(filePath);
+									mutations.recordActions(report);
 									return report;
 								},
 							}
@@ -1015,7 +990,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							};
 							const preparedTools = new Map<string, { requestId: string; name: string; args: unknown }>();
 							const admittedCalls = new Set<string>();
+							const successfulMutations = new Set<string>();
 							let stopAdmission: (() => void) | undefined;
+							let stopExecution: (() => void) | undefined;
 							let committed = false;
 							const abortTranscriptCursor = (): void => {
 								providerTurn.close();
@@ -1040,9 +1017,15 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 									checkpointUsage(`Authorized worker tool '${toolName}' under its durable grant.`);
 									options.toolSelection?.begin(toolCallId, toolName, args);
 									if (options.toolSelection) admittedToolSelectionIds.add(toolCallId);
-									const target = mutationTarget(toolName, args);
-									if (target) admittedMutationTargets.set(toolCallId, target);
 									admittedCalls.add(toolCallId);
+								});
+								stopExecution = options.toolSurface.onToolExecution({
+									start: (id, name, args) => {
+										if (admittedCalls.has(id)) mutations.start(id, name, args);
+									},
+									end: (id, result) => {
+										if (mutations.end(id, result)) successfulMutations.add(id);
+									},
 								});
 								let result: IsolatedCompletionResult;
 								// The conversation's sent-prefix marks, carried across its runs like root's.
@@ -1142,7 +1125,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													context.registerCleanup?.(() => {
 														preparedTools.delete(context.toolCall.id);
 														admittedCalls.delete(context.toolCall.id);
-														admittedMutationTargets.delete(context.toolCall.id);
+														successfulMutations.delete(context.toolCall.id);
 														if (admittedToolSelectionIds.delete(context.toolCall.id))
 															options.toolSelection?.discard(context.toolCall.id);
 													});
@@ -1165,16 +1148,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												options.toolSurface.assertHealthy();
 												if (!admittedCalls.delete(toolCall.id)) return undefined;
 												let duplicateNote: string | undefined;
-												const admittedTarget = admittedMutationTargets.get(toolCall.id);
-												if (admittedTarget) {
-													admittedMutationTargets.delete(toolCall.id);
-													const completedTarget = mutationTarget(toolCall.name, args) ?? admittedTarget;
-													recordMutationTarget(completedTarget);
-												}
+
 												signal.throwIfAborted();
 												options.toolSelection?.complete(toolCall.id, !isError, result.content);
 												admittedToolSelectionIds.delete(toolCall.id);
-												if (admittedTarget && !isError)
+												if (successfulMutations.delete(toolCall.id) && !isError)
 													duplicateNote = await options.reviewNewCode?.({
 														toolName: toolCall.name,
 														args,
@@ -1510,6 +1488,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								return evidenced.completion;
 							} finally {
 								stopAdmission?.();
+								stopExecution?.();
 								signal.removeEventListener("abort", abortTranscriptCursor);
 								providerTurn.close();
 								if (activeProviderTurn === providerTurn) activeProviderTurn = undefined;

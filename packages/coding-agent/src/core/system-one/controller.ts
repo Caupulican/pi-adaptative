@@ -1,5 +1,4 @@
 import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
-import type { Consequence } from "../decision/primitives.ts";
 import { choiceProbability } from "../decision/thresholds.ts";
 import {
 	lightweightQuestionId,
@@ -82,6 +81,7 @@ import {
 import { StateProjector } from "./projector.ts";
 import type { SemanticDoubtDecision, SemanticUncertaintyPort } from "./semantic-doubts.ts";
 import {
+	consequenceForImpact,
 	doubtReason,
 	type SemanticEvaluationObserver,
 	type SemanticQuestionState,
@@ -214,20 +214,6 @@ export class SystemOneStageInterruptedError extends ObjectiveExecutionInterrupte
 		super(reason);
 		this.message = `System One ${stage} result was superseded by a goal or session change.`;
 		this.name = "SystemOneStageInterruptedError";
-	}
-}
-
-/** The consequence class a stage's tool impact maps to, for the evaluation record. */
-function consequenceForImpact(impact: ToolImpact): Consequence {
-	switch (impact) {
-		case "read_only":
-			return "low";
-		case "local_reversible":
-			return "medium";
-		case "repo_mutation":
-			return "high";
-		default:
-			return "critical";
 	}
 }
 
@@ -482,20 +468,7 @@ export class SystemOneController {
 				consequence: consequenceForImpact(impact),
 				model: pinnedModel,
 			});
-			let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
-			try {
-				response = await this.adapter.evaluate(
-					{
-						model: pinnedModel,
-						state: stateView,
-						questions: toTypeSafeEvaluationQuestions(questions),
-					},
-					{ impact, timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, ...(signal ? { signal } : {}) },
-				);
-			} catch (error) {
-				if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
-				throw error;
-			}
+			const response = await this.evaluateQuestions(evaluationId, pinnedModel, stateView, questions, impact, signal);
 			if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId);
 
 			const decision: ValidationDecision = {
@@ -516,6 +489,30 @@ export class SystemOneController {
 		} finally {
 			this.activeEvaluations--;
 			if (this.activeEvaluations === 0) this.evaluationIdleListener?.();
+		}
+	}
+
+	private async evaluateQuestions(
+		evaluationId: string | undefined,
+		model: string,
+		state: Record<string, unknown>,
+		questions: Readonly<QuestionPack>,
+		impact: ToolImpact,
+		signal?: AbortSignal,
+	) {
+		try {
+			const response = await this.adapter.evaluate(
+				{ model, state, questions: toTypeSafeEvaluationQuestions(questions) },
+				{ impact, timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, signal },
+			);
+			if (evaluationId !== undefined) this.evaluationObserver?.noteResponse?.(evaluationId, response);
+			return response;
+		} catch (error) {
+			if (evaluationId !== undefined) {
+				if (signal?.aborted) this.evaluationObserver?.settleCancelled(evaluationId, error);
+				else this.evaluationObserver?.settleFailed(evaluationId, error);
+			}
+			throw error;
 		}
 	}
 
@@ -540,16 +537,9 @@ export class SystemOneController {
 			model,
 		});
 		try {
-			const response = await this.adapter.evaluate(
-				{ model, state, questions: toTypeSafeEvaluationQuestions(questions) },
-				{ impact: "read_only", timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, ...(signal ? { signal } : {}) },
-			);
+			const response = await this.evaluateQuestions(evaluationId, model, state, questions, "read_only", signal);
 			return { status: "evaluated", response, evaluationId };
 		} catch (error) {
-			if (evaluationId !== undefined) {
-				if (signal?.aborted) this.evaluationObserver?.settleCancelled(evaluationId);
-				else this.evaluationObserver?.settleFailed(evaluationId, error);
-			}
 			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
 		}
 	}

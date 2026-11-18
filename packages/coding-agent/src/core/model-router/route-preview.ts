@@ -10,6 +10,7 @@ import type { ModelRouterIntent } from "./intent-classifier.ts";
  * status state.
  */
 export interface RoutePreview {
+	readonly ownerChatModel: string | null;
 	readonly intent: ModelRouterIntent;
 	readonly baselineTier: string;
 	readonly risk: string;
@@ -32,8 +33,9 @@ export interface RoutePreview {
 	readonly candidates: readonly string[];
 }
 
-/** Live preview: the same path a real turn takes (judge, H-MoE), still without executing anything. */
+/** Live preview: task recommendation with the routing judge and H-MoE, alongside the current owner chat model. */
 export interface LiveRoutePreview {
+	readonly ownerChatModel: string | null;
 	readonly tier: string;
 	readonly risk: string;
 	readonly reasonCode: string;
@@ -64,6 +66,7 @@ export function formatRouteSelectionSource(selection: RouteSelectionSource | und
 export function formatRoutePreview(preview: RoutePreview): string {
 	const words = interfaceText().localModels.routerSetup.preview;
 	const lines = [
+		words.ownerChatModel(preview.ownerChatModel ?? words.none),
 		words.intent(preview.intent),
 		words.baselineTier(preview.baselineTier),
 		words.risk(preview.risk),
@@ -76,7 +79,7 @@ export function formatRoutePreview(preview: RoutePreview): string {
 		words.poolPreference(preview.poolPreference),
 		words.subscriptionCandidates(preview.subscriptionCandidates),
 		words.eligibleCandidates(preview.eligibleCandidates),
-		words.wouldChoose(preview.chosenModel ?? words.noModel),
+		words.taskRecommendation(preview.chosenModel ?? words.none),
 		words.source(formatRouteSelectionSource(preview.selection)),
 	];
 	if (preview.manualPinOutsidePool) {
@@ -95,10 +98,11 @@ export function formatRoutePreview(preview: RoutePreview): string {
 export function formatLiveRoutePreview(preview: LiveRoutePreview): string {
 	const words = interfaceText().localModels.routerSetup.preview;
 	const lines = [
+		words.ownerChatModel(preview.ownerChatModel ?? words.none),
 		words.chosenTier(preview.tier),
 		words.risk(preview.risk),
 		words.reason(preview.reasonCode),
-		words.chosenModel(preview.chosenModel ?? words.noModel),
+		words.taskRecommendation(preview.chosenModel ?? words.none),
 		words.source(formatRouteSelectionSource(preview.selection)),
 		words.preference(preview.poolPreference),
 	];

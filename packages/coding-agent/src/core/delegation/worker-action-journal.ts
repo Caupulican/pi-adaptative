@@ -117,7 +117,7 @@ function validateScope(scope: WorkerActionJournalScope): JournalScopeFields {
 	};
 }
 
-function journalIdentity(scope: JournalScopeFields): WorkerActionJournalIdentity {
+function journalIdentity(scope: WorkerActionJournalIdentity): WorkerActionJournalIdentity {
 	return { parentSessionId: scope.parentSessionId, taskId: scope.taskId };
 }
 
@@ -248,6 +248,43 @@ function parseJournal(value: unknown, expectedScope: WorkerActionJournalIdentity
 	return { schemaVersion: JOURNAL_SCHEMA_VERSION, scope: parsedScope, entries };
 }
 
+function readWorkerActionJournal(filePath: string, identity: WorkerActionJournalIdentity): PersistedJournal {
+	const content = readOptionalBoundedTextFileSync(filePath, MAX_JOURNAL_BYTES, "Worker action journal");
+	if (content === undefined) {
+		return { schemaVersion: JOURNAL_SCHEMA_VERSION, scope: structuredClone(identity), entries: [] };
+	}
+	let raw: unknown;
+	try {
+		raw = JSON.parse(content);
+	} catch {
+		throw new Error("Worker action journal is unreadable; refusing mutation replay.");
+	}
+	return parseJournal(raw, identity);
+}
+
+/** Reads confirmed and unfinished mutations under the same bounded decoder as action authorization. */
+export function readWorkerActionMutationProgress(options: {
+	orchestrationHome: OrchestrationHome;
+	parentSessionId: string;
+	taskId: string;
+	attemptId: string;
+	cwd: string;
+}): { changedFiles: string[]; uncertain: boolean } {
+	const identity = journalIdentity(options);
+	const filePath = workerActionJournalFile(options.orchestrationHome, options.parentSessionId, scopeDigest(identity));
+	return withSessionBundleFileInspection(options.orchestrationHome, options.parentSessionId, filePath, () => {
+		const entries = readWorkerActionJournal(filePath, identity).entries.filter(
+			(entry) => entry.attemptId === options.attemptId,
+		);
+		const pathApi = usesWindowsPath(options.cwd) ? path.win32 : path.posix;
+		return {
+			changedFiles: entries
+				.filter((entry) => entry.status === "succeeded")
+				.map((entry) => pathApi.relative(options.cwd, entry.normalizedTarget).split(pathApi.sep).join("/")),
+			uncertain: entries.some((entry) => entry.status === "intent"),
+		};
+	});
+}
 function now(): string {
 	return new Date().toISOString();
 }
@@ -375,17 +412,7 @@ export class WorkerActionJournal {
 	}
 
 	private readLocked(): PersistedJournal {
-		const content = readOptionalBoundedTextFileSync(this.filePath, MAX_JOURNAL_BYTES, "Worker action journal");
-		if (content === undefined) {
-			return { schemaVersion: JOURNAL_SCHEMA_VERSION, scope: structuredClone(this.identity), entries: [] };
-		}
-		let raw: unknown;
-		try {
-			raw = JSON.parse(content);
-		} catch {
-			throw new Error("Worker action journal is unreadable; refusing mutation replay.");
-		}
-		return parseJournal(raw, this.identity);
+		return readWorkerActionJournal(this.filePath, this.identity);
 	}
 
 	private withMutation<T>(operation: () => T): T {

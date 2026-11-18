@@ -16,12 +16,13 @@ import type { Consequence } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
 import { CONSEQUENCE_MIN_CONFIDENCE, choiceProbability, STEERING_CUTS } from "../decision/thresholds.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
-import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
+import { authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
 import type { SystemOneThresholds } from "../system-one/config.ts";
 import { completionPackFailures, isAdverseAnswer, noulBandThresholds } from "../system-one/policy.ts";
 import {
 	type SemanticDecisionTrace,
 	type SemanticEvaluationObserver,
+	type SemanticResponseEvidence,
 	type SemanticTraceGate,
 	semanticWorkerTaskScope,
 	traceJudgmentsFromEvaluation,
@@ -41,24 +42,21 @@ import {
 	type SteeringCertificate,
 	type SteeringCheckpointRequest,
 	type SteeringDirective,
+	SteeringJudgmentUnavailableError,
 	SteeringProtocolError,
 	type SteeringResult,
 	SteeringSemanticFailedError,
 	type SteeringSemanticOutcome,
+	SystemOneSteeringUnavailableError,
 } from "./types.ts";
+
+export { SteeringJudgmentUnavailableError, SystemOneSteeringUnavailableError } from "./types.ts";
 
 export function isCertificateSemanticallyPassed(cert: SteeringCertificate): boolean {
 	return (
 		cert.semantic_outcome === "pass" &&
 		(!cert.failed_semantic_predicates || cert.failed_semantic_predicates.length === 0)
 	);
-}
-
-export class SystemOneSteeringUnavailableError extends Error {
-	constructor(message: string, options?: ErrorOptions) {
-		super(message, options);
-		this.name = "SystemOneSteeringUnavailableError";
-	}
 }
 
 /**
@@ -79,23 +77,6 @@ function engineCallFailure(
 		`${source} unavailable for ${required ? "mandatory " : ""}checkpoint ${checkpointId}: ${String(err)}`,
 		{ cause: err },
 	);
-}
-
-/**
- * The engine gave no judgment for a checkpoint. Carries what the judgment would have decided, so the
- * caller applies the authority line: reversible work proceeds with the outage visible, an objective
- * transition holds.
- */
-export class SteeringJudgmentUnavailableError extends SystemOneSteeringUnavailableError {
-	readonly checkpointId: string;
-	readonly authority: AuthorityKind;
-
-	constructor(checkpointId: string, authority: AuthorityKind, cause: unknown) {
-		super(cause instanceof Error ? cause.message : String(cause));
-		this.name = "SteeringJudgmentUnavailableError";
-		this.checkpointId = checkpointId;
-		this.authority = authority;
-	}
 }
 
 export interface SystemOneSteeringPlaneDeps {
@@ -803,7 +784,9 @@ export class SystemOneSteeringPlane {
 
 		const evaluationId = this.startObserved(bound);
 		try {
-			const evaluation = await this.runEngine(request.checkpointId, bound.program, request, bound.consequence);
+			const evaluation = await this.runEngine(request.checkpointId, bound.program, request, bound.consequence, [
+				evaluationId,
+			]);
 			return await this.certify(bound, evaluation, evaluationId);
 		} catch (error) {
 			this.settleObservedFailure(evaluationId, request, error);
@@ -844,7 +827,7 @@ export class SystemOneSteeringPlane {
 		const evaluationIds = fresh.map((index) => this.startObserved(bounds[index]));
 		let evaluation: DecisionEvaluation;
 		try {
-			evaluation = await this.runEngine(label, program, first.request, first.consequence);
+			evaluation = await this.runEngine(label, program, first.request, first.consequence, evaluationIds);
 		} catch (error) {
 			for (const [position, index] of fresh.entries()) {
 				this.settleObservedFailure(evaluationIds[position], bounds[index].request, error);
@@ -929,14 +912,14 @@ export class SystemOneSteeringPlane {
 		error: unknown,
 	): void {
 		if (evaluationId === undefined) return;
-		if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-			this.evaluationObserver?.settleCancelled(evaluationId);
-			return;
-		}
 		// The ledger diagnoses the engine's own failure (its kind and receipt), not the outage wrapper.
 		const cause =
 			error instanceof SystemOneSteeringUnavailableError && error.cause !== undefined ? error.cause : error;
-		this.evaluationObserver?.settleFailed(evaluationId, cause);
+		if (request.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+			this.evaluationObserver?.settleCancelled(evaluationId, cause);
+		} else {
+			this.evaluationObserver?.settleFailed(evaluationId, cause);
+		}
 	}
 
 	/** One engine or router request for `program`; every failure to judge is the plane's unavailable error. */
@@ -945,45 +928,50 @@ export class SystemOneSteeringPlane {
 		program: DecisionProgram,
 		request: SteeringCheckpointRequest,
 		consequence: Consequence,
+		evaluationIds: readonly (string | undefined)[],
 	): Promise<DecisionEvaluation> {
+		const noteResponse = (response: SemanticResponseEvidence) => {
+			for (const id of evaluationIds) {
+				if (id !== undefined) this.evaluationObserver?.noteResponse?.(id, response);
+			}
+		};
 		const required = this.policy.mode === "system_one_required";
 		let evaluation: DecisionEvaluation;
 		// Taken as the checkpoint asks: the adapter resolves its access, and may retry, before its reviewer would take it.
 		const origin = this.captureOrigin?.();
 
-		if (this.router) {
-			try {
-				evaluation = await this.router.evaluateOrFallback(program, request.state, {
-					consequence,
-					occupancy: request.occupancy,
-					...(origin ? { origin } : {}),
-				});
-			} catch (err) {
-				throw engineCallFailure(err, request.signal, label, "Decision router", required);
-			}
-		} else if (this.decisionEngine) {
-			try {
-				evaluation = await this.decisionEngine.evaluate(program, request.state, {
-					consequence,
-					occupancy: request.occupancy,
-					...(request.objectiveId && request.taskId
-						? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
-						: {}),
-					...(request.signal ? { signal: request.signal } : {}),
-					...(origin ? { origin } : {}),
-				});
-			} catch (err) {
-				throw engineCallFailure(err, request.signal, label, "System One steering engine", required);
-			}
-		} else {
-			if (required) {
+		const options = {
+			consequence,
+			occupancy: request.occupancy,
+			signal: request.signal,
+			origin,
+			evaluationScope:
+				request.objectiveId && request.taskId
+					? semanticWorkerTaskScope(request.objectiveId, request.taskId)
+					: undefined,
+		};
+		try {
+			if (this.router)
+				evaluation = await this.router.evaluateOrFallback(program, request.state, options, noteResponse);
+			else if (this.decisionEngine) evaluation = await this.decisionEngine.evaluate(program, request.state, options);
+			else
 				throw new SystemOneSteeringUnavailableError(
-					`Decision engine missing for mandatory checkpoint ${label} in system_one_required mode.`,
+					required
+						? `Decision engine missing for mandatory checkpoint ${label} in system_one_required mode.`
+						: `No decision engine configured for checkpoint ${label}.`,
 				);
-			}
-			throw new SystemOneSteeringUnavailableError(`No decision engine configured for checkpoint ${label}.`);
+		} catch (err) {
+			throw engineCallFailure(
+				err,
+				request.signal,
+				label,
+				this.router ? "Decision router" : "System One steering engine",
+				required,
+			);
 		}
 
+		// Attribute the response before validating or persisting a certificate: either step can still fail.
+		if (evaluation) noteResponse(evaluation.audit ?? evaluation.engine);
 		if (required) {
 			const provenance = evaluation.engine.confidence_provenance;
 			if (isForbiddenRequiredProvenance(provenance)) {
@@ -1131,6 +1119,7 @@ export class SystemOneSteeringPlane {
 			failed_semantic_predicates,
 			unsure_semantic_predicates,
 			parent_certificate_ids: request.parentCertificateIds ? [...request.parentCertificateIds] : undefined,
+			...(evaluationId !== undefined ? { evaluation_id: evaluationId } : {}),
 			usage: evaluation.audit as Record<string, unknown> | undefined,
 			created_at: new Date().toISOString(),
 		};
@@ -1140,7 +1129,7 @@ export class SystemOneSteeringPlane {
 
 		if (evaluationId !== undefined) {
 			const { verdict, reasons, questionStates } = verdictFromCertificate(certificate);
-			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons, questionStates);
+			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons, questionStates, certificate.certificate_id);
 			// How code reached the verdict: the directive and outcome gates, the floor that turned a pass
 			// into a doubt, and this checkpoint's own judgments (a shared request carries other checkpoints').
 			const unsettled = new Set([...failed_semantic_predicates, ...unsure_semantic_predicates]);

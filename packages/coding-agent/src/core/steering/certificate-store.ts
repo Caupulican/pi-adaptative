@@ -22,6 +22,7 @@ export function isValidCertificateRecord(item: unknown): item is SteeringCertifi
 	const c = item as Record<string, unknown>;
 	return (
 		typeof c.certificate_id === "string" &&
+		(c.evaluation_id === undefined || typeof c.evaluation_id === "string") &&
 		typeof c.objective_id === "string" &&
 		typeof c.checkpoint_id === "string" &&
 		typeof c.state_digest === "string" &&

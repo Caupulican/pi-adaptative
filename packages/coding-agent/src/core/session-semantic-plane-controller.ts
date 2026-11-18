@@ -140,6 +140,7 @@ export class SessionSemanticPlaneController {
 				});
 				try {
 					const evaluation = await engine.evaluate(program, state, options);
+					this.health.noteResponse(evaluationId, evaluation.audit ?? evaluation.engine);
 					const { verdict, reasons, questionStates } = verdictFromEvaluation(evaluation);
 					this.health.settleOk(evaluationId, verdict, reasons, questionStates);
 					// The ledger id travels on the audit so the caller can attach its decision trace (`noteTrace`).
@@ -163,7 +164,7 @@ export class SessionSemanticPlaneController {
 						(error instanceof Error && error.name === "AbortError") ||
 						isRequestSpendRefusal(error)
 					) {
-						this.health.settleCancelled(evaluationId);
+						this.health.settleCancelled(evaluationId, error);
 					} else {
 						this.health.settleFailed(evaluationId, error);
 					}
@@ -255,6 +256,10 @@ export class SessionSemanticPlaneController {
 							...(row.reasons ? { reasons: row.reasons } : {}),
 							...(row.questionStates ? { questionStates: row.questionStates } : {}),
 							...(row.trace ? { trace: row.trace } : {}),
+							...(row.model ? { model: row.model } : {}),
+							...(row.provider ? { provider: row.provider } : {}),
+							...(row.usageRefs ? { usageRefs: row.usageRefs } : {}),
+							...(row.certificateId ? { certificateId: row.certificateId } : {}),
 						},
 					];
 				}),
@@ -271,15 +276,7 @@ export class SessionSemanticPlaneController {
 					...(record.consequence ? { consequence: record.consequence } : {}),
 					...(record.model ? { model: record.model } : {}),
 				}),
-			settle: (record) =>
-				ledger.settleSemanticEvaluation(record.evaluationId, {
-					endedAt: record.endedAt,
-					outcome: record.outcome,
-					...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
-					...(record.reasons ? { reasons: record.reasons } : {}),
-					...(record.questionStates ? { questionStates: record.questionStates } : {}),
-					...(record.trace ? { trace: record.trace } : {}),
-				}),
+			settle: (record) => ledger.settleSemanticEvaluation(record.evaluationId, record),
 			noteVerdict: (evaluationId, verdict, reasons, questionStates) =>
 				ledger.noteSemanticVerdict(evaluationId, verdict, reasons, questionStates),
 			noteTrace: (evaluationId, trace) => ledger.noteSemanticTrace(evaluationId, trace),

@@ -89,10 +89,12 @@ export function formatEvaluationRows(rows: readonly SemanticEvaluationLedgerRow[
 			const verdict = row.verdict ? ` verdict=${row.verdict}` : "";
 			const duration =
 				row.endedAt !== undefined ? ` ${formatDuration(Math.max(0, row.endedAt - row.startedAt))}` : "";
-			const model = row.model ? ` model=${row.model}` : "";
+			const model = row.model ? ` model=${row.provider ? `${row.provider}/` : ""}${row.model}` : "";
+			const certificate = row.certificateId ? ` certificate=${row.certificateId}` : "";
+			const usage = row.usageRefs?.map((ref) => `${ref.reportId}#${ref.attempt}`).join(",");
 			const consequence = row.consequence ? ` consequence=${row.consequence}` : "";
 			const reasons = row.reasons?.length ? `\n  ${row.reasons.join("\n  ")}` : "";
-			return `${formatTime(row.startedAt)} ${row.label} [${row.programId}] ${outcome}${verdict}${duration}${model}${consequence}${reasons}`;
+			return `${formatTime(row.startedAt)} ${row.label} [${row.programId}] ${outcome}${verdict}${duration}${model}${consequence}${certificate}${usage ? ` usage=${usage}` : ""}${reasons}`;
 		})
 		.join("\n");
 }

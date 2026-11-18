@@ -5,7 +5,10 @@
  * form otherwise. A nested call (one tool calling another) is never handed off, so it always runs in its foreground form.
  */
 
+import { formatToolRepairStandingRule } from "@caupulican/pi-ai/tool-repair-registry";
+import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import type { AgentLoopConfig, BackgroundToolCallContext } from "./loop-config.ts";
+import { sanitizeToolFailureEvidence } from "./tool-failure-memory.ts";
 import type { AgentTool, AgentToolCall, ToolCallBackgroundForms } from "./types.ts";
 
 /**
@@ -27,6 +30,39 @@ export function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentTo
 	if (!tool.prepareArguments) return toolCall;
 	const prepared = tool.prepareArguments(toolCall.arguments);
 	return prepared === toolCall.arguments ? toolCall : { ...toolCall, arguments: prepared as Record<string, any> };
+}
+
+export function validationFailureCorrection(
+	tool: AgentTool<any>,
+	args: unknown,
+	event: ToolArgumentValidationTelemetryEvent | undefined,
+): string {
+	try {
+		const correction = sanitizeToolFailureEvidence(tool.failureRecovery?.getValidationCorrection?.(args));
+		if (correction) return correction;
+	} catch {
+		// An extension's guidance can fail. The schema diagnostic still describes the refused call.
+	}
+	const shape = event?.failureShape
+		?.slice(0, 3)
+		.map((entry) =>
+			// A constraint failure on a well-typed value is only actionable with the constraint itself;
+			// "expected string, received string" is what a length cap used to print.
+			entry.constraint
+				? `${entry.path}: ${entry.keyword ?? "constraint"} ${entry.constraint}`
+				: `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`,
+		)
+		.join("; ");
+	const rules = [
+		...new Set(
+			(event?.failureModes ?? [])
+				.filter((mode) => mode !== "other")
+				.map((mode) => formatToolRepairStandingRule(mode)),
+		),
+	];
+	return [`Match ${tool.name} arguments to its current schema.`, shape ? `Fix ${shape}.` : undefined, ...rules]
+		.filter((part): part is string => part !== undefined)
+		.join(" ");
 }
 
 /** A call's forms, read from its validated arguments; both are schema-valid, so neither is re-validated. */

@@ -13,10 +13,15 @@ import type { ParentExecutionPolicy } from "./parent-execution-context.ts";
 import {
 	isOAuthCredentialUnusableText,
 	type WorkerCredentialHealth,
+	type WorkerModelMove,
 	type WorkerModelMoveReason,
 	workerModelMoveReason,
 } from "./worker-credential-health.ts";
 import type { ResolvedWorkerProfile, WorkerProfileResolver } from "./worker-profile-resolver.ts";
+
+import type { WorkerRecoveryCoordinator, WorkerRetryScheduleResult } from "./worker-recovery-coordinator.ts";
+
+type RetryRequest = Parameters<WorkerRecoveryCoordinator["scheduleAttemptRetry"]>[0];
 
 export interface WorkerModelFailoverPorts {
 	resolver(): Pick<WorkerProfileResolver, "resolveContract">;
@@ -27,6 +32,8 @@ export interface WorkerModelFailoverPorts {
 	readonly credentialHealth: Pick<WorkerCredentialHealth, "loginExpired" | "tellLoginExpired">;
 	readonly runModelHold?: ParentExecutionPolicy["runModelHold"];
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
+	isSubscription(model: Model<Api>): boolean;
+	scheduleRetry(request: RetryRequest): WorkerRetryScheduleResult;
 	warn(message: string): void;
 }
 
@@ -52,6 +59,35 @@ export class WorkerModelFailover {
 			);
 	}
 
+	/** A failed credential may schedule an ordered replacement. A failed completion may also retry its current
+	 * model. Every replacement is only a candidate until the scheduler admits it under the next lease fence. */
+	schedule(
+		source: "credential" | "completion",
+		model: Model<Api>,
+		request: Omit<RetryRequest, "failover" | "subscription" | "provider">,
+	):
+		| { record: Extract<WorkerRetryScheduleResult, { scheduled: true }>["record"]; move?: WorkerModelMove }
+		| undefined {
+		const next = this.failOver(request.laneId, request.outcome, model);
+		if (!next && source === "credential") return undefined;
+		const retry = this.ports.scheduleRetry({
+			...request,
+			provider: model.provider,
+			subscription: this.ports.isSubscription(model),
+			...(next ? { failover: next.reason } : {}),
+		});
+		if (!retry.scheduled) return undefined;
+		if (!next) return { record: retry.record };
+		return {
+			record: retry.record,
+			move: {
+				from: `${model.provider}/${model.id}`,
+				to: `${next.resolved.model.provider}/${next.resolved.model.id}`,
+				reason: next.reason,
+			},
+		};
+	}
+
 	/**
 	 * A worker whose model cannot take work: out of quota, refused for the account, or its credential unusable. A
 	 * model-level failure is marked exhausted where every routing decision reads it (the same registry root's billing
@@ -60,7 +96,7 @@ export class WorkerModelFailover {
 	 * outlive the new login and tells the owner once. Returns why the worker moved and the model it resolved to, when its
 	 * contract carries ordered fallbacks and its retry resolves to a different model; undefined when it did not move.
 	 */
-	failOver(
+	private failOver(
 		laneId: string,
 		outcome: { reasonCode: string; reasonDetail?: string },
 		model: Model<Api>,

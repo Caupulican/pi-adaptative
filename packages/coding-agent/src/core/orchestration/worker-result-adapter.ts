@@ -3,6 +3,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
+import { WORKER_UNCERTAIN_MUTATION_OBSERVATION } from "../autonomy/host-findings.ts";
 import { normalizeWorkerClaimForHost } from "../delegation/worker-claim.ts";
 import { sameFileVersion } from "../util/bounded-file.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
@@ -348,6 +349,17 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		artifacts,
 		evidence: [
 			...evidenceForClaim(claim, createdAt),
+			...(claim.hostFindings ?? [])
+				.filter((finding) => finding.code === "mutation_uncertain")
+				.map((finding, index) => ({
+					evidenceId: `host-worker-uncertain-mutation-${index + 1}`,
+					kind: "observation" as const,
+					summary: finding.text,
+					artifactIds: [],
+					trusted: true,
+					createdAt,
+					metadata: { observation: WORKER_UNCERTAIN_MUTATION_OBSERVATION },
+				})),
 			...hostFileStateEvidence(changedFileObservations, createdAt),
 			...(args.outputArtifact
 				? [

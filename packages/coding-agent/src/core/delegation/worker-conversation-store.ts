@@ -1217,36 +1217,76 @@ export class WorkerConversation {
 		);
 	}
 
-	/** Rehydrate the bounded mutation set across owner-session disposal and worker resume. */
+	recordUncertainMutation(attemptId: string): void {
+		if (this.usageAccountingVersion === 1) this.beginAttemptUsage(attemptId);
+		this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, { attemptId, uncertain: true }),
+		);
+	}
+
+	/** With no path this is the pre-execution intent; a path closes it as a confirmed write. */
+	recordNativeWriteProgress(attemptId: string, writeId: string, path?: string): void {
+		attemptId = assertAttemptUsageId(attemptId);
+		if (writeId.length !== 36) throw new TypeError("Worker native write identity is invalid.");
+		const candidate = path === undefined ? undefined : collectBoundedWorkerClaimChangedFiles([path]);
+		if (candidate && (candidate.overflowed || candidate.values.length !== 1)) {
+			throw new TypeError("Worker changed-file progress path is invalid or exceeds its durable bound.");
+		}
+		if (this.usageAccountingVersion === 1) this.beginAttemptUsage(attemptId);
+		this.appendSessionEntry((sessionManager) =>
+			sessionManager.appendCustomEntry(WORKER_CHANGED_FILE_CUSTOM_TYPE, {
+				attemptId,
+				writeId,
+				...(candidate ? { path: candidate.values[0]! } : {}),
+			}),
+		);
+	}
+
 	getChangedFiles(attemptId: string): string[] {
+		return this.getMutationProgress(attemptId).changedFiles;
+	}
+
+	/** Rehydrate host mutation evidence across owner-session disposal and worker resume. */
+	getMutationProgress(attemptId: string): { changedFiles: string[]; uncertain: boolean; matched: boolean } {
 		let firstEntry = 0;
 		let lastEntry = this.sessionManager.getEntryCount();
+		let matched = false;
 		if (this.usageAccountingVersion === 1) {
 			const boundaryIndex = attemptUsageBoundaryIndex(this.sessionManager, assertAttemptUsageId(attemptId));
-			if (boundaryIndex < 0) return [];
+			if (boundaryIndex < 0) return { changedFiles: [], uncertain: false, matched };
+			matched = true;
 			firstEntry = boundaryIndex + 1;
 			const nextBoundaryIndex = attemptUsageBoundaryIndex(this.sessionManager, undefined, firstEntry);
 			if (nextBoundaryIndex >= 0) lastEntry = nextBoundaryIndex;
 		}
 		const paths: string[] = [];
+		const unfinished = new Set<string>();
+		let uncertain = false;
 		visitWorkerSessionEntries(this.sessionManager, firstEntry, lastEntry, (entry) => {
 			if (entry.type !== "custom" || entry.customType !== WORKER_CHANGED_FILE_CUSTOM_TYPE) return;
 			const data = entry.data;
 			if (!data || typeof data !== "object" || Array.isArray(data)) return;
 			const attemptDescriptor = Object.getOwnPropertyDescriptor(data, "attemptId");
-			const pathDescriptor = Object.getOwnPropertyDescriptor(data, "path");
-			if (
-				attemptDescriptor &&
-				"value" in attemptDescriptor &&
-				attemptDescriptor.value === attemptId &&
-				pathDescriptor &&
-				"value" in pathDescriptor &&
-				typeof pathDescriptor.value === "string"
-			) {
-				paths.push(pathDescriptor.value);
+			if (!attemptDescriptor || !("value" in attemptDescriptor) || attemptDescriptor.value !== attemptId) return;
+			matched = true;
+			if (Object.getOwnPropertyDescriptor(data, "uncertain")?.value === true) uncertain = true;
+			const writeId: unknown = Object.getOwnPropertyDescriptor(data, "writeId")?.value;
+			const path: unknown = Object.getOwnPropertyDescriptor(data, "path")?.value;
+			if (typeof writeId === "string" && writeId.length === 36) {
+				if (typeof path === "string") {
+					if (!unfinished.delete(writeId)) return;
+				} else {
+					unfinished.add(writeId);
+				}
 			}
+			if (typeof path === "string") paths.push(path);
 		});
-		return collectBoundedWorkerClaimChangedFiles(paths).values;
+		const changedFiles = collectBoundedWorkerClaimChangedFiles(paths);
+		return {
+			changedFiles: changedFiles.values,
+			uncertain: uncertain || unfinished.size > 0 || changedFiles.overflowed,
+			matched,
+		};
 	}
 
 	/**

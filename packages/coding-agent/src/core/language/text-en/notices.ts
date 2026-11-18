@@ -205,7 +205,7 @@ export const NOTICES = {
 	/** A worker model's provider login expired and could not be refreshed (`worker-credential-health.ts`). */
 	workerLogin: {
 		expiredMoved: (name: string, provider: string) =>
-			`Your ${name} login has expired, so workers use another subscription model. Run /login ${provider} to sign in again.`,
+			`Your ${name} login has expired, so the worker has another model candidate to try. Run /login ${provider} to sign in again.`,
 		expiredUnstarted: (name: string, provider: string) =>
 			`Your ${name} login has expired, so a worker on it could not start. Run /login ${provider} to sign in again.`,
 	},

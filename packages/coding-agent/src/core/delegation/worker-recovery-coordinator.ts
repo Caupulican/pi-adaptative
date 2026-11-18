@@ -17,6 +17,7 @@ import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { RecoveredWorkerTerminalCompletion } from "./worker-attempt-executor.ts";
 import type { WorkerConversation } from "./worker-conversation-store.ts";
+import type { WorkerModelMoveReason } from "./worker-credential-health.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
@@ -323,7 +324,7 @@ export class WorkerRecoveryCoordinator {
 		provider: string;
 		maxAttempts?: number;
 		/** The attempt's contract has another usable candidate for a quota failure (see evaluateWorkerRetry). */
-		failover?: boolean;
+		failover?: WorkerModelMoveReason;
 		/** The attempt's model is reached through a subscription (see evaluateWorkerRetry). */
 		subscription?: boolean;
 	}): WorkerRetryScheduleResult {
@@ -341,7 +342,7 @@ export class WorkerRecoveryCoordinator {
 			retriesUsed,
 			resetWaits,
 			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
-			...(args.failover ? { failover: true } : {}),
+			...(args.failover ? { failover: args.failover } : {}),
 			...(args.subscription ? { subscription: true } : {}),
 		});
 		if (!decision.retry) return { scheduled: false, reason: decision.reason };

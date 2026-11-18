@@ -20,6 +20,7 @@
 import { createHash } from "node:crypto";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
+import { semanticFailureReceipts } from "../review/system-one-review-port.ts";
 import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadEvidence } from "./memory-read-context.ts";
 import { BatchAccount, CauseSlots, type TerminalHolds } from "./transcript-batch-account.ts";
 import type { CoordinatorHost } from "./transcript-coordinator-host.ts";
@@ -152,7 +153,6 @@ import {
 	admissionRecordFromResult,
 	needsReadmission,
 	parseSemanticReceipt,
-	receiptsOf,
 	summaryTextDigest,
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 	type TranscriptSummaryAdmissionPort,
@@ -2297,7 +2297,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * abort that carried none is not counted (nothing was paid), and a job that already left the list has no counters.
 	 */
 	private settleCarriedReceipts(port: TranscriptSummaryAdmissionPort, error: unknown, jobId: string): void {
-		const carried = receiptsOf(error);
+		const carried = semanticFailureReceipts(error);
 		const scheduler = this.run.scheduler;
 		if (carried.length === 0 || !scheduler) return;
 		const owner = this.ports.ownerSessionId();

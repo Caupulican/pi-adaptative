@@ -487,6 +487,7 @@ const HOST_FINDING_CODES: ReadonlySet<unknown> = new Set<WorkerHostFindingCode>(
 	"overlap",
 	"protected_path",
 	"lane",
+	"mutation_uncertain",
 	"omitted",
 ]);
 const CLAIM_PENDING_STATES: ReadonlySet<unknown> = new Set<WorkerClaimPending>(["verification"]);
@@ -748,7 +749,11 @@ export function isParentReviewRequired(args: { request: WorkerRequest; claim: Wo
 	// A claim that did not complete (cancelled, failed, blocked) is not an ask-user outcome of the gate, but what the
 	// host itself observed about the worker is evidence the parent must review. The marker is still derived from
 	// the claim as it stands, never carried over, so it cannot outlive the findings that justify it.
-	return args.claim.status !== "completed" && (args.claim.hostFindings?.length ?? 0) > 0;
+	return Boolean(
+		args.claim.hostFindings?.some((finding) => finding.code === "mutation_uncertain") ||
+			(args.claim.status !== "completed" &&
+				((args.claim.hostFindings?.length ?? 0) > 0 || args.claim.changedFiles.length > 0)),
+	);
 }
 
 export function validateWorkerClaim(args: {

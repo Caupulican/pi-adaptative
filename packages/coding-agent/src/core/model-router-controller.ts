@@ -960,11 +960,8 @@ export class ModelRouterController {
 	}
 
 	/**
-	 * Routing for an owner message. The session model answers every owner message (root-first routing): with a talker already chosen the
-	 * route is `talker`, otherwise `direct`. No side trip, opening or toolkit route is produced, so no owner turn is a routed turn and the
-	 * routed-turn machinery (`runRoutedTurn`'s model path, refused-model replacement) has no owner-path producer; the return type keeps
-	 * those kinds for their downstream handlers. The router reads only `typedWords`, the owner's typed words (`ownerTypedText`, each
-	 * pasted span elided): a model, tier or toolkit choice is the owner's only when typed, never when it appears in pasted text.
+	 * The session model answers ordinary owner messages. Only the durable talker selection distinguishes
+	 * `talker` from `direct`; task tier classification belongs to the preview and executor paths.
 	 */
 	async routeOwnerMessage(
 		_typedWords: string,
@@ -1218,8 +1215,7 @@ export class ModelRouterController {
 	}
 
 	/**
-	 * Deterministic route preview for an example task. Classifies the prompt exactly as a turn
-	 * would and resolves the model through the same code path, but makes no provider call and
+	 * Deterministic task-routing preview alongside the current owner chat model. It makes no provider call and
 	 * leaves the router's sticky status state untouched.
 	 */
 	previewRoute(prompt: string): RoutePreview {
@@ -1262,6 +1258,7 @@ export class ModelRouterController {
 				)
 			: undefined;
 		return {
+			ownerChatModel: this.getForegroundRouteSnapshot().rootModel,
 			intent: tier === "cheap" ? "research" : "modify",
 			baselineTier: tier,
 			risk: classified.risk,
@@ -1301,9 +1298,11 @@ export class ModelRouterController {
 			this._lastModelRouterSkipReason = previousSkip;
 			this._lastModelRouterIntent = previousIntent;
 		}
+		const ownerChatModel = this.getForegroundRouteSnapshot().rootModel;
 		if (!resolved) {
 			const classified = classifyModelRouterRoute(prompt);
 			return {
+				ownerChatModel,
 				tier: classified.tier,
 				risk: classified.risk,
 				reasonCode: classified.reasonCode,
@@ -1317,6 +1316,7 @@ export class ModelRouterController {
 				? resolved.decision.tier
 				: "expensive";
 		return {
+			ownerChatModel,
 			tier: resolved.decision.tier,
 			risk: resolved.decision.risk,
 			reasonCode: resolved.decision.reasonCode,

@@ -5,6 +5,7 @@ import {
 	type RetryPolicy,
 } from "../../kernel/reliability/index.ts";
 import { statedUsageResetMs, usageResetWaitMs } from "../provider-admission/usage-reset.ts";
+import type { WorkerModelMoveReason } from "./worker-credential-health.ts";
 
 /**
  * Restart-durable, host-owned attempt ladder policy for delegated workers.
@@ -56,7 +57,7 @@ export function evaluateWorkerRetry(args: {
 	 * The attempt's contract has another usable candidate: a quota failure moves it there at once
 	 * instead of terminalizing (the failed model is already marked exhausted).
 	 */
-	failover?: boolean;
+	failover?: WorkerModelMoveReason;
 }): WorkerRetryDecision {
 	if (args.laneStatus !== "failed") return { retry: false, reason: `lane_status_${args.laneStatus}` };
 	if (args.reasonCode !== "completion_error") return { retry: false, reason: `reason_code_${args.reasonCode}` };
@@ -66,11 +67,9 @@ export function evaluateWorkerRetry(args: {
 	// retry-after bounds the account it leaves, not the one it moves to. It is not a repeat of the same
 	// failure, so it does not spend the attempt ceiling: the chain is bounded by the contract's finite
 	// candidates, each marked exhausted as it is left.
-	const failover =
-		args.failover === true &&
-		(classified.reason === "billing_or_quota" ||
-			classified.reason === "model_unsupported" ||
-			classified.reason === "auth");
+	// WorkerModelFailover already verified the cause and an actual different ordered candidate.
+	// An expired OAuth login can have a provider-specific diagnostic outside the retry classifier.
+	const failover = args.failover;
 	const subscription = !failover && args.subscription === true;
 	// A usage reset is waited out and spends nothing. A nearer stated reset (a reset worded "~0 min" just before it passes)
 	// is an ordinary retry that spends the ceiling, so a refusal that keeps stating a near reset ends once it is spent.
@@ -102,9 +101,11 @@ export function evaluateWorkerRetry(args: {
 	return {
 		retry: true,
 		reason: failover
-			? classified.reason === "billing_or_quota"
+			? failover === "quota_exhausted"
 				? "billing_or_quota_failover"
-				: `${classified.reason}_failover`
+				: failover === "model_unavailable"
+					? "model_unsupported_failover"
+					: "auth_failover"
 			: classified.reason,
 		delayMs,
 	};

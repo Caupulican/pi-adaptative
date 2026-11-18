@@ -229,6 +229,7 @@ export class FileLocator {
 						{ state: batch.state, questions: wire },
 						{ impact: "read_only", timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, ...(signal ? { signal } : {}) },
 					);
+					if (evaluationId !== undefined) observer?.noteResponse?.(evaluationId, response);
 					const scored: LocateMatch[] = [];
 					for (const index of batch.indexes) {
 						const answer = response.answers[locateQuestionId(index)] as { noul?: unknown } | undefined;
@@ -258,7 +259,7 @@ export class FileLocator {
 				} catch (error) {
 					requests.push({ questions: batch.indexes.length, bytes, latencyMs: Date.now() - started, failed: true });
 					if (signal?.aborted) {
-						if (evaluationId !== undefined) observer?.settleCancelled(evaluationId);
+						if (evaluationId !== undefined) observer?.settleCancelled(evaluationId, error);
 						throw error;
 					}
 					if (evaluationId !== undefined) observer?.settleFailed(evaluationId, error);

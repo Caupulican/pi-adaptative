@@ -881,7 +881,7 @@ export const SETTINGS_SCREEN = {
 		preview: {
 			label: "Preview route",
 			description:
-				"Enter an example task. Deterministic preview makes no provider call; live preview (judge/H-MoE) is a separate explicit action.",
+				"Compare the current chat model with the router’s recommendation for a task. The default preview runs locally.",
 			title: "Preview Route",
 			taskDescription:
 				"Type an example task. Enter previews deterministically (no provider call). Prefix with `live:` to run the judge/H-MoE path.",

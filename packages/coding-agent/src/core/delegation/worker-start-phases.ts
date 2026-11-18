@@ -426,9 +426,8 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 			return outcome;
 		}
 		const { startSettled, ...started } = outcome;
-		// A running worker's result names the model it settled on, and the moves on the way, so the parent never probes
-		// credentials or names a model to work around a login the harness already routed past. Bounded: past it, the
-		// admitted model is reported and the lane's status shows any later move.
+		// Wait for the start credential result so a scheduled replacement is reported as pending admission.
+		// Beyond the wait bound the lane’s status carries subsequent changes.
 		const modelMoves = startSettled
 			? await awaitWorkerStartSettlement(
 					startSettled,

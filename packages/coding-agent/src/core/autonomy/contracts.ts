@@ -272,7 +272,7 @@ export interface WorkerClaimVerificationDecision {
 }
 
 /** Which observation the host made about a worker: concurrent writes, a protected path, its lane, findings left out. */
-export type WorkerHostFindingCode = "overlap" | "protected_path" | "lane" | "omitted";
+export type WorkerHostFindingCode = "overlap" | "protected_path" | "lane" | "mutation_uncertain" | "omitted";
 
 /**
  * Something the host itself observed about a worker. Only the host writes it, and the review gate reads this

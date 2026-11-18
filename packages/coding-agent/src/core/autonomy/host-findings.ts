@@ -12,6 +12,7 @@ export const HOST_FINDING_LABEL: Readonly<Record<WorkerHostFindingCode, string>>
 	overlap: "worker_write_overlap:",
 	protected_path: "protected_path_changed:",
 	lane: "worker_lane:",
+	mutation_uncertain: "worker_mutation_uncertain:",
 	omitted: "host_findings:",
 };
 
@@ -27,4 +28,14 @@ export function hostFinding(code: WorkerHostFindingCode, text: string): WorkerHo
 /** The blocker line a finding renders. */
 export function hostFindingBlockerLine(finding: WorkerHostFinding): string {
 	return `${HOST_FINDING_LABEL[finding.code]} ${finding.text}`;
+}
+
+export const WORKER_UNCERTAIN_MUTATION_OBSERVATION = "worker_mutation_uncertain";
+
+/** A physical operation ran without a confirmed list of its changed files or their final state. */
+export function uncertainWorkerMutationFinding(): WorkerHostFinding {
+	return hostFinding(
+		"mutation_uncertain",
+		"An operation may have changed files whose paths or final state the host could not confirm.",
+	);
 }

@@ -146,6 +146,10 @@ const laneMemorySchema = {
 type LaneMemoryParams = Static<typeof laneMemorySchema>;
 const PROCESS_TOOL_NAMES = new Set<string>([STABLE_SHELL_TOOL_NAME, PYTHON_LANE_TOOL_NAME, PROCESS_LANE_TOOL_NAME]);
 
+export function isLaneProcessTool(name: string): boolean {
+	return PROCESS_TOOL_NAMES.has(name);
+}
+
 export interface LaneToolSurface {
 	/** Fresh tools owned by this lane only; no foreground tool instances or extension state leak in. */
 	tools: AgentTool[];
@@ -824,7 +828,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// fingerprints of the harness write-protected set, and a change is recorded, never refused or reverted.
 	const watchedTools = protectedPathWatch
 		? rawTools.map((tool) =>
-				PROCESS_TOOL_NAMES.has(tool.name)
+				isLaneProcessTool(tool.name)
 					? wrapToolExecution(tool, (executor) => ({
 							...executor,
 							execute: (toolCallId, ...args) =>
@@ -846,13 +850,18 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					if (refused?.block) {
 						throw new AgentToolPolicyDeniedError(refused.reason, refused.terminate, refused.correction);
 					}
-					for (const observer of [...executionObservers]) observer.start(toolCallId, tool.name, args);
+					const observers = [...executionObservers];
+					let started = 0;
 					let result: Awaited<ReturnType<typeof executor.execute>> | undefined;
 					try {
+						for (const observer of observers) {
+							started++;
+							observer.start(toolCallId, tool.name, args);
+						}
 						result = await executor.execute(toolCallId, args, signal, onUpdate);
 						return result;
 					} finally {
-						for (const observer of [...executionObservers]) observer.end(toolCallId, result);
+						for (let index = 0; index < started; index++) observers[index]!.end(toolCallId, result);
 					}
 				}),
 		})),

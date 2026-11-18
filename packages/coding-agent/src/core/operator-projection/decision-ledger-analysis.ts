@@ -24,6 +24,7 @@ import type {
 	SemanticQuestionState,
 } from "../system-one/semantic-evaluation-ledger.ts";
 import { DECISION_LEDGER_SCHEMA_VERSION } from "./decision-ledger-store.ts";
+import { asInteger, asText } from "./semantic-evaluation-row.ts";
 
 /** Rows per statement; the ledger is append-only and unbounded, a read is not. */
 const PAGE_ROWS = 500;
@@ -195,14 +196,6 @@ function acceptTrace(value: unknown): SemanticDecisionTrace | undefined {
 	if (stored.exit !== undefined && typeof stored.exit !== "string") return undefined;
 	if (stored.cached !== undefined && typeof stored.cached !== "boolean") return undefined;
 	return value as SemanticDecisionTrace;
-}
-
-function asText(value: unknown): string | undefined {
-	return typeof value === "string" ? value : undefined;
-}
-
-function asInteger(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function countInto(counts: Map<string, number>, key: string): void {

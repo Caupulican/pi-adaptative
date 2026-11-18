@@ -57,7 +57,7 @@ export interface AttemptBudgetInput {
 	readonly attemptId: string;
 	readonly initialUsage: AttemptUsageSnapshot;
 	readonly snapshot: TaskRuntimeProjection;
-	/** The model the attempt runs on now; a failover at its start composes again (`composeMovable`), a retry at its own. */
+	/** The model admitted on this run. A retry composes its own budget on the replacement model. */
 	readonly model: Model<Api>;
 	readonly agent: { readonly agentId: string; readonly rootAgentId: string };
 	readonly attemptTaskId: string;
@@ -76,15 +76,7 @@ export interface RequestCostBoundsDeps {
 	readonly goalMailSpentUsd: GoalMailSpend;
 }
 
-/** An attempt's budget (`RequestCostBounds.composeMovable`) that follows a model move before its first request. */
-export interface MovableAttemptBudget extends SharedCapabilityBudget {
-	/** Composes the attempt's budget again on the model its start failed over to. */
-	moveTo(model: Model<Api>, snapshot: TaskRuntimeProjection): void;
-	/** The dollar ceiling the attempt's own spend is held to on the model it runs on now (`costCeilingUsd` of its grant). */
-	ceilingUsd(): number | undefined;
-}
-
-/** The request with the attempt's own dollar ceiling (`MovableAttemptBudget.ceilingUsd`) on it and on its envelope. */
+/** The request with the attempt's own dollar ceiling (`RequestCostBounds.costCeilingUsd`) on it and on its envelope. */
 export function withAttemptCostCeiling(request: WorkerRequest, maxUsd: number | undefined): WorkerRequest {
 	const { maxEstimatedUsd: _request, ...rest } = request;
 	const { maxEstimatedUsd: _envelope, ...envelope } = request.envelope;
@@ -197,30 +189,6 @@ export class RequestCostBounds {
 			}
 		}
 		return ports.reduce((folded, port) => boundedByRunBudget(folded, port), tree);
-	}
-
-	/**
-	 * `compose`, for an attempt whose start may fail over to another model before its first provider request (its
-	 * credential did not resolve): `moveTo` composes it again on that model, so a move from a subscription model to a
-	 * metered one is held by the metered bounds, and its run reserved on the host's wider bound, before it spends.
-	 */
-	composeMovable(input: AttemptBudgetInput): MovableAttemptBudget {
-		let current = this.compose(input);
-		let model = input.model;
-		return {
-			assertBudgetAvailable: (subject) => current.assertBudgetAvailable(subject),
-			getAttemptUsage: () => current.getAttemptUsage(),
-			recordAttemptUsage: (usage, accounting) => current.recordAttemptUsage(usage, accounting),
-			remainingTokens: () => current.remainingTokens(),
-			remainingContextTokens: () => current.remainingContextTokens(),
-			reserveProviderBudget: (requestedMaxTokens, subject, signal, request) =>
-				current.reserveProviderBudget(requestedMaxTokens, subject, signal, request),
-			moveTo: (next, snapshot) => {
-				model = next;
-				current = this.compose({ ...input, model, snapshot });
-			},
-			ceilingUsd: () => this.costCeilingUsd(input.grantBudget, model),
-		};
 	}
 
 	/**

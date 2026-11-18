@@ -167,13 +167,26 @@ export interface SystemOneReviewRecord extends SystemOneEvaluationRecord {
 	readonly failures: string[];
 }
 
+/** A semantic call can fail after receiving billable responses. Keep their identities across error boundaries. */
+export class SemanticResponseError extends Error {
+	readonly receipts: readonly SystemOneReceipt[];
+
+	constructor(message: string, receipts: readonly SystemOneReceipt[], options?: ErrorOptions) {
+		super(message, options);
+		this.receipts = receipts;
+	}
+}
+
+export function semanticFailureReceipts(error: unknown): readonly SystemOneReceipt[] {
+	return error instanceof SemanticResponseError ? error.receipts : [];
+}
+
 /** Provider-neutral failure retaining the request, every response received, and every paid receipt so far. */
-export class SystemOneReviewError extends Error {
+export class SystemOneReviewError extends SemanticResponseError {
 	readonly response: unknown;
 	readonly requestSha256: string;
 	readonly request: SystemOneEvaluationRecord["request"];
 	readonly transportAttempts: SystemOneTransportAttempt[];
-	readonly receipts: readonly SystemOneReceipt[];
 
 	constructor(
 		message: string,
@@ -183,13 +196,12 @@ export class SystemOneReviewError extends Error {
 		transportAttempts: SystemOneTransportAttempt[],
 		receipts: readonly SystemOneReceipt[],
 	) {
-		super(message);
+		super(message, receipts);
 		this.name = "SystemOneReviewError";
 		this.response = response;
 		this.requestSha256 = requestSha256;
 		this.request = request;
 		this.transportAttempts = transportAttempts;
-		this.receipts = receipts;
 	}
 }
 
@@ -212,14 +224,10 @@ export class SystemOneInvalidResponseError extends SystemOneReviewError {
 }
 
 /** The caller's response observer failed. Not a receipt or provider failure; surfaced as its own error. */
-export class SystemOneObserverError extends Error {
-	/** The paid responses received before the observer failed: their receipts are still owed to the caller. */
-	readonly receipts: readonly SystemOneReceipt[];
-
+export class SystemOneObserverError extends SemanticResponseError {
 	constructor(message: string, cause: unknown, receipts: readonly SystemOneReceipt[] = []) {
-		super(message, { cause });
+		super(message, receipts, { cause });
 		this.name = "SystemOneObserverError";
-		this.receipts = receipts;
 	}
 }
 

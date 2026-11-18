@@ -31,7 +31,9 @@ const MOVE_REASON_WORDS: Record<WorkerModelMoveReason, string> = {
 /** The start-result line that tells the root model its worker already moved, so it neither probes nor names a model. */
 export function describeWorkerModelMoves(moves: readonly WorkerModelMove[] | undefined): string | undefined {
 	if (!moves || moves.length === 0) return undefined;
-	return moves.map((move) => `moved from ${move.from} to ${move.to} (${MOVE_REASON_WORDS[move.reason]})`).join("; ");
+	return moves
+		.map((move) => `retry scheduled from ${move.from} with candidate ${move.to} (${MOVE_REASON_WORDS[move.reason]})`)
+		.join("; ");
 }
 
 /**
@@ -111,8 +113,8 @@ export class WorkerCredentialHealth {
 }
 
 /**
- * The moment a started worker's model is settled: its start credentials resolved (possibly after moves to the next
- * candidates) or failed. The start result waits for it, so it names the model the worker actually runs on.
+ * Start credentials resolved, the start failed, or an ordered replacement was scheduled for admission.
+ * A scheduled move names the candidate separately from the model the lane has actually run.
  */
 export class WorkerStartSettlement {
 	readonly moves: WorkerModelMove[] = [];

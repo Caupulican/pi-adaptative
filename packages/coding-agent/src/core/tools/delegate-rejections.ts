@@ -11,6 +11,53 @@ import { type CommsErrRecord, commsErr } from "../comms/comms-records.ts";
 import { laneWorkerRefusalSkipRemedy } from "../model-capability.ts";
 import type { CommsErrCode, CommsHintCode } from "../provider-prompt-contracts.ts";
 
+const START_EXAMPLE = '{"action":"start","instructions":"<worker brief>"}';
+const MODEL_OVERRIDE = '"model":{"provider":"<provider>","modelId":"<model-id>"}';
+const FOLLOW_UP_EXAMPLE = '{"action":"follow_up","agentId":"<returned agentId>","message":"<follow-up>"}';
+
+export function delegateCallGuidance(actions: readonly string[]): string {
+	return [
+		actions.includes("start") && `Start ${START_EXAMPLE}. To select a model add ${MODEL_OVERRIDE}.`,
+		actions.includes("follow_up") && `Continue ${FOLLOW_UP_EXAMPLE}.`,
+	]
+		.filter(Boolean)
+		.join(" ");
+}
+
+/** Correct a rejected shape without copying its brief into the prompt or executing an inferred action. */
+export function delegateValidationCorrection(args: unknown, actions: readonly string[]): string | undefined {
+	if (!args || typeof args !== "object") return undefined;
+	const { action = "start", model } = args as Record<string, unknown>;
+	if (typeof action !== "string" || !actions.includes(action)) {
+		if (action === "spawn" && actions.includes("start"))
+			return `Use ${START_EXAMPLE} with the original brief. To select a model add ${MODEL_OVERRIDE}.`;
+		if (action === "followup" && actions.includes("follow_up"))
+			return `Use ${FOLLOW_UP_EXAMPLE} with the original message.`;
+		return `Available delegate actions: ${actions.join(", ")}. ${delegateCallGuidance(actions)}`.trim();
+	}
+	if (action === "start" && typeof model === "string")
+		return `Keep the brief in instructions and supply ${MODEL_OVERRIDE}.`;
+	return undefined;
+}
+
+/** One placeholder value of a schema property's type, for a minimal valid call. */
+export function delegateFieldExample(properties: Readonly<Record<string, unknown>>, field: string): unknown {
+	const node: unknown = properties[field];
+	if (!node || typeof node !== "object") return `<${field}>`;
+	const schema = node as { type?: unknown; minimum?: unknown; anyOf?: unknown; enum?: unknown };
+	const literal = Array.isArray(schema.anyOf)
+		? (schema.anyOf as { const?: unknown }[]).find((member) => member.const !== undefined)?.const
+		: Array.isArray(schema.enum)
+			? schema.enum[0]
+			: undefined;
+	if (literal !== undefined) return literal;
+	if (schema.type === "array") return [`<${field.replace(/s$/, "")}>`];
+	if (schema.type === "integer" || schema.type === "number")
+		return typeof schema.minimum === "number" ? Math.max(schema.minimum, 1) : 1;
+	if (schema.type === "boolean") return true;
+	return `<${field}>`;
+}
+
 interface RejectionShape {
 	readonly c: CommsErrCode;
 	readonly f?: string;

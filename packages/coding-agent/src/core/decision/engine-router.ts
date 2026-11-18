@@ -1,3 +1,5 @@
+import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
+import { semanticFailureReceipts } from "../review/system-one-review-port.ts";
 import { DecisionActionPolicy } from "./action-policy.ts";
 import { supportsProgram } from "./capabilities.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "./engine.ts";
@@ -43,6 +45,7 @@ export class DecisionEngineRouter {
 		program: DecisionProgram,
 		state: unknown,
 		options?: DecisionOptions,
+		observeDiscarded?: (response: { receipts: readonly SystemOneReceipt[] }) => void,
 	): Promise<DecisionEvaluation> {
 		const consequence = options?.consequence ?? "medium";
 		const candidates = this.engines
@@ -78,7 +81,7 @@ export class DecisionEngineRouter {
 						audit: {
 							...evaluation.audit,
 							engineId: engine.id,
-							model: engine.model,
+							model: evaluation.engine.model,
 							programId: program.id,
 							programVersion: program.version,
 							confidenceProvenance: evaluation.engine.confidence_provenance,
@@ -89,11 +92,14 @@ export class DecisionEngineRouter {
 					};
 				}
 
+				if (evaluation.audit?.receipts?.length) observeDiscarded?.({ receipts: evaluation.audit.receipts });
 				// "try_next_engine" means this engine missed (an unsupported result or a disallowed provenance).
 				// An answer below a cut comes back as "gather_more" above: uncertainty is returned to the
 				// caller, never re-asked of a less calibrated engine as if this one had not answered.
 			} catch (err) {
 				if (isRequestSpendRefusal(err) || options?.signal?.aborted) throw err;
+				const receipts = semanticFailureReceipts(err);
+				if (receipts.length) observeDiscarded?.({ receipts });
 				lastError = err;
 				// Cascade to next engine in fallback chain
 			}

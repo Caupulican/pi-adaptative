@@ -4,6 +4,31 @@
  */
 
 import type { SemanticEvaluationOccupancy } from "../decision/engine.ts";
+import type { AuthorityKind } from "../system-one/authority-line.ts";
+
+export class SystemOneSteeringUnavailableError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "SystemOneSteeringUnavailableError";
+	}
+}
+
+/**
+ * The engine gave no judgment for a checkpoint. Carries what the judgment would have decided, so the
+ * caller applies the authority line: reversible work proceeds with the outage visible, an objective
+ * transition holds.
+ */
+export class SteeringJudgmentUnavailableError extends SystemOneSteeringUnavailableError {
+	readonly checkpointId: string;
+	readonly authority: AuthorityKind;
+
+	constructor(checkpointId: string, authority: AuthorityKind, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause));
+		this.name = "SteeringJudgmentUnavailableError";
+		this.checkpointId = checkpointId;
+		this.authority = authority;
+	}
+}
 
 export class SteeringProtocolError extends Error {
 	readonly checkpointId: string;
@@ -138,6 +163,8 @@ export class SteeringSemanticFailedError extends Error {
 export interface SteeringCertificate {
 	readonly schema_version: "1.0";
 	readonly certificate_id: string;
+	/** Durable observer row for the original judgment, including when this certificate is later reused. */
+	readonly evaluation_id?: string;
 	readonly objective_id: string;
 	readonly task_id?: string | null;
 	readonly work_unit_id?: string | null;

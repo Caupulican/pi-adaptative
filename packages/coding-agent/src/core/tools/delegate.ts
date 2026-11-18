@@ -82,9 +82,12 @@ import {
 import { BLOCK_AT_OCCURRENCE, RepeatedRejectionDetector, rejectionSignature } from "./delegate-rejection-signature.ts";
 import {
 	type DelegateErrRecord,
+	delegateCallGuidance,
+	delegateFieldExample,
 	delegateInputRemedies,
 	delegateRejection,
 	delegateStartRejection,
+	delegateValidationCorrection,
 	isInputRejection,
 	isSpecialistStateRefusal,
 	MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS,
@@ -145,9 +148,7 @@ const ORCHESTRATION_TOOL_NAME_PATTERN = `^(?:${WORKER_ORCHESTRATION_TOOL_NAMES.j
 
 function createDelegateSchema(actions: readonly DelegateAction[]) {
 	const actionDescription = [
-		actions.includes("start")
-			? 'Pass a JSON object. Start example: {"action":"start","instructions":"<worker brief>"}. Optional model override: {"provider":"<provider>","modelId":"<model-id>"}.'
-			: undefined,
+		delegateCallGuidance(actions) || undefined,
 		actions.includes("tasks")
 			? "tasks lists durable tasks, list worker metadata and activity, transcript pages messages"
 			: undefined,
@@ -157,9 +158,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			? "events recalls exact CI evidence and discovers source subjects; subscriptions reads or replaces task-bound event subscriptions"
 			: undefined,
 		actions.includes("profile_create") ? "profile_inspect/profile_create manage narrowed session presets" : undefined,
-		actions.includes("send")
-			? 'send/broadcast post non-waking peer evidence. Use {"action":"follow_up","agentId":"<returned agentId>","message":"<follow-up>"} to continue work on the same worker.'
-			: undefined,
+		actions.includes("send") ? "send/broadcast post non-waking peer evidence" : undefined,
 		actions.includes("reply") ? "reply answers one request" : undefined,
 		actions.includes("inbox")
 			? "inbox/inbox_wait/inbox_ack read and consume explicit replies, never completion"
@@ -575,24 +574,6 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	subscriptions: ["action", "taskId", "expectedRevision", "subscriptions", "cursor", "maxMessages"],
 } as const satisfies Record<DelegateAction, readonly DelegateInputField[]>;
 
-/** One placeholder value of a schema property's type, for a minimal valid call. */
-function exampleValue(field: string): unknown {
-	const node: unknown = Reflect.get(delegateSchema.properties, field);
-	if (!node || typeof node !== "object") return `<${field}>`;
-	const schema = node as { type?: unknown; minimum?: unknown; anyOf?: unknown; enum?: unknown };
-	const literal = Array.isArray(schema.anyOf)
-		? (schema.anyOf as { const?: unknown }[]).find((member) => member.const !== undefined)?.const
-		: Array.isArray(schema.enum)
-			? schema.enum[0]
-			: undefined;
-	if (literal !== undefined) return literal;
-	if (schema.type === "array") return [`<${field.replace(/s$/, "")}>`];
-	if (schema.type === "integer" || schema.type === "number")
-		return typeof schema.minimum === "number" ? Math.max(schema.minimum, 1) : 1;
-	if (schema.type === "boolean") return true;
-	return `<${field}>`;
-}
-
 /**
  * The `s` of an input refusal: the action's required fields (each alternative the advertised schema accepts), its
  * optional fields and one minimal valid call, read from the advertised schema and the action's field list. Bounded
@@ -613,7 +594,10 @@ function delegateSchemaFragment(action: DelegateAction): string {
 					.map((fields) => fields.join("+"))
 					.join(" or ")} in place of ${required.join("+")})`
 			: "";
-	const example = { action, ...Object.fromEntries(required.map((field) => [field, exampleValue(field)])) };
+	const example = {
+		action,
+		...Object.fromEntries(required.map((field) => [field, delegateFieldExample(delegateSchema.properties, field)])),
+	};
 	const fragment = `delegate ${action} required: ${required.join(", ") || "none"}${instead}; optional: ${optional.join(", ") || "none"}; minimal call ${JSON.stringify(example)}`;
 	return fragment.length <= MAX_DELEGATE_SCHEMA_FRAGMENT_CHARS
 		? fragment
@@ -991,7 +975,10 @@ function screenDelegateInput(
 		refusal: { message, details, ...(overrides ? { overrides } : {}) },
 	});
 	if (!isDelegateAction(requestedAction)) {
-		return refuse(`delegate action is invalid: ${requestedAction}`, { started: false, skipReason: "invalid_action" });
+		return refuse(`Invalid delegate action. ${delegateValidationCorrection(originalInput, availableActions)}`, {
+			started: false,
+			skipReason: "invalid_action",
+		});
 	}
 	if (!availableActions.includes(requestedAction)) {
 		return refuse(`delegate action is unavailable to this caller: ${requestedAction}`, {
@@ -1444,11 +1431,14 @@ function describeStartedWorker(
 	{ record, similarLaneIds, modelMoves, parentCeilingHolds }: Extract<DelegateStartOutcome, { started: true }>,
 	grant: WorkerGrantSummary | undefined,
 ): string {
+	const retryPending = record.reasonCode?.startsWith("retry_scheduled:") && modelMoves?.length;
 	const parts = [
-		`delegate started (${record.status}) — stable agentId ${record.agentId ?? record.laneId}, task laneId ${record.laneId}`,
+		`delegate started (${retryPending ? "waiting for retry" : record.status}) — stable agentId ${record.agentId ?? record.laneId}, task laneId ${record.laneId}`,
 	];
-	if (record.modelRef) parts.push(`effective model ${record.modelRef}, thinking ${record.thinkingLevel ?? "unknown"}`);
-	// The harness already moved the worker past an unusable model: said here so the parent neither probes nor names one.
+	if (record.modelRef)
+		parts.push(
+			`${retryPending ? "last admitted" : "effective"} model ${record.modelRef}, thinking ${record.thinkingLevel ?? "unknown"}`,
+		);
 	const moved = describeWorkerModelMoves(modelMoves);
 	if (moved) parts.push(moved);
 	if (grant) {
@@ -2102,7 +2092,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			...(profileDescription ? [profileDescription] : []),
 			...(isAsyncWiring ? [ASYNC_DELEGATE_DESCRIPTION_SUFFIX] : []),
 		].join(" "),
-		promptSnippet: "Persistent leaf workers",
+		promptSnippet: `Persistent leaf workers. ${delegateCallGuidance(availableActions)}`.trim(),
 		neverDefer: true,
 		parameters: createDelegateSchema(availableActions),
 		// Folding `task` onto its action's own field runs before schema validation, and a brief still over
@@ -2124,7 +2114,10 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		},
 		// The kernel shows the model a failed call's record, not the call's own result; the refusal view (its reason, and
 		// for an input refusal the schema fragment and remedies) reaches the model as that record's evidence.
-		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },
+		failureRecovery: {
+			getFailureEvidence: (_params, failure) => failure.message,
+			getValidationCorrection: (args) => delegateValidationCorrection(args, availableActions),
+		},
 		execute: screenedExecution(availableActions, rejections, async (toolCallId, screened, signal) => {
 			const { action, input, brief, agentIds, dependsOnTaskIds } = screened;
 			// Every refusal is an `err` record: the class, field and hint come from the skip reason's table entry.

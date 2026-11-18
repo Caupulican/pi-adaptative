@@ -4,11 +4,7 @@
  */
 
 import { EventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
-import {
-	formatToolRepairStandingRule,
-	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
-	type ToolFailurePhase,
-} from "@caupulican/pi-ai/tool-repair-registry";
+import { REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE, type ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import {
 	formatToolValidationEnrichment,
@@ -34,7 +30,13 @@ import {
 	startPlannedAgentProviderRequestWithId,
 } from "./provider-request-planner.ts";
 import { hasRecalledHistoryMarker, RECALLED_HISTORY_DETAIL_KEY } from "./session/message-retention.ts";
-import { canHandOffToolCalls, prepareToolCallArguments, toolCallForm, toolCallHandoff } from "./tool-call-arguments.ts";
+import {
+	canHandOffToolCalls,
+	prepareToolCallArguments,
+	toolCallForm,
+	toolCallHandoff,
+	validationFailureCorrection,
+} from "./tool-call-arguments.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	assessToolFailure,
@@ -1804,32 +1806,6 @@ function createValidationBounceTelemetry(
 	};
 }
 
-function validationFailureCorrection(
-	event: ToolArgumentValidationTelemetryEvent | undefined,
-	toolName: string,
-): string {
-	const shape = event?.failureShape
-		?.slice(0, 3)
-		.map((entry) =>
-			// A constraint failure on a well-typed value is only actionable with the constraint itself;
-			// "expected string, received string" is what a length cap used to print.
-			entry.constraint
-				? `${entry.path}: ${entry.keyword ?? "constraint"} ${entry.constraint}`
-				: `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`,
-		)
-		.join("; ");
-	const rules = [
-		...new Set(
-			(event?.failureModes ?? [])
-				.filter((mode) => mode !== "other")
-				.map((mode) => formatToolRepairStandingRule(mode)),
-		),
-	];
-	return [`Match ${toolName} arguments to its current schema.`, shape ? `Fix ${shape}.` : undefined, ...rules]
-		.filter((part): part is string => part !== undefined)
-		.join(" ");
-}
-
 function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
 	tracker.clear();
 }
@@ -2271,7 +2247,7 @@ async function prepareToolCall(
 			failureCode: validationError ? "invalid_arguments" : "preflight_error",
 			executionScope: binding?.executionScope,
 			correction: validationError
-				? [validationFailureCorrection(validationEvent, toolCall.name), parserDiagnostic]
+				? [validationFailureCorrection(tool, toolCall.arguments, validationEvent), parserDiagnostic]
 						.filter((part): part is string => part !== undefined)
 						.join(" ")
 				: toolFailureCorrection(message, "rejected", "preflight"),

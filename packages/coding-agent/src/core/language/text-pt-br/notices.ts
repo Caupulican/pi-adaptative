@@ -191,7 +191,7 @@ export const NOTICES = {
 		`Resultados de rotinas iniciaram ${bound} turnos da sessão principal nas últimas 24 horas, o limite routines.maxResultWakesPerDay; os próximos resultados esperam o seu próximo turno até o dia ter espaço. Aumentar a configuração deixa mais deles iniciarem turnos.`,
 	workerLogin: {
 		expiredMoved: (name: string, provider: string) =>
-			`O seu login em ${name} expirou, então os workers usam outro modelo de assinatura. Rode /login ${provider} para entrar de novo.`,
+			`O seu login em ${name} expirou, então o worker tem outro modelo candidato. Rode /login ${provider} para entrar de novo.`,
 		expiredUnstarted: (name: string, provider: string) =>
 			`O seu login em ${name} expirou, então um worker nele não pôde iniciar. Rode /login ${provider} para entrar de novo.`,
 	},

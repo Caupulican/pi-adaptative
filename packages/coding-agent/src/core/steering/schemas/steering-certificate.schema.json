@@ -24,6 +24,9 @@
     "certificate_id": {
       "type": "string"
     },
+    "evaluation_id": {
+      "type": "string"
+    },
     "objective_id": {
       "type": "string"
     },

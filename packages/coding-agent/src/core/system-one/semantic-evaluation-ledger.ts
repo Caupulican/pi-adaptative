@@ -10,23 +10,55 @@ import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { type NoulBand, type NoulDirection, noulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { choiceProbability, choiceRunnerUp, YES_NO_BANDS, type YesNoFamily } from "../decision/thresholds.ts";
+import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
 import { findPackForCheckpoint } from "../steering/programs.ts";
 import type { SteeringCertificate } from "../steering/types.ts";
 import { isAdverseAnswer } from "./policy.ts";
 import { redactSecrets } from "./projector.ts";
-import type { ValidationStage } from "./types.ts";
+import type { ToolImpact, ValidationStage } from "./types.ts";
 
 export type SemanticEvaluationOutcome = "ok" | "failed" | "cancelled";
 
 export type { SemanticEvaluationOccupancy, SemanticEvaluationScope } from "../decision/engine.ts";
+
+/** The consequence class a stage's tool impact maps to, for the evaluation record. */
+export function consequenceForImpact(impact: ToolImpact): Consequence {
+	switch (impact) {
+		case "read_only":
+			return "low";
+		case "local_reversible":
+			return "medium";
+		case "repo_mutation":
+			return "high";
+		default:
+			return "critical";
+	}
+}
 
 /** Collision-free worker question identity for one objective and logical task across retries. */
 export function semanticWorkerTaskScope(objectiveId: string, taskId: string): SemanticEvaluationScope {
 	return { kind: "worker-task", id: JSON.stringify([objectiveId, taskId]) };
 }
 
+/** Compact foreign keys to physical usage. Checkpoints judged together can reference the same response. */
+export interface SemanticUsageReference {
+	readonly reportId: string;
+	readonly attempt: number;
+	readonly provider: string;
+	readonly model: string;
+}
+
+export interface SemanticResponseEvidence {
+	readonly model?: string;
+	readonly provider?: string;
+	readonly receipts?: readonly SystemOneReceipt[];
+}
+
 /** One evaluation the plane is running right now. */
 export interface SemanticEvaluationStart {
+	readonly model?: string;
+	readonly provider?: string;
+	readonly usageRefs?: readonly SemanticUsageReference[];
 	readonly evaluationId: string;
 	readonly programId: string;
 	/** Operator-readable name for the judgment; see {@link semanticEvaluationLabel}. */
@@ -43,6 +75,7 @@ export interface SemanticEvaluationStart {
 
 /** One finished evaluation. */
 export interface SemanticEvaluationRecord extends SemanticEvaluationStart {
+	readonly certificateId?: string;
 	readonly endedAt: number;
 	readonly durationMs: number;
 	readonly outcome: SemanticEvaluationOutcome;
@@ -258,14 +291,17 @@ export interface SemanticEvaluationObserver {
 		evaluationScope?: SemanticEvaluationScope;
 		occupancy?: SemanticEvaluationOccupancy;
 	}): string;
+	/** Records the answering engine and physical receipt references before local verdict processing. */
+	noteResponse?(evaluationId: string, response: SemanticResponseEvidence): void;
 	settleOk(
 		evaluationId: string,
 		verdict?: string,
 		reasons?: readonly string[],
 		questionStates?: readonly SemanticQuestionState[],
+		certificateId?: string,
 	): void;
 	settleFailed(evaluationId: string, error: unknown): void;
-	settleCancelled(evaluationId: string): void;
+	settleCancelled(evaluationId: string, error?: unknown): void;
 	/** Sets the verdict on an already-settled record (System One's policy result arrives later). */
 	noteVerdict(
 		evaluationId: string,

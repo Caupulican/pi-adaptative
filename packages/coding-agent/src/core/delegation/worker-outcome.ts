@@ -8,6 +8,7 @@ import type {
 	WorkerHostVerdictKind,
 	WorkerReportRequirementStatus,
 } from "../autonomy/contracts.ts";
+import { WORKER_UNCERTAIN_MUTATION_OBSERVATION } from "../autonomy/host-findings.ts";
 import type { ArtifactContract } from "../orchestration/contracts.ts";
 import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -491,6 +492,7 @@ const FINDING_BLOCKERS: Readonly<Record<WorkerHostFindingCode, BlockerCode>> = {
 	overlap: "scope_denied",
 	protected_path: "scope_denied",
 	omitted: "evidence_missing",
+	mutation_uncertain: "unverified_result",
 	lane: "unverified_result",
 };
 
@@ -513,7 +515,12 @@ function selectBlocker(args: {
 	if (facts?.declared) return { blocker: facts.declared, source: `worker_declared:${facts.declared}` };
 	const finding =
 		facts?.findingCodes.find((code) => FINDING_BLOCKERS[code] === "scope_denied") ??
-		facts?.findingCodes.find((code) => code !== "lane");
+		facts?.findingCodes.find((code) => code !== "lane") ??
+		(args.attempt.result?.evidence.some(
+			(evidence) => evidence.trusted && evidence.metadata?.observation === WORKER_UNCERTAIN_MUTATION_OBSERVATION,
+		)
+			? "mutation_uncertain"
+			: undefined);
 	if (finding) return { blocker: FINDING_BLOCKERS[finding], source: `host_finding:${finding}` };
 	if (facts?.verdict === "rejected" || facts?.verdict === "needs_more") {
 		const mapped = facts.verdictReasonCodes

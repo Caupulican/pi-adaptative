@@ -138,6 +138,8 @@ export async function runJourney1HostEventWorkersPhase(
 			{
 				name: "event-workers-start-b",
 				check: (request) => {
+					const wireDescription = request.context.tools?.find((tool) => tool.name === "delegate")?.description;
+					expect(wireDescription).toContain('"action":"follow_up","agentId":');
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
 					// The start's own answer names the worker: its attempt reaches `running` on a later turn than the tool returns.

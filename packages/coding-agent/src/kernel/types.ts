@@ -486,6 +486,8 @@ export interface AgentToolFailureRecoveryContract<TParameters extends TSchema> {
 	 * when this method is declared. The same resolver must supply the executor's own timeout.
 	 */
 	getTimeoutMs?: (params: Static<TParameters>) => number | undefined;
+	/** Pure, bounded guidance for malformed arguments rejected before binding or execution. */
+	getValidationCorrection?: (args: unknown) => string | undefined;
 	/** Tool-owned corrective instruction, separate from raw diagnostics and execution admission. */
 	getFailureCorrection?: (params: Static<TParameters>, failure: AgentToolFailureEvidenceContext) => string | undefined;
 	/** Derive exact recovery requirements from validated arguments and a classified failure. */

@@ -19,6 +19,7 @@ import type {
 	SemanticEvaluationOutcome,
 	SemanticEvaluationScope,
 	SemanticQuestionState,
+	SemanticUsageReference,
 } from "../system-one/semantic-evaluation-ledger.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
 import type {
@@ -28,6 +29,7 @@ import type {
 	DecisionStageStoredEntry,
 } from "./decision-stage-log.ts";
 import { isLegacyIdleStageRow } from "./decision-stage-log.ts";
+import { asInteger, asText, semanticEvaluationRows } from "./semantic-evaluation-row.ts";
 
 export const DECISION_LEDGER_SCHEMA_VERSION = 1;
 
@@ -49,6 +51,9 @@ export interface SemanticEvaluationLedgerRow {
 	readonly questionStates?: readonly SemanticQuestionState[];
 	readonly trace?: SemanticDecisionTrace;
 	readonly model?: string;
+	readonly provider?: string;
+	readonly usageRefs?: readonly SemanticUsageReference[];
+	readonly certificateId?: string;
 }
 
 /** One recorded session of a working directory, as the read tool lists it. */
@@ -209,14 +214,6 @@ const STAGE_SET: ReadonlySet<string> = new Set([
 	"done",
 ]);
 
-function asInteger(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function asText(value: unknown): string | undefined {
-	return typeof value === "string" ? value : undefined;
-}
-
 export class DecisionLedgerStore {
 	private readonly database: SqliteDatabase;
 	private readonly attribution: DecisionLedgerAttribution;
@@ -273,6 +270,9 @@ export class DecisionLedgerStore {
 				scope_kind TEXT,
 				scope_id TEXT,
 				question_namespace TEXT,
+				provider TEXT,
+				usage_refs TEXT,
+				certificate_id TEXT,
 				trace TEXT
 			);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_session ON semantic_evaluations (session_id, started_at);
@@ -423,7 +423,16 @@ export class DecisionLedgerStore {
 							.all()
 							.map((column) => column.name),
 					);
-					for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states", "trace"])
+					for (const column of [
+						"scope_kind",
+						"scope_id",
+						"question_namespace",
+						"question_states",
+						"trace",
+						"provider",
+						"usage_refs",
+						"certificate_id",
+					])
 						if (!evaluationColumns.has(column))
 							database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
 					if (
@@ -587,7 +596,15 @@ export class DecisionLedgerStore {
 	startSemanticEvaluation(
 		row: Omit<
 			SemanticEvaluationLedgerRow,
-			"endedAt" | "outcome" | "verdict" | "reasons" | "questionStates" | "trace"
+			| "endedAt"
+			| "outcome"
+			| "verdict"
+			| "reasons"
+			| "questionStates"
+			| "trace"
+			| "provider"
+			| "usageRefs"
+			| "certificateId"
 		>,
 	): void {
 		this.attributeSession(row.sessionId);
@@ -621,11 +638,15 @@ export class DecisionLedgerStore {
 			reasons?: readonly string[];
 			questionStates?: readonly SemanticQuestionState[];
 			trace?: SemanticDecisionTrace;
+			model?: string;
+			provider?: string;
+			usageRefs?: readonly SemanticUsageReference[];
+			certificateId?: string;
 		},
 	): void {
 		this.database
 			.prepare(
-				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states), trace = COALESCE(?, trace) WHERE evaluation_id = ?",
+				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states), trace = COALESCE(?, trace), model = COALESCE(?, model), provider = COALESCE(?, provider), usage_refs = COALESCE(?, usage_refs), certificate_id = COALESCE(?, certificate_id) WHERE evaluation_id = ?",
 			)
 			.run(
 				settlement.endedAt,
@@ -634,6 +655,10 @@ export class DecisionLedgerStore {
 				settlement.reasons ? JSON.stringify(settlement.reasons) : null,
 				settlement.questionStates !== undefined ? JSON.stringify(settlement.questionStates) : null,
 				settlement.trace !== undefined ? JSON.stringify(settlement.trace) : null,
+				settlement.model ?? null,
+				settlement.provider ?? null,
+				settlement.usageRefs?.length ? JSON.stringify(settlement.usageRefs) : null,
+				settlement.certificateId ?? null,
 				evaluationId,
 			);
 	}
@@ -1175,7 +1200,7 @@ export class DecisionLedgerStore {
 				"SELECT * FROM semantic_evaluations WHERE session_id = ? AND (? IS NULL OR outcome = ?) ORDER BY started_at DESC, rowid DESC LIMIT ?",
 			)
 			.all(sessionId, outcome ?? null, outcome ?? null, Math.max(1, Math.floor(limit)));
-		return this.semanticEvaluationRows(rows, sessionId);
+		return semanticEvaluationRows(rows, sessionId);
 	}
 
 	/** Every evaluation of a session, in durable start order for live doubt restoration. */
@@ -1183,7 +1208,7 @@ export class DecisionLedgerStore {
 		const rows = this.database
 			.prepare("SELECT * FROM semantic_evaluations WHERE session_id = ? ORDER BY started_at ASC, rowid ASC")
 			.all(sessionId);
-		return this.semanticEvaluationRows(rows, sessionId);
+		return semanticEvaluationRows(rows, sessionId);
 	}
 
 	/** Appends one immutable advisory choice for a live doubt; exact retries are idempotent. */
@@ -1261,108 +1286,6 @@ export class DecisionLedgerStore {
 			});
 		}
 		return decisions;
-	}
-
-	private semanticEvaluationRows(
-		rows: readonly Record<string, unknown>[],
-		sessionId: string,
-	): SemanticEvaluationLedgerRow[] {
-		const out: SemanticEvaluationLedgerRow[] = [];
-		for (const row of rows) {
-			const evaluationId = asText(row.evaluation_id);
-			const programId = asText(row.program_id);
-			const label = asText(row.label);
-			const startedAt = asInteger(row.started_at);
-			const cwd = asText(row.cwd);
-			if (
-				evaluationId === undefined ||
-				programId === undefined ||
-				label === undefined ||
-				startedAt === undefined ||
-				cwd === undefined
-			)
-				continue;
-			const outcome = asText(row.outcome);
-			let reasons: string[] | undefined;
-			const rawReasons = asText(row.reasons);
-			if (rawReasons !== undefined) {
-				try {
-					const parsed: unknown = JSON.parse(rawReasons);
-					if (Array.isArray(parsed)) reasons = parsed.filter((item): item is string => typeof item === "string");
-				} catch {
-					reasons = undefined;
-				}
-			}
-			const endedAt = asInteger(row.ended_at);
-			const verdict = asText(row.verdict);
-			let questionStates: SemanticQuestionState[] | undefined;
-			const rawQuestionStates = asText(row.question_states);
-			if (rawQuestionStates !== undefined) {
-				try {
-					const parsed: unknown = JSON.parse(rawQuestionStates);
-					if (
-						Array.isArray(parsed) &&
-						parsed.every(
-							(item) =>
-								typeof item === "object" &&
-								item !== null &&
-								typeof item.question === "string" &&
-								typeof item.uncertain === "boolean" &&
-								(item.text === undefined || typeof item.text === "string"),
-						)
-					)
-						questionStates = parsed;
-				} catch {
-					questionStates = undefined;
-				}
-			}
-			// A trace that does not parse is dropped; it never makes the row, or the store, unreadable.
-			let trace: SemanticDecisionTrace | undefined;
-			const rawTrace = asText(row.trace);
-			if (rawTrace !== undefined) {
-				try {
-					const parsed: unknown = JSON.parse(rawTrace);
-					if (
-						typeof parsed === "object" &&
-						parsed !== null &&
-						typeof (parsed as { decision?: unknown }).decision === "string" &&
-						["gates", "judgments", "facts"].every((key) => {
-							const list = (parsed as Record<string, unknown>)[key];
-							return list === undefined || Array.isArray(list);
-						})
-					)
-						trace = parsed as SemanticDecisionTrace;
-				} catch {
-					trace = undefined;
-				}
-			}
-			const consequence = asText(row.consequence);
-			const model = asText(row.model);
-			const scopeKind = asText(row.scope_kind);
-			const scopeId = asText(row.scope_id);
-			const questionNamespace = asText(row.question_namespace);
-			out.push({
-				evaluationId,
-				sessionId,
-				cwd,
-				programId,
-				label,
-				startedAt,
-				...(consequence !== undefined ? { consequence } : {}),
-				...(endedAt !== undefined ? { endedAt } : {}),
-				...(outcome === "ok" || outcome === "failed" || outcome === "cancelled" ? { outcome } : {}),
-				...(verdict !== undefined ? { verdict } : {}),
-				...(reasons !== undefined ? { reasons } : {}),
-				...(questionStates !== undefined ? { questionStates } : {}),
-				...(trace !== undefined ? { trace } : {}),
-				...(model !== undefined ? { model } : {}),
-				...(scopeId !== undefined && (scopeKind === "session" || scopeKind === "worker-task")
-					? { evaluationScope: { kind: scopeKind, id: scopeId } }
-					: {}),
-				...(questionNamespace !== undefined ? { questionNamespace } : {}),
-			});
-		}
-		return out;
 	}
 
 	close(): void {
