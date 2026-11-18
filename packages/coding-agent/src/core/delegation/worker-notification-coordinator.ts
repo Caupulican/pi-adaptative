@@ -287,8 +287,6 @@ export class WorkerNotificationCoordinator {
 		this.schedule();
 	}
 
-	isReady = (): boolean => this.options.isReady?.() !== false;
-
 	resumePendingDelivery(): void {
 		if (this.pending.size > 0) this.schedule();
 	}
@@ -309,7 +307,7 @@ export class WorkerNotificationCoordinator {
 	}
 
 	private schedule(): void {
-		if (this.disposed || this.scheduled || !this.isReady()) return;
+		if (this.disposed || this.scheduled || this.options.isReady?.() === false) return;
 		this.scheduled = true;
 		const retryAlarm = this.retryAlarm;
 		this.retryAlarm = undefined;

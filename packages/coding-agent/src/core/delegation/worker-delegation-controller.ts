@@ -342,6 +342,7 @@ function describeReapedWorkerProcesses(laneId: string, processes: readonly strin
 
 export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	createBotMessageDirectory?(senderAgentId: string, attemptId: string): BotMessageDirectory;
+	isRecoveryReady?(): boolean;
 	/** The subscription allowance the fleet's room reads per worker account; absent leaves that term unbounded. */
 	fleetAllowance?: FleetAllowancePort;
 	/** The fleet queue metadata's file key; the session id when absent. A second host on the same session names its own. */
@@ -726,12 +727,11 @@ export class WorkerDelegationController {
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),
-			isReady: notifications.isReady,
+			isReady: this.deps.isRecoveryReady,
 			lifecycle: this.lifecycle,
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
 			recoverModelTransfers: () => this.modelHandoffs.recover(),
-			// The interrupted job's worker must not resume without its runner's deadline and cancellation.
 			endUnresumable: (attempt) => {
 				if (placedJobRef(attempt.dispatch.turnOrigin) === undefined) return false;
 				this.cancelAndPublish(this.lifecycle, attempt.taskId, "placed_job_not_resumed");

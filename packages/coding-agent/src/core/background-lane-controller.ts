@@ -535,6 +535,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			{
 				...this.deps,
 				...this._getTranscriptWrites(),
+				isRecoveryReady: () => this._workerBackgroundReady,
 				workerCeiling: () => workerCeilingOf(this.deps.standing, this.deps),
 				createBotMessageDirectory: (sender, attempt) =>
 					this._botLifecycle.createBotMessageDirectory(sender, attempt),
