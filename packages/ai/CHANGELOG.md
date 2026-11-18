@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Codex WebSocket continuations send the actual tool-search result on the next request. A synthesized placeholder previously caused a prefix mismatch and a full request after a tool search.
+
 ## [0.104.69] - 2026-11-17
 
 ### Added

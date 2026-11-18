@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Added
+
+- `/cost` shows recorded direct worker spend across retained tasks, including retries and unsuccessful attempts. It reports cost per host-accepted task when the ledger has enough pricing and outcome evidence.
+
+### Changed
+
+- Continuous chat sends compact, readable tool output to the model and reuses compatible history on follow-up requests. Pending history is grouped into navigable ranges, and numeric `zoom` IDs open individual messages.
+- Shell, Python, and filtered Git output are bounded before model delivery. Deterministic chat compaction can continue while model-backed summaries wait.
+- Routing diagnostics identify the active model, the router's proposed model, and the model and usage receipts behind System One decisions.
+
+### Fixed
+
+- Worker dispatch and follow-up guidance now uses the advertised tool arguments. Failed writes no longer count as completed changes, and worker handoffs retain observed changes through errors, cancellation, and retries.
+- Credential failover rechecks admission before sending the request with the next credential.
+- Codex sessions can continue on the cached WebSocket context after a successful tool search.
+
 ## [0.104.69] - 2026-11-17
 
 ### Changed
