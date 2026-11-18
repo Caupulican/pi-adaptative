@@ -1619,7 +1619,7 @@ export class AgentSession {
 							kind: "tool_output",
 							content,
 							toolName: name,
-							createdAtTurn: this.sessionManager.getEntries().length,
+							createdAtTurn: this.sessionManager.getEntryCount(),
 							reproducible: false,
 						}).ref.id,
 				};

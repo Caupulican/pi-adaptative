@@ -39,6 +39,7 @@ import {
 	sanitizeToolFailureContext,
 	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+	type ToolFailureMemoryRecord,
 } from "./tool-failure-memory.ts";
 import { logTransientRecordDecisions } from "./transient-record-decision.ts";
 import {
@@ -125,8 +126,13 @@ function lowerPrefixMarksToSharedPrefix(
 	previous: readonly AgentMessage[],
 	next: readonly AgentMessage[],
 ): void {
-	let shared = 0;
-	while (shared < previous.length && shared < next.length && previous[shared] === next[shared]) shared++;
+	const limit = Math.min(
+		previous.length,
+		next.length,
+		Math.max(readSentPrefixCount(config), readSanitizerSentPrefixCount(config)),
+	);
+	let shared = previous === next ? limit : 0;
+	while (shared < limit && previous[shared] === next[shared]) shared++;
 	if (readSentPrefixCount(config) > shared) writeSentPrefixCount(config, shared);
 	if (readSanitizerSentPrefixCount(config) > shared) {
 		writeSanitizerSentPrefixCount(config, shared);
@@ -290,6 +296,7 @@ export async function resolveProviderRequestAuthOptions(
 }
 
 export interface StartedAgentProviderRequest {
+	activeFailureRecords: readonly ToolFailureMemoryRecord[];
 	requestId: AgentRequestId;
 	stream: Awaited<ReturnType<StreamFn>>;
 	usesTextToolProtocol: boolean;
@@ -392,6 +399,7 @@ function detectSentPrefixDisturbance(
 	output: readonly AgentMessage[],
 	sentPrefixCount: number,
 ): SentPrefixDisturbanceInfo | undefined {
+	if (input === output) return undefined;
 	let disturbedCount = 0;
 	let firstDisturbedIndex = -1;
 	const limit = Math.min(sentPrefixCount, input.length);
@@ -442,16 +450,18 @@ function validateReplannedSourceContext(previous: AgentContext, next: AgentConte
 }
 
 /** Preserve the loop-owned messages array so shallow response-context projections observe compaction. */
-function adoptReplannedMessages(target: AgentContext, accepted: AgentContext): void {
+function adoptReplannedMessages(target: AgentContext, accepted: AgentContext, privateSnapshot: boolean): void {
 	if (target.messages === accepted.messages) return;
-	const messages = accepted.messages.slice();
+	const messages = privateSnapshot ? accepted.messages : accepted.messages.slice();
 	target.messages.length = 0;
 	for (const message of messages) target.messages.push(message);
 }
 
-/** A transcript message that can activate a deferred tool: an assistant's tool call or a tool's result. */
-function isToolActivationMessage(message: AgentMessage): message is Message {
-	return message.role === "assistant" || message.role === "toolResult";
+/** Eager disclosure never iterates the activation history. Deferred disclosure reads it in transcript order. */
+function* toolActivationHistory(messages: AgentMessage[]): Iterable<Message> {
+	for (const message of messages) {
+		if (message.role === "assistant" || message.role === "toolResult") yield message;
+	}
 }
 
 /** Materialize one candidate without admission, lifecycle callbacks or durable effects. */
@@ -572,7 +582,7 @@ async function materializeContextPlan(
 		sourceProviderContext,
 		config,
 		config.model,
-		sourceContext.messages.filter(isToolActivationMessage),
+		toolActivationHistory(sourceContext.messages),
 	);
 	const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
 	const materialized =
@@ -639,6 +649,7 @@ export async function startPlannedAgentProviderRequestWithId(
 		signal?.throwIfAborted();
 		const config = { ...baseConfig, ...requestAuth, providerRequestPrefixState: prefixState };
 		requestAuth.requestGuard?.(config.model, signal);
+		prefixState.reconcileRequestScope?.(config.model, requestAuth.providerAccountKey, sourceContext);
 		// TWO DELIBERATELY DIFFERENT marks (see ProviderRequestPrefixState in types.ts - do not merge
 		// these back into one value; that recreates either the cache defect or the unbounded-context
 		// defect the split exists to keep apart):
@@ -654,12 +665,16 @@ export async function startPlannedAgentProviderRequestWithId(
 		// can never reach the sanitizer or `planContext`.
 		const sanitizerSentPrefixCount = Math.min(readSanitizerSentPrefixCount(config), sourceContext.messages.length);
 		const sentPrefixCount = Math.min(readSentPrefixCount(config), sourceContext.messages.length);
+		let activeFailureRecords: readonly ToolFailureMemoryRecord[] = [];
 		const sanitized = sanitizeToolFailureContext(
 			sourceContext.messages,
 			sourceContext.systemPrompt,
 			sanitizerSentPrefixCount,
 			config.providerRequestPrefixState?.sanitizerMemory,
 			config.toolFailureProtocolProse ?? "full",
+			(records) => {
+				activeFailureRecords = records;
+			},
 		);
 		// The trailing records the request carries behind the plan; a request whose tail is a host instruction takes none.
 		const ledgerView = sanitized.ledger ? renderToolFailureLedger(sanitized.ledger) : undefined;
@@ -805,6 +820,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			// `adoptReplannedMessages` exists to protect. See `nonCompactableProviderContext`'s doc
 			// comment for why these records are safe to fold into durable history with no special
 			// exemption from ordinary compaction/GC once the pack-freeze horizon moves past them.
+			const beforeTransientCommit = sourceContext;
 			sourceContext = await commitTransientRecords(
 				sourceContext,
 				pendingTransientRecords,
@@ -829,7 +845,9 @@ export async function startPlannedAgentProviderRequestWithId(
 			plan.commit?.();
 			if (historyCandidate) plan.providerHistory?.accept(historyCandidate, materialized.context.messages);
 			recordPrefixFoldWork(sourceContext.messages.length, plan.messages.length);
-			adoptReplannedMessages(initialContext, sourceContext);
+			// A transient commit produced a private array. The loop keeps its own live array after adoption.
+			const privateSnapshot = sourceContext !== beforeTransientCommit;
+			adoptReplannedMessages(initialContext, sourceContext, privateSnapshot);
 			keepPlan = true;
 			await config.onProviderRequestSnapshot?.(
 				{
@@ -839,7 +857,9 @@ export async function startPlannedAgentProviderRequestWithId(
 					requestOnlyMessageRange: continued?.requestOnly ?? fresh.requestOnlyMessageRange,
 					// The loop appends the provider reply to its live history after this callback.
 					// Freeze the accepted source extent so cache-lane compaction can identify that reply as newer.
-					sourceContext: { ...sourceContext, messages: sourceContext.messages.slice() },
+					sourceContext: privateSnapshot
+						? sourceContext
+						: { ...sourceContext, messages: sourceContext.messages.slice() },
 					maxTokens: requestMaxTokens,
 					requestId,
 					providerAccountKey: requestAuth.providerAccountKey,
@@ -883,6 +903,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			)) as Awaited<ReturnType<StreamFn>>;
 			return {
 				requestId,
+				activeFailureRecords,
 				stream,
 				usesTextToolProtocol: materialized.usesTextToolProtocol,
 				observeAssistant: plan.providerHistory?.observeAssistant,

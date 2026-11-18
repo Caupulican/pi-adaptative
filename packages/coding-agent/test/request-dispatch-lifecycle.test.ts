@@ -141,3 +141,49 @@ describe.each([false, true])("durable dispatch lifecycle, text protocol=%s", (te
 		},
 	);
 });
+
+it("resolves the latest request's exact call across appends and branch changes", () => {
+	const manager = SessionManager.inMemory(ownerSessionStorageRoots(process.cwd()), process.cwd());
+	const startRequest = (requestId: string) =>
+		manager.appendRequestSnapshot({
+			requestId,
+			reason: "initial",
+			api: model.api,
+			provider: model.provider,
+			modelId: model.id,
+			effectiveConfigFingerprint: "config",
+			systemFingerprint: "system",
+			toolsFingerprint: "tools",
+			historyFingerprint: "history",
+			messageEntryIds: [],
+		});
+	const assistant = (): AssistantMessage => ({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "reused-call", name: "lookup", arguments: {} }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createEmptyUsage(),
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+	});
+
+	const resolve = (name = "lookup") => manager.activeProviderToolInvocationIdentity("reused-call", name);
+	expect(() => resolve()).toThrow("no accepted provider request");
+	startRequest("first");
+	const firstAssistant = manager.appendMessage(assistant());
+	const firstIdentity = resolve();
+	manager.appendCustomEntry("test-unrelated");
+	expect(resolve()).toBe(firstIdentity);
+
+	startRequest("second");
+	expect(() => resolve()).toThrow("missing or ambiguous");
+	manager.appendMessage(assistant());
+	expect(resolve()).not.toBe(firstIdentity);
+	expect(() => resolve("write")).toThrow("missing or ambiguous");
+	manager.appendMessage(assistant(), "local");
+	expect(() => resolve()).toThrow("missing or ambiguous");
+
+	manager.branch(firstAssistant);
+	expect(resolve()).toBe(firstIdentity);
+});

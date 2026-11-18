@@ -95,6 +95,8 @@ export type StreamFn = (
  * cheaper to keep two clearly-named numbers than to re-debug either defect this split prevents.
  */
 export interface ProviderRequestPrefixState {
+	/** Reconcile conversation-owned marks with resolved credentials and the effective request before planning. */
+	reconcileRequestScope?(model: Model<Api>, providerAccountKey: string | undefined, sourceContext: AgentContext): void;
 	/**
 	 * SESSION-scoped pack-freeze horizon (carried across top-level prompts like the sanitizer mark).
 	 * Feeds `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in

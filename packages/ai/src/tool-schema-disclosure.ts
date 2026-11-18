@@ -441,7 +441,7 @@ function sameTools(left: readonly Tool[], right: readonly Tool[]): boolean {
 export function discloseToolSchemas(
 	model: ToolSchemaDisclosureModel,
 	context: Context,
-	options: { forcedToolName?: string; appendActivated: boolean; activationHistory?: readonly Message[] },
+	options: { forcedToolName?: string; appendActivated: boolean; activationHistory?: Iterable<Message> },
 ): { context: Context; decision: ToolSchemaDisclosureDecision } {
 	const tools = context.tools ?? [];
 	const plan = planToolSchemaDisclosure(model, tools);

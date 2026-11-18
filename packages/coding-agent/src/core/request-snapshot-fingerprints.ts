@@ -285,7 +285,7 @@ function exactSystemPromptFingerprint(prompt: unknown): string | undefined {
 
 const exactToolFingerprints = new WeakMap<object, string | undefined>();
 
-function exactToolsFingerprint(tools: readonly unknown[]): string | undefined {
+export function exactToolsFingerprint(tools: readonly unknown[]): string | undefined {
 	const hash = createHash("sha256").update(`${tools.length}\0`);
 	for (const tool of tools) {
 		if (!tool || typeof tool !== "object") return undefined;

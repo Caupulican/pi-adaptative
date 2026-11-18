@@ -23,6 +23,7 @@ import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
 	ContinuousChatIngestor,
 } from "../src/core/memory/continuous-chat-ingest.ts";
+import { ContinuousChatMessageDependencies } from "../src/core/memory/continuous-chat-message-dependencies.ts";
 import {
 	continuousChatRequestHistory,
 	createContinuousChatPlanWrapper,
@@ -488,6 +489,21 @@ describe("continuous chat at the native provider boundary", () => {
 			expect(wire).toContain(f.controls.knowledge);
 		},
 	);
+});
+
+it("rechecks cached message revisions after an edit or importing earlier custody", () => {
+	const amended = {};
+	const retained = new ContinuousChatMessageDependencies();
+	retained.add([amended]);
+	expect(retained.isCurrent()).toBe(true);
+	advanceMessageContentRevision(amended);
+	expect(retained.isCurrent()).toBe(false);
+
+	const next = new ContinuousChatMessageDependencies();
+	next.add([{}]);
+	expect(next.isCurrent()).toBe(true);
+	next.include(retained);
+	expect(next.isCurrent()).toBe(false);
 });
 
 it("binds a complete live handoff to its exact details and body", () => {

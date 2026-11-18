@@ -1691,18 +1691,18 @@ function analyzeToolFailureContext(
 	return buildFailureContextAnalysis(messages, state, omittedCallIds);
 }
 
-/**
- * The loop's in-run failure tracker, seeded from the same fold the sanitizer resumes. With the
- * conversation's `memory`, seeding touches only messages appended since the last fold; a fresh fold
- * per run walked and re-hashed the whole history at every turn start.
- */
+/** Build a tracker directly from the accepted request’s analysis without folding its transcript again. */
+export function trackerFromFailureRecords(records: readonly ToolFailureMemoryRecord[]): ToolFailureMemoryTracker {
+	return new Map(records.map((record) => [record.failureKey, record]));
+}
+
 export function createToolFailureMemoryTracker(
 	messages: AgentMessage[],
 	memory?: ToolFailureContextMemory,
 	sentPrefixCount = 0,
 ): ToolFailureMemoryTracker {
 	const { state } = resumeFailureFold(messages, sentPrefixCount, memory);
-	return new Map(activeFailureRecords(state.active).map((record) => [record.failureKey, record]));
+	return trackerFromFailureRecords(activeFailureRecords(state.active));
 }
 
 const UNKNOWN_TOOL_KIND = "unknown_tool";
@@ -1949,18 +1949,7 @@ function retainBlockedToolFailure(record: ToolFailureMemoryRecord, countedInBatc
 	};
 }
 
-/**
- * The failure ledger is returned SEPARATELY from the system prompt and never appended to it.
- *
- * The ledger is per-request-mutable by nature: it appears on the first active failure, its
- * `mistakes=` counts change as failures accumulate, and it disappears when a matching success
- * clears them. The system prompt is the first thing on the wire, so text that changes there
- * invalidates the provider's cached prefix for the WHOLE conversation — a single failure used to
- * cost two or more full re-prefills (block appears, counts mutate, block clears). The caller
- * projects `ledger` into the transient tail instead, where the same churn is priced at the tail
- * that re-prefills anyway. See provider-request-planner.ts for the projection. `ledger` is the
- * canonical record; its model view is `renderToolFailureLedger(ledger)`.
- */
+/** The mutable failure ledger travels in the transient tail to preserve the cached system prompt. */
 export function sanitizeToolFailureContext(
 	messages: AgentMessage[],
 	systemPrompt: string,
@@ -1975,8 +1964,10 @@ export function sanitizeToolFailureContext(
 	contextMemory?: ToolFailureContextMemory,
 	/** See AgentLoopConfig.toolFailureProtocolProse. */
 	protocolProse: "full" | "short" = "full",
+	captureFailures?: (records: readonly ToolFailureMemoryRecord[]) => void,
 ): { messages: AgentMessage[]; systemPrompt: string; ledger?: ToolFailureLedgerRecord } {
 	const analysis = analyzeToolFailureContext(messages, sentPrefixCount, contextMemory);
+	captureFailures?.(analysis.activeRecords);
 	if (analysis.activeRecords.length === 0 && analysis.activeDirectives.length === 0) {
 		return { messages: analysis.messages, systemPrompt };
 	}

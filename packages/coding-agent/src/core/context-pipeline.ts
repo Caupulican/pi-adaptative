@@ -34,6 +34,8 @@ import {
 import { TokenBudget } from "../kernel/compaction/token-budget.ts";
 import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
+import { messageContentRevision } from "../kernel/message-revision.ts";
+import { PrefixFold } from "../kernel/prefix-fold.ts";
 import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -172,9 +174,8 @@ interface ContextProjectionLaneState {
 	latest: ContextProjection | undefined;
 }
 
-/** Per-message memo of `estimateTokens(message)`, keyed by message object identity --
- * same contract as {@link ContextAuditMemo}. See `estimateContextTokensMemoized`. */
-type TokenMemo = Map<AgentMessage, number>;
+/** Token counts depend on the individual message, regardless of its branch or position. */
+type TokenMemo = WeakMap<AgentMessage, { revision: number; tokens: number }>;
 
 interface ContextTokenEstimate {
 	tokens: number;
@@ -183,14 +184,6 @@ interface ContextTokenEstimate {
 	lastUsageIndex: number | null;
 }
 
-/**
- * Incremental-memo implementation of `estimateContextTokens` (compaction.ts). The shared
- * `getApplicableAssistantUsageInfo` owns usage-anchor selection so compaction rewrites cannot make
- * this hot path drift from the canonical estimator. Only the expensive per-message
- * `estimateTokens` text scan is memoized, keyed by message object identity exactly like
- * `_auditMemo`. Produces byte-identical output to `estimateContextTokens(messages)` for the same
- * input regardless of `memo` -- see the equivalence test.
- */
 /**
  * Empty `memo` when `messages` no longer extends the array it was last filled for, and return the
  * lineage to remember. A message leaving the context is the only way an entry goes stale.
@@ -208,6 +201,7 @@ function continueMemoLineage(
 	return messages.slice();
 }
 
+/** Use the canonical usage anchor and reuse estimates for messages whose published contents still match. */
 function estimateContextTokensMemoized(
 	messages: AgentMessage[],
 	memo?: TokenMemo,
@@ -217,9 +211,10 @@ function estimateContextTokensMemoized(
 ): ContextTokenEstimate {
 	const tokensFor = (message: AgentMessage): number => {
 		const cached = memo?.get(message);
-		if (cached !== undefined) return cached;
+		const revision = messageContentRevision(message);
+		if (cached?.revision === revision) return cached.tokens;
 		const tokens = estimateTokens(message);
-		memo?.set(message, tokens);
+		memo?.set(message, { revision, tokens });
 		return tokens;
 	};
 
@@ -352,20 +347,16 @@ export class ContextPipeline {
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/** Each worker conversation's own context-policy lane (`planWorkerRequest`), by its agent id. */
 	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
-	/**
-	 * The messages each memo above was last filled for, one lineage per memo: the audit and the
-	 * estimate are fed different projections of the history, and a shared lineage made each call
-	 * evict the other's entries. Entries go stale only when a message leaves the context -- a
-	 * compaction, a branch -- which shows as the next array not extending the previous one; then
-	 * that memo is emptied and refilled. Rebuilding on every pass copied every entry per request.
-	 */
+	/** Last audit input, used to drop position- and branch-dependent evidence after a rewrite. */
 	private _auditMemoMessages: readonly AgentMessage[] = [];
-	private _tokenMemoMessages: readonly AgentMessage[] = [];
 	private readonly _usageFinder = createApplicableAssistantUsageFinder();
-	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
-	 * relies on -- same object-identity-keyed, fresh-rebuild-per-pass contract as `_auditMemo`,
-	 * just for a plain `estimateTokens(message)` number instead of a built ContextItem. */
-	private readonly _tokenMemo: TokenMemo = new Map();
+	private readonly _tokenMemo: TokenMemo = new WeakMap();
+	private readonly _coveredChars = new PrefixFold<AgentMessage, { count: number }>(
+		() => ({ count: 0 }),
+		(sum, message) => {
+			sum.count += messageChars(message);
+		},
+	);
 	private readonly _latestCompactionScan = new LatestCompactionEntryScan();
 
 	private _ephemeralContextRoot: string | undefined;
@@ -540,10 +531,9 @@ export class ContextPipeline {
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
-		this._tokenMemo.clear();
+		this._coveredChars.fold([]);
 		this._settledGcArtifactHolders.clear();
 		this._auditMemoMessages = [];
-		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
 		if (failures.length) throw new AggregateError(failures, "Context storage cleanup failed");
 	}
@@ -1391,22 +1381,13 @@ export class ContextPipeline {
 			return;
 		}
 
-		const estimate = this._estimateContextTokens(messages);
-		if (estimate.lastUsageIndex === null || messages[estimate.lastUsageIndex] !== usageMessage) {
-			return;
-		}
-
 		const compactionEntry = this._getLatestCompactionEntry();
-		if (!compactionEntry) {
-			return;
-		}
+		if (!compactionEntry || usageMessage.timestamp <= new Date(compactionEntry.timestamp).getTime()) return;
 
-		const compactionTimestamp = new Date(compactionEntry.timestamp).getTime();
-		if (usageMessage.timestamp <= compactionTimestamp) {
-			return;
-		}
+		const estimate = this._estimateContextTokens(messages);
+		if (estimate.lastUsageIndex === null || messages[estimate.lastUsageIndex] !== usageMessage) return;
 
-		const coveredChars = estimateConversationChars(messages, 0, estimate.lastUsageIndex + 1);
+		const coveredChars = this._coveredChars.fold(messages, estimate.lastUsageIndex + 1).count;
 		if (estimate.usageTokens <= 0 || coveredChars <= 0) {
 			return;
 		}
@@ -1423,14 +1404,13 @@ export class ContextPipeline {
 	}
 
 	private _estimateContextTokens(messages: AgentMessage[]): ContextTokenEstimate {
-		this._tokenMemoMessages = continueMemoLineage(this._tokenMemo, this._tokenMemoMessages, messages);
 		return estimateContextTokensMemoized(messages, this._tokenMemo, this._usageFinder);
 	}
 
 	estimateCurrentContextTokens(messages: AgentMessage[]): number {
 		const estimate = this._estimateContextTokens(messages);
 		if (estimate.lastUsageIndex === null) {
-			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
+			return this._tokenBudget.estimateDelta(this._coveredChars.fold(messages).count);
 		}
 
 		const usageMessage = messages[estimate.lastUsageIndex];
@@ -1441,14 +1421,15 @@ export class ContextPipeline {
 		const usageTimestamp = (usageMessage as AssistantMessage).timestamp;
 		const compactionTimestamp = new Date(compactionEntry.timestamp).getTime();
 		if (usageTimestamp <= compactionTimestamp) {
-			return this._tokenBudget.estimateDelta(estimateConversationChars(messages));
+			return this._tokenBudget.estimateDelta(this._coveredChars.fold(messages).count);
 		}
 
 		if (!this._hasTokenBudgetAnchor || this._tokenBudgetAnchorCompactionId !== compactionEntry.id) {
 			return estimate.tokens;
 		}
 
-		const deltaChars = estimateConversationChars(messages, estimate.lastUsageIndex + 1, messages.length);
+		let deltaChars = 0;
+		for (let i = estimate.lastUsageIndex + 1; i < messages.length; i++) deltaChars += messageChars(messages[i]!);
 		return this._tokenBudget.current(deltaChars, estimate.tokens);
 	}
 }
@@ -1493,37 +1474,18 @@ function logContextGcPass(messages: readonly AgentMessage[], report: ContextGcRe
 	}
 }
 
-/**
- * Estimate covered characters from the provider-visible context messages.
- */
-function estimateConversationChars(messages: AgentMessage[], start = 0, end = messages.length): number {
-	let total = 0;
-	for (let index = Math.max(0, start); index < Math.min(messages.length, end); index++) {
-		const message = messages[index];
-		if (!message) continue;
-		const rawContent = (message as { content?: unknown }).content;
-		if (typeof rawContent === "string") {
-			total += rawContent.length;
-			continue;
-		}
-		if (!Array.isArray(rawContent)) {
-			continue;
-		}
-		for (const block of rawContent) {
-			if (typeof block === "string") {
-				total += block.length;
-				continue;
-			}
-			if (!block || typeof block !== "object") {
-				continue;
-			}
-			if (typeof (block as { text?: unknown }).text === "string") {
-				total += (block as { text?: string }).text?.length ?? 0;
-			}
-			if (typeof (block as { thinking?: unknown }).thinking === "string") {
-				total += (block as { thinking?: string }).thinking?.length ?? 0;
-			}
+/** Text and thinking characters counted by the calibrated token budget. */
+function messageChars(message: AgentMessage): number {
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return content.length;
+	if (!Array.isArray(content)) return 0;
+	let chars = 0;
+	for (const block of content) {
+		if (typeof block === "string") chars += block.length;
+		else if (block && typeof block === "object") {
+			if (typeof block.text === "string") chars += block.text.length;
+			if (typeof block.thinking === "string") chars += block.thinking.length;
 		}
 	}
-	return total;
+	return chars;
 }

@@ -77,12 +77,14 @@ export class ProviderRequestRuntimeController {
 		};
 		agent.prepareNextTurn = async (signal) => {
 			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
-			const snapshot = agent.createContextSnapshot();
+			const { systemPrompt, tools, model, thinkingLevel } = agent.state;
 			return {
 				...previous,
-				context: { ...(previous?.context ?? snapshot), systemPrompt: snapshot.systemPrompt, tools: snapshot.tools },
-				model: previous?.model ?? agent.state.model,
-				thinkingLevel: previous?.thinkingLevel ?? agent.state.thinkingLevel,
+				context: previous?.context
+					? { ...previous.context, systemPrompt, tools: tools.slice() }
+					: agent.createContextSnapshot(),
+				model: previous?.model ?? model,
+				thinkingLevel: previous?.thinkingLevel ?? thinkingLevel,
 			};
 		};
 	}

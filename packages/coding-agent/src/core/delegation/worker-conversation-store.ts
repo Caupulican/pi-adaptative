@@ -11,7 +11,7 @@ import {
 	prepareCompaction,
 } from "../../kernel/compaction/compaction.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import type { ProviderRequestPrefixState, ProviderRequestSnapshotContext } from "../../kernel/index.ts";
+import type { ProviderRequestSnapshotContext } from "../../kernel/index.ts";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -19,11 +19,7 @@ import {
 	isWireNativeAgentMessageRole,
 } from "../../kernel/messages.ts";
 import { cloneResumeContext } from "../../kernel/session/agent-identity.ts";
-import {
-	indexSessionLifecycle,
-	type SessionLifecycleToolResult,
-	sessionLifecycleToolIdentityKey,
-} from "../../kernel/session/lifecycle-ledger.ts";
+import { indexSessionLifecycle, type SessionLifecycleToolResult } from "../../kernel/session/lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
 import type { SessionStorageRoots } from "../../kernel/session/session-bundle-paths.ts";
 import {
@@ -57,7 +53,6 @@ import {
 	workerConversationMetadataFile,
 	workerTranscriptLocation,
 } from "../../kernel/session/worker-storage-identity.ts";
-import { createToolFailureContextMemory } from "../../kernel/tool-failure-memory.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
@@ -125,6 +120,7 @@ import {
 	type WorkerMailboxContextReference,
 	workerMailboxPath,
 } from "./worker-mailbox-record.ts";
+import { WorkerRequestPrefix } from "./worker-request-prefix.ts";
 import { equalWorkerTranscriptValues } from "./worker-transcript-equality.ts";
 import { boundedTranscriptJsonBytes, projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
@@ -270,25 +266,6 @@ interface WorkerConversationCore {
 	activeTranscriptCursors: number;
 	/** Sent-prefix marks carried across this conversation's runs in this process (see `requestPrefix`). */
 	requestPrefix?: WorkerRequestPrefix;
-}
-
-/** A conversation's sent-prefix marks and the history they index: the messages its last request carried. */
-export interface WorkerRequestPrefix {
-	readonly state: ProviderRequestPrefixState;
-	source: readonly AgentMessage[];
-}
-
-/** What the provider sees of a message: two messages that render the same compare equal. */
-function providerView(message: AgentMessage | undefined): string | undefined {
-	if (!message) return undefined;
-	const view = message as {
-		role: string;
-		content?: unknown;
-		toolCallId?: unknown;
-		toolName?: unknown;
-		customType?: unknown;
-	};
-	return stringifySessionJson([view.role, view.content, view.toolCallId, view.toolName, view.customType]);
 }
 
 export interface WorkerTranscriptCommitCursor {
@@ -893,29 +870,20 @@ export class WorkerConversation {
 		this.projectClaim = projectClaim ? structuredClone(projectClaim) : undefined;
 	}
 
-	/** A view carries its original claim; refreshing a shared parsed core never grants new authority. */
-	/**
-	 * The conversation's sent-prefix marks for its next run, re-anchored to the leading messages that run
-	 * still shares with the history the last request carried: what the provider already has is never
-	 * rewritten, and a history compaction replaced moves the marks back to where they still hold.
-	 */
-	requestPrefix(nextHistory: readonly AgentMessage[]): WorkerRequestPrefix {
-		this.core.requestPrefix ??= {
-			state: { sentPrefixCount: 0, sanitizerSentPrefixCount: 0, sanitizerMemory: createToolFailureContextMemory() },
-			source: [],
-		};
-		const prefix = this.core.requestPrefix;
-		const mark = Math.max(prefix.state.sentPrefixCount, prefix.state.sanitizerSentPrefixCount);
-		let shared = 0;
-		while (shared < mark && providerView(prefix.source[shared]) === providerView(nextHistory[shared])) shared++;
-		if (prefix.state.sentPrefixCount > shared) prefix.state.sentPrefixCount = shared;
-		if (prefix.state.sanitizerSentPrefixCount > shared) {
-			prefix.state.sanitizerSentPrefixCount = shared;
-			prefix.state.sanitizerMemory = createToolFailureContextMemory();
-		}
-		return prefix;
+	/** Prepare to carry the previous request's marks only if the next request authenticates the same scope. */
+	requestPrefix(): WorkerRequestPrefix {
+		const { core } = this;
+		const { generation, sessionManager } = core;
+		const assertBranch = sessionManager.captureBranchContext();
+		core.requestPrefix ??= new WorkerRequestPrefix();
+		return core.requestPrefix.beginRun(() => {
+			if (core.invalid || core.generation !== generation || core.sessionManager !== sessionManager)
+				throw new WorkerConversationOwnershipError("Worker prefix belongs to an earlier transcript generation.");
+			assertBranch();
+		});
 	}
 
+	/** A view carries its original claim; refreshing a shared parsed core never grants new authority. */
 	getProjectClaim(): SpecialistContextClaim | undefined {
 		return this.projectClaim ? structuredClone(this.projectClaim) : undefined;
 	}
@@ -955,15 +923,7 @@ export class WorkerConversation {
 
 	/** Resolve a live call only inside the latest accepted request; provider call IDs may repeat later. */
 	toolInvocationIdentity(toolCallId: string, toolName: string): string {
-		const index = this.sessionManager.getSessionLifecycleIndex();
-		const request = index.requestSnapshots.at(-1);
-		if (!request) throw new Error("Worker tool invocation has no accepted provider request.");
-		const calls = index.assistantToolCalls.filter(
-			(call) => call.requestId === request.requestId && call.callId === toolCallId,
-		);
-		if (calls.length !== 1 || calls[0]!.toolName !== toolName)
-			throw new Error("Worker tool invocation is missing or ambiguous in its provider request.");
-		return sessionLifecycleToolIdentityKey(request.requestId, calls[0]!.assistantMessageEntryId, toolCallId);
+		return this.sessionManager.activeProviderToolInvocationIdentity(toolCallId, toolName);
 	}
 
 	/** True when provider context is a compacted projection rather than the raw transcript prefix. */

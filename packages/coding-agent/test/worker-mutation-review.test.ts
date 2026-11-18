@@ -1,6 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Api, Model } from "@caupulican/pi-ai";
+import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { ownerOrchestrationHome } from "../src/core/agent-paths.ts";
@@ -29,7 +31,10 @@ import {
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { getActiveSessionBranchEntries } from "../src/core/session-snapshot.ts";
+import type { AgentContext } from "../src/kernel/loop-config.ts";
+import { advanceMessageContentRevision } from "../src/kernel/message-revision.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
+import type { AgentMessage } from "../src/kernel/types.ts";
 
 const updatedAt = "2026-11-17T20:53:54.000Z";
 const request: WorkerRequest = {
@@ -53,7 +58,166 @@ function workerConversation(session: SessionManager): WorkerConversation {
 	});
 }
 
+const workerModel: Model<Api> = {
+	id: "worker",
+	name: "Worker",
+	api: "openai-responses",
+	provider: "fixture",
+	baseUrl: "https://unused.invalid",
+	reasoning: false,
+	input: ["text"],
+	contextWindow: 100_000,
+	maxTokens: 1_000,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
+
+function prefixContext(messages: AgentMessage[] = []): AgentContext {
+	return { messages, systemPrompt: "Worker instructions.", tools: [] };
+}
+
 describe("worker mutation review", () => {
+	it("rewinds at a published edit to an aliased accepted row but ignores edits in other conversations", () => {
+		const conversation = workerConversation(sessionManager());
+		const history = [{ role: "user" as const, content: "accepted", timestamp: 1 }];
+		const prefix = conversation.requestPrefix();
+		const reconcile = () => prefix.state.reconcileRequestScope?.(workerModel, "account", prefixContext(history));
+		reconcile();
+		prefix.acceptSource(history);
+		prefix.state.sentPrefixCount = prefix.state.sanitizerSentPrefixCount = 1;
+		advanceMessageContentRevision({});
+		conversation.requestPrefix();
+		reconcile();
+		expect(prefix.state.sentPrefixCount).toBe(1);
+		history[0]!.content = "edited";
+		advanceMessageContentRevision(history[0]!);
+		conversation.requestPrefix();
+		reconcile();
+		expect(prefix.state.sentPrefixCount).toBe(0);
+		expect(prefix.state.sanitizerSentPrefixCount).toBe(0);
+	});
+
+	it("re-anchors carried request marks using exact scalar and compound views within both history lengths", () => {
+		const conversation = workerConversation(sessionManager());
+		const prefix = conversation.requestPrefix();
+		prefix.state.reconcileRequestScope?.(workerModel, "account", prefixContext());
+		const reanchor = (next: AgentMessage[]) =>
+			conversation.requestPrefix().state.reconcileRequestScope?.(workerModel, "account", prefixContext(next));
+		const scalar = { role: "user", content: 'One "quoted"\nline', timestamp: 1 } as const;
+		const blocks = [{ type: "text" as const, text: "Original compound view" }];
+		prefix.acceptSource([scalar, { role: "user", content: blocks, timestamp: 2 }]);
+		prefix.state.sentPrefixCount = prefix.state.sanitizerSentPrefixCount = 3;
+		const next = [
+			{ ...scalar, timestamp: 3 },
+			{ role: "user" as const, content: blocks.map((block) => ({ ...block })), timestamp: 4 },
+		];
+		reanchor(next);
+		expect(prefix.state.sentPrefixCount).toBe(2);
+		expect(prefix.state.sanitizerSentPrefixCount).toBe(2);
+
+		blocks[0]!.text = "Edited compound view";
+		reanchor(next);
+		expect(prefix.state.sentPrefixCount).toBe(1);
+		expect(prefix.state.sanitizerSentPrefixCount).toBe(1);
+		reanchor([{ ...scalar, content: "Different scalar view" }]);
+		expect(prefix.state.sentPrefixCount).toBe(0);
+		expect(prefix.state.sanitizerSentPrefixCount).toBe(0);
+	});
+
+	it.each([
+		{
+			previous: { role: "branchSummary", summary: "Before", fromId: "from", timestamp: 1 },
+			next: { role: "branchSummary", summary: "After", fromId: "from", timestamp: 1 },
+		},
+		{
+			previous: { role: "compactionSummary", summary: "Before", tokensBefore: 1, timestamp: 1 },
+			next: { role: "compactionSummary", summary: "After", tokensBefore: 1, timestamp: 1 },
+		},
+		{
+			previous: {
+				role: "bashExecution",
+				command: "ls",
+				output: "before",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 1,
+			},
+			next: {
+				role: "bashExecution",
+				command: "ls",
+				output: "after",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 1,
+			},
+		},
+	] satisfies { previous: AgentMessage; next: AgentMessage }[])(
+		"reopens the carried prefix when $previous.role renders different content",
+		({ previous, next }) => {
+			const conversation = workerConversation(sessionManager());
+			const history: AgentMessage[] = [previous];
+			const prefix = conversation.requestPrefix();
+			prefix.state.reconcileRequestScope?.(workerModel, "account", prefixContext(history));
+			prefix.acceptSource(history);
+			prefix.state.sentPrefixCount = prefix.state.sanitizerSentPrefixCount = 1;
+			const newHistory: AgentMessage[] = [next];
+			conversation.requestPrefix().state.reconcileRequestScope?.(workerModel, "account", prefixContext(newHistory));
+			expect(prefix.state.sentPrefixCount).toBe(0);
+			expect(prefix.state.sanitizerSentPrefixCount).toBe(0);
+		},
+	);
+
+	it.each([
+		"account",
+		"unknown account",
+		"model",
+		"base URL",
+		"prompt",
+		"tool provider description",
+		"tool disclosure",
+		"branch",
+	] as const)("clears both carried marks when the worker changes %s", (change) => {
+		const manager = sessionManager();
+		const root = manager.appendSessionInfo("Original branch");
+		manager.appendSessionInfo("Prior leaf");
+		const conversation = workerConversation(manager);
+		const history: AgentMessage[] = [{ role: "user", content: "Continue work.", timestamp: 1 }];
+		const tool = {
+			name: "check",
+			label: "Check",
+			description: "Check the workspace.",
+			providerDescription: "Read the workspace status.",
+			neverDefer: false,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [], details: undefined }),
+		};
+		const context = { ...prefixContext(history), tools: [tool] };
+		const prefix = conversation.requestPrefix();
+		prefix.state.reconcileRequestScope?.(workerModel, "account", context);
+		prefix.acceptSource(history);
+		prefix.state.sentPrefixCount = prefix.state.sanitizerSentPrefixCount = 1;
+		const previousMemory = prefix.state.sanitizerMemory;
+		let model = workerModel;
+		let account: string | undefined = "account";
+		if (change === "account") account = "other";
+		if (change === "unknown account") account = undefined;
+		if (change === "model") model = { ...workerModel, id: "other-model" };
+		if (change === "base URL") model = { ...workerModel, baseUrl: "https://other.invalid" };
+		if (change === "prompt") context.systemPrompt = "Different instructions.";
+		if (change === "tool provider description")
+			context.tools = [{ ...tool, providerDescription: "A different provider-facing command." }];
+		if (change === "tool disclosure") context.tools = [{ ...tool, neverDefer: true }];
+		if (change === "branch") {
+			manager.branch(root);
+			conversation.requestPrefix();
+		}
+		prefix.state.reconcileRequestScope?.(model, account, context);
+		expect(prefix.state.sentPrefixCount).toBe(0);
+		expect(prefix.state.sanitizerSentPrefixCount).toBe(0);
+		expect(prefix.state.sanitizerMemory).not.toBe(previousMemory);
+	});
+
 	it("repairs a subdirectory path from this attempt's evidence without repeating the edit", () => {
 		const judge = (changedFiles: string[], files: string[]) =>
 			judgeSubmittedReport({

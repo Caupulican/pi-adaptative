@@ -119,7 +119,7 @@ export function materializeProviderRequest(
 	context: Context,
 	options: StreamOptions | undefined,
 	model?: Model<Api>,
-	toolActivationHistory?: readonly Message[],
+	toolActivationHistory?: Iterable<Message>,
 ): MaterializedProviderRequest {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	const disclosed = model

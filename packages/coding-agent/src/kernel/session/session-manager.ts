@@ -220,9 +220,8 @@ interface LifecycleActiveCache {
 	leafId: string | null;
 	currentRequestId?: string;
 	positions: Map<string, number>;
-	entryTypes: Map<string, string>;
 	requestIds: Set<string>;
-	requestSnapshotsById: Map<string, RequestSnapshotEntry>;
+	currentRequestTools?: Map<string, { entryId: string; name: string } | "duplicate">;
 	providerTerminalsByRequest: Set<string>;
 	providerResponsesByRequest: Map<string, ProviderResponseReference | "duplicate">;
 	startsByIdentity: Set<string>;
@@ -1379,9 +1378,7 @@ export class SessionManager {
 		const cache: LifecycleActiveCache = {
 			leafId: this.leafId,
 			positions: new Map(),
-			entryTypes: new Map(),
 			requestIds: new Set(),
-			requestSnapshotsById: new Map(),
 			providerTerminalsByRequest: new Set(),
 			providerResponsesByRequest: new Map(),
 			startsByIdentity: new Set(),
@@ -1390,9 +1387,7 @@ export class SessionManager {
 			compactionEnds: new Set(),
 			assistantToolsByIdentity: new Map(),
 		};
-		for (let position = 0; position < branch.length; position += 1) {
-			this._applyLifecycleCacheEntry(cache, branch[position]!, position);
-		}
+		for (const entry of branch) this._applyLifecycleCacheEntry(cache, entry, cache.positions.size);
 		this.lifecycleActiveCache = cache;
 		return cache;
 	}
@@ -1400,11 +1395,10 @@ export class SessionManager {
 	/** Apply one canonical branch entry to both rebuilt and incrementally advanced lifecycle caches. */
 	private _applyLifecycleCacheEntry(cache: LifecycleActiveCache, entry: SessionEntry, position: number): void {
 		cache.positions.set(entry.id, position);
-		cache.entryTypes.set(entry.id, entry.type);
 		if (entry.type === "request_snapshot") {
 			cache.currentRequestId = entry.requestId;
+			cache.currentRequestTools = cache.requestIds.has(entry.requestId) ? undefined : new Map();
 			cache.requestIds.add(entry.requestId);
-			cache.requestSnapshotsById.set(entry.requestId, entry);
 		} else if (entry.type === "provider_request_terminal") {
 			cache.providerTerminalsByRequest.add(entry.requestId);
 		} else if (entry.type === "foreground_tool_start") {
@@ -1419,8 +1413,8 @@ export class SessionManager {
 			cache.compactionStarts.set(entry.compactionId, entry);
 		} else if (entry.type === "compaction_end") {
 			cache.compactionEnds.add(entry.compactionId);
-		} else if (entry.type === "message" && entry.message.role === "assistant" && entry.origin !== "local") {
-			if (cache.currentRequestId) {
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			if (cache.currentRequestId && entry.origin !== "local") {
 				const response: ProviderResponseReference = {
 					assistantMessageEntryId: entry.id,
 					outcome:
@@ -1437,6 +1431,9 @@ export class SessionManager {
 			}
 			for (const block of entry.message.content) {
 				if (block.type !== "toolCall") continue;
+				const tools = cache.currentRequestTools;
+				tools?.set(block.id, tools.has(block.id) ? "duplicate" : { entryId: entry.id, name: block.name });
+				if (entry.origin === "local") continue;
 				const key = assistantToolIdentityKey(entry.id, block.id);
 				if (cache.assistantToolsByIdentity.has(key)) {
 					cache.assistantToolsByIdentity.set(key, "duplicate");
@@ -1701,12 +1698,7 @@ export class SessionManager {
 			);
 		}
 		const reference = cache.assistantToolsByIdentity.get(assistantToolIdentityKey(assistantMessageEntryId, callId));
-		if (reference === "duplicate") {
-			throw new Error(
-				`Foreground tool lifecycle identity must resolve to exactly one assistant tool call: ${assistantMessageEntryId}/${callId}.`,
-			);
-		}
-		if (!reference) {
+		if (!reference || reference === "duplicate") {
 			throw new Error(
 				`Foreground tool lifecycle identity must resolve to exactly one assistant tool call: ${assistantMessageEntryId}/${callId}.`,
 			);
@@ -1755,7 +1747,7 @@ export class SessionManager {
 	private _validateProviderRequestTerminal(entry: ProviderRequestTerminalEntry): void {
 		validateSessionLifecycleEntry(entry);
 		const cache = this._getLifecycleActiveCache();
-		if (!cache.requestSnapshotsById.has(entry.requestId)) {
+		if (!cache.requestIds.has(entry.requestId)) {
 			throw new Error(`Provider request terminal has no matching snapshot: ${entry.requestId}.`);
 		}
 		if (cache.providerTerminalsByRequest.has(entry.requestId)) {
@@ -1848,8 +1840,6 @@ export class SessionManager {
 		const finalFirstKeptPosition =
 			compactionEntry?.type === "compaction" ? cache.positions.get(compactionEntry.firstKeptEntryId) : undefined;
 		if (
-			!entry.compactionEntryId ||
-			cache.entryTypes.get(entry.compactionEntryId) !== "compaction" ||
 			compactionPosition === undefined ||
 			compactionPosition <= (cache.positions.get(start.id) ?? -1) ||
 			compactionEntry?.type !== "compaction" ||
@@ -2051,6 +2041,15 @@ export class SessionManager {
 			}
 		}
 		return undefined;
+	}
+	/** Resolve an invocation in the latest accepted request using the live lifecycle index. */
+	activeProviderToolInvocationIdentity(callId: string, toolName: string): string {
+		const cache = this._getLifecycleActiveCache();
+		if (!cache.currentRequestId) throw new Error("Worker tool invocation has no accepted provider request.");
+		const call = cache.currentRequestTools?.get(callId);
+		if (!call || call === "duplicate" || call.name !== toolName)
+			throw new Error("Worker tool invocation is missing or ambiguous in its provider request.");
+		return sessionLifecycleToolIdentityKey(cache.currentRequestId, call.entryId, callId);
 	}
 
 	/** Return lifecycle records on one branch without exposing lifecycle data to model context. */
@@ -2681,7 +2680,8 @@ export class SessionManager {
 			if (entry.type === "custom" && types.has(entry.customType)) appended.push(entry);
 		}
 		appended.reverse();
-		const entries = resumed && cached ? [...cached.entries, ...appended] : appended;
+		let entries: readonly CustomEntry[] = appended;
+		if (resumed && cached) entries = appended.length ? cached.entries.concat(appended) : cached.entries;
 		this.branchCustomEntriesCache.perKey.set(key, { leafId: this.leafId, entries });
 		return entries;
 	}

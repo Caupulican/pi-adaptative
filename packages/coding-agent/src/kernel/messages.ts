@@ -155,7 +155,12 @@ export function createCustomMessage(
  * - Custom extensions and tools
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.map(convertMessage).filter((m) => m !== undefined);
+	const converted: Message[] = [];
+	for (const message of messages) {
+		const wireMessage = convertMessage(message);
+		if (wireMessage !== undefined) converted.push(wireMessage);
+	}
+	return converted;
 }
 
 /**
@@ -166,7 +171,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
  */
 const convertedMessages = new WeakMap<AgentMessage, { revision: number; converted: Message | undefined }>();
 
-function convertMessage(m: AgentMessage): Message | undefined {
+export function convertMessage(m: AgentMessage): Message | undefined {
 	switch (m.role) {
 		case "user":
 		case "assistant":

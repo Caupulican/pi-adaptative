@@ -25,6 +25,7 @@ import type {
 	ToolCallStartContext,
 	ToolCallStartReservation,
 } from "./loop-config.ts";
+import { advanceMessageContentRevision } from "./message-revision.ts";
 import {
 	startPlannedAgentProviderRequest,
 	startPlannedAgentProviderRequestWithId,
@@ -44,7 +45,6 @@ import {
 	clearToolFailure,
 	createRepeatedToolFailureResult,
 	createToolFailureContextMemory,
-	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
 	getToolExecutionKey,
@@ -54,8 +54,10 @@ import {
 	readToolFailureOccurrence,
 	rememberToolFailure,
 	type ToolFailureContextMemory,
+	type ToolFailureMemoryRecord,
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
+	trackerFromFailureRecords,
 } from "./tool-failure-memory.ts";
 import { createErrorToolResult } from "./tool-failure-receipt.ts";
 import {
@@ -485,11 +487,8 @@ async function runLoop(
 	};
 	const validationFailureTracker: ToolValidationFailureTracker = new Map();
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
-	let toolFailureMemory = createToolFailureMemoryTracker(
-		currentContext.messages,
-		providerRequestPrefixState.sanitizerMemory,
-		providerRequestPrefixState.sanitizerSentPrefixCount,
-	);
+	// Seed from the accepted sanitizer analysis only if this reply actually needs a tool tracker.
+	let toolFailureMemory: ToolFailureMemoryTracker | undefined;
 	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
 	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages, currentContext.tools);
@@ -615,6 +614,7 @@ async function runLoop(
 			hasMoreToolCalls = false;
 			let batchHandoff = false;
 			if (toolCalls.length > 0) {
+				toolFailureMemory ??= trackerFromFailureRecords(response.activeFailureRecords);
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
 				const incomingBatchSignature = textProtocolBatchSignature(toolCalls);
 				const previousSuccessfulTextProtocolResults =
@@ -781,11 +781,7 @@ async function runLoop(
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				if (nextTurnSnapshot.context) {
-					toolFailureMemory = createToolFailureMemoryTracker(
-						currentContext.messages,
-						providerRequestPrefixState.sanitizerMemory,
-						providerRequestPrefixState.sanitizerSentPrefixCount,
-					);
+					toolFailureMemory = undefined;
 					verificationObligations.restore(currentContext.messages);
 				}
 				config = {
@@ -925,6 +921,7 @@ export async function startAgentProviderRequest(
 }
 
 type StartedAssistantResponse = {
+	activeFailureRecords: readonly ToolFailureMemoryRecord[];
 	message: AssistantMessage;
 	/** Provider output before degeneration collapse, retained for the next turn comparison. */
 	comparisonMessage: AssistantMessage;
@@ -1062,7 +1059,12 @@ async function streamAssistantResponse(
 		}
 		response.observeAssistant?.(providerMessage, finalMessage);
 		await emit({ type: "message_end", message: finalMessage });
-		return { message: finalMessage, comparisonMessage, requestId: response.requestId };
+		return {
+			message: finalMessage,
+			comparisonMessage,
+			requestId: response.requestId,
+			activeFailureRecords: response.activeFailureRecords,
+		};
 	} finally {
 		signal?.removeEventListener("abort", onOuterAbort);
 	}
@@ -2125,6 +2127,7 @@ async function prepareToolCall(
 		if (validatedArgs !== toolCall.arguments) {
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
+			advanceMessageContentRevision(assistantMessage);
 		}
 		const hostFilled = hostFilledArguments(tool.sessionIdentity, modelArguments, validatedArgs);
 		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);

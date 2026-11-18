@@ -449,7 +449,7 @@ export class Agent {
 	/** Mutations publish one revision for every derived message projection. */
 	appendMessage(message: AgentMessage): void {
 		this._state.messages.push(message);
-		advanceMessageRevision(this._state.messages);
+		advanceMessageRevision(this._state.messages, "append");
 	}
 
 	removeMessage(message: AgentMessage): void {
@@ -673,7 +673,7 @@ export class Agent {
 			try {
 				await runAgentLoop(
 					messages,
-					this.createContextSnapshot(),
+					this.contextWithMessages(this._state.messages),
 					this.createLoopConfig(options),
 					(event) => this.processEvents(event),
 					signal,
@@ -696,7 +696,7 @@ export class Agent {
 		await this.runWithLifecycle(async (signal) => {
 			try {
 				await runAgentLoopContinue(
-					this.createContextSnapshot(),
+					this.contextWithMessages(this._state.messages),
 					this.createLoopConfig(),
 					(event) => this.processEvents(event),
 					signal,
@@ -740,9 +740,14 @@ export class Agent {
 
 	/** The system prompt, messages and tools the next request reads, copied out of the state so a caller cannot mutate it. */
 	createContextSnapshot(): AgentContext {
+		return this.contextWithMessages(this._state.messages.slice());
+	}
+
+	/** Loop entry copies messages synchronously before its first await. External snapshots own their copy here. */
+	private contextWithMessages(messages: AgentMessage[]): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
-			messages: this._state.messages.slice(),
+			messages,
 			tools: this._state.tools.slice(),
 		};
 	}

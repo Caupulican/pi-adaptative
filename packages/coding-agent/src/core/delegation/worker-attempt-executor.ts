@@ -1030,7 +1030,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								});
 								let result: IsolatedCompletionResult;
 								// The conversation's sent-prefix marks, carried across its runs like root's.
-								const requestPrefix = options.conversation.requestPrefix(history);
+								const requestPrefix = options.conversation.requestPrefix();
 								try {
 									result = await runIsolatedCompletion({
 										prefixState: requestPrefix.state,
@@ -1081,9 +1081,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												context: context.context,
 												sourceMessages: context.sourceContext.messages,
 											};
+											requestPrefix.acceptSource(context.sourceContext.messages);
 											options.onRequestAccepted?.(context.context);
-											// The history the marks index: the next run re-anchors them against it.
-											requestPrefix.source = context.sourceContext.messages;
 											options.observeWorkerRequest?.(
 												options.agentId,
 												snapshot,

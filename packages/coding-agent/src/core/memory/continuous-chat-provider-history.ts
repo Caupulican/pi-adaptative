@@ -460,22 +460,24 @@ export class ContinuousChatProviderHistory {
 						],
 					}
 				: state;
-		const head: Message[] = [...previous.request.messages, previous.terminal.wire, turnState];
+		const messages: Message[] = [...previous.request.messages, previous.terminal.wire, turnState];
 		if (additions.length > 0) {
-			head.push({
+			messages.push({
 				role: "user",
 				content: [{ type: "text", text: renderRetainedAliasAdditions(additions) }],
 				timestamp: state.timestamp,
 			});
 		}
-		const context = { ...fresh, messages: [...head, ...fresh.messages.slice(end)] };
+		const frameLength = messages.length;
+		for (let index = end; index < fresh.messages.length; index++) messages.push(fresh.messages[index]!);
+		const context = { ...fresh, messages };
 		const tokens = this.eligibleTokens(candidate, context);
 		return tokens === undefined
 			? undefined
 			: {
 					messages: context.messages,
 					requestOnly: previous.request.requestOnly,
-					frameLength: head.length,
+					frameLength,
 					handoffs,
 					model: candidate.model,
 					tokens,

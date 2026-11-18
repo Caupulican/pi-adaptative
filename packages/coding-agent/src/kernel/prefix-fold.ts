@@ -3,7 +3,8 @@
  * every message keeps its identity, so a request-time scan over the whole history -- a plan, a sum, a flag -- replays only what
  * was appended since the previous request. Each fold keeps the references it has processed (pushed as they are folded, never
  * copied from the array it read) and compares the next array against them by identity, so an array mutated in place is still
- * checked element by element. A fold also starts over when a message's content was edited in place (see
+ * checked element by element. Agent-owned arrays publish a lineage across append operations, allowing both folds to skip
+ * that comparison. A fold also starts over when a message's content was edited in place (see
  * `messageContentEpoch`), since identity alone does not show that. A fold owns one lineage: give each call site, or each
  * conversation, its own.
  *
@@ -12,7 +13,7 @@
  */
 
 import { harnessLog } from "./harness-log.ts";
-import { messageContentEpoch } from "./message-revision.ts";
+import { messageAppendLineage, messageContentEpoch } from "./message-revision.ts";
 
 /** Element operations counted by the folds since the last take. */
 let foldOperations = 0;
@@ -30,6 +31,7 @@ export class PrefixFold<Item extends object, State> {
 	private processed: Item[] = [];
 	private state: State;
 	private epoch = messageContentEpoch();
+	private lineage: object | undefined;
 
 	constructor(create: () => State, step: (state: State, item: Item, index: number, items: readonly Item[]) => void) {
 		this.create = create;
@@ -38,11 +40,14 @@ export class PrefixFold<Item extends object, State> {
 	}
 
 	/** Fold `items`, resuming past the identical prefix. The returned state is mutated by later folds. */
-	fold(items: readonly Item[]): State {
+	fold(items: readonly Item[], end = items.length): State {
+		if (!Number.isSafeInteger(end) || end < 0 || end > items.length) throw new RangeError("Invalid prefix length");
+		const lineage = messageAppendLineage(items);
 		let from = this.processed.length;
 		let work = 0;
-		if (from > items.length || this.epoch !== messageContentEpoch()) from = -1;
-		for (let index = 0; from > 0 && index < from; index++) {
+		if (from > end || this.epoch !== messageContentEpoch()) from = -1;
+		const compareUntil = lineage !== undefined && lineage === this.lineage ? 0 : from;
+		for (let index = 0; index < compareUntil; index++) {
 			work++;
 			if (this.processed[index] !== items[index]) {
 				from = -1;
@@ -54,13 +59,14 @@ export class PrefixFold<Item extends object, State> {
 			this.processed = [];
 			from = 0;
 		}
-		for (let index = from; index < items.length; index++) {
+		for (let index = from; index < end; index++) {
 			const item = items[index]!;
 			this.step(this.state, item, index, items);
 			this.processed.push(item);
 		}
-		work += items.length - from;
+		work += end - from;
 		foldOperations += work;
+		this.lineage = lineage;
 		this.epoch = messageContentEpoch();
 		return this.state;
 	}
@@ -113,16 +119,19 @@ export class PrefixFirstMatch<Item extends object> {
 	private processed: Item[] = [];
 	private firstMatch = -1;
 	private epoch = messageContentEpoch();
+	private lineage: object | undefined;
 
 	constructor(matches: (item: Item) => boolean) {
 		this.matches = matches;
 	}
 
 	find(items: readonly Item[]): number {
+		const lineage = messageAppendLineage(items);
 		const bound = this.epoch === messageContentEpoch() ? Math.min(this.processed.length, items.length) : 0;
-		let common = 0;
+		const certified = lineage !== undefined && lineage === this.lineage ? bound : 0;
+		let common = certified;
 		while (common < bound && this.processed[common] === items[common]) common++;
-		let work = common < bound ? common + 1 : common;
+		let work = common - certified + Number(common < bound);
 		if (this.firstMatch >= common) this.firstMatch = -1;
 		this.processed.length = common;
 		let found = this.firstMatch;
@@ -139,6 +148,7 @@ export class PrefixFirstMatch<Item extends object> {
 			}
 		}
 		foldOperations += work;
+		this.lineage = lineage;
 		this.epoch = messageContentEpoch();
 		return found;
 	}

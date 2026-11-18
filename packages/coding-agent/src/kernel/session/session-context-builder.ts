@@ -107,22 +107,13 @@ function recoveredCoveredEntryId(
 	compactionIdx: number,
 	appliedSummary: string,
 ): string | undefined {
-	let coveredId: string | undefined;
-	for (let i = 0; i < compactionIdx; i++) {
+	for (let i = compactionIdx - 1; i >= 0; i--) {
 		const entry = path[i];
+		if (entry.type === "request_snapshot" || entry.type === "compaction") break;
 		const prepared = readPreparedSummary(entry);
-		if (!prepared || !appliedSummaryMatchesPrepared(appliedSummary, prepared)) continue;
-		let blocked = false;
-		for (let j = i + 1; j < compactionIdx; j++) {
-			const between = path[j]?.type;
-			if (between === "request_snapshot" || between === "compaction") {
-				blocked = true;
-				break;
-			}
-		}
-		if (!blocked && entry.parentId) coveredId = entry.parentId;
+		if (prepared && appliedSummaryMatchesPrepared(appliedSummary, prepared)) return entry.parentId ?? undefined;
 	}
-	return coveredId;
+	return undefined;
 }
 
 function latestUserText(entries: readonly SessionEntry[], anchorId: string | undefined): string {
@@ -135,27 +126,6 @@ function latestUserText(entries: readonly SessionEntry[], anchorId: string | und
 	return text;
 }
 
-interface OriginalUserCut {
-	compaction: CompactionEntry;
-	index: number;
-	coveredIdx: number;
-}
-
-function originalUserCuts(path: readonly SessionEntry[]): OriginalUserCut[] {
-	const cuts: OriginalUserCut[] = [];
-	for (let i = 0; i < path.length; i++) {
-		const entry = path[i];
-		if (entry?.type !== "compaction" || entry.retention?.mode !== "original-user") continue;
-		const coveredThroughEntryId = entry.coveredThroughEntryId ?? recoveredCoveredEntryId(path, i, entry.summary);
-		const coveredIdx =
-			coveredThroughEntryId === undefined
-				? -1
-				: path.findIndex((candidate) => candidate.id === coveredThroughEntryId);
-		cuts.push({ compaction: entry, index: i, coveredIdx });
-	}
-	return cuts;
-}
-
 function isProjectedGapEntry(entry: SessionEntry): boolean {
 	return (
 		entry.type === "message" ||
@@ -164,40 +134,39 @@ function isProjectedGapEntry(entry: SessionEntry): boolean {
 	);
 }
 
-function gapEntries(path: readonly SessionEntry[], cut: OriginalUserCut): SessionEntry[] {
-	if (cut.coveredIdx < 0 || cut.coveredIdx >= cut.index) return [];
-	const anchorId = cut.compaction.retention?.userEntryId;
-	const entries: SessionEntry[] = [];
-	for (let i = cut.coveredIdx + 1; i < cut.index; i++) {
-		const entry = path[i];
-		if (!entry || entry.id === anchorId || !isProjectedGapEntry(entry)) continue;
-		entries.push(entry);
-	}
-	return entries;
-}
-
-/** A later checkpoint lists this id only when its summary was built from a projection that contained it. */
-function gapOwnedByLaterSummary(path: readonly SessionEntry[], entryId: string, cutIndex: number): boolean {
-	for (let i = cutIndex + 1; i < path.length; i++) {
-		const later = path[i];
-		if (later?.type !== "compaction" || !later.summarizedGapEntryIds?.includes(entryId)) continue;
-		return true;
-	}
-	return false;
-}
-
 /**
  * Gap entries the current projection emits. These are the messages a summary of this projection
  * contains and must record. A later checkpoint that lists an id already summarized it.
  */
 function projectedGapEntries(path: readonly SessionEntry[]): SessionEntry[] {
+	const lastSummary = new Map<string, number>();
+	for (let i = 0; i < path.length; i++) {
+		const entry = path[i];
+		if (entry.type === "compaction" && entry.summarizedGapEntryIds) {
+			for (const id of entry.summarizedGapEntryIds) lastSummary.set(id, i);
+		}
+	}
 	const projected: SessionEntry[] = [];
 	const seen = new Set<string>();
-	for (const cut of originalUserCuts(path)) {
-		for (const entry of gapEntries(path, cut)) {
-			if (seen.has(entry.id) || gapOwnedByLaterSummary(path, entry.id, cut.index)) continue;
-			seen.add(entry.id);
+	const positions = new Map<string, number>();
+	for (let i = 0; i < path.length; i++) {
+		const cut = path[i];
+		if (!positions.has(cut.id)) positions.set(cut.id, i);
+		if (cut.type !== "compaction" || cut.retention?.mode !== "original-user") continue;
+		const covered = cut.coveredThroughEntryId ?? recoveredCoveredEntryId(path, i, cut.summary);
+		const start = covered === undefined ? undefined : positions.get(covered);
+		if (start === undefined) continue;
+		for (let j = start + 1; j < i; j++) {
+			const entry = path[j];
+			if (
+				entry.id === cut.retention.userEntryId ||
+				!isProjectedGapEntry(entry) ||
+				seen.has(entry.id) ||
+				(lastSummary.get(entry.id) ?? -1) > i
+			)
+				continue;
 			projected.push(entry);
+			seen.add(entry.id);
 		}
 	}
 	return projected;
@@ -334,31 +303,29 @@ function selectCompactedContext(
 			tailKinds.add(entry.customType);
 		}
 	}
-	const carriedByKind = new Map<string, SessionEntry[]>();
-	for (let i = scopeIdx; i < firstKeptIdx; i++) {
+	// Select newest-only kinds in reverse, then emit in branch order alongside pending inputs.
+	const seenKinds = new Set<string>();
+	const selected = new Set<SessionEntry>();
+	for (let i = firstKeptIdx - 1; i >= scopeIdx; i--) {
 		const entry = path[i];
-		if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
+		if (entry.type !== "custom_message" || tailKinds.has(entry.customType) || seenKinds.has(entry.customType))
+			continue;
 		const record = classifyTransientRecord(entry.content, entry.details);
 		if (!record.transient) continue;
-		if (record.cumulative) {
-			const list = carriedByKind.get(entry.customType) ?? [];
-			list.push(entry);
-			carriedByKind.set(entry.customType, list);
-		} else carriedByKind.set(entry.customType, [entry]);
+		selected.add(entry);
+		if (!record.cumulative) seenKinds.add(entry.customType);
 	}
 	const retained = compaction.retention ? restoredGaps : path.slice(firstKeptIdx, compactionIdx);
-	const carried = [...carriedByKind.values()].flat();
-	const preserved = new Set([...carried, ...retained, ...restoredGaps].map((entry) => entry.id));
+	const preserved = new Set(retained.map((entry) => entry.id));
 	if (originalUserEntry) preserved.add(originalUserEntry.id);
-	// Accepted input remains verbatim until its wake settles, even when a summary covers its position.
+	const carried: SessionEntry[] = [];
 	for (let i = scopeIdx; i < compactionIdx; i++) {
 		const entry = path[i];
-		if (pendingInputIds.has(entry.id) && !preserved.has(entry.id)) {
+		if (selected.has(entry) || (pendingInputIds.has(entry.id) && !preserved.has(entry.id))) {
 			carried.push(entry);
 			preserved.add(entry.id);
 		}
 	}
-	carried.sort((a, b) => path.indexOf(a) - path.indexOf(b));
 	return { scopeIdx, compactionIdx, end, originalUserEntry, restoredGaps, carried, retained };
 }
 

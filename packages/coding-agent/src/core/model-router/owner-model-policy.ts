@@ -14,6 +14,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { ReadonlySessionManager } from "../../kernel/session/session-manager.ts";
 
 export const MODEL_POOLS = ["subscription", "metered", "local"] as const;
 export type ModelPool = (typeof MODEL_POOLS)[number];
@@ -56,52 +57,45 @@ export interface ModelPoolPolicyRecord {
 	readonly changedAt: string;
 }
 
-function poolPolicyRecord(value: unknown): ModelPoolPolicyRecord | undefined {
+function decodePoolPolicy(value: unknown): ModelPoolPolicy | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const record = value as { version?: unknown; policy?: unknown; changedAt?: unknown };
 	const policy = record.policy as Record<string, unknown> | undefined;
 	if (record.version !== 1 || !policy || typeof policy !== "object" || typeof record.changedAt !== "string")
 		return undefined;
 	if (!MODEL_POOLS.every((pool) => typeof policy[pool] === "boolean")) return undefined;
-	return {
-		version: 1,
-		policy: Object.freeze({
-			subscription: policy.subscription,
-			metered: policy.metered,
-			local: policy.local,
-		}) as ModelPoolPolicy,
-		changedAt: record.changedAt,
-	};
+	return Object.freeze({
+		subscription: policy.subscription,
+		metered: policy.metered,
+		local: policy.local,
+	}) as ModelPoolPolicy;
 }
 
-/** The policy the latest pool-policy record on `branch` states, or undefined when the branch has none. */
-export function latestPoolPolicy(
-	branch: readonly { type: string; customType?: string; data?: unknown }[],
-): ModelPoolPolicy | undefined {
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index]!;
-		if (entry.type !== "custom" || entry.customType !== MODEL_POOL_POLICY_CUSTOM_TYPE) continue;
-		const record = poolPolicyRecord(entry.data);
-		if (record) return record.policy;
-	}
-	return undefined;
-}
+type PoolPolicyBranchReader = Pick<ReadonlySessionManager, "getLatestCustomEntryOnBranch">;
 
-/** The reader of a session's branch the policy in force is read from. */
-export interface PoolPolicyBranchReader {
-	getSessionId(): string;
-	getLeafId(): string | null;
-	getBranch(): readonly { type: string; customType?: string; data?: unknown }[];
-}
-
-/** The policy in force on a reader's branch, read once per branch position: allocation asks per candidate model. */
+/** Read the latest valid policy, memoized by the raw entry so unrelated appends can reuse it. */
 export function branchPoolPolicyReader(getReader: () => PoolPolicyBranchReader): () => ModelPoolPolicy | undefined {
-	let read: { branchKey: string; policy: ModelPoolPolicy | undefined } | undefined;
+	let cached:
+		| {
+				reader: PoolPolicyBranchReader;
+				head: ReturnType<PoolPolicyBranchReader["getLatestCustomEntryOnBranch"]>;
+				data: unknown;
+				policy: ModelPoolPolicy | undefined;
+		  }
+		| undefined;
 	return () => {
 		const reader = getReader();
-		const branchKey = `${reader.getSessionId()}:${reader.getLeafId() ?? ""}`;
-		if (read?.branchKey !== branchKey) read = { branchKey, policy: latestPoolPolicy(reader.getBranch()) };
-		return read.policy;
+		const head = reader.getLatestCustomEntryOnBranch(MODEL_POOL_POLICY_CUSTOM_TYPE);
+		if (cached?.reader === reader && cached.head === head && cached.data === head?.data) return cached.policy;
+
+		let policy: ModelPoolPolicy | undefined;
+		for (let entry = head; entry; ) {
+			policy = decodePoolPolicy(entry.data);
+			if (policy || entry.parentId === null) break;
+			entry = reader.getLatestCustomEntryOnBranch(MODEL_POOL_POLICY_CUSTOM_TYPE, entry.parentId);
+		}
+		cached = { reader, head, data: head?.data, policy };
+		return policy;
 	};
 }
 

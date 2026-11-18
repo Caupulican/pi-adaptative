@@ -1,5 +1,6 @@
 import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
+import { messageContentRevision } from "./message-revision.ts";
 import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
 import { visitJsonTokens } from "./utils/json-traversal.ts";
 
@@ -145,6 +146,7 @@ function semanticMessage(message: Message, addImageChars: () => void): unknown {
 }
 
 interface SemanticMessageMeasure {
+	readonly revision: number;
 	/** JSON length of the message's semantic projection, or the `null` length when unmeasurable. */
 	readonly length: number;
 	/** Image blocks the projection replaced, each worth ESTIMATED_IMAGE_CHARS. */
@@ -154,22 +156,23 @@ interface SemanticMessageMeasure {
 /**
  * Per-message measurements, keyed by message identity. A request is estimated at least twice per
  * provider call (admission plus the non-compactable floor) over the WHOLE context, and messages are
- * immutable once built and keep their identity across requests unless a pipeline stage rewrites them,
+ * usually keep their identity and content revision across requests,
  * so measuring every message on every request re-walked the entire transcript: 8% of host CPU over a
  * 1,500-turn session, growing with the transcript. Now only messages this process has never measured
- * are walked. `WeakMap`, so a message that leaves the context takes its measurement with it.
+ * or whose content revision changed are walked. `WeakMap`, so a message that leaves the context takes its measurement with it.
  */
 const semanticMessageMeasures = new WeakMap<Message, SemanticMessageMeasure>();
 
 function measureSemanticMessage(message: Message): SemanticMessageMeasure {
+	const revision = messageContentRevision(message);
 	const cached = semanticMessageMeasures.get(message);
-	if (cached) return cached;
+	if (cached?.revision === revision) return cached;
 	let images = 0;
 	const projected = semanticMessage(message, () => {
 		images += 1;
 	});
 	// `undefined` only for values JSON omits; a message is an object, so it serializes as `null` at worst.
-	const measure: SemanticMessageMeasure = { length: measureJsonLength(projected) ?? 4, images };
+	const measure: SemanticMessageMeasure = { revision, length: measureJsonLength(projected) ?? 4, images };
 	semanticMessageMeasures.set(message, measure);
 	return measure;
 }

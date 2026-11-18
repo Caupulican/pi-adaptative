@@ -12,6 +12,7 @@
  * never overtakes an older verifier, which is the order the dispatch queue always had.
  */
 
+import { MinHeap } from "../util/min-heap.ts";
 import { type FleetPriority, type ShareSpec, WEIGHT_CLASS_COST, type WeightClass } from "./fleet-types.ts";
 
 /** One step of aging: an entry waiting this long ranks one priority higher, up to 3. */
@@ -42,6 +43,13 @@ export interface FleetQueueEntry<P> {
 	readonly seq: number;
 }
 
+interface FlowCursor<P> {
+	readonly pending: readonly FleetQueueEntry<P>[];
+	readonly shareWeight: number | undefined;
+	index: number;
+	finish: number;
+}
+
 interface Flow<P> {
 	readonly key: string;
 	readonly subtreeId: string;
@@ -65,6 +73,14 @@ export interface FleetQueueOptions {
 
 export function fleetFlowKey(objectiveId: string, subtreeId: string): string {
 	return `${objectiveId}\u0000${subtreeId}`;
+}
+
+function priorityWeight(priority: number): number {
+	return 2 ** priority;
+}
+
+function serviceCost(weightClass: WeightClass, flowWeight: number): number {
+	return WEIGHT_CLASS_COST[weightClass] / flowWeight;
 }
 
 export class FleetQueue<P> {
@@ -140,27 +156,25 @@ export class FleetQueue<P> {
 	/** Every queued entry in service order: the order a selection pass offers them to admission. */
 	ordered(): FleetQueueEntry<P>[] {
 		const now = this.options.now();
-		const lanes: { flow: Flow<P>; pending: FleetQueueEntry<P>[]; served: number }[] = [];
+		const heads = new MinHeap<FlowCursor<P>>(
+			(a, b) => a.finish - b.finish || a.pending[a.index]!.seq - b.pending[b.index]!.seq,
+		);
+		const offer = (flow: FlowCursor<P>, served: number): void => {
+			const head = flow.pending[flow.index];
+			if (!head) return;
+			// The head has the maximum effective priority among the remaining entries.
+			const weight = flow.shareWeight ?? priorityWeight(this.effectivePriority(head, now));
+			flow.finish = served + serviceCost(head.weight, weight);
+			if (flow.finish < Number.POSITIVE_INFINITY) heads.push(flow);
+		};
 		for (const flow of this.flows.values()) {
 			const pending = [...flow.entries.values()].sort((a, b) => this.compareWithinFlow(a, b, now));
-			lanes.push({ flow, pending, served: flow.served });
+			offer({ pending, shareWeight: this.shareWeight(flow.subtreeId), index: 0, finish: 0 }, flow.served);
 		}
 		const order: FleetQueueEntry<P>[] = [];
-		while (order.length < this.entries.size) {
-			let best: (typeof lanes)[number] | undefined;
-			let bestFinish = Number.POSITIVE_INFINITY;
-			for (const lane of lanes) {
-				const head = lane.pending[0];
-				if (!head) continue;
-				const finish = lane.served + WEIGHT_CLASS_COST[head.weight] / this.flowWeight(lane.flow, lane.pending, now);
-				if (finish < bestFinish || (finish === bestFinish && best && head.seq < best.pending[0]!.seq)) {
-					best = lane;
-					bestFinish = finish;
-				}
-			}
-			if (!best) break;
-			order.push(best.pending.shift()!);
-			best.served = bestFinish;
+		for (let flow = heads.pop(); flow; flow = heads.pop()) {
+			order.push(flow.pending[flow.index++]!);
+			offer(flow, flow.finish);
 		}
 		return order;
 	}
@@ -196,12 +210,17 @@ export class FleetQueue<P> {
 		);
 	}
 
-	private flowWeight(flow: Flow<P>, pending: readonly FleetQueueEntry<P>[], now: number): number {
-		const share = this.shares.get(flow.subtreeId);
-		if (share && share.weight > 0) return share.weight;
+	private shareWeight(subtreeId: string): number | undefined {
+		const share = this.shares.get(subtreeId);
+		return share && share.weight > 0 ? share.weight : undefined;
+	}
+
+	private flowWeight(flow: Flow<P>, now: number): number {
+		const share = this.shareWeight(flow.subtreeId);
+		if (share !== undefined) return share;
 		let highest = 0;
-		for (const entry of pending) highest = Math.max(highest, this.effectivePriority(entry, now));
-		return 2 ** highest;
+		for (const entry of flow.entries.values()) highest = Math.max(highest, this.effectivePriority(entry, now));
+		return priorityWeight(highest);
 	}
 
 	private leastServed(): number {
@@ -218,7 +237,7 @@ export class FleetQueue<P> {
 		if (flow) {
 			if (charge) {
 				const now = this.options.now();
-				flow.served += WEIGHT_CLASS_COST[entry.weight] / this.flowWeight(flow, [...flow.entries.values()], now);
+				flow.served += serviceCost(entry.weight, this.flowWeight(flow, now));
 			}
 			flow.entries.delete(id);
 			if (flow.entries.size === 0) this.flows.delete(flow.key);

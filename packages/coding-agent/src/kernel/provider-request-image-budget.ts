@@ -50,8 +50,6 @@ export interface BudgetedProviderRequestContext {
 
 interface ImageLocation {
 	messageIndex: number;
-	role: "user" | "toolResult";
-	block: ImageContent;
 	serializedBytes: number;
 }
 
@@ -84,7 +82,6 @@ function validatePolicy(policy: ProviderRequestImageBudgetPolicy): void {
 function measureContent(
 	content: (TextContent | ImageContent)[],
 	messageIndex: number,
-	role: ImageLocation["role"],
 	locations: ImageLocation[],
 ): { content: (TextContent | ImageContent)[]; dataBytes: number } {
 	let changed = false;
@@ -97,7 +94,7 @@ function measureContent(
 		const blank = { type: "image" as const, data: "", mimeType: block.mimeType };
 		const blankBytes = measureJsonUtf8Bytes(blank);
 		if (blankBytes === undefined) throw new TypeError("image content must be JSON serializable");
-		locations.push({ messageIndex, role, block, serializedBytes: blankBytes + bytes });
+		locations.push({ messageIndex, serializedBytes: blankBytes + bytes });
 		dataBytes += bytes;
 		return blank;
 	});
@@ -109,21 +106,12 @@ function measureContextImages(context: Context): ContextImageMeasurement {
 	let dataBytes = 0;
 	let changed = false;
 	const messages = context.messages.map((message, messageIndex) => {
-		if (message.role === "user" && Array.isArray(message.content)) {
-			const measured = measureContent(message.content, messageIndex, "user", locations);
-			dataBytes += measured.dataBytes;
-			if (measured.content === message.content) return message;
-			changed = true;
-			return { ...message, content: measured.content };
-		}
-		if (message.role === "toolResult") {
-			const measured = measureContent(message.content, messageIndex, "toolResult", locations);
-			dataBytes += measured.dataBytes;
-			if (measured.content === message.content) return message;
-			changed = true;
-			return { ...message, content: measured.content };
-		}
-		return message;
+		if ((message.role !== "user" && message.role !== "toolResult") || !Array.isArray(message.content)) return message;
+		const measured = measureContent(message.content, messageIndex, locations);
+		dataBytes += measured.dataBytes;
+		if (measured.content === message.content) return message;
+		changed = true;
+		return { ...message, content: measured.content };
 	});
 	const blankBytes = measureJsonUtf8Bytes({
 		systemPrompt: context.systemPrompt,
@@ -132,16 +120,6 @@ function measureContextImages(context: Context): ContextImageMeasurement {
 	});
 	if (blankBytes === undefined) throw new TypeError("provider request context must be JSON serializable");
 	return { bodyBytes: blankBytes + dataBytes, locations };
-}
-
-function cloneImageBearingMessages(messages: Message[]): Message[] {
-	return messages.map((message) => {
-		if (message.role === "user" && Array.isArray(message.content)) {
-			return { ...message, content: message.content.slice() };
-		}
-		if (message.role === "toolResult") return { ...message, content: message.content.slice() };
-		return message;
-	});
 }
 
 function hasInlineImage(message: Message): boolean {
@@ -195,7 +173,7 @@ export function applyProviderRequestImageBudget(
 		};
 	}
 
-	const messages = cloneImageBearingMessages(projectedContext.messages);
+	const messages = projectedContext.messages.slice();
 	const budgetedContext = { ...projectedContext, messages };
 	const userPlaceholder: TextContent = { type: "text", text: USER_IMAGE_BUDGET_PLACEHOLDER };
 	const toolNote: TextContent = { type: "text", text: TOOL_IMAGE_BUDGET_NOTE };
@@ -207,34 +185,38 @@ export function applyProviderRequestImageBudget(
 	let bodyBytesAfter = measurement.bodyBytes;
 	let evicted = 0;
 
-	for (const location of measurement.locations) {
-		if (bodyBytesAfter <= policy.reclaimTargetBytes) break;
-		const message = messages[location.messageIndex];
-		if (location.role === "user") {
-			if (message?.role !== "user" || !Array.isArray(message.content)) {
-				throw new TypeError("provider request image location changed during budgeting");
-			}
-			const blockIndex = message.content.indexOf(location.block);
-			if (blockIndex < 0) throw new TypeError("provider request user image disappeared during budgeting");
-			message.content[blockIndex] = userPlaceholder;
-			bodyBytesAfter -= location.serializedBytes - userPlaceholderBytes;
-		} else {
-			if (message?.role !== "toolResult") {
-				throw new TypeError("provider request image location changed during budgeting");
-			}
-			const blockIndex = message.content.indexOf(location.block);
-			if (blockIndex < 0) throw new TypeError("provider request tool image disappeared during budgeting");
-			const hasNote = message.content.some(
-				(block) => block.type === "text" && block.text === TOOL_IMAGE_BUDGET_NOTE,
-			);
-			if (!hasNote) {
-				bodyBytesAfter += toolNoteBytes + (message.content.length > 0 ? 1 : 0);
-				message.content.push(toolNote);
-			}
-			message.content.splice(blockIndex, 1);
-			bodyBytesAfter -= location.serializedBytes + 1;
+	// Locations are in message and block order. Decide a whole message's evictions before rewriting
+	// its content once. Earlier versions searched and spliced the same content array for each image.
+	while (evicted < measurement.locations.length && bodyBytesAfter > policy.reclaimTargetBytes) {
+		const start = evicted;
+		const { messageIndex } = measurement.locations[start]!;
+		const message = messages[messageIndex]!;
+		if ((message.role !== "toolResult" && message.role !== "user") || !Array.isArray(message.content)) {
+			throw new TypeError("provider request image location changed during budgeting");
 		}
-		evicted++;
+		const content = message.content;
+		const appendNote =
+			message.role === "toolResult" &&
+			!content.some((block) => block.type === "text" && block.text === TOOL_IMAGE_BUDGET_NOTE);
+		if (appendNote) bodyBytesAfter += toolNoteBytes + 1;
+		do {
+			const imageBytes = measurement.locations[evicted++]!.serializedBytes;
+			bodyBytesAfter -= message.role === "user" ? imageBytes - userPlaceholderBytes : imageBytes + 1;
+		} while (
+			bodyBytesAfter > policy.reclaimTargetBytes &&
+			measurement.locations[evicted]?.messageIndex === messageIndex
+		);
+
+		let remaining = evicted - start;
+		const kept: (TextContent | ImageContent)[] = [];
+		for (const block of content) {
+			if (remaining > 0 && block.type === "image") {
+				remaining--;
+				if (message.role === "user") kept.push(userPlaceholder);
+			} else kept.push(block);
+		}
+		if (appendNote) kept.push(toolNote);
+		messages[messageIndex] = { ...message, content: kept };
 	}
 
 	return {

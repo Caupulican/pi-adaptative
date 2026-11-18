@@ -1,6 +1,6 @@
 /** Bounded revision custody over the objects a provider-history request read or retained. */
 
-import { messageContentRevision } from "../../kernel/message-revision.ts";
+import { messageContentEpoch, messageContentRevision } from "../../kernel/message-revision.ts";
 
 export const MAX_RETAINED_MESSAGES = 128;
 // Durable, sanitized, planned and provider copies plus the carried and transient records they read.
@@ -9,6 +9,8 @@ const MAX_DEPENDENCIES = MAX_RETAINED_MESSAGES * 8;
 export class ContinuousChatMessageDependencies {
 	private readonly revisions = new Map<object, number>();
 	private bounded = true;
+	private checkedEpoch = -1;
+	private current = true;
 
 	get complete(): boolean {
 		return this.bounded;
@@ -32,10 +34,19 @@ export class ContinuousChatMessageDependencies {
 	}
 
 	isCurrent(): boolean {
+		// Appending messages leaves their content revisions alone. Repeated plan guards can reuse the
+		// verdict until a tracked object is added or the kernel announces an in-place content edit.
+		const epoch = messageContentEpoch();
+		if (this.checkedEpoch === epoch) return this.current;
+		this.checkedEpoch = epoch;
+		this.current = true;
 		for (const [message, revision] of this.revisions) {
-			if (messageContentRevision(message) !== revision) return false;
+			if (messageContentRevision(message) !== revision) {
+				this.current = false;
+				break;
+			}
 		}
-		return true;
+		return this.current;
 	}
 
 	markIncomplete(): void {
@@ -49,6 +60,7 @@ export class ContinuousChatMessageDependencies {
 			return false;
 		}
 		this.revisions.set(message, revision);
+		this.checkedEpoch = -1;
 		return true;
 	}
 }
