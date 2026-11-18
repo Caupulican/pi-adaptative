@@ -5,6 +5,7 @@
  * facts; nothing here judges.
  */
 
+import { recordedAttemptCostUsd } from "../orchestration/attempt-usage.ts";
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { costRefusalTokenFor, DELEGATION_BUDGET_REFUSAL_REASONS } from "./budget-reason-codes.ts";
@@ -93,7 +94,7 @@ export function delegationBudgetLeftUsd(
 
 /** The cost an attempt recorded: its usage accounting, else its result's usage. A figure that is not a positive number counts nothing. */
 function attemptCostUsd(attempt: AttemptRuntimeState): number {
-	const usd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd ?? 0;
+	const usd = recordedAttemptCostUsd(attempt) ?? 0;
 	return Number.isFinite(usd) && usd > 0 ? usd : 0;
 }
 

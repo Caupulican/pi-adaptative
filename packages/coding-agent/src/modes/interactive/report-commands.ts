@@ -19,6 +19,7 @@ import {
 	formatCompactTaskDuration,
 	type SessionCostSummary,
 } from "../../core/cost/cost-summary.ts";
+import { retainedWorkerTaskSpend } from "../../core/cost/worker-task-spend.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
@@ -183,6 +184,20 @@ export function handleUsageCommand(host: UsageReportHost): void {
 
 	info += `${theme.bold(text.costTitle)}\n`;
 	info += `${formatCostReport(costs, usingSubscription)}\n\n`;
+
+	const ledger = host.session.backgroundLanes.getTaskRuntimeSnapshot();
+	if (ledger) {
+		const workers = retainedWorkerTaskSpend(ledger);
+		if (workers.settledTasks > 0) {
+			info += `${text.workerTaskSpend(usd(workers.recordedUsd, 4), workers.attempts, workers.settledTasks, workers.acceptedTasks)}\n`;
+			if (workers.missingCosts || workers.missingOutcomes)
+				info += `${text.workerTaskEvidenceMissing(workers.missingCosts, workers.missingOutcomes)}\n`;
+			else if (workers.perAcceptedUsd !== undefined)
+				info += `${text.workerTaskUnitCost(usd(workers.perAcceptedUsd, 4))}\n`;
+			else info += `${text.workerTaskNoAcceptances}\n`;
+			info += "\n";
+		}
+	}
 
 	const taskMetrics = host.session.getTaskAndModelMetrics();
 	if (taskMetrics && (taskMetrics.tasks.length > 0 || taskMetrics.models.length > 0)) {

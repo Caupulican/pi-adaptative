@@ -9,6 +9,7 @@ import type {
 	WorkerReportRequirementStatus,
 } from "../autonomy/contracts.ts";
 import { WORKER_UNCERTAIN_MUTATION_OBSERVATION } from "../autonomy/host-findings.ts";
+import { recordedAttemptCostUsd } from "../orchestration/attempt-usage.ts";
 import type { ArtifactContract } from "../orchestration/contracts.ts";
 import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -407,7 +408,7 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			0,
 			OUTCOME_LIMITS.maxChangedFiles,
 		),
-		cost: outcomeCost(attempt),
+		cost: outcomeCost(attempt, snapshot.checkpoints),
 		durationMs: Math.max(
 			0,
 			Math.round(attempt.result?.usage.wallClockMs ?? attempt.usageAccounting?.total.activeWallClockMs ?? 0),
@@ -656,9 +657,9 @@ function changedFilesFromArtifacts(artifacts: readonly ArtifactContract[]): stri
 	});
 }
 
-function outcomeCost(attempt: AttemptRuntimeState): Outcome["cost"] {
+function outcomeCost(attempt: AttemptRuntimeState, checkpoints: TaskRuntimeProjection["checkpoints"]): Outcome["cost"] {
 	const total = attempt.usageAccounting?.total;
-	const usd = total?.costUsd ?? attempt.result?.usage.costUsd;
+	const usd = recordedAttemptCostUsd(attempt, checkpoints);
 	return {
 		usd: usd !== undefined && Number.isFinite(usd) && usd > 0 ? usd : 0,
 		metered: usd !== undefined,

@@ -104,6 +104,12 @@ export const REPORTS = {
 		taskCostDetail: (total: string, root: string, sub: string, icm: string) =>
 			`${total} (raiz ${root} · sub ${sub}${icm})`,
 		icmPart: (amount: string) => ` · ICM ${amount}`,
+		workerTaskSpend: (usd: string, attempts: number, tasks: number, accepted: number) =>
+			`Custo direto registrado dos agentes nas tarefas retidas cuja última tentativa terminou: $${usd} (${attempts} tentativas, ${tasks} tarefas, ${accepted} aceitas). Os valores dos provedores podem incluir custos equivalentes aos da API.`,
+		workerTaskNoAcceptances: "O custo por tarefa aceita estará disponível após a primeira aceitação.",
+		workerTaskUnitCost: (usd: string) => `Custo registrado por tarefa aceita: $${usd}`,
+		workerTaskEvidenceMissing: (costs: number, outcomes: number) =>
+			`Custo por tarefa indisponível: ${costs} tentativas com preço ausente ou não confirmado, ${outcomes} tarefas sem resultado correspondente.`,
 		modelBreakdownTitle: "Custo por modelo",
 		modelLabel: (model: string, role: string) => `${model} (${role}):`,
 		modelUsage: (calls: number, reports: boolean, tokens: string) =>

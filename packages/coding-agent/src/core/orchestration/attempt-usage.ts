@@ -1,6 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { AttemptUsageSnapshot } from "./contracts.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "./task-runtime-state.ts";
 
 export const EMPTY_ATTEMPT_USAGE: AttemptUsageSnapshot = {
 	toolCalls: 0,
@@ -13,20 +14,44 @@ export const EMPTY_ATTEMPT_USAGE: AttemptUsageSnapshot = {
 	activeWallClockMs: 0,
 };
 
-/** Canonical accounting supersedes execution checkpoints, which cannot accept late receipts. */
-export function projectAttemptUsage(
-	attempt: {
-		checkpointIds: readonly string[];
-		usageAccounting?: { readonly total: AttemptUsageSnapshot };
-	},
-	checkpoints: Readonly<Record<string, { usage?: AttemptUsageSnapshot }>>,
+type AttemptUsageSource = {
+	checkpointIds: readonly string[];
+	usageAccounting?: { readonly total: AttemptUsageSnapshot };
+};
+type UsageCheckpoints = Readonly<Record<string, { usage?: AttemptUsageSnapshot }>>;
+
+function latestCheckpointUsage(
+	attempt: Pick<AttemptUsageSource, "checkpointIds">,
+	checkpoints?: UsageCheckpoints,
 ): AttemptUsageSnapshot | undefined {
-	if (attempt.usageAccounting) return structuredClone(attempt.usageAccounting.total);
+	if (!checkpoints) return undefined;
 	for (let index = attempt.checkpointIds.length - 1; index >= 0; index--) {
 		const usage = checkpoints[attempt.checkpointIds[index]]?.usage;
-		if (usage) return structuredClone(usage);
+		if (usage) return usage;
 	}
 	return undefined;
+}
+
+/** Canonical accounting supersedes execution checkpoints, which cannot accept late receipts. */
+export function projectAttemptUsage(
+	attempt: AttemptUsageSource,
+	checkpoints: UsageCheckpoints,
+): AttemptUsageSnapshot | undefined {
+	const usage = attempt.usageAccounting?.total ?? latestCheckpointUsage(attempt, checkpoints);
+	return usage && structuredClone(usage);
+}
+
+/** Generation accounting owns late receipts. A legacy checkpoint and terminal result report overlapping cost
+ * for the same attempt; the strongest recorded amount includes work after a checkpoint without counting it twice. */
+export function recordedAttemptCostUsd(
+	attempt: Pick<AttemptRuntimeState, "checkpointIds" | "usageAccounting" | "result">,
+	checkpoints?: TaskRuntimeProjection["checkpoints"],
+): number | undefined {
+	if (attempt.usageAccounting) return attempt.usageAccounting.total.costUsd;
+	const terminal = attempt.result?.usage.costUsd;
+	const checkpoint = latestCheckpointUsage(attempt, checkpoints)?.costUsd;
+	if (checkpoint === undefined) return terminal;
+	return terminal === undefined ? checkpoint : Math.max(terminal, checkpoint);
 }
 
 /**

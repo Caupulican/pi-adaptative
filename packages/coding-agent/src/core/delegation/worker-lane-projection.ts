@@ -1,5 +1,6 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
+import { recordedAttemptCostUsd } from "../orchestration/attempt-usage.ts";
 
 export { attemptAwaitsParent, attemptVerification } from "../orchestration/verification-identity.ts";
 
@@ -138,7 +139,7 @@ export function projectWorkerAttemptLaneRecord(
 		: undefined;
 	// A terminal result seals execution, not subsequent received billing. Legacy managed results
 	// have no generation accounting and retain their reported cost.
-	const costUsd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd;
+	const costUsd = recordedAttemptCostUsd(attempt, snapshot.checkpoints);
 	const outcome = sameOutcomeAttempt(task.outcome, attempt.attemptId);
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,

@@ -26,7 +26,7 @@ import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { ACTIVE_ATTEMPT_STATUSES } from "../delegation/delegation-spend.ts";
 import type { RunCostBound } from "../delegation/parent-execution-context.ts";
-import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
+import { recordedAttemptCostUsd } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { ROUTINE_COMPLETION_TYPE } from "../routines/routine-parent-input.ts";
 import { entryTurnOrigin, isOutsideInputKind, turnOriginOf } from "../turn-origin.ts";
@@ -292,8 +292,7 @@ export class BotSpendWindows {
 		for (const attempt of Object.values(snapshot?.attempts ?? {})) {
 			if (!snapshot || this.windowOfAttempt(attempt, snapshot) !== windowId) continue;
 			// A managed lane runs out of process and is metered by no generation: its cost is the one its terminal result reports.
-			const costUsd =
-				projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? attempt.result?.usage.costUsd ?? 0;
+			const costUsd = recordedAttemptCostUsd(attempt, snapshot.checkpoints) ?? 0;
 			usd += costUsd;
 			if (this.ports.attemptMetered(attempt)) meteredUsd += costUsd;
 		}

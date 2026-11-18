@@ -105,6 +105,12 @@ export const REPORTS = {
 		taskCostDetail: (total: string, root: string, sub: string, icm: string) =>
 			`${total} (root ${root} · sub ${sub}${icm})`,
 		icmPart: (amount: string) => ` · ICM ${amount}`,
+		workerTaskSpend: (usd: string, attempts: number, tasks: number, accepted: number) =>
+			`Recorded direct worker cost for retained tasks whose latest attempt ended: $${usd} (${attempts} attempts, ${tasks} tasks, ${accepted} accepted). Provider amounts may include API-equivalent costs.`,
+		workerTaskNoAcceptances: "Cost per accepted worker task is unavailable until a task is accepted.",
+		workerTaskUnitCost: (usd: string) => `Recorded worker cost per accepted task: $${usd}`,
+		workerTaskEvidenceMissing: (costs: number, outcomes: number) =>
+			`Unit cost unavailable: ${costs} attempts with missing or unconfirmed pricing, ${outcomes} tasks without a matching outcome.`,
 		modelBreakdownTitle: "Model Cost Breakdown",
 		modelLabel: (model: string, role: string) => `${model} (${role}):`,
 		modelUsage: (calls: number, reports: boolean, tokens: string) =>
