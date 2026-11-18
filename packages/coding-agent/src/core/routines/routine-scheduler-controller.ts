@@ -989,6 +989,7 @@ export class RoutineSchedulerController {
 					nowMs: this.deps.timers.now(),
 				});
 				// A prompt that reached no one is a failed run, which counts toward the routine's pause.
+				if (sent.outcome === "cancelled") return;
 				if (sent.outcome === "failed") return void result.failed.push(`${occurrence.routineId}: ${sent.summary}`);
 			}
 			result.dispatched.push(occurrence.routineId);

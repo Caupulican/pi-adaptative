@@ -1,15 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "../../config.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { HOST_EVENT_LISTENER_LIMITS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
-import { namedBotClockWork } from "../routines/named-bot-schedule.ts";
 import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
@@ -28,7 +25,6 @@ import {
 	parseRoutineIntakeConsumptions,
 	parseRoutineIntakeSessions,
 	parseRoutineOccurrence,
-	parseRoutineScheduleInput,
 	parseRoutineTarget,
 	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineClaimResult,
@@ -41,12 +37,8 @@ import {
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
-	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	routineResultDigest,
-	routineScheduleInputOf,
-	routineSlotRule,
-	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { holdsRoutine, type RoutineHolder } from "../routines/routine-holder.ts";
@@ -57,7 +49,6 @@ import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/rou
 import { routineSaveOriginRefusal, savedRoutineOrigin } from "../routines/routine-save-origin.ts";
 import { ROUTINE_STORE_VERSIONS, routineStoreFormatVersion } from "../routines/routine-store-format.ts";
 import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "../routines/routine-watch-edge.ts";
-import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
@@ -90,6 +81,7 @@ import {
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
+import { type BotStoreRead, readBotTeamStore } from "./bot-team-store-file.ts";
 import { assertBotReachable } from "./bot-unreachable.ts";
 import {
 	BOT_OR_TEAM_ID_REGEX,
@@ -136,11 +128,19 @@ import {
 import { assertRoutineRevision } from "./routine-revision.ts";
 import {
 	awaySettlement,
+	desktopQueueAt,
 	latestBotOccurrenceIds,
 	listedRoutineOccurrences,
+	namedBotClockWork,
 	resultSummaryText,
 } from "./routine-run-state.ts";
-import { type RoutineSaveRevertInput, revertRoutineSave, routineViewAfterSave } from "./routine-save-writes.ts";
+import {
+	type RoutineSaveRevertInput,
+	revertRoutineSave,
+	routineViewAfterSave,
+	savedRoutineSchedule,
+} from "./routine-save-writes.ts";
+import { commitTaskStop, readStopWitnesses, type TaskStopRequest } from "./routine-stop-witness.ts";
 import { claimManualRoutineOccurrence, observeWatch, retireEndedRoutines } from "./routine-trigger-writes.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
@@ -387,6 +387,7 @@ export class PersistentBotTeamStore {
 	private readonly teamMessages = new Map<string, PersistentTeamMessage[]>();
 	private readonly routines = new Map<string, RoutineDefinitionView>();
 	private readonly routineOccurrences = new Map<string, RoutineOccurrence>();
+	private taskStopWitnesses = readStopWitnesses(undefined);
 	private readonly routineReplayTombstones = new Set<string>();
 	/** Consumed owner-intake origins by key, oldest first; deleting a routine never removes its origin. */
 	private readonly routineIntakeOrigins = new Map<string, RoutineIntakeConsumption>();
@@ -410,6 +411,7 @@ export class PersistentBotTeamStore {
 	private refreshQueued = false;
 	private watchGeneration = 0;
 	private loadedDigest: string | undefined;
+	private loadedVersion?: BotStoreRead["version"];
 	/** The loaded file has a top-level `routines` array: the shape an earlier inline-script daemon acts on. */
 	private legacyRoutinesExposed = false;
 	private readonly onDiagnostic: (message: string) => void;
@@ -663,7 +665,12 @@ export class PersistentBotTeamStore {
 			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
 			// A build that predates a field the routines hold refuses the store rather than dropping what it cannot read.
-			version: routineStoreFormatVersion([...this.routines.values()], [...this.routineOccurrences.values()]),
+			version: routineStoreFormatVersion(
+				[...this.routines.values()],
+				[...this.routineOccurrences.values()],
+				this.taskStopWitnesses.length > 0,
+			),
+			...(this.taskStopWitnesses.length ? { taskStopWitnesses: this.taskStopWitnesses } : {}),
 			routineRevisionCounter: this.routineRevisionCounter,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
@@ -685,6 +692,7 @@ export class PersistentBotTeamStore {
 			...(this.retiredRoutines.size > 0 ? { routineRetired: Array.from(this.retiredRoutines.values()) } : {}),
 		};
 		const raw = JSON.stringify(data, null, 2);
+		this.loadedVersion = undefined;
 		writeFileAtomicSync(this.filePath, raw);
 		this.loadedDigest = createHash("sha256").update(raw).digest("hex");
 		this.botClockWork = undefined;
@@ -723,14 +731,15 @@ export class PersistentBotTeamStore {
 	/** Re-reads the shared store file. Every mutation starts here so another session's changes are not overwritten. */
 	reload(observeOnly = false): boolean {
 		let parsed: unknown;
-		let raw: string | undefined;
-		try {
-			raw = readFileSync(this.filePath, "utf8");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
+		const snapshot = readBotTeamStore(this.filePath, observeOnly ? this.loadedVersion : undefined);
+		if (snapshot === "unchanged") return false;
+		const { raw, version } = snapshot;
+		this.loadedVersion = undefined;
 		const digest = raw === undefined ? undefined : createHash("sha256").update(raw).digest("hex");
-		if (observeOnly && digest === this.loadedDigest) return false;
+		if (observeOnly && digest === this.loadedDigest) {
+			this.loadedVersion = version;
+			return false;
+		}
 		if (raw !== undefined) {
 			parsed = JSON.parse(raw);
 		}
@@ -749,6 +758,7 @@ export class PersistentBotTeamStore {
 		}
 		// Versions 3 to 6 share the current shape (a revision counter, no legacy routine key); `routine-store-format.ts` says what each adds.
 		const currentStoreFormat = storeVersion !== undefined && storeVersion >= 3;
+		const taskStops = readStopWitnesses(isRecordObject(parsed) ? parsed.taskStopWitnesses : undefined);
 		const previousState = {
 			bots: new Map(this.bots),
 			teams: new Map(this.teams),
@@ -768,7 +778,10 @@ export class PersistentBotTeamStore {
 		this.routineRevisionCounter = 0;
 		this.loadedDigest = digest;
 		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
-		if (!isRecordObject(parsed)) return true;
+		if (!isRecordObject(parsed)) {
+			this.taskStopWitnesses = taskStops;
+			return true;
+		}
 
 		if (Array.isArray(parsed.bots)) {
 			for (const rawBot of parsed.bots) {
@@ -894,6 +907,8 @@ export class PersistentBotTeamStore {
 			this._cachedTeamList = previousState.cachedTeamList;
 			throw error;
 		}
+		this.taskStopWitnesses = taskStops;
+		this.loadedVersion = version;
 		return true;
 	}
 
@@ -1171,161 +1186,110 @@ export class PersistentBotTeamStore {
 		return routine ? structuredClone(routine) : undefined;
 	}
 
-	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView {
-		return this.mutate(() => {
-			const normalizedId = normalizeBotOrTeamId(input.routineId, "routineId");
-			const existing = this.routines.get(normalizedId);
-			assertRoutineRevision(existing?.revision, input.expectedRevision);
-			// Checked before `createOnly`: a replay of a consumed origin meets its own deterministic routine id.
-			const intake = input.intakeOrigin ? admitRoutineIntake(this.routineState, input) : undefined;
-			if (input.createOnly && existing) throw new Error("Routine already exists.");
-			const stored = existing ? routineScheduleInputOf(existing.schedule) : undefined;
-			// The stored schedule resubmitted unchanged (a pause, resume or prompt edit) is kept as saved, so a routine whose
-			// zone this runtime does not support stays editable here; any other schedule is validated as authored.
-			const keepsSchedule = stored !== undefined && isDeepStrictEqual(input.schedule, stored);
-			const scheduleInput = keepsSchedule ? stored : parseRoutineScheduleInput(input.schedule);
-			const session = input.target.kind === "session";
-			// The stored side is re-canonicalized: a runtime may spell a stored zone differently than when it was saved.
-			// A zone it cannot read at all is compared as saved; a valid new schedule never equals it.
-			const scheduleChanged =
-				!existing ||
-				(!keepsSchedule &&
-					!isDeepStrictEqual(
-						routineSlotRule(
-							routineZoneUnsupported(existing.schedule) ? stored! : parseRoutineScheduleInput(stored),
-						),
-						routineSlotRule(scheduleInput),
-					));
-			const anchorAt =
-				!scheduleChanged && existing && "anchorAt" in existing.schedule
-					? existing.schedule.anchorAt
-					: (input.nowMs ?? Date.now());
-			let schedule: RoutineSchedule;
-			if (scheduleInput.kind === "interval")
-				schedule = {
-					kind: "interval",
-					intervalMs: scheduleInput.intervalMs,
-					anchorAt,
-					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
-					...(scheduleInput.readyBy ? { readyBy: true as const } : {}),
-					...(scheduleInput.readyLeadMs === undefined ? {} : { readyLeadMs: scheduleInput.readyLeadMs }),
-				};
-			else if (scheduleInput.kind === "once") schedule = scheduleInput;
-			else if (scheduleInput.kind === "event" && scheduleInput.source === "watch") {
-				// A watch is evaluated by the session that holds it, while it is open; a bot or team has no session to watch for.
-				if (!session) throw new Error("Watch routines run in their owning session only.");
-				schedule = {
-					kind: "event",
-					source: "watch",
-					condition: parseWatchCondition(scheduleInput.condition),
-					...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
-					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
-				};
-			} else if (scheduleInput.kind === "event") {
-				// Host events are decided by the session that owns their ledger; a bot or team has none.
-				if (!session) throw new Error("Event routines run in their owning session only.");
-				const kept =
-					!scheduleChanged && existing?.schedule.kind === "event" && existing.schedule.source !== "watch"
-						? existing.schedule
-						: undefined;
-				const anchor = kept
-					? { ordinal: kept.anchorOrdinal, replayGaps: kept.anchorReplayGaps }
-					: input.eventAnchor;
-				if (!anchor) throw new Error("Event routines require the session's host-event ledger position.");
-				if (scheduleInput.source === "github") {
-					const sessionId = input.target.kind === "session" ? input.target.parentSessionId : undefined;
-					const listeners = Array.from(this.routines.values()).filter(
-						(routine) =>
-							routine.routineId !== normalizedId &&
-							routine.target.kind === "session" &&
-							routine.target.parentSessionId === sessionId &&
-							routine.schedule.kind === "event" &&
-							routine.schedule.source === "github",
-					).length;
-					if (listeners >= HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource)
-						throw new Error(
-							`This session already holds ${HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource} GitHub event routines, the most one session may hold; delete one first.`,
-						);
-					schedule = {
-						...scheduleInput,
-						anchorOrdinal: anchor.ordinal,
-						anchorReplayGaps: anchor.replayGaps,
-						anchorAt,
-					};
-				} else
-					schedule = {
-						kind: "event",
-						source: scheduleInput.source,
-						conclusions: scheduleInput.conclusions ?? ["failure"],
-						...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
-						...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
-						...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
-						anchorOrdinal: anchor.ordinal,
-						anchorReplayGaps: anchor.replayGaps,
-					};
-			} else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
-			else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
-			const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
-			if (
-				schedule.kind === "once" &&
-				schedule.notAfter !== undefined &&
-				schedule.notAfter < (input.nowMs ?? Date.now()) &&
-				!(existing?.schedule.kind === "once" && existing.schedule.notAfter === schedule.notAfter)
-			)
-				throw new Error("One-time routine start window has already closed.");
-			// An end time already reached is refused unless it is the saved one resubmitted (a pause or prompt edit).
-			if (
-				schedule.kind !== "once" &&
-				schedule.expiresAt !== undefined &&
-				schedule.expiresAt <= (input.nowMs ?? Date.now()) &&
-				!(existing && existing.schedule.kind !== "once" && existing.schedule.expiresAt === schedule.expiresAt)
-			)
-				throw new Error("Routine end time has already passed; send a later expiresAt.");
-			const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
-			if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
-				throw new Error("Routine revision counter is exhausted.");
-			const revision = this.routineRevisionCounter + 1;
-			this.routineRevisionCounter = revision;
+	stopBotTask(request: TaskStopRequest) {
+		return this.mutate(() =>
+			commitTaskStop(
+				this.taskStopWitnesses,
+				request,
+				this.routines.get(request.routine),
+				this.bots.get(request.bot),
+				() =>
+					(this.namedBotWork().byBotTask.get(request.incarnation) ?? [])
+						.filter(
+							(run) =>
+								run.target.kind === "bot" &&
+								run.target.agentId === request.bot &&
+								run.definition.revision <= request.revision,
+						)
+						.map((run) => run.occurrenceId),
+				(pause) => {
+					if (pause) this.writeRoutine(pause);
+					else this.save();
+				},
+			),
+		);
+	}
 
-			const definition: PersistentRoutineDefinition = {
-				routineId: normalizedId,
-				incarnationId: existing?.incarnationId ?? randomUUID(),
-				revision,
-				target: parseRoutineTarget(input.target),
-				prompt: input.prompt.trim(),
-				schedule,
-				enabled: input.enabled ?? existing?.enabled ?? true,
-				...savedRoutineOrigin(input, existing),
-				...creationProvenance(existing, intake, input.armedBy, input.wake, input.workerScope),
-				createdAt: existing?.createdAt ?? nowIso,
-				updatedAt: nowIso,
-			};
-			if (!definition.prompt || definition.prompt.length > MAX_ROUTINE_PROMPT_CHARS)
-				throw new Error("Routine prompt is invalid.");
-			const originRefusal = routineSaveOriginRefusal(definition) ?? routineWakeRefusal(definition);
-			if (originRefusal) throw new Error(originRefusal);
-			const plannedRunAt = nextRoutineAt(schedule, cursor);
-			if (plannedRunAt === undefined && schedule.kind === "interval")
-				throw new Error("Routine interval has no representable future instant.");
-			if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
-				throw new Error("Calendar rule never matches a date.");
-			const nextRunAt = plannedRunAt ?? ROUTINE_NO_NEXT_RUN_AT;
-			const view = routineViewAfterSave(definition, cursor, nextRunAt, existing);
-			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
-			this.routines.set(normalizedId, view);
-			if (intake) consumeRoutineIntake(this.routineState, intake, normalizedId, input.nowMs ?? Date.now());
-			if (input.toolAnsweredSources !== undefined)
-				recordRoutineToolAnswers(
-					this.routineState,
-					definition.target,
-					input.toolAnsweredSources,
-					input.nowMs ?? Date.now(),
-				);
-			if (!view.enabled)
-				cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, input.nowMs ?? Date.now());
+	consumeTaskStop(key: string): void {
+		if (!this.taskStopWitnesses.some((row) => row.key === key)) return;
+		this.mutate(() => {
+			this.taskStopWitnesses = this.taskStopWitnesses.filter((row) => row.key !== key);
 			this.save();
-			return structuredClone(view);
 		});
+	}
+
+	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView {
+		return this.mutate(() => this.writeRoutine(input));
+	}
+
+	private writeRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView {
+		const normalizedId = normalizeBotOrTeamId(input.routineId, "routineId");
+		const existing = this.routines.get(normalizedId);
+		assertRoutineRevision(existing?.revision, input.expectedRevision);
+		// Checked before `createOnly`: a replay of a consumed origin meets its own deterministic routine id.
+		const intake = input.intakeOrigin ? admitRoutineIntake(this.routineState, input) : undefined;
+		if (input.createOnly && existing) throw new Error("Routine already exists.");
+		const { schedule, scheduleChanged } = savedRoutineSchedule(input, existing, normalizedId, this.routines);
+		const cursor: RoutineCursor = scheduleChanged || !existing ? initialRoutineCursor(schedule) : existing.cursor;
+		if (
+			schedule.kind === "once" &&
+			schedule.notAfter !== undefined &&
+			schedule.notAfter < (input.nowMs ?? Date.now()) &&
+			!(existing?.schedule.kind === "once" && existing.schedule.notAfter === schedule.notAfter)
+		)
+			throw new Error("One-time routine start window has already closed.");
+		// An end time already reached is refused unless it is the saved one resubmitted (a pause or prompt edit).
+		if (
+			schedule.kind !== "once" &&
+			schedule.expiresAt !== undefined &&
+			schedule.expiresAt <= (input.nowMs ?? Date.now()) &&
+			!(existing && existing.schedule.kind !== "once" && existing.schedule.expiresAt === schedule.expiresAt)
+		)
+			throw new Error("Routine end time has already passed; send a later expiresAt.");
+		const nowIso = new Date(input.nowMs ?? Date.now()).toISOString();
+		if (this.routineRevisionCounter >= Number.MAX_SAFE_INTEGER)
+			throw new Error("Routine revision counter is exhausted.");
+		const revision = this.routineRevisionCounter + 1;
+		this.routineRevisionCounter = revision;
+
+		const definition: PersistentRoutineDefinition = {
+			routineId: normalizedId,
+			incarnationId: existing?.incarnationId ?? randomUUID(),
+			revision,
+			target: parseRoutineTarget(input.target),
+			prompt: input.prompt.trim(),
+			schedule,
+			enabled: input.enabled ?? existing?.enabled ?? true,
+			...savedRoutineOrigin(input, existing),
+			...creationProvenance(existing, intake, input.armedBy, input.wake, input.workerScope),
+			createdAt: existing?.createdAt ?? nowIso,
+			updatedAt: nowIso,
+		};
+		if (!definition.prompt || definition.prompt.length > MAX_ROUTINE_PROMPT_CHARS)
+			throw new Error("Routine prompt is invalid.");
+		const originRefusal = routineSaveOriginRefusal(definition) ?? routineWakeRefusal(definition);
+		if (originRefusal) throw new Error(originRefusal);
+		const plannedRunAt = nextRoutineAt(schedule, cursor);
+		if (plannedRunAt === undefined && schedule.kind === "interval")
+			throw new Error("Routine interval has no representable future instant.");
+		if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
+			throw new Error("Calendar rule never matches a date.");
+		const nextRunAt = plannedRunAt ?? ROUTINE_NO_NEXT_RUN_AT;
+		const view = routineViewAfterSave(definition, cursor, nextRunAt, existing);
+		if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
+		this.routines.set(normalizedId, view);
+		if (intake) consumeRoutineIntake(this.routineState, intake, normalizedId, input.nowMs ?? Date.now());
+		if (input.toolAnsweredSources !== undefined)
+			recordRoutineToolAnswers(
+				this.routineState,
+				definition.target,
+				input.toolAnsweredSources,
+				input.nowMs ?? Date.now(),
+			);
+		if (!view.enabled)
+			cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, input.nowMs ?? Date.now());
+		this.save();
+		return structuredClone(view);
 	}
 
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined {
@@ -1892,18 +1856,13 @@ export class PersistentBotTeamStore {
 	 * is resealed in the same transaction.
 	 */
 	queueDueRoutinesForDaemon(nowMs = Date.now()): number {
+		this.reload(true);
+		if (!this.legacyRoutinesExposed && this.namedBotWork().firstDesktopQueueAt > nowMs) return 0;
 		return this.mutate(() => {
 			const nowIso = new Date(nowMs).toISOString();
 			let queued = 0;
 			for (const routine of [...this.routines.values()]) {
-				if (
-					routine.target.kind === "session" ||
-					routine.receiptOrigin !== undefined ||
-					!routine.enabled ||
-					routine.nextRunAt > nowMs ||
-					routine.lastStatus === "queued"
-				)
-					continue;
+				if (desktopQueueAt(routine) > nowMs) continue;
 				const summary = `[Daemon ${nowIso}] Routine queued across TUI session: ${routine.prompt.slice(0, 160)}`;
 				this.routines.set(routine.routineId, { ...routine, lastStatus: "queued", lastSummary: summary });
 				queued++;

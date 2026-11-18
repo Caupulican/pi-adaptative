@@ -323,6 +323,8 @@ see [Scheduled work](proactivity.md#scheduled-work).
 
 Use `/bot schedule add <routine-id> <bot-id> <interval> <prompt>` to schedule a named bot. The confirmation and `/bot schedule list` show its next slot and unattended readiness. The schedule records the project and the session that saved it. With unattended execution enabled, the daemon can deliver a due slot to the named bot and run it in that project after the last terminal closes. The bot uses its existing unattended spend allowance. A bot that needs a profile waits for a root session. For a schedule saved before project capture, use `/bot schedule set` from its intended project to enable unattended dispatch.
 
+Update every desktop and daemon using the same agent directory together. The shared store uses format 9 for project-bound schedules and format 10 while a phone stop awaits acknowledgement. Older builds refuse a format they cannot read.
+
 A running daemon can keep a previously enabled `/remote listen` address available while the coordinator desktop is closed. The paired executor must remain online to run the job. The returning desktop takes the listener back on the same address.
 
 A verified owner can select the same bot and schedule from the phone. After a scheduled bot places a job on a paired machine, status on either device reads that occurrence's machine, job ID and result. See [phone task commands](channels.md#control-a-named-bot-task).

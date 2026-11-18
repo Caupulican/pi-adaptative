@@ -111,3 +111,46 @@ export function latestBotOccurrenceIds(
 	}
 	return result;
 }
+
+/** Bot and group schedules without a saved project are announced once when due, then wait for a root. */
+export function desktopQueueAt(routine: RoutineDefinitionView): number {
+	return routine.enabled &&
+		routine.target.kind !== "session" &&
+		!routine.receiptOrigin &&
+		routine.lastStatus !== "queued"
+		? routine.nextRunAt
+		: Number.POSITIVE_INFINITY;
+}
+
+/** References in this projection are immutable store records. A single store revision serves every project clock. */
+export function namedBotClockWork(
+	definitions: Iterable<RoutineDefinitionView>,
+	journal: Iterable<RoutineOccurrence>,
+): {
+	readonly routines: readonly RoutineDefinitionView[];
+	readonly open: ReadonlyMap<string, readonly RoutineOccurrence[]>;
+	readonly byBotTask: ReadonlyMap<string, readonly RoutineOccurrence[]>;
+	readonly firstDesktopQueueAt: number;
+} {
+	const routines: RoutineDefinitionView[] = [];
+	let firstDesktopQueueAt = Number.POSITIVE_INFINITY;
+	for (const item of definitions) {
+		if (item.botProjectCwd && item.enabled) routines.push(item);
+		firstDesktopQueueAt = Math.min(firstDesktopQueueAt, desktopQueueAt(item));
+	}
+	const open = new Map<string, RoutineOccurrence[]>();
+	const byBotTask = new Map<string, RoutineOccurrence[]>();
+	for (const item of journal) {
+		if (item.target.kind === "bot") {
+			const retained = byBotTask.get(item.definition.incarnationId);
+			if (retained) retained.push(item);
+			else byBotTask.set(item.definition.incarnationId, [item]);
+		}
+		if (!item.definition.botProjectCwd || item.phase === "terminal") continue;
+		const id = item.definition.incarnationId;
+		const list = open.get(id);
+		if (list) list.push(item);
+		else open.set(id, [item]);
+	}
+	return { routines, open, byBotTask, firstDesktopQueueAt };
+}

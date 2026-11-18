@@ -33,15 +33,18 @@ export function withResult(
 	if ((ownerUpdate !== undefined || conditionMet !== undefined) && outcome !== "succeeded")
 		throw new Error("Only a succeeded routine run can skip the owner update or report its stated end met.");
 	const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none", conditionMet === true);
+	// A named task's inbox acceptance and the owner's acknowledged stop have already reached their destination.
+	const namedTaskSettled =
+		occurrence.definition.botProjectCwd &&
+		((outcome === "succeeded" && facts?.reasonCode === "bot_inbox_accepted") ||
+			(outcome === "cancelled" && facts?.reasonCode === "owner_stop"));
 	const finished: RoutineOccurrence = {
 		...occurrence,
 		result: {
 			outcome,
 			summary,
 			digest,
-			...(occurrence.definition.botProjectCwd &&
-			outcome === "succeeded" &&
-			facts?.reasonCode === "bot_inbox_accepted"
+			...(namedTaskSettled
 				? { delivery: "acknowledged" as const, deliveryMarker: routineBotOccurrenceRef(occurrence.occurrenceId) }
 				: { delivery: "pending" as const }),
 			recipient,

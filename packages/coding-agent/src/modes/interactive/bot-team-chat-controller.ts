@@ -71,7 +71,7 @@ export interface BotTeamChatSessionPort {
 	/** The session's background lanes: the always-on service of its agent directory and its channels served away. */
 	readonly backgroundLanes?: {
 		readonly botChat?: { viewBotChatMessages(agentId: string): readonly AgentMessage[] };
-		captureBotScheduleOrigin?(): { receiptOrigin: WorkerReceiptOrigin; botProjectCwd: string };
+		captureBotScheduleOrigin(): { receiptOrigin: WorkerReceiptOrigin; botProjectCwd: string };
 		routineAwayReader?(): (routine: RoutineDefinitionView) => string;
 		getAwayService(): AwayService;
 		readAwayChannelStatus(): readonly AwayChannelStatus[];
@@ -1068,11 +1068,12 @@ export class BotTeamChatController {
 			if (kind === "bot") {
 				const agentId = normalizeBotOrTeamId(rawTargetId, "agentId");
 				this.ensureTeamMembersExist([agentId], port);
+				if (!port.backgroundLanes) throw new Error("Save the bot schedule from its project session.");
 				const routine = store.upsertRoutine({
 					...revision,
 					routineId: rawRoutineId,
 					target: { kind: "bot", agentId },
-					...port.backgroundLanes?.captureBotScheduleOrigin?.(),
+					...port.backgroundLanes.captureBotScheduleOrigin(),
 					schedule: { kind: "interval", intervalMs },
 					prompt,
 				});

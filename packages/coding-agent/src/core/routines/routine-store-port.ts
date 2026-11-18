@@ -23,7 +23,7 @@ import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routin
  * (a retired or missing bot, a group none of whose members took it), with the code and the sentence saying why.
  */
 export interface RoutineMessageResult {
-	readonly outcome: "succeeded" | "failed";
+	readonly outcome: "succeeded" | "failed" | "cancelled";
 	readonly summary: string;
 	readonly facts: RoutineRunFacts;
 }

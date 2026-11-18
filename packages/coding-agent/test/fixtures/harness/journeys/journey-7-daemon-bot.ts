@@ -173,6 +173,34 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 		});
 	createOwnerBot(author, bot, MODEL_ID.awayBot, soul);
 	const recurring = save(author, "main-checkout", prompt, true);
+	const authorStore = author.getBotTeamStore();
+	const file = authorStore.getStoreFilePath();
+	const original = world.io.readFileSync(file, "utf8") as string;
+	const replacementPrompt = prompt.replace("main", "next");
+	const updated = original.replace(prompt, replacementPrompt);
+	expect(updated).not.toBe(original);
+	expect(Buffer.byteLength(updated)).toBe(Buffer.byteLength(original));
+	const firstObservation = world.io.operations.length;
+	const snapshotReads = () =>
+		world.io.operations.slice(firstObservation).filter((op) => op.kind === "read" && op.path === file).length;
+	for (let poll = 0; poll < 3; poll++) {
+		expect(authorStore.reload(true)).toBe(false);
+		expect(authorStore.queueDueRoutinesForDaemon(anchor)).toBe(0);
+	}
+	expect(snapshotReads(), "three unchanged schedule observations read zero store bytes").toBe(0);
+	world.io.writeFileSync(`${file}.new`, updated);
+	world.io.renameSync(`${file}.new`, file);
+	expect(authorStore.reload(true), "same-length replacement is observed").toBe(true);
+	expect(authorStore.getRoutine(recurring.routineId)?.prompt).toBe(replacementPrompt);
+	expect(authorStore.reload(true)).toBe(false);
+	expect(snapshotReads(), "replacement is read once and reused by the next observer").toBe(1);
+	world.io.writeFileSync(file, "{");
+	expect(() => authorStore.reload(true), "truncation cannot serve the cached project schedule").toThrow();
+	expect(authorStore.getRoutine(recurring.routineId)?.prompt).toBe(replacementPrompt);
+	world.io.writeFileSync(file, original);
+	expect(authorStore.reload(true)).toBe(true);
+	expect(authorStore.getRoutine(recurring.routineId)?.prompt).toBe(prompt);
+	expect(snapshotReads(), "truncation and repair each read the changed file").toBe(3);
 	const authorId = author.sessionId;
 	expect(await world.disposeSessionInBody(author)).toBeUndefined();
 

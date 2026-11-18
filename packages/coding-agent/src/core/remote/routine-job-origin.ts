@@ -18,14 +18,19 @@ function scope(homeName: string, ref: string): string {
 }
 
 export function routineJobScope(bot: string, occurrenceId: string): string {
-	return scope(botHomeName(bot), routineBotOccurrenceRef(occurrenceId));
+	return routineJobScopeFromRef(bot, routineBotOccurrenceRef(occurrenceId));
+}
+
+export function routineJobScopeFromRef(bot: string, ref: string): string {
+	if (!isRoutineBotOccurrenceRef(ref)) throw new Error("Invalid scheduled occurrence reference.");
+	return scope(botHomeName(bot), ref);
 }
 
 export function isRoutineJobScope(value: unknown): value is string {
 	return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
-function sourceRef(origin: TurnOriginRecord | undefined): string | undefined {
+export function scheduledBotSourceRef(origin: TurnOriginRecord | undefined): string | undefined {
 	if (origin?.k === "owner-channel" && origin.verified) return origin.routineRef;
 	if (
 		origin?.channel === ROUTINE_BOT_CHANNEL &&
@@ -62,7 +67,7 @@ export function placedRoutineJobScope(manager: SessionManager, receipt: WorkerRe
 			visited.push(entry);
 			const origin = entryTurnOrigin(entry);
 			if (isAddressedInput(entry.type === "message" ? entry.message.role : undefined, origin)) {
-				ref = sourceRef(origin) ?? null;
+				ref = scheduledBotSourceRef(origin) ?? null;
 				return false;
 			}
 			return undefined;

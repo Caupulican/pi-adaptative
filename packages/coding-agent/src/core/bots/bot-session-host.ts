@@ -50,7 +50,7 @@ import { type GoalProgress, unfinishedGoalProgress } from "../goals/goal-progres
 import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createBotMailToolDefinition } from "../tools/bot-mail.ts";
-import { branchHoldsTurnRef, recordedMessageOrigin } from "../turn-origin.ts";
+import { branchHoldsTurnRef } from "../turn-origin.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import { OWNER_STOP_CLOCK, type TimerPort } from "../util/timer-port.ts";
 import { readSessionWatchWork, type SessionWatchWork } from "../watches/session-watch-ledger.ts";
@@ -81,6 +81,7 @@ import { BotMail, type BotMailSent, type ReturnedMail } from "./bot-mail.ts";
 import { BotMailAnswering, returnedMailSender } from "./bot-mail-replies.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { botOpenFailure } from "./bot-open-retry.ts";
+import { submitBotPrompt } from "./bot-origin-submission.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { admitBotPhoneCommand } from "./bot-phone-command.ts";
 import { BotRelease } from "./bot-release.ts";
@@ -619,15 +620,9 @@ export class BotSessionHost {
 		this.touch(entry);
 		entry.inFlight++;
 		this.changed(agentId);
-		void entry.session
-			.prompt(message, {
-				// The owner's words reach the bot as written: no slash command or template of the bot's own session runs them.
-				expandPromptTemplates: false,
-				processSlashCommands: false,
-				streamingBehavior: queued ? "followUp" : "steer",
-				...(recorded ? { source: "extension" as const, origin: recordedMessageOrigin(recorded) } : {}),
-				preflightResult: (success, ended) => accept(success, ended?.reason),
-			})
+		void submitBotPrompt(this.ports.agentDir(), entry, message, queued, recorded, (success, ended) =>
+			accept(success, ended?.reason),
+		)
 			.then(
 				() => accept(false),
 				(error: unknown) => {

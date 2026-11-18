@@ -155,12 +155,16 @@ export async function scheduledBotJob(
 					},
 					{ bot: name, routine: id, incarnation },
 				);
-			expect(phone(saved.routineId, saved.incarnationId)).toContain(jobs[0]!.jobId);
-			expect(phone(saved.routineId, saved.incarnationId)).toContain(summary);
-			expect(formatRoutineList([saved], undefined, (entry) => routineJobStatusLines(fresh, entry))).toContain(
-				summary,
-			);
-			expect(phone(sibling.routineId, sibling.incarnationId)).not.toContain(summary);
+			const completedPhone = phone(saved.routineId, saved.incarnationId);
+			expect(completedPhone).toContain("No further slot");
+			expect(completedPhone).toContain(jobs[0]!.jobId);
+			expect(completedPhone).toContain(summary);
+			const completedDesktop = formatRoutineList([saved], undefined, (entry) => routineJobStatusLines(fresh, entry));
+			expect(completedDesktop).toContain("next=complete");
+			expect(completedDesktop).toContain(summary);
+			const futurePhone = phone(sibling.routineId, sibling.incarnationId);
+			expect(futurePhone).toContain(`Next scheduled slot ${new Date(sibling.nextRunAt).toISOString()}`);
+			expect(futurePhone).not.toContain(summary);
 			expect(phone(saved.routineId, sibling.incarnationId)).not.toContain(summary);
 			expect(world.provider.reached).toHaveLength(reads);
 		} finally {

@@ -170,7 +170,7 @@ export class BotDaemonKeeper {
 	 */
 	status(): PersistentBotDaemonStatus {
 		const store = this.ports.store();
-		store.reload();
+		store.reload(true);
 		const botsOwed = this.botsOwedStatus();
 		return { ...store.getDaemonStatus(this.ports.clock().now()), botsOwed };
 	}

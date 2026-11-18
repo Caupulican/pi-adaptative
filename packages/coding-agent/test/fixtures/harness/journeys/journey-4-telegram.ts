@@ -40,9 +40,29 @@ import { icmLatestResult, latestBatchResults } from "./shared.ts";
 
 const API_ORIGIN = "https://api.telegram.org";
 /** A token-shaped sentinel (joined from parts so no source line matches a secret scanner): it must reach the Bot API's URL and nothing else. */
-export const TOKEN = ["918273645", "SentinelTokenForTheJourney_0123456789"].join(":");
+const TOKEN = ["918273645", "SentinelTokenForTheJourney_0123456789"].join(":");
 export const OWNER_ID = 424242424;
 const STRANGER_ID = 777000111;
+
+const seededTokenFiles = new WeakMap<HarnessWorld, Set<string>>();
+
+/** Record each exact private credential path as the fixture provisions it. */
+export function seedTelegramToken(world: HarnessWorld, agentDir: string): void {
+	const dir = join(agentDir, "channels");
+	const file = join(dir, "telegram.token");
+	world.io.mkdirSync(dir, { recursive: true });
+	world.io.writeFileSync(file, `${TOKEN}\n`, { mode: 0o600 });
+	const paths = seededTokenFiles.get(world) ?? new Set<string>();
+	paths.add(file);
+	seededTokenFiles.set(world, paths);
+}
+
+function expectPrivateTokenFiles(world: HarnessWorld, secret: string): void {
+	const paths = seededTokenFiles.get(world);
+	for (const [file, text] of world.io.fileEntries()) {
+		if (!paths?.has(file)) expect(text, `${file} never holds the bot token`).not.toContain(secret);
+	}
+}
 
 interface SentMessage {
 	readonly body: Record<string, unknown>;
@@ -235,10 +255,8 @@ export async function runJourney4TelegramPhase(world: HarnessWorld): Promise<voi
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = (): TelegramJournal =>
 		world.io.existsSync(journalPath)
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as TelegramJournal)
@@ -369,8 +387,7 @@ export async function runJourney4TelegramPhase(world: HarnessWorld): Promise<voi
 		expect(api.offsets.slice(0, 3), "the offset advanced once per handled update").toEqual([undefined, 2, 3]);
 
 		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
-		for (const [path, text] of world.io.fileEntries())
-			if (path !== tokenPath) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expectPrivateTokenFiles(world, secret);
 		expect(world.warnings.join("\n"), "no warning carries the bot token").not.toContain(secret);
 		expect(JSON.stringify(manager.getEntries()), "no entry, notice or draft carries the bot token").not.toContain(
 			secret,
@@ -472,10 +489,8 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram-owner`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	world.io.seed(configFile(agentDir, "MEMORY.md"), `${OWNER_MEMORY}\n`);
 	new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
 		{
@@ -962,10 +977,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 		expect(journal().holder, "the closed session no longer serves telegram").toBeUndefined();
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
 		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
-		// The Telegram leg before this one keeps its own token file in its own agent directory.
-		const tokenFiles = new Set([tokenPath, join(`${world.agentDir}-telegram`, "channels", "telegram.token")]);
-		for (const [path, text] of world.io.fileEntries())
-			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expectPrivateTokenFiles(world, secret);
 		expect(JSON.stringify(manager.getEntries()), "no entry carries the bot token").not.toContain(secret);
 		expect(
 			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
@@ -1001,10 +1013,8 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram-bounds`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = (): BoundsLegJournal =>
 		world.io.existsSync(journalPath)
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as BoundsLegJournal)
@@ -1293,14 +1303,7 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
 		expect(world.io.existsSync(join(agentDir, "ESTOP")), "the lifted stop leaves no sentinel").toBe(false);
 		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
-		// The Telegram legs before this one keep their own token files in their own agent directories.
-		const tokenFiles = new Set([
-			tokenPath,
-			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
-			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
-		]);
-		for (const [path, text] of world.io.fileEntries())
-			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expectPrivateTokenFiles(world, secret);
 		expect(JSON.stringify(manager.getEntries()), "no entry carries the bot token").not.toContain(secret);
 		expect(
 			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
@@ -1335,10 +1338,8 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram-quota`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = (): QuotaLegJournal =>
 		world.io.existsSync(journalPath)
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as QuotaLegJournal)
@@ -1551,7 +1552,6 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram-daemon`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
 	const policy = {
 		mode: "explicit" as const,
@@ -1585,8 +1585,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		routines: { away: { autostart: "off" as const } },
 		channels: { telegram: policy },
 	};
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	world.io.seed(configFile(agentDir, "MEMORY.md"), `${OWNER_MEMORY}\n`);
 	const journal = (): DaemonLegJournal =>
 		world.io.existsSync(journalPath)
@@ -1849,16 +1848,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		expect(await world.disposeSessionInBody(opened.session), "the reopened phone session closes").toBeUndefined();
 
 		const secret = TOKEN.slice(TOKEN.indexOf(":") + 1);
-		// The Telegram legs before this one keep their own token files in their own agent directories.
-		const tokenFiles = new Set([
-			tokenPath,
-			join(`${world.agentDir}-telegram`, "channels", "telegram.token"),
-			join(`${world.agentDir}-telegram-owner`, "channels", "telegram.token"),
-			join(`${world.agentDir}-telegram-bounds`, "channels", "telegram.token"),
-			join(`${world.agentDir}-telegram-quota`, "channels", "telegram.token"),
-		]);
-		for (const [path, text] of world.io.fileEntries())
-			if (!tokenFiles.has(path)) expect(text, `${path} never holds the bot token`).not.toContain(secret);
+		expectPrivateTokenFiles(world, secret);
 		expect(
 			world.warnings.slice(warningsBefore).filter((warning) => /telegram/i.test(warning)),
 			"the daemon leg ran without a Telegram warning",
@@ -1887,10 +1877,8 @@ export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Prom
 	const { trace } = world;
 	const agentDir = `${world.agentDir}-telegram-waiting`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const settings = {
 		memorySystem: "okf" as const,
 		autoLearn: { enabled: false },

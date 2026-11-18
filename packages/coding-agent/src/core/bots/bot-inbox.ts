@@ -39,6 +39,9 @@ import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { isOwnerChannelName } from "../channels/channel-policy.ts";
 import { type FleetStopScope, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
+import { jobsDir } from "../remote/job-store.ts";
+import { withRoutineScopeAdmission } from "../remote/routine-job-index.ts";
+import { routineJobScopeFromRef, scheduledBotSourceRef } from "../remote/routine-job-origin.ts";
 import { routineBotOccurrenceRef } from "../routines/routine-bot-reference.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import {
@@ -506,7 +509,10 @@ export function enqueueBotInbox(
 		(waiting.length >= MAX_BOT_INBOX_MESSAGES || bytes + Buffer.byteLength(text) > MAX_BOT_INBOX_BYTES)
 	)
 		throw new BotInboxFullError((text) => text.botTeam.botInboxFull(input.agentId, MAX_BOT_INBOX_MESSAGES));
-	writeFileAtomicSync(file, text, { mode: 0o600 });
+	const write = () => writeFileAtomicSync(file, text, { mode: 0o600 });
+	const ref = scheduledBotSourceRef(input.origin);
+	if (ref) withRoutineScopeAdmission(jobsDir(agentDir), routineJobScopeFromRef(input.agentId, ref), write);
+	else write();
 	return { file, message };
 }
 

@@ -14,10 +14,11 @@ import {
 	OWNER_TASK_HELP,
 	type OwnerTaskAction,
 	type OwnerTaskPort,
+	ownerTaskOccurrences,
 	parseTaskAction,
+	pausedTaskReply,
 	phoneCommandRef,
 	readOwnerTask,
-	stopTask,
 	taskStatus,
 } from "./owner-task.ts";
 
@@ -92,15 +93,16 @@ function admitTaskControl(
 			throw new Error("Phone stop queue is busy; redeliver this event.");
 		} else return { conversation, reply: "The phone steering queue is full. Task stops remain available." };
 	}
-	const occurrences = store
-		.listRoutineOccurrences({ routineId: selection.routine, ...(action.kind === "steer" ? { limit: 1 } : {}) })
-		.filter(
-			(o) =>
-				o.definition.incarnationId === selection.incarnation &&
-				o.target.kind === "bot" &&
-				o.target.agentId === selection.bot &&
-				(stop || o.phase === "running" || o.result?.outcome === "succeeded"),
-		);
+	const runs = ownerTaskOccurrences(store, selection);
+	const last = runs.reduce<(typeof runs)[number] | undefined>(
+		(latest, run) => (!latest || run.createdAt >= latest.createdAt ? run : latest),
+		undefined,
+	);
+	const occurrences = stop
+		? runs
+		: last && (last.phase === "running" || last.result?.outcome === "succeeded")
+			? [last]
+			: [];
 	const occurrenceIds = occurrences.map((o) => o.occurrenceId);
 	const project = action.kind === "steer" ? occurrences.at(-1)?.definition.botProjectCwd : undefined;
 	if (!stop && !occurrenceIds.length)
@@ -170,17 +172,58 @@ export async function drainTaskControls(
 		const admitted = live(command.sender, command.policyHash);
 		const task = command.selection;
 		if (!admitted) text = "The channel no longer has authority for this command.";
-		else if (!readOwnerTask(port.getBotTeamStore(), task.bot, task.routine, task.incarnation)) text = OWNER_TASK_GONE;
+		else if (
+			command.action !== "stop" &&
+			!readOwnerTask(port.getBotTeamStore(), task.bot, task.routine, task.incarnation)
+		)
+			text = OWNER_TASK_GONE;
 		else {
+			const store = port.getBotTeamStore();
+			const key = digest(
+				JSON.stringify([
+					channel,
+					command.id,
+					command.sender,
+					command.conversation,
+					task.bot,
+					task.routine,
+					task.incarnation,
+					command.revision,
+				]),
+			);
 			const paused =
 				command.action === "stop" && !resignal
-					? stopTask(port.getBotTeamStore(), task, command.revision)
+					? command.stopCaptured
+						? { kind: "paused" as const, ids: command.occurrenceIds }
+						: store.stopBotTask({
+								key,
+								...task,
+								revision: command.revision,
+								now,
+								expiresAt: command.admittedAt + DAY_MS,
+							})
 					: undefined;
-			if (paused && !paused.paused) text = paused.reply;
+			if (paused?.kind === "gone") text = OWNER_TASK_GONE;
+			else if (paused?.kind === "changed")
+				text = "The schedule changed before the stop. Check status and send stop task again.";
 			else {
-				if (paused) {
-					stopRoutineBotJobs(agentDir, task.bot, command.occurrenceIds);
-					const refs = new Set(command.refs);
+				if (paused?.kind === "paused") {
+					const seen = command.stopCaptured
+						? command
+						: journal.update(now, (state) => {
+								const current = state.ownerTaskCommands?.find((item) => item.id === command.id);
+								if (!current || current.stopCaptured) return current;
+								current.occurrenceIds = [...new Set([...current.occurrenceIds, ...paused.ids])];
+								current.refs = [
+									...new Set([...(current.refs ?? []), ...paused.ids.map(routineBotOccurrenceRef)]),
+								];
+								current.stopCaptured = true;
+								return current;
+							}).result;
+					if (!seen) continue;
+					store.consumeTaskStop(key);
+					stopRoutineBotJobs(agentDir, task.bot, seen.occurrenceIds);
+					const refs = new Set(seen.refs);
 					journal.update(now, (state) => {
 						for (const item of state.ownerTaskCommands ?? []) {
 							if (item.state === "finished" || item.action !== "steer" || !refs.has(phoneCommandRef(item.id)))
@@ -207,7 +250,12 @@ export async function drainTaskControls(
 					wakeExisting: resignal,
 				});
 				queued = true;
-				text = paused?.reply ?? `Steering queued for bot ${task.bot}, task ${task.routine}.`;
+				text =
+					paused?.kind === "paused"
+						? store.getRoutine(task.routine)?.enabled
+							? `Stopped the captured dispatches for task ${task.routine}. Its current schedule is enabled.`
+							: pausedTaskReply(task)
+						: `Steering queued for bot ${task.bot}, task ${task.routine}.`;
 			}
 		}
 		journal.update(now, (state) => {
@@ -246,12 +294,16 @@ export function admitOwnerConversation(
 	const action =
 		parseTaskAction(event.text) ??
 		(previous?.selection && event.text.trim().toLowerCase() === "status" ? { kind: "taskStatus" } : undefined);
-	if (action && state.ownerTaskCommands?.some((cmd) => cmd.id === event.key)) return { conversation: selected };
-	const result = action
-		? live
-			? admitTaskControl(port, state, selected, action, event.key, policy, event.cwd)
-			: { conversation: selected, reply: "Phone task controls are unavailable." }
-		: undefined;
+	let result: TaskAdmission | undefined;
+	if (action) {
+		// Provider event IDs belong to one channel. The bot inbox and turn references are shared by every channel.
+		const commandId = digest(JSON.stringify([conversation.senderDigest, conversation.conversationKey, event.key]));
+		if (state.ownerTaskCommands?.some((cmd) => cmd.id === commandId || cmd.id === event.key))
+			return { conversation: selected };
+		result = live
+			? admitTaskControl(port, state, selected, action, commandId, policy, event.cwd)
+			: { conversation: selected, reply: "Phone task controls are unavailable." };
+	}
 	const others = (state.ownerConversations ?? []).filter((c) => c.conversationKey !== conversation.conversationKey);
 	state.ownerConversations = [...others, result?.conversation ?? selected].slice(-MAX_OWNER_CONVERSATIONS);
 	return result;

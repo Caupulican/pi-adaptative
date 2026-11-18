@@ -20,7 +20,14 @@ import {
 	NATIVE_PLATFORM_SHELL_BY_DEFAULT,
 	withDeadline,
 } from "../session-fixture.ts";
-import { deliveryWith, FakeBotApi, OWNER_ID, ownerLegUpdate, TOKEN, withFakeBotApi } from "./journey-4-telegram.ts";
+import {
+	deliveryWith,
+	FakeBotApi,
+	OWNER_ID,
+	ownerLegUpdate,
+	seedTelegramToken,
+	withFakeBotApi,
+} from "./journey-4-telegram.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 import {
 	requestTexts,
@@ -63,10 +70,8 @@ export async function runJourney4TelegramWatchPhase(world: HarnessWorld): Promis
 	const held = world.systemOne.enabled;
 	const agentDir = `${world.agentDir}-telegram-watch`;
 	const channelsDir = join(agentDir, "channels");
-	const tokenPath = join(channelsDir, "telegram.token");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = (): WatchLegJournal =>
 		world.io.existsSync(journalPath)
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as WatchLegJournal)
@@ -320,8 +325,7 @@ export async function runJourney4TelegramCiWatchPhase(world: HarnessWorld): Prom
 	const agentDir = `${world.agentDir}-telegram-ci-watch`;
 	const channelsDir = join(agentDir, "channels");
 	const journalPath = join(channelsDir, "telegram.json");
-	world.io.mkdirSync(channelsDir, { recursive: true });
-	world.io.writeFileSync(join(channelsDir, "telegram.token"), `${TOKEN}\n`, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = (): WatchLegJournal =>
 		world.io.existsSync(journalPath)
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as WatchLegJournal)

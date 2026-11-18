@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { BotInboxFullError, enqueueBotInbox, hasNamedBotReceipt } from "../bots/bot-inbox.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { RoutineOccurrenceStopped } from "../remote/routine-job-index.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { OWNER_STOP_CLOCK } from "../util/timer-port.ts";
 import { awaySavedRoutineRefusal, namedBotSessionRefusal } from "./away-routine-admission.ts";
@@ -27,19 +28,22 @@ export function botScheduleAccepted(agentId: string, mode: string): RoutineMessa
 
 export function queueNamedBotSchedule(agentDir: string, occurrence: RoutineOccurrence): RoutineMessageResult {
 	const { target, definition, parentOrigin } = occurrence;
-	if (target.kind !== "bot" || !definition.botProjectCwd || !definition.receiptOrigin)
+	const cwd = definition.botProjectCwd;
+	if (target.kind !== "bot" || !cwd || !definition.receiptOrigin)
 		throw new Error("A named bot schedule requires a pinned project and receipt origin.");
 	try {
 		enqueueBotInbox(agentDir, {
 			agentId: target.agentId,
 			text: definition.prompt,
-			from: { pid: process.pid, sessionId: parentOrigin.sessionId, cwd: definition.botProjectCwd },
+			from: { pid: process.pid, sessionId: parentOrigin.sessionId, cwd },
 			at: OWNER_STOP_CLOCK.now(),
 			origin: routineBotMessageOrigin(occurrence, definition.prompt),
 			projectBound: true,
 			occurrenceCreatedAt: occurrence.createdAt,
 		});
 	} catch (error) {
+		if (error instanceof RoutineOccurrenceStopped)
+			return { outcome: "cancelled", summary: error.message, facts: { reasonCode: "owner_stop", step: "dispatch" } };
 		if (!(error instanceof BotInboxFullError)) throw error;
 		return { outcome: "failed", summary: error.message, facts: { reasonCode: "bot_inbox_full", step: "dispatch" } };
 	}
@@ -48,20 +52,6 @@ export function queueNamedBotSchedule(agentDir: string, occurrence: RoutineOccur
 
 function inboxAccepted(agentId: string): RoutineMessageResult {
 	return { ...botScheduleAccepted(agentId, "queued"), facts: { reasonCode: "bot_inbox_accepted" } };
-}
-
-/** References in this projection are immutable store records. A single store revision serves every project clock. */
-export function namedBotClockWork(definitions: Iterable<RoutineDefinitionView>, journal: Iterable<RoutineOccurrence>) {
-	const routines = Array.from(definitions).filter((item) => item.botProjectCwd && item.enabled);
-	const open = new Map<string, RoutineOccurrence[]>();
-	for (const item of journal) {
-		if (!item.definition.botProjectCwd || item.phase === "terminal" || item.phase === "uncertain") continue;
-		const id = item.definition.incarnationId;
-		const list = open.get(id);
-		if (list) list.push(item);
-		else open.set(id, [item]);
-	}
-	return { routines, open };
 }
 
 type NamedBotClockStore = RoutineStorePort & Pick<PersistentBotTeamStore, "getBot" | "namedBotWork">;
@@ -207,17 +197,9 @@ export class NamedBotScheduleClock {
 			return;
 		}
 		store.markRoutineDispatching({ ...id, dispatchKey: `routine:${run.occurrenceId}`, nowMs });
+		let result: RoutineMessageResult;
 		try {
-			const result = queueNamedBotSchedule(this.host.agentDir, run);
-			store.finishRoutineOccurrence({
-				...id,
-				...result,
-				recipient,
-				nowMs: this.host.now(),
-				...(run.executor === "away" ? { awaySpentUsd: 0 } : {}),
-			});
-			if (result.outcome === "failed") failed.push(`${run.routineId}: ${result.summary}`);
-			else dispatched.push(run.routineId);
+			result = queueNamedBotSchedule(this.host.agentDir, run);
 		} catch (error) {
 			const reason =
 				cleanRedactBound(error instanceof Error ? error.message : String(error), MAX_ROUTINE_SUMMARY_CHARS) ||
@@ -230,7 +212,18 @@ export class NamedBotScheduleClock {
 				facts: { reasonCode: "dispatch_failed", step: "dispatch" },
 			});
 			failed.push(`${run.routineId}: ${reason}`);
+			return;
 		}
+		// If recording the result fails, recovery reads this occurrence's exact mailbox receipt after the lease.
+		store.finishRoutineOccurrence({
+			...id,
+			...result,
+			recipient,
+			nowMs: this.host.now(),
+			...(run.executor === "away" ? { awaySpentUsd: 0 } : {}),
+		});
+		if (result.outcome === "failed") failed.push(`${run.routineId}: ${result.summary}`);
+		else if (result.outcome === "succeeded") dispatched.push(run.routineId);
 	}
 }
 

@@ -3,11 +3,20 @@
  * keeps, and the undo of a save whose arming could not be completed. The functions change the routine state they are
  * given; `persist` is the store's save.
  */
-import type {
-	PersistentRoutineDefinition,
-	RoutineCursor,
-	RoutineDefinitionView,
+import { isDeepStrictEqual } from "node:util";
+import { HOST_EVENT_LISTENER_LIMITS } from "../events/host-event-kinds.ts";
+import {
+	type PersistentRoutineDefinition,
+	parseRoutineScheduleInput,
+	type RoutineCursor,
+	type RoutineDefinitionView,
+	type RoutineSchedule,
+	routineScheduleInputOf,
+	routineSlotRule,
+	routineZoneUnsupported,
+	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
+import { parseWatchCondition } from "../routines/watch-contract.ts";
 import type { RoutineStoreState } from "./routine-occurrence-journal.ts";
 
 /** The undo of one save: the routine it wrote, the revision it wrote, and the routine as it stood before. */
@@ -73,4 +82,96 @@ export function revertRoutineSave(state: RoutineStoreState, input: RoutineSaveRe
 	if (input.prior) state.routines.set(input.routineId, structuredClone(input.prior));
 	else state.routines.delete(input.routineId);
 	persist();
+}
+
+/** Save the authored clock or event schedule with its original anchor when its slot rule is unchanged. */
+export function savedRoutineSchedule(
+	input: UpsertPersistentRoutineInput,
+	existing: RoutineDefinitionView | undefined,
+	normalizedId: string,
+	routines: ReadonlyMap<string, RoutineDefinitionView>,
+) {
+	const stored = existing ? routineScheduleInputOf(existing.schedule) : undefined;
+	// The stored schedule resubmitted unchanged (a pause, resume or prompt edit) is kept as saved, so a routine whose
+	// zone this runtime does not support stays editable here; any other schedule is validated as authored.
+	const keepsSchedule = stored !== undefined && isDeepStrictEqual(input.schedule, stored);
+	const scheduleInput = keepsSchedule ? stored : parseRoutineScheduleInput(input.schedule);
+	const session = input.target.kind === "session";
+	// The stored side is re-canonicalized: a runtime may spell a stored zone differently than when it was saved.
+	// A zone it cannot read at all is compared as saved; a valid new schedule never equals it.
+	const scheduleChanged =
+		!existing ||
+		(!keepsSchedule &&
+			!isDeepStrictEqual(
+				routineSlotRule(routineZoneUnsupported(existing.schedule) ? stored! : parseRoutineScheduleInput(stored)),
+				routineSlotRule(scheduleInput),
+			));
+	const anchorAt =
+		!scheduleChanged && existing && "anchorAt" in existing.schedule
+			? existing.schedule.anchorAt
+			: (input.nowMs ?? Date.now());
+	let schedule: RoutineSchedule;
+	if (scheduleInput.kind === "interval")
+		schedule = {
+			kind: "interval",
+			intervalMs: scheduleInput.intervalMs,
+			anchorAt,
+			...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+			...(scheduleInput.readyBy ? { readyBy: true as const } : {}),
+			...(scheduleInput.readyLeadMs === undefined ? {} : { readyLeadMs: scheduleInput.readyLeadMs }),
+		};
+	else if (scheduleInput.kind === "once") schedule = scheduleInput;
+	else if (scheduleInput.kind === "event" && scheduleInput.source === "watch") {
+		// A watch is evaluated by the session that holds it, while it is open; a bot or team has no session to watch for.
+		if (!session) throw new Error("Watch routines run in their owning session only.");
+		schedule = {
+			kind: "event",
+			source: "watch",
+			condition: parseWatchCondition(scheduleInput.condition),
+			...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+			...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+		};
+	} else if (scheduleInput.kind === "event") {
+		// Host events are decided by the session that owns their ledger; a bot or team has none.
+		if (!session) throw new Error("Event routines run in their owning session only.");
+		const kept =
+			!scheduleChanged && existing?.schedule.kind === "event" && existing.schedule.source !== "watch"
+				? existing.schedule
+				: undefined;
+		const anchor = kept ? { ordinal: kept.anchorOrdinal, replayGaps: kept.anchorReplayGaps } : input.eventAnchor;
+		if (!anchor) throw new Error("Event routines require the session's host-event ledger position.");
+		if (scheduleInput.source === "github") {
+			const sessionId = input.target.kind === "session" ? input.target.parentSessionId : undefined;
+			const listeners = Array.from(routines.values()).filter(
+				(routine) =>
+					routine.routineId !== normalizedId &&
+					routine.target.kind === "session" &&
+					routine.target.parentSessionId === sessionId &&
+					routine.schedule.kind === "event" &&
+					routine.schedule.source === "github",
+			).length;
+			if (listeners >= HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource)
+				throw new Error(
+					`This session already holds ${HOST_EVENT_LISTENER_LIMITS.maxListenersPerSource} GitHub event routines, the most one session may hold; delete one first.`,
+				);
+			schedule = {
+				...scheduleInput,
+				anchorOrdinal: anchor.ordinal,
+				anchorReplayGaps: anchor.replayGaps,
+				anchorAt,
+			};
+		} else
+			schedule = {
+				kind: "event",
+				source: scheduleInput.source,
+				conclusions: scheduleInput.conclusions ?? ["failure"],
+				...(scheduleInput.workflowPath === undefined ? {} : { workflowPath: scheduleInput.workflowPath }),
+				...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+				...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+				anchorOrdinal: anchor.ordinal,
+				anchorReplayGaps: anchor.replayGaps,
+			};
+	} else if (scheduleInput.timeZone === undefined) throw new Error("Calendar routines require a time zone.");
+	else schedule = { ...scheduleInput, timeZone: scheduleInput.timeZone, anchorAt };
+	return { schedule, scheduleChanged };
 }

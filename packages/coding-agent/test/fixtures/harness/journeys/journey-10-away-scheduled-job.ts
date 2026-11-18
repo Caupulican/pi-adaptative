@@ -1,5 +1,4 @@
 /** The phone follows a desktop schedule across daemon takeover, an interrupted machine link and desktop handback. */
-import { join } from "node:path";
 import { expect } from "vitest";
 import { botTeamStoreFile, configFile } from "../../../../src/core/agent-paths.ts";
 import { readRemoteBotHost } from "../../../../src/core/bots/bot-host-state.ts";
@@ -14,7 +13,7 @@ import { readRoutineBotJobResults, routineJobStatusLines } from "../../../../src
 import { formatRoutineList } from "../../../../src/modes/interactive/bot-team-lines.ts";
 import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, SCRIPTED_TRACKS, withDeadline } from "../session-fixture.ts";
-import { FakeBotApi, OWNER_ID, ownerLegUpdate, TOKEN, withFakeBotApi } from "./journey-4-telegram.ts";
+import { FakeBotApi, OWNER_ID, ownerLegUpdate, seedTelegramToken, withFakeBotApi } from "./journey-4-telegram.ts";
 import { createOwnerBot, enqueueBot } from "./journey-7-shared.ts";
 import {
 	enqueueJoinerJob,
@@ -56,9 +55,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			systemOne: { enabled: false },
 		}),
 	);
-	const channels = join(hubDir, "channels");
-	world.io.mkdirSync(channels, { recursive: true });
-	world.io.writeFileSync(join(channels, "telegram.token"), TOKEN, { mode: 0o600 });
+	seedTelegramToken(world, hubDir);
 	const journal = new ChannelJournal(hubDir, "telegram");
 	const api = new FakeBotApi(() => journal.read().result.seen.map((item) => item.d));
 	const wait = <T>(description: string, result: Promise<T>) => withDeadline(world.trace, description, result);

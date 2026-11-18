@@ -3,7 +3,12 @@
 import { isAbsolute } from "node:path";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { routineJobStatusLines } from "../remote/routine-job-results.ts";
-import { isRoutineId, type RoutineDefinitionView, routineScheduleInputOf } from "../routines/routine-contract.ts";
+import {
+	isRoutineId,
+	MAX_ROUTINE_OCCURRENCES,
+	nextRoutineAt,
+	type RoutineDefinitionView,
+} from "../routines/routine-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -79,12 +84,13 @@ export function readOwnerTask(store: PersistentBotTeamStore, bot: string, id: st
 export function taskStatus(port: OwnerTaskPort, task: OwnerTask): string {
 	const routine = readOwnerTask(port.getBotTeamStore(), task.bot, task.routine, task.incarnation);
 	if (!routine) return OWNER_TASK_GONE;
+	const next = nextRoutineAt(routine.schedule, routine.cursor);
 	const when = !routine.enabled
 		? "Paused"
 		: routine.schedule.kind === "event"
 			? "Waiting for an event"
-			: Number.isFinite(routine.nextRunAt)
-				? `Next scheduled slot ${new Date(routine.nextRunAt).toISOString()}`
+			: next !== undefined
+				? `Next scheduled slot ${new Date(next).toISOString()}`
 				: "No further slot";
 	return [
 		`Bot ${task.bot} · task ${task.routine}`,
@@ -98,30 +104,15 @@ export function taskStatus(port: OwnerTaskPort, task: OwnerTask): string {
 		.join("\n");
 }
 
-/** A replay never pauses a schedule the desktop has since re-enabled or replaced. */
-export function stopTask(
-	store: PersistentBotTeamStore,
-	task: OwnerTask,
-	revision: number,
-): { paused: boolean; reply: string } {
-	const routine = readOwnerTask(store, task.bot, task.routine, task.incarnation);
-	if (!routine) return { paused: false, reply: OWNER_TASK_GONE };
-	if (routine.enabled) {
-		if (routine.revision !== revision)
-			return {
-				paused: false,
-				reply: "The schedule changed before the stop. Check status and send stop task again.",
-			};
-		store.upsertRoutine({
-			routineId: routine.routineId,
-			target: routine.target,
-			expectedRevision: revision,
-			prompt: routine.prompt,
-			schedule: routineScheduleInputOf(routine.schedule),
-			enabled: false,
-		});
-	}
-	return { paused: true, reply: `Paused task ${task.routine} on bot ${task.bot}. Pending dispatches are cancelled.` };
+/** The retained occurrences of this exact bot and task. The store builds the index once per revision. */
+export function ownerTaskOccurrences(store: PersistentBotTeamStore, task: OwnerTask) {
+	return (store.namedBotWork().byBotTask.get(task.incarnation) ?? []).filter(
+		(run) => run.routineId === task.routine && run.target.kind === "bot" && run.target.agentId === task.bot,
+	);
+}
+
+export function pausedTaskReply(task: OwnerTask): string {
+	return `Paused task ${task.routine} on bot ${task.bot}. Pending dispatches are cancelled.`;
 }
 
 /** The immutable address and admission of a command, kept until its bot or routine store settles it. */
@@ -138,8 +129,10 @@ export interface OwnerTaskCommand {
 	readonly projectBound?: true;
 	readonly revision: number;
 	readonly action: "steer" | "stop";
-	readonly occurrenceIds: readonly string[];
-	readonly refs?: readonly string[];
+	occurrenceIds: readonly string[];
+	/** The stop captured claims up to its pause; retries reuse this set even after a desktop resumes. */
+	stopCaptured?: true;
+	refs?: readonly string[];
 	readonly words?: string;
 	anchor?: string | null;
 	state: "pending" | "queued" | "running" | "finished";
@@ -173,10 +166,13 @@ export function isTaskCommand(v: unknown): v is OwnerTaskCommand {
 		(v.action === "stop" || (v.action === "steer" && typeof v.words === "string")) &&
 		["pending", "queued", "running", "finished"].includes(String(v.state)) &&
 		Array.isArray(v.occurrenceIds) &&
-		v.occurrenceIds.length <= 256 &&
+		v.occurrenceIds.length <= MAX_ROUTINE_OCCURRENCES * (v.action === "stop" ? 2 : 1) &&
 		v.occurrenceIds.every((id) => typeof id === "string") &&
 		(v.refs === undefined ||
-			(Array.isArray(v.refs) && v.refs.length <= 300 && v.refs.every((ref) => typeof ref === "string"))) &&
+			(Array.isArray(v.refs) &&
+				v.refs.length <= MAX_ROUTINE_OCCURRENCES * 2 + MAX_PHONE_TASK_COMMANDS &&
+				v.refs.every((ref) => typeof ref === "string"))) &&
+		(v.stopCaptured === undefined || (v.stopCaptured === true && v.action === "stop")) &&
 		(v.anchor === undefined || v.anchor === null || typeof v.anchor === "string") &&
 		(v.resignal === undefined || v.resignal === true) &&
 		(v.stopRequested === undefined || v.stopRequested === true) &&

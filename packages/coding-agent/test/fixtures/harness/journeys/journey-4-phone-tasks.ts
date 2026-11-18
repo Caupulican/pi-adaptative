@@ -1,20 +1,24 @@
 /** Telegram command replay, independent private conversations and a selected routine replaced from the desktop. */
-import { join } from "node:path";
-import { expect } from "vitest";
+import { basename, join } from "node:path";
+import { expect, vi } from "vitest";
+import { botInboxDir } from "../../../../src/core/agent-paths.ts";
+import { enqueueBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
 import { OWED_INBOX_SWEEP_MS } from "../../../../src/core/bots/bot-session-owed-work.ts";
 import { ChannelJournal } from "../../../../src/core/channels/channel-journal.ts";
 import { MAX_PHONE_TASK_COMMANDS } from "../../../../src/core/channels/owner-task.ts";
+import { PersistentBotTeamStore } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
+import { queueNamedBotSchedule } from "../../../../src/core/routines/named-bot-schedule.ts";
+import type { RoutineOccurrence } from "../../../../src/core/routines/routine-contract.ts";
+import { routineBotMessageOrigin } from "../../../../src/core/routines/routine-parent-input.ts";
 import { calls } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { FakeBotApi, OWNER_ID, ownerLegUpdate, TOKEN, withFakeBotApi } from "./journey-4-telegram.ts";
+import { FakeBotApi, OWNER_ID, ownerLegUpdate, seedTelegramToken, withFakeBotApi } from "./journey-4-telegram.ts";
 import { botSessionFilesText, carries, createOwnerBot } from "./journey-7-shared.ts";
 
 export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise<void> {
 	const agentDir = `${world.agentDir}-phone-tasks`;
-	const dir = join(agentDir, "channels");
-	world.io.mkdirSync(dir, { recursive: true });
-	world.io.writeFileSync(join(dir, "telegram.token"), TOKEN, { mode: 0o600 });
+	seedTelegramToken(world, agentDir);
 	const journal = new ChannelJournal(agentDir, "telegram");
 	const api = new FakeBotApi(() => journal.read().result.seen.map((item) => item.d));
 	await withFakeBotApi(world, api, async () => {
@@ -145,11 +149,124 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 				spend: { reserved: 1, usd: 1 },
 			}));
 		});
-		await send(9, OWNER_ID, "stop task");
-		expect(api.texts().at(-1)).toContain("Paused task Review");
+		// The clock claims after the authenticated phone journal snapshot, then stalls between dispatch and inbox write.
+		let late!: RoutineOccurrence;
+		const save = store.stopBotTask.bind(store);
+		const pause = vi.spyOn(store, "stopBotTask").mockImplementationOnce((input) => {
+			expect(input).toMatchObject({ routine: "Review", incarnation: replacement.incarnationId });
+			late = store.claimManualRoutineOccurrence({
+				routineId: "Review",
+				commandId: "already-dispatching",
+				owner: "desktop",
+				nowMs,
+				leaseMs: 120_000,
+				receiptOrigin,
+			});
+			store.markRoutineDispatching({
+				occurrenceId: late.occurrenceId,
+				claimToken: late.claim!.token,
+				nowMs,
+				dispatchKey: `routine:${late.occurrenceId}`,
+			});
+			const first = save(input);
+			expect(first.kind).toBe("paused");
+			expect(
+				journal.read().result.ownerTaskCommands?.find((cmd) => cmd.action === "stop")?.stopCaptured,
+			).toBeUndefined();
+			// Discard the first result at the crash boundary. A different desktop resumes before the channel replays.
+			const recovered = new PersistentBotTeamStore(agentDir);
+			try {
+				const paused = recovered.getRoutine("Review")!;
+				expect(paused.enabled).toBe(false);
+				const resumed = recovered.upsertRoutine({
+					...definition,
+					...pinned,
+					enabled: true,
+					expectedRevision: paused.revision,
+				});
+				const newer = recovered.claimManualRoutineOccurrence({
+					routineId: "Review",
+					expectedRevision: resumed.revision,
+					commandId: "after-desktop-resume",
+					owner: "desktop",
+					nowMs: Math.max(nowMs + 1, Date.parse(resumed.updatedAt)),
+					leaseMs: 120000,
+					receiptOrigin,
+				});
+				const replay = recovered.stopBotTask(input);
+				expect(replay).toEqual(first);
+				expect(replay.kind === "paused" && replay.ids.includes(newer.occurrenceId)).toBe(false);
+				expect(recovered.getRoutine("Review")?.enabled).toBe(true);
+				store.reload(true);
+				return replay;
+			} finally {
+				recovered.dispose();
+			}
+		});
+		try {
+			await send(9, OWNER_ID, "stop task");
+		} finally {
+			pause.mockRestore();
+		}
+		expect(api.texts().at(-1)).toContain("Its current schedule is enabled.");
 		expect(journal.read().result.ownerTaskCommands?.[0]).toMatchObject({
 			state: "finished",
 			reply: "Stopped before delivery.",
 		});
+		const stopped = journal.read().result.ownerTaskCommands!.find((command) => command.action === "stop")!;
+		expect(stopped.occurrenceIds).toContain(late.occurrenceId);
+		await withDeadline(
+			world.trace,
+			"the selected bot drained its phone stop",
+			world.io.waitForMutation(
+				() =>
+					journal
+						.read()
+						.result.ownerTaskCommands?.some((item) => item.id === stopped.id && item.state === "finished") ===
+					true,
+			),
+		);
+		const requests = world.provider.requests.length;
+		const streak = store.getRoutine("Review")?.failureStreak;
+		const cancelled = queueNamedBotSchedule(agentDir, late);
+		expect(cancelled).toMatchObject({ outcome: "cancelled", facts: { reasonCode: "owner_stop" } });
+		store.finishRoutineOccurrence({
+			...cancelled,
+			nowMs,
+			recipient: late.parentOrigin.sessionId,
+			occurrenceId: late.occurrenceId,
+			claimToken: late.claim!.token,
+		});
+		const ended = store
+			.listRoutineOccurrences({ routineId: "Review" })
+			.find((run) => run.occurrenceId === late.occurrenceId);
+		expect(ended).toMatchObject({ phase: "terminal", result: { outcome: "cancelled", delivery: "acknowledged" } });
+		expect(
+			store.getRoutine("Review")?.lastStatus,
+			"an older cancelled dispatch cannot overwrite the newly resumed run",
+		).toBe("running");
+		expect(store.getRoutine("Review")?.failureStreak, "an owner's stop does not count as a bot failure").toBe(streak);
+		// A legacy writer leaves the same message after that drain. The bot must refuse it at submission too.
+		const origin = routineBotMessageOrigin(late, late.definition.prompt);
+		const legacy = enqueueBotInbox(`${agentDir}-independent`, {
+			agentId: "Atlas",
+			text: late.definition.prompt,
+			origin,
+			projectBound: true,
+			occurrenceCreatedAt: late.createdAt,
+			from: { pid: process.pid, sessionId: late.parentOrigin.sessionId, cwd: pinned.botProjectCwd },
+			at: nowMs,
+		});
+		const dest = join(botInboxDir(agentDir, "Atlas"), basename(legacy.file));
+		world.io.writeFileSync(dest, `${JSON.stringify(legacy.message)}\n`, { mode: 0o600 });
+		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
+		const refused = dest.replace(/\.json$/, ".refused.json");
+		await withDeadline(
+			world.trace,
+			"legacy late delivery refused before its bot uses a model",
+			world.io.waitForMutation(() => world.io.existsSync(refused)),
+		);
+		expect(JSON.parse(world.io.readFileSync(refused, "utf8").toString()).reason).toContain("owner stopped");
+		expect(world.provider.requests).toHaveLength(requests);
 	});
 }
