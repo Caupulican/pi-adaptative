@@ -5,6 +5,8 @@ import { isLaneRecord, isLaneTerminalStatus } from "../packages/coding-agent/src
 import { LANE_RECORD_CUSTOM_TYPE } from "../packages/coding-agent/src/core/autonomy/session-lane-record.ts";
 import { COMMS_RECORD_VERSION } from "../packages/coding-agent/src/core/comms/comms-records.ts";
 import { BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE } from "../packages/coding-agent/src/core/proof/proof-sheet.ts";
+import { ASSIGN_TOOL_NAME } from "../packages/coding-agent/src/core/tools/assign-tool-name.ts";
+import { DELEGATE_TOOL_NAME } from "../packages/coding-agent/src/core/tools/delegate-tool-name.ts";
 import { isVersionOneSessionSnapshotPayload } from "../packages/coding-agent/src/core/session-snapshot.ts";
 import {
 	assistantToolCalls,
@@ -57,18 +59,20 @@ export async function delegationStats(sessionsDir, sinceMs = null) {
 		onEntry(entry, session) {
 			const message = entry?.type === "message" ? entry.message : undefined;
 			for (const call of assistantToolCalls(message)) {
-				if (call?.type !== "toolCall" || call.name !== "delegate") continue;
-				const action = call.arguments?.action ?? "start";
-				// "spawn" is a historically observed failed spelling. Other actions are outside the start cohort.
-				if (action !== "start" && action !== "spawn") continue;
-				if (!session.first) session.first = { id: typeof call.id === "string" ? call.id : undefined, outcomes: new Set() };
-				else if (session.first.id === call.id) session.first.ambiguous = true;
+				if (call?.type !== "toolCall") continue;
+				if (call.name === DELEGATE_TOOL_NAME) {
+					const action = call.arguments?.action ?? "start";
+					// "spawn" is a historically observed failed spelling of the delegate start action.
+					if (action !== "start" && action !== "spawn") continue;
+				} else if (call.name !== ASSIGN_TOOL_NAME) continue;
+				if (!session.first) session.first = { tool: call.name, id: typeof call.id === "string" ? call.id : undefined, outcomes: new Set() };
+				else if (session.first.tool === call.name && session.first.id === call.id) session.first.ambiguous = true;
 			}
 			const first = session.first;
 			if (
 				first?.id &&
 				message?.role === "toolResult" &&
-				message.toolName === "delegate" &&
+				message.toolName === first.tool &&
 				message.toolCallId === first.id
 			) {
 				first.outcomes.add(dispatchOutcome(message));

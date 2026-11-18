@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Worker report reviews now show the paths recorded for the current attempt and explain how to correct a report without repeating a successful edit.
+
 ## [0.104.70] - 2026-11-18
 
 ### Added

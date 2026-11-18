@@ -95,7 +95,7 @@ describe("columnar JSON tool output", () => {
 			level: "standard",
 		});
 		expect(reduced?.details.recoveryHint).toBe(
-			"jq -c 'to_entries[] | select(.value | type == \"array\") | .value[]'",
+			"jq -c 'first(to_entries[] | select(.value | type == \"array\")) | .value[:6][]'",
 		);
 		expect(reduced?.text).toContain("touch rogue");
 	});

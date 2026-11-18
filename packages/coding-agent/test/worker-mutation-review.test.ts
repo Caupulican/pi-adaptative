@@ -16,6 +16,11 @@ import {
 	retainCancelledWorkerMutationClaim,
 	WorkerMutationEvidence,
 } from "../src/core/delegation/worker-mutation-evidence.ts";
+import {
+	buildNeedsMoreRequest,
+	buildReportRequest,
+	judgeSubmittedReport,
+} from "../src/core/delegation/worker-report.ts";
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { getActiveSessionBranchEntries } from "../src/core/session-snapshot.ts";
@@ -44,6 +49,50 @@ function workerConversation(session: SessionManager): WorkerConversation {
 }
 
 describe("worker mutation review", () => {
+	it("repairs a subdirectory path from this attempt's evidence without repeating the edit", () => {
+		const judge = (changedFiles: string[], files: string[]) =>
+			judgeSubmittedReport({
+				context: { writeCapable: true, verifier: false, requirementIds: [] },
+				cwd: path.resolve("packages/app"),
+				receipts: [],
+				changedFiles,
+				submitted: {
+					status: "completed",
+					summary: "Updated slugify.",
+					blockers: [],
+					inconclusive: [],
+					findings: [],
+					reasonCodes: [],
+					report: {
+						changes: files.map((file) => ({ file, what: "Updated slugify." })),
+						checks: [],
+						requirements: [],
+						assumptions: [],
+						regressions: [],
+						remaining: [],
+					},
+				},
+			});
+		const changed = ["util.ts"];
+		const firstReport = buildReportRequest({
+			context: { writeCapable: true, verifier: false, requirementIds: [] },
+			receipts: [],
+			changedFiles: changed,
+		});
+		expect(firstReport).toContain("No command receipts were recorded");
+		const rejected = judge(changed, ["packages/app/util.ts"]);
+		expect(rejected.verdict).toBe("rejected");
+		const review = buildNeedsMoreRequest(rejected, [], changed);
+		expect(review).toContain("Files the host recorded as changed: 'util.ts'");
+		expect(review).toContain("without repeating that edit");
+		expect(judge(changed, changed).verdict).toBe("accepted");
+
+		const priorAttemptOnly = judge([], changed);
+		expect(priorAttemptOnly.verdict).toBe("rejected");
+		expect(buildNeedsMoreRequest(priorAttemptOnly, [], [])).toContain("Leave changes empty");
+		expect(judge([], []).verdict).toBe("accepted");
+	});
+
 	it.each(["cancelled", "failed", "completed"] as const)(
 		"retains and acknowledges %s uncertainty without asserting any changed path",
 		(status) => {

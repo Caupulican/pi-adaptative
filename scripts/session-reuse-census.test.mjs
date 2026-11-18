@@ -76,6 +76,13 @@ test("classifies requests by trigger, counts wipes and misses, and reads TTFT", 
 	assert.ok(groups.get("reflection_turn").p50PromptRatio < 0.6);
 });
 
+test("separates worker handoffs from owner prompts and ongoing tool loops", () => {
+	const reply = (index) => assistant(index, { input: 100, cacheRead: 900 });
+	const handoff = { type: "custom_message", customType: "background-worker-completion", display: true };
+	const entries = [handoff, reply(0), handoff, toolResult("file contents"), reply(1), handoff, { type: "message", message: { role: "user", content: "Continue" } }, reply(2)];
+	assert.deepEqual(censusEntries(entries).requests.map((r) => r.group), ["worker_handoff", "tool_loop", "user_turn"]);
+});
+
 test("censuses persisted host records against tool output and fails the gate", () => {
 	const census = censusEntries(session);
 	assert.equal(census.toolResultChars, 2_000);

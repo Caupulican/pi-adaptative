@@ -2,7 +2,7 @@
 /**
  * Prompt-cache reuse census over recorded sessions: per session (and per provider/model with
  * `--by-model`) the median prefix reuse, the share of requests reusing at least 90%, the cache
- * wipes, time to first token, cost and prompt size; per trigger kind (tool loop, user turn,
+ * wipes, time to first token, cost and prompt size; per trigger kind (tool loop, user turn, worker handoff,
  * reflection turn, goal continuation, after compaction) the same; with `--wipes` every wipe and
  * what rode between it and the previous request; with `--records` the persisted host-record
  * census by kind against tool-result and assistant bytes. `--gate <json>` fails on thresholds.
@@ -25,6 +25,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE } from "../packages/coding-agent/src/core/proof/proof-sheet.ts";
 import { cacheLaneKey } from "../packages/coding-agent/src/core/context/cache-observation-recorder.ts";
 import { priceCompaction } from "../packages/coding-agent/src/core/compaction/early-compaction-economics.ts";
 import {
@@ -100,6 +101,7 @@ function triggerGroup(between) {
 	if (between.includes("custom_message:goal_continuation_trigger")) return "goal_continuation";
 	if (between.includes("compaction")) return "after_compaction";
 	if (between.includes("user")) return "user_turn";
+	if (between.includes(`custom_message:${BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE}`) && !between.includes("toolResult")) return "worker_handoff";
 	return "tool_loop";
 }
 

@@ -442,7 +442,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					reasonCodes: hostVerdict.reasonCodes,
 				});
 				reportCapture.submitted = undefined;
-				return message(buildNeedsMoreRequest(hostVerdict, commandReceipts));
+				return message(buildNeedsMoreRequest(hostVerdict, commandReceipts, [...changedFiles]));
 			}
 			return [];
 		}

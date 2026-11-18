@@ -27,7 +27,9 @@ describe("filtered Git output for Bash and recorded commands", () => {
 		const staged = await executeFilteredGit(directory, "add", [], ["sample.txt"]);
 		expect(staged.exitCode).toBe(0);
 		expect(staged.rawBytes?.toString()).toContain("sample.txt");
-		const message = Array.from({ length: 2100 }, (_, i) => `commit message line ${i}`).join("\n");
+		// Keep the witness a full preview budget away from either end for every head/tail split.
+		const omittedLine = `commit message line ${DEFAULT_MAX_LINES + 1}`;
+		const message = Array.from({ length: DEFAULT_MAX_LINES * 3 }, (_, i) => `commit message line ${i}`).join("\n");
 		git(
 			[
 				"-c",
@@ -53,7 +55,7 @@ describe("filtered Git output for Bash and recorded commands", () => {
 		const rendered = run.content[0];
 		if (rendered?.type !== "text") throw new Error("Expected Git text");
 		expect(rendered.text).toContain("middle omitted");
-		expect(rendered.text).not.toContain("commit message line 1050");
+		expect(rendered.text).not.toContain(omittedLine);
 		const chunks: string[] = [];
 		const unused = {
 			exec: async (): Promise<never> => {
@@ -67,11 +69,11 @@ describe("filtered Git output for Bash and recorded commands", () => {
 		try {
 			expect(recorded.truncated).toBe(true);
 			expect(recorded.output).toBe(chunks.join(""));
-			expect(recorded.output).not.toContain("commit message line 1050");
+			expect(recorded.output).not.toContain(omittedLine);
 			expect(Buffer.byteLength(recorded.output)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
-			expect(await readFile(recorded.fullOutputPath!, "utf8")).toBe(
-				await readFile(run.details!.fullOutputPath!, "utf8"),
-			);
+			const raw = await readFile(recorded.fullOutputPath!, "utf8");
+			expect(raw).toContain(omittedLine);
+			expect(raw).toBe(await readFile(run.details!.fullOutputPath!, "utf8"));
 		} finally {
 			if (recorded.fullOutputPath) await rm(recorded.fullOutputPath, { force: true });
 		}

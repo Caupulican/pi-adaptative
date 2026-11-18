@@ -118,7 +118,7 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 					),
 					{
 						description:
-							"The shell commands (bash, run_process) you ran or chose not to run, with what each showed. Reading files with read, grep, find or ls is not a check: say it in the summary.",
+							"List command checks with their exact inputs. If you only used file tools, omit checks. Put edits and writes in changes, and file reads and searches in the summary.",
 					},
 				),
 			),
@@ -128,7 +128,7 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 						{
 							file: Type.String({
 								description:
-									"Use a changed path exactly as listed in the host report request, or its absolute spelling. Relative paths resolve from your working directory.",
+									"Use the exact path from your successful edit or the host's changed-file list. Relative paths resolve from the worker's working directory, including after a shell command used cd.",
 							}),
 							what: Type.String(),
 							serves: Type.Optional(
@@ -508,6 +508,10 @@ function receiptLine(receipt: WorkerCommandReceipt): string {
 	return `- ${receiptAlias(receipt)} ${receipt.tool}: ${quotedSpan(receipt.command)} -> ${outcome}`;
 }
 
+function recordedChangesLine(files: readonly string[]): string {
+	return `Files the host recorded as changed: ${files.slice(0, 40).map(quotedSpan).join(", ")}${files.length > 40 ? ", ..." : ""}. List each under changes with what changed and which requirement it serves.`;
+}
+
 /** The request the worker receives when it declares itself done: what to report and how to prove it. */
 export function buildReportRequest(input: {
 	context: WorkerReportContext;
@@ -533,12 +537,8 @@ export function buildReportRequest(input: {
 			"Commands the host recorded; cite the stable receipt name (c-...) for each check. Display snippets may be shortened; checks.command must repeat the exact tool input, preserving whitespace (run_process: executable/args JSON):",
 		);
 		lines.push(...receipts.slice(-24).map(receiptLine));
-	}
-	if (changedFiles.length > 0) {
-		lines.push(
-			`Files the host recorded as changed: ${changedFiles.slice(0, 40).map(quotedSpan).join(", ")}${changedFiles.length > 40 ? ", ..." : ""}. List each under changes with what changed and which requirement it serves.`,
-		);
-	}
+	} else lines.push("No command receipts were recorded for this attempt. Omit passed and failed checks.");
+	if (changedFiles.length > 0) lines.push(recordedChangesLine(changedFiles));
 	lines.push(
 		"Say what remains, what you assumed and what could regress. If something is still unproven, run the check now, then report. If you cannot finish, submit status blocked with the blocker.",
 	);
@@ -590,6 +590,7 @@ export function worthAFollowUpTurn(verdict: WorkerHostVerdict): boolean {
 export function buildNeedsMoreRequest(
 	verdict: WorkerHostVerdict,
 	receipts: readonly WorkerCommandReceipt[] = [],
+	changedFiles: readonly string[] = [],
 ): string {
 	// A check that matches no recorded command is usually a command the worker did run but wrote differently (a `python -c`
 	// line for code the python tool ran): showing what the host recorded lets it cite the exact input instead of giving up.
@@ -605,10 +606,18 @@ export function buildNeedsMoreRequest(
 					...receipts.slice(-12).map(receiptLine),
 				]
 			: [];
+	const repairChanges = verdict.reasonCodes.some(
+		(code) => code === "change_not_recorded" || code === "unreported_changes",
+	);
+	const pathGuidance = changedFiles.length
+		? "Copy the listed path into changes.file for the edit you made. Correct the report without repeating that edit."
+		: "This attempt has no recorded file changes. Leave changes empty and describe any inspected work or uncertain changes in the summary.";
 	return [
 		"REPORT REVIEW",
 		"The host checked your report against its records and found:",
 		...verdict.missing.map((line) => `- ${line}`),
+		...(repairChanges && changedFiles.length ? [recordedChangesLine(changedFiles)] : []),
+		...(repairChanges ? [pathGuidance] : []),
 		...recorded,
 		"Run what is missing or correct the report, then submit it again with submit_report. Finished work stays status completed: only submit blocked for something that actually stopped you. If a requirement cannot be met, say so in the report and mark it not_met; that is accepted.",
 	].join("\n");

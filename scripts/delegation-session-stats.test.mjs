@@ -8,13 +8,13 @@ import { delegationStats } from "./delegation-session-stats.mjs";
 test("start evidence and visible terminal handoffs keep their own identities", async (t) => {
 	const dir = await mkdtemp(path.join(tmpdir(), "pi-delegation-stats-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
-	const call = (action, id) => ({
+	const call = (action, id, name = "delegate") => ({
 		type: "message",
-		message: { role: "assistant", content: [{ type: "toolCall", id, name: "delegate", arguments: { action } }] },
+		message: { role: "assistant", content: [{ type: "toolCall", id, name, arguments: { action } }] },
 	});
-	const result = (toolCallId, details) => ({
+	const result = (toolCallId, details, toolName = "delegate") => ({
 		type: "message",
-		message: { role: "toolResult", toolCallId, toolName: "delegate", details },
+		message: { role: "toolResult", toolCallId, toolName, details },
 	});
 	const save = (name, rows) =>
 		writeFile(path.join(dir, name + ".jsonl"), rows.map((row) => JSON.stringify(row)).join("\n"));
@@ -45,13 +45,16 @@ test("start evidence and visible terminal handoffs keep their own identities", a
 	await save("incomplete", [call("start", "a"), handoff([terminal])]);
 	await save("conflict", [snapshot, handoff([terminal, { ...terminal, status: "succeeded" }])]);
 	await save("mailbox", [call("start", "a"), result("a", { started: true, messageId: "m" })]);
+	await save("assign", [call(undefined, "a", "assign"), result("a", { started: true, laneId: "lane" }, "assign")]);
+	await save("distinct-tools", [call(undefined, "c", "assign"), call("start", "c"), result("c", { started: true, laneId: "lane" }, "assign")]);
+	await save("cross-tool", [call(undefined, "b", "assign"), result("b", { started: true, laneId: "lane" })]);
 	const stats = await delegationStats(dir);
 	assert.deepEqual(stats.firstDispatch, {
-		admitted: 1,
+		admitted: 3,
 		partial: 0,
 		refused: 1,
 		existingAgentMessage: 1,
-		unknown: 1,
+		unknown: 2,
 		noStartAttempt: 1,
 	});
 	assert.deepEqual(stats.handoffs.partial, { matched: 1, missingVisibleRecord: 1, conflicting: 1 });
