@@ -108,7 +108,7 @@ import {
 	type ModelRouterDecisionStatus,
 	type ModelRouterFailoverStatus,
 } from "./model-router/status.ts";
-import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import { hasKnownNoToolPath, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { type FitnessReportLookup, FitnessStore } from "./models/fitness-store.ts";
 import type {
@@ -226,7 +226,7 @@ export interface ModelRouterControllerDeps {
 	resolveLaneModel(pattern: string): Model<Api> | undefined;
 	/** Persisted `/toolprobe` verdict for this model (native / text-protocol / none), or undefined
 	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
-	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
+	 * ({@link hasKnownNoToolPath}); cloud models never call it. */
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
 	/** Available favorites, narrowed by the operator's explicit Models configuration or scope. */
 	getCandidatePool(): RouterCandidatePool;
@@ -560,6 +560,10 @@ export class ModelRouterController {
 		return this._accessProblem(model) === undefined;
 	}
 
+	private _hasKnownNoToolPath(model: Model<Api>): boolean {
+		return hasKnownNoToolPath(model, (candidate) => this.deps.getToolProbeVerdict(candidate));
+	}
+
 	private _createFitnessLookup(): FitnessReportLookup {
 		return FitnessStore.forAgentDir(this.deps.getAgentDir()).createReportLookup();
 	}
@@ -578,14 +582,16 @@ export class ModelRouterController {
 		}
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		const expensivePattern = settings.expensiveModel;
-		if (!expensivePattern || !this._isModelAvailableAndAuthed(expensivePattern))
-			return { skip: "expensive model not configured or not available" };
+		if (!expensivePattern) return { skip: "expensive model not configured or not available" };
 		const resolvedExpensive = resolveCliModel({
 			cliModel: expensivePattern,
 			modelRegistry: this.deps.getModelRegistry(),
 		});
-		if (!resolvedExpensive.model) return { skip: "expensive model not configured or not available" };
+		if (!resolvedExpensive.model || !this._hasAccess(resolvedExpensive.model))
+			return { skip: "expensive model not configured or not available" };
 		if (this.deps.isModelExhausted(resolvedExpensive.model)) return { skip: "expensive model exhausted: quota" };
+		if (this._hasKnownNoToolPath(resolvedExpensive.model))
+			return { skip: "expensive model has no working tool-call path" };
 		if (settings.fitnessGate) {
 			const verdict = evaluateModelFitness("router_expensive", resolvedExpensive.model, fitness);
 			if (!verdict.fit) return { skip: `expensive model unfit: ${formatFitnessFailure(verdict)} (fitness gate)` };
@@ -733,14 +739,14 @@ export class ModelRouterController {
 			return undefined;
 		}
 
-		// For a LOCAL/MANAGED tier model (never cloud — isLocalOrManagedRouterModel), honor a
+		// For a LOCAL/MANAGED tier model, honor a
 		// persisted "no working tool-call path" probe verdict. This is an ALWAYS-ON doctrine gate,
 		// deliberately not behind the opt-in `fitnessGate` setting below (cloud fitness gating stays
 		// opt-in; this local/managed check is unconditional, matching the auto-probe that writes
 		// the verdict). "native"/"text-protocol"/unprobed all fall through unchanged: native wins
 		// when it works, the shared model-tool-protocol resolver engages the calibrated text dialect,
 		// and an unprobed model routes native-first (the evidence loop, not a speculative pre-block).
-		if (isLocalOrManagedRouterModel(resolved.model) && this.deps.getToolProbeVerdict(resolved.model) === "none") {
+		if (this._hasKnownNoToolPath(resolved.model)) {
 			if (decision.tier === "medium") {
 				const fallback = this._resolveExpensiveFallbackRoute(
 					decision,
@@ -849,7 +855,7 @@ export class ModelRouterController {
 		if (this.deps.isModelExhausted(resolved.model)) return undefined;
 		// (Same doctrine as _resolveModelRouterTurnRoute above): never resolve a local/managed
 		// model the probe has already graded as having no working tool-call path.
-		if (isLocalOrManagedRouterModel(resolved.model) && this.deps.getToolProbeVerdict(resolved.model) === "none") {
+		if (this._hasKnownNoToolPath(resolved.model)) {
 			return undefined;
 		}
 		return resolved.model;
@@ -890,7 +896,10 @@ export class ModelRouterController {
 				...(facts.hasImages ? { requiredCapabilities: ["image_input"] } : {}),
 				...(facts.contextTokens ? { minimumContextWindow: facts.contextTokens } : {}),
 				// The pool is a hard boundary for H-MoE too: candidates are generated inside it.
-				allowedModelRefs: routerPoolModelRefs(pool),
+				allowedModelRefs: routerPoolModelRefs({
+					...pool,
+					models: pool.models.filter((model) => !this._hasKnownNoToolPath(model)),
+				}),
 				preferSubscription: preferSub,
 				preferLocal: preferLoc,
 				hmoePreset: settings.hmoePreset,
@@ -912,6 +921,7 @@ export class ModelRouterController {
 					model &&
 					isModelInRouterPool(this.deps.getCandidatePool(), model) &&
 					this._hasAccess(model) &&
+					!this._hasKnownNoToolPath(model) &&
 					!this.deps.isModelExhausted(model)
 				) {
 					return {
@@ -1180,8 +1190,7 @@ export class ModelRouterController {
 		if (this.deps.isModelAllowed?.(resolved) === false)
 			return { reason: `${ref} is outside the owner's model policy` };
 		if (this.deps.isModelExhausted(resolved)) return { reason: `${ref} quota exhausted` };
-		if (isLocalOrManagedRouterModel(resolved) && this.deps.getToolProbeVerdict(resolved) === "none")
-			return { reason: `${ref} has no working tool-call path` };
+		if (this._hasKnownNoToolPath(resolved)) return { reason: `${ref} has no working tool-call path` };
 		if (!fitsTurnFacts(resolved, facts))
 			return {
 				reason:

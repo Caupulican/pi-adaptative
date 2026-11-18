@@ -3,6 +3,7 @@ import { ORIGINAL_TIMEOUTS, TIMEOUTS_PATH } from "./journey-5-plan-verify-reject
 import { runJourney9BudgetPhase } from "./journey-9-budget.ts";
 import { runJourney9FixAndOwnerPhase } from "./journey-9-fix-and-owner.ts";
 import { runJourney9HostCheckPhase } from "./journey-9-host-check.ts";
+import { runJourney9ModelReferencePhase } from "./journey-9-model-reference.ts";
 import { runJourney9OwnWordsPhase } from "./journey-9-own-words.ts";
 import { runJourney9RerunAndModelMovePhase } from "./journey-9-rerun-and-model-move.ts";
 import { runJourney9RouterFitnessPhase } from "./journey-9-router-fitness.ts";
@@ -36,6 +37,7 @@ export async function runJourney9(): Promise<void> {
 			await runJourney9HostCheckPhase(world);
 			await runJourney9RerunAndModelMovePhase(world);
 			await runJourney9WorktreeRerunPhase(world);
+			await runJourney9ModelReferencePhase(world);
 			await runJourney9RouterFitnessPhase(world);
 		},
 	);

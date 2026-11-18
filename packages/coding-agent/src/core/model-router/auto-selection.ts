@@ -10,7 +10,7 @@ import {
 	formatFitnessVerdict,
 	routerSurfaceForTier,
 } from "./fitness-gate.ts";
-import { isLocalOrManagedRouterModel } from "./tool-escalation.ts";
+import { hasKnownNoToolPath } from "./tool-escalation.ts";
 
 /**
  * Deterministic exact-model selection for an AUTO tier, bounded to the candidate pool.
@@ -118,7 +118,7 @@ function admit(tier: AutoSelectionTier, model: Model<Api>, deps: AutoSelectionDe
 	const reasons: string[] = [];
 	if (!deps.hasConfiguredAuth(model)) reasons.push("auth_missing");
 	if (deps.isExhausted(model)) reasons.push("quota_exhausted");
-	if (isLocalOrManagedRouterModel(model) && deps.toolProbeVerdict(model) === "none") reasons.push("no_tool_path");
+	if (hasKnownNoToolPath(model, (candidate) => deps.toolProbeVerdict(candidate))) reasons.push("no_tool_path");
 	const fitness = deps.fitness(routerSurfaceForTier(tier), model);
 	if (deps.fitnessGate && !fitness.fit) reasons.push("fitness_gate");
 	return {

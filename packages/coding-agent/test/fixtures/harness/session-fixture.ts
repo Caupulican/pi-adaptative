@@ -3741,6 +3741,8 @@ export class HarnessWorld {
 			readonly model?: CreateAgentSessionOptions["model"];
 			/** A real SDK registry containing every scripted routing track; omitted keeps the world's registry and metadata. */
 			readonly modelRegistry?: ModelRegistry;
+			/** Additional registered tracks included in this session's explicit SDK router scope. */
+			readonly additionalRouterModels?: readonly { provider: string; modelId: string }[];
 			/** This session's System One mode: the world's transport and settings stay as they are; only this session's binding changes. */
 			readonly systemOneEnabled?: boolean;
 			/** An owner-authored host profile owns the root's model and tools; the SDK forbids a model option alongside it. */
@@ -3810,6 +3812,11 @@ export class HarnessWorld {
 				throw new Error(`The supplied harness registry has no ${HARNESS_PROVIDER}/${id} track`);
 			return { model };
 		});
+		for (const { provider, modelId } of options.additionalRouterModels ?? []) {
+			const model = modelRegistry.find(provider, modelId);
+			if (!model) throw new Error(`Missing scoped harness model ${provider}/${modelId}`);
+			routerModels.push({ model });
+		}
 		const model =
 			options.model ??
 			(options.modelRegistry === undefined

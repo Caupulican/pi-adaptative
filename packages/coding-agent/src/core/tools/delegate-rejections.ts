@@ -12,12 +12,12 @@ import { laneWorkerRefusalSkipRemedy } from "../model-capability.ts";
 import type { CommsErrCode, CommsHintCode } from "../provider-prompt-contracts.ts";
 
 const START_EXAMPLE = '{"action":"start","instructions":"<worker brief>"}';
-const MODEL_OVERRIDE = '"model":{"provider":"<provider>","modelId":"<model-id>"}';
+const MODEL_START_EXAMPLE = '{"action":"start","model":"sol","instructions":"<worker brief>"}';
 const FOLLOW_UP_EXAMPLE = '{"action":"follow_up","agentId":"<returned agentId>","message":"<follow-up>"}';
 
 export function delegateCallGuidance(actions: readonly string[]): string {
 	return [
-		actions.includes("start") && `Start ${START_EXAMPLE}. To select a model add ${MODEL_OVERRIDE}.`,
+		actions.includes("start") && `Start ${START_EXAMPLE}. To select a favorite: ${MODEL_START_EXAMPLE}.`,
 		actions.includes("follow_up") && `Continue ${FOLLOW_UP_EXAMPLE}.`,
 	]
 		.filter(Boolean)
@@ -27,16 +27,14 @@ export function delegateCallGuidance(actions: readonly string[]): string {
 /** Correct a rejected shape without copying its brief into the prompt or executing an inferred action. */
 export function delegateValidationCorrection(args: unknown, actions: readonly string[]): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
-	const { action = "start", model } = args as Record<string, unknown>;
+	const { action = "start" } = args as Record<string, unknown>;
 	if (typeof action !== "string" || !actions.includes(action)) {
 		if (action === "spawn" && actions.includes("start"))
-			return `Use ${START_EXAMPLE} with the original brief. To select a model add ${MODEL_OVERRIDE}.`;
+			return `Use ${START_EXAMPLE} with the original brief. To select a favorite: ${MODEL_START_EXAMPLE}.`;
 		if (action === "followup" && actions.includes("follow_up"))
 			return `Use ${FOLLOW_UP_EXAMPLE} with the original message.`;
 		return `Available delegate actions: ${actions.join(", ")}. ${delegateCallGuidance(actions)}`.trim();
 	}
-	if (action === "start" && typeof model === "string")
-		return `Keep the brief in instructions and supply ${MODEL_OVERRIDE}.`;
 	return undefined;
 }
 
@@ -71,6 +69,9 @@ interface RejectionShape {
 
 /** How a dispatch-level skip reason maps to an error class, field and hint. A reason absent here is a state refusal. */
 const DELEGATE_REJECTION_SHAPES: Readonly<Record<string, RejectionShape>> = {
+	delegate_model_reference_unknown: { c: "E_REF", f: "model", h: "USE_ID" },
+	delegate_model_reference_ambiguous: { c: "E_REF", f: "model", h: "USE_ID" },
+	delegate_model_reference_unavailable: { c: "E_STATE", f: "model", h: "ASK_OWNER" },
 	invalid_action: { c: "E_FIELD", f: "action", input: true },
 	action_unavailable: { c: "E_STATE", f: "action" },
 	action_field_forbidden: { c: "E_FIELD", h: "DROP_FIELD", input: true },

@@ -2022,7 +2022,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			integrationBranch: () => this._edgeIntent.localCommitBranch() || undefined,
 			getModelRegistry: () => this._modelRegistry,
-			getPeerReviewModels: (selectedRef) =>
+			getScopedModelCandidates: (selectedRef) =>
 				this._edgeIntent.modelPolicy.allowed(this.getRouterCandidatePool(selectedRef).models),
 			isModelExhausted: (model) => this._modelAccess.isUnusable(model),
 			getResourceLoader: () => this._resourceLoader,

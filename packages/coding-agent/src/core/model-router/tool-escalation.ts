@@ -1,6 +1,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ModelTier } from "../autonomy/contracts.ts";
+import type { ModelToolProbeVerdict } from "../models/adaptation-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
@@ -28,6 +29,14 @@ export function isLocalOrManagedRouterModel(model: Model<Api>): boolean {
 		model.provider === HF_TRANSFORMERS_PROVIDER ||
 		isPiManagedPrismLlamaCppModel(model)
 	);
+}
+
+/** The local/managed tool-path gate is independent of opt-in fitness and never reads cloud probe verdicts. */
+export function hasKnownNoToolPath(
+	model: Model<Api>,
+	verdict: (model: Model<Api>) => ModelToolProbeVerdict | undefined,
+): boolean {
+	return isLocalOrManagedRouterModel(model) && verdict(model) === "none";
 }
 
 const READ_ONLY_TOOL_NAMES = new Set([

@@ -222,6 +222,7 @@ import { buildShellSessionContext } from "./tools/bash.ts";
 import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
+import { bindDelegateModelResolver } from "./tools/delegate-model-reference.ts";
 import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
@@ -237,6 +238,7 @@ import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createPeerReviewToolDefinition } from "./tools/peer-review.ts";
 import { createPipelineToolDefinition } from "./tools/pipeline.ts";
+import { bindTaskProfileWriter } from "./tools/profile-writer.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
@@ -369,7 +371,7 @@ export interface RuntimeBuilderDeps {
 	/** Model registry, passed to the extension runner and profile model re-resolution. */
 	getModelRegistry(): ModelRegistry;
 	/** Host routing pool for explicit stronger-peer reviews. */
-	getPeerReviewModels?(selectedRef?: string): readonly Model<Api>[];
+	getScopedModelCandidates?(selectedRef?: string): readonly Model<Api>[];
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
 	/** Extension/skill/prompt/theme discovery + the reload/commit/rollback generation swap. */
@@ -1638,13 +1640,13 @@ export class RuntimeBuilder {
 							this.deps.getAgentDir(),
 						)
 					: undefined;
-			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {
+			if (this.deps.getScopedModelCandidates && toolAccess.allows("peer")) {
 				this._peerReviewController ??= new PeerReviewController({
 					getLead: () => {
 						const state = this.deps.getAgent().state;
 						return state.model ? { model: state.model, thinkingLevel: state.thinkingLevel } : undefined;
 					},
-					getModels: (selectedRef) => this.deps.getPeerReviewModels?.(selectedRef) ?? [],
+					getModels: (selectedRef) => this.deps.getScopedModelCandidates?.(selectedRef) ?? [],
 					getAdvisorSettings: () => ({
 						...this.deps.getSettingsManager().getAdvisorSettings(),
 						revision: this.deps.getSettingsManager().getAdvisorSettingsRevision(),
@@ -2109,14 +2111,7 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows("delegate")) {
 				const workerAgentControl = this.deps.workerAgentControl;
-				const profileWriter =
-					workerAgentControl?.inspectTaskProfileOptions && workerAgentControl.createTaskProfile
-						? {
-								inspectTaskProfileOptions: () => workerAgentControl.inspectTaskProfileOptions!(),
-								createTaskProfile: (input: Parameters<TaskProfileWriterPort["createTaskProfile"]>[0]) =>
-									workerAgentControl.createTaskProfile!(input),
-							}
-						: undefined;
+				const profileWriter = bindTaskProfileWriter(workerAgentControl);
 				const delegateToolDefinition = createDelegateToolDefinition({
 					caller: { kind: "session_root" },
 					resolveMessageReplayScope: () => {
@@ -2148,6 +2143,7 @@ export class RuntimeBuilder {
 						? { describeWorkerGrant: (laneId: string) => this.deps.describeWorkerGrant?.(laneId) }
 						: {}),
 					orchestrationProfiles: this.deps.getOrchestrationProfileCatalog(),
+					resolveWorkerModelReference: bindDelegateModelResolver(this.deps),
 					workerModelPinPolicy: settingsManager.getWorkerModelPinPolicy(),
 					...(workerAgentControl ? { workerAgentControl } : {}),
 					status: {

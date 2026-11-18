@@ -344,9 +344,10 @@ export class ExpertSelectionService {
 			const exact = (card: ModelCapabilityCard) => card.thinkingLevels.includes(CATEGORY_THINKING[category]);
 			// Superseded last; then a model that runs the category's thinking level exactly before one that
 			// only reaches it by clamping (a fixed-preset variant for this level is that exact model).
-			ordered.sort(
+			tied.sort(
 				(a, b) => Number(known.has(a.ref)) - Number(known.has(b.ref)) || Number(exact(b)) - Number(exact(a)),
 			);
+			ordered.splice(0, tied.length, ...tied);
 		}
 		for (const card of ordered) {
 			const thinking = clampThinkingLevel(card.model, CATEGORY_THINKING[category]);

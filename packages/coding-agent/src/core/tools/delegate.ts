@@ -61,8 +61,6 @@ import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
-	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
@@ -79,6 +77,11 @@ import {
 	delegateEventPanelModel,
 	executeDelegateEventAction,
 } from "./delegate-events.ts";
+import {
+	type DelegateModelResolver,
+	delegateModelReferenceSchema,
+	resolveDelegateModelInput,
+} from "./delegate-model-reference.ts";
 import { BLOCK_AT_OCCURRENCE, RepeatedRejectionDetector, rejectionSignature } from "./delegate-rejection-signature.ts";
 import {
 	type DelegateErrRecord,
@@ -170,15 +173,6 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 	]
 		.filter((value): value is string => value !== undefined)
 		.join("; ");
-	const model = Type.Optional(
-		Type.Object(
-			{
-				provider: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH }),
-				modelId: Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_MODEL_ID_LENGTH }),
-			},
-			{ additionalProperties: false },
-		),
-	);
 	const thinkingLevel = Type.Optional(Type.Union(ORCHESTRATION_THINKING_LEVELS.map((level) => Type.Literal(level))));
 	const toolNames = Type.Optional(
 		Type.Array(
@@ -210,7 +204,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 					description: "Loaded profile preset; omit to inherit the foreground base.",
 				}),
 			),
-			model,
+			model: delegateModelReferenceSchema,
 			thinkingLevel,
 			path: Type.Optional(
 				Type.String({
@@ -518,6 +512,9 @@ function isDelegateAction(value: string): value is DelegateAction {
 }
 
 export type DelegateToolInput = Static<typeof delegateSchema>;
+type ResolvedDelegateToolInput = Omit<DelegateToolInput, "model"> & {
+	model?: Exclude<DelegateToolInput["model"], string>;
+};
 
 type DelegateInputField = keyof DelegateToolInput;
 
@@ -1391,6 +1388,7 @@ type DelegateStartOutcome =
 	  };
 
 export interface DelegateToolDependencies {
+	resolveWorkerModelReference?: DelegateModelResolver;
 	startWorkerDelegation?: (
 		args: WorkerDelegationRequest,
 		signal?: AbortSignal,
@@ -1490,8 +1488,7 @@ const ASYNC_DELEGATE_DESCRIPTION_SUFFIX =
 	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn, read the report after the handoff (delegate status; transcript pages on demand, or in full when the handoff says h READ_ALL), and use wait/wait_many only when this turn cannot proceed without the result.";
 
 // Fresh-start authority clause; an owner model pin policy replaces it (see createDelegateToolDefinition).
-const DELEGATE_AUTHORITY_CLAUSE =
-	"Fresh start: omit overrides to inherit; allowed overrides are model, thinkingLevel, path, writePaths, toolNames, with existing ids only.";
+const DELEGATE_AUTHORITY_CLAUSE = `Fresh start: omit overrides to inherit. Allowed overrides are model, thinkingLevel, path, writePaths, and toolNames. Use agentId only to reuse an existing worker. ${delegateCallGuidance(["start"])}`;
 
 function delegatePanelModel(details: DelegateToolDetails | undefined): OrchestrationPanelModel {
 	if (!details) {
@@ -1863,7 +1860,7 @@ function buildDelegateStartRequest(input: {
 	instructions: string;
 	/** The structured task `instructions` was rendered from; stored beside it on the dispatch. */
 	brief?: TaskBrief;
-	toolInput: DelegateToolInput;
+	toolInput: ResolvedDelegateToolInput;
 	requirementIds: readonly string[];
 	dependsOnTaskIds?: readonly string[];
 	messageReplayKey?: string;
@@ -1938,7 +1935,7 @@ async function executeDelegateFanoutStart(args: {
 	deps: DelegateToolDependencies;
 	caller: DelegateCaller;
 	toolCallId: string;
-	input: DelegateToolInput;
+	input: ResolvedDelegateToolInput;
 	instructions: string;
 	requirementIds: readonly string[];
 	dependsOnTaskIds: readonly string[] | undefined;
@@ -2119,10 +2116,14 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			getValidationCorrection: (args) => delegateValidationCorrection(args, availableActions),
 		},
 		execute: screenedExecution(availableActions, rejections, async (toolCallId, screened, signal) => {
-			const { action, input, brief, agentIds, dependsOnTaskIds } = screened;
+			const { action, brief, agentIds, dependsOnTaskIds } = screened;
 			// Every refusal is an `err` record: the class, field and hint come from the skip reason's table entry.
 			const invalid = (message: string, actionDetails: DelegateToolDetails, overrides?: RejectionOverrides) =>
 				refusalResult(delegateRejection(actionDetails.skipReason, message, overrides), actionDetails);
+			const resolved = resolveDelegateModelInput(screened.input, deps.resolveWorkerModelReference);
+			if (!resolved.ok)
+				return invalid(resolved.message, { started: false, action, skipReason: resolved.skipReason });
+			const input: ResolvedDelegateToolInput = resolved.input;
 			const requireAgentId = (): string | undefined => {
 				const agentId = input.agentId?.trim();
 				if (agentId) return agentId;
@@ -3050,7 +3051,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						}
 						return invalid(
 							skipReason === "unknown_agent"
-								? `unknown_agent: no reusable worker named ${reuseAgentId} in this caller's control scope; nothing started or dropped. For fresh work omit agentId and keep instructions unchanged (put any overrides or profileId on that fresh start); for reuse use an exact returned agentId.`
+								? `unknown_agent: no reusable worker named ${reuseAgentId} in this caller's control scope; nothing started or dropped. For a fresh worker, omit agentId and keep instructions unchanged. To name a model, use model (e.g. model: "sol"); to reuse a worker, use its returned agentId.`
 								: `delegate start could not reuse worker ${reuseAgentId}: ${skipReason}`,
 							{
 								started: false,

@@ -3,6 +3,74 @@ import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { findRenamedFreeTierModel } from "../model-registry.ts";
+import {
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+} from "../orchestration/contracts.ts";
+
+type WorkerModelReference = { provider: string; modelId: string };
+
+export type WorkerModelReferenceResolution =
+	| { ok: true; model: WorkerModelReference }
+	| { ok: false; reason: "unknown" | "ambiguous" | "unavailable"; candidates: readonly string[] };
+
+/** Resolve a delegate shorthand by configured identity before availability can bias an ambiguous match. */
+export function resolveWorkerModelReference(
+	reference: string,
+	context?: {
+		favorites: readonly WorkerModelReference[];
+		catalog(): readonly Model<Api>[];
+		available(): readonly Model<Api>[];
+	},
+): WorkerModelReferenceResolution {
+	const ref = reference.trim();
+	const separator = ref.indexOf("/");
+	if (separator >= 0) {
+		const provider = ref.slice(0, separator);
+		const modelId = ref.slice(separator + 1);
+		return provider &&
+			modelId &&
+			provider.length <= MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH &&
+			modelId.length <= MAX_ORCHESTRATION_MODEL_ID_LENGTH &&
+			!/\s/.test(ref)
+			? { ok: true, model: { provider, modelId } }
+			: { ok: false, reason: "unknown", candidates: [] };
+	}
+	const favorites = context?.favorites ?? [];
+	const needle = ref.toLowerCase();
+	let matches = favorites.filter(({ modelId }) => modelId.toLowerCase() === needle);
+	if (!matches.length && favorites.length && context) {
+		// Keep version numbers intact. "Sol 6.2" and "gpt-6.2-sol" can name the same favorite.
+		const tokens = (value: string): string[] => value.toLowerCase().match(/[\p{L}\p{N}]+(?:\.[\p{N}]+)*/gu) ?? [];
+		const wanted = tokens(ref);
+		const favoriteRefs = new Set(favorites.map(({ provider, modelId }) => `${provider}/${modelId}`));
+		const names = new Map<string, string>();
+		for (const model of context.catalog()) {
+			const key = `${model.provider}/${model.id}`;
+			if (favoriteRefs.has(key)) names.set(key, model.name);
+		}
+		const nameOf = ({ provider, modelId }: WorkerModelReference) => names.get(`${provider}/${modelId}`) ?? "";
+		matches = favorites.filter((favorite) => needle !== "" && nameOf(favorite).toLowerCase() === needle);
+		if (!matches.length && wanted.length) {
+			matches = favorites.filter((favorite) =>
+				[favorite.modelId, nameOf(favorite)].some((label) => {
+					const parts = tokens(label);
+					return wanted.every((token) => parts.includes(token));
+				}),
+			);
+		}
+	}
+	const candidates = (models: readonly WorkerModelReference[]) =>
+		models.slice(0, 4).map(({ provider, modelId }) => `${provider}/${modelId}`);
+	if (matches.length === 0) return { ok: false, reason: "unknown", candidates: candidates(favorites) };
+	if (matches.length > 1) return { ok: false, reason: "ambiguous", candidates: candidates(matches) };
+	const model = matches[0]!;
+	if (
+		!context?.available().some((candidate) => candidate.provider === model.provider && candidate.id === model.modelId)
+	)
+		return { ok: false, reason: "unavailable", candidates: candidates(matches) };
+	return { ok: true, model: { provider: model.provider, modelId: model.modelId } };
+}
 
 /**
  * Favorites define router eligibility. An explicit Models configuration, CLI/SDK scope or selector
@@ -63,19 +131,25 @@ export function resolveRouterCandidatePool(
 	};
 
 	const available = filterDisabled(registry.getAvailable());
+	const availableKeys = new Set(available.map((model) => `${model.provider}\0${model.id}`));
 	const resolvedFavoriteKeys = new Set<string>();
 	for (const favorite of options.favorites) {
-		const exact = available.find((m) => m.provider === favorite.provider && m.id === favorite.modelId);
-		const target = exact ?? findRenamedFreeTierModel(available, favorite.provider, favorite.modelId);
+		const key = `${favorite.provider}\0${favorite.modelId}`;
+		if (availableKeys.has(key)) {
+			resolvedFavoriteKeys.add(key);
+			continue;
+		}
+		const target = findRenamedFreeTierModel(available, favorite.provider, favorite.modelId);
 		if (target) {
 			resolvedFavoriteKeys.add(`${target.provider}\0${target.id}`);
 		}
 	}
+	const scopedKeys = pool && new Set(pool.models.map((model) => `${model.provider}\0${model.id}`));
 	const models = available.filter(
 		(model) =>
 			(resolvedFavoriteKeys.has(`${model.provider}\0${model.id}`) ||
 				options.selectedAdvisorRef === `${model.provider}/${model.id}`) &&
-			(!pool || pool.models.some((scoped) => modelsAreEqual(scoped, model))),
+			(!scopedKeys || scopedKeys.has(`${model.provider}\0${model.id}`)),
 	);
 	const resolved: RouterCandidatePool = {
 		customized: pool !== undefined,

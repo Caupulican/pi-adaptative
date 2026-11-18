@@ -29,6 +29,17 @@ export interface DelegateProfileToolDetails extends TaskProfileCreateResult {
 	inspection?: TaskProfileInspection;
 }
 
+/** The paired inspection and creation operations belong to the same host writer. */
+export function bindTaskProfileWriter(
+	source: Partial<TaskProfileWriterPort> | undefined,
+): TaskProfileWriterPort | undefined {
+	if (!source?.inspectTaskProfileOptions || !source.createTaskProfile) return undefined;
+	return {
+		inspectTaskProfileOptions: source.inspectTaskProfileOptions.bind(source),
+		createTaskProfile: source.createTaskProfile.bind(source),
+	};
+}
+
 export function createDelegateProfileParameterSchemas() {
 	return {
 		task: Type.Optional(Type.String({ minLength: 1, maxLength: 3_500 })),
