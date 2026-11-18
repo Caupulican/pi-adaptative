@@ -670,7 +670,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 						type: "toolCall",
 						id: "late-write-1",
 						name: "write",
-						arguments: { path: "src/late.ts", content: "export const LATE = true;\n" },
+						arguments: { path: "src/late.ts", content: "export const LATE = false;\n" },
 					},
 				],
 				stopReason: "toolUse",
@@ -926,7 +926,10 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	).toBeUndefined();
 	expect(readerWarnings, "the reader control emits no warnings").toEqual([]);
 
-	// The same persistent agent takes a new turn: its write is the current evidence, and its truthful report is the admitted repair.
+	expect(world.io.readFileSync(`${lateLane}/src/late.ts`, "utf8"), "the adverse attempt left the initial module").toBe(
+		"export const LATE = false;\n",
+	);
+	// The same persistent agent edits its existing file in the new turn, so the truthful report has a current mutation receipt.
 	// The old phase is physically queued-empty before the distinct repair is appended: no worker-b step from it can serve the follow-up.
 	expect(
 		world.provider.getPendingStepNames("worker-b"),
@@ -935,7 +938,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	world.provider.enqueue(
 		"worker-b",
 		{
-			name: "late-repair-write",
+			name: "late-repair-edit",
 			check: () => {
 				lateRepairStarted.release();
 			},
@@ -943,25 +946,35 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 				content: [
 					{
 						type: "toolCall",
-						id: "late-repair-write-1",
-						name: "write",
-						arguments: { path: "src/late.ts", content: "export const LATE = true;\n" },
+						id: "late-repair-edit-1",
+						name: "edit",
+						arguments: {
+							path: "src/late.ts",
+							edits: [{ oldText: "LATE = false", newText: "LATE = true" }],
+						},
 					},
 				],
 				stopReason: "toolUse",
 			},
 		},
-		calls("late-current", [
-			{
-				id: "late-report-1",
-				name: "submit_report",
-				arguments: {
-					status: "completed",
-					summary: "LATE-CURRENT-REPORT: the lane is reported.",
-					changes: [{ file: "src/late.ts", what: "Exports the LATE flag from the late module." }],
+		{
+			...calls("late-current", [
+				{
+					id: "late-report-1",
+					name: "submit_report",
+					arguments: {
+						status: "completed",
+						summary: "LATE-CURRENT-REPORT: the lane is reported.",
+						changes: [{ file: "src/late.ts", what: "Exports the LATE flag from the late module." }],
+					},
 				},
+			]),
+			check: (request) => {
+				expect(latestBatchResults(request), "the repair report follows a successful edit").toEqual([
+					expect.objectContaining({ toolName: "edit", isError: false }),
+				]);
 			},
-		]),
+		},
 	);
 	// Readiness through the existing public wait: idle is reported only once the specialist is settled, so the repair never
 	// races release of the adverse attempt's tools and resource holds. The public ready predicate does not join the outer
@@ -993,7 +1006,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	expect(repair.started, "the follow-up admits a new turn on the same persistent agent").toBe(true);
 	lateRepairTaskId = repair.record?.laneId;
 	if (lateRepairTaskId === undefined) throw new Error("the follow-up admitted no task");
-	await withDeadline(trace, "repair write starts", lateRepairStarted.promise, 60_000);
+	await withDeadline(trace, "repair edit starts", lateRepairStarted.promise, 60_000);
 	await withDeadline(trace, "truthful handoff", lateHanded.promise, 60_000);
 	await withDeadline(trace, "late handoff settled", session.waitForForegroundIdle(), 60_000);
 	const admitted = Object.values(session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).filter(

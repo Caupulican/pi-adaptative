@@ -3577,6 +3577,8 @@ export class HarnessWorld {
 		holds: (seen: readonly string[]) => boolean;
 		resolve: () => void;
 	}>();
+	/** Candidate origins include earlier, already asserted occurrences of the same text. */
+	private readonly warningOrigins = new Map<string, Set<string>>();
 	private readonly warningAllowances: readonly RegExp[];
 	private readonly everySession: AgentSession[] = [];
 	/** Immutable disposal certificates: a disposed owner's snapshot taken at disposal, and the exact claims it keeps by design. */
@@ -3878,7 +3880,7 @@ export class HarnessWorld {
 			// supplies its own sink (`null`: none).
 			onClosingWarnings:
 				options.closingSink === undefined
-					? (warnings) => this.noteWarnings(warnings)
+					? (warnings) => this.noteWarnings(warnings, agentDir)
 					: (options.closingSink ?? undefined),
 			authStorage: this.authStorage,
 			modelRegistry,
@@ -3954,7 +3956,7 @@ export class HarnessWorld {
 			this.recordIsolatedCompletion(trace.observe(runIsolatedCompletion(...args)));
 		this.warningSubscriptions.push(
 			session.subscribe((event) => {
-				if (event.type === "warning") this.noteWarnings([event.message]);
+				if (event.type === "warning") this.noteWarnings([event.message], agentDir);
 			}),
 		);
 		this.everySession.push(session);
@@ -3978,7 +3980,13 @@ export class HarnessWorld {
 		});
 	}
 
-	private noteWarnings(messages: readonly string[]): void {
+	private noteWarnings(messages: readonly string[], agentDir: string): void {
+		const origin = `${agentDir} after ${this.provider.reached.at(-1) ?? "session startup"}`;
+		for (const message of messages) {
+			const origins = this.warningOrigins.get(message) ?? new Set<string>();
+			origins.add(origin);
+			this.warningOrigins.set(message, origins);
+		}
 		this.warnings.push(...messages);
 		for (const waiter of [...this.warningWaiters]) {
 			if (!waiter.holds(this.warnings.slice(waiter.mark))) continue;
@@ -4279,7 +4287,14 @@ export class HarnessWorld {
 					const unclassified = this.warnings.filter(
 						(message) => !this.warningAllowances.some((pattern) => pattern.test(message)),
 					);
-					if (unclassified.length > 0) throw new Error(`Unclassified warnings: ${JSON.stringify(unclassified)}`);
+					if (unclassified.length > 0) {
+						const origins = Object.fromEntries(
+							unclassified.map((line) => [line, [...(this.warningOrigins.get(line) ?? [])]]),
+						);
+						throw new Error(
+							`Unclassified warnings: ${JSON.stringify(unclassified)}. Observed at: ${JSON.stringify(origins)}`,
+						);
+					}
 				},
 			];
 			// Each manager's last window ends at close; no binding after it can extend it. Off windows report through the failure list.
