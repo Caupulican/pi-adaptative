@@ -98,3 +98,47 @@ it("audits a changing extension suffix without indexing it as durable history", 
 	]);
 	expect(next.items).toEqual(runContextAudit([...messages, replacement], { turnIndex: 2 }).items);
 });
+
+it("captures one metadata batch for retained and transient tool results and isolates delayed reports", () => {
+	const store = createInMemoryArtifactStore();
+	const write = { kind: "tool_output", createdAtTurn: 1, reproducible: true } as const;
+	const first = store.write({ ...write, content: "first" }).ref;
+	const second = store.write({ ...write, content: "second" }).ref;
+	const returned = new Map([
+		[first.id, first],
+		[second.id, second],
+	]);
+	const batches: string[][] = [];
+	let replay: (() => void) | undefined;
+	const artifactStore = {
+		...store,
+		visitRefs(ids: ReadonlySet<string>, visit: (id: string, ref: typeof first | undefined) => void) {
+			batches.push([...ids]);
+			replay = () => visit(first.id, first);
+			for (const id of ids) {
+				const ref = returned.get(id);
+				if (ref) visit(id, ref);
+			}
+		},
+		readRef(): never {
+			throw new Error("Audit requested individual metadata despite batch support");
+		},
+	};
+	const messages = createVersionedMessageHistory([immutableHistoryMessage(tool("persisted", "first", first.id))!]);
+	const work = observeHistoryWork(messages);
+	const audit = new ContextAuditHistory();
+	const report = audit.capture(messages, { turnIndex: 3, artifactStore }, undefined, [
+		tool("again", "first", first.id),
+		tool("additional", "second", second.id),
+	]);
+	first.createdAtTurn = 9;
+	replay?.();
+	returned.clear();
+	const missing = audit.capture(messages, { turnIndex: 4, artifactStore });
+	replay?.();
+	expect(batches).toEqual([[first.id, second.id], [first.id]]);
+	expect(work.auditArtifactRefsChecked).toBe(3);
+	expect(work.auditRowsMaterialized).toBe(0);
+	expect(report.items.map(({ item }) => item.createdAtTurn)).toEqual([1, 1, 1]);
+	expect(missing.items[0].item.primaryRef).toBeUndefined();
+});

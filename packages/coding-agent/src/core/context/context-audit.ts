@@ -28,7 +28,7 @@ import {
 	messageHistoryVersion,
 	unchangedMessagePrefix,
 } from "../../kernel/message-revision.ts";
-import type { ArtifactStore } from "./context-artifacts.ts";
+import { type ArtifactStore, readArtifactRefs } from "./context-artifacts.ts";
 import {
 	type ContextArtifactRef,
 	type ContextEvidenceRef,
@@ -285,23 +285,19 @@ function captureReport(
 	transients?: readonly AgentMessage[],
 ): ContextAuditReport {
 	const segments = [{ index, end: index.rows.length }];
+	let artifactIds = index.artifactIds;
 	if (transients?.length) {
 		const tail = emptyIndex();
 		indexSuffix(tail, transients, 0, messages.length, messages);
 		segments.push({ index: tail, end: tail.rows.length });
+		if (artifactStore && tail.artifactIds.size) {
+			artifactIds = new Set(index.artifactIds);
+			for (const id of tail.artifactIds) artifactIds.add(id);
+		}
 	}
 	const storeAvailable = artifactStore !== undefined;
-	const artifacts = new Map<string, ContextArtifactRef | undefined>();
-	if (artifactStore) {
-		for (const segment of segments) {
-			for (const id of segment.index.artifactIds) {
-				if (artifacts.has(id)) continue;
-				const ref = artifactStore.readRef(id);
-				artifacts.set(id, ref && { ...ref });
-			}
-		}
-		countHistoryWork(messages, "auditArtifactRefsChecked", artifacts.size);
-	}
+	const artifacts = artifactStore && artifactIds.size ? readArtifactRefs(artifactStore, artifactIds) : undefined;
+	if (artifacts) countHistoryWork(messages, "auditArtifactRefsChecked", artifactIds.size);
 	let canonical: ContextAuditItemReport[] | undefined;
 	function materialize(): ContextAuditItemReport[] {
 		if (canonical) return canonical;
@@ -310,7 +306,7 @@ function captureReport(
 			countHistoryWork(report, "auditRowsMaterialized", end);
 			for (let i = 0; i < end; i++) {
 				const row = index.rows[i];
-				const artifact = row.artifactId ? artifacts.get(row.artifactId) : undefined;
+				const artifact = row.artifactId ? artifacts?.get(row.artifactId) : undefined;
 				const built = buildToolOutputItem(row, turnIndex, artifact, sessionEntryIdForToolCallId?.(row.toolCallId));
 				result.push(evaluateRow(row, built, turnIndex, storeAvailable));
 			}

@@ -31,6 +31,7 @@ import {
 	readFileSync,
 	readSync,
 	rmdirSync,
+	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -71,6 +72,8 @@ export interface MissingArtifactMarker {
 export function isMissingArtifactMarker(value: ArtifactRecord | MissingArtifactMarker): value is MissingArtifactMarker {
 	return (value as MissingArtifactMarker).missing === true;
 }
+
+type ArtifactRefVisitor = (id: string, ref: ContextArtifactRef | undefined) => void;
 
 /**
  * Artifact id for a capture event, not merely a payload: it hashes every ref-defining
@@ -128,6 +131,12 @@ export interface ArtifactStore {
 	 * never pays the cost of reading potentially large content off disk.
 	 */
 	readRef(id: string): ContextArtifactRef | undefined;
+	/**
+	 * Visit each resolved id once, synchronously and without loading payloads. Visit an
+	 * unavailable id with an undefined ref to preserve its failure across lineage lookups.
+	 * Omit confirmed misses.
+	 */
+	visitRefs?(ids: ReadonlySet<string>, visit: ArtifactRefVisitor): void;
 	has(id: string): boolean;
 	/**
 	 * Register that `holderId` (a context item id, session entry id, etc.) depends on this
@@ -141,6 +150,45 @@ export interface ArtifactStore {
 	referenceCount(id: string): number;
 	/** Delete only artifacts with zero active references. Returns the ids actually deleted. */
 	cleanup(): string[];
+}
+
+/** Return request-owned metadata, including when a custom store reuses its records. */
+export function readArtifactRefs(
+	store: ArtifactStore,
+	ids: ReadonlySet<string>,
+): ReadonlyMap<string, ContextArtifactRef> {
+	const refs = new Map<string, ContextArtifactRef>();
+	visitArtifactRefs(store, ids, (id, ref) => {
+		if (ref && !refs.has(id)) refs.set(id, { ...ref });
+	});
+	return refs;
+}
+
+function visitArtifactRefs(store: ArtifactStore, ids: ReadonlySet<string>, visit: ArtifactRefVisitor): void {
+	if (ids.size === 0) return;
+	if (store.visitRefs) {
+		let visiting = true;
+		try {
+			store.visitRefs(ids, (id, ref) => {
+				if (visiting && ids.has(id)) visit(id, ref?.id === id ? ref : undefined);
+			});
+		} finally {
+			visiting = false;
+		}
+		return;
+	}
+	for (const id of ids) {
+		const ref = store.readRef(id);
+		if (ref) visit(id, ref.id === id ? ref : undefined);
+	}
+}
+
+function readSingleArtifactRef(store: ArtifactStore, id: string): ContextArtifactRef | undefined {
+	let ref: ContextArtifactRef | undefined;
+	visitArtifactRefs(store, new Set([id]), (_id, found) => {
+		ref = found;
+	});
+	return ref;
 }
 
 interface StoredArtifact {
@@ -281,6 +329,14 @@ function metaPath(baseDir: string, id: string): string {
 	return join(baseDir, `${id}${META_SUFFIX}`);
 }
 
+/** Either directory entry, including a dangling symlink, makes absence unproven. */
+function hasArtifactFiles(baseDir: string, id: string, payload: string): boolean {
+	return (
+		lstatSync(metaPath(baseDir, id), { throwIfNoEntry: false }) !== undefined ||
+		lstatSync(payload, { throwIfNoEntry: false }) !== undefined
+	);
+}
+
 function referencesDir(baseDir: string, id: string): string {
 	return join(baseDir, `${id}${REFERENCES_SUFFIX}`);
 }
@@ -329,7 +385,6 @@ function isValidPersistedArtifactMeta(value: unknown): value is PersistedArtifac
 
 function readMeta(baseDir: string, id: string): PersistedArtifactMeta | undefined {
 	const path = metaPath(baseDir, id);
-	if (!existsSync(path)) return undefined;
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		return isValidPersistedArtifactMeta(parsed) ? parsed : undefined;
@@ -425,7 +480,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 		}
 	};
 
-	return {
+	const store: ArtifactStore = {
 		write(request: ArtifactWriteRequest): ArtifactRecord {
 			ensureBaseDir();
 			const id = generateArtifactId(request);
@@ -461,17 +516,14 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 					const meta = readMeta(baseDir, id);
 					const pPath = payloadPath(baseDir, id);
 					if (!meta) {
-						const metadataExists = lstatSync(metaPath(baseDir, id), { throwIfNoEntry: false }) !== undefined;
-						const payloadExists = lstatSync(pPath, { throwIfNoEntry: false }) !== undefined;
 						return {
 							id,
 							missing: true,
-							reason:
-								metadataExists || payloadExists
-									? "unavailable"
-									: cleanedUpThisInstance.has(id)
-										? "cleaned_up"
-										: "not_found",
+							reason: hasArtifactFiles(baseDir, id, pPath)
+								? "unavailable"
+								: cleanedUpThisInstance.has(id)
+									? "cleaned_up"
+									: "not_found",
 						};
 					}
 					if (meta.ref.id !== id) return { id, missing: true, reason: "unavailable" };
@@ -484,17 +536,45 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 		},
 
 		readRef(id: string): ContextArtifactRef | undefined {
-			if (!isSafeArtifactId(id)) return undefined;
-			if (!ensureExistingBaseDir()) return undefined;
-			const meta = readMeta(baseDir, id);
-			if (!meta || !existsSync(payloadPath(baseDir, id))) return undefined;
-			return meta.ref;
+			return readSingleArtifactRef(store, id);
+		},
+		visitRefs(ids, visit) {
+			let directory: "present" | "absent" | "unavailable" | undefined;
+			for (const id of ids) {
+				if (!isSafeArtifactId(id)) continue;
+				if (directory === undefined) {
+					try {
+						directory = ensureExistingBaseDir()
+							? "present"
+							: lstatSync(baseDir, { throwIfNoEntry: false })
+								? "unavailable"
+								: "absent";
+					} catch {
+						directory = "unavailable";
+					}
+				}
+				if (directory === "absent") break;
+				if (directory === "unavailable") {
+					visit(id, undefined);
+					continue;
+				}
+				let ref: ContextArtifactRef | undefined;
+				try {
+					const meta = readMeta(baseDir, id);
+					const payload = payloadPath(baseDir, id);
+					if (!meta && !hasArtifactFiles(baseDir, id, payload)) continue;
+					if (meta?.ref.id === id && statSync(payload, { throwIfNoEntry: false })?.isFile()) {
+						ref = meta.ref;
+					}
+				} catch {
+					// Access failed and absence cannot be confirmed.
+				}
+				visit(id, ref);
+			}
 		},
 
 		has(id: string): boolean {
-			if (!isSafeArtifactId(id)) return false;
-			if (!ensureExistingBaseDir()) return false;
-			return readMeta(baseDir, id) !== undefined && existsSync(payloadPath(baseDir, id));
+			return store.readRef(id) !== undefined;
 		},
 
 		addReference(id: string, holderId: string): boolean {
@@ -567,6 +647,7 @@ export function createFileArtifactStore(options: FileArtifactStoreOptions): Arti
 			return deleted;
 		},
 	};
+	return store;
 }
 
 /**
@@ -589,7 +670,7 @@ export function createLineageArtifactStore(
 	};
 	const confirmedAbsent = (value: ArtifactRecord | MissingArtifactMarker): boolean =>
 		isMissingArtifactMarker(value) && value.reason !== "unavailable";
-	return {
+	const store: ArtifactStore = {
 		write: (request) => own.write(request),
 		read(id: string, options?: ArtifactReadOptions): ArtifactRecord | MissingArtifactMarker {
 			const owned = own.read(id, options);
@@ -601,18 +682,25 @@ export function createLineageArtifactStore(
 			return owned;
 		},
 		readRef(id: string): ContextArtifactRef | undefined {
-			const owned = own.readRef(id);
-			if (owned) return owned;
-			for (const ancestor of lineage()) {
-				const inherited = ancestor.readRef(id);
-				if (inherited) return inherited;
-			}
-			return undefined;
+			return readSingleArtifactRef(store, id);
 		},
-		has: (id) => own.has(id) || lineage().some((ancestor) => ancestor.has(id)),
+		visitRefs(ids, visit) {
+			const unresolved = new Set(ids);
+			const resolve: ArtifactRefVisitor = (id, ref) => {
+				if (unresolved.delete(id)) visit(id, ref);
+			};
+			visitArtifactRefs(own, unresolved, resolve);
+			if (unresolved.size === 0) return;
+			for (const ancestor of lineage()) {
+				visitArtifactRefs(ancestor, unresolved, resolve);
+				if (unresolved.size === 0) break;
+			}
+		},
+		has: (id) => store.readRef(id) !== undefined,
 		addReference: (id, holderId) => own.addReference(id, holderId),
 		removeReference: (id, holderId) => own.removeReference(id, holderId),
 		referenceCount: (id) => own.referenceCount(id),
 		cleanup: () => own.cleanup(),
 	};
+	return store;
 }
