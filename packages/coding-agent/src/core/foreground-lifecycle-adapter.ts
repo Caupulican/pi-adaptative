@@ -98,8 +98,9 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.install();
 	}
 
-	start(): void {
+	start(borrowProviderSnapshotSource = false): void {
 		this.install();
+		if (borrowProviderSnapshotSource) this.agent.allowBorrowedProviderSnapshotSource();
 		this.repair();
 	}
 

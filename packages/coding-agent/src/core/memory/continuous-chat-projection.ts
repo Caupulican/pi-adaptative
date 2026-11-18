@@ -5,6 +5,7 @@
 
 import type { TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
+import { immutableHistoryMessage, messageSourceOf } from "../../kernel/message-revision.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import { isContextPlanDispatchCurrent } from "../../kernel/provider-request-planner.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -187,7 +188,8 @@ export function resolveContinuousChatTurnStart(
 		const start = handle.startMessage;
 		if (start === undefined) return { error: "Continuous-chat turn has no start message." };
 		// Searched from the end: the turn's own messages are the tail, so this costs the turn, not the whole session.
-		const startIndex = messages.lastIndexOf(start);
+		const startSource = messageSourceOf(start);
+		const startIndex = messages.findLastIndex((message) => messageSourceOf(message) === startSource);
 		if (startIndex === -1) return { error: "Continuous-chat turn start is missing from the planned history." };
 		return { index: start.role === "compactionSummary" ? startIndex + 1 : startIndex };
 	}
@@ -293,7 +295,8 @@ function carriedHeadWire(records: readonly AgentMessage[], legendBlocks: readonl
 	const blocks: TextContent[] = texts.map((text, index) =>
 		index === texts.length - 1 ? { type: "text", text, cacheBoundary: true } : { type: "text", text },
 	);
-	return [...records.slice(0, -1), { ...last, content: blocks }];
+	const tail = { ...last, content: blocks };
+	return [...records.slice(0, -1), immutableHistoryMessage(tail) ?? tail];
 }
 
 /**
@@ -316,7 +319,10 @@ export function createContinuousChatPlanWrapper(
 	let frame: { handle: IcmTurnHandle; stateText: string; messages: AgentMessage[] } | undefined;
 	const frameFor = (handle: IcmTurnHandle, stateText: string): AgentMessage[] => {
 		if (frame?.handle === handle && frame.stateText === stateText) return frame.messages;
-		frame = { handle, stateText, messages: continuousChatFrameMessages(handle, stateText) };
+		const messages = continuousChatFrameMessages(handle, stateText).map(
+			(message) => immutableHistoryMessage(message) ?? message,
+		);
+		frame = { handle, stateText, messages };
 		return frame.messages;
 	};
 	// The frame legend's text as the blocks sent so far, across turns (see `legendBatches`).
@@ -380,7 +386,8 @@ export function createContinuousChatPlanWrapper(
 			},
 			signal,
 		);
-		const records = memoized?.records ?? plan.carriedRecords ?? [];
+		const records =
+			memoized?.records ?? (plan.carriedRecords ?? []).map((message) => immutableHistoryMessage(message) ?? message);
 		const legend = records.at(-1);
 		const legendBlocks =
 			legend !== undefined && isFrameLegend(legend) ? legendBatches(legendSent, carriedText(legend)) : [];

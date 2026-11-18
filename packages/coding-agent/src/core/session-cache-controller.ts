@@ -7,6 +7,8 @@
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { estimateTokens } from "../kernel/compaction/compaction.ts";
+import type { ProviderRequestSnapshotContext } from "../kernel/loop-config.ts";
+import { capturePublishedMessagePrefix, messageHistoryVersion } from "../kernel/message-revision.ts";
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { WorkerDelegationRunOutcome } from "./agent-session-contracts.ts";
@@ -86,6 +88,35 @@ export class SessionCacheController {
 		});
 		this.custody = this.guard.custody;
 		this.knowledge = this.guard.knowledge;
+	}
+
+	recordLastSentRequest({
+		model,
+		context,
+		sourceBoundary,
+		sourceContext,
+	}: Pick<ProviderRequestSnapshotContext, "model" | "context" | "sourceBoundary" | "sourceContext">): void {
+		const sessionManager = this.deps.getSessionManager();
+		const assertBranch = sessionManager.captureBranchContext();
+		const boundary = sourceBoundary ?? {
+			count: sourceContext.messages.length,
+			last: sourceContext.messages.at(-1),
+		};
+		// Unclassified extensions can retain and mutate raw rows without publishing an edit.
+		const prefixIsCurrent = messageHistoryVersion(sourceContext.messages)
+			? capturePublishedMessagePrefix(() => this.deps.getMessages(), boundary.count)
+			: () => false;
+		this.lastSentRequest = {
+			model,
+			context,
+			sourceBoundary: boundary,
+			assertSourceBranch: () => {
+				if (this.deps.getSessionManager() !== sessionManager)
+					throw new Error("The provider request belongs to an earlier session.");
+				assertBranch();
+				if (!prefixIsCurrent()) throw new Error("The accepted provider request prefix changed.");
+			},
+		};
 	}
 
 	/**

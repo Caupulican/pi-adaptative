@@ -1907,9 +1907,9 @@ export class AgentSession {
 			ownerInputPublications.persisted,
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
-			({ requestId, model, context, sourceContext }, deliveredNoteIds) => {
+			({ requestId, model, context, sourceContext, sourceBoundary }, deliveredNoteIds) => {
 				this._durableCustomMessageTurns.displayParentNotes(deliveredNoteIds);
-				this._cache.lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
+				this._cache.recordLastSentRequest({ model, context, sourceContext, sourceBoundary });
 				this._continuousChatPrefix.record(context, model);
 				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.
 				if (sourceContext.surfaceChange) {
@@ -1939,7 +1939,7 @@ export class AgentSession {
 			},
 			ownerInputPublications.uncertain,
 		);
-		this._foregroundLifecycle.start();
+		this._foregroundLifecycle.start(true);
 		this._reflection = new ReflectionController({
 			getModel: () => this.model,
 			getAgent: () => this.agent,
@@ -2558,12 +2558,15 @@ export class AgentSession {
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent, { publishesMessageEdits: true });
 		this._installAgentToolHooks();
 		this._providerRequestRuntime.install();
 		this._providerRequestRuntime.installTurnRefresh(
 			() => this._terminalHandoffs.flushProviderBoundary(),
 			() => this._durableCustomMessageTurns.flushParentSteers(),
+		);
+		this._providerRequestRuntime.isolateHistoryWhen(
+			() => !this._hasMutableEventListeners && this._extensionRunner.activeExtensions.length === 0,
 		);
 
 		this._runtimeBuilder.buildRuntime({
@@ -3432,6 +3435,8 @@ export class AgentSession {
 	 * never added here and never suppressed.
 	 */
 	private _earlyDisplayedUserMessages = new Set<AgentMessage>();
+	/** A listener may keep messages after unsubscribe, so this exposure is permanent for the session. */
+	private _hasMutableEventListeners = false;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = (event: AgentEvent): Promise<void> => this._agentEvents.handleAgentEvent(event);
@@ -3446,7 +3451,8 @@ export class AgentSession {
 	 * Session persistence is handled internally (saves messages on message_end).
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
 	 */
-	subscribe(listener: AgentSessionEventListener): () => void {
+	subscribe(listener: AgentSessionEventListener, options?: { publishesMessageEdits: true }): () => void {
+		if (!options?.publishesMessageEdits) this._hasMutableEventListeners = true;
 		this._eventListeners.push(listener);
 		this._foregroundLifecycle.emitPendingWarnings((message) => this._emit({ type: "warning", message }));
 
@@ -3507,7 +3513,7 @@ export class AgentSession {
 	 */
 	private _reconnectToAgent(): void {
 		if (this._unsubscribeAgent) return; // Already connected
-		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent, { publishesMessageEdits: true });
 	}
 
 	/**

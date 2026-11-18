@@ -123,6 +123,7 @@ import {
 import { WorkerRequestPrefix } from "./worker-request-prefix.ts";
 import { equalWorkerTranscriptValues } from "./worker-transcript-equality.ts";
 import { boundedTranscriptJsonBytes, projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
+import { WorkerTranscriptProviderHistory } from "./worker-transcript-provider-history.ts";
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
 export const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
@@ -266,6 +267,7 @@ interface WorkerConversationCore {
 	activeTranscriptCursors: number;
 	/** Sent-prefix marks carried across this conversation's runs in this process (see `requestPrefix`). */
 	requestPrefix?: WorkerRequestPrefix;
+	providerHistory?: WorkerTranscriptProviderHistory;
 }
 
 export interface WorkerTranscriptCommitCursor {
@@ -871,16 +873,25 @@ export class WorkerConversation {
 	}
 
 	/** Prepare to carry the previous request's marks only if the next request authenticates the same scope. */
-	requestPrefix(): WorkerRequestPrefix {
+	requestPrefix(history?: readonly Message[], cursor?: WorkerTranscriptCommitCursor): WorkerRequestPrefix {
 		const { core } = this;
 		const { generation, sessionManager } = core;
 		const assertBranch = sessionManager.captureBranchContext();
-		core.requestPrefix ??= new WorkerRequestPrefix();
-		return core.requestPrefix.beginRun(() => {
-			if (core.invalid || core.generation !== generation || core.sessionManager !== sessionManager)
-				throw new WorkerConversationOwnershipError("Worker prefix belongs to an earlier transcript generation.");
-			assertBranch();
-		});
+		const owner = cursor && workerTranscriptCommitCursorStates.get(cursor);
+		const overlap = cursor !== undefined && core.activeTranscriptCursors !== 1;
+		if (overlap) core.requestPrefix = undefined;
+		else core.requestPrefix ??= new WorkerRequestPrefix();
+		const prefix = core.requestPrefix ?? new WorkerRequestPrefix();
+		return prefix.beginRun(
+			() => {
+				if (core.invalid || core.generation !== generation || core.sessionManager !== sessionManager)
+					throw new WorkerConversationOwnershipError("Worker prefix belongs to an earlier transcript generation.");
+				if ((!overlap && core.requestPrefix !== prefix) || (cursor && owner?.core !== core))
+					throw new WorkerConversationOwnershipError("Worker prefix belongs to another transcript attempt.");
+				assertBranch();
+			},
+			!overlap && core.providerHistory?.ownsReplay(history) ? history : undefined,
+		);
 	}
 
 	/** A view carries its original claim; refreshing a shared parsed core never grants new authority. */
@@ -911,14 +922,21 @@ export class WorkerConversation {
 		return reference ? structuredClone(reference) : undefined;
 	}
 
-	/** Resolve current provider-visible messages lazily through SessionManager. */
-	getProviderContext(): SessionContext {
-		return this.sessionManager.buildSessionContext();
+	private get providerHistory(): WorkerTranscriptProviderHistory {
+		this.core.providerHistory ??= new WorkerTranscriptProviderHistory();
+		return this.core.providerHistory;
 	}
 
-	/** Convert the current compacted projection at its transcript owner, never at each consumer. */
+	getProviderContext(): SessionContext {
+		return this.providerHistory.inspect(this, this.sessionManager, !!this.core.head);
+	}
+
 	getProviderMessages(): Message[] {
 		return convertToLlm(this.getProviderContext().messages);
+	}
+
+	cacheResponseHistory(): ReturnType<WorkerTranscriptProviderHistory["cacheResponseHistory"]> {
+		return this.providerHistory.cacheResponseHistory(this, this.sessionManager, !!this.core.head);
 	}
 
 	/** Resolve a live call only inside the latest accepted request; provider call IDs may repeat later. */
@@ -1843,7 +1861,7 @@ export class WorkerConversation {
 	/** Atomically capture the provider projection and the raw-entry cursor that immediately follows it. */
 	beginTranscriptCommit(): { history: Message[]; cursor: WorkerTranscriptCommitCursor } {
 		return this.withCanonicalSessionLock((sessionManager) => ({
-			history: convertToLlm(sessionManager.buildSessionContext().messages),
+			history: this.providerHistory.replay(this, sessionManager, !!this.core.head, this.hasActiveTranscriptCommit()),
 			cursor: this.captureTranscriptCommitCursorLocked(sessionManager),
 		}));
 	}

@@ -755,7 +755,6 @@
     "packages/coding-agent/src/kernel/host-event-stamp.ts",
     "packages/coding-agent/src/kernel/index.ts",
     "packages/coding-agent/src/kernel/loop-config.ts",
-    "packages/coding-agent/src/kernel/message-revision.ts",
     "packages/coding-agent/src/kernel/node.ts",
     "packages/coding-agent/src/kernel/provider-request-estimator.ts",
     "packages/coding-agent/src/kernel/provider-request-image-budget.ts",

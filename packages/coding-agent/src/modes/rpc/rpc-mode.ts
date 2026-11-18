@@ -467,12 +467,18 @@ export async function runRpcMode(
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(projectSessionEventForJson(event));
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await io.waitForStdoutBackpressure();
-		});
+		unsubscribe = session.subscribe(
+			(event) => {
+				output(projectSessionEventForJson(event));
+			},
+			{ publishesMessageEdits: true },
+		);
+		unsubscribeBackpressure = session.agent.subscribe(
+			async () => {
+				await io.waitForStdoutBackpressure();
+			},
+			{ publishesMessageEdits: true },
+		);
 		session.announceRestoredQueuedInput();
 	};
 

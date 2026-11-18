@@ -19,7 +19,13 @@ import type { WorkerResponseObservation } from "../delegation/worker-attempt-exe
 import type { CacheDecisionRow, DecisionLedgerStore } from "../operator-projection/decision-ledger-store.ts";
 import { CacheCustody } from "./cache-custody.ts";
 import { CacheKnowledge } from "./cache-knowledge.ts";
-import { CacheObservationRecorder, cacheLaneKey, historyLineage, idleHolder } from "./cache-observation-recorder.ts";
+import {
+	type CacheIdleHolder,
+	CacheObservationRecorder,
+	cacheLaneKey,
+	historyLineage,
+	idleHolder,
+} from "./cache-observation-recorder.ts";
 
 /** The messages a reply's request carried since the previous reply (see `idleHolder`). */
 export function sincePreviousReply(messages: readonly AgentMessage[], reply: AgentMessage): readonly AgentMessage[] {
@@ -37,13 +43,12 @@ export interface CacheLaneGuardDeps {
 }
 
 /** The request a provider response answered, on the conversation it belongs to. */
-export interface CacheResponseRequest {
+export type CacheResponseRequest = {
 	readonly sessionId: string;
 	readonly snapshot: SessionRequestSnapshotInput | undefined;
 	readonly openedAt: number | undefined;
-	readonly history: readonly AgentMessage[];
 	readonly lineage: string;
-}
+} & ({ readonly history: readonly AgentMessage[] } | { readonly holder: CacheIdleHolder });
 
 export class CacheLaneGuard {
 	private readonly deps: CacheLaneGuardDeps;
@@ -68,7 +73,7 @@ export class CacheLaneGuard {
 	 */
 	observeResponse(message: AssistantMessage, request: CacheResponseRequest): void {
 		try {
-			const { snapshot, history, sessionId } = request;
+			const { snapshot, sessionId } = request;
 			const lane = cacheLaneKey(message.api, message.provider, message.model);
 			const snapshotLane = snapshot ? cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId) : undefined;
 			const matched = snapshotLane === lane ? snapshot : undefined;
@@ -82,7 +87,7 @@ export class CacheLaneGuard {
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
 				lineage: request.lineage,
-				holder: idleHolder(sincePreviousReply(history, message)),
+				holder: "holder" in request ? request.holder : idleHolder(sincePreviousReply(request.history, message)),
 			});
 			if (row) {
 				const recorded = { ...row, sessionId, cwd: this.deps.getCwd() };
@@ -104,8 +109,7 @@ export class CacheLaneGuard {
 				sessionId: `${this.deps.getSessionId()}/worker:${conversation.agentId}`,
 				snapshot: conversation.snapshot,
 				openedAt: conversation.requestOpenedAt,
-				history: conversation.messages,
-				lineage: historyLineage(conversation.messages),
+				...conversation.history,
 			});
 		} catch {
 			// Telemetry only.

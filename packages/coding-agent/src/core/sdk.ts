@@ -1,22 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { basename } from "node:path";
-import {
-	type Api,
-	type Message,
-	type Model,
-	resolveModelThinkingLevel,
-	type ServiceTier,
-	streamSimple,
-} from "@caupulican/pi-ai";
+import { type Api, type Model, resolveModelThinkingLevel, type ServiceTier, streamSimple } from "@caupulican/pi-ai";
 import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { registerBuiltInApiProviders } from "@caupulican/pi-ai/register-builtins";
 import { getAgentDir } from "../config.ts";
 import { Agent } from "../kernel/agent.ts";
 import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentStreamOptions } from "../kernel/loop-config.ts";
-import { convertToLlm } from "../kernel/messages.ts";
+import { createProviderMessageConverter } from "../kernel/messages.ts";
 import { SessionManager } from "../kernel/session/session-manager.ts";
-import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
+import type { ThinkingLevel } from "../kernel/types.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { createProductionAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
@@ -90,6 +83,7 @@ import { applyResourceProfileOptions } from "./resource-profile-blocks.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
+import { conditionalPayloadHook } from "./secrets/credential-request-projection.ts";
 import { acquireOpeningSessionLease, observeSessionCleanupRelease } from "./session-open-lease.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { resolveSessionStanding, type SessionStanding, sessionCapabilities } from "./session-standing.ts";
@@ -516,42 +510,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		let agent: Agent;
 
-		// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
-		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlm(messages);
-			// Check setting dynamically so mid-session changes take effect
-			if (!settingsManager.getBlockImages()) {
-				return converted;
-			}
-			// Filter out ImageContent from all messages, replacing with text placeholder
-			return converted.map((msg) => {
-				if (msg.role === "user" || msg.role === "toolResult") {
-					const content = msg.content;
-					if (Array.isArray(content)) {
-						const hasImages = content.some((c) => c.type === "image");
-						if (hasImages) {
-							const filteredContent = content
-								.map((c) =>
-									c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
-								)
-								.filter(
-									(c, i, arr) =>
-										// Dedupe consecutive "Image reading is disabled." texts
-										!(
-											c.type === "text" &&
-											c.text === "Image reading is disabled." &&
-											i > 0 &&
-											arr[i - 1].type === "text" &&
-											(arr[i - 1] as { type: "text"; text: string }).text === "Image reading is disabled."
-										),
-								);
-							return { ...msg, content: filteredContent };
-						}
-					}
-				}
-				return msg;
-			});
-		};
+		const convertToLlmWithBlockImages = createProviderMessageConverter(() => settingsManager.getBlockImages());
 
 		const extensionRunnerRef: { current?: ExtensionRunner } = {};
 		const sessionRef: { current?: AgentSession } = {};
@@ -688,13 +647,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (prefixChange) sessionRef.current?.emitHostWarning(prefixChange);
 				return streamSimple(requestModel, context, providerOptions);
 			},
-			onPayload: async (payload, _model) => {
-				const runner = extensionRunnerRef.current;
-				if (!runner?.hasHandlers("before_provider_request")) {
-					return payload;
-				}
-				return runner.emitBeforeProviderRequest(payload);
-			},
+			onPayload: conditionalPayloadHook(
+				() => !!extensionRunnerRef.current?.hasHandlers("before_provider_request"),
+				async (payload, _model) => {
+					const runner = extensionRunnerRef.current;
+					if (!runner?.hasHandlers("before_provider_request")) {
+						return payload;
+					}
+					return runner.emitBeforeProviderRequest(payload);
+				},
+			),
 			onResponse: async (response, _model) => {
 				const runner = extensionRunnerRef.current;
 				if (!runner?.hasHandlers("after_provider_response")) {

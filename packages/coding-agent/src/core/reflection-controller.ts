@@ -1599,11 +1599,14 @@ export class ReflectionController {
 				getHaltRequest: opts.getHaltRequest,
 				transformContext: opts.transformContext,
 				planContext: opts.planContext,
+				...opts.historyState,
+				providerMessageProjectionOwner: opts.prefixState,
 				requestPreflight: opts.requestPreflight,
 				requestGuard: opts.requestGuard,
 				providerResponseObserver: opts.providerResponseObserver,
 				maxRetries: opts.maxRetries,
 				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
+				borrowProviderSnapshotSource: opts.borrowProviderSnapshotSource,
 				...(maxTurns === undefined
 					? {}
 					: {
@@ -1621,7 +1624,7 @@ export class ReflectionController {
 			if (opts.tools !== undefined) {
 				const childContext: AgentContext = {
 					systemPrompt: opts.systemPrompt,
-					messages: [...history],
+					messages: history,
 					tools: [...opts.tools],
 				};
 				const messages = await runAgentLoop(
@@ -1693,24 +1696,16 @@ export class ReflectionController {
 					.filter((content): content is TextContent => content.type === "text")
 					.map((content) => content.text)
 					.join("");
-				// KNOWN TYPE GAP, not an oversight (see the matching note on the emit callback above): this
-				// was once true - "the loop only adds assistant/tool-result messages" - and is not anymore.
-				// Since the turn-economics step-3 host-gap hook, `messages` (this run's own `newMessages`,
-				// the kernel's agent-loop.ts) can genuinely include a durable custom transient record.
-				// `IsolatedCompletionResult.messages` is declared `Message[]` (agent-session-contracts.ts);
-				// making that field, and `IsolatedCompletionOptions.onMessage`'s parameter, honestly wider
-				// would touch every `runIsolatedCompletion` caller (research/fitness/judge lanes too, not
-				// only worker delegation), which is beyond this fix's granted scope. Documented as an open
-				// defect rather than silently left to look intentional - see AGENTS.md's "Delegation and
-				// Orchestration" section for the full trace. `worker-attempt-executor.ts` and
-				// `worker-conversation-store.ts`'s `WorkerTranscriptMessage` type recover the honest wider
-				// type on the read side, immediately after this cast forces it narrow here.
+				// A worker's result suffix may contain a kernel transient record. The worker transcript
+				// verifier accepts that wider runtime shape while the isolated API retains its Message type.
 				return {
 					text,
 					usage,
 					stopReason: finalAssistant.stopReason,
 					...(finalAssistant.errorMessage ? { errorMessage: finalAssistant.errorMessage } : {}),
-					messages: [...history, ...(messages as Message[])],
+					...(opts.returnMessageSuffix
+						? { messageSuffix: messages as Message[] }
+						: { messages: [...history, ...(messages as Message[])] }),
 				};
 			}
 

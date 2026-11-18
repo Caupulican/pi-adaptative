@@ -14,6 +14,8 @@ import type {
 	ResponseReasoningItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
+import { countHistoryWork, freezeOwnedJson, historyWorkFallback, providerMessagePrefix } from "../history-work.ts";
+import { modelImageProjection } from "../image-support.ts";
 import { calculateCost } from "../models.ts";
 import {
 	isToolSchemaSearchDetails,
@@ -27,6 +29,7 @@ import type {
 	AssistantMessage,
 	Context,
 	ImageContent,
+	Message,
 	Model,
 	ServiceTier,
 	StopReason,
@@ -42,9 +45,17 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import { createToolNameMap, type IndexedToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import {
+	beginResponsesFork,
+	findResponsesPredecessor,
+	type ResponsesFrame,
+	recordResponsesInput,
+	rememberResponsesInput,
+	withoutForeignThinking,
+} from "./openai-responses-history.ts";
 import { commitSuccessfulAssistantParse } from "./provider-runtime.ts";
-import { joinTextContent, transformMessages } from "./transform-messages.ts";
+import { joinTextContent, MessageTransformCursor } from "./transform-messages.ts";
 
 // =============================================================================
 // Utilities
@@ -67,7 +78,7 @@ const RESERVED_RESPONSES_TOOL_NAMES = new Set([
 	"web",
 ]);
 
-export function createOpenAIResponsesToolNameMap(tools: readonly Tool[]): ToolNameMap {
+export function createOpenAIResponsesToolNameMap(tools: readonly Tool[]): IndexedToolNameMap {
 	return createToolNameMap(tools, { reservedNames: RESERVED_RESPONSES_TOOL_NAMES });
 }
 
@@ -122,6 +133,8 @@ export interface ConvertResponsesToolsOptions {
 }
 
 export interface ConvertResponsesMessagesOptions {
+	/** Native Responses transport, before SDK serialization. Reused output items must stay read-only. */
+	reuseAcceptedPrefix?: boolean;
 	/** null omits image detail for transports such as ChatGPT Responses Lite. */
 	imageDetail?: "auto" | null;
 	/** Emit the explicit Responses message discriminator required by Lite transports. */
@@ -210,19 +223,70 @@ export function convertResponsesMessages<TApi extends Api>(
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
-	const messages: ResponseInput = [];
+	const proof =
+		options?.reuseAcceptedPrefix && !options.toolNameMap && model.api === "openai-responses"
+			? providerMessagePrefix(context.messages)
+			: undefined;
+	const scope = proof
+		? JSON.stringify([
+				model.provider,
+				model.api,
+				model.id,
+				model.baseUrl,
+				model.input,
+				model.supportedImageMimeTypes,
+				options?.requestFormat,
+				options?.includeMessageType,
+				options?.imageDetail,
+				allowedToolCallProviders.has(model.provider),
+				context.tools?.map((tool) => tool.name),
+			])
+		: "";
+	const previous = proof?.previous && findResponsesPredecessor(proof.previous);
+	const priorFrame = previous?.frame;
+	const reusable = priorFrame?.systemPrompt === context.systemPrompt && priorFrame?.scope === scope;
+	const from = reusable && previous ? Math.min(proof!.count, previous.reusableRows) : 0;
+	const frame: ResponsesFrame =
+		reusable && priorFrame
+			? priorFrame
+			: {
+					scope,
+					systemPrompt: context.systemPrompt,
+					transform: new MessageTransformCursor(!!proof),
+					output: [],
+					checkpoints: [],
+					names: proof ? createOpenAIResponsesToolNameMap(context.tools ?? []) : undefined,
+				};
 	const nativeSearchCalls = new Map<string, ToolCall["toolSearch"]>();
 	const imageDetail = options?.imageDetail === undefined ? "auto" : options.imageDetail;
 	const useXaiCliFormat = options?.requestFormat === "xai-cli";
 	const includeMessageType = useXaiCliFormat || options?.includeMessageType === true;
-	if (useXaiCliFormat && context.systemPrompt) {
-		messages.push({
-			type: "message",
-			role: "system",
-			content: sanitizeSurrogates(context.systemPrompt),
-		});
+	const names = proof ? frame.names : options?.toolNameMap;
+	let msgIndex = 0;
+	if (reusable && previous) {
+		beginResponsesFork(previous, from);
+		// Each checkpoint describes the state immediately AFTER its source row.
+		const checkpoint = frame.checkpoints[from - 1];
+		frame.transform.rewind(checkpoint?.transform ?? 0);
+		frame.names!.rewind(checkpoint?.names ?? context.tools?.length ?? 0);
+		frame.output.length = checkpoint?.output ?? 0;
+		frame.checkpoints.length = from;
+		msgIndex = checkpoint?.messageIndex ?? 0;
+	} else if (proof?.previous) {
+		historyWorkFallback(context.messages, previous ? "responses-scope-changed" : "responses-predecessor-unavailable");
+	} else if (!proof) {
+		historyWorkFallback(context.messages, "responses-unversioned-input");
 	}
-
+	if (from === 0) {
+		if (useXaiCliFormat && context.systemPrompt) {
+			frame.output.push({
+				type: "message",
+				role: "system",
+				content: sanitizeSurrogates(context.systemPrompt),
+			});
+		}
+	}
+	const stableOutput = frame.output.length;
 	const normalizeIdPart = (part: string): string => {
 		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
 		const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
@@ -248,205 +312,223 @@ export function convertResponsesMessages<TApi extends Api>(
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const sanitizedInputMessages = context.messages.map((msg) => {
-		if (
-			msg.role === "assistant" &&
-			(msg.provider !== model.provider || msg.api !== model.api || msg.model !== model.id) &&
-			msg.content.some((block) => block.type === "thinking")
-		) {
-			return {
-				...msg,
-				content: msg.content.filter((block) => block.type !== "thinking"),
-			};
-		}
-		return msg;
-	});
-	const transformedMessages = transformMessages(sanitizedInputMessages, model, normalizeToolCallId);
+	const render = (transformedMessages: Message[], messages: ResponseInput): void => {
+		for (const msg of transformedMessages) {
+			if (msg.role === "user") {
+				if (typeof msg.content === "string") {
+					messages.push(
+						useXaiCliFormat
+							? { type: "message", role: "user", content: sanitizeSurrogates(msg.content) }
+							: {
+									...(includeMessageType ? { type: "message" as const } : {}),
+									role: "user",
+									content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
+								},
+					);
+				} else {
+					const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
+						if (item.type === "text") {
+							return {
+								type: "input_text",
+								text: sanitizeSurrogates(item.text),
+							} satisfies ResponseInputText;
+						}
+						return createResponseInputImage(`data:${item.mimeType};base64,${item.data}`, imageDetail);
+					});
+					if (content.length === 0) continue;
+					messages.push({
+						...(includeMessageType ? { type: "message" as const } : {}),
+						role: "user",
+						content,
+					});
+				}
+			} else if (msg.role === "assistant") {
+				const output: ResponseInput = [];
+				const assistantMsg = msg as AssistantMessage;
+				const isDifferentModel =
+					assistantMsg.model !== model.id &&
+					assistantMsg.provider === model.provider &&
+					assistantMsg.api === model.api;
+				let textBlockIndex = 0;
 
-	let msgIndex = 0;
-	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
-				messages.push(
-					useXaiCliFormat
-						? { type: "message", role: "user", content: sanitizeSurrogates(msg.content) }
-						: {
-								...(includeMessageType ? { type: "message" as const } : {}),
-								role: "user",
-								content: [{ type: "input_text", text: sanitizeSurrogates(msg.content) }],
-							},
-				);
-			} else {
-				const content: ResponseInputContent[] = msg.content.map((item): ResponseInputContent => {
-					if (item.type === "text") {
-						return {
-							type: "input_text",
-							text: sanitizeSurrogates(item.text),
-						} satisfies ResponseInputText;
-					}
-					return createResponseInputImage(`data:${item.mimeType};base64,${item.data}`, imageDetail);
-				});
-				if (content.length === 0) continue;
-				messages.push({
-					...(includeMessageType ? { type: "message" as const } : {}),
-					role: "user",
-					content,
-				});
-			}
-		} else if (msg.role === "assistant") {
-			const output: ResponseInput = [];
-			const assistantMsg = msg as AssistantMessage;
-			const isDifferentModel =
-				assistantMsg.model !== model.id &&
-				assistantMsg.provider === model.provider &&
-				assistantMsg.api === model.api;
-			let textBlockIndex = 0;
-
-			for (const block of msg.content) {
-				if (block.type === "thinking") {
-					if (block.thinkingSignature) {
-						const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+				for (const block of msg.content) {
+					if (block.type === "thinking") {
+						if (block.thinkingSignature) {
+							const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+							if (useXaiCliFormat) {
+								output.push({
+									type: "reasoning",
+									id: reasoningItem.id,
+									summary: reasoningItem.summary,
+									...(reasoningItem.encrypted_content
+										? { encrypted_content: reasoningItem.encrypted_content }
+										: {}),
+								});
+							} else {
+								output.push(reasoningItem);
+							}
+						}
+					} else if (block.type === "text") {
+						const textBlock = block as TextContent;
 						if (useXaiCliFormat) {
 							output.push({
-								type: "reasoning",
-								id: reasoningItem.id,
-								summary: reasoningItem.summary,
-								...(reasoningItem.encrypted_content
-									? { encrypted_content: reasoningItem.encrypted_content }
-									: {}),
+								type: "message",
+								role: "assistant",
+								content: sanitizeSurrogates(textBlock.text),
 							});
-						} else {
-							output.push(reasoningItem);
+							continue;
 						}
-					}
-				} else if (block.type === "text") {
-					const textBlock = block as TextContent;
-					if (useXaiCliFormat) {
+						const parsedSignature = parseTextSignature(textBlock.textSignature);
+						const fallbackMessageId =
+							textBlockIndex === 0 ? `msg_pi_${msgIndex}` : `msg_pi_${msgIndex}_${textBlockIndex}`;
+						textBlockIndex++;
+						// OpenAI requires id to be max 64 characters
+						let msgId = parsedSignature?.id;
+						if (!msgId) {
+							msgId = fallbackMessageId;
+						} else if (msgId.length > 64) {
+							msgId = `msg_${shortHash(msgId)}`;
+						}
 						output.push({
 							type: "message",
 							role: "assistant",
-							content: sanitizeSurrogates(textBlock.text),
-						});
-						continue;
-					}
-					const parsedSignature = parseTextSignature(textBlock.textSignature);
-					const fallbackMessageId =
-						textBlockIndex === 0 ? `msg_pi_${msgIndex}` : `msg_pi_${msgIndex}_${textBlockIndex}`;
-					textBlockIndex++;
-					// OpenAI requires id to be max 64 characters
-					let msgId = parsedSignature?.id;
-					if (!msgId) {
-						msgId = fallbackMessageId;
-					} else if (msgId.length > 64) {
-						msgId = `msg_${shortHash(msgId)}`;
-					}
-					output.push({
-						type: "message",
-						role: "assistant",
-						content: [{ type: "output_text", text: sanitizeSurrogates(textBlock.text), annotations: [] }],
-						status: "completed",
-						id: msgId,
-						phase: parsedSignature?.phase,
-					} satisfies ResponseOutputMessage);
-				} else if (block.type === "toolCall") {
-					const toolCall = block as ToolCall;
-					const [callId, itemIdRaw] = toolCall.id.split("|");
-					let itemId: string | undefined = itemIdRaw;
-
-					if (
-						model.api === "openai-codex-responses" &&
-						(toolCall.toolSearch ||
-							(options?.toolSearch?.mode === "native" && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
-					) {
-						nativeSearchCalls.set(callId, toolCall.toolSearch);
-						output.push({
-							type: "tool_search_call",
-							...(toolCall.toolSearch?.id ? { id: toolCall.toolSearch.id } : {}),
-							call_id: callId,
-							execution: "client",
+							content: [{ type: "output_text", text: sanitizeSurrogates(textBlock.text), annotations: [] }],
 							status: "completed",
-							arguments: toolCall.arguments,
+							id: msgId,
+							phase: parsedSignature?.phase,
+						} satisfies ResponseOutputMessage);
+					} else if (block.type === "toolCall") {
+						const toolCall = block as ToolCall;
+						const [callId, itemIdRaw] = toolCall.id.split("|");
+						let itemId: string | undefined = itemIdRaw;
+
+						if (
+							model.api === "openai-codex-responses" &&
+							(toolCall.toolSearch ||
+								(options?.toolSearch?.mode === "native" && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
+						) {
+							nativeSearchCalls.set(callId, toolCall.toolSearch);
+							output.push({
+								type: "tool_search_call",
+								...(toolCall.toolSearch?.id ? { id: toolCall.toolSearch.id } : {}),
+								call_id: callId,
+								execution: "client",
+								status: "completed",
+								arguments: toolCall.arguments,
+							});
+							continue;
+						}
+
+						// For different-model messages, set id to undefined to avoid pairing validation.
+						// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
+						// By omitting the id, we avoid triggering that validation (like cross-provider does).
+						if (isDifferentModel && itemId?.startsWith("fc_")) {
+							itemId = undefined;
+						}
+
+						output.push({
+							type: "function_call",
+							id: useXaiCliFormat ? undefined : itemId,
+							call_id: callId,
+							name: names?.toProviderName(toolCall.name) ?? toolCall.name,
+							arguments: JSON.stringify(toolCall.arguments),
 						});
-						continue;
 					}
-
-					// For different-model messages, set id to undefined to avoid pairing validation.
-					// OpenAI tracks which fc_xxx IDs were paired with rs_xxx reasoning items.
-					// By omitting the id, we avoid triggering that validation (like cross-provider does).
-					if (isDifferentModel && itemId?.startsWith("fc_")) {
-						itemId = undefined;
-					}
-
-					output.push({
-						type: "function_call",
-						id: useXaiCliFormat ? undefined : itemId,
-						call_id: callId,
-						name: options?.toolNameMap?.toProviderName(toolCall.name) ?? toolCall.name,
-						arguments: JSON.stringify(toolCall.arguments),
-					});
 				}
-			}
-			if (output.length === 0) continue;
-			messages.push(...output);
-		} else if (msg.role === "toolResult") {
-			const [searchCallId] = (msg.toolCallId || "").split("|");
-			if (nativeSearchCalls.has(searchCallId)) {
-				// Old transcripts lack a captured result. Never reconstruct their past from today's registry.
-				const captured = msg.toolSearch ?? nativeSearchCalls.get(searchCallId);
+				if (output.length === 0) continue;
+				messages.push(...output);
+			} else if (msg.role === "toolResult") {
+				const [searchCallId] = (msg.toolCallId || "").split("|");
+				if (nativeSearchCalls.has(searchCallId)) {
+					// Old transcripts lack a captured result. Never reconstruct their past from today's registry.
+					const captured = msg.toolSearch ?? nativeSearchCalls.get(searchCallId);
+					messages.push({
+						type: "tool_search_output",
+						call_id: searchCallId,
+						status: "completed",
+						execution: "client",
+						tools: convertResponsesTools(msg.isError ? [] : (captured?.tools ?? []), {
+							strict: captured?.strict ?? null,
+						}).map((tool) => ({
+							...tool,
+							defer_loading: true,
+						})),
+					});
+					msgIndex++;
+					continue;
+				}
+				const textResult = joinTextContent(msg.content);
+				const hasImages = msg.content.some((c): c is ImageContent => c.type === "image");
+				const hasText = textResult.length > 0;
+				const [callId] = (msg.toolCallId || "").split("|");
+
+				let output: string | ResponseFunctionCallOutputItemList;
+				if (hasImages && model.input.includes("image")) {
+					const contentParts: ResponseFunctionCallOutputItemList = [];
+
+					if (hasText) {
+						contentParts.push({
+							type: "input_text",
+							text: sanitizeSurrogates(textResult),
+						});
+					}
+
+					for (const block of msg.content) {
+						if (block.type === "image") {
+							contentParts.push(
+								createResponseInputImage(`data:${block.mimeType};base64,${block.data}`, imageDetail),
+							);
+						}
+					}
+
+					output = contentParts;
+				} else {
+					output = sanitizeSurrogates(hasText ? textResult : "(see attached image)");
+				}
+
 				messages.push({
-					type: "tool_search_output",
-					call_id: searchCallId,
-					status: "completed",
-					execution: "client",
-					tools: convertResponsesTools(msg.isError ? [] : (captured?.tools ?? []), {
-						strict: captured?.strict ?? null,
-					}).map((tool) => ({
-						...tool,
-						defer_loading: true,
-					})),
+					type: "function_call_output",
+					call_id: callId,
+					output,
 				});
-				msgIndex++;
-				continue;
 			}
-			const textResult = joinTextContent(msg.content);
-			const hasImages = msg.content.some((c): c is ImageContent => c.type === "image");
-			const hasText = textResult.length > 0;
-			const [callId] = (msg.toolCallId || "").split("|");
-
-			let output: string | ResponseFunctionCallOutputItemList;
-			if (hasImages && model.input.includes("image")) {
-				const contentParts: ResponseFunctionCallOutputItemList = [];
-
-				if (hasText) {
-					contentParts.push({
-						type: "input_text",
-						text: sanitizeSurrogates(textResult),
-					});
-				}
-
-				for (const block of msg.content) {
-					if (block.type === "image") {
-						contentParts.push(
-							createResponseInputImage(`data:${block.mimeType};base64,${block.data}`, imageDetail),
-						);
-					}
-				}
-
-				output = contentParts;
-			} else {
-				output = sanitizeSurrogates(hasText ? textResult : "(see attached image)");
-			}
-
-			messages.push({
-				type: "function_call_output",
-				call_id: callId,
-				output,
-			});
+			msgIndex++;
 		}
-		msgIndex++;
+	};
+	const projectImages = modelImageProjection(model);
+	const scratch: Message[] = [];
+	for (let i = from; i < context.messages.length; i++) {
+		const message = withoutForeignThinking(context.messages[i]!, model);
+		frame.transform.append(projectImages ? projectImages(message) : message, model, scratch, normalizeToolCallId);
+		render(scratch, frame.output);
+		scratch.length = 0;
+		if (proof)
+			frame.checkpoints.push({
+				output: frame.output.length,
+				messageIndex: msgIndex,
+				transform: frame.transform.checkpoint,
+				names: frame.names!.checkpoint,
+			});
 	}
-
-	return messages;
+	// An open tool group is provisional. Its synthetic results are emitted but never stored in the prefix.
+	if (proof) {
+		for (let i = reusable && from ? stableOutput : 0; i < frame.output.length; i++) freezeOwnedJson(frame.output[i]);
+		countHistoryWork(context.messages, "copiedRows", frame.output.length);
+	}
+	const result = proof ? frame.output.slice() : frame.output;
+	frame.transform.finish(scratch);
+	render(scratch, result);
+	countHistoryWork(context.messages, "wireRowsConverted", context.messages.length - from);
+	if (proof?.previous && proof.count > from) countHistoryWork(context.messages, "oldRowsRead", proof.count - from);
+	countHistoryWork(context.messages, "emittedRows", result.length);
+	if (proof) {
+		for (let index = frame.output.length; index < result.length; index++) freezeOwnedJson(result[index]);
+		Object.freeze(result);
+		const predecessor = reusable && from ? previous?.emitted.deref() : undefined;
+		recordResponsesInput(result, context.messages, predecessor ? stableOutput : 0, predecessor);
+		rememberResponsesInput(frame, context.messages, result);
+	}
+	return result;
 }
 
 // =============================================================================

@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { countHistoryWork } from "@caupulican/pi-ai/history-work";
 import { readTransientRecordPayload } from "../../kernel/index.ts";
+import {
+	immutableHistoryMessage,
+	isImmutableHistoryMessage,
+	type MessageHistoryVersion,
+	messageHistoryVersion,
+	unchangedMessagePrefix,
+	withMessageSource,
+} from "../../kernel/message-revision.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import { PrefixFold, PrefixFoldByFirstItem } from "../../kernel/prefix-fold.ts";
 import { transientRecordMessageOf } from "../../kernel/transient-records.ts";
@@ -117,6 +126,7 @@ function legendText(message: Extract<AgentMessage, { role: "custom" }>): string 
 interface RenderState {
 	live: Map<string, string>;
 	rendered: AgentMessage[];
+	rewritten: boolean;
 }
 
 /** The legend fold's state over one history: the lines its records list, and whether a pause note is still on the wire. */
@@ -236,37 +246,18 @@ export class PathAliasRuntime {
 		},
 	);
 	/**
-	 * Result of the most recent {@link sync} call, keyed by the exact message-list identity it saw.
-	 * `sync` is called twice per provider request (preview, then commit — see
-	 * `ProviderRequestContextController.plan`) built from the same durable messages; when nothing
-	 * was freshly GC-packed in between, `applyContextGc` hands back its input array unchanged BY
-	 * REFERENCE (untouched messages keep their identity — see `context-gc.ts`'s `nextMessages =
-	 * messages.slice()`), so the two calls see the identical array and the second `sync` is a full
-	 * transcript hash-and-rewrite pass repeated for an answer already computed. Comparing by
-	 * per-element reference (never content) is what keeps the check itself cheap — a pointer scan is
-	 * orders of magnitude cheaper than the hashing it lets us skip — and it can never return a stale
-	 * answer: any message that actually changed (freshly packed, newly appended) fails the
-	 * comparison and falls through to a full, correct recompute. `cwd` is part of the key too: it
-	 * comes from a live getter (a session can change directory mid-run), and a cwd change can alter
-	 * every display path without touching a single message — keying on messages alone could hand
-	 * back a stale legend that a cwd-aware caller (`prepareCommit`'s own equality check) would
-	 * otherwise have caught as a genuine change.
-	 *
-	 * The stored `messages` is a SNAPSHOT (`messages.slice()`), never the caller's live array. That
-	 * is what makes `sameMessageSequence`'s `a === b` fast path safe: an array is not immutable just
-	 * because this class treats it that way, and at least one real caller mutates one in place to
-	 * preserve its identity across a replan (`adoptReplannedMessages` in
-	 * `provider-request-planner.ts`, which does `target.messages.length = 0` then re-pushes). Storing
-	 * the live reference would let `a === b` compare a mutated array against itself and report "same"
-	 * for content that has actually changed, handing back a result computed from the pre-mutation
-	 * bytes. The snapshot is a different object from the caller's array on every later call, so a
-	 * same-reference caller that mutated in place still falls through to the real (and correct)
-	 * length/element comparison below.
+	 * Reuse an exact match, or skip the already-scanned rows of a certified append. An unversioned
+	 * source retains its reference snapshot for the legacy comparison. A directory change can alter
+	 * every display path, so its input always goes through the new table and render state.
 	 */
 	private lastSync:
 		| {
 				readonly cwd: string;
-				readonly messages: readonly AgentMessage[];
+				readonly version: MessageHistoryVersion | undefined;
+				readonly snapshot: readonly AgentMessage[] | undefined;
+				readonly length: number;
+				readonly scanned: number;
+				readonly borrowHistory: boolean;
 				readonly result: PathAliasSyncResult;
 		  }
 		| undefined;
@@ -324,11 +315,20 @@ export class PathAliasRuntime {
 		return this.table;
 	}
 
-	sync(messages: readonly AgentMessage[]): PathAliasSyncResult {
+	sync(messages: readonly AgentMessage[], borrowHistory = false): PathAliasSyncResult {
 		this.ensureLoaded();
 		const cached = this.lastSync;
-		if (cached && cached.cwd === this.table.cwd && sameMessageSequence(cached.messages, messages))
-			return cached.result;
+		const version = messageHistoryVersion(messages);
+		const sameCwd = cached?.cwd === this.table.cwd;
+		const shared = sameCwd && cached.version && version ? unchangedMessagePrefix(cached.version, version) : 0;
+		if (sameCwd && cached.borrowHistory === borrowHistory && cached.length === messages.length) {
+			if (
+				version
+					? cached.version && shared === messages.length
+					: cached.snapshot && sameMessageSequence(cached.snapshot, messages)
+			)
+				return cached.result;
+		}
 		// A candidate id that names a real file or directory under cwd (a literal `p/`
 		// tree) must never be assigned, or expansion would redirect real-file references.
 		// Every id lives under the literal relative prefix `p/`, so when no `p` entry
@@ -343,8 +343,20 @@ export class PathAliasRuntime {
 		// in every record that carries it. Once the lines cost more than every mention saves, minting
 		// stops (existing aliases keep working) until the balance recovers.
 		this.mintingPaused = this.legendCostExceedsSavings();
-		const unscanned = messages.filter((message) => !this.scanned.has(this.scanFingerprint(message)));
-		const textsToScan = this.mintingPaused ? [] : collectMessageTexts(unscanned);
+		const scannedFrom = Math.min(shared, cached?.scanned ?? 0);
+		const unscanned: AgentMessage[] = [];
+		if (!this.mintingPaused) {
+			countHistoryWork(
+				messages,
+				"oldRowsRead",
+				Math.max(0, Math.min(cached?.length ?? 0, messages.length) - scannedFrom),
+			);
+			for (let index = scannedFrom; index < messages.length; index++) {
+				const message = messages[index]!;
+				if (!this.scanned.has(this.scanFingerprint(message))) unscanned.push(message);
+			}
+		}
+		const textsToScan = collectMessageTexts(unscanned);
 		let scanWholeHistoryForReservations = !this.reservationHistoryScanned;
 		const reservationTexts = scanWholeHistoryForReservations ? collectMessageTexts(messages) : textsToScan;
 		this.reservationHistoryScanned = true;
@@ -409,7 +421,7 @@ export class PathAliasRuntime {
 		) {
 			this.persistScanned();
 		}
-		const rewritten = this.renderFrozen(messages);
+		const rewritten = this.renderFrozen(messages, borrowHistory && version !== undefined);
 		// The legend a request carries is the delta of the aliases visible on its wire against the lines
 		// the model can actually see: the legend records in this history. Read from the history, not
 		// remembered by the process, so a restarted process does not re-send lines already there, and a
@@ -450,9 +462,14 @@ export class PathAliasRuntime {
 		};
 		this.lastSync = {
 			cwd: this.table.cwd,
-			messages: messages.slice(),
+			version,
+			snapshot: version ? undefined : messages.slice(),
+			length: messages.length,
+			scanned: this.mintingPaused ? scannedFrom : messages.length,
+			borrowHistory,
 			result,
 		};
+		if (!version) countHistoryWork(messages, "copiedRows", messages.length);
 		return result;
 	}
 
@@ -602,7 +619,7 @@ export class PathAliasRuntime {
 	 */
 	private createRenderFold(): PrefixFold<AgentMessage, RenderState> {
 		return new PrefixFold<AgentMessage, RenderState>(
-			() => ({ live: new Map(), rendered: [] }),
+			() => ({ live: new Map(), rendered: [], rewritten: false }),
 			(state, message) => this.renderMessage(state, message),
 		);
 	}
@@ -627,10 +644,11 @@ export class PathAliasRuntime {
 			// Its spellings stay live for any later message that repeats one of its spans.
 			for (const [key, spelling] of memo.spellings) state.live.set(key, spelling);
 			state.rendered.push(memo.message);
+			state.rewritten ||= memo.message !== message;
 			return;
 		}
 		const spellings: Array<readonly [string, string]> = [];
-		const [output] = rewriteAgentMessagesWith([message], (text) => {
+		const [rewritten] = rewriteAgentMessagesWith([message], (text) => {
 			const key = createHash("sha256").update(text).digest("hex");
 			const frozen = state.live.get(key) ?? this.frozenSpellings.get(key);
 			const spelling = frozen ?? rewriteText(this.table, text);
@@ -638,19 +656,26 @@ export class PathAliasRuntime {
 			spellings.push([key, spelling]);
 			return spelling;
 		});
-		const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
+		const output =
+			rewritten !== message && isImmutableHistoryMessage(message)
+				? (immutableHistoryMessage(withMessageSource(message, rewritten!)) ?? rewritten!)
+				: rewritten!;
+		const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output]))];
 		for (const id of aliasIds) {
 			this.legendIds.add(id);
 			this.mentionsById.set(id, (this.mentionsById.get(id) ?? 0) + 1);
 		}
-		this.rendered.set(message, { message: output!, spellings, aliasIds });
-		state.rendered.push(output!);
+		this.rendered.set(message, { message: output, spellings, aliasIds });
+		state.rendered.push(output);
+		state.rewritten ||= output !== message;
 	}
 
-	private renderFrozen(messages: readonly AgentMessage[]): AgentMessage[] {
+	private renderFrozen(messages: readonly AgentMessage[], borrowHistory: boolean): AgentMessage[] {
 		const state = this.renderFold.fold(messages);
 		this.frozenSpellings = state.live;
+		if (borrowHistory && !state.rewritten) return messages as AgentMessage[];
 		// The caller keeps the array it is handed (the sync result), so the fold's own output is never shared out.
+		countHistoryWork(messages, "copiedRows", state.rendered.length);
 		return state.rendered.slice();
 	}
 
@@ -678,6 +703,7 @@ export class PathAliasRuntime {
 		this.records = [];
 		this.retainedPaths = undefined;
 		this.loaded = false;
+		this.lastSync = undefined;
 		this.rendered = new WeakMap();
 		this.renderFold = this.createRenderFold();
 		this.reservationHistoryScanned = false;

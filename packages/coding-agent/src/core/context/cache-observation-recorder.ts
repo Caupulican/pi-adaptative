@@ -28,10 +28,19 @@ export interface CacheObservationInput {
  * otherwise (host records alone, such as a continuation trigger) `host`. Host records that ride along
  * with a person's message or tool results do not change who woke it.
  */
-export function idleHolder(sincePreviousReply: readonly { role: string }[]): "owner" | "tool" | "host" {
-	if (sincePreviousReply.some((message) => message.role === "user")) return "owner";
-	if (sincePreviousReply.some((message) => message.role === "toolResult")) return "tool";
-	return "host";
+export type CacheIdleHolder = "owner" | "tool" | "host";
+
+export function addIdleHolderRole(holder: CacheIdleHolder, role: string): CacheIdleHolder {
+	if (role === "user") return "owner";
+	if (role === "toolResult" && holder === "host") return "tool";
+	return holder;
+}
+
+export function idleHolder(sincePreviousReply: readonly { role: string }[]): CacheIdleHolder {
+	return sincePreviousReply.reduce<CacheIdleHolder>(
+		(holder, message) => addIdleHolderRole(holder, message.role),
+		"host",
+	);
 }
 
 /**
@@ -42,7 +51,11 @@ export function idleHolder(sincePreviousReply: readonly { role: string }[]): "ow
  */
 export function historyLineage(messages: readonly { role: string; timestamp?: number }[]): string {
 	const summary = messages.findLast((message) => message.role === "compactionSummary");
-	return summary === undefined ? "root" : `compaction@${summary.timestamp ?? "?"}`;
+	return summary === undefined ? "root" : compactionLineage(summary.timestamp);
+}
+
+export function compactionLineage(timestamp: number | undefined): string {
+	return `compaction@${timestamp ?? "?"}`;
 }
 
 /** A session lane's last recorded response: when it ended and how large its prompt was. */

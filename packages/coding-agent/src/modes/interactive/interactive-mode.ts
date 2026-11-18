@@ -1723,17 +1723,16 @@ export class InteractiveMode {
 	private subscribeToAgent(): void {
 		const session = this.session;
 		const generation = ++this.subscriptionGeneration;
-		if (!this.hasHumanAudience) {
-			this.unsubscribe = session.subscribe(async (event) => {
+		const hasHumanAudience = this.hasHumanAudience;
+		this.unsubscribe = session.subscribe(
+			async (event) => {
 				if (generation !== this.subscriptionGeneration || session !== this.session) return;
-				await this.handleUnattendedEvent(event);
-			});
-			return;
-		}
-		this.unsubscribe = session.subscribe(async (event) => {
-			if (generation !== this.subscriptionGeneration || session !== this.session) return;
-			await this.handleEvent(event);
-		});
+				if (hasHumanAudience) await this.handleEvent(event);
+				else await this.handleUnattendedEvent(event);
+			},
+			{ publishesMessageEdits: true },
+		);
+		if (!hasHumanAudience) return;
 		this.unsubscribeForegroundActivity?.();
 		this.unsubscribeForegroundActivity = session.subscribeForegroundActivity(() => {
 			if (generation !== this.subscriptionGeneration || session !== this.session) return;

@@ -25,7 +25,7 @@ import type {
 	ToolCallStartContext,
 	ToolCallStartReservation,
 } from "./loop-config.ts";
-import { advanceMessageContentRevision } from "./message-revision.ts";
+import { advanceMessageContentRevision, messageHistoryVersion } from "./message-revision.ts";
 import {
 	startPlannedAgentProviderRequest,
 	startPlannedAgentProviderRequestWithId,
@@ -51,7 +51,6 @@ import {
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	noteToolFailureInBatch,
-	readToolFailureOccurrence,
 	rememberToolFailure,
 	type ToolFailureContextMemory,
 	type ToolFailureMemoryRecord,
@@ -76,7 +75,14 @@ import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-
 import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
 import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
 import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
-import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
+import {
+	mostRepeatedToolFailure,
+	repeatsToolCallPattern,
+	STAGNANT_RESULT_REPEAT_LIMIT,
+	STALL_WINDOW_PERIODS,
+	ToolResultProgressTracker,
+	toolResultBatchSignature,
+} from "./tool-result-progress.ts";
 import type {
 	AgentEvent,
 	AgentMessage,
@@ -242,8 +248,10 @@ export async function runAgentLoop(
 	const newMessages: AgentMessage[] = [...prompts];
 	const currentContext: AgentContext = {
 		...context,
-		messages: [...context.messages, ...prompts],
+		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
 	};
+
+	for (const prompt of prompts) currentContext.messages.push(prompt);
 
 	await emit({ type: "agent_start" });
 	if (providerTurnLimitReached(config, continuationState)) {
@@ -275,7 +283,10 @@ export async function runAgentLoopContinue(
 	assertContinuableContext(context);
 
 	const newMessages: AgentMessage[] = [];
-	const currentContext: AgentContext = { ...context, messages: [...context.messages] };
+	const currentContext: AgentContext = {
+		...context,
+		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
+	};
 
 	await emit({ type: "agent_start" });
 	if (providerTurnLimitReached(config, continuationState)) {
@@ -358,49 +369,8 @@ async function emitProviderTurnLimitStop(
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
-/**
- * Maximum exact cycle width inspected by the runaway-loop backstop. Detection requires the complete
- * suffix pattern to repeat `stallLimit` times; recurring housekeeping calls among distinct productive
- * operations therefore never look like a loop merely because one signature is frequent.
- */
-const STALL_WINDOW_PERIODS = 4;
-
-/** Identical observable results make a repeated cycle conclusive well before the coarse call-only fuse. */
-const STAGNANT_RESULT_REPEAT_LIMIT = 3;
-
-function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: number): boolean {
-	if (stallLimit <= 0) return false;
-	const maxPeriod = Math.min(STALL_WINDOW_PERIODS, Math.floor(stallWindow.length / stallLimit));
-	for (let period = 1; period <= maxPeriod; period++) {
-		const requiredTurns = period * stallLimit;
-		const start = stallWindow.length - requiredTurns;
-		let matches = true;
-		for (let offset = period; offset < requiredTurns; offset++) {
-			if (stallWindow[start + offset] !== stallWindow[start + (offset % period)]) {
-				matches = false;
-				break;
-			}
-		}
-		if (matches) return true;
-	}
-	return false;
-}
-
 function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string {
 	return JSON.stringify(toolCalls.map((toolCall) => getToolExecutionKey(toolCall.name, toolCall.arguments ?? null)));
-}
-
-/** The most-repeated failure key among this turn's results, as the ledger counted it. */
-function mostRepeatedToolFailure(
-	toolResults: readonly ToolResultMessage[],
-): { failureKey: string; occurrence: number; diagnostic?: string } | undefined {
-	let worst: { failureKey: string; occurrence: number; diagnostic?: string } | undefined;
-	for (const result of toolResults) {
-		if (result.isError !== true) continue;
-		const occurrence = readToolFailureOccurrence(result.details);
-		if (occurrence && (!worst || occurrence.occurrence > worst.occurrence)) worst = occurrence;
-	}
-	return worst;
 }
 
 /**
@@ -416,7 +386,11 @@ async function runLoop(
 	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
 ): Promise<void> {
 	let currentContext = initialContext;
+	let followsCanonicalHistory = initialConfig.keepCanonicalHistory === true;
 	let config = initialConfig;
+	if (config.getCanonicalMessages && config.workingHistory) {
+		currentContext.messages = config.workingHistory.refresh(config.getCanonicalMessages());
+	}
 	let firstTurn = true;
 	// Runaway-loop backstop state: a sliding window of recent NORMALIZED tool-call signatures. A model
 	// wedged repeating the same action makes no progress but keeps spending tokens; if one signature
@@ -489,9 +463,33 @@ async function runLoop(
 	const repairTeachTracker: ToolRepairTeachTracker = new Map();
 	// Seed from the accepted sanitizer analysis only if this reply actually needs a tool tracker.
 	let toolFailureMemory: ToolFailureMemoryTracker | undefined;
-	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
+	const verificationObligations =
+		config.verificationHistory?.startRun(currentContext.messages) ??
+		new VerificationObligationTracker(currentContext.messages);
+	const refreshCanonicalHistory = (): void => {
+		const { getCanonicalMessages, workingHistory } = config;
+		if (!getCanonicalMessages || !workingHistory) return;
+		const before = currentContext.messages;
+		const previousLength = before.length;
+		const messages = workingHistory.refresh(getCanonicalMessages());
+		currentContext.messages = messages;
+		const changedFrom = workingHistory.changedFrom;
+		if (
+			before !== messages ||
+			messageHistoryVersion(messages) === undefined ||
+			(changedFrom !== undefined && changedFrom < previousLength)
+		) {
+			verificationObligations.restore(messages);
+		} else if (changedFrom !== undefined) {
+			verificationObligations.replayAdditional(messages.slice(changedFrom));
+		}
+	};
 	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
-	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages, currentContext.tools);
+	toolFailureRecoveryGate.restoreFromMessages(
+		currentContext.messages,
+		currentContext.tools,
+		config.toolFailureRecoveryHistory,
+	);
 	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
 	let previousAssistantForDegenerateCollapse: AssistantMessage | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
@@ -552,6 +550,7 @@ async function runLoop(
 					currentContext.messages.push(haltMessage);
 					newMessages.push(haltMessage);
 				}
+				if (followsCanonicalHistory) refreshCanonicalHistory();
 				await streamToollessClosingTurn(
 					currentContext,
 					newMessages,
@@ -577,6 +576,7 @@ async function runLoop(
 
 			// Process pending messages (inject before next assistant response).
 			await processPendingMessages();
+			if (followsCanonicalHistory) refreshCanonicalHistory();
 			continuationState.providerTurns++;
 			// Obligation instructions ride the trailing region (see `AgentContext.trailingInstruction`
 			// and `provider-request-planner.ts`), never `systemPrompt`: that set changes as obligations
@@ -780,6 +780,13 @@ async function runLoop(
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
+				if (nextTurnSnapshot.context) followsCanonicalHistory = false;
+				if (nextTurnSnapshot.refreshHistory && config.getCanonicalMessages && config.workingHistory) {
+					followsCanonicalHistory = true;
+					currentContext = { ...currentContext, ...nextTurnSnapshot.refreshHistory };
+					refreshCanonicalHistory();
+					toolFailureMemory = undefined;
+				}
 				if (nextTurnSnapshot.context) {
 					toolFailureMemory = undefined;
 					verificationObligations.restore(currentContext.messages);
@@ -2127,7 +2134,10 @@ async function prepareToolCall(
 		if (validatedArgs !== toolCall.arguments) {
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
-			advanceMessageContentRevision(assistantMessage);
+		}
+		if (preparedToolCall.repairNotes || validatedArgs !== modelArguments) {
+			if (config.onMessageContentsEdited) config.onMessageContentsEdited(assistantMessage);
+			else advanceMessageContentRevision(assistantMessage);
 		}
 		const hostFilled = hostFilledArguments(tool.sessionIdentity, modelArguments, validatedArgs);
 		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);

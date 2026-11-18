@@ -1,4 +1,10 @@
 import type { ToolSchemaDisclosureDecision } from "@caupulican/pi-ai";
+import {
+	countHistoryWork,
+	historyWorkFallback,
+	inheritHistoryWork,
+	registerProviderMessagePrefix,
+} from "@caupulican/pi-ai/history-work";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import {
 	dispatchGuardedProviderRequest,
@@ -22,9 +28,15 @@ import type {
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./loop-config.ts";
-import { messageSourceOf } from "./message-revision.ts";
+import { isImmutableHistoryMessage, messageContentRevision, messageSourceOf } from "./message-revision.ts";
+import { captureProviderMessageConverter } from "./messages.ts";
 import { recordPrefixFoldWork } from "./prefix-fold.ts";
-import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
+import {
+	convertProviderWireRows,
+	projectProviderMessages,
+	providerMessageProjectionScope,
+} from "./provider-message-projection.ts";
+import { estimateProviderRequestTokens, markImageFreeProviderMessages } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
 import { sealSystemPrompt } from "./sealed-directives.ts";
@@ -538,19 +550,47 @@ async function materializeContextPlan(
 	);
 	const pendingTransientRecords = reconciliation.records;
 	history?.trackDependencies?.(pendingTransientRecords);
-	const compactableMessages = await config.convertToLlm(plan.messages);
-	history?.trackDependencies?.(compactableMessages);
 	const nonCompactableHead = plan.nonCompactableHead ?? 0;
 	if (!Number.isInteger(nonCompactableHead) || nonCompactableHead < 0 || nonCompactableHead > plan.messages.length) {
 		throw new TypeError(
 			`Context plan nonCompactableHead must be an integer from 0 to ${plan.messages.length}, got ${nonCompactableHead}.`,
 		);
 	}
-	// `convertToLlm` converts message by message, so the head's own conversion is the wire prefix it occupies.
+	const envelope = {
+		systemPrompt: sealSystemPrompt(composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt)),
+		tools: projectToolsForProvider(sourceContext.tools),
+	};
+	const converter = captureProviderMessageConverter(config.convertToLlm);
+	const owner = config.providerMessageProjectionOwner;
+	const work = sourceContext.messages;
+	const scopeFor = (context: Pick<Context, "systemPrompt" | "tools">) =>
+		providerMessageProjectionScope({
+			model: config.model,
+			account: config.providerAccountKey,
+			context,
+			policy: plan.compressionPolicy,
+			blockImages: converter?.policy,
+			conversation: config.conversationId ?? config.sessionId,
+			protocol: config.textToolCallProtocol,
+		});
+	const scope = converter && owner && !sourceContext.instructionTail ? scopeFor(envelope) : undefined;
+	if (!converter) historyWorkFallback(work, "custom provider converter");
+	if (converter && !scope) historyWorkFallback(work, "unscoped provider projection");
+	const projected =
+		converter && scope !== undefined
+			? projectProviderMessages({ owner, work, scope, converter, messages: plan.messages, head: nonCompactableHead })
+			: undefined;
+	const compactableMessages = projected?.wire ?? (await config.convertToLlm(plan.messages));
+	if (!projected) countHistoryWork(work, "providerRowsConverted", plan.messages.length);
+	history?.trackDependencies?.(compactableMessages);
+	// A custom bulk converter cannot opt in to the row-local projection.
 	const headWireCount =
-		nonCompactableHead === 0 ? 0 : (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length;
+		projected?.headWire ??
+		(nonCompactableHead === 0 ? 0 : (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length);
+	const convertTail = (rows: AgentMessage[]) =>
+		projected && converter ? convertProviderWireRows(rows, converter) : config.convertToLlm(rows);
 	const requestOnlyWireMessages =
-		hostTransients.requestOnly.length > 0 ? await config.convertToLlm(hostTransients.requestOnly) : [];
+		hostTransients.requestOnly.length > 0 ? await convertTail(hostTransients.requestOnly) : [];
 	// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty
 	// for informational slots most turns, but see the trailing-pair note above for why it is NOT
 	// typically empty overall) plus `hostTransients.passThrough` (any host transient this module
@@ -559,22 +599,26 @@ async function materializeContextPlan(
 	// are separate: they lead compactable history and contribute to both wire boundaries below.
 	history?.trackDependencies?.(requestOnlyWireMessages);
 	const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
-	const newTransientWireMessages =
-		newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
+	const newTransientWireMessages = newTransientMessages.length > 0 ? await convertTail(newTransientMessages) : [];
 	// Live knowledge must remain replaceable and absent from durable history. Placing it after the
 	// fixed host head, before growing history, also keeps an unchanged projection at the same wire
 	// position on every tool-loop append. A real correction or withholding still replaces it now.
 	history?.trackDependencies?.(newTransientWireMessages);
-	const llmMessages: Message[] = compactableMessages.slice();
-	llmMessages.splice(headWireCount, 0, ...requestOnlyWireMessages);
+	const compactableWireCount = compactableMessages.length;
+	const llmMessages: Message[] = projected ? compactableMessages : compactableMessages.slice();
+	countHistoryWork(work, "copiedRows", projected === undefined ? compactableWireCount : 0);
+	if (requestOnlyWireMessages.length > 0) {
+		countHistoryWork(work, "copiedRows", Math.max(0, (projected?.reusedWire ?? 0) - headWireCount));
+		llmMessages.splice(headWireCount, 0, ...requestOnlyWireMessages);
+	}
 	for (const message of newTransientWireMessages) llmMessages.push(message);
 	signal?.throwIfAborted();
 
 	const sourceProviderContext: Context = {
 		// The one place every agent loop writes its provider request: the sealed directives are restored here if any layer above lost them.
-		systemPrompt: sealSystemPrompt(composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt)),
+		systemPrompt: envelope.systemPrompt,
 		messages: llmMessages,
-		tools: projectToolsForProvider(sourceContext.tools),
+		tools: envelope.tools,
 	};
 	// Deferred-tool activation reads the whole transcript, not the planned view: a folded view drops the search or call
 	// that activated a tool while still showing the model it used that tool (see `discloseToolSchemas`).
@@ -584,15 +628,26 @@ async function materializeContextPlan(
 		config.model,
 		toolActivationHistory(sourceContext.messages),
 	);
-	const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
+	const compactablePrefix = requestOnlyWireMessages.length === 0 ? compactableWireCount : headWireCount;
+	const knownImageFreePrefix =
+		protocolMaterialized.context.messages === llmMessages && projected?.previousFinal
+			? Math.min(projected.reusedWire, projected.previousFinal.compactablePrefix, compactablePrefix)
+			: 0;
+	const budgeted = applyProviderRequestImageBudget(
+		protocolMaterialized.context,
+		config.model,
+		undefined,
+		knownImageFreePrefix,
+	);
 	const materialized =
 		budgeted.context === protocolMaterialized.context
 			? protocolMaterialized
 			: { ...protocolMaterialized, context: budgeted.context };
+	inheritHistoryWork(work, materialized.context.messages);
 	history?.trackDependencies?.(materialized.context.messages);
 	const nonCompactableContext = nonCompactableProviderContext(
 		materialized.context,
-		compactableMessages.length + requestOnlyWireMessages.length,
+		compactableWireCount + requestOnlyWireMessages.length,
 		materialized.usesTextToolProtocol,
 		headWireCount + requestOnlyWireMessages.length,
 	);
@@ -600,6 +655,20 @@ async function materializeContextPlan(
 		start: (materialized.usesTextToolProtocol && materialized.context.messages.length > 0 ? 1 : 0) + headWireCount,
 		count: requestOnlyWireMessages.length,
 	};
+	const finalScope = scopeFor(materialized.context);
+	const projectionFinal =
+		projected?.stableWire &&
+		materialized.context.messages === llmMessages &&
+		finalScope !== undefined &&
+		!budgeted.outcome &&
+		requestOnlyWireMessages.every(isImmutableHistoryMessage) &&
+		newTransientWireMessages.every(isImmutableHistoryMessage)
+			? {
+					messages: llmMessages,
+					compactablePrefix,
+					scope: finalScope,
+				}
+			: undefined;
 	return {
 		materialized,
 		nonCompactableContext,
@@ -608,7 +677,26 @@ async function materializeContextPlan(
 		transientDecisions: reconciliation.decisions,
 		nativeHistory: !materialized.usesTextToolProtocol && !sourceContext.instructionTail,
 		transientTail: newTransientMessages,
+		projected,
+		projectionFinal,
+		blockImages: converter?.policy,
 	};
+}
+
+function certifyProviderProjection(
+	projected: ReturnType<typeof projectProviderMessages> | undefined,
+	final: { readonly messages: Message[]; readonly compactablePrefix: number; readonly scope: string } | undefined,
+): void {
+	if (!projected || !final) return;
+	Object.freeze(final.messages);
+	markImageFreeProviderMessages(final.messages);
+	const previous = projected.previousFinal;
+	const compatible = previous?.scope === final.scope ? previous : undefined;
+	registerProviderMessagePrefix(
+		final.messages,
+		compatible?.messages,
+		compatible ? Math.min(projected.reusedWire, compatible.compactablePrefix, final.compactablePrefix) : 0,
+	);
 }
 
 /**
@@ -676,6 +764,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				activeFailureRecords = records;
 			},
 		);
+		inheritHistoryWork(sourceContext.messages, sanitized.messages);
 		// The trailing records the request carries behind the plan; a request whose tail is a host instruction takes none.
 		const ledgerView = sanitized.ledger ? renderToolFailureLedger(sanitized.ledger) : undefined;
 		const trailingTexts = sourceContext.instructionTail
@@ -691,7 +780,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			{ texts: trailingTexts },
 			async (candidate) => {
 				signal?.throwIfAborted();
-				const { materialized } = await materializeContextPlan(
+				const { materialized, projected, projectionFinal } = await materializeContextPlan(
 					planningSource,
 					sanitized,
 					ledgerView,
@@ -699,6 +788,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					config,
 					signal,
 				);
+				certifyProviderProjection(projected, projectionFinal);
 				return estimateProviderRequestTokens(materialized.context, config.model);
 			},
 		);
@@ -734,7 +824,11 @@ export async function startPlannedAgentProviderRequestWithId(
 				accountKey: requestAuth.providerAccountKey,
 				requestOnly: fresh.requestOnlyMessageRange,
 				transientTail: fresh.transientTail,
+				compressionPolicy: plan.compressionPolicy,
+				blockImages: fresh.blockImages,
+				conversation: config.conversationId ?? config.sessionId,
 				nativeHistory: fresh.nativeHistory,
+				certifiedWire: fresh.projectionFinal !== undefined,
 			};
 			const continued = historyCandidate && plan.providerHistory?.offer(historyCandidate);
 			// A prior wire prefix is optional. Its size is checked before admission, which always receives
@@ -742,6 +836,15 @@ export async function startPlannedAgentProviderRequestWithId(
 			const materialized = continued
 				? { ...fresh.materialized, context: { ...fresh.materialized.context, messages: continued.messages } }
 				: fresh.materialized;
+
+			const projectionFinal = continued ? undefined : fresh.projectionFinal;
+			// A certified array is the transport's immutable request value. Callbacks receive this same value.
+			certifyProviderProjection(fresh.projected, projectionFinal);
+			inheritHistoryWork(initialContext.messages, materialized.context.messages);
+			const acceptProjection = fresh.projected?.prepareAcceptance(
+				projectionFinal,
+				fresh.requestOnlyMessageRange.count,
+			);
 
 			if (plan.isCurrent?.() === false) {
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
@@ -848,7 +951,12 @@ export async function startPlannedAgentProviderRequestWithId(
 			// A transient commit produced a private array. The loop keeps its own live array after adoption.
 			const privateSnapshot = sourceContext !== beforeTransientCommit;
 			adoptReplannedMessages(initialContext, sourceContext, privateSnapshot);
+			prefixState.acceptSource?.(initialContext.messages);
 			keepPlan = true;
+			if (config.onProviderRequestSnapshot && !privateSnapshot && !config.borrowProviderSnapshotSource) {
+				countHistoryWork(initialContext.messages, "copiedRows", sourceContext.messages.length);
+			}
+			const lastSource = sourceContext.messages.at(-1);
 			await config.onProviderRequestSnapshot?.(
 				{
 					model: config.model,
@@ -857,9 +965,15 @@ export async function startPlannedAgentProviderRequestWithId(
 					requestOnlyMessageRange: continued?.requestOnly ?? fresh.requestOnlyMessageRange,
 					// The loop appends the provider reply to its live history after this callback.
 					// Freeze the accepted source extent so cache-lane compaction can identify that reply as newer.
-					sourceContext: privateSnapshot
-						? sourceContext
-						: { ...sourceContext, messages: sourceContext.messages.slice() },
+					sourceContext:
+						privateSnapshot || config.borrowProviderSnapshotSource
+							? sourceContext
+							: { ...sourceContext, messages: sourceContext.messages.slice() },
+					sourceBoundary: {
+						count: sourceContext.messages.length,
+						last: lastSource,
+						lastRevision: lastSource ? messageContentRevision(lastSource) : undefined,
+					},
 					maxTokens: requestMaxTokens,
 					requestId,
 					providerAccountKey: requestAuth.providerAccountKey,
@@ -901,6 +1015,19 @@ export async function startPlannedAgentProviderRequestWithId(
 							)
 						: streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
+			if (acceptProjection || plan.acceptProviderHistory) {
+				// A stream object can also represent a pre-dispatch guard/redaction refusal. Retain only
+				// when this request has a provider result that can be used by the next turn.
+				void stream
+					.result()
+					.then((message) => {
+						if (message.stopReason !== "error" && message.stopReason !== "aborted" && !signal?.aborted) {
+							acceptProjection?.();
+							plan.acceptProviderHistory?.();
+						}
+					})
+					.catch(() => undefined);
+			}
 			return {
 				requestId,
 				activeFailureRecords,

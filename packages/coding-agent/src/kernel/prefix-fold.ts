@@ -12,8 +12,15 @@
  * takes once per accepted request and logs (see `recordPrefixFoldWork`).
  */
 
+import { countHistoryWork } from "@caupulican/pi-ai/history-work";
 import { harnessLog } from "./harness-log.ts";
-import { messageAppendLineage, messageContentEpoch } from "./message-revision.ts";
+import {
+	type MessageHistoryVersion,
+	messageAppendLineage,
+	messageContentEpoch,
+	messageHistoryVersion,
+	unchangedMessagePrefix,
+} from "./message-revision.ts";
 
 /** Element operations counted by the folds since the last take. */
 let foldOperations = 0;
@@ -32,6 +39,7 @@ export class PrefixFold<Item extends object, State> {
 	private state: State;
 	private epoch = messageContentEpoch();
 	private lineage: object | undefined;
+	private version: MessageHistoryVersion | undefined;
 
 	constructor(create: () => State, step: (state: State, item: Item, index: number, items: readonly Item[]) => void) {
 		this.create = create;
@@ -43,10 +51,13 @@ export class PrefixFold<Item extends object, State> {
 	fold(items: readonly Item[], end = items.length): State {
 		if (!Number.isSafeInteger(end) || end < 0 || end > items.length) throw new RangeError("Invalid prefix length");
 		const lineage = messageAppendLineage(items);
-		let from = this.processed.length;
+		const oldEnd = this.processed.length;
+		let from = oldEnd;
 		let work = 0;
-		if (from > end || this.epoch !== messageContentEpoch()) from = -1;
-		const compareUntil = lineage !== undefined && lineage === this.lineage ? 0 : from;
+		const version = messageHistoryVersion(items, end);
+		const certified = this.version && version ? unchangedMessagePrefix(this.version, version) : undefined;
+		if (from > end || (certified === undefined ? this.epoch !== messageContentEpoch() : certified < from)) from = -1;
+		const compareUntil = certified !== undefined || (lineage !== undefined && lineage === this.lineage) ? 0 : from;
 		for (let index = 0; index < compareUntil; index++) {
 			work++;
 			if (this.processed[index] !== items[index]) {
@@ -59,6 +70,7 @@ export class PrefixFold<Item extends object, State> {
 			this.processed = [];
 			from = 0;
 		}
+		countHistoryWork(items, "oldRowsRead", work + Math.max(0, Math.min(oldEnd, end) - from));
 		for (let index = from; index < end; index++) {
 			const item = items[index]!;
 			this.step(this.state, item, index, items);
@@ -67,6 +79,7 @@ export class PrefixFold<Item extends object, State> {
 		work += end - from;
 		foldOperations += work;
 		this.lineage = lineage;
+		this.version = version;
 		this.epoch = messageContentEpoch();
 		return this.state;
 	}
@@ -120,6 +133,7 @@ export class PrefixFirstMatch<Item extends object> {
 	private firstMatch = -1;
 	private epoch = messageContentEpoch();
 	private lineage: object | undefined;
+	private version: MessageHistoryVersion | undefined;
 
 	constructor(matches: (item: Item) => boolean) {
 		this.matches = matches;
@@ -127,11 +141,15 @@ export class PrefixFirstMatch<Item extends object> {
 
 	find(items: readonly Item[]): number {
 		const lineage = messageAppendLineage(items);
-		const bound = this.epoch === messageContentEpoch() ? Math.min(this.processed.length, items.length) : 0;
-		const certified = lineage !== undefined && lineage === this.lineage ? bound : 0;
+		const version = messageHistoryVersion(items, Math.min(this.processed.length, items.length));
+		const proven = this.version && version ? unchangedMessagePrefix(this.version, version) : undefined;
+		const bound =
+			proven ?? (this.epoch === messageContentEpoch() ? Math.min(this.processed.length, items.length) : 0);
+		const certified = proven ?? (lineage !== undefined && lineage === this.lineage ? bound : 0);
 		let common = certified;
 		while (common < bound && this.processed[common] === items[common]) common++;
 		let work = common - certified + Number(common < bound);
+		countHistoryWork(items, "oldRowsRead", work);
 		if (this.firstMatch >= common) this.firstMatch = -1;
 		this.processed.length = common;
 		let found = this.firstMatch;
@@ -149,6 +167,7 @@ export class PrefixFirstMatch<Item extends object> {
 		}
 		foldOperations += work;
 		this.lineage = lineage;
+		this.version = messageHistoryVersion(items, this.processed.length);
 		this.epoch = messageContentEpoch();
 		return found;
 	}

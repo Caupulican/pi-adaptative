@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { Api, Model } from "@caupulican/pi-ai";
+import type { Api, Message, Model } from "@caupulican/pi-ai";
+import { countHistoryWork, historyWorkFallback, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
 import type { ProviderRequestSnapshotContext } from "../kernel/index.ts";
-import { messageContentRevision } from "../kernel/message-revision.ts";
+import { isImmutableHistoryMessage } from "../kernel/message-revision.ts";
 import type { RequestSnapshotEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
@@ -159,7 +160,8 @@ function contentDescriptor(content: unknown): unknown {
 const providerMessageMetadata = new WeakMap<object, unknown>();
 
 function providerMessageDescriptor(message: object): unknown {
-	const cached = providerMessageMetadata.get(message);
+	const stable = isImmutableHistoryMessage(message);
+	const cached = stable ? providerMessageMetadata.get(message) : undefined;
 	if (cached !== undefined) return cached;
 	const candidate = message as Record<string, unknown>;
 	const entry: Record<string, unknown> = {
@@ -169,7 +171,7 @@ function providerMessageDescriptor(message: object): unknown {
 	for (const key of ["id", "callId", "toolCallId", "toolName", "provider", "model"] as const) {
 		if (typeof candidate[key] === "string") entry[key] = candidate[key];
 	}
-	providerMessageMetadata.set(message, entry);
+	if (stable) providerMessageMetadata.set(message, entry);
 	return entry;
 }
 
@@ -178,10 +180,11 @@ const messageFingerprints = new WeakMap<object, string>();
 /** A message's provider-visible content identity (role, content, ids), memoized by object. */
 export function messageFingerprint(message: unknown): string {
 	if (!message || typeof message !== "object") return fingerprint({ type: typeof message });
-	const cached = messageFingerprints.get(message);
+	const stable = isImmutableHistoryMessage(message);
+	const cached = stable ? messageFingerprints.get(message) : undefined;
 	if (cached) return cached;
 	const value = fingerprint(providerMessageDescriptor(message));
-	messageFingerprints.set(message, value);
+	if (stable) messageFingerprints.set(message, value);
 	return value;
 }
 
@@ -300,18 +303,14 @@ export function exactToolsFingerprint(tools: readonly unknown[]): string | undef
 	return hash.digest("hex");
 }
 
-const exactMessageFingerprints = new WeakMap<
-	object,
-	{ readonly revision: number; readonly value: string | undefined }
->();
+const exactMessageFingerprints = new WeakMap<object, string | undefined>();
 
 export function exactMessageFingerprint(message: unknown): string | undefined {
 	if (!message || typeof message !== "object") return exactProviderFingerprint(message);
-	const revision = messageContentRevision(message);
-	const cached = exactMessageFingerprints.get(message);
-	if (cached?.revision === revision) return cached.value;
+	const stable = isImmutableHistoryMessage(message);
+	if (stable && exactMessageFingerprints.has(message)) return exactMessageFingerprints.get(message);
 	const value = exactProviderFingerprint(message);
-	exactMessageFingerprints.set(message, { revision, value });
+	if (stable) exactMessageFingerprints.set(message, value);
 	return value;
 }
 
@@ -323,19 +322,23 @@ export function exactMessageFingerprint(message: unknown): string | undefined {
  * request was the single largest per-request cost left in the host at 1,500 turns.
  */
 export function historyFingerprint(messages: readonly unknown[]): string {
-	const firstCount = Math.min(messages.length, Math.floor(MAX_PROVIDER_HISTORY_MESSAGES / 4));
+	return sampledHistoryFingerprint(messages.length, (index) => messageFingerprint(messages[index]));
+}
+
+function sampledHistoryFingerprint(length: number, fingerprintAt: (index: number) => string): string {
+	const firstCount = Math.min(length, Math.floor(MAX_PROVIDER_HISTORY_MESSAGES / 4));
 	const indexes =
-		messages.length <= MAX_PROVIDER_HISTORY_MESSAGES
-			? Array.from({ length: messages.length }, (_, index) => index)
+		length <= MAX_PROVIDER_HISTORY_MESSAGES
+			? Array.from({ length }, (_, index) => index)
 			: [
 					...Array.from({ length: firstCount }, (_, index) => index),
 					...Array.from(
 						{ length: MAX_PROVIDER_HISTORY_MESSAGES - firstCount },
-						(_, index) => messages.length - (MAX_PROVIDER_HISTORY_MESSAGES - firstCount) + index,
+						(_, index) => length - (MAX_PROVIDER_HISTORY_MESSAGES - firstCount) + index,
 					),
 				];
-	const digest = createHash("sha256").update(`${messages.length}\0${Math.max(0, messages.length - indexes.length)}\0`);
-	for (const index of indexes) digest.update(messageFingerprint(messages[index])).update("\0");
+	const digest = createHash("sha256").update(`${length}\0${Math.max(0, length - indexes.length)}\0`);
+	for (const index of indexes) digest.update(fingerprintAt(index)).update("\0");
 	return digest.digest("hex");
 }
 
@@ -352,7 +355,12 @@ export interface LaneRequestPrefix {
 }
 
 /** Per session log and lane (api, provider, model): the last request's prefix. Process-local by design. */
-const lanePrefixes = new WeakMap<SessionManager, Map<string, LaneRequestPrefix>>();
+interface LaneRequestFingerprints {
+	readonly wire: readonly Message[] | undefined;
+	readonly prefix: LaneRequestPrefix & { messages: string[]; exactMessages: (string | undefined)[] };
+}
+
+const lanePrefixes = new WeakMap<SessionManager, Map<string, LaneRequestFingerprints>>();
 
 export interface RequestPrefixDivergence {
 	readonly prefixIntact: boolean | "unknown";
@@ -378,6 +386,7 @@ function compareRequestPrefixStrict(
 	previous: LaneRequestPrefix | undefined,
 	current: LaneRequestPrefix,
 	messages: readonly unknown[],
+	unchanged = 0,
 ): RequestPrefixDivergence {
 	if (!previous) return { prefixIntact: "unknown" };
 	if (
@@ -392,7 +401,7 @@ function compareRequestPrefixStrict(
 			: previous.tools !== current.tools
 	)
 		return { prefixIntact: false, firstDivergentIndex: -1, firstDivergentKind: "tools" };
-	for (let index = 0; index < previous.messages.length; index++) {
+	for (let index = unchanged; index < previous.messages.length; index++) {
 		if (index >= current.messages.length)
 			return { prefixIntact: false, firstDivergentIndex: index, firstDivergentKind: "removed" };
 		const previousExact = previous.exactMessages[index];
@@ -475,20 +484,37 @@ export function compareRequestPrefix(
 		: divergence;
 }
 
-function requestPrefixDivergence(
+function recordRequestPrefix(
 	sessionManager: SessionManager,
 	lane: string,
-	current: LaneRequestPrefix,
-	messages: readonly unknown[],
-): RequestPrefixDivergence {
+	envelope: Omit<LaneRequestPrefix, "messages" | "exactMessages">,
+	wire: readonly Message[],
+): { history: string; divergence: RequestPrefixDivergence } {
 	let lanes = lanePrefixes.get(sessionManager);
 	if (!lanes) {
 		lanes = new Map();
 		lanePrefixes.set(sessionManager, lanes);
 	}
-	const divergence = compareRequestPrefix(lanes.get(lane), current, messages);
-	lanes.set(lane, current);
-	return divergence;
+	const previous = lanes.get(lane);
+	const proof = providerMessagePrefix(wire);
+	const append =
+		previous?.wire !== undefined && proof?.previous === previous.wire && proof.count === previous.wire.length;
+	const messages = append ? previous.prefix.messages : [];
+	const exactMessages = append ? previous.prefix.exactMessages : [];
+	const start = messages.length;
+	if (previous && !append) historyWorkFallback(wire, "request-snapshot-history-unproven");
+	for (let index = start; index < wire.length; index++) {
+		if (index < (previous?.prefix.messages.length ?? 0)) countHistoryWork(wire, "oldRowsRead");
+		const message = wire[index];
+		messages.push(messageFingerprint(message));
+		exactMessages.push(exactMessageFingerprint(message));
+	}
+	const current = { ...envelope, messages, exactMessages };
+	const divergence = append
+		? compareRequestPrefixStrict(previous.prefix, current, wire, wire.length)
+		: compareRequestPrefix(previous?.prefix, current, wire);
+	lanes.set(lane, { wire: proof ? wire : undefined, prefix: current });
+	return { history: sampledHistoryFingerprint(messages.length, (index) => messages[index]!), divergence };
 }
 
 export function messageEntryIds(sessionManager: SessionManager): string[] {
@@ -550,6 +576,19 @@ export function buildRequestSnapshotInput(
 	const exactSystem = exactSystemPromptFingerprint(context.context.systemPrompt);
 	const exactTools = exactToolsFingerprint(context.context.tools ?? []);
 	const requestOnlyMessageRange = context.requestOnlyMessageRange;
+	const prefix = recordRequestPrefix(
+		sessionManager,
+		cacheLaneKey(ref.api, ref.provider, ref.modelId),
+		{
+			system: systemFingerprint,
+			...(exactSystem !== undefined ? { exactSystem } : {}),
+			tools,
+			...(exactTools !== undefined ? { exactTools } : {}),
+			reasoning: fingerprint(context.reasoning),
+			...(requestOnlyMessageRange ? { requestOnlyMessageRange } : {}),
+		},
+		context.context.messages,
+	);
 	return {
 		requestId: context.requestId,
 		reason: requestSnapshotReason(sessionManager, model),
@@ -564,24 +603,10 @@ export function buildRequestSnapshotInput(
 		}),
 		systemFingerprint,
 		toolsFingerprint: tools,
-		historyFingerprint: historyFingerprint(context.context.messages),
+		historyFingerprint: prefix.history,
 		messageEntryIds: messageEntryIds(sessionManager),
 		...(typeof context.reasoning === "string" ? { reasoning: context.reasoning } : {}),
-		...requestPrefixDivergence(
-			sessionManager,
-			cacheLaneKey(ref.api, ref.provider, ref.modelId),
-			{
-				system: systemFingerprint,
-				...(exactSystem !== undefined ? { exactSystem } : {}),
-				tools,
-				...(exactTools !== undefined ? { exactTools } : {}),
-				reasoning: fingerprint(context.reasoning),
-				messages: context.context.messages.map(messageFingerprint),
-				exactMessages: context.context.messages.map(exactMessageFingerprint),
-				...(requestOnlyMessageRange ? { requestOnlyMessageRange } : {}),
-			},
-			context.context.messages,
-		),
+		...prefix.divergence,
 		messageCount: context.context.messages.length,
 	};
 }

@@ -12,6 +12,11 @@
 			"pi-source": "./src/index.ts",
 			"import": "./dist/index.js"
 		},
+		"./history-work": {
+			"types": "./dist/history-work.d.ts",
+			"pi-source": "./src/history-work.ts",
+			"import": "./dist/history-work.js"
+		},
 		"./api-registry": {
 			"types": "./dist/api-registry.d.ts",
 			"pi-source": "./src/api-registry.ts",

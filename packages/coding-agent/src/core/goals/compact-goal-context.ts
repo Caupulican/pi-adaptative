@@ -1,5 +1,6 @@
 import type { TextContent } from "@caupulican/pi-ai";
 import { createCustomMessage } from "../../kernel/messages.ts";
+import { PrefixFirstMatchByFirstItem } from "../../kernel/prefix-fold.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
@@ -68,18 +69,7 @@ function isGoalContinuationPayload(message: AgentMessage): boolean {
 	return messageText(message).startsWith(LEGACY_GOAL_CONTINUATION_PREFIX);
 }
 
-function latestContinuationTriggerIndex(messages: AgentMessage[]): number {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (
-			(message.role === "custom" && message.customType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE) ||
-			messageText(message).startsWith(LEGACY_GOAL_CONTINUATION_PREFIX)
-		) {
-			return i;
-		}
-	}
-	return -1;
-}
+const continuationPayloads = new PrefixFirstMatchByFirstItem<AgentMessage>(isGoalContinuationPayload);
 
 /** Capture continuation-only facts before historical goal payloads are removed for context GC. */
 export function captureGoalContextProjection(
@@ -88,7 +78,7 @@ export function captureGoalContextProjection(
 	autoContinueNote?: string,
 ): GoalContextProjection {
 	return {
-		continuationTurn: routedContext !== undefined || latestContinuationTriggerIndex(messages) >= 0,
+		continuationTurn: routedContext !== undefined || continuationPayloads.find(messages) >= 0,
 		routedContext,
 		autoContinueNote,
 	};
@@ -173,7 +163,8 @@ export function injectCompactGoalContext(
 	state: GoalState | undefined,
 	projection: GoalContextProjection = captureGoalContextProjection(messages),
 ): AgentMessage[] {
-	const filtered = messages.filter((message) => !isGoalContinuationPayload(message));
+	const first = continuationPayloads.find(messages);
+	const filtered = first < 0 ? messages : messages.filter((message) => !isGoalContinuationPayload(message));
 	if (!state || !isGoalExecutionActive(state.status)) return filtered;
 	const routedContext = projection.routedContext;
 	return [

@@ -11,6 +11,7 @@ import type {
 	ToolInvocationReceipt,
 } from "../kernel/index.ts";
 import { retainedToolFailureMemory, retainedToolInvocation, stampToolInvocation } from "../kernel/index.ts";
+import { messageSourceOf } from "../kernel/message-revision.ts";
 import {
 	TOOL_NOT_STARTED,
 	type TOOL_OUTCOME_UNKNOWN,
@@ -212,7 +213,7 @@ export class ForegroundLifecycleController {
 	}
 
 	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
-		return this.deps.sessionManager.getMessageEntryId(message);
+		return this.deps.sessionManager.getMessageEntryId(messageSourceOf(message));
 	}
 
 	/**

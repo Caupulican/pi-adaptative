@@ -1,9 +1,20 @@
 /** Bounded, session-local provider history retained only from accepted native requests. */
 
 import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai";
+import {
+	countHistoryWork,
+	inheritHistoryWork,
+	providerMessagePrefix,
+	registerProviderMessagePrefix,
+} from "@caupulican/pi-ai/history-work";
 import type { AgentContextPlan, AgentProviderHistoryPlan, ProviderHistoryCandidate } from "../../kernel/loop-config.ts";
+import { immutableHistoryMessage, messageSourceOf } from "../../kernel/message-revision.ts";
 import { convertToLlm } from "../../kernel/messages.ts";
-import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
+import { providerMessageProjectionScope } from "../../kernel/provider-message-projection.ts";
+import {
+	estimateProviderRequestTokens,
+	markImageFreeProviderMessages,
+} from "../../kernel/provider-request-estimator.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { PathAliasLegendEntry } from "../comms/host-injection-records.ts";
 import {
@@ -58,11 +69,13 @@ interface AcceptedRequest {
 	dependencies: ContinuousChatMessageDependencies;
 	handoffs: readonly HandoffEvidence[];
 	envelope: ProviderHistoryCandidate;
+	scope: string;
 	requestOnly: ProviderHistoryCandidate["requestOnly"];
 	fixedHeadMessages: number;
 	aliases: readonly PathAliasLegendEntry[];
 	verifyAliases: ProviderHistoryFrame["verifyAliases"];
 	messages: readonly Message[];
+	dispatched?: readonly Message[];
 	terminal?: { wire: AssistantMessage; durable: AssistantMessage };
 }
 
@@ -108,19 +121,15 @@ function equalWireMessages(left: readonly Message[], right: readonly Message[], 
 	);
 }
 
-function sameEnvelope(previous: ProviderHistoryCandidate, next: ProviderHistoryCandidate): boolean {
-	const a = previous.model;
-	const b = next.model;
-	return (
-		previous.accountKey !== undefined &&
-		previous.accountKey === next.accountKey &&
-		a.provider === b.provider &&
-		a.api === b.api &&
-		a.id === b.id &&
-		a.baseUrl === b.baseUrl &&
-		previous.context.systemPrompt === next.context.systemPrompt &&
-		equalJson(previous.context.tools, next.context.tools)
-	);
+function providerHistoryScope(candidate: ProviderHistoryCandidate): string | undefined {
+	return providerMessageProjectionScope({
+		model: candidate.model,
+		account: candidate.accountKey,
+		context: candidate.context,
+		policy: candidate.compressionPolicy,
+		blockImages: candidate.blockImages,
+		conversation: candidate.conversation,
+	});
 }
 
 function hasImages(messages: readonly Message[]): boolean {
@@ -276,6 +285,8 @@ export class ContinuousChatProviderHistory {
 				handoff = undefined;
 				if (!dependencies.complete || !dependencies.isCurrent() || !canUseHistory() || !candidate.nativeHistory)
 					return undefined;
+				const scope = providerHistoryScope(candidate);
+				if (scope === undefined) return undefined;
 				const openingEvidence = durableOpening && captureHandoff(this.source, durableOpening);
 				if (durableOpening && openingEvidence) {
 					const { start, count } = candidate.requestOnly;
@@ -307,6 +318,7 @@ export class ContinuousChatProviderHistory {
 				selected = this.extend(
 					previous,
 					candidate,
+					scope,
 					frame,
 					fixedHeadMessages,
 					additions,
@@ -347,29 +359,45 @@ export class ContinuousChatProviderHistory {
 					(!retained && this.eligibleTokens(candidate, candidate.context) === undefined)
 				)
 					return;
+				const scope = providerHistoryScope(candidate);
+				if (scope === undefined) return;
 				const { start, count } = candidate.requestOnly;
+				const frameMessages: Message[] = [];
+				for (let index = 0; index < start + count; index++) {
+					const stable = immutableHistoryMessage(candidate.context.messages[index]!);
+					if (!stable) return;
+					frameMessages.push(stable as Message);
+				}
 				const envelope = {
 					...candidate,
+					model: { ...candidate.model },
 					transientTail: [],
-					context: { ...candidate.context, messages: candidate.context.messages.slice(0, start + count) },
+					context: { ...candidate.context, messages: frameMessages },
 				};
 				const retainedDependencies = new ContinuousChatMessageDependencies();
-				if (retained && previous) retainedDependencies.include(previous.request.dependencies);
+				const certified = candidate.certifiedWire && Object.isFrozen(messages) && !!providerMessagePrefix(messages);
+				const prefix = retained && previous?.request.dispatched && certified ? previous.request : undefined;
+				if (prefix) retainedDependencies.includeSealed(prefix.dependencies);
+				else if (retained && previous) retainedDependencies.include(previous.request.dependencies);
 				retainedDependencies.include(dependencies);
-				retainedDependencies.add(messages);
+				retainedDependencies.add(prefix ? messages.slice(prefix.messages.length) : messages);
 				if (!retainedDependencies.complete || !retainedDependencies.isCurrent()) return;
 				const handoffs = retained?.handoffs ?? handoffEvidence();
 				if (!handoffsCurrent(handoffs)) return;
+				const stableMessages = certified ? messages : this.copyMessages(messages);
+				if (!stableMessages) return;
 				committed = {
 					handle,
 					dependencies: retainedDependencies,
 					handoffs,
 					envelope,
+					scope,
 					requestOnly: retained?.requestOnly ?? candidate.requestOnly,
 					fixedHeadMessages,
 					aliases: offeredAliases,
 					verifyAliases: frame.verifyAliases,
-					messages: messages.slice(),
+					messages: stableMessages,
+					dispatched: certified ? messages : undefined,
 				};
 				this.accepted = committed;
 			},
@@ -377,13 +405,18 @@ export class ContinuousChatProviderHistory {
 				if (
 					!committed ||
 					this.accepted !== committed ||
+					committed.terminal !== undefined ||
 					!committed.dependencies.isCurrent() ||
 					!handoffsCurrent(committed.handoffs) ||
 					!sameTerminal(provider, final, committed.envelope.model)
 				)
 					return;
 				committed.dependencies.add([provider, final]);
-				if (committed.dependencies.complete) committed.terminal = { wire: provider, durable: final };
+				const stableProvider = immutableHistoryMessage(provider);
+				if (committed.dependencies.complete && stableProvider?.role === "assistant") {
+					committed.terminal = { wire: stableProvider, durable: final };
+					committed.dependencies.seal();
+				}
 			},
 		};
 	}
@@ -405,9 +438,11 @@ export class ContinuousChatProviderHistory {
 			request.handle.turnId + 1 !== handle.turnId
 		)
 			return undefined;
-		if (messages[start - 1] !== terminal.durable) return undefined;
+		const terminalRow = messages[start - 1];
+		if (!terminalRow || messageSourceOf(terminalRow) !== messageSourceOf(terminal.durable)) return undefined;
+		const firstSource = messageSourceOf(first);
 		for (let index = start - 1, count = 1; index >= 0 && count <= MAX_RETAINED_MESSAGES; index--, count++) {
-			if (messages[index] !== first) continue;
+			if (messageSourceOf(messages[index]!) !== firstSource) continue;
 			const history = messages.slice(index, start);
 			return { request, terminal, history: sourceMessage ? history.map(sourceMessage) : history };
 		}
@@ -417,6 +452,7 @@ export class ContinuousChatProviderHistory {
 	private extend(
 		previous: PreviousTurn,
 		candidate: ProviderHistoryCandidate,
+		scope: string,
 		frame: ProviderHistoryFrame,
 		fixedHeadMessages: number,
 		additions: readonly PathAliasLegendEntry[],
@@ -431,7 +467,7 @@ export class ContinuousChatProviderHistory {
 		const oldStart = old.requestOnly.start;
 		const state = fresh.messages[frame.headMessages + 1];
 		if (
-			!sameEnvelope(old, candidate) ||
+			previous.request.scope !== scope ||
 			start !== frame.headMessages + 2 ||
 			previous.request.fixedHeadMessages !== fixedHeadMessages ||
 			state?.role !== "user" ||
@@ -460,18 +496,29 @@ export class ContinuousChatProviderHistory {
 						],
 					}
 				: state;
-		const messages: Message[] = [...previous.request.messages, previous.terminal.wire, turnState];
+		const tail: Message[] = [previous.terminal.wire, turnState];
 		if (additions.length > 0) {
-			messages.push({
+			tail.push({
 				role: "user",
 				content: [{ type: "text", text: renderRetainedAliasAdditions(additions) }],
 				timestamp: state.timestamp,
 			});
 		}
-		const frameLength = messages.length;
-		for (let index = end; index < fresh.messages.length; index++) messages.push(fresh.messages[index]!);
+		const frameLength = previous.request.messages.length + tail.length;
+		for (let index = end; index < fresh.messages.length; index++) tail.push(fresh.messages[index]!);
+		const predecessor = candidate.certifiedWire ? previous.request.dispatched : undefined;
+		const stableTail = predecessor ? this.copyMessages(tail) : undefined;
+		const certified = !!predecessor && !!stableTail && !hasImages(stableTail);
+		const messages: Message[] = [...previous.request.messages, ...(stableTail ?? tail)];
+		inheritHistoryWork(fresh.messages, messages);
+		countHistoryWork(messages, "copiedRows", previous.request.messages.length);
+		if (certified && predecessor) {
+			Object.freeze(messages);
+			registerProviderMessagePrefix(messages, predecessor, predecessor.length);
+			markImageFreeProviderMessages(messages);
+		}
 		const context = { ...fresh, messages };
-		const tokens = this.eligibleTokens(candidate, context);
+		const tokens = this.eligibleTokens(candidate, context, certified);
 		return tokens === undefined
 			? undefined
 			: {
@@ -484,12 +531,26 @@ export class ContinuousChatProviderHistory {
 				};
 	}
 
-	private eligibleTokens(candidate: ProviderHistoryCandidate, context: Context): number | undefined {
+	private copyMessages(messages: readonly Message[]): Message[] | undefined {
+		const rows: Message[] = [];
+		for (const message of messages) {
+			const stable = immutableHistoryMessage(message);
+			if (!stable) return undefined;
+			rows.push(stable as Message);
+		}
+		return rows;
+	}
+
+	private eligibleTokens(
+		candidate: ProviderHistoryCandidate,
+		context: Context,
+		imageFree = false,
+	): number | undefined {
 		if (
 			!candidate.nativeHistory ||
 			candidate.accountKey === undefined ||
 			context.messages.length >= MAX_RETAINED_MESSAGES ||
-			hasImages(context.messages)
+			(!imageFree && hasImages(context.messages))
 		)
 			return undefined;
 		const tokens = estimateProviderRequestTokens(context, candidate.model);

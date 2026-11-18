@@ -137,8 +137,8 @@ export interface WorkerResponseObservation {
 	readonly snapshot: SessionRequestSnapshotInput | undefined;
 	/** When that request opened. */
 	readonly requestOpenedAt: number | undefined;
-	/** The worker conversation's history the request carried. */
-	readonly messages: readonly AgentMessage[];
+	/** Derived from the durable worker history before recording this response. */
+	readonly history: ReturnType<WorkerConversation["cacheResponseHistory"]>;
 }
 
 export interface WorkerAttemptExecutorOptions {
@@ -719,6 +719,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										thinkingLevel: options.thinkingLevel,
 										maxTokens,
 										requestPreflight: (request) => providerTurn.requestPreflight(request),
+										borrowProviderSnapshotSource: true,
 										signal: requestSignal,
 										...(structured
 											? {
@@ -1030,10 +1031,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								});
 								let result: IsolatedCompletionResult;
 								// The conversation's sent-prefix marks, carried across its runs like root's.
-								const requestPrefix = options.conversation.requestPrefix();
+								const requestPrefix = options.conversation.requestPrefix(history, transcriptCursor);
 								try {
 									result = await runIsolatedCompletion({
 										prefixState: requestPrefix.state,
+										historyState: requestPrefix.historyState,
+										returnMessageSuffix: true,
 										systemPrompt: buildWorkerSystemPrompt({
 											soul: options.soul,
 											rolePrompt: systemPrompt,
@@ -1079,9 +1082,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											lastSent = {
 												model: context.model as Model<Api>,
 												context: context.context,
-												sourceMessages: context.sourceContext.messages,
+												sourceBoundary: context.sourceBoundary ?? {
+													count: context.sourceContext.messages.length,
+													last: context.sourceContext.messages.at(-1),
+												},
 											};
-											requestPrefix.acceptSource(context.sourceContext.messages);
 											options.onRequestAccepted?.(context.context);
 											options.observeWorkerRequest?.(
 												options.agentId,
@@ -1217,7 +1222,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														agentId: options.agentId,
 														snapshot: lastRequest?.snapshot,
 														requestOpenedAt: lastRequest?.openedAt,
-														messages: options.conversation.getProviderContext().messages,
+														history: options.conversation.cacheResponseHistory(),
 													});
 												}
 												// Failed/aborted streams can retain partial tool calls, but the loop never

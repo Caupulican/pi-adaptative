@@ -1,4 +1,5 @@
 import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
+import { countHistoryWork, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
 import { messageContentRevision } from "./message-revision.ts";
 import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
@@ -191,6 +192,43 @@ const messagesMeasures = new PrefixFoldByFirstItem<Message, { length: number; im
 	},
 );
 
+interface CertifiedMessageMeasure {
+	readonly lengths: number[];
+	readonly imageSizes: number[];
+}
+
+const certifiedMessageMeasures = new WeakMap<readonly Message[], CertifiedMessageMeasure>();
+const imageFreeProviderMessages = new WeakSet<readonly Message[]>();
+
+/** Record the planner's image-budget result only for its frozen, image-free wire. */
+export function markImageFreeProviderMessages(messages: readonly Message[]): void {
+	imageFreeProviderMessages.add(messages);
+}
+
+function measureProviderMessages(messages: Message[]): { length: number; imageChars: number } {
+	const proof = providerMessagePrefix(messages);
+	if (!proof) return messagesMeasures.fold(messages);
+
+	let measured = certifiedMessageMeasures.get(messages);
+	if (!measured) {
+		const earlier = proof.previous && certifiedMessageMeasures.get(proof.previous);
+		const shared = earlier ? proof.count : 0;
+		const canExtend = earlier?.lengths.length === shared + 1;
+		const lengths = canExtend ? earlier.lengths : (earlier?.lengths.slice(0, shared + 1) ?? [2]);
+		const imageSizes = canExtend ? earlier.imageSizes : (earlier?.imageSizes.slice(0, shared + 1) ?? [0]);
+		if (earlier && !canExtend) countHistoryWork(messages, "copiedRows", shared);
+		if (!earlier) countHistoryWork(messages, "oldRowsRead", proof.count);
+		for (let index = shared; index < messages.length; index++) {
+			const measure = measureSemanticMessage(messages[index]!);
+			lengths.push(lengths[index]! + measure.length + Number(index > 0));
+			imageSizes.push(imageSizes[index]! + measure.images * ESTIMATED_IMAGE_CHARS);
+		}
+		measured = { lengths, imageSizes };
+		certifiedMessageMeasures.set(messages, measured);
+	}
+	return { length: measured.lengths[messages.length]!, imageChars: measured.imageSizes[messages.length]! };
+}
+
 const MESSAGES_FIELD_LENGTH = jsonStringUtf16Length("messages") + 1;
 const TOOLS_FIELD_LENGTH = jsonStringUtf16Length("tools") + 1;
 const SYSTEM_PROMPT_FIELD_LENGTH = jsonStringUtf16Length("systemPrompt") + 1;
@@ -238,8 +276,11 @@ function toolsLength(tools: readonly unknown[]): number {
  * measured on an earlier request.
  */
 export function estimateProviderRequestTokens(context: Context, model?: Model<Api>): number {
-	const imageAwareMessages = model ? projectMessagesForModelImageSupport(context.messages, model) : context.messages;
-	const measured = messagesMeasures.fold(imageAwareMessages);
+	const imageAwareMessages =
+		model && !imageFreeProviderMessages.has(context.messages)
+			? projectMessagesForModelImageSupport(context.messages, model)
+			: context.messages;
+	const measured = measureProviderMessages(imageAwareMessages);
 	const messagesLength = measured.length;
 	const imageChars = measured.imageChars;
 	// Exact assembly of `{"systemPrompt":…,"messages":[…],"tools":…}`: braces, each present field's

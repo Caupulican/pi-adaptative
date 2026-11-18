@@ -282,6 +282,8 @@ export function callbackEvidencedCompletion(
 	emittedMessages: readonly WorkerTranscriptMessage[],
 	endToolName?: string,
 ): { completion: IsolatedCompletionResult; suffix: WorkerTranscriptMessage[] } {
+	if (result.messageSuffix !== undefined && result.messages !== undefined)
+		throw new WorkerCompletionProtocolError("Worker completion protocol returned conflicting message evidence.");
 	if (result.messages !== undefined && result.messages.length < historyLength)
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol returned fewer messages than its input history.",
@@ -293,8 +295,8 @@ export function callbackEvidencedCompletion(
 	// itself still does, where a wide value is forced into that narrower declared field. See
 	// worker-conversation-store.ts's `WorkerTranscriptMessage` doc comment.
 	let suffix: WorkerTranscriptMessage[];
-	if (result.messages !== undefined) {
-		suffix = result.messages.slice(historyLength);
+	if (result.messageSuffix !== undefined || result.messages !== undefined) {
+		suffix = result.messageSuffix ?? result.messages!.slice(historyLength);
 		if (!equalWorkerTranscriptValues(suffix, emittedMessages)) {
 			throw new WorkerCompletionProtocolError(
 				"Worker completion protocol returned a suffix without exact callback evidence.",

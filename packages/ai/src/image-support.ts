@@ -24,28 +24,38 @@ function replaceUnsupportedImagesWithPlaceholder(
 	return result ?? content;
 }
 
+/** Construct the model's image policy once for a batch of rows. */
+export function modelImageProjection<TApi extends Api>(
+	model: Model<TApi>,
+): ((message: Message) => Message) | undefined {
+	if (model.input.includes("image") && !model.supportedImageMimeTypes) return undefined;
+	const supported = model.input.includes("image")
+		? new Set(model.supportedImageMimeTypes?.map((type) => type.toLowerCase()))
+		: undefined;
+	const isSupported = (block: ImageContent): boolean => supported?.has(block.mimeType.toLowerCase()) === true;
+	return (message) => {
+		if ((message.role !== "user" && message.role !== "toolResult") || !Array.isArray(message.content)) return message;
+		const placeholder =
+			message.role === "user" ? NON_VISION_USER_IMAGE_PLACEHOLDER : NON_VISION_TOOL_IMAGE_PLACEHOLDER;
+		const content = replaceUnsupportedImagesWithPlaceholder(message.content, placeholder, isSupported);
+		return content === message.content ? message : { ...message, content };
+	};
+}
+
 /** Provider capability projection shared by transport, token admission, and request-body budgeting. */
 export function projectMessagesForModelImageSupport<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 ): Message[] {
-	if (model.input.includes("image") && !model.supportedImageMimeTypes) return messages;
-
-	const supportedMimeTypes = model.input.includes("image")
-		? new Set(model.supportedImageMimeTypes?.map((mimeType) => mimeType.toLowerCase()))
-		: undefined;
-	const isSupported = (block: ImageContent): boolean => supportedMimeTypes?.has(block.mimeType.toLowerCase()) === true;
-	let projected: Message[] | undefined;
-	for (let index = 0; index < messages.length; index++) {
-		const message = messages[index]!;
-		if ((message.role !== "user" && message.role !== "toolResult") || !Array.isArray(message.content)) continue;
-		const placeholder =
-			message.role === "user" ? NON_VISION_USER_IMAGE_PLACEHOLDER : NON_VISION_TOOL_IMAGE_PLACEHOLDER;
-		const content = replaceUnsupportedImagesWithPlaceholder(message.content, placeholder, isSupported);
-		if (content !== message.content) {
-			projected ??= messages.slice();
-			projected[index] = { ...message, content };
+	const project = modelImageProjection(model);
+	if (!project) return messages;
+	let result: Message[] | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		const message = project(messages[i]!);
+		if (message !== messages[i]) {
+			result ??= messages.slice();
+			result[i] = message;
 		}
 	}
-	return projected ?? messages;
+	return result ?? messages;
 }

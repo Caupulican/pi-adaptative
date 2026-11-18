@@ -8,6 +8,7 @@ import {
 	type Model,
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
+import { historyWorkFallback, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
 import {
 	type ContinuousChatCacheComparison,
 	type ContinuousChatCacheFingerprint,
@@ -42,17 +43,11 @@ import {
 const MAX_REPORTS_PER_CONVERSATION = 5;
 const MAX_TRACKED_CONVERSATIONS = 32;
 
-function digest(value: unknown): string {
-	return createHash("sha1")
-		.update(JSON.stringify(value) ?? "")
-		.digest("hex")
-		.slice(0, 12);
-}
-
 type SegmentFingerprint = [label: string, hash: string, chars: number];
 
 function segment(label: string, value: unknown): SegmentFingerprint {
-	return [label, digest(value), (JSON.stringify(value) ?? "").length];
+	const json = JSON.stringify(value) ?? "";
+	return [label, createHash("sha1").update(json).digest("hex").slice(0, 12), json.length];
 }
 
 interface RequestFingerprint {
@@ -83,13 +78,26 @@ const CHAT_VIEW_TAIL_FRACTION = 0.1;
  * The ICM chat view of a request: the first user message holding a text block with `icmCache`, the provenance only the view
  * carries. A carried head (skills, authority, task directory, path legend) precedes it, so the view is not always message 0.
  */
+const viewPositions = new WeakMap<readonly Message[], number>();
 function chatViewIndex(messages: readonly Message[]): number {
-	return messages.findIndex(
-		(message) =>
-			message.role === "user" &&
-			typeof message.content !== "string" &&
-			message.content.some((block) => block.type === "text" && "icmCache" in block),
-	);
+	const proof = providerMessagePrefix(messages);
+	const prior = proof?.previous ? viewPositions.get(proof.previous) : undefined;
+	let index = prior !== undefined && prior >= 0 && prior < proof!.count ? prior : -1;
+	if (index < 0) {
+		for (let i = prior === undefined ? 0 : proof!.count; i < messages.length; i++) {
+			const message = messages[i]!;
+			if (
+				message.role === "user" &&
+				typeof message.content !== "string" &&
+				message.content.some((block) => block.type === "text" && "icmCache" in block)
+			) {
+				index = i;
+				break;
+			}
+		}
+	}
+	if (proof) viewPositions.set(messages, index);
+	return index;
 }
 
 /** The text of the ICM chat view when the request's view is that user message; undefined otherwise. */
@@ -148,6 +156,7 @@ function segmentLabel(messages: readonly Message[], viewIndex: number, index: nu
 }
 
 function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
+	if (process.env.PI_CACHE_TRACE) historyWorkFallback(context.messages, "full-cache-trace-requested");
 	const viewIndex = chatViewIndex(context.messages);
 	const view = chatView(context.messages[viewIndex]);
 	return {
@@ -159,9 +168,14 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		viewCache: view?.cache,
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		harnessDeferred: harnessDeferredCatalog(context),
-		messages: context.messages.map((message, index) =>
-			segment(segmentLabel(context.messages, viewIndex, index), { role: message.role, content: message.content }),
-		),
+		messages: !process.env.PI_CACHE_TRACE
+			? []
+			: context.messages.map((message, index) =>
+					segment(segmentLabel(context.messages, viewIndex, index), {
+						role: message.role,
+						content: message.content,
+					}),
+				),
 	};
 }
 

@@ -8,6 +8,11 @@ export interface ToolNameMap {
 	toOriginalName(name: string): string;
 }
 
+export interface IndexedToolNameMap extends ToolNameMap {
+	readonly checkpoint: number;
+	rewind(checkpoint: number): void;
+}
+
 export interface ToolNameMapOptions {
 	reservedNames?: ReadonlySet<string>;
 	reservedSuffix?: string;
@@ -41,10 +46,11 @@ function uniqueToolName(base: string, usedNames: Set<string>, reservedNames?: Re
 	}
 }
 
-export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapOptions): ToolNameMap {
+export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapOptions): IndexedToolNameMap {
 	const originalToProvider = new Map<string, string>();
 	const providerToOriginal = new Map<string, string>();
 	const usedProviderNames = new Set<string>();
+	const allocated: string[] = [];
 
 	const allocate = (originalName: string): string => {
 		const existing = originalToProvider.get(originalName);
@@ -55,6 +61,7 @@ export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapO
 			? baseSanitizedToolName(`${normalizedBase}${options.reservedSuffix ?? "_tool"}`)
 			: normalizedBase;
 		const providerName = uniqueToolName(base, usedProviderNames, options?.reservedNames);
+		allocated.push(originalName);
 		originalToProvider.set(originalName, providerName);
 		providerToOriginal.set(providerName, originalName);
 		return providerName;
@@ -65,7 +72,22 @@ export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapO
 		allocate(tool.name);
 	}
 
+	const initialSize = allocated.length;
 	return {
+		get checkpoint() {
+			return allocated.length;
+		},
+		rewind(checkpoint) {
+			if (!Number.isSafeInteger(checkpoint) || checkpoint < initialSize || checkpoint > allocated.length)
+				throw new RangeError("Invalid tool name checkpoint");
+			while (allocated.length > checkpoint) {
+				const original = allocated.pop()!;
+				const name = originalToProvider.get(original)!;
+				originalToProvider.delete(original);
+				providerToOriginal.delete(name);
+				usedProviderNames.delete(name);
+			}
+		},
 		toProviderName(name: string): string {
 			return allocate(name);
 		},

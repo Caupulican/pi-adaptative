@@ -2,6 +2,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compaction.ts";
 import type { AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
+import { messageSourceOf } from "../kernel/message-revision.ts";
 import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
 import {
 	composeRequestSystemPrompt,
@@ -65,6 +66,13 @@ export class ProviderRequestRuntimeController {
 		this.deps = deps;
 	}
 
+	/** A caller-supplied context transformation may retain or mutate the legacy source rows. */
+	isolateHistoryWhen(allowed: () => boolean): void {
+		this.deps.agent.useIsolatedRequestHistory(
+			() => allowed() && !this.previousPlanContext && !this.previousTransformContext && !this.previousAdmission,
+		);
+	}
+
 	/** Refresh only live runtime metadata; keep the loop's canonical message history. */
 	installTurnRefresh(...flushInboxes: readonly (() => void)[]): void {
 		const agent = this.deps.agent;
@@ -80,9 +88,9 @@ export class ProviderRequestRuntimeController {
 			const { systemPrompt, tools, model, thinkingLevel } = agent.state;
 			return {
 				...previous,
-				context: previous?.context
-					? { ...previous.context, systemPrompt, tools: tools.slice() }
-					: agent.createContextSnapshot(),
+				...(previous?.context
+					? { context: { ...previous.context, systemPrompt, tools: tools.slice() } }
+					: { refreshHistory: { systemPrompt, tools: tools.slice() } }),
 				model: previous?.model ?? model,
 				thinkingLevel: previous?.thinkingLevel ?? thinkingLevel,
 			};
@@ -106,7 +114,8 @@ export class ProviderRequestRuntimeController {
 	): number {
 		const usageInfo = this.findUsage(request.sourceContext.messages);
 		if (!usageInfo) return fallbackTokens;
-		const usageMessage = request.sourceContext.messages[usageInfo.index];
+		const sourceMessage = request.sourceContext.messages[usageInfo.index];
+		const usageMessage = sourceMessage && messageSourceOf(sourceMessage);
 		if (
 			usageMessage?.role !== "assistant" ||
 			usageMessage.provider !== request.model.provider ||

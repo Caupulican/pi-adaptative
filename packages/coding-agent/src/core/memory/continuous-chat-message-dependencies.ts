@@ -11,6 +11,29 @@ export class ContinuousChatMessageDependencies {
 	private bounded = true;
 	private checkedEpoch = -1;
 	private current = true;
+	private sealed = false;
+	private retained?: ContinuousChatMessageDependencies;
+	private retainedSize = 0;
+
+	private get size(): number {
+		return this.revisions.size + this.retainedSize;
+	}
+
+	seal(): void {
+		this.sealed = true;
+	}
+
+	/** Only a completed, immutable predecessor can be borrowed by reference. */
+	includeSealed(previous: ContinuousChatMessageDependencies): void {
+		if (!previous.sealed || this.retained) {
+			this.include(previous);
+			return;
+		}
+		this.bounded &&= previous.complete && this.size + previous.size <= MAX_DEPENDENCIES;
+		this.retained = previous;
+		this.retainedSize = previous.size;
+		this.checkedEpoch = -1;
+	}
 
 	get complete(): boolean {
 		return this.bounded;
@@ -28,6 +51,7 @@ export class ContinuousChatMessageDependencies {
 
 	include(previous: ContinuousChatMessageDependencies): void {
 		this.bounded &&= previous.complete;
+		if (previous.retained) this.include(previous.retained);
 		for (const [message, revision] of previous.revisions) {
 			if (!this.keep(message, revision)) return;
 		}
@@ -39,7 +63,8 @@ export class ContinuousChatMessageDependencies {
 		const epoch = messageContentEpoch();
 		if (this.checkedEpoch === epoch) return this.current;
 		this.checkedEpoch = epoch;
-		this.current = true;
+		this.current = this.retained?.isCurrent() ?? true;
+		if (!this.current) return false;
 		for (const [message, revision] of this.revisions) {
 			if (messageContentRevision(message) !== revision) {
 				this.current = false;
@@ -55,7 +80,7 @@ export class ContinuousChatMessageDependencies {
 
 	private keep(message: object, revision: number): boolean {
 		if (this.revisions.has(message)) return true;
-		if (this.revisions.size >= MAX_DEPENDENCIES) {
+		if (this.size >= MAX_DEPENDENCIES) {
 			this.bounded = false;
 			return false;
 		}

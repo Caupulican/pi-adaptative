@@ -21,7 +21,15 @@
  */
 
 import type { ToolResultMessage } from "@caupulican/pi-ai";
+import { countHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { AgentMessage } from "../../kernel/index.ts";
+import {
+	type MessageHistoryVersion,
+	messageContentRevision,
+	messageHistoryVersion,
+	unchangedMessagePrefix,
+} from "../../kernel/message-revision.ts";
+import { PrefixFoldByFirstItem } from "../../kernel/prefix-fold.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 import {
 	type ContextEvidenceRef,
@@ -86,7 +94,54 @@ export interface BuiltToolOutputItem {
  * across compaction rewrites or branch switches. Callers that must stay pure full-scans (tests,
  * read-only recompute paths) simply omit this parameter.
  */
-export type ContextAuditMemo = Map<AgentMessage, { messageIndex: number; built: BuiltToolOutputItem }>;
+export type ContextAuditMemo = Map<
+	AgentMessage,
+	{ messageIndex: number; revision: number; built: BuiltToolOutputItem }
+>;
+
+type ContextToolRows = {
+	rows: { message: ToolResultMessage; messageIndex: number }[];
+	callIds: Set<string>;
+};
+
+const toolRows = (): ContextToolRows => ({ rows: [], callIds: new Set<string>() });
+
+function collectToolRow(result: ContextToolRows, message: AgentMessage, messageIndex: number): void {
+	if (message.role !== "toolResult") return;
+	result.rows.push({ message, messageIndex });
+	result.callIds.add(message.toolCallId);
+}
+
+const indexedToolRows = new PrefixFoldByFirstItem<AgentMessage, ContextToolRows>(toolRows, collectToolRow);
+
+/** The audit and its transcript lookup need the same ordered set of tool-result rows. */
+export function contextToolRows(messages: readonly AgentMessage[]): ContextToolRows {
+	if (messageHistoryVersion(messages)) return indexedToolRows.fold(messages);
+	const result = toolRows();
+	countHistoryWork(messages, "oldRowsRead", messages.length);
+	messages.forEach((message, index) => {
+		collectToolRow(result, message, index);
+	});
+	return result;
+}
+
+export class ContextAuditHistory {
+	private readonly memo: ContextAuditMemo = new Map();
+	private version: MessageHistoryVersion | undefined;
+	private length = 0;
+
+	refresh(messages: readonly AgentMessage[]): ContextAuditMemo | undefined {
+		const version = messageHistoryVersion(messages);
+		if (!version || !this.version || unchangedMessagePrefix(this.version, version) < this.length) this.memo.clear();
+		this.version = version;
+		this.length = messages.length;
+		return version ? this.memo : undefined;
+	}
+
+	clear(): void {
+		this.refresh([]);
+	}
+}
 
 function buildToolOutputItem(
 	message: ToolResultMessage,
@@ -228,14 +283,16 @@ export function runContextAudit(
 	memo?: ContextAuditMemo,
 ): ContextAuditReport {
 	const items: ContextAuditItemReport[] = [];
-	messages.forEach((message, messageIndex) => {
-		if (message.role !== "toolResult") return;
+	const { rows } = contextToolRows(messages);
+	countHistoryWork(messages, "oldRowsRead", rows.length);
+	for (const { message, messageIndex } of rows) {
 		const cached = memo?.get(message);
+		const revision = messageContentRevision(message);
 		let built: BuiltToolOutputItem;
-		if (cached && cached.messageIndex === messageIndex) built = cached.built;
+		if (cached && cached.messageIndex === messageIndex && cached.revision === revision) built = cached.built;
 		else {
 			built = buildToolOutputItem(message, messageIndex, options);
-			memo?.set(message, { messageIndex, built });
+			memo?.set(message, { messageIndex, revision, built });
 		}
 		// Re-derive the turnIndex-dependent tail every call, cache hit or miss: a resolved
 		// artifact's real capture turn never changes (see buildToolOutputItem), while a
@@ -257,6 +314,6 @@ export function runContextAudit(
 			dropFromPromptHardConstraints: evaluateHardConstraints("drop_from_prompt", features, flags),
 			summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
 		});
-	});
+	}
 	return { turnIndex: options.turnIndex, items };
 }

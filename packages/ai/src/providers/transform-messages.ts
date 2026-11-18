@@ -29,22 +29,77 @@ export function joinTextContent(content: readonly (TextContent | ImageContent)[]
 	return parts?.join("\n") ?? first ?? "";
 }
 
-/**
- * Normalize tool call ID for cross-provider compatibility.
- * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
- * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
- */
-export function transformMessages<TApi extends Api>(
-	messages: Message[],
-	model: Model<TApi>,
-	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
-): Message[] {
-	// Build a map of original tool call IDs to normalized IDs
-	const toolCallIdMap = new Map<string, string>();
-	const imageAwareMessages = projectMessagesForModelImageSupport(messages, model);
+type NormalizeCall<TApi extends Api> = (id: string, model: Model<TApi>, source: AssistantMessage) => string;
 
-	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
-	const transformed = imageAwareMessages.map((msg) => {
+/** Cross-message state for ID normalization, interrupted calls, and unmatched tool output. */
+export class MessageTransformCursor {
+	private readonly toolCallIdMap = new Map<string, string>();
+	private readonly retained = new Set<string>();
+	private readonly dropped = new Set<string>();
+	private pending: ToolCall[] = [];
+	private answered = new Set<string>();
+	private readonly undo?: (() => void)[];
+
+	constructor(reversible = false) {
+		if (reversible) this.undo = [];
+	}
+
+	get checkpoint(): number {
+		return this.undo?.length ?? 0;
+	}
+
+	rewind(checkpoint: number): void {
+		if (!this.undo || checkpoint < 0 || checkpoint > this.undo.length)
+			throw new RangeError("Invalid transform checkpoint");
+		while (this.undo.length > checkpoint) this.undo.pop()!();
+	}
+
+	private remember(set: Set<string>, id: string): void {
+		if (set.has(id)) return;
+		set.add(id);
+		this.undo?.push(() => {
+			set.delete(id);
+		});
+	}
+
+	private replaceGroup(calls: ToolCall[]): void {
+		const pending = this.pending;
+		const answered = this.answered;
+		this.undo?.push(() => {
+			this.pending = pending;
+			this.answered = answered;
+		});
+		this.pending = calls;
+		this.answered = new Set();
+	}
+
+	/** Pending calls are displayed at EOF. An appended real result can replace this provisional tail. */
+	finish(result: Message[]): void {
+		for (const tc of this.pending) {
+			if (!this.answered.has(tc.id)) {
+				result.push({
+					role: "toolResult",
+					toolCallId: tc.id,
+					toolName: tc.name,
+					content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
+					isError: true,
+					timestamp: Date.now(),
+				} as ToolResultMessage);
+			}
+		}
+	}
+
+	private closeGroup(result: Message[]): void {
+		if (!this.pending.length) return;
+		this.finish(result);
+		this.replaceGroup([]);
+	}
+
+	private normalize<TApi extends Api>(
+		msg: Message,
+		model: Model<TApi>,
+		normalizeToolCallId?: NormalizeCall<TApi>,
+	): Message {
 		// User messages pass through unchanged
 		if (msg.role === "user") {
 			return msg;
@@ -52,7 +107,7 @@ export function transformMessages<TApi extends Api>(
 
 		// Handle toolResult messages - normalize toolCallId if we have a mapping
 		if (msg.role === "toolResult") {
-			const normalizedId = toolCallIdMap.get(msg.toolCallId);
+			const normalizedId = this.toolCallIdMap.get(msg.toolCallId);
 			if (normalizedId && normalizedId !== msg.toolCallId) {
 				return { ...msg, toolCallId: normalizedId };
 			}
@@ -106,7 +161,14 @@ export function transformMessages<TApi extends Api>(
 					if (!isSameModel && normalizeToolCallId) {
 						const normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
 						if (normalizedId !== toolCall.id) {
-							toolCallIdMap.set(toolCall.id, normalizedId);
+							const previous = this.toolCallIdMap.get(toolCall.id);
+							if (previous !== normalizedId) {
+								this.undo?.push(() => {
+									if (previous === undefined) this.toolCallIdMap.delete(toolCall.id);
+									else this.toolCallIdMap.set(toolCall.id, previous);
+								});
+								this.toolCallIdMap.set(toolCall.id, normalizedId);
+							}
 							normalizedToolCall = { ...normalizedToolCall, id: normalizedId };
 						}
 					}
@@ -123,40 +185,18 @@ export function transformMessages<TApi extends Api>(
 			};
 		}
 		return msg;
-	});
+	}
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
-	const result: Message[] = [];
-	let pendingToolCalls: ToolCall[] = [];
-	let existingToolResultIds = new Set<string>();
-	const droppedToolCallIds = new Set<string>();
-	const retainedToolCallIds = new Set<string>();
-	const insertSyntheticToolResults = () => {
-		if (pendingToolCalls.length > 0) {
-			for (const tc of pendingToolCalls) {
-				if (!existingToolResultIds.has(tc.id)) {
-					result.push({
-						role: "toolResult",
-						toolCallId: tc.id,
-						toolName: tc.name,
-						content: [{ type: "text", text: INTERRUPTED_TOOL_RESULT_TEXT }],
-						isError: true,
-						timestamp: Date.now(),
-					} as ToolResultMessage);
-				}
-			}
-			pendingToolCalls = [];
-			existingToolResultIds = new Set();
-		}
-	};
-
-	for (let i = 0; i < transformed.length; i++) {
-		const msg = transformed[i];
-
+	append<TApi extends Api>(
+		message: Message,
+		model: Model<TApi>,
+		result: Message[],
+		normalizeToolCallId?: NormalizeCall<TApi>,
+	): void {
+		const msg = this.normalize(message, model, normalizeToolCallId);
 		if (msg.role === "assistant") {
 			// If we have pending orphaned tool calls from a previous assistant, insert synthetic results now
-			insertSyntheticToolResults();
+			this.closeGroup(result);
 
 			// Skip errored/aborted assistant messages entirely.
 			// These are incomplete turns that shouldn't be replayed:
@@ -167,25 +207,24 @@ export function transformMessages<TApi extends Api>(
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 				const skippedToolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
 				for (const toolCall of skippedToolCalls) {
-					droppedToolCallIds.add(toolCall.id);
+					this.remember(this.dropped, toolCall.id);
 				}
-				continue;
+				return;
 			}
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
-			for (const toolCall of toolCalls) retainedToolCallIds.add(toolCall.id);
+			for (const toolCall of toolCalls) this.remember(this.retained, toolCall.id);
 			if (toolCalls.length > 0) {
-				pendingToolCalls = toolCalls;
-				existingToolResultIds = new Set();
+				this.replaceGroup(toolCalls);
 			}
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
-			if (droppedToolCallIds.has(msg.toolCallId)) {
-				continue;
+			if (this.dropped.has(msg.toolCallId)) {
+				return;
 			}
-			if (!retainedToolCallIds.has(msg.toolCallId)) {
+			if (!this.retained.has(msg.toolCallId)) {
 				// Older compacted sessions can start inside an exchange. Preserve the observed output
 				// without inventing an executable call or sending a provider-invalid unmatched result.
 				result.push({
@@ -199,21 +238,31 @@ export function transformMessages<TApi extends Api>(
 					],
 					timestamp: msg.timestamp,
 				});
-				continue;
+				return;
 			}
-			existingToolResultIds.add(msg.toolCallId);
+			if (this.pending.length) this.remember(this.answered, msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {
 			// User message interrupts tool flow - insert synthetic results for orphaned calls
-			insertSyntheticToolResults();
+			this.closeGroup(result);
 			result.push(msg);
 		} else {
 			result.push(msg);
 		}
 	}
+}
 
-	// If the conversation ends with unresolved tool calls, synthesize results now.
-	insertSyntheticToolResults();
-
+/** Normalize cross-provider history and reconcile interrupted exchanges in message order. */
+export function transformMessages<TApi extends Api>(
+	messages: Message[],
+	model: Model<TApi>,
+	normalizeToolCallId?: NormalizeCall<TApi>,
+): Message[] {
+	const cursor = new MessageTransformCursor();
+	const result: Message[] = [];
+	for (const message of projectMessagesForModelImageSupport(messages, model)) {
+		cursor.append(message, model, result, normalizeToolCallId);
+	}
+	cursor.finish(result);
 	return result;
 }

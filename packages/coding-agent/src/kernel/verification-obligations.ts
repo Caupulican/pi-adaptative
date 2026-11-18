@@ -1,4 +1,6 @@
+import { countHistoryWork, historyWorkFallback } from "@caupulican/pi-ai/history-work";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
+import { type MessageHistoryVersion, messageHistoryVersion, unchangedMessagePrefix } from "./message-revision.ts";
 import type { AgentMessage } from "./types.ts";
 
 const MAX_ACTIVE_VERIFICATION_OBLIGATIONS = 16;
@@ -373,7 +375,7 @@ export class VerificationObligationTracker {
 	private transcriptRevision = 0;
 
 	constructor(messages: readonly AgentMessage[] = []) {
-		this.replay(messages);
+		this.replayAdditional(messages);
 	}
 
 	/**
@@ -388,12 +390,24 @@ export class VerificationObligationTracker {
 		this.activeRevisions.clear();
 		this.backgroundTaskRevisions.clear();
 		this.transcriptRevision = 0;
-		this.replay(messages);
+		this.replayAdditional(messages);
 		for (const id of [...this.openedThisRun]) if (!this.activeIds.has(id)) this.openedThisRun.delete(id);
 	}
 
+	/** A run owns new failures separately from the retained transcript's bounded baseline. */
+	forkRun(): VerificationObligationTracker {
+		const run = new VerificationObligationTracker();
+		for (const [key, value] of this.activeIds) run.activeIds.set(key, value);
+		for (const [key, value] of this.activeSetupGroups) run.activeSetupGroups.set(key, value);
+		for (const [key, value] of this.descriptions) run.descriptions.set(key, value);
+		for (const [key, value] of this.activeRevisions) run.activeRevisions.set(key, value);
+		for (const [key, value] of this.backgroundTaskRevisions) run.backgroundTaskRevisions.set(key, value);
+		run.transcriptRevision = this.transcriptRevision;
+		return run;
+	}
+
 	/** History belongs to earlier runs: it shapes the active set but never this run's own failures. */
-	private replay(messages: readonly AgentMessage[]): void {
+	replayAdditional(messages: readonly AgentMessage[]): void {
 		this.replaying = true;
 		try {
 			this.record(messages);
@@ -632,4 +646,27 @@ export function retainedVerificationDetails(details: unknown): { piVerification:
 	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
 	const record = readVerificationRecord(ownDataValue(details, "piVerification"));
 	return record ? { piVerification: record } : undefined;
+}
+
+/** Cache the bounded verification baseline for one conversation and read only its newly appended rows. */
+export class VerificationHistory {
+	private readonly baseline = new VerificationObligationTracker();
+	private version: MessageHistoryVersion | undefined;
+	private length = 0;
+
+	startRun(messages: readonly AgentMessage[]): VerificationObligationTracker {
+		const version = messageHistoryVersion(messages);
+		if (this.version && version && unchangedMessagePrefix(this.version, version) === this.length) {
+			this.baseline.replayAdditional(messages.slice(this.length));
+		} else {
+			if (this.length > 0) {
+				countHistoryWork(messages, "oldRowsRead", Math.min(this.length, messages.length));
+				historyWorkFallback(messages, version ? "verification-history-edited" : "verification-history-unowned");
+			}
+			this.baseline.restore(messages);
+		}
+		this.version = version;
+		this.length = messages.length;
+		return this.baseline.forkRun();
+	}
 }

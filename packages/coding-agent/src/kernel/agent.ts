@@ -32,35 +32,22 @@ import type {
 	ToolCallPreflightRejectionContext,
 	ToolCallStartHook,
 } from "./loop-config.ts";
-import { advanceMessageContentRevision, advanceMessageRevision } from "./message-revision.ts";
+import {
+	advanceMessageContentRevision,
+	createVersionedMessageHistory,
+	ImmutableMessageHistory,
+	MessageHistoryMirror,
+	markMessageHistoryEdit,
+} from "./message-revision.ts";
 import { convertToLlm } from "./messages.ts";
 import { sealSystemPrompt } from "./sealed-directives.ts";
 import { createToolFailureContextMemory } from "./tool-failure-memory.ts";
+import { ToolFailureRecoveryHistory } from "./tool-failure-recovery-gate.ts";
 import type { AgentEvent, AgentMessage, AgentState, AgentTool, QueueMode, ToolExecutionMode } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
+import { VerificationHistory } from "./verification-obligations.ts";
 
 export type { QueueMode } from "./types.ts";
-
-/**
- * Default `convertToLlm` for a caller that supplies none of its own. Delegates to the real
- * converter (`./messages.ts`) rather than duplicating a narrower filter: that function has an
- * explicit case for every `AgentMessage` role - "custom", "bashExecution", "branchSummary",
- * "compactionSummary" - converting each into a valid `Message` instead of silently dropping it. A
- * narrower, hand-rolled filter here (user/assistant/toolResult only, as this used to be) is a
- * latent trap for any content injected as one of those other roles: a default-converter caller
- * never sees it reach the provider at all, no error, nothing to notice - exactly what happened to
- * a MUST-protocol verification directive represented as a `role: "custom"` message (see the
- * turn-economics remediation doc's append-on-change section for the incident this fixes).
- *
- * Confirmed zero production behaviour change: `packages/coding-agent/src/core/sdk.ts` has always
- * wired its own `convertToLlm` explicitly (wrapping this same `messages.ts` function), so this
- * default only ever governed callers that never supply one - the test harness being the one that
- * mattered, which is why the harness silently dropped role:"custom" content while production never
- * did.
- */
-function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return convertToLlm(messages);
-}
 
 const DEFAULT_MODEL = {
 	id: "unknown",
@@ -86,8 +73,7 @@ function createMutableAgentState(
 	initialState?: Partial<Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">>,
 ): MutableAgentState {
 	let tools = initialState?.tools?.slice() ?? [];
-	let messages = initialState?.messages?.slice() ?? [];
-	advanceMessageRevision(messages);
+	let messages = createVersionedMessageHistory(initialState?.messages);
 
 	return {
 		systemPrompt: initialState?.systemPrompt ?? "",
@@ -103,8 +89,7 @@ function createMutableAgentState(
 			return messages;
 		},
 		set messages(nextMessages: AgentMessage[]) {
-			messages = nextMessages.slice();
-			advanceMessageRevision(messages);
+			messages = createVersionedMessageHistory(nextMessages);
 		},
 		isStreaming: false,
 		streamingMessage: undefined,
@@ -331,6 +316,13 @@ export class Agent {
 	public beforeSteeringPoll?: (signal?: AbortSignal) => void | Promise<void>;
 	private activeRun?: ActiveRun;
 	/** No-progress gates shared only by host continuations of the current logical prompt. */
+	private readonly workingHistory = new MessageHistoryMirror();
+	private readonly requestHistory = new ImmutableMessageHistory();
+	private readonly verificationHistory = new VerificationHistory();
+	private readonly toolFailureRecoveryHistory = new ToolFailureRecoveryHistory();
+	private requestHistoryAllowed?: () => boolean;
+	private borrowedProviderSnapshotCallback?: AgentLoopConfig["onProviderRequestSnapshot"];
+	private supportsIsolatedHistory = true;
 	private loopContinuationState: AgentLoopContinuationState | undefined;
 	/**
 	 * SESSION-scoped "already sent" mark for `sanitizeToolFailureContext` (see
@@ -374,7 +366,7 @@ export class Agent {
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
-		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
+		this.convertToLlm = options.convertToLlm ?? convertToLlm;
 		this.transformContext = options.transformContext;
 		this.planContext = options.planContext;
 		this.admitProviderRequest = options.admitProviderRequest;
@@ -430,9 +422,55 @@ export class Agent {
 	 * `agent_end` is the final emitted event for a run, but the agent does not
 	 * become idle until all awaited listeners for that event have settled.
 	 */
-	subscribe(listener: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void): () => void {
+	subscribe(
+		listener: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void,
+		options?: { publishesMessageEdits: true },
+	): () => void {
 		this.listeners.add(listener);
+		if (!options?.publishesMessageEdits) {
+			this.supportsIsolatedHistory = false;
+			this.requestHistory.reset();
+		}
 		return () => this.listeners.delete(listener);
+	}
+
+	/** Install the host's eligibility check for isolated request history. */
+	useIsolatedRequestHistory(allowed: () => boolean): void {
+		const installed = this.historyCallbacks();
+		this.requestHistoryAllowed = () =>
+			allowed() && this.historyCallbacks().every((callback, index) => callback === installed[index]);
+		this.requestHistory.reset();
+	}
+
+	private historyCallbacks(): readonly unknown[] {
+		return [
+			this.planContext,
+			this.transformContext,
+			this.convertToLlm,
+			this.admitProviderRequest,
+			this.onProviderRequestSnapshot,
+			this.beforeToolCall,
+			this.afterToolCall,
+			this.onToolCallStart,
+			this.prepareNextTurn,
+			this.streamFn,
+		];
+	}
+
+	/** The built-in lifecycle observer reads the source synchronously and retains only its boundary. */
+	allowBorrowedProviderSnapshotSource(): void {
+		this.borrowedProviderSnapshotCallback = this.onProviderRequestSnapshot;
+	}
+
+	private canonicalRequestMessages(): AgentMessage[] {
+		const { messages } = this._state;
+		if (!this.requestHistoryAllowed || !this.supportsIsolatedHistory) return messages;
+		if (!this.requestHistoryAllowed()) {
+			this.supportsIsolatedHistory = false;
+			this.requestHistory.reset();
+			return messages;
+		}
+		return this.requestHistory.project(messages, this.workingHistory.messages);
 	}
 
 	/**
@@ -449,14 +487,12 @@ export class Agent {
 	/** Mutations publish one revision for every derived message projection. */
 	appendMessage(message: AgentMessage): void {
 		this._state.messages.push(message);
-		advanceMessageRevision(this._state.messages, "append");
 	}
 
 	removeMessage(message: AgentMessage): void {
 		const index = this._state.messages.indexOf(message);
 		if (index < 0) return;
 		this._state.messages.splice(index, 1);
-		advanceMessageRevision(this._state.messages);
 	}
 
 	/** Preserve the identity shared by finalized events and persistence. */
@@ -465,8 +501,14 @@ export class Agent {
 		const record = target as unknown as Record<string, unknown>;
 		for (const key of Object.keys(record)) delete record[key];
 		Object.assign(record, replacement);
+		this.noteMessageContentsEdited(target);
+	}
+
+	/** Publish a tool normalizer or host edit before the next request reads the affected row. */
+	private noteMessageContentsEdited(target: AgentMessage): void {
 		advanceMessageContentRevision(target);
-		advanceMessageRevision(this._state.messages);
+		const messages = this._state.messages;
+		markMessageHistoryEdit(messages, target);
 	}
 
 	/** Controls how queued steering messages are drained. */
@@ -673,7 +715,7 @@ export class Agent {
 			try {
 				await runAgentLoop(
 					messages,
-					this.contextWithMessages(this._state.messages),
+					this.contextWithMessages(this.canonicalRequestMessages()),
 					this.createLoopConfig(options),
 					(event) => this.processEvents(event),
 					signal,
@@ -696,7 +738,7 @@ export class Agent {
 		await this.runWithLifecycle(async (signal) => {
 			try {
 				await runAgentLoopContinue(
-					this.contextWithMessages(this._state.messages),
+					this.contextWithMessages(this.canonicalRequestMessages()),
 					this.createLoopConfig(),
 					(event) => this.processEvents(event),
 					signal,
@@ -743,7 +785,7 @@ export class Agent {
 		return this.contextWithMessages(this._state.messages.slice());
 	}
 
-	/** Loop entry copies messages synchronously before its first await. External snapshots own their copy here. */
+	/** External snapshots own their copy. The loop refreshes its working history from the canonical rows. */
 	private contextWithMessages(messages: AgentMessage[]): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
@@ -784,6 +826,13 @@ export class Agent {
 			backgroundToolCallAfterMs: this.backgroundToolCallAfterMs,
 			backgroundHandoff: this.backgroundHandoff,
 			subscribeToolCallHandoffRequest: this.subscribeToolCallHandoffRequest,
+			providerMessageProjectionOwner: this,
+			workingHistory: this.workingHistory,
+			verificationHistory: this.verificationHistory,
+			toolFailureRecoveryHistory: this.toolFailureRecoveryHistory,
+			getCanonicalMessages: () => this.canonicalRequestMessages(),
+			keepCanonicalHistory: this.requestHistoryAllowed !== undefined,
+			onMessageContentsEdited: (message) => this.noteMessageContentsEdited(message),
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			shouldStopAfterTurn: this.shouldStopAfterTurn
 				? async () => (await this.shouldStopAfterTurn?.(this.signal)) ?? false
@@ -793,6 +842,7 @@ export class Agent {
 			planContext: this.planContext,
 			admitProviderRequest: this.admitProviderRequest,
 			onProviderRequestSnapshot: this.onProviderRequestSnapshot,
+			borrowProviderSnapshotSource: this.onProviderRequestSnapshot === this.borrowedProviderSnapshotCallback,
 			resolveRequestReasoning: this.resolveRequestReasoning,
 			onSentPrefixDisturbance: this.onSentPrefixDisturbance,
 			requestPreflight: this.requestPreflight,

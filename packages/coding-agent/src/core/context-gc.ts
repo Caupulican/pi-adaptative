@@ -1,10 +1,21 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
+import { countHistoryWork, historyWorkFallback } from "@caupulican/pi-ai/history-work";
 import { estimateTokens } from "../kernel/compaction/compaction.ts";
 import type { AgentMessage } from "../kernel/index.ts";
 import { isTransientPointerRecord, PrefixFold, transientRecordPackedDetails } from "../kernel/index.ts";
+import {
+	immutableHistoryMessage,
+	isImmutableHistoryMessage,
+	type MessageHistoryVersion,
+	messageHistoryVersion,
+	registerProjectedMessageHistory,
+	unchangedMessagePrefix,
+	withMessageSource,
+} from "../kernel/message-revision.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
@@ -139,6 +150,9 @@ export interface ContextGcReport {
 }
 
 export interface ContextGcResult {
+	compressionPolicy?: string;
+	/** Publish packed rows only when the surrounding provider request really ran. */
+	acceptProviderHistory?(): void;
 	messages: AgentMessage[];
 	report: ContextGcReport;
 	/**
@@ -461,6 +475,10 @@ interface GcPlanFold {
 
 const gcPlanFolds = new WeakMap<AgentMessage, GcPlanFold>();
 
+function semanticMarkerKey(semanticSettings: Required<SemanticMemoryGcSettings>): string {
+	return JSON.stringify([semanticSettings.enabled, semanticSettings.markers]);
+}
+
 function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemoryGcSettings>): GcPlanFold {
 	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
 		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [], lastRecordIndexByKind: new Map() }),
@@ -484,7 +502,7 @@ function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemory
 			}
 		},
 	);
-	return { cwd, markersKey: semanticSettings.markers.join("\0"), fold };
+	return { cwd, markersKey: semanticMarkerKey(semanticSettings), fold };
 }
 
 function collectContextGcPlan(
@@ -494,7 +512,7 @@ function collectContextGcPlan(
 ): ContextGcPlan {
 	const first = messages[0];
 	if (!first) return createGcPlanFold(cwd, semanticSettings).fold.fold(messages);
-	const markersKey = semanticSettings.markers.join("\0");
+	const markersKey = semanticMarkerKey(semanticSettings);
 	let planFold = gcPlanFolds.get(first);
 	if (!planFold || planFold.cwd !== cwd || planFold.markersKey !== markersKey) {
 		planFold = createGcPlanFold(cwd, semanticSettings);
@@ -568,6 +586,8 @@ function storeOriginal(options: ContextGcOptions, record: ContextGcPackedRecord,
  * message identity stable across requests.
  */
 interface PackedMemo {
+	readonly source: AgentMessage;
+	readonly policy: string;
 	readonly originalText: string;
 	readonly originalTokens: number;
 	readonly key: string;
@@ -583,6 +603,23 @@ interface PackedMemo {
 
 const packedMemos = new WeakMap<AgentMessage, PackedMemo>();
 
+interface AcceptedGcProjection {
+	readonly policy: string;
+	readonly version: MessageHistoryVersion;
+	readonly projectedVersion?: MessageHistoryVersion;
+	readonly packed: readonly (readonly [index: number, memo: PackedMemo])[];
+}
+
+const acceptedGcProjections = new WeakMap<AgentMessage[], AcceptedGcProjection>();
+
+function acceptedPack(message: AgentMessage, policy: string, work: object): PackedMemo | undefined {
+	const memo = packedMemos.get(message);
+	if (!memo || memo.policy !== policy) return undefined;
+	if (isImmutableHistoryMessage(message)) return memo;
+	historyWorkFallback(work, "mutable context compression row");
+	return isDeepStrictEqual(memo.source, message) ? memo : undefined;
+}
+
 /**
  * A frozen message that an earlier request already packed keeps its packed form: the packed bytes
  * are what the provider has seen, so emitting the original again would itself be a rewrite. The
@@ -593,7 +630,7 @@ function emitMemoizedPack(pass: PackingPass, messageIndex: number, memo: PackedM
 	// An active session lease owns retained originals. `commit()` updates the memo's record after the
 	// one first write, so re-emitting it must not add a filesystem stat per packed item per request.
 	const record: ContextGcPackedRecord = { ...memo.record, messageIndex };
-	pass.nextMessages[messageIndex] = memo.packed;
+	writePacked(pass, messageIndex, memo.packed, memo);
 	pass.report.records.push(record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
@@ -704,7 +741,12 @@ function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextG
 interface PackingPass {
 	readonly options: ContextGcOptions;
 	readonly report: ContextGcReport;
-	readonly nextMessages: AgentMessage[];
+	readonly messages: AgentMessage[];
+	nextMessages?: AgentMessage[];
+	uncertifiedReplacement: boolean;
+	readonly retained: Array<readonly [index: number, memo: PackedMemo]>;
+	readonly policy: string;
+	readonly published: Map<AgentMessage, PackedMemo>;
 	readonly resolvedDigests: Map<string, string | undefined>;
 	readonly pending: Array<{
 		record: ContextGcPackedRecord;
@@ -712,6 +754,16 @@ interface PackingPass {
 		/** Memo-owned availability that future frozen-prefix emissions copy. */
 		availabilityOwner: ContextGcPackedRecord;
 	}>;
+}
+
+function writePacked(pass: PackingPass, index: number, message: AgentMessage, memo?: PackedMemo): void {
+	if (!pass.nextMessages) {
+		pass.nextMessages = pass.messages.slice();
+		countHistoryWork(pass.messages, "copiedRows", pass.messages.length);
+	}
+	pass.nextMessages[index] = message;
+	if (memo) pass.retained.push([index, memo]);
+	else pass.uncertifiedReplacement = true;
 }
 
 function commitPackedMessage<TMessage extends AgentMessage>(
@@ -731,31 +783,41 @@ function commitPackedMessage<TMessage extends AgentMessage>(
 	pass.options.curation?.onPacked?.(record, originalText);
 	const shape = packedShape(record);
 	let packed: AgentMessage;
+	let accepted: PackedMemo | undefined;
 	if (memo && memo.key === key && memo.shape === shape) {
+		accepted = memo;
 		packed = memo.packed;
 		record.packedTokens = memo.packedTokens;
 	} else {
-		packed = makePacked(message, record);
+		const rawPacked = makePacked(message, record);
+		const stableSource = immutableHistoryMessage(message);
+		const stable = stableSource && immutableHistoryMessage(withMessageSource(message, rawPacked));
+		packed = stable ?? rawPacked;
 		record.packedTokens = estimateTokens(packed);
-		packedMemos.set(message, {
-			originalText,
-			originalTokens: record.originalTokens,
-			key,
-			keyIndex: record.reason === "stale-semantic-memory" ? messageIndex : undefined,
-			shape,
-			packed,
-			packedTokens: record.packedTokens,
-			record,
-		});
+		if (stable && stableSource) {
+			accepted = {
+				source: stableSource,
+				policy: pass.policy,
+				originalText,
+				originalTokens: record.originalTokens,
+				key,
+				keyIndex: record.reason === "stale-semantic-memory" ? messageIndex : undefined,
+				shape,
+				packed,
+				packedTokens: record.packedTokens,
+				record,
+			};
+			pass.published.set(message, accepted);
+		}
 	}
-	pass.nextMessages[messageIndex] = packed;
+	writePacked(pass, messageIndex, packed, accepted);
 	pass.report.records.push(record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
 	pass.pending.push({
 		record,
 		originalText,
-		availabilityOwner: memo && memo.key === key && memo.shape === shape ? memo.record : record,
+		availabilityOwner: accepted?.record ?? record,
 	});
 }
 
@@ -770,6 +832,7 @@ export function applyContextGc(
 		storageDir?: string;
 		acquireStorageDir?: () => string;
 		writePayloads?: boolean;
+		deferProviderAcceptance?: boolean;
 		curation?: ContextGcCurationHooks;
 		frozenBelow?: number;
 		admitSentPrefixRewrite?: (batch: SentPrefixRewriteBatch) => SentPrefixRewriteVerdict;
@@ -784,7 +847,7 @@ export function applyContextGc(
 		savedTokens: 0,
 		records: [],
 	};
-	if (!settings.enabled) return noEffectResult(messages, baseReport);
+	if (!settings.enabled) return { ...noEffectResult(messages, baseReport), compressionPolicy: "disabled" };
 
 	const options: ContextGcOptions = {
 		...settings,
@@ -797,6 +860,12 @@ export function applyContextGc(
 		// Clamped defensively: a caller-supplied mark must never be trusted past the array it indexes.
 		frozenBelow: Math.min(Math.max(0, Math.floor(rawSettings.frozenBelow ?? 0)), messages.length),
 	};
+	const compressionPolicy = JSON.stringify([
+		settings,
+		options.cwd,
+		options.storageDir,
+		!!options.curation?.resolveDigest,
+	]);
 	const eligibleTools = new Set(options.tools);
 	const plan = collectContextGcPlan(messages, options.cwd, options.semanticMemory);
 	// Quantized so the boundary advances in strides, not one position per appended message:
@@ -824,22 +893,42 @@ export function applyContextGc(
 			? plan.semanticIndexes.slice(-options.semanticMemory.preserveRecentPages)
 			: [],
 	);
-	const nextMessages = messages.slice();
-	let changed = false;
-	const pass: PackingPass = { options, report: baseReport, nextMessages, resolvedDigests: new Map(), pending: [] };
+	const pass: PackingPass = {
+		options,
+		report: baseReport,
+		messages,
+		policy: compressionPolicy,
+		uncertifiedReplacement: false,
+		retained: [],
+		published: new Map(),
+		resolvedDigests: new Map(),
+		pending: [],
+	};
+	const version = messageHistoryVersion(messages);
+	const previous = acceptedGcProjections.get(messages);
+	const unchangedFrozen =
+		!crossing && version && previous?.policy === compressionPolicy
+			? Math.min(options.frozenBelow, unchangedMessagePrefix(previous.version, version))
+			: 0;
+	if (previous && unchangedFrozen > 0) {
+		for (const [index, memo] of previous.packed) {
+			if (index >= unchangedFrozen) break;
+			emitMemoizedPack(pass, index, memo);
+		}
+	}
+	countHistoryWork(messages, "oldRowsRead", options.frozenBelow - unchangedFrozen);
 	const decisions: PackDecision[] = [];
 
-	for (let index = 0; index < messages.length; index++) {
+	for (let index = unchangedFrozen; index < messages.length; index++) {
 		const message = messages[index];
+		const memo = acceptedPack(message, compressionPolicy, messages);
 		// Below the sent mark nothing changes spelling on its own: a message packed on an earlier request
 		// is re-emitted in its memoized packed form (never reverted, whatever this pass decides), anything
 		// else stays as sent. Checked first, uniformly, so neither packing category below can rewrite it
 		// outside the priced crossing batch.
 		if (index < options.frozenBelow) {
-			const memo = packedMemos.get(message);
 			if (memo && (memo.keyIndex === undefined || memo.keyIndex === index)) {
 				emitMemoizedPack(pass, index, memo);
-				changed = true;
 				continue;
 			}
 			// Between crossings nothing else below the mark may change. At a crossing a never-packed
@@ -857,7 +946,6 @@ export function applyContextGc(
 			!semanticIndexSet.has(index) &&
 			(plan.lastRecordIndexByKind.get(message.customType) ?? -1) > index
 		) {
-			const memo = packedMemos.get(message);
 			const originalText = memo?.originalText ?? message.content;
 			if (originalText.length >= options.minToolResultChars) {
 				const originalTokens = memo?.originalTokens ?? estimateTokens(message);
@@ -888,7 +976,6 @@ export function applyContextGc(
 			}
 		}
 		if (semanticIndexSet.has(index) && !preservedSemanticIndexes.has(index) && index < recentStart) {
-			const memo = packedMemos.get(message);
 			const originalText = memo?.originalText ?? agentMessageText(message);
 			if (originalText && originalText.length >= options.semanticMemory.minChars) {
 				const originalTokens = memo?.originalTokens ?? estimateTokens(message);
@@ -932,7 +1019,6 @@ export function applyContextGc(
 		if (!eligibleTools.has(message.toolName)) continue;
 		if (index >= recentStart) continue;
 
-		const memo = packedMemos.get(message);
 		const originalText = memo?.originalText ?? toolResultText(message);
 		if (originalText.length < options.minToolResultChars) continue;
 
@@ -995,7 +1081,7 @@ export function applyContextGc(
 		const earliestIndex = sentDecisions[0].index;
 		let rewrittenTokens = 0;
 		for (let index = earliestIndex; index < options.frozenBelow; index++) {
-			rewrittenTokens += estimateTokens(nextMessages[index]);
+			rewrittenTokens += estimateTokens((pass.nextMessages ?? messages)[index]!);
 		}
 		let savedTokens = 0;
 		for (const decision of sentDecisions) {
@@ -1019,6 +1105,9 @@ export function applyContextGc(
 	}
 	for (const decision of decisions) {
 		if (decision.index < options.frozenBelow && !admitSent) continue;
+		if (decision.index < options.frozenBelow && !decision.memo) {
+			countHistoryWork(messages, "oldBytesRecompressed", () => Buffer.byteLength(decision.originalText));
+		}
 		commitPackedMessage(
 			pass,
 			decision.index,
@@ -1029,12 +1118,37 @@ export function applyContextGc(
 			decision.record,
 			decision.makePacked,
 		);
-		changed = true;
 	}
 
+	const projectedVersion =
+		version && pass.nextMessages
+			? !pass.uncertifiedReplacement
+				? registerProjectedMessageHistory(
+						pass.nextMessages,
+						previous?.projectedVersion,
+						previous?.projectedVersion ? unchangedFrozen : 0,
+					)
+				: undefined
+			: version;
 	baseReport.packedCount = baseReport.records.length;
 	baseReport.savedTokens = Math.max(0, baseReport.originalTokens - baseReport.packedTokens);
 	let committed = false;
+	let accepted = false;
+	const acceptProviderHistory = () => {
+		if (!committed || accepted) return;
+		accepted = true;
+		if (version && acceptedGcProjections.get(messages) !== previous) return;
+		for (const [message, memo] of pass.published) packedMemos.set(message, memo);
+		if (version) {
+			if (crossing) pass.retained.sort(([left], [right]) => left - right);
+			acceptedGcProjections.set(messages, {
+				version,
+				projectedVersion,
+				policy: compressionPolicy,
+				packed: pass.retained,
+			});
+		}
+	};
 	const commit = () => {
 		if (committed) return;
 		committed = true;
@@ -1045,6 +1159,7 @@ export function applyContextGc(
 			record.retrievalAvailable = retrievalAvailable;
 			availabilityOwner.retrievalAvailable = retrievalAvailable;
 		}
+		if (!rawSettings.deferProviderAcceptance) acceptProviderHistory();
 	};
 	const isCurrent = () => {
 		const resolveDigest = options.curation?.resolveDigest;
@@ -1055,5 +1170,12 @@ export function applyContextGc(
 		return true;
 	};
 	if (options.writePayloads) commit();
-	return { messages: changed ? nextMessages : messages, report: baseReport, isCurrent, commit };
+	return {
+		messages: pass.nextMessages ?? messages,
+		report: baseReport,
+		compressionPolicy,
+		acceptProviderHistory,
+		isCurrent,
+		commit,
+	};
 }

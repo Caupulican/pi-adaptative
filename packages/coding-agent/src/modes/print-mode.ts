@@ -127,14 +127,17 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		});
 
 		unsubscribe?.();
-		unsubscribe = session.subscribe((event) => {
-			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(projectSessionEventForJson(event))}\n`);
-			} else if (event.type === "warning") {
-				const shown = neutralizeControls(event.message);
-				console.warn(event.severity === "info" ? shown : `Warning: ${shown}`);
-			}
-		});
+		unsubscribe = session.subscribe(
+			(event) => {
+				if (mode === "json") {
+					writeRawStdout(`${JSON.stringify(projectSessionEventForJson(event))}\n`);
+				} else if (event.type === "warning") {
+					const shown = neutralizeControls(event.message);
+					console.warn(event.severity === "info" ? shown : `Warning: ${shown}`);
+				}
+			},
+			{ publishesMessageEdits: true },
+		);
 		session.announceRestoredQueuedInput();
 		session.resumeSelfCompaction();
 	};

@@ -55,6 +55,7 @@ export function createProviderRequestSecretPolicy(
 	context: Context,
 	model: Model<Api>,
 	redact: (text: string) => string,
+	inheritedOpaque?: (text: string) => boolean,
 ) {
 	// Hooks receive the same model object. Protocol selection must not follow later mutations.
 	const api = model.api;
@@ -62,6 +63,7 @@ export function createProviderRequestSecretPolicy(
 	const modelId = model.id;
 	const contextStrings = new Map<string, { original: string; projected: string }>();
 	const opaque = new Set<string>();
+	const isOpaque = (text: string) => opaque.has(text) || inheritedOpaque?.(text) === true;
 	const messages = field(context, "messages");
 	if (!Array.isArray(messages)) throw new CredentialContentProjectionError("accessor");
 	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
@@ -286,7 +288,7 @@ export function createProviderRequestSecretPolicy(
 		const key = path.at(-1);
 		const item = protocolItem(path.slice(0, -1), parent, root);
 		if (item) {
-			if ((key === item.key && opaque.has(text)) || (key === "type" && text === item.type)) return text;
+			if ((key === item.key && isOpaque(text)) || (key === "type" && text === item.type)) return text;
 			if (item.type === "reasoning" && key === "status" && isReasoningStatus(text)) return text;
 			const signature = field(parent, "signature");
 			if (
@@ -294,7 +296,7 @@ export function createProviderRequestSecretPolicy(
 				item.type === "thinking" &&
 				key === "thinking" &&
 				typeof signature === "string" &&
-				opaque.has(signature) &&
+				isOpaque(signature) &&
 				redact(text) !== text
 			)
 				throw new CredentialContentProjectionError("signed-content");
@@ -318,6 +320,7 @@ export function createProviderRequestSecretPolicy(
 		return redact(text);
 	};
 	return {
+		opaque,
 		contextString,
 		contextKey(path: ContentPath, key: string, parent: object, root: unknown): boolean {
 			if (

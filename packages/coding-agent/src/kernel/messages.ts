@@ -6,7 +6,6 @@
  */
 
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
-import { messageContentRevision } from "./message-revision.ts";
 import type { AgentMessage } from "./types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
@@ -155,21 +154,70 @@ export function createCustomMessage(
  * - Custom extensions and tools
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
+	return convertMessageRows(messages, convertMessage);
+}
+
+type MessageConverter = (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+type ConvertProviderMessage = (message: AgentMessage) => Message | undefined;
+
+function convertMessageRows(messages: AgentMessage[], convert: ConvertProviderMessage): Message[] {
 	const converted: Message[] = [];
 	for (const message of messages) {
-		const wireMessage = convertMessage(message);
-		if (wireMessage !== undefined) converted.push(wireMessage);
+		const wire = convert(message);
+		if (wire !== undefined) converted.push(wire);
 	}
 	return converted;
 }
 
-/**
- * The converted object of each message that conversion builds anew (custom, bash execution and summary messages), keyed by the
- * source object and tagged with the source's content revision. The conversion reads only the source's content, so a converted
- * object stays valid until an in-place content edit (`replaceMessageContents`) moves that revision. A converted object that is
- * the same object on every request lets the folds over the wire resume past it, instead of starting over each request.
- */
-const convertedMessages = new WeakMap<AgentMessage, { revision: number; converted: Message | undefined }>();
+const providerMessageConverters = new WeakMap<
+	MessageConverter,
+	() => { policy: boolean; convert: ConvertProviderMessage }
+>();
+
+/** Capture the SDK's per-request image setting once for a candidate and all its wire sections. */
+export function createProviderMessageConverter(
+	readBlockImages: () => boolean,
+): (messages: AgentMessage[]) => Message[] {
+	const capture = () => {
+		const policy = readBlockImages();
+		return { policy, convert: policy ? convertWithoutImages : convertMessage };
+	};
+	const convert = (messages: AgentMessage[]): Message[] => convertMessageRows(messages, capture().convert);
+	providerMessageConverters.set(convert, capture);
+	return convert;
+}
+
+export function captureProviderMessageConverter(converter: MessageConverter) {
+	return converter === convertToLlm
+		? { policy: false, convert: convertMessage }
+		: providerMessageConverters.get(converter)?.();
+}
+
+const IMAGE_DISABLED_TEXT = "Image reading is disabled.";
+
+function convertWithoutImages(message: AgentMessage): Message | undefined {
+	const wire = convertMessage(message);
+	if (
+		(wire?.role !== "user" && wire?.role !== "toolResult") ||
+		!Array.isArray(wire.content) ||
+		!wire.content.some((block) => block.type === "image")
+	)
+		return wire;
+	const filtered: (TextContent | ImageContent)[] = [];
+	for (const block of wire.content) {
+		const next = block.type === "image" ? { type: "text" as const, text: IMAGE_DISABLED_TEXT } : block;
+		const previous = filtered.at(-1);
+		if (
+			next.type === "text" &&
+			next.text === IMAGE_DISABLED_TEXT &&
+			previous?.type === "text" &&
+			previous.text === IMAGE_DISABLED_TEXT
+		)
+			continue;
+		filtered.push(next);
+	}
+	return { ...wire, content: filtered };
+}
 
 export function convertMessage(m: AgentMessage): Message | undefined {
 	switch (m.role) {
@@ -179,25 +227,16 @@ export function convertMessage(m: AgentMessage): Message | undefined {
 			return m;
 		case "bashExecution":
 			// Messages excluded from context (the !! prefix) convert to nothing, so there is no object to keep.
-			return m.excludeFromContext ? undefined : convertCachedMessage(m);
+			return m.excludeFromContext ? undefined : buildConvertedMessage(m);
 		case "custom":
 		case "branchSummary":
 		case "compactionSummary":
-			return convertCachedMessage(m);
+			return buildConvertedMessage(m);
 		default: {
 			const _exhaustiveCheck: never = m;
 			return undefined;
 		}
 	}
-}
-
-function convertCachedMessage(m: AgentMessage): Message | undefined {
-	const revision = messageContentRevision(m);
-	const cached = convertedMessages.get(m);
-	if (cached && cached.revision === revision) return cached.converted;
-	const converted = buildConvertedMessage(m);
-	convertedMessages.set(m, { revision, converted });
-	return converted;
 }
 
 function buildConvertedMessage(m: AgentMessage): Message | undefined {

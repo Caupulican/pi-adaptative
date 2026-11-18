@@ -1,4 +1,4 @@
-import type { AssistantMessage, Context } from "@caupulican/pi-ai";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import { dispatchGuardedProviderRequest, streamSimple } from "@caupulican/pi-ai/stream";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
@@ -33,8 +33,8 @@ import {
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
-import { CredentialContentProjectionError, redactCredentialContent } from "./secrets/credential-model-content.ts";
-import { createProviderRequestSecretPolicy } from "./secrets/provider-request-secrets.ts";
+import { CredentialContentProjectionError } from "./secrets/credential-model-content.ts";
+import { CredentialRequestProjection } from "./secrets/credential-request-projection.ts";
 import { redactTokenShapes } from "./security/secret-text.ts";
 import type {
 	ResolvedFleetSettings,
@@ -109,32 +109,9 @@ export interface SessionStreamChainInput {
 	getStreamIdleOptionsOverride: () => Partial<StreamIdleOptions> | undefined;
 }
 
-const REQUEST_IDENTITY_FIELDS = new Set([
-	"role",
-	"api",
-	"provider",
-	"model",
-	"responseModel",
-	"responseId",
-	"stopReason",
-	"timestamp",
-	"type",
-	"id",
-	"toolName",
-	"toolCallId",
-	"mimeType",
-	"textSignature",
-	"thinkingSignature",
-	"thoughtSignature",
-]);
-
 type CredentialRequestOptions = NonNullable<Parameters<StreamFn>[2]> & {
 	credentialHeaders?: Record<string, string>;
 };
-
-function isPayloadIdentityKey(key: string): boolean {
-	return REQUEST_IDENTITY_FIELDS.has(key) || key === "name";
-}
 
 function requestCredentialValues(options: Parameters<StreamFn>[2]): readonly string[] | undefined {
 	const values = new Set<string>();
@@ -160,24 +137,6 @@ function combineCredentialValues(
 	const values = new Set(hostValues);
 	for (const value of requestValues ?? []) values.add(value);
 	return [...values];
-}
-
-function redactRequestContext(
-	context: Context,
-	redact: (text: string) => string,
-	policy: ReturnType<typeof createProviderRequestSecretPolicy>,
-): Context {
-	const preserveKey = (path: readonly (string | number)[], key: string) =>
-		REQUEST_IDENTITY_FIELDS.has(key) || (key === "name" && (path.at(-2) === "tools" || path.at(-2) === "content"));
-	// Only typed image data is opaque, through the string policy. An arbitrary object whose
-	// type is "image" (for example inside tool arguments) still needs ordinary redaction.
-	return redactCredentialContent(
-		context,
-		redact,
-		(path, key, parent, root) => preserveKey(path, key) || policy.contextKey(path, key, parent, root),
-		undefined,
-		policy.contextString,
-	);
 }
 
 function failedRedactionStream(
@@ -208,10 +167,7 @@ function failedRedactionStream(
 
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
-	const redactedMessageCache = new WeakMap<
-		Context["messages"][number],
-		{ fingerprint: string; message: Context["messages"][number] }
-	>();
+	const projection = new CredentialRequestProjection();
 	const redactedBase: StreamFn = async (model, context, options) => {
 		let redactedContext = context;
 		let redactedOptions = options;
@@ -225,68 +181,9 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			// Known values are exact; token shapes are the floor for keys the host has never seen. Both are
 			// unconditional: a session without a credential boundary still never sends a recognizable key.
 			const redact = (text: string) => redactTokenShapes(redactKnown(text));
-			const fingerprint = JSON.stringify([model.api, model.provider, model.id, additionalValues ?? []]);
-			const uncachedMessages: Context["messages"][number][] = [];
-			const uncachedIndices: number[] = [];
-			const resolvedMessages = context.messages.map((message, index) => {
-				const cached = redactedMessageCache.get(message);
-				if (cached && cached.fingerprint === fingerprint) {
-					return cached.message;
-				}
-				uncachedIndices.push(index);
-				uncachedMessages.push(message);
-				return message;
-			});
-			const uncachedContext: Context = { ...context, messages: uncachedMessages };
-			const uncachedPolicy = createProviderRequestSecretPolicy(uncachedContext, model, redact);
-			const redactedUncached = redactRequestContext(uncachedContext, redact, uncachedPolicy);
-			for (let i = 0; i < uncachedIndices.length; i++) {
-				const originalIndex = uncachedIndices[i]!;
-				const originalMessage = uncachedMessages[i]!;
-				const redactedMessage = redactedUncached.messages[i]!;
-				resolvedMessages[originalIndex] = redactedMessage;
-				redactedMessageCache.set(originalMessage, { fingerprint, message: redactedMessage });
-				redactedMessageCache.set(redactedMessage, { fingerprint, message: redactedMessage });
-			}
-			const messagesUnchanged = resolvedMessages.every((message, index) => message === context.messages[index]);
-			redactedContext =
-				messagesUnchanged &&
-				redactedUncached.systemPrompt === context.systemPrompt &&
-				redactedUncached.tools === context.tools
-					? context
-					: {
-							...redactedUncached,
-							messages: messagesUnchanged ? context.messages : resolvedMessages,
-						};
-			const secretPolicy = createProviderRequestSecretPolicy(redactedContext, model, redact);
-			const onPayload = options?.onPayload;
-			redactedOptions = onPayload
-				? {
-						...options,
-						onPayload: async (payload: unknown, payloadModel: Parameters<NonNullable<typeof onPayload>>[1]) => {
-							// A provider payload may carry its transport signal (Google-style `config.abortSignal`):
-							// it holds no text and must reach the transport as the same live object.
-							const safePayload = redactCredentialContent(
-								payload,
-								redact,
-								(path, key, parent, root) =>
-									isPayloadIdentityKey(key) || secretPolicy.payloadKey(path, key, parent, root),
-								secretPolicy.payloadObject,
-								secretPolicy.payloadString,
-							);
-							const hooked = await onPayload(safePayload, payloadModel);
-							const finalPayload = hooked === undefined ? safePayload : hooked;
-							return redactCredentialContent(
-								finalPayload,
-								redact,
-								(path, key, parent, root) =>
-									isPayloadIdentityKey(key) || secretPolicy.payloadKey(path, key, parent, root),
-								secretPolicy.payloadObject,
-								secretPolicy.payloadString,
-							);
-						},
-					}
-				: options;
+			const projected = projection.prepare(model, context, redactKnown, redact, options?.onPayload);
+			redactedContext = projected.context;
+			redactedOptions = projected.onPayload ? { ...options, onPayload: projected.onPayload } : options;
 		} catch (error) {
 			if (options?.signal?.aborted) throw error;
 			const reason =

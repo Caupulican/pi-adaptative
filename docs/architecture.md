@@ -54,12 +54,13 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/machine-model-liveness.ts` | Liveness over an explored model graph, for the kernel model checker. |
 | `kernel/machine-model.ts` | The vocabulary of the kernel model checker. |
 | `kernel/machine-spec.ts` | A declared state machine and an observer of it. |
-| `kernel/message-revision.ts` | (no header comment) |
+| `kernel/message-revision.ts` | Version evidence for owned transcript arrays and immutable request rows. |
 | `kernel/messages.ts` | Custom message types and transformers for the agent kernel. |
 | `kernel/node.ts` | (no header comment) |
 | `kernel/outbox.ts` | Record-before-effect: a durable claim, then the effect, then a durable settle. |
 | `kernel/owner-input-stamp.ts` | Stamps an agent message with the identity of the owner input it carries as a non-enumerable symbol property, and reads that identity back. |
 | `kernel/prefix-fold.ts` | Folds over conversation arrays that resume where they stopped. |
+| `kernel/provider-message-projection.ts` | Retains accepted per-message provider conversion within a single request scope. |
 | `kernel/provider-request-estimator.ts` | (no header comment) |
 | `kernel/provider-request-image-budget.ts` | (no header comment) |
 | `kernel/provider-request-planner.ts` | (no header comment) |
@@ -158,7 +159,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-124 kernel modules, 65 with a header comment.
+125 kernel modules, 67 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

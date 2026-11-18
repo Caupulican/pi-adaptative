@@ -283,6 +283,7 @@ export class CredentialManager {
 	private readonly resolveMachineSession: MachineCredentialSessionResolver | undefined;
 	private readonly onEnvironmentChanged: () => void;
 	private readonly activeEnvironments = new Map<string, ActiveCredentialEnvironment>();
+	private readonly textRedactors = new Map<string, (text: string) => string>();
 	private readonly sensitiveValues = new Set<string>();
 	private pendingSessionKey: string | undefined;
 	private pendingStorageProvider: CredentialStorageProvider | undefined;
@@ -543,7 +544,17 @@ export class CredentialManager {
 	}
 
 	createSensitiveTextRedactor(additionalValues: readonly string[] = []): (text: string) => string {
-		return createCredentialTextRedactor([...this.sensitiveValues, ...additionalValues]);
+		const key = JSON.stringify(additionalValues);
+		const cached = this.textRedactors.get(key);
+		if (cached) {
+			this.textRedactors.delete(key);
+			this.textRedactors.set(key, cached);
+			return cached;
+		}
+		const redact = createCredentialTextRedactor([...this.sensitiveValues, ...additionalValues]);
+		if (this.textRedactors.size >= 16) this.textRedactors.delete(this.textRedactors.keys().next().value!);
+		this.textRedactors.set(key, redact);
+		return redact;
 	}
 
 	lock(): void {
@@ -556,6 +567,7 @@ export class CredentialManager {
 		this.sessionKeyForRedaction = undefined;
 		this.connectionPromise = undefined;
 		this.activeEnvironments.clear();
+		this.textRedactors.clear();
 		this.sensitiveValues.clear();
 		if (hadActiveEnvironment) this.onEnvironmentChanged();
 	}
@@ -658,6 +670,7 @@ export class CredentialManager {
 	}
 
 	private rebuildSensitiveValues(): void {
+		this.textRedactors.clear();
 		this.sensitiveValues.clear();
 		if (this.sessionKeyForRedaction) this.sensitiveValues.add(this.sessionKeyForRedaction);
 		for (const active of this.activeEnvironments.values()) {

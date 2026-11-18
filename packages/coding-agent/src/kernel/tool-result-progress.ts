@@ -1,5 +1,10 @@
 import type { ToolResultMessage } from "@caupulican/pi-ai/types";
-import { getToolExecutionKey, normalizeToolSignature, stableToolFailureIdentity } from "./tool-failure-memory.ts";
+import {
+	getToolExecutionKey,
+	normalizeToolSignature,
+	readToolFailureOccurrence,
+	stableToolFailureIdentity,
+} from "./tool-failure-memory.ts";
 import type { AgentToolCall } from "./types.ts";
 
 /**
@@ -63,4 +68,45 @@ export class ToolResultProgressTracker {
 		}
 		return this.repeats;
 	}
+}
+
+/**
+ * Maximum exact cycle width inspected by the runaway-loop backstop. Detection requires the complete
+ * suffix pattern to repeat `stallLimit` times; recurring housekeeping calls among distinct productive
+ * operations therefore never look like a loop merely because one signature is frequent.
+ */
+export const STALL_WINDOW_PERIODS = 4;
+
+/** Identical observable results make a repeated cycle conclusive well before the coarse call-only fuse. */
+export const STAGNANT_RESULT_REPEAT_LIMIT = 3;
+
+export function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: number): boolean {
+	if (stallLimit <= 0) return false;
+	const maxPeriod = Math.min(STALL_WINDOW_PERIODS, Math.floor(stallWindow.length / stallLimit));
+	for (let period = 1; period <= maxPeriod; period++) {
+		const requiredTurns = period * stallLimit;
+		const start = stallWindow.length - requiredTurns;
+		let matches = true;
+		for (let offset = period; offset < requiredTurns; offset++) {
+			if (stallWindow[start + offset] !== stallWindow[start + (offset % period)]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) return true;
+	}
+	return false;
+}
+
+/** The most-repeated failure key among this turn's results, as the ledger counted it. */
+export function mostRepeatedToolFailure(
+	toolResults: readonly ToolResultMessage[],
+): { failureKey: string; occurrence: number; diagnostic?: string } | undefined {
+	let worst: { failureKey: string; occurrence: number; diagnostic?: string } | undefined;
+	for (const result of toolResults) {
+		if (result.isError !== true) continue;
+		const occurrence = readToolFailureOccurrence(result.details);
+		if (occurrence && (!worst || occurrence.occurrence > worst.occurrence)) worst = occurrence;
+	}
+	return worst;
 }

@@ -76,6 +76,7 @@ export function frozenPrefixLength(
 ): number {
 	const safeSentPrefixCount = Number.isFinite(sentPrefixCount) ? Math.floor(sentPrefixCount) : 0;
 	const bound = Math.min(Math.max(0, safeSentPrefixCount), source.length, target.length);
+	if (source === target) return bound;
 	let index = 0;
 	while (index < bound && source[index] === target[index]) index++;
 	if (index < bound) {

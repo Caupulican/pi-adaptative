@@ -1,4 +1,5 @@
 import { isRecord } from "@caupulican/pi-ai";
+import { countHistoryWork, historyWorkFallback, inheritHistoryWork } from "@caupulican/pi-ai/history-work";
 import {
 	getToolExecutionAttemptMemory,
 	getToolExecutionErrorPolicy,
@@ -1287,6 +1288,8 @@ function createFailureFoldState(): FailureFoldState {
 export class ToolFailureContextMemory {
 	/** @internal */
 	readonly omittedCallIds = new Set<string>();
+	/** @internal Source extent observed by the previous filtered projection. */
+	lastProjectionLength = 0;
 	/** @internal The sent mark of the request being folded: read by each step, set by `resumeFailureFold` before a fold. */
 	sentPrefixCount = 0;
 	/** @internal Each message is folded once, as the fold reaches it; the sent mark is the request's own. */
@@ -1485,8 +1488,7 @@ function foldToolFailureContext(
 
 		if (call) {
 			const callIndex = callMessageIndexById.get(call.id) ?? index;
-			// The hot path: every successful result re-derives this on every request. See
-			// memoizedOperationIdentity's doc comment.
+			// Reuse the operation identity if a changed prefix has to replay this result.
 			const identity = memoizedOperationIdentity(call, executionScope);
 			// Erasure needs the exact operation: the volatile-normalized failure key folds ids, hashes and
 			// timestamps together, so two reads of different `txn:<hex>` refs would supersede each other.
@@ -1576,6 +1578,7 @@ function buildFailureContextAnalysis(
 	messages: AgentMessage[],
 	state: FailureFoldState,
 	omittedCallIds: ReadonlySet<string>,
+	memory?: ToolFailureContextMemory,
 ): FailureContextAnalysis {
 	const {
 		omittedResults,
@@ -1586,12 +1589,16 @@ function buildFailureContextAnalysis(
 		activeDirectives,
 		kindMistakesMap,
 	} = state;
+	const priorLength = memory?.lastProjectionLength ?? 0;
+	if (memory) memory.lastProjectionLength = messages.length;
 	const kindMistakesSummary = Object.fromEntries(kindMistakesMap);
 	const activeRecords = activeFailureRecords(active);
 	if (omittedCallIds.size === 0 && omittedResults.size === 0 && boundedReplacements.size === 0) {
 		return { messages, activeRecords, activeDirectives: [...activeDirectives.values()], kindMistakesSummary };
 	}
 
+	historyWorkFallback(messages, "filtered-tool-failure-history");
+	countHistoryWork(messages, "oldRowsRead", Math.min(priorLength, messages.length));
 	const filteredMessages: AgentMessage[] = [];
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
@@ -1651,6 +1658,8 @@ function buildFailureContextAnalysis(
 		}
 		if (filtered.message) filteredMessages.push(filtered.message);
 	}
+	countHistoryWork(messages, "copiedRows", filteredMessages.length);
+	inheritHistoryWork(messages, filteredMessages);
 	return {
 		messages: filteredMessages,
 		activeRecords,
@@ -1688,7 +1697,7 @@ function analyzeToolFailureContext(
 	memory?: ToolFailureContextMemory,
 ): FailureContextAnalysis {
 	const { state, omittedCallIds } = resumeFailureFold(messages, sentPrefixCount, memory);
-	return buildFailureContextAnalysis(messages, state, omittedCallIds);
+	return buildFailureContextAnalysis(messages, state, omittedCallIds, memory);
 }
 
 /** Build a tracker directly from the accepted request’s analysis without folding its transcript again. */

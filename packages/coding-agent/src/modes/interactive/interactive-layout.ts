@@ -348,13 +348,16 @@ export class InteractiveLayout {
 		flow.reset();
 		this.generationRate = new GenerationRate();
 		const rate = this.generationRate;
-		const unsubscribeFlow = session.subscribe((event) => {
-			flow.observe(event);
-			rate.observe(event);
-			this.cacheClock.observe(event);
-			this.syncCacheTicker();
-			this.settleCompletedGoal();
-		});
+		const unsubscribeFlow = session.subscribe(
+			(event) => {
+				flow.observe(event);
+				rate.observe(event);
+				this.cacheClock.observe(event);
+				this.syncCacheTicker();
+				this.settleCompletedGoal();
+			},
+			{ publishesMessageEdits: true },
+		);
 		// A run turns idle only after its `agent_end` listeners settle; the submission's release follows that.
 		const unsubscribeForegroundActivity = session.subscribeForegroundActivity(() => this.settleCompletedGoal());
 		flow.observeLanes(session.getLaneRecords());

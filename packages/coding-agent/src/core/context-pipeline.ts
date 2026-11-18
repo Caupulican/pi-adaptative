@@ -64,9 +64,10 @@ import {
 	createLineageArtifactStore,
 } from "./context/context-artifacts.ts";
 import {
-	type ContextAuditMemo,
+	ContextAuditHistory,
 	type ContextAuditOptions,
 	type ContextAuditReport,
+	contextToolRows,
 	runContextAudit,
 } from "./context/context-audit.ts";
 import {
@@ -165,8 +166,7 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
  * lane, and a lane's reports are its own, never the root's inspection state.
  */
 export interface ContextPolicyLane {
-	readonly memo: ContextAuditMemo;
-	memoMessages: readonly AgentMessage[];
+	readonly auditHistory: ContextAuditHistory;
 	toolNames: readonly string[];
 }
 
@@ -182,23 +182,6 @@ interface ContextTokenEstimate {
 	usageTokens: number;
 	trailingTokens: number;
 	lastUsageIndex: number | null;
-}
-
-/**
- * Empty `memo` when `messages` no longer extends the array it was last filled for, and return the
- * lineage to remember. A message leaving the context is the only way an entry goes stale.
- */
-function continueMemoLineage(
-	memo: { clear(): void },
-	previous: readonly AgentMessage[],
-	messages: readonly AgentMessage[],
-): readonly AgentMessage[] {
-	let extension = previous.length <= messages.length;
-	for (let index = 0; extension && index < previous.length; index++) {
-		if (previous[index] !== messages[index]) extension = false;
-	}
-	if (!extension) memo.clear();
-	return messages.slice();
 }
 
 /** Use the canonical usage anchor and reuse estimates for messages whose published contents still match. */
@@ -340,15 +323,10 @@ export class ContextPipeline {
 	 * still present in the provider-visible context, so compaction also bounds this cache. */
 	private _sessionEntryLookupCache: { leafId: string | null; byToolCallId: Map<string, string> } | undefined =
 		undefined;
-	/** Incremental memo for the hot-path audit's expensive per-message work, keyed by
-	 * message object identity -- see {@link ContextAuditMemo}'s doc for the invalidation
-	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
-	private readonly _auditMemo: ContextAuditMemo = new Map();
+	private readonly _auditHistory = new ContextAuditHistory();
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/** Each worker conversation's own context-policy lane (`planWorkerRequest`), by its agent id. */
 	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
-	/** Last audit input, used to drop position- and branch-dependent evidence after a rewrite. */
-	private _auditMemoMessages: readonly AgentMessage[] = [];
 	private readonly _usageFinder = createApplicableAssistantUsageFinder();
 	private readonly _tokenMemo: TokenMemo = new WeakMap();
 	private readonly _coveredChars = new PrefixFold<AgentMessage, { count: number }>(
@@ -440,7 +418,7 @@ export class ContextPipeline {
 			() => this.deps.getTurnIndex(),
 			{ isActive },
 		);
-		return this._pathAliasRuntime.sync(messages);
+		return this._pathAliasRuntime.sync(messages, true);
 	}
 
 	peekPathAliasTable(): PathAliasTable {
@@ -530,10 +508,9 @@ export class ContextPipeline {
 		}
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
-		this._auditMemo.clear();
+		this._auditHistory.clear();
 		this._coveredChars.fold([]);
 		this._settledGcArtifactHolders.clear();
-		this._auditMemoMessages = [];
 		this._latestCompactionScan.reset();
 		if (failures.length) throw new AggregateError(failures, "Context storage cleanup failed");
 	}
@@ -616,10 +593,7 @@ export class ContextPipeline {
 
 	/** Options shared by the memoized hot path and the no-memo full-scan path. */
 	private _sessionEntryIdResolver(messages: readonly AgentMessage[]): (toolCallId: string) => string | undefined {
-		const wantedToolCallIds = new Set(
-			messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
-		);
-		return this._buildSessionEntryIdLookup(wantedToolCallIds);
+		return this._buildSessionEntryIdLookup(contextToolRows(messages).callIds);
 	}
 
 	private _buildContextAuditOptions(messages: AgentMessage[]): ContextAuditOptions {
@@ -675,7 +649,7 @@ export class ContextPipeline {
 		};
 		let policyLane = this._workerContextPolicyLanes.get(agentId);
 		if (!policyLane) {
-			policyLane = { memo: new Map(), memoMessages: [], toolNames };
+			policyLane = { auditHistory: new ContextAuditHistory(), toolNames };
 			this._workerContextPolicyLanes.set(agentId, policyLane);
 		}
 		policyLane.toolNames = toolNames;
@@ -732,7 +706,7 @@ export class ContextPipeline {
 	 * Never throws into a live turn: any failure degrades to an empty report.
 	 *
 	 * This is the memoized hot path (provider-request planning calls it every
-	 * round trip via agent-session.ts's one-line delegation) -- see `_auditMemo`'s doc for the
+	 * round trip via agent-session.ts's one-line delegation). It reuses indexed rows from the
 	 * incremental design. `getContextAuditReport`/`getPromptPolicyReport`'s `messages`-arg
 	 * recompute variants deliberately do NOT go through this method (see
 	 * `_runContextAuditFullScan`), so a read-only debug/test peek at a hypothetical `messages`
@@ -741,16 +715,18 @@ export class ContextPipeline {
 	runContextAudit(messages: AgentMessage[], lane?: ContextPolicyLane): ContextAuditReport {
 		try {
 			if (lane) {
-				lane.memoMessages = continueMemoLineage(lane.memo, lane.memoMessages, messages);
 				// A lane's tool results live in its own conversation, never on the root session's branch.
 				return runContextAudit(
 					messages,
 					{ turnIndex: this.deps.getTurnIndex(), artifactStore: this._toolArtifactStore },
-					lane.memo,
+					lane.auditHistory.refresh(messages),
 				);
 			}
-			this._auditMemoMessages = continueMemoLineage(this._auditMemo, this._auditMemoMessages, messages);
-			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
+			const report = runContextAudit(
+				messages,
+				this._buildContextAuditOptions(messages),
+				this._auditHistory.refresh(messages),
+			);
 			this._latestContextAuditReport = report;
 			return report;
 		} catch (error) {
@@ -1184,6 +1160,7 @@ export class ContextPipeline {
 				// Side effects are deferred into `commit()` below and applied there (or immediately when
 				// `writePayloads`), so ONE pass serves preview, currency check and commit.
 				writePayloads: false,
+				deferProviderAcceptance: !writePayloads,
 				frozenBelow,
 				admitSentPrefixRewrite: (batch) => this._priceSentPrefixRewrite(messages, batch, lane),
 				curation: curationSettings.enabled
@@ -1232,7 +1209,7 @@ export class ContextPipeline {
 				if (result.report.packedCount > 0) this._releaseGcPackedArtifactReferences(messages, result.report);
 			};
 			if (writePayloads) commit();
-			return { messages: result.messages, report: result.report, isCurrent: result.isCurrent, commit };
+			return { ...result, commit };
 		} catch (error) {
 			harnessLog.warn("context", "context-gc failed; the context is sent unpacked", () => ({
 				conversation: lane ? lane.conversation : "root",

@@ -1,4 +1,6 @@
+import { countHistoryWork, historyWorkFallback } from "@caupulican/pi-ai/history-work";
 import { getToolExecutionUnchangedRetryLimit } from "@caupulican/pi-ai/tool-repair-registry";
+import { type MessageHistoryVersion, messageHistoryVersion, unchangedMessagePrefix } from "./message-revision.ts";
 import {
 	getToolExecutionKey,
 	getToolExecutionKeyHashParts,
@@ -27,6 +29,7 @@ import { isAgentToolFailureRecoveryAuthority } from "./types.ts";
 import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
 const MAX_TRACKED_OPERATIONS = 64;
+const MAX_RETAINED_REPLAY_CALLS = 256;
 const SEEN_EXECUTION_FILTER_BYTES = 64 * 1024;
 const MAX_RECOVERY_TARGETS = 8;
 const MAX_RECOVERY_ACTIONS = 8;
@@ -175,8 +178,15 @@ interface AvailableRecoveryAction {
  */
 class SeenExecutionFilter {
 	private readonly bits = new Uint8Array(SEEN_EXECUTION_FILTER_BYTES);
+	private populated = false;
+
+	copyFrom(other: SeenExecutionFilter): void {
+		if (other.populated) this.bits.set(other.bits);
+		this.populated = other.populated;
+	}
 
 	add(executionKey: string): void {
+		this.populated = true;
 		for (const hash of getToolExecutionKeyHashParts(executionKey)) this.set(hash);
 	}
 
@@ -232,10 +242,26 @@ export class ToolFailureRecoveryGate {
 		return this.statesByExecutionKey.size === 0;
 	}
 
-	restoreFromMessages(messages: readonly AgentMessage[], tools: readonly AgentTool<any>[] = []): void {
+	restoreFromMessages(
+		messages: readonly AgentMessage[],
+		tools: readonly AgentTool<any>[] = [],
+		history?: ToolFailureRecoveryHistory,
+	): void {
 		this.trackTranscript(messages);
 		if (this.restoredFromTranscript || !this.isEmpty()) return;
 		this.restoredFromTranscript = true;
+		if (history) history.restoreRun(this, messages, tools);
+		else this.replayTranscript(messages, tools, 0, createTranscriptWalk());
+		this.exhaustRestoredUnchangedRetries();
+	}
+
+	/** Extend a transcript baseline without applying the new-run budget reset to its replay state. */
+	replayTranscript(
+		messages: readonly AgentMessage[],
+		tools: readonly AgentTool<any>[],
+		start: number,
+		walk: TranscriptWalk,
+	): void {
 		this.worldCursor = walkTranscript(
 			messages,
 			(event) => {
@@ -250,9 +276,21 @@ export class ToolFailureRecoveryGate {
 				this.retainState(event.executionKey, { ...restoreObservedState(previous, event), needsReplay });
 			},
 			tools,
+			start,
+			walk,
 		);
-		// Preserve the existing conservative restart policy for transient unchanged retries. Replay
-		// computes their spending first so it can distinguish them from bound escalations correctly.
+	}
+
+	copyBaseline(other: ToolFailureRecoveryGate): void {
+		for (const [key, state] of other.statesByExecutionKey) {
+			this.statesByExecutionKey.set(key, { ...state, budget: { ...state.budget } });
+		}
+		this.seenUnproductiveExecutions.copyFrom(other.seenUnproductiveExecutions);
+		this.worldCursor = other.worldCursor;
+	}
+
+	private exhaustRestoredUnchangedRetries(): void {
+		// Transcript replay reconstructs the budget before the conservative new-run clamp.
 		for (const state of this.statesByExecutionKey.values()) state.budget.unchangedRetriesRemaining = 0;
 	}
 
@@ -497,6 +535,8 @@ export class ToolFailureRecoveryGate {
 
 	private restoreOperationFromTranscript(executionKey: string, tool: AgentTool<any>): OperationState | undefined {
 		let restored: OperationState | undefined;
+		countHistoryWork(this.transcriptMessages, "oldRowsRead", this.transcriptMessages.length);
+		historyWorkFallback(this.transcriptMessages, "tool-operation-replay");
 		walkTranscript(
 			this.transcriptMessages,
 			(event) => {
@@ -611,6 +651,69 @@ function restoreObservedState(
 	return observeFailureState(event.record, event.envelopeBound, event.worldCursor, previous);
 }
 
+interface TranscriptWalk {
+	callsById: Map<string, { name: string; args: unknown }>;
+	worldCursor: number;
+	missingTimeoutEvidence: boolean;
+}
+
+function createTranscriptWalk(): TranscriptWalk {
+	return { callsById: new Map(), worldCursor: 0, missingTimeoutEvidence: false };
+}
+
+function hasLiveTimeout(tools: readonly AgentTool<any>[]): boolean {
+	try {
+		return tools.some((tool) => typeof tool.failureRecovery?.getTimeoutMs === "function");
+	} catch {
+		return true;
+	}
+}
+
+/** Conversation-owned immutable recovery replay. Each run still receives its own admission state. */
+export class ToolFailureRecoveryHistory {
+	private baseline = new ToolFailureRecoveryGate();
+	private walk = createTranscriptWalk();
+	private version: MessageHistoryVersion | undefined;
+	private length = 0;
+	private usedLiveTimeout = false;
+
+	restoreRun(
+		gate: ToolFailureRecoveryGate,
+		messages: readonly AgentMessage[],
+		tools: readonly AgentTool<any>[],
+	): void {
+		const version = messageHistoryVersion(messages);
+		const wasMissingTimeoutEvidence = this.walk.missingTimeoutEvidence;
+		const liveTimeout = wasMissingTimeoutEvidence && hasLiveTimeout(tools);
+		const mutableTimeout = wasMissingTimeoutEvidence && (this.usedLiveTimeout || liveTimeout);
+		const append =
+			this.version && version && !mutableTimeout && unchangedMessagePrefix(this.version, version) === this.length;
+		if (!append) {
+			if (this.length > 0) {
+				countHistoryWork(messages, "oldRowsRead", Math.min(this.length, messages.length));
+				historyWorkFallback(
+					messages,
+					mutableTimeout ? "tool-recovery-live-timeout" : "tool-recovery-history-changed",
+				);
+			}
+			this.baseline = new ToolFailureRecoveryGate();
+			this.walk = createTranscriptWalk();
+		}
+		this.baseline.replayTranscript(messages, tools, append ? this.length : 0, this.walk);
+		gate.copyBaseline(this.baseline);
+		this.length = messages.length;
+		this.usedLiveTimeout =
+			this.walk.missingTimeoutEvidence && (wasMissingTimeoutEvidence ? liveTimeout : hasLiveTimeout(tools));
+		if (version && this.walk.callsById.size <= MAX_RETAINED_REPLAY_CALLS) {
+			this.version = version;
+		} else {
+			this.baseline = new ToolFailureRecoveryGate();
+			this.walk = createTranscriptWalk();
+			this.version = undefined;
+		}
+	}
+}
+
 /**
  * Replay a transcript's world advances in order, reporting each completed operation with the cursor
  * value that was current when it ran. Advances are counted exactly as the live gate counts them —
@@ -621,10 +724,13 @@ function walkTranscript(
 	messages: readonly AgentMessage[],
 	visit: (event: TranscriptEvent) => void,
 	tools: readonly AgentTool<any>[] = [],
+	start = 0,
+	walk = createTranscriptWalk(),
 ): number {
-	const callsById = new Map<string, { name: string; args: unknown }>();
-	let worldCursor = 0;
-	for (const message of messages) {
+	const { callsById } = walk;
+	let { worldCursor } = walk;
+	for (let index = start; index < messages.length; index++) {
+		const message = messages[index]!;
 		if (message.role === "user") {
 			if (!isExternalEvidenceMessage(message)) worldCursor++;
 			continue;
@@ -654,6 +760,7 @@ function walkTranscript(
 		if (isPromptScopedFailureCode(record.failureCode)) {
 			continue;
 		}
+		if (invocation?.timeoutMs === undefined) walk.missingTimeoutEvidence = true;
 		visit({
 			kind: "unproductive",
 			executionKey,
@@ -672,6 +779,7 @@ function walkTranscript(
 					readVisibleToolFailureCode(message) === "repeated_failed_operation"),
 		});
 	}
+	walk.worldCursor = worldCursor;
 	return worldCursor;
 }
 

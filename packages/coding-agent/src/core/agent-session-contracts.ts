@@ -505,6 +505,7 @@ export interface IsolatedCompletionOptions {
 	 * `request_snapshot` here, the same way the foreground lifecycle boundary does for the owner.
 	 */
 	onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
+	borrowProviderSnapshotSource?: AgentLoopConfig["borrowProviderSnapshotSource"];
 	signal?: AbortSignal;
 	/** Required cache policy; isolated calls never inherit a provider default implicitly. */
 	cacheRetention: CacheRetention;
@@ -523,6 +524,10 @@ export interface IsolatedCompletionOptions {
 	 * provider already has. The child loop writes through it in place.
 	 */
 	prefixState?: ProviderRequestPrefixState;
+	/** Worker-owned history folds, refreshed against its canonical replay on each run. */
+	historyState?: Pick<AgentLoopConfig, "workingHistory" | "toolFailureRecoveryHistory" | "verificationHistory">;
+	/** Prefer exact new-message evidence for a transcript owner that already holds the input history. */
+	returnMessageSuffix?: boolean;
 	/**
 	 * The caller's conversation identity for per-conversation host policy (the reasoning pin, the lane's
 	 * observed cache lifetime). A worker passes the id its cache observations are recorded under.
@@ -551,6 +556,8 @@ export interface IsolatedCompletionResult {
 	providerRefusal?: ProviderAdmissionRefusal;
 	/** Complete child-owned conversation; isolated calls never expose foreground history. */
 	messages?: Message[];
+	/** Exact messages emitted by this run when the caller already owns the input history. */
+	messageSuffix?: Message[];
 }
 
 export interface ResearchLaneRunOutcome {

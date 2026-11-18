@@ -219,7 +219,9 @@ describe("request prefix proof for replaceable request-only projections", () => 
 			count: 1,
 		});
 
-		expect(previous.messages[2]).toBe(current.messages[2]);
+		// Unowned mutable rows must refresh both their sampled and exact fingerprints.
+		expect(previous.messages[2]).not.toBe(current.messages[2]);
+		expect(previous.exactMessages[2]).not.toBe(current.exactMessages[2]);
 		expect(compareRequestPrefix(previous, current, []).requestOnlyProjectionReplacement).toBeUndefined();
 	});
 

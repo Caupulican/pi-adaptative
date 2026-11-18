@@ -7,7 +7,9 @@ import {
 	type Model,
 	type UserMessage,
 } from "@caupulican/pi-ai";
+import { observeHistoryWork, providerMessagePrefix, responsesInputPrefix } from "@caupulican/pi-ai/history-work";
 import { describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../../ai/src/providers/openai-responses-shared.ts";
 import {
 	type PathAliasLegendEntry,
 	renderPathAliasLegend,
@@ -31,7 +33,7 @@ import {
 import type { ProviderHistoryContinuation } from "../src/core/memory/continuous-chat-provider-history.ts";
 import { IcmTurnCoordinator } from "../src/core/memory/continuous-chat-turn-coordinator.ts";
 import type { AgentContext, AgentLoopConfig } from "../src/kernel/loop-config.ts";
-import { advanceMessageContentRevision } from "../src/kernel/message-revision.ts";
+import { advanceMessageContentRevision, immutableHistoryMessage } from "../src/kernel/message-revision.ts";
 import { convertToLlm, createCustomMessage } from "../src/kernel/messages.ts";
 import { startPlannedAgentProviderRequestWithId } from "../src/kernel/provider-request-planner.ts";
 import type { SessionEntry } from "../src/kernel/session/session-entries.ts";
@@ -62,7 +64,7 @@ function aliasLegend(entries: readonly PathAliasLegendEntry[], frame: boolean) {
 	);
 }
 
-function fixture() {
+function fixture(certified = false) {
 	const frameRecords: AgentMessage[] = [];
 	const transient: AgentMessage[] = [];
 	const aliases = new Map<string, string>();
@@ -79,7 +81,8 @@ function fixture() {
 		budget: 48_000,
 		knowledge: "current fact",
 		totalMessages: 0,
-		transform: async (messages: AgentMessage[]) => messages,
+		transform: async (messages: AgentMessage[]) =>
+			certified ? messages.map((message) => immutableHistoryMessage(message)!) : messages,
 	};
 	const turns = new IcmTurnCoordinator({
 		started: Promise.resolve(),
@@ -115,6 +118,7 @@ function fixture() {
 		model,
 		convertToLlm,
 		providerAccountKey: "first",
+		providerMessageProjectionOwner: certified ? {} : undefined,
 		onProviderRequestSnapshot: (snapshot) => {
 			knowledgeRanges.push(snapshot.requestOnlyMessageRange);
 		},
@@ -135,6 +139,7 @@ function fixture() {
 		})),
 	};
 	const wires: Context[] = [];
+	const inputs: ReturnType<typeof convertResponsesMessages>[] = [];
 	async function begin(text: string | AgentMessage) {
 		const previous = turns.current();
 		if (previous) turns.end(previous);
@@ -148,6 +153,11 @@ function fixture() {
 	async function send(content: AssistantMessage["content"] = [{ type: "text", text: "Done." }]) {
 		const started = await startPlannedAgentProviderRequestWithId(source, config, undefined, (_model, context) => {
 			wires.push(context);
+			if (certified) {
+				inputs.push(
+					convertResponsesMessages(model, context, new Set([model.provider]), { reuseAcceptedPrefix: true }),
+				);
+			}
 			const stream = new AssistantMessageEventStream();
 			const stopReason = content.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
 			const message: AssistantMessage = {
@@ -171,10 +181,53 @@ function fixture() {
 		source.messages.push(final);
 		return provider;
 	}
-	return { begin, send, config, controls, turns, source, wires, frameRecords, transient, aliases, knowledgeRanges };
+	return {
+		begin,
+		send,
+		config,
+		controls,
+		turns,
+		source,
+		wires,
+		inputs,
+		frameRecords,
+		transient,
+		aliases,
+		knowledgeRanges,
+	};
 }
 
 describe("continuous chat at the native provider boundary", () => {
+	it("bridges the exact dispatched tool history into the next Responses conversion", async () => {
+		const f = fixture(true);
+		await f.begin("Inspect the build.");
+		await f.send([{ type: "toolCall", name: "bash", id: "build", arguments: {} }]);
+		f.source.messages.push({
+			role: "toolResult",
+			toolName: "bash",
+			toolCallId: "build",
+			isError: false,
+			content: [{ type: "text", text: "First failing check" }],
+			timestamp: 9,
+		});
+		await f.send();
+		const previous = f.wires[1]!.messages;
+		const previousInput = f.inputs[1]!;
+		expect(providerMessagePrefix(previous)).toBeDefined();
+
+		await f.begin("Explain the failure.");
+		const work = observeHistoryWork(f.source.messages);
+		await f.send();
+		const continued = f.wires[2]!.messages;
+		const input = f.inputs[2]!;
+		expect(providerMessagePrefix(continued)?.previous).toBe(previous);
+		expect(providerMessagePrefix(continued)?.count).toBe(previous.length);
+		expect(responsesInputPrefix(input)?.previous).toBe(previousInput);
+		expect(responsesInputPrefix(input)?.count).toBe(previousInput.length);
+		expect(input[0]).toBe(previousInput[0]);
+		expect(work.providerRowsConverted).toBeLessThan(continued.length);
+	});
+
 	it("extends the previously dispatched tool request through two owner turns and preserves live fact placement", async () => {
 		const f = fixture();
 		await f.begin("Inspect the build.");

@@ -1,4 +1,5 @@
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import { acceptsReadOnlyProviderInput, providerMessagePrefix } from "../history-work.ts";
 import { clampThinkingLevel, getModel } from "../models.ts";
 import type {
 	CacheRetention,
@@ -222,9 +223,10 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
 	const useXaiCliFormat = compat.requestFormat === "xai-cli";
+	const reusable = acceptsReadOnlyProviderInput(options?.onPayload) && !!providerMessagePrefix(context.messages);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
 		requestFormat: compat.requestFormat,
-		toolNameMap,
+		...(reusable ? { reuseAcceptedPrefix: true } : { toolNameMap }),
 	});
 	// GPT-5.6 and later replace `prompt_cache_retention` with `prompt_cache_options` and bill cache
 	// writes (1.25× input). Implicit mode caches through the latest eligible message; explicit

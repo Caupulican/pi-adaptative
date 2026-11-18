@@ -35,6 +35,49 @@ export function retainSynthesizedSessionContextMessage<T extends AgentMessage>(
 	return message;
 }
 
+export interface SessionContextCache {
+	leafId: string | null;
+	context: SessionContext;
+}
+
+/** Advance a materialized linear projection without walking its ancestry again. */
+export function advanceSessionContextCache(
+	cached: SessionContextCache | undefined,
+	entry: SessionEntry,
+): SessionContextCache | undefined {
+	if (!cached || cached.leafId !== entry.parentId || entry.type === "compaction") return undefined;
+	switch (entry.type) {
+		case "message":
+			cached.context.messages.push(entry.message);
+			break;
+		case "custom_message":
+			cached.context.messages.push(
+				retainSynthesizedSessionContextMessage(
+					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+					entry,
+				),
+			);
+			break;
+		case "branch_summary":
+			if (entry.summary) {
+				cached.context.messages.push(
+					retainSynthesizedSessionContextMessage(
+						createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+					),
+				);
+			}
+			break;
+		case "thinking_level_change":
+			cached.context.thinkingLevel = entry.thinkingLevel;
+			break;
+		case "model_change":
+			cached.context.model = { provider: entry.provider, modelId: entry.modelId };
+			break;
+	}
+	cached.leafId = entry.id;
+	return cached;
+}
+
 export function cloneSessionContext(context: SessionContext): SessionContext {
 	return {
 		messages: context.messages.map((message) => {

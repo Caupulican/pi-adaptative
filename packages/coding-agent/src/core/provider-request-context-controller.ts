@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { countHistoryWork, inheritHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
@@ -457,6 +458,7 @@ export class ProviderRequestContextController {
 		const extensionPlan = this.deps.transformExtensions
 			? await this.deps.transformExtensions(transformed)
 			: { messages: transformed, transientMessages: [] as AgentMessage[] };
+		inheritHistoryWork(messages, extensionPlan.messages);
 		const routedGoalContext = this.deps.getRoutedGoalContext?.();
 		const goalAutoContinueNote = this.deps.getGoalAutoContinueNote?.();
 		const goalContextProjection = captureGoalContextProjection(
@@ -553,21 +555,24 @@ export class ProviderRequestContextController {
 				: []),
 		];
 		const durableMessages = injectCompactGoalContext(extensionPlan.messages, undefined);
+		inheritHistoryWork(messages, durableMessages);
 		// `sentPrefixCount` indexes `messages` as received above; `durableMessages` is the same
 		// conversation after transformBase/extension hooks/goal-context stripping may have reshaped
 		// it. Re-anchor the mark by reference so packing only ever freezes what is PROVABLY still the
 		// same already-sent content, computed once and reused for both the preview and commit GC
 		// passes below so they can never disagree about what is frozen.
 		const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, durableMessages);
-		const extensionMessages = [...durableMessages, ...providerTransients];
+		const extensionMessages = appendPlanningMessages(durableMessages, providerTransients);
 		const auditReport = this.deps.runContextAudit?.(extensionMessages);
 		const shadowReport = auditReport ? this.deps.runPromptPolicyPlanning?.(auditReport) : undefined;
 		const memoryReport = this.deps.runMemoryRetrieval
 			? await this.deps.runMemoryRetrieval(extensionMessages)
 			: undefined;
 		const previewGc = this.deps.applyContextGc(durableMessages, false, frozenBelow);
+		inheritHistoryWork(messages, previewGc.messages);
 		const pathAliasPlan = this.deps.applyPathAliases(previewGc.messages);
-		const previewProviderMessages = [...pathAliasPlan.messages, ...providerTransients];
+		inheritHistoryWork(messages, pathAliasPlan.messages);
+		const previewProviderMessages = appendPlanningMessages(pathAliasPlan.messages, providerTransients);
 		const previewEnforcement =
 			shadowReport && this.deps.runPromptEnforcement
 				? this.deps.runPromptEnforcement(
@@ -581,23 +586,31 @@ export class ProviderRequestContextController {
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
 		}
-		const compactableMessages = previewEnforcement.messages.slice(0, previewGc.messages.length);
+		const compactableCount = previewGc.messages.length;
+		let compactableMessages = previewEnforcement.messages;
+		if (
+			previewEnforcement.messages === previewProviderMessages &&
+			pathAliasPlan.messages.length === compactableCount
+		) {
+			compactableMessages = pathAliasPlan.messages;
+		} else if (compactableMessages.length !== compactableCount) {
+			compactableMessages = compactableMessages.slice(0, compactableCount);
+			countHistoryWork(messages, "copiedRows", compactableCount);
+		}
+		inheritHistoryWork(messages, compactableMessages);
 		const goalState = this.deps.getGoalState?.();
 		const withExtensionTransients = [
 			...previewEnforcement.messages.slice(previewGc.messages.length),
 			...previewEnforcement.transientMessages,
 		];
+		const beforeMemory = appendPlanningMessages(compactableMessages, withExtensionTransients);
 		const memoryPlan =
 			memoryReport && this.deps.appendMemoryEvidence
-				? this.deps.appendMemoryEvidence(
-						[...compactableMessages, ...withExtensionTransients],
-						memoryReport,
-						wire.messages ?? [],
-					)
+				? this.deps.appendMemoryEvidence(beforeMemory, memoryReport, wire.messages ?? [])
 				: undefined;
-		const withMemory = memoryPlan?.messages ?? [...compactableMessages, ...withExtensionTransients];
+		const withMemory = memoryPlan?.messages ?? beforeMemory;
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);
-		if (!sameMessages(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
+		if (!sameMessagePrefix(beforeSkill, compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const skillVault = this.deps.skillVault;
@@ -631,7 +644,9 @@ export class ProviderRequestContextController {
 		);
 		const transientMessages = appendPathAliasLegend(beforeLegend, legend);
 		const carriedRecords = wire.carry === true ? this.carriedHeadRecords(transientMessages, frameLegend) : undefined;
-		const contextProjection = this.deps.previewContextProjection?.([...compactableMessages, ...transientMessages]);
+		const contextProjection = this.deps.previewContextProjection?.(
+			appendPlanningMessages(compactableMessages, transientMessages),
+		);
 
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
@@ -670,7 +685,15 @@ export class ProviderRequestContextController {
 			skillVault?.previewExclusionReminder?.() === exclusionReminder;
 
 		return {
-			messages: compactableMessages,
+			messages:
+				compactableMessages !== previewGc.messages &&
+				compactableMessages !== messages &&
+				compactableMessages.length === messages.length &&
+				compactableMessages.every((message, index) => message === messages[index])
+					? messages
+					: compactableMessages,
+			compressionPolicy: previewGc.compressionPolicy,
+			acceptProviderHistory: previewGc.acceptProviderHistory,
 			transientMessages,
 			verifyPathAliases: pathAliasPlan.verifyPathAliases,
 			...(carriedRecords === undefined ? {} : { carriedRecords }),
@@ -699,15 +722,24 @@ export class ProviderRequestContextController {
 	}
 }
 
+function appendPlanningMessages(history: AgentMessage[], suffix: readonly AgentMessage[]): AgentMessage[] {
+	if (suffix.length === 0) return history;
+	const result = [...history, ...suffix];
+	countHistoryWork(history, "copiedRows", history.length);
+	inheritHistoryWork(history, result);
+	return result;
+}
+
 /**
  * Same messages, cheaply: identity first, structural equality only for the elements that differ.
  * Contributors that leave compactable history alone hand back the very same objects, so this is
  * usually an O(n) reference walk; `isDeepStrictEqual` over the whole history was O(bytes) per
  * request for the same answer.
  */
-function sameMessages(left: readonly AgentMessage[], right: readonly AgentMessage[]): boolean {
-	if (left.length !== right.length) return false;
-	for (let index = 0; index < left.length; index++) {
+function sameMessagePrefix(left: readonly AgentMessage[], right: readonly AgentMessage[]): boolean {
+	if (left === right) return true;
+	if (left.length < right.length) return false;
+	for (let index = 0; index < right.length; index++) {
 		if (left[index] !== right[index] && !isDeepStrictEqual(left[index], right[index])) return false;
 	}
 	return true;

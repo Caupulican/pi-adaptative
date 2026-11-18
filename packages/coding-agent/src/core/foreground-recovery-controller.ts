@@ -203,11 +203,14 @@ export class ForegroundRecoveryController {
 	constructor(deps: ForegroundRecoveryControllerDeps) {
 		this.deps = deps;
 		this.unsubscribeRuntime = deps.runtimeAdmission.subscribeAvailability(() => this.notifyActivity());
-		this.unsubscribeTurnOrigin = deps.agent.subscribe((event) => {
-			if (event.type !== "message_end") return;
-			this.turnOrigin.note(event.message);
-			if (this.turnOrigin.isActive()) this.toolManifests.noteRootOrigin(this.turnOrigin.origin());
-		});
+		this.unsubscribeTurnOrigin = deps.agent.subscribe(
+			(event) => {
+				if (event.type !== "message_end") return;
+				this.turnOrigin.note(event.message);
+				if (this.turnOrigin.isActive()) this.toolManifests.noteRootOrigin(this.turnOrigin.origin());
+			},
+			{ publishesMessageEdits: true },
+		);
 		const admissionClock = (deps.timers ?? SYSTEM_TIMER_SOURCE).port("provider-admission");
 		this.retry = new RetryController(
 			deps.agent,

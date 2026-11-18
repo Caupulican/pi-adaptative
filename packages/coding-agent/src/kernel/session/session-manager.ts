@@ -1,13 +1,10 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readSync, renameSync, type Stats, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { countHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
-import {
-	type BashExecutionMessage,
-	type CustomMessage,
-	createBranchSummaryMessage,
-	createCustomMessage,
-} from "../messages.ts";
+import { messageSourceOf } from "../message-revision.ts";
+import { type BashExecutionMessage, type CustomMessage, createCustomMessage } from "../messages.ts";
 import { ownerInputIdOf } from "../owner-input-stamp.ts";
 import { isMissingFileError } from "../storage/atomic-file.ts";
 import { sameFileVersion } from "../storage/bounded-file.ts";
@@ -73,13 +70,14 @@ import {
 import { sessionExclusiveHost } from "./session-bundle-lifecycle.ts";
 import type { SessionStorageRoots } from "./session-bundle-paths.ts";
 import {
+	advanceSessionContextCache,
 	buildSessionContext,
 	cloneSessionContext,
 	customMessageEntries,
 	deliveredOwnerInput,
 	deliveredTurnOrigin,
 	deliveredWorkerControl,
-	retainSynthesizedSessionContextMessage,
+	type SessionContextCache,
 } from "./session-context-builder.ts";
 import { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
 import type {
@@ -191,11 +189,6 @@ export {
 
 /** Maximum normal message/custom-message records in one atomic append batch. */
 export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
-
-interface SessionContextCache {
-	leafId: string | null;
-	context: SessionContext;
-}
 
 /**
  * Per-custom-type memo of the last `getLatestCustomEntryOnBranch` answer for the current leaf. A
@@ -884,6 +877,7 @@ export class SessionManager {
 		const location = this._getEntryFileLocation(entryId);
 		if (!location) throw new Error(`Compacted session payload ${entryId} is unavailable`);
 		const fd = openSync(this.sessionFile, "r");
+		countHistoryWork(this, "coldPayloadLoads");
 		const buffer = Buffer.allocUnsafe(location.length);
 		let bytesRead = 0;
 		try {
@@ -1312,7 +1306,7 @@ export class SessionManager {
 				} else this.parentInputCache = undefined;
 				this._advanceLifecycleActiveCache(entry);
 				assertPublishedContext();
-				this._advanceSessionContextCache(entry);
+				this.sessionContextCache = advanceSessionContextCache(this.sessionContextCache, entry);
 				assertPublishedContext();
 			}
 		} catch (error) {
@@ -1459,45 +1453,6 @@ export class SessionManager {
 
 	private _invalidateSessionContextCache(): void {
 		this.sessionContextCache = undefined;
-	}
-
-	/** Advance a materialized linear projection without walking its immutable ancestry again. */
-	private _advanceSessionContextCache(entry: SessionEntry): void {
-		const cached = this.sessionContextCache;
-		if (!cached || cached.leafId !== entry.parentId || entry.type === "compaction") {
-			this._invalidateSessionContextCache();
-			return;
-		}
-
-		switch (entry.type) {
-			case "message":
-				cached.context.messages.push(entry.message);
-				break;
-			case "custom_message":
-				cached.context.messages.push(
-					retainSynthesizedSessionContextMessage(
-						createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-						entry,
-					),
-				);
-				break;
-			case "branch_summary":
-				if (entry.summary) {
-					cached.context.messages.push(
-						retainSynthesizedSessionContextMessage(
-							createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
-						),
-					);
-				}
-				break;
-			case "thinking_level_change":
-				cached.context.thinkingLevel = entry.thinkingLevel;
-				break;
-			case "model_change":
-				cached.context.model = { provider: entry.provider, modelId: entry.modelId };
-				break;
-		}
-		cached.leafId = entry.id;
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -2231,7 +2186,7 @@ export class SessionManager {
 		if (message.role !== "user") return undefined;
 		const stamped = ownerInputIdOf(message);
 		if (stamped) return stamped;
-		const id = this.getMessageEntryId(message);
+		const id = this.getMessageEntryId(messageSourceOf(message));
 		const entry = id ? this.getEntry(id) : undefined;
 		return entry?.type === "message" ? entry.ownerInputId : undefined;
 	}
@@ -2247,7 +2202,8 @@ export class SessionManager {
 		if (!selection.isCurrent()) throw new Error("Parent note selection changed before transport.");
 		const owner = this.parentNoteAdmission?.owners.get(selection.ownerInputId);
 		const ownerMessage = source.find((message) => this._parentNoteOwnerId(message) === selection.ownerInputId);
-		const ownerEntryId = (ownerMessage && this.getMessageEntryId(ownerMessage)) ?? owner?.ownerEntryId;
+		const ownerEntryId =
+			(ownerMessage && this.getMessageEntryId(messageSourceOf(ownerMessage))) ?? owner?.ownerEntryId;
 		const ownerEntry = ownerEntryId && this.getEntry(ownerEntryId);
 		if (
 			!ownerEntryId ||
@@ -2723,6 +2679,11 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionContext(): SessionContext {
+		return this.readSessionContext((context) => cloneSessionContext(context));
+	}
+
+	/** Borrow the current append-only projection for a synchronous, read-only traversal. */
+	readSessionContext<Result>(read: (context: Readonly<SessionContext>) => Result): Result {
 		let cached = this.sessionContextCache;
 		if (!cached || cached.leafId !== this.leafId) {
 			cached = {
@@ -2731,7 +2692,7 @@ export class SessionManager {
 			};
 			this.sessionContextCache = cached;
 		}
-		return cloneSessionContext(cached.context);
+		return read(cached.context);
 	}
 
 	/**

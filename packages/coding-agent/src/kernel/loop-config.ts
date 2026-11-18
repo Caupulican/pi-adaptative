@@ -13,7 +13,9 @@ import type {
 	Usage,
 } from "@caupulican/pi-ai";
 import type { ExecutionContext, ExecutionPathAuthority } from "./execution-context.ts";
+import type { MessageHistoryMirror } from "./message-revision.ts";
 import type { ToolFailureContextMemory } from "./tool-failure-memory.ts";
+import type { ToolFailureRecoveryHistory } from "./tool-failure-recovery-gate.ts";
 import type {
 	AgentMessage,
 	AgentRequestId,
@@ -23,6 +25,7 @@ import type {
 	ThinkingLevel,
 	ToolExecutionMode,
 } from "./types.ts";
+import type { VerificationHistory } from "./verification-obligations.ts";
 
 /** The options a stream function receives: the provider's options plus the host's identity of the request's conversation. */
 export interface AgentStreamOptions extends SimpleStreamOptions {
@@ -97,6 +100,8 @@ export type StreamFn = (
 export interface ProviderRequestPrefixState {
 	/** Reconcile conversation-owned marks with resolved credentials and the effective request before planning. */
 	reconcileRequestScope?(model: Model<Api>, providerAccountKey: string | undefined, sourceContext: AgentContext): void;
+	/** Observe the loop's accepted source extent before a public request snapshot copies it. */
+	acceptSource?(messages: readonly AgentMessage[]): void;
 	/**
 	 * SESSION-scoped pack-freeze horizon (carried across top-level prompts like the sanitizer mark).
 	 * Feeds `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in
@@ -334,6 +339,8 @@ export interface ShouldStopAfterTurnContext {
 
 /** Replacement runtime state used by the agent loop before starting another provider request. */
 export interface AgentLoopTurnUpdate {
+	/** Reconcile the live loop with its Agent-owned transcript and refresh only the supplied envelope. */
+	refreshHistory?: { systemPrompt: string; tools: AgentTool<any>[] };
 	/** Context for the next provider request. */
 	context?: AgentContext;
 	/** Model for the next provider request. */
@@ -437,7 +444,13 @@ export interface ProviderHistoryCandidate {
 	readonly accountKey?: string;
 	readonly requestOnly: { readonly start: number; readonly count: number };
 	readonly transientTail: readonly AgentMessage[];
+	readonly compressionPolicy?: string;
+	/** Effective message conversion options when the kernel owns materialization. */
+	readonly blockImages?: boolean;
+	readonly conversation?: string;
 	readonly nativeHistory: boolean;
+	/** The kernel owns every row of the fresh native wire. */
+	readonly certifiedWire?: boolean;
 }
 
 /** Request-local projection; a rejected or measured candidate never advances the host's history window. */
@@ -460,6 +473,10 @@ export interface AgentContextPlan {
 	messages: AgentMessage[];
 	/** Optional history relative to this request’s fresh materialization. */
 	providerHistory?: AgentProviderHistoryPlan;
+	/** Effective host-side message compression policy for the projected history. */
+	compressionPolicy?: string;
+	/** Publish host compression state after the provider returns a usable result. */
+	acceptProviderHistory?: () => void;
 	/** The path projection's live proof that a retained mapping still names the same path. */
 	verifyPathAliases?: (entries: readonly { id: string; path: string }[]) => boolean;
 	transientMessages?: AgentMessage[];
@@ -508,7 +525,12 @@ export interface AgentContextPlan {
 /** The data a request measurement may inspect, with no lifecycle callbacks or authority. */
 export type AgentContextPlanPayload = Pick<
 	AgentContextPlan,
-	"messages" | "transientMessages" | "transientSystemPrompt" | "transientReconciliationBase" | "nonCompactableHead"
+	| "messages"
+	| "transientMessages"
+	| "transientSystemPrompt"
+	| "transientReconciliationBase"
+	| "nonCompactableHead"
+	| "compressionPolicy"
 >;
 
 /** A replay-safe planning hook as installed on an agent. */
@@ -555,6 +577,12 @@ export interface ProviderRequestAdmissionContext extends RequestPreflightContext
 
 /** Exact accepted provider request offered to the host-owned durable lifecycle boundary. */
 export interface ProviderRequestSnapshotContext extends ProviderRequestAdmissionContext {
+	/** Fixed extent even when sourceContext is borrowed only for the callback. */
+	readonly sourceBoundary?: {
+		readonly count: number;
+		readonly last: AgentMessage | undefined;
+		readonly lastRevision?: number;
+	};
 	/** Opaque identity generated only after final plan validation and adoption. */
 	requestId: AgentRequestId;
 	/** Final provider-message interval occupied by replaceable request-only projections; no content is retained. */
@@ -610,6 +638,9 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	 * let the loop manage it.
 	 */
 	providerRequestPrefixState?: ProviderRequestPrefixState;
+
+	/** Identity of the owner whose accepted provider projection persists across turns. */
+	providerMessageProjectionOwner?: object;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -718,6 +749,8 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	 * throwing prevents the provider stream from being created and leaves the accepted plan committed.
 	 */
 	onProviderRequestSnapshot?: (context: ProviderRequestSnapshotContext, signal?: AbortSignal) => void | Promise<void>;
+	/** The callback retains sourceBoundary and only borrows sourceContext during its invocation. */
+	borrowProviderSnapshotSource?: boolean;
 
 	/**
 	 * Internal wiring seam, not a host extension point: the agent loop creates and injects this once
@@ -859,6 +892,18 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	 * Return replacement context/model/thinking state to affect the next turn in this run.
 	 * Return undefined to keep using the current context/config.
 	 */
+	/** Working history owned for one conversation and exclusively used for one run at a time. */
+	workingHistory?: MessageHistoryMirror;
+	/** Conversation-owned baseline for reading verification records across top-level runs. */
+	verificationHistory?: VerificationHistory;
+	/** Conversation-owned transcript baseline for retry admission across top-level runs. */
+	toolFailureRecoveryHistory?: ToolFailureRecoveryHistory;
+	/** The canonical transcript published by this loop’s Agent event sink. */
+	getCanonicalMessages?: () => readonly AgentMessage[];
+	/** Preserve the foreground event transcript across requests, including late inbox appends. */
+	keepCanonicalHistory?: boolean;
+	/** Publish runtime normalization of a finalized message to its owner. */
+	onMessageContentsEdited?: (message: AgentMessage) => void;
 	prepareNextTurn?: (
 		context: PrepareNextTurnContext,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;

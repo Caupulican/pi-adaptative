@@ -149,9 +149,16 @@ export function applyProviderRequestImageBudget(
 	context: Context,
 	model: Model<Api>,
 	policy: ProviderRequestImageBudgetPolicy = resolveProviderRequestImageBudget(model),
+	knownImageFreePrefix = 0,
 ): BudgetedProviderRequestContext {
 	validatePolicy(policy);
-	if (!hasInlineImages(context.messages)) return { context };
+	if (knownImageFreePrefix === 0) {
+		if (!hasInlineImages(context.messages)) return { context };
+	} else {
+		let index = knownImageFreePrefix;
+		while (index < context.messages.length && !hasInlineImage(context.messages[index]!)) index++;
+		if (index === context.messages.length) return { context };
+	}
 	const projectedMessages = projectMessagesForModelImageSupport(context.messages, model);
 	const projectedContext =
 		projectedMessages === context.messages ? context : { ...context, messages: projectedMessages };

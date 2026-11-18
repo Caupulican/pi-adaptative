@@ -17,6 +17,8 @@ import {
 	summarizerCanIngest,
 } from "../kernel/compaction/compaction.ts";
 import type { AgentLoopConfig, ResolvedProviderRequestAuth } from "../kernel/index.ts";
+import type { ProviderRequestSnapshotContext } from "../kernel/loop-config.ts";
+import { messageContentRevision, sameMessageContents } from "../kernel/message-revision.ts";
 import { convertToLlm } from "../kernel/messages.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import type {
@@ -101,11 +103,17 @@ export function sameCacheLane(a: Model<Api>, b: Model<Api>): boolean {
 }
 
 /** The session lane's last sent provider request: its model, the context as sent, and the history it was planned from. */
-export interface LastSentRequest {
+export type LastSentRequest = {
 	readonly model: Model<Api>;
 	readonly context: Context;
-	readonly sourceMessages: readonly AgentMessage[];
-}
+	readonly assertSourceBranch?: () => void;
+} & (
+	| { readonly sourceMessages: readonly AgentMessage[]; readonly sourceBoundary?: never }
+	| {
+			readonly sourceBoundary: NonNullable<ProviderRequestSnapshotContext["sourceBoundary"]>;
+			readonly sourceMessages?: never;
+	  }
+);
 
 /**
  * The summarizer request for a compaction on the session's own model, which reads the session's cached
@@ -155,9 +163,20 @@ function extendSentContext(
 	materializeNewer: (newer: readonly AgentMessage[]) => Context["messages"],
 ): Context | undefined {
 	if (!sent || !sameCacheLane(sent.model, model)) return undefined;
-	const planned = sent.sourceMessages.length;
+	try {
+		sent.assertSourceBranch?.();
+	} catch {
+		return undefined;
+	}
+	const planned = sent.sourceBoundary?.count ?? sent.sourceMessages?.length ?? 0;
+	const last = sent.sourceBoundary ? sent.sourceBoundary.last : sent.sourceMessages?.[planned - 1];
+	const revision = sent.sourceBoundary?.lastRevision;
 	// The sent request no longer describes this history when its last message is not where it was.
-	if (planned > live.length || (planned > 0 && live[planned - 1] !== sent.sourceMessages[planned - 1])) {
+	if (
+		planned > live.length ||
+		(planned > 0 && (!last || !sameMessageContents(live[planned - 1], last))) ||
+		(last && revision !== undefined && revision !== messageContentRevision(last))
+	) {
 		return undefined;
 	}
 	const newer = live.slice(planned);
