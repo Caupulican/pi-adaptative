@@ -15,7 +15,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { lstatSync } from "node:fs";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { AgentMessage } from "../kernel/types.ts";
@@ -121,7 +120,7 @@ import type { WorkerModelHandoffPort } from "./delegation/worker-lifecycle-contr
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
-import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
+import { accessExistingWorkerStore, WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { WorkerTerminalReport } from "./delegation/worker-terminal-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
@@ -192,7 +191,6 @@ import { SessionRoutines } from "./routines/session-routines.ts";
 import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
-import { isMissingFileError } from "./util/atomic-file.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { GithubWatchLink } from "./watches/github-watch-poller.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
@@ -250,6 +248,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
 	private _workerLifecycle: WorkerLifecycle | undefined;
+	private _workerBackgroundReady = false;
 	/** The lifecycle's durable event store: every attempt transition commits through it. */
 	private _orchestrationStore: OrchestrationEventStore | undefined;
 	/** The store and lifecycle as the session opens them, before (or without) the worker composition. */
@@ -437,7 +436,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			onContinuationActivity: () => this._notifyContinuationActivity(),
 			timers: deps.getTimers().port("goal-continuation"),
 		});
-		queueMicrotask(() => this.signalWorkerReceiptDelivery());
 	}
 
 	/** The model a fresh worker would run on now (see WorkerDelegationController.previewWorkerModel). */
@@ -655,6 +653,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		// of a live waiter at terminal-record time.
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
 			timers: this.deps.getTimers().port("worker-notification"),
+			isReady: () => this._workerBackgroundReady,
 			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
 			ensureDurableNotification: (record) => this._ensureDurableNotification(record),
 			emitStatus: (status) => {
@@ -1389,21 +1388,27 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (this.deps.isDelegateToolActive?.()) this._getWorkerController().drain();
 	}
 
+	/** Start recovery after SDK startup has installed the foreground's provider and tool surface. */
+	startWorkerBackgroundWork(): void {
+		if (this._workerBackgroundReady || this.deps.isDisposed()) return;
+		this._workerBackgroundReady = true;
+		this.signalWorkerReceiptDelivery();
+		if (this._workerLifecycle && this.deps.isDelegateToolActive?.()) this._getWorkerController().drain();
+		this._workerNotifications?.resumePendingDelivery();
+	}
+
 	/** Recover existing obligations even when the current tool surface cannot start new workers. */
 	signalWorkerReceiptDelivery(): void {
-		if (this.deps.isDisposed()) return;
+		if (!this._workerBackgroundReady || this.deps.isDisposed()) return;
 		if (!this._workerLifecycle) {
-			try {
-				const existing = lstatSync(this._orchestrationStoreDir());
-				if (!existing.isDirectory()) throw new Error("Worker orchestration storage is not a directory.");
-				this._getWorkerLifecycle();
-			} catch (error) {
-				if (!isMissingFileError(error))
-					this._safeWarn(
-						`Worker receipt recovery unavailable: ${error instanceof Error ? error.message : String(error)}`,
-					);
+			if (
+				!accessExistingWorkerStore(
+					() => this._orchestrationStoreDir(),
+					() => this._getWorkerLifecycle(),
+					(warning) => this._safeWarn(warning),
+				)
+			)
 				return;
-			}
 		} else if (this._parentWriteHolds.size > 0) {
 			// Writes that could not land before (no persisted transcript yet, a busy lock) are retried here.
 			this._landRecordedParentWrites(this._workerLifecycle);
@@ -1683,12 +1688,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
 	private _hasWorkerState(): boolean {
-		if (this._workers || this._workerLifecycle) return true;
-		try {
-			return lstatSync(this._orchestrationStoreDir()).isDirectory();
-		} catch {
-			return false;
-		}
+		return (
+			!!this._workers || !!this._workerLifecycle || accessExistingWorkerStore(() => this._orchestrationStoreDir())
+		);
 	}
 
 	/** The session's orchestration event store directory, in the session's orchestration home. */

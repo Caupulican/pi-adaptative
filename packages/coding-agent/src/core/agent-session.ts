@@ -4454,6 +4454,7 @@ export class AgentSession {
 	}
 
 	startBackgroundInputs(): void {
+		this._backgroundLanes.startWorkerBackgroundWork();
 		if (this._caps.routineScope === undefined) return;
 		this._durableCustomMessageTurns.startParentInputs();
 		this._backgroundLanes.startSessionInputs();

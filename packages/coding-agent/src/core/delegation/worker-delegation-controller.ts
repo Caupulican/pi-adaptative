@@ -726,12 +726,12 @@ export class WorkerDelegationController {
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),
+			isReady: notifications.isReady,
 			lifecycle: this.lifecycle,
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
 			recoverModelTransfers: () => this.modelHandoffs.recover(),
-			// A placed job's worker is not resumed after a restart: its runner has ended the job as interrupted, so the lane
-			// ends with it instead of running unsupervised with no deadline and no cancel path.
+			// The interrupted job's worker must not resume without its runner's deadline and cancellation.
 			endUnresumable: (attempt) => {
 				if (placedJobRef(attempt.dispatch.turnOrigin) === undefined) return false;
 				this.cancelAndPublish(this.lifecycle, attempt.taskId, "placed_job_not_resumed");

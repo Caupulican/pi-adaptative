@@ -57,6 +57,8 @@ const RETRY_ENQUEUE_FAILURE_BASE_MS = 1_000;
 const RETRY_ENQUEUE_FAILURE_MAX_MS = 30_000;
 
 export interface WorkerRecoveryCoordinatorOptions {
+	/** The parent can be inspected before startup has installed its execution surface. */
+	isReady?(): boolean;
 	/**
 	 * The session's `orchestration` port: the retry deadline is computed and rechecked on its clock and every retry
 	 * alarm is armed on its timers. The lifecycle's task runtime reads the same clock when it checks the deadline again
@@ -150,7 +152,7 @@ export class WorkerRecoveryCoordinator {
 
 	/** Idempotently rebuild in-process queues, terminal outboxes, and task-bearing mailboxes. */
 	recover(): void {
-		if (this.disposed || this.recoveringDurableState) return;
+		if (this.disposed || this.recoveringDurableState || this.options.isReady?.() === false) return;
 		this.recoveringDurableState = true;
 		const { lifecycle } = this.options;
 		try {

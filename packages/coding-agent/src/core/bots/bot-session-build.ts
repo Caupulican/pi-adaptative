@@ -98,6 +98,7 @@ export async function createBotAgentSession(input: BotAgentSessionInput): Promis
 		sessionManager: input.sessionManager,
 		// The bot's host runs its session alone: an owner's open of it is refused while the host holds it.
 		bundleLeaseRole: "bot-host",
+		backgroundInputStartup: "host",
 		model: definition.model,
 		...(definition.thinkingLevel ? { thinkingLevel: definition.thinkingLevel } : {}),
 		// A bot's own session: it runs the watches it arms and takes their wakes as parent inputs (idle starts a turn,

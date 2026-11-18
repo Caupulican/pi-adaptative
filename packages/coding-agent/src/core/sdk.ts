@@ -149,6 +149,8 @@ export interface CreateAgentSessionOptions extends SessionHostOptions {
 	 * hold and never launches or reconciles the daemon.
 	 */
 	hostedChannels?: "daemon";
+	/** A host that attaches turn observers after construction calls session.startBackgroundInputs() when ready. */
+	backgroundInputStartup?: "host";
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
 	/**
@@ -1215,7 +1217,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			await session.initializeMemory();
 			const extensionsResult = resourceLoader.getExtensions();
 			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
-			session.startBackgroundInputs();
+			if (options.backgroundInputStartup !== "host") session.startBackgroundInputs();
 			observeSessionCleanupRelease(session, sessionManager);
 
 			return {

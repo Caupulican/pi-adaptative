@@ -1,9 +1,29 @@
+import { lstatSync } from "node:fs";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import { deliverableWorkerReceipt } from "../orchestration/worker-receipt-publication.ts";
+import { isMissingFileError } from "../util/atomic-file.ts";
 import { ReceiptDeliveryLoop } from "./receipt-delivery-loop.ts";
 import { WorkerReceiptParentLedger } from "./worker-receipt-parent-ledger.ts";
+
+/** Cold recovery and presence checks read only previously recorded orchestration stores. */
+export function accessExistingWorkerStore(
+	directory: () => string,
+	load?: () => void,
+	warn?: (message: string) => void,
+): boolean {
+	try {
+		if (!lstatSync(directory()).isDirectory()) throw new Error("Worker orchestration storage is not a directory.");
+		load?.();
+		return true;
+	} catch (error) {
+		if (!isMissingFileError(error)) {
+			warn?.(`Worker receipt recovery unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		return false;
+	}
+}
 
 interface WorkerReceiptDeliveryDeps {
 	readonly runtime: Pick<DurableTaskRuntime, "getSnapshot" | "acknowledgeWorkerReceipts">;

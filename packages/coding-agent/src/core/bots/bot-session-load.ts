@@ -311,7 +311,6 @@ export class BotSessionLoader {
 				unobserveTurns();
 				unobserveSince();
 			};
-			session.startBackgroundInputs();
 			// A stop made since the one taken under the lock is taken first: nothing it stops resumes below. No turn runs yet.
 			const loadStop = this.ports.owed.unrecorded.loaded(
 				agentId,
@@ -319,6 +318,7 @@ export class BotSessionLoader {
 				this.ports.stopPorts(),
 			);
 			if (loadStop.failure) throw loadStop.failure.cause;
+			session.startBackgroundInputs();
 			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
 			session.restoreGoalRuntimeAfterResume();
 			session.backgroundLanes.drainQueuedWorkerDelegations();

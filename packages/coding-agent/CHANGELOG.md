@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Reopening a parent with a pending worker report now waits for tool registration before sending its first model request.
 - Interrupted workers append the report request to their conversation and reuse eligible provider history. The closing response cannot execute tools.
 - Workers can copy the recorded file path from a successful edit or write and cite a command result by its receipt ID in their completion report. The host checks the recorded command and exit outcome.
 - Continuous chat can keep the previous model request intact when a worker hands its result back to the same session. The handoff adds the visible work-report rows and their zoom references.

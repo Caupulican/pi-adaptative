@@ -1,14 +1,18 @@
 /** A clean close parks a requested handoff; a fresh controller in the same process must reacquire its transcript claim. */
 import { expect } from "vitest";
 import { workerConversationMetadataFile } from "../../../../src/kernel/session/worker-storage-identity.ts";
-import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
+import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { handoffBlocks, J9_ROOT_JUDGMENTS, J9_ROOT_REPLY, J9_SETTINGS, workerReport } from "./journey-9-shared.ts";
-import { LIMITS_PATH, NO_DELIVERY_CLAIMS, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
+import { LIMITS_PATH, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
 
 async function exerciseRestartHandoff(world: HarnessWorld): Promise<void> {
-	const settings = { ...J9_SETTINGS, worktreeSync: { enabled: true }, modelRouter: { fitnessGate: false } };
-	world.systemOne.enterPhase("handoff-restart", { ...J9_ROOT_JUDGMENTS, ...NO_DELIVERY_CLAIMS });
+	const settings = {
+		...J9_SETTINGS,
+		worktreeSync: { enabled: true },
+		modelRouter: { fitnessGate: false },
+	};
+	world.systemOne.enterPhase("handoff-restart", J9_ROOT_JUDGMENTS);
 	const owner = await world.createRootSession("root", { settings, sessionManager: world.createSessionManager() });
 	const wait = <T>(label: string, pending: Promise<T>) =>
 		withDeadline(world.trace, `handoff-restart-${label}`, pending);
@@ -17,22 +21,30 @@ async function exerciseRestartHandoff(world: HarnessWorld): Promise<void> {
 	const complete = createBarrier();
 	const successorGate = createBarrier();
 	const target = `${HARNESS_PROVIDER}/worker-b`;
+	const expectRootTools = ({ context }: ScriptedRequest): void => {
+		const tools = context.tools?.map(({ name }) => name);
+		expect(tools).toContain("delegate");
+		expect(tools).toContain("memory");
+	};
 	world.provider.enqueue(
 		"root",
-		calls("restart-start", [
-			{
-				id: "start-restart-worker",
-				name: "delegate",
-				arguments: {
-					action: "start",
-					model: "worker-a",
-					instructions: "Read limits.ts and report the configured retry count.",
-					path: "src",
-					readOnly: true,
+		{
+			...calls("restart-start", [
+				{
+					id: "start-restart-worker",
+					name: "delegate",
+					arguments: {
+						action: "start",
+						model: "worker-a",
+						instructions: "Read limits.ts and report the configured retry count.",
+						path: "src",
+						readOnly: true,
+					},
 				},
-			},
-		]),
-		text("restart-accepted", J9_ROOT_REPLY),
+			]),
+			check: expectRootTools,
+		},
+		{ ...text("restart-accepted", J9_ROOT_REPLY), check: expectRootTools },
 	);
 	world.provider.enqueue("worker-a", {
 		...text("restart-parked", "Still inspecting."),
@@ -68,6 +80,7 @@ async function exerciseRestartHandoff(world: HarnessWorld): Promise<void> {
 		});
 		world.provider.enqueue("root", {
 			...text("restart-wake", J9_ROOT_REPLY),
+			check: expectRootTools,
 			until: (request) => {
 				const successor =
 					reopened?.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts[transfer.successorAttemptId];

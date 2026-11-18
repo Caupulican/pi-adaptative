@@ -94,6 +94,8 @@ interface NotificationAlarm {
 export interface WorkerNotificationCoordinatorOptions {
 	/** The session's `worker-notification` port: the delivery retry backoff and the handoff observation watchdog. */
 	timers: TimerPort;
+	/** Bootstrap can retain notifications before the parent is ready to dispatch a wake-up. */
+	isReady?(): boolean;
 	getWorkerRecords(): readonly LaneRecord[];
 	/** Bind a transient terminal to its durable notification before attempting delivery. */
 	ensureDurableNotification?(record: WorkerTerminalHandoffRecord): string | undefined;
@@ -285,6 +287,12 @@ export class WorkerNotificationCoordinator {
 		this.schedule();
 	}
 
+	isReady = (): boolean => this.options.isReady?.() !== false;
+
+	resumePendingDelivery(): void {
+		if (this.pending.size > 0) this.schedule();
+	}
+
 	/** Callers that want to durably persist outstanding work must read getOutstandingRecords() first. */
 	dispose(): void {
 		this.disposed = true;
@@ -301,7 +309,7 @@ export class WorkerNotificationCoordinator {
 	}
 
 	private schedule(): void {
-		if (this.disposed || this.scheduled) return;
+		if (this.disposed || this.scheduled || !this.isReady()) return;
 		this.scheduled = true;
 		const retryAlarm = this.retryAlarm;
 		this.retryAlarm = undefined;
