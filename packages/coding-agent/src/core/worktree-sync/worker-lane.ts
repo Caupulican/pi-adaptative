@@ -22,7 +22,6 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { findRepositoryGitPaths, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { LaneFacts, LaneRegistration } from "./codes.ts";
 import {
-	bindLaneWorker,
 	createLane,
 	deriveLaneFacts,
 	type RepoContext,
@@ -30,7 +29,9 @@ import {
 	resolveRepoContext,
 	type WorktreeSyncEngineDeps,
 } from "./git-engine.ts";
-import { listLanes, readLaneSync, syncStorePaths } from "./store.ts";
+import { WORKTREE_LANE_KEY_PATTERN } from "./lane-binding.ts";
+import { bindRegisteredLaneWorker } from "./lane-ownership.ts";
+import { listLanes, readLane, readLaneSync, type SyncStorePaths, syncStorePaths } from "./store.ts";
 
 /** Directories whose presence in the checkout means the project's dependencies are installed in-tree. */
 const INSTALLED_DEPENDENCY_DIRECTORIES = ["node_modules", ".venv", "venv"] as const;
@@ -136,11 +137,24 @@ async function resolveLaneAt(
 ): Promise<LaneAt | undefined> {
 	const context = await resolveRepoContext({ ...deps, cwd: worktreePath });
 	if ("code" in context) return undefined;
-	const wanted = canonical(containingCheckout ? context.topLevel : worktreePath);
-	const lane = (await listLanes(context.paths)).find(
-		(entry) => entry.status === "active" && canonical(entry.worktreePath) === wanted,
-	);
+	const lane = await activeRegistrationAt(context.paths, containingCheckout ? context.topLevel : worktreePath);
 	return lane ? { context, lane } : undefined;
+}
+
+async function activeRegistrationAt(paths: SyncStorePaths, checkout: string): Promise<LaneRegistration | undefined> {
+	const wanted = canonical(checkout);
+	const key = basename(wanted);
+	const matches = (lane: LaneRegistration) => lane.status === "active" && canonical(lane.worktreePath) === wanted;
+	// Created lanes use their key as the directory name. Reconciled worktrees may live at a custom path.
+	const named = WORKTREE_LANE_KEY_PATTERN.test(key) ? await readLane(paths, key) : undefined;
+	return named && matches(named) ? named : (await listLanes(paths)).find(matches);
+}
+
+/** A live lane in a linked checkout, including one parked under a previously configured worktree root. */
+export async function registeredLinkedLane(directory: string): Promise<LaneRegistration | undefined> {
+	const repo = findRepositoryGitPaths(directory);
+	if (!repo?.commonDir || repo.gitDirs.length < 2) return undefined;
+	return activeRegistrationAt(syncStorePaths(repo.commonDir), repo.root);
 }
 
 /**
@@ -155,7 +169,7 @@ function repositoryCheckout(context: RepoContext): string | undefined {
 async function releaseLaneFromRepository(
 	deps: WorktreeSyncEngineDeps,
 	found: LaneAt,
-	args: { expectBoundLaneId?: string },
+	args: { expectBoundLaneId: string | null },
 ): Promise<{ laneKey: string; code: string; message?: string }> {
 	const checkout = repositoryCheckout(found.context);
 	if (!checkout) return { laneKey: found.lane.laneKey, code: "repository_checkout_unavailable" };
@@ -271,16 +285,27 @@ export function laneWorktreeOf(deps: WorktreeSyncEngineDeps, candidate: string):
 	return slug && laneKey ? join(deps.worktreesBaseDir, slug, laneKey) : undefined;
 }
 
-/** Record which worker owns the lane at `worktreePath`. Idempotent; a lane already bound elsewhere is left alone. */
+/** Bind an unclaimed checkout, or transfer its binding from an expected source worker. */
 export async function bindWorkerLaneByPath(
 	deps: WorktreeSyncEngineDeps,
-	worktreePath: string,
+	directory: string,
 	laneId: string,
-): Promise<{ laneKey: string; code: string } | undefined> {
-	const lane = await findLaneByPath(deps, worktreePath);
-	if (!lane) return undefined;
-	const bound = await bindLaneWorker({ ...deps, cwd: worktreePath }, { laneKey: lane.laneKey, laneId });
-	return { laneKey: lane.laneKey, code: bound.code };
+	expectedSource?: string,
+): Promise<{ laneKey: string; code: string; message?: string } | undefined> {
+	const found = await resolveLaneAt(deps, directory, true);
+	if (!found) return undefined;
+	const bound = await bindRegisteredLaneWorker(
+		found.context,
+		deps,
+		{ laneKey: found.lane.laneKey, laneId, expectedSource },
+		found.lane.worktreePath,
+	);
+	return {
+		laneKey: found.lane.laneKey,
+		code: bound.code,
+		...("message" in bound ? { message: bound.message } : {}),
+		...(bound.code === "binding_conflict" ? { message: `bound to worker ${bound.boundLaneId}` } : {}),
+	};
 }
 
 export interface WorkerLaneState {
@@ -322,7 +347,7 @@ export async function releaseWorkerLane(
 	// A lane never bound (its worker was cancelled or failed before starting) is released like a bound one: the
 	// retired worker's pinned directory is what links them, and release still requires it landed and clean. A lane
 	// bound to a different worker is left alone.
-	return releaseLaneFromRepository(deps, found, found.lane.boundLaneId ? { expectBoundLaneId: laneId } : {});
+	return releaseLaneFromRepository(deps, found, { expectBoundLaneId: found.lane.boundLaneId ? laneId : null });
 }
 
 /**
@@ -336,7 +361,8 @@ export async function discardUnusedWorkerLane(
 	const found = await resolveLaneAt(deps, worktreePath);
 	if (!found) return { code: "lane_not_found" };
 	if (found.lane.boundLaneId) return { laneKey: found.lane.laneKey, code: "lane_in_use" };
-	return releaseLaneFromRepository(deps, found, {});
+	const released = await releaseLaneFromRepository(deps, found, { expectBoundLaneId: null });
+	return released.code === "lane_bound_elsewhere" ? { ...released, code: "lane_in_use" } : released;
 }
 
 /** Identity of the repository `directory` belongs to (its canonical git common directory), or undefined. */

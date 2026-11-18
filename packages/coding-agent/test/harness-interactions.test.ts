@@ -18,6 +18,8 @@ import { runJourney7 } from "./fixtures/harness/journeys/journey-7.ts";
 import { runJourney8 } from "./fixtures/harness/journeys/journey-8.ts";
 import { runJourney9 } from "./fixtures/harness/journeys/journey-9.ts";
 import { runJourney10 } from "./fixtures/harness/journeys/journey-10.ts";
+import { runWorkerModelHandoffJourney } from "./fixtures/harness/journeys/journey-11-model-handoff.ts";
+import { runWorkerModelHandoffRecovery } from "./fixtures/harness/journeys/journey-12-restart-handoff.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -62,5 +64,13 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("linked machines: a hub and a joiner pair over a sealed link, place read-only work and plans with closed-gate fallback and remote cancel, and exchange ask replies", async () => {
 		await runJourney10();
+	}, 360_000);
+
+	it("worker handoff: a running or blocked writer transfers the same dirty workspace to one exact successor", async () => {
+		await runWorkerModelHandoffJourney();
+	}, 360_000);
+
+	it("worker handoff recovery: a reopened parent reclaims a suspended source for its reserved successor", async () => {
+		await runWorkerModelHandoffRecovery();
 	}, 360_000);
 });

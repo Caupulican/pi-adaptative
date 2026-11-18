@@ -16,7 +16,7 @@
  * a restart cut 3 to 5 s, and real backoff waits at their asserted lower bounds. It is not a budget and nothing gates on it.
  */
 
-export type FaultMatrixJourney = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+export type FaultMatrixJourney = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
 export type SystemOneMode = "on" | "off";
 /** The harness extensions of the fault census that open rows wait for. */
 export type HarnessExtension = "X1" | "X2" | "X3" | "X4" | "X5" | "X6" | "X7" | "X8" | "X9";
@@ -59,6 +59,30 @@ export type FaultMatrixRow = CoveredFaultMatrixRow | OpenFaultMatrixRow;
 const BOTH: readonly SystemOneMode[] = ["on", "off"];
 
 const rows: readonly FaultMatrixRow[] = [
+	{
+		id: "restart-model-handoff",
+		owner: "core/delegation/worker-transfer-source.ts",
+		journey: 12,
+		phase: "recover requested worker model handoff",
+		fault: "the parent closes after requesting handoff and leaves a suspended worker",
+		witness: "the source transcript carries a clean handoff receipt",
+		control: "reopening and replaying the same command starts exactly its reserved successor and retires the source",
+		estSeconds: 3,
+		status: "covered",
+		modes: BOTH,
+	},
+	{
+		id: "worker-model-handoff",
+		owner: "core/delegation/worker-model-handoff.ts",
+		journey: 11,
+		phase: "worker model handoff",
+		fault: "an unavailable exact model is requested for the current task",
+		witness: "the source keeps its status and its uncommitted file until a different model is accepted",
+		control: "command replay returns one successor on the same task and workspace",
+		estSeconds: 2,
+		status: "covered",
+		modes: BOTH,
+	},
 	{
 		id: "R1",
 		owner: "core/delegation/worker-write-reservation-coordinator.ts",

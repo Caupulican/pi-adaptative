@@ -179,6 +179,7 @@ export interface AppendOrchestrationEventOptions {
 /** Borrowed synchronous append capability; invalid as soon as its transaction returns. */
 export interface OrchestrationEventTransaction {
 	readonly lastOrdinal: number;
+	findIdempotentEvent(key: string): OrchestrationEvent | undefined;
 	append(
 		input: AppendOrchestrationEventInput,
 		options?: Omit<AppendOrchestrationEventOptions, "lockOptions">,
@@ -427,6 +428,10 @@ export class OrchestrationEventStore {
 		return this.transact(undefined, (transaction) => transaction.append(input, options), options.lockOptions);
 	}
 
+	findIdempotentEvent(key: string): OrchestrationEvent | undefined {
+		return this.transact(undefined, (transaction) => transaction.findIdempotentEvent(key));
+	}
+
 	/**
 	 * One non-reentrant lock scope. Callers may hold outer mailbox/transcript locks, then borrow this
 	 * capability for exact authority checks and append-after-effect receipts without reacquiring it.
@@ -460,6 +465,14 @@ export class OrchestrationEventStore {
 								const result = operation({
 									get lastOrdinal() {
 										return indexes.lastOrdinal;
+									},
+									findIdempotentEvent: (key) => {
+										if (!active)
+											throw new OrchestrationEventStoreError(
+												"Orchestration transaction capability expired.",
+											);
+										const event = indexes.idempotencyEvents.get(key);
+										return event ? structuredClone(event) : undefined;
 									},
 									append: (input, appendOptions = {}) => {
 										if (!active || ++appends > 64)

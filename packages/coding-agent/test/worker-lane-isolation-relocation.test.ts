@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { WorkerLaneIsolation } from "../src/core/delegation/worker-lane-isolation.ts";
-import type { WorktreeSyncEngineDeps } from "../src/core/worktree-sync/git-engine.ts";
+import { releaseLane, type WorktreeSyncEngineDeps } from "../src/core/worktree-sync/git-engine.ts";
 import { readLane, syncStorePaths, writeLane } from "../src/core/worktree-sync/store.ts";
 import { findLaneByDirectory } from "../src/core/worktree-sync/worker-lane.ts";
 import type { ExecutionContext } from "../src/kernel/index.ts";
@@ -138,6 +138,45 @@ describe("worker lane lookup from a nested workspace", () => {
 			expect(await isolation.release(nested, "worker-a", "attempt-a")).toMatchObject({ kind: "abandoned" });
 			expect((await readLane(syncStorePaths(common), lane.laneKey))?.status).toBe("active");
 			expect(notices).toHaveLength(1);
+
+			// Only one successor may acquire the source's dirty checkout. Its predecessor's delayed
+			// release and an unused-lane cleanup that previously saw no owner must both leave it intact.
+			const marker = join(nested, "pending.txt");
+			writeFileSync(marker, "pending edit");
+			const successors = ["worker-b", "worker-c"];
+			const transfers = await Promise.allSettled(successors.map((id) => isolation.transfer(nested, "worker-a", id)));
+			expect(transfers.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+			const successor = successors[transfers.findIndex((result) => result.status === "fulfilled")]!;
+			await isolation.transfer(nested, "worker-a", successor);
+			expect(await isolation.release(nested, "worker-a", "attempt-a")).toMatchObject({ kind: "superseded" });
+			expect(
+				await releaseLane(depsForTopLevel(laneRoot), { laneKey: lane.laneKey, expectBoundLaneId: null }),
+			).toMatchObject({ code: "lane_bound_elsewhere" });
+			expect(await readLane(syncStorePaths(common), lane.laneKey)).toMatchObject({
+				status: "active",
+				boundLaneId: successor,
+			});
+			expect(await isolation.claimFinding(nested, "worker-a")).toBeUndefined();
+			expect((await isolation.claimFinding(nested, successor))?.text).toContain(laneRoot);
+			expect(readFileSync(marker, "utf8")).toBe("pending edit");
+			await isolation.transfer(nested, successor, "worker-a");
+			expect((await readLane(syncStorePaths(common), lane.laneKey))?.boundLaneId).toBe("worker-a");
+			expect(notices).toHaveLength(1);
+
+			const gitDir = join(common, "worktrees", "lane-a");
+			mkdirSync(gitDir, { recursive: true });
+			writeFileSync(join(gitDir, "commondir"), "../..");
+			writeFileSync(join(laneRoot, ".git"), `gitdir: ${gitDir}\n`);
+			const relocatedRoot = new WorkerLaneIsolation({
+				engineDeps: () => ({ ...depsForTopLevel(laneRoot), worktreesBaseDir: join(temp, "new-lanes") }),
+				isolateByDefault: () => false,
+				notifyParent: () => {},
+				warn: () => {},
+			});
+			await expect(relocatedRoot.transfer(nested, "worker-a", "worker-d")).rejects.toThrow(
+				"configured worktree root",
+			);
+			expect((await readLane(syncStorePaths(common), lane.laneKey))?.boundLaneId).toBe("worker-a");
 		} finally {
 			rmSync(temp, { recursive: true, force: true });
 		}

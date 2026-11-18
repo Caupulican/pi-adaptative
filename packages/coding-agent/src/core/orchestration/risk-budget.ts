@@ -1,6 +1,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { isPlainRecord } from "../util/value-guards.ts";
-import type { RiskBudget } from "./contracts.ts";
+import type { ObjectiveContract, RiskBudget } from "./contracts.ts";
+import { DurableTaskRuntimeError, type TaskRuntimeState } from "./task-runtime-state.ts";
 
 export const RISK_BUDGET_LIMIT_FIELDS = [
 	"maxTokens",
@@ -145,4 +146,26 @@ export function envelopeCeilingUsd(
 	billing: ModelBilling,
 ): number | undefined {
 	return costCeilingUsd(envelopeCostBudget(envelope), isMeteredSpend(model, billing));
+}
+
+export function assertTaskAttemptBudgetForState(task: TaskRuntimeState, objective: ObjectiveContract): void {
+	const attemptCeilings = [task.task.riskBudget.maxAttempts, objective.riskBudget.maxAttempts].filter(
+		(value): value is number => value !== undefined,
+	);
+	const maxAttempts = attemptCeilings.length > 0 ? Math.min(...attemptCeilings) : undefined;
+	if (maxAttempts !== undefined && task.attemptIds.length >= maxAttempts) {
+		throw new DurableTaskRuntimeError(`Task '${task.task.taskId}' exhausted its ${maxAttempts} attempt budget.`);
+	}
+}
+
+export function riskBudgetFromValue(value: unknown, label: string): RiskBudget {
+	try {
+		return parseRiskBudget(value, label);
+	} catch (error) {
+		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+	}
+}
+
+export function parseInputRiskBudget(budget: RiskBudget | undefined, label: string): RiskBudget {
+	return riskBudgetFromValue(budget ?? {}, label);
 }

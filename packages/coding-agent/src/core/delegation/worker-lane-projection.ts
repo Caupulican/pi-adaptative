@@ -7,6 +7,7 @@ export { attemptAwaitsParent, attemptVerification } from "../orchestration/verif
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptVerification, currentTaskTerminalOverride } from "../orchestration/verification-identity.ts";
 import { BUDGET_EXHAUSTED_REASON_CODES, UNPRICED_BUDGET_REASON_CODES } from "./budget-reason-codes.ts";
+import type { WorkerAgentLaneResolution } from "./worker-agent-control.ts";
 import type { BlockerCode } from "./worker-outcome-contract.ts";
 import { describeNextAction, sameOutcomeAttempt } from "./worker-outcome-words.ts";
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
@@ -16,6 +17,13 @@ export const NONTERMINAL_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(
 	...ACTIVE_WORKER_ATTEMPT_STATUSES,
 	"suspended",
 ]);
+
+/** The inspected worker's latest task and any transfer command attached to that exact attempt. */
+export function workerAgentLane(attempt: AttemptRuntimeState | undefined): WorkerAgentLaneResolution | undefined {
+	if (!attempt) return undefined;
+	const { taskId: laneId, status, modelTransfer } = attempt;
+	return modelTransfer ? { laneId, status, modelTransfer } : { laneId, status };
+}
 
 export function isManagedWorkerAttempt(attempt: AttemptRuntimeState): boolean {
 	return attempt.dispatch.executionKind === "managed-process";

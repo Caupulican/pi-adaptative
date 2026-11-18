@@ -13,7 +13,6 @@ import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/ho
 import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { planRuntimeStateFromValue } from "../plan/plan-codec.ts";
 import { PLAN_LIMITS } from "../plan/plan-graph.ts";
-import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { contextOriginFromValue, optionalPrunedTurns } from "./agent-binding-carry-codec.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
@@ -25,7 +24,15 @@ import {
 	type AttemptUsageGenerationIdentity,
 	totalAttemptGenerationUsage,
 } from "./attempt-usage-generations.ts";
-import { dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
+import {
+	boolean,
+	cancellationDetail,
+	dispatchIdentifier,
+	isoDate,
+	number,
+	string,
+	stringArray,
+} from "./codec-primitives.ts";
 import {
 	type AcceptanceCriterion,
 	AGENT_BINDING_STATUSES,
@@ -72,7 +79,6 @@ import {
 	type OrchestrationModelBinding,
 	type OrchestrationTaskStatus,
 	type ResourcePointer,
-	type RiskBudget,
 	TASK_STATUSES,
 	type TaskContract,
 	toJsonObject,
@@ -84,9 +90,10 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import { DISPATCH_FIELDS } from "./dispatch-request-fields.ts";
+import { assertModelTransferSnapshotBinding, modelTransferAttemptFieldsFromValue } from "./model-transfer.ts";
 import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
 import { retentionArchiveIdsField } from "./retention-event.ts";
-import { parseRiskBudget } from "./risk-budget.ts";
+import { riskBudgetFromValue } from "./risk-budget.ts";
 import {
 	assertRecordWithinLimit,
 	assertRetainedProjectionNestedCollections,
@@ -124,7 +131,7 @@ import {
 } from "./worker-receipt-publication.ts";
 import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
 
-export { dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
+export { cancellationDetail, dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
 
 export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
 	const label = "orchestration projection snapshot";
@@ -223,37 +230,6 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 	return normalized;
 }
 
-export function cancellationDetail(value: unknown, label: string): string {
-	const detail = string(value, label);
-	if (boundedRedactedDiagnosticText(detail) !== detail)
-		throw new DurableTaskRuntimeError(`${label} must be bounded, redacted diagnostic text.`);
-	return detail;
-}
-
-function boolean(value: unknown, label: string): boolean {
-	if (typeof value !== "boolean") throw new DurableTaskRuntimeError(`${label} is invalid.`);
-	return value;
-}
-
-function riskBudgetFromValue(value: unknown, label: string): RiskBudget {
-	try {
-		return parseRiskBudget(value, label);
-	} catch (error) {
-		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
-	}
-}
-
-export function parseInputRiskBudget(budget: RiskBudget | undefined, label: string): RiskBudget {
-	return riskBudgetFromValue(budget ?? {}, label);
-}
-
-function stringArray(value: unknown, label: string): string[] {
-	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
-		throw new DurableTaskRuntimeError(`${label} must be a string array.`);
-	}
-	return [...value];
-}
-
 function dispatchTurnOrigin(value: unknown, label: string): TurnOriginRecord {
 	const origin = parseTurnOriginRecord(value);
 	if (!origin) throw new DurableTaskRuntimeError(`${label}.turnOrigin is invalid.`);
@@ -265,15 +241,6 @@ export function admittedTurnOriginFromValue(value: unknown, label: string): Turn
 	const origin = parseTurnOriginRecord(value);
 	if (!origin?.thirdParty) throw new DurableTaskRuntimeError(`${label} is invalid.`);
 	return origin;
-}
-
-function isoDate(value: unknown, label: string): string {
-	const date = dispatchIdentifier(value, label);
-	const epochMs = Date.parse(date);
-	if (!Number.isFinite(epochMs) || Math.abs(epochMs) > MAX_DATE_EPOCH_MS || new Date(epochMs).toISOString() !== date) {
-		throw new DurableTaskRuntimeError(`${label} is invalid.`);
-	}
-	return date;
 }
 
 /** A filesystem path in a dispatch record (a worktree lane's directory); longer than an identifier. */
@@ -914,6 +881,9 @@ export function managedLaneLifetimeFromValue(value: unknown, label: string): Man
 function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRuntimeState {
 	const attempt = exactRecord(value, label, [
 		"attemptId",
+		"modelTransfer",
+		"modelTransferRefusals",
+		"modelTransferSourceAttemptId",
 		"taskId",
 		"dispatch",
 		"status",
@@ -969,6 +939,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		throw new DurableTaskRuntimeError(`${label}.updatedAt is before createdAt.`);
 	}
 	return {
+		...modelTransferAttemptFieldsFromValue(attempt, label),
 		attemptId: dispatchIdentifier(attempt.attemptId, `${label}.attemptId`),
 		taskId: dispatchIdentifier(attempt.taskId, `${label}.taskId`),
 		dispatch: dispatchFromValue(attempt.dispatch, `${label}.dispatch`),
@@ -1863,6 +1834,7 @@ function validateSnapshotTaskGraph(state: TaskRuntimeProjection): void {
 		if (attempt.receiptAcknowledgement)
 			assertWorkerReceiptAcknowledgement(state, attempt, attempt.receiptAcknowledgement);
 		assertAttemptAgentBinding(attempt);
+		assertModelTransferSnapshotBinding(state, attempt);
 		if (attempt.attemptId !== attemptId) {
 			throw new DurableTaskRuntimeError(`${label} attempt '${attemptId}' has a mismatched id.`);
 		}

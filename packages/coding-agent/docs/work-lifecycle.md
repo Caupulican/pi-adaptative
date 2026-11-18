@@ -73,6 +73,8 @@ Work the first open plan item. The root remains integration owner; a worker resu
 
 Record changed files, focused tests, rejected hypotheses, and blockers on the relevant task and goal requirement. Wait event-driven at true dependencies. Worker terminals already pass through one durable notification coordinator and one foreground handoff path; matching active-goal completions wake the parent (`packages/coding-agent/src/core/background-lane-controller.ts:174-200`; `packages/coding-agent/src/core/foreground-terminal-handoff-controller.ts:197-205,341-429`). The goal continuation decision waits on bound in-flight workers and resumes once work can advance (`packages/coding-agent/src/core/goals/goal-continuation-controller.ts:284-353`).
 
+To continue with a different model, call `delegate` with `{"action":"handoff","agentId":"<source agent>","model":"<favorite or provider/model>"}`. The root receives a command receipt after admission and can continue other work. A running source gets a chance to report its progress. Its successor receives the original task, a bounded account of the prior attempt, and the same checkout and permissions. The source retires once the successor has accepted the work. Use `delegate status` with the source agent ID to inspect the disposition and the successor ID. An unavailable target leaves the source available. Uncommitted changes still go through the ordinary review process.
+
 A failed implementation or review does not create a new phase. Update Contract only if the requested outcome changed; otherwise return to Plan/Route or continue Execute with the new evidence.
 
 **Exit condition:** planned mutations are integrated, no required work is silently deferred, and evidence is ready for independent acceptance.

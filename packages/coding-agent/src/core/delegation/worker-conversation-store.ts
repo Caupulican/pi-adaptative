@@ -2271,7 +2271,7 @@ export class WorkerConversationStore {
 			owner: SpecialistContextOwner;
 			specializationKey: string;
 			/** Host proof is re-read under the ownership lock, before either release or transfer. */
-			assertQueuedRecovery?: (ownership: SpecialistContextOwnership) => void;
+			assertBusyRecovery?: (ownership: SpecialistContextOwnership) => void;
 		},
 	): WorkerConversation {
 		const context = options.resumeContext;
@@ -2317,8 +2317,8 @@ export class WorkerConversationStore {
 						if (!metadata.projectContext && metadata.parentSessionId !== options.owner.parentSessionId)
 							throw new Error("Cannot enroll a foreign worker history.");
 						let previousOwnership = metadata.projectContext?.ownership;
-						if (previousOwnership?.state === "busy" && options.assertQueuedRecovery) {
-							options.assertQueuedRecovery(normalizeSpecialistContextOwnership(previousOwnership));
+						if (previousOwnership?.state === "busy" && options.assertBusyRecovery) {
+							options.assertBusyRecovery(normalizeSpecialistContextOwnership(previousOwnership));
 							previousOwnership = releaseSpecialistContext(previousOwnership, previousOwnership.claim);
 						}
 						const ownership = previousOwnership

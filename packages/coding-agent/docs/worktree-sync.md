@@ -140,7 +140,9 @@ branch off main before it is admitted, through the same engine as every other la
   worker resumes in the same lane) and its `write`/`edit` scope, shell directory and claim review are the lane's;
 - the worker's repository writes can only land on its own lane branch; `git switch main` fails because main is
   checked out in the hub, and nothing it commits reaches main except through `sync` and `land`;
-- the lane registration records the worker as its owner when the worker starts, and the lane stays that worker's.
+- the lane registration records the worker as its owner when the worker starts. A model handoff transfers that
+  registration to the successor under the same lock used for release. The successor inherits the checkout,
+  index and uncommitted edits in place. A late retirement of the source leaves the successor's lane intact.
   A plan's review of the worker's result runs in the same lane, because the work is there and nowhere else until
   it lands, and owns nothing in it: the review's start changes no registration, its claim carries no lane
   blocker, and its retirement releases nothing;

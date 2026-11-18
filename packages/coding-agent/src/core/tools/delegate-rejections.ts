@@ -18,6 +18,8 @@ const FOLLOW_UP_EXAMPLE = '{"action":"follow_up","agentId":"<returned agentId>",
 export function delegateCallGuidance(actions: readonly string[]): string {
 	return [
 		actions.includes("start") && `Start ${START_EXAMPLE}. To select a favorite: ${MODEL_START_EXAMPLE}.`,
+		actions.includes("handoff") &&
+			'Transfer the current task and its workspace to a new model with {"action":"handoff","agentId":"<source agentId>","model":"<favorite or provider/modelId>"}. The successor runs in the background. Read progress with status on the source agentId.',
 		actions.includes("follow_up") && `Continue ${FOLLOW_UP_EXAMPLE}.`,
 	]
 		.filter(Boolean)
@@ -105,6 +107,7 @@ const DELEGATE_REJECTION_SHAPES: Readonly<Record<string, RejectionShape>> = {
 	missing_wait_mode: { c: "E_FIELD", f: "mode" },
 	missing_message: { c: "E_FIELD", f: "message" },
 	missing_agent_id: { c: "E_FIELD", f: "agentId" },
+	missing_model: { c: "E_FIELD", f: "model" },
 	missing_instructions: { c: "E_FIELD", f: "instructions" },
 	worker_control_identity_conflict: { c: "E_DUP" },
 	goal_instructions_conflict: { c: "E_FIELD", f: "instructions", h: "DROP_FIELD", input: true },

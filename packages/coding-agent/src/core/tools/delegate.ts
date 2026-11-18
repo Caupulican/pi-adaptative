@@ -66,6 +66,7 @@ import {
 	type OrchestrationThinkingLevel,
 } from "../orchestration/contracts.ts";
 import { WORKER_ORCHESTRATION_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
+import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import { hasRolePins, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
@@ -74,7 +75,6 @@ import {
 	createDelegateEventParameterSchemas,
 	DELEGATE_EVENT_ACTIONS,
 	type DelegateEventToolDetails,
-	delegateEventPanelModel,
 	executeDelegateEventAction,
 } from "./delegate-events.ts";
 import {
@@ -82,6 +82,7 @@ import {
 	delegateModelReferenceSchema,
 	resolveDelegateModelInput,
 } from "./delegate-model-reference.ts";
+import { delegatePanelModel } from "./delegate-panel.ts";
 import { BLOCK_AT_OCCURRENCE, RepeatedRejectionDetector, rejectionSignature } from "./delegate-rejection-signature.ts";
 import {
 	type DelegateErrRecord,
@@ -102,20 +103,14 @@ import {
 	DELEGATE_STATUS_ACTIONS,
 	type DelegateStatusDependencies,
 	type DelegateStatusToolDetails,
-	delegateStatusPanelModel,
 	executeDelegateStatusAction,
 } from "./delegate-status.ts";
-import {
-	emptyOrchestrationCall,
-	type OrchestrationPanelModel,
-	type OrchestrationRowStatus,
-	renderOrchestrationToolResult,
-} from "./orchestration-panel.ts";
+import { handoffSummary, handoffWorkerReceipt, interruptWorkerReceipt } from "./delegate-worker-lifecycle.ts";
+import { emptyOrchestrationCall, renderOrchestrationToolResult } from "./orchestration-panel.ts";
 import {
 	createDelegateProfileParameterSchemas,
 	DELEGATE_PROFILE_ACTIONS,
 	type DelegateProfileToolDetails,
-	delegateProfilePanelModel,
 	executeDelegateProfileAction,
 } from "./profile-writer.ts";
 
@@ -137,6 +132,7 @@ const DELEGATE_WORKER_CONTROL_ACTIONS = ["reply"] as const;
 
 export const DELEGATE_ACTIONS = [
 	"start",
+	"handoff",
 	...DELEGATE_CONTROL_ACTIONS,
 	...DELEGATE_MESSAGE_ACTIONS,
 	...DELEGATE_ROOT_CONTROL_ACTIONS,
@@ -472,6 +468,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 		reply: ["message", "replyToMessageId"],
 		wait: ["agentId"],
 		wait_many: ["agentIds", "mode"],
+		handoff: ["agentId", "model"],
 		interrupt: ["agentId"],
 		resume: ["agentId"],
 		retire: ["agentId"],
@@ -559,6 +556,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	reply: ["action", "message", "replyToMessageId"],
 	wait: ["action", "agentId", "timeoutMs"],
 	wait_many: ["action", "agentIds", "mode", "timeoutMs"],
+	handoff: ["action", "agentId", "model"],
 	interrupt: ["action", "agentId", "message"],
 	resume: ["action", "agentId"],
 	retire: ["action", "agentId", "force"],
@@ -628,7 +626,7 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 	{
 		// `wait` is not here: waiting is read-only, so a plural wait can only mean wait_many and is
 		// normalized to it before this table runs (see the action resolution in the executor).
-		actions: ["cancel", "interrupt", "resume", "retire"],
+		actions: ["cancel", "interrupt", "resume", "retire", "handoff"],
 		field: "agentIds",
 		correction: (action) =>
 			`delegate ${action} does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.`,
@@ -1211,6 +1209,7 @@ function modelPinBypassFrom(source: { modelPinBypass?: string; outcome?: WorkerR
 }
 
 export interface DelegateDispatchToolDetails {
+	modelTransfer?: ModelTransferRecord;
 	started: boolean;
 	action?: DelegateAction;
 	agentId?: string;
@@ -1488,76 +1487,13 @@ const ASYNC_DELEGATE_DESCRIPTION_SUFFIX =
 	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn, read the report after the handoff (delegate status; transcript pages on demand, or in full when the handoff says h READ_ALL), and use wait/wait_many only when this turn cannot proceed without the result.";
 
 // Fresh-start authority clause; an owner model pin policy replaces it (see createDelegateToolDefinition).
-const DELEGATE_AUTHORITY_CLAUSE = `Fresh start: omit overrides to inherit. Allowed overrides are model, thinkingLevel, path, writePaths, and toolNames. Use agentId only to reuse an existing worker. ${delegateCallGuidance(["start"])}`;
-
-function delegatePanelModel(details: DelegateToolDetails | undefined): OrchestrationPanelModel {
-	if (!details) {
-		return {
-			label: "workers",
-			action: "dispatch",
-			status: "idle",
-			emptyText: "No structured worker details were retained.",
-		};
-	}
-	if ("kind" in details) {
-		if (details.kind === "events") return delegateEventPanelModel(details);
-		return details.kind === "profile" ? delegateProfilePanelModel(details) : delegateStatusPanelModel(details);
-	}
-	if (!details.started) {
-		return {
-			label: "workers",
-			action: "dispatch skipped",
-			status: "warning",
-			emptyText: details.skipReason ?? "The worker was not started.",
-		};
-	}
-	const laneStatus = details.status ?? "queued";
-	const rowStatus: OrchestrationRowStatus = laneStatus;
-	const meta = [
-		details.profileId ? `profile ${details.profileId}` : undefined,
-		details.modelRef ? `model ${details.modelRef}` : undefined,
-		details.thinkingLevel ? `thinking ${details.thinkingLevel}` : undefined,
-		details.reasonCode,
-		details.accepted === undefined ? undefined : details.accepted ? "accepted" : "not accepted",
-		details.costUsd === undefined ? undefined : `$${details.costUsd.toFixed(4)}`,
-	].filter((value): value is string => value !== undefined);
-	const detailsLines = [
-		details.summary ? `untrusted claim: ${details.summary}` : undefined,
-		...(details.blockers ?? []).map((blocker) => `blocker: ${blocker}`),
-	].filter((value): value is string => value !== undefined);
-	const active = laneStatus === "queued" || laneStatus === "running";
-	return {
-		label: "workers",
-		action: active ? "dispatched" : "completed",
-		status: active
-			? "running"
-			: laneStatus === "succeeded" && details.accepted !== false
-				? "success"
-				: laneStatus === "failed"
-					? "error"
-					: "warning",
-		summary: active ? ["terminal handoff will wake this session"] : undefined,
-		rows: [
-			{
-				status: rowStatus,
-				label: details.label ?? details.laneId ?? "worker lane",
-				meta: [details.label ? details.laneId : undefined, ...meta].filter(
-					(value): value is string => value !== undefined,
-				),
-				details: detailsLines,
-			},
-		],
-		notices:
-			details.accepted === false
-				? [{ status: "warning", text: "Worker output was not accepted; inspect and verify before use." }]
-				: undefined,
-	};
-}
+const DELEGATE_AUTHORITY_CLAUSE = `Fresh start: omit overrides to inherit. Allowed overrides are model, thinkingLevel, path, writePaths, and toolNames. On start, agentId reuses an existing worker. ${delegateCallGuidance(["start"])}`;
 
 function availableDelegateActions(caller: DelegateCaller, deps: DelegateToolDependencies): readonly DelegateAction[] {
 	const actions: DelegateAction[] = caller.kind === "session_root" ? ["start"] : [];
 	if (deps.workerAgentControl) {
 		actions.push(...DELEGATE_CONTROL_ACTIONS);
+		if (deps.workerAgentControl.handOffWorkerAgent) actions.push("handoff");
 		if (deps.workerAgentControl.readHostEvents && deps.workerAgentControl.changeHostEventSubscriptions)
 			actions.push(...DELEGATE_EVENT_ACTIONS);
 		if (deps.resolveMessageReplayScope) actions.push(...DELEGATE_MESSAGE_ACTIONS);
@@ -2195,6 +2131,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							: status;
 					let laneId = input.laneId?.trim() || undefined;
 					let resolvedFromAgent: string | undefined;
+					let modelTransfer: ModelTransferRecord | undefined;
 					const statusAgentId = input.agentId?.trim();
 					if (!laneId && statusAgentId) {
 						// An agent identity names its latest task lane; a status question about an agent
@@ -2219,6 +2156,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							);
 						}
 						laneId = resolved.laneId;
+						modelTransfer = resolved.modelTransfer;
 						resolvedFromAgent = `${statusAgentId} → lane ${resolved.laneId} (latest task, ${resolved.status})`;
 					}
 					const rawStatusResult = executeDelegateStatusAction(action, { laneId }, statusDependencies);
@@ -2227,10 +2165,17 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								...rawStatusResult,
 								content: rawStatusResult.content.map((item, index) =>
 									index === 0 && item.type === "text"
-										? { ...item, text: `resolved ${resolvedFromAgent}\n${item.text}` }
+										? {
+												...item,
+												text: `resolved ${resolvedFromAgent}\n${modelTransfer ? `${handoffSummary(modelTransfer)}\n` : ""}${item.text}`,
+											}
 										: item,
 								),
-								details: { ...rawStatusResult.details, agentId: statusAgentId },
+								details: {
+									...rawStatusResult.details,
+									agentId: statusAgentId,
+									...(modelTransfer ? { modelTransfer } : {}),
+								},
 							}
 						: rawStatusResult;
 					if (action === "status") {
@@ -2790,23 +2735,24 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						const outcome = deps.workerAgentControl.interruptWorkerAgent(agentId, workerScope, {
 							...(haltReason ? { message: haltReason } : {}),
 						});
-						const interruptText = !outcome.interrupted
-							? outcome.reason === "agent_not_running"
-								? `worker ${agentId} was not interrupted (agent_not_running): it has no running request to halt. A queued task starts on its own and cancel withdraws it; an idle worker has already finished its task.`
-								: `worker ${agentId} was not interrupted (${outcome.reason ?? "unknown"})`
-							: outcome.reason === "halt_already_requested"
-								? `worker ${agentId} already has a halt in flight; its report arrives through the terminal handoff`
-								: `worker ${agentId} halt requested: it finishes its current request, is told you stopped it${haltReason ? " and why" : ""}, and reports to you; its terminal handoff wakes you. A worker that reaches no request boundary in time is cancelled and that is reported instead. Continue it afterwards with follow_up on the same agentId. Do not poll or wait on it.`;
-						return {
-							content: [{ type: "text" as const, text: interruptText }],
-							details: {
-								started: outcome.interrupted,
+						return interruptWorkerReceipt(agentId, haltReason, outcome);
+					}
+					if (action === "handoff") {
+						if (!deps.workerAgentControl?.handOffWorkerAgent || !input.model)
+							return invalid("delegate handoff requires a model and an available worker control", {
+								started: false,
 								action,
 								agentId,
-								...(outcome.mode ? { mode: outcome.mode } : {}),
-								skipReason: outcome.reason,
-							},
-						};
+								skipReason: input.model ? "worker_agent_control_unavailable" : "missing_model",
+							});
+						const transfer = await deps.workerAgentControl.handOffWorkerAgent(
+							agentId,
+							`${input.model.provider}/${input.model.modelId}`,
+							toolCallId,
+							workerScope,
+						);
+						const receipt = handoffWorkerReceipt(transfer);
+						return transfer.status === "refused" ? invalid(receipt.content[0]!.text, receipt.details) : receipt;
 					}
 					if (action === "resume") {
 						if (!deps.workerAgentControl)

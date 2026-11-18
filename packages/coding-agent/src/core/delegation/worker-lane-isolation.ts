@@ -18,9 +18,8 @@
  * A requested lane (`create(cwd, "worktree")`) is made whether or not worktree-sync is on by default; the caller refuses a
  * requested start that gets none, and never runs it shared.
  *
- * Every step but release is best-effort and never fails the worker or the transition that triggered it. Release
- * returns its outcome and throws only when the lane may still be released by a retry (a git failure, an unavailable
- * checkout); its caller owns that retry.
+ * An explicit handoff must acquire the source's current binding before the successor can run in its lane.
+ * An ordinary bind is best-effort. Release returns its outcome and throws on retryable failures.
  */
 
 import { randomUUID } from "node:crypto";
@@ -45,6 +44,7 @@ import {
 } from "../worktree-sync/git-engine.ts";
 import { laneTipContained } from "../worktree-sync/lane-containment.ts";
 import { type LaneLanding, landingOutcome } from "../worktree-sync/lane-landing.ts";
+import { ownerConflicts } from "../worktree-sync/lane-ownership.ts";
 import {
 	bindWorkerLaneByPath,
 	boundLaneRepositoryKey,
@@ -58,6 +58,7 @@ import {
 	laneWorktreeOf,
 	nativeRealPath,
 	readLaneSource,
+	registeredLinkedLane,
 	releaseWorkerLane,
 	repositoryKeyAt,
 	type WorkerLaneCreation,
@@ -503,15 +504,47 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return;
 		try {
-			const laneRoot = await this.laneRootAt(cwd);
-			if (!laneRoot) return;
-			const bound = await bindWorkerLaneByPath(engine, laneRoot, agentId);
+			const bound = await bindWorkerLaneByPath(engine, cwd, agentId);
 			if (bound && !LANE_KEPT_BY_BIND.has(bound.code)) {
 				this.deps.warn(`Worker ${agentId}'s worktree lane '${bound.laneKey}' could not be bound: [${bound.code}].`);
 			}
 		} catch (error) {
 			this.deps.warn(`Worker lane bind failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/** Check the registered owner before stopping the source. Recovery may find its reserved successor already bound. */
+	async assertTransferOwner(cwd: string, sourceAgentId: string, reservedSuccessor?: string): Promise<void> {
+		const engine = await this.transferEngine(cwd);
+		if (!engine) return;
+		const lane = await findLaneByDirectory(engine, cwd);
+		if (
+			!lane ||
+			ownerConflicts(engine, lane) ||
+			!lane.boundLaneId ||
+			(lane.boundLaneId !== sourceAgentId && lane.boundLaneId !== reservedSuccessor)
+		)
+			throw new Error(`Cannot hand off ${cwd}: the source has no transferable worker binding.`);
+	}
+
+	private async transferEngine(cwd: string): Promise<WorktreeSyncEngineDeps | undefined> {
+		const engine = this.deps.engineDeps(cwd);
+		if (!engine) throw new Error("Cannot resolve the worktree engine for the worker handoff.");
+		if (isUnderLaneRoot(engine, cwd)) return engine;
+		const lane = await registeredLinkedLane(cwd);
+		if (lane) throw new Error(`Cannot hand off lane '${lane.laneKey}' outside the configured worktree root.`);
+		return undefined;
+	}
+
+	/** Keep the existing checkout and replace its worker binding before admitting the successor. */
+	async transfer(cwd: string, sourceAgentId: string, successorAgentId: string): Promise<void> {
+		const engine = await this.transferEngine(cwd);
+		if (!engine) return;
+		const bound = await bindWorkerLaneByPath(engine, cwd, successorAgentId, sourceAgentId);
+		if (bound?.code === "bound" || bound?.code === "already_bound") return;
+		throw new Error(
+			`Cannot transfer worker ${sourceAgentId}'s worktree in ${cwd}: ${bound?.message ?? bound?.code ?? "lane not found"}.`,
+		);
 	}
 
 	/**

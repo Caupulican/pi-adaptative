@@ -20,8 +20,10 @@ import type {
 } from "../events/host-event-state.ts";
 import type { PlanRuntimeState } from "../plan/plan-graph.ts";
 import { reducePlanEvent } from "../plan/plan-reducer.ts";
+import { assertAgentHasNoLiveDescendant } from "./agent-retirement-lineage.ts";
+import { assertApprovalRequestTransition, assertApprovalResolutionTransition } from "./approval-transitions.ts";
 import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
-import { selectedTaskAttempt } from "./attempt-ordering.ts";
+import { latestAgentAttemptByDurableOrder, selectedTaskAttempt } from "./attempt-ordering.ts";
 import { nextRetryStateFromValue } from "./attempt-retry-state.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
 import {
@@ -31,8 +33,6 @@ import {
 } from "./attempt-usage-generations.ts";
 import {
 	type AgentBindingContract,
-	type ApprovalRequestContract,
-	type ApprovalResolutionContract,
 	type AttemptCheckpoint,
 	type AttemptLease,
 	type AttemptStatus,
@@ -55,8 +55,20 @@ import {
 	WORKER_RESULT_STATUSES,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import {
+	assertModelTransferAllowsNewAgentTurn,
+	assertModelTransferDispatch,
+	isModelTransferInterrupted,
+	isRefusedModelTransferSuccessor,
+	type ModelTransferRecord,
+	modelTransferIsPending,
+	pendingModelTransferForTask,
+} from "./model-transfer.ts";
+import { applyModelTransferEvent } from "./model-transfer-events.ts";
+import { carryPendingModelTransferSources } from "./model-transfer-pending-index.ts";
 import { ensureNotificationCapacity } from "./notification-eviction.ts";
 import { applyRetentionEvent, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
+import { assertTaskAttemptBudgetForState } from "./risk-budget.ts";
 import {
 	admittedTurnOriginFromValue,
 	agentFromPayload,
@@ -241,24 +253,6 @@ export function assertObjectiveStatusTransition(
 
 const RETIREMENT_BLOCKING_ATTEMPT_STATUSES = new Set<AttemptStatus>(["queued", "leased", "running", "suspended"]);
 
-function isAgentDescendant(
-	agents: Readonly<Record<string, AgentBindingContract>>,
-	candidate: AgentBindingContract,
-	ancestorAgentId: string,
-): boolean {
-	let parentAgentId = candidate.parentAgentId;
-	const visited = new Set<string>();
-	while (parentAgentId) {
-		if (parentAgentId === ancestorAgentId) return true;
-		if (visited.has(parentAgentId)) {
-			throw new DurableTaskRuntimeError(`Agent '${candidate.agentId}' lineage contains a cycle.`);
-		}
-		visited.add(parentAgentId);
-		parentAgentId = agents[parentAgentId]?.parentAgentId;
-	}
-	return false;
-}
-
 /** One authoritative guard shared by command admission and durable event replay. */
 export function assertAgentRetirementEligible(state: TaskRuntimeProjection, agentId: string): AgentBindingContract {
 	const agent = state.agents[agentId];
@@ -279,15 +273,15 @@ export function assertAgentRetirementEligible(state: TaskRuntimeProjection, agen
 			`Agent '${agentId}' owns active '${blockingAttempt.status}' attempt '${blockingAttempt.attemptId}'.`,
 		);
 	}
-	const liveDescendant = Object.values(state.agents).find(
-		(candidate) =>
-			candidate.status !== "retired" &&
-			candidate.agentId !== agentId &&
-			isAgentDescendant(state.agents, candidate, agentId),
+	const transferBeforeSuccessorStart = Object.values(state.attempts).some(
+		({ modelTransfer }) =>
+			modelTransfer?.sourceAgentId === agentId &&
+			modelTransferIsPending(modelTransfer) &&
+			!modelTransfer.successorStarted,
 	);
-	if (liveDescendant) {
-		throw new DurableTaskRuntimeError(`Agent '${agentId}' has non-retired descendant '${liveDescendant.agentId}'.`);
-	}
+	if (transferBeforeSuccessorStart)
+		throw new DurableTaskRuntimeError(`Agent '${agentId}' has a model transfer whose successor has not started.`);
+	assertAgentHasNoLiveDescendant(state, agentId);
 	return agent;
 }
 
@@ -430,6 +424,9 @@ export function attemptDispatchReadiness(
 			objectiveStatus: objective.status,
 		};
 	}
+	if (modelTransferIsPending(attempt.modelTransfer)) {
+		return { state: "waiting", reasonCode: "model_transfer", attemptId: attempt.attemptId, taskId: attempt.taskId };
+	}
 	const dependencyReadiness = taskDependencyReadiness(state, task, checkVerification);
 	if (dependencyReadiness.state === "blocked") {
 		return {
@@ -473,6 +470,8 @@ function assertAttemptDispatchReady(state: TaskRuntimeProjection, attempt: Attem
 			`Attempt '${attempt.attemptId}' has failed or cancelled dependencies: ${readiness.dependencyTaskIds.join(", ")}.`,
 		);
 	}
+	if (readiness.reasonCode === "model_transfer")
+		throw new DurableTaskRuntimeError(`Attempt '${attempt.attemptId}' is waiting for its model transfer.`);
 	throw new DurableTaskRuntimeError(
 		`Attempt '${attempt.attemptId}' objective is not active (${readiness.objectiveStatus}).`,
 	);
@@ -487,16 +486,6 @@ export function activeTaskAttempt(
 		.find(
 			(attempt): attempt is AttemptRuntimeState => attempt !== undefined && !terminalAttemptStatus(attempt.status),
 		);
-}
-
-export function assertTaskAttemptBudgetForState(task: TaskRuntimeState, objective: ObjectiveContract): void {
-	const attemptCeilings = [task.task.riskBudget.maxAttempts, objective.riskBudget.maxAttempts].filter(
-		(value): value is number => value !== undefined,
-	);
-	const maxAttempts = attemptCeilings.length > 0 ? Math.min(...attemptCeilings) : undefined;
-	if (maxAttempts !== undefined && task.attemptIds.length >= maxAttempts) {
-		throw new DurableTaskRuntimeError(`Task '${task.task.taskId}' exhausted its ${maxAttempts} attempt budget.`);
-	}
 }
 
 function refreshReadyTasks(state: TaskRuntimeProjection, objectiveId: string, at: string): void {
@@ -539,7 +528,12 @@ function applyTaskCreated(state: TaskRuntimeProjection, task: TaskContract, even
 		);
 }
 
-function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, occurredAt: string): void {
+function applyAttemptQueued(
+	state: TaskRuntimeProjection,
+	payload: JsonObject,
+	occurredAt: string,
+	transfer?: ModelTransferRecord,
+): void {
 	const objectives = state.objectives as Record<string, ObjectiveRuntimeState>;
 	const tasks = state.tasks as Record<string, TaskRuntimeState>;
 	const attempts = state.attempts as Record<string, AttemptRuntimeState>;
@@ -559,7 +553,17 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 		throw new DurableTaskRuntimeError(`Objective '${task.task.objectiveId}' is not active.`);
 	}
 	assertTaskAttemptBudgetForState(task, objective);
-	if (!["pending", "ready", "blocked", "failed"].includes(task.task.status)) {
+	const preceding = selectedTaskAttempt(state, taskId);
+	if (!transfer && pendingModelTransferForTask(state, taskId)) {
+		throw new DurableTaskRuntimeError(`Task '${taskId}' already has a pending model transfer.`);
+	}
+	const source = transfer && state.attempts[transfer.sourceAttemptId];
+	const interruptedForTransfer =
+		source &&
+		preceding &&
+		task.task.status === "cancelled" &&
+		(isModelTransferInterrupted(source) || isRefusedModelTransferSuccessor(source, preceding));
+	if (!interruptedForTransfer && !["pending", "ready", "blocked", "failed"].includes(task.task.status)) {
 		throw new DurableTaskRuntimeError(`Task '${taskId}' is not dispatchable from '${task.task.status}'.`);
 	}
 	const dispatch = dispatchFromValue(payload.dispatch, "attempt.queued.dispatch");
@@ -573,7 +577,21 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 	) {
 		throw new DurableTaskRuntimeError(`Attempt '${attemptId}' execution contract does not match its dispatch.`);
 	}
-	const preceding = selectedTaskAttempt(state, taskId);
+	if (transfer && source) assertModelTransferDispatch(state, source, transfer, dispatch);
+	if (
+		dispatch.executionKind !== "managed-process" &&
+		dispatch.logicalLaneId &&
+		dispatch.dispatchSequence !== undefined
+	)
+		assertModelTransferAllowsNewAgentTurn(
+			latestAgentAttemptByDurableOrder(state, dispatch.logicalLaneId),
+			dispatch.logicalLaneId,
+		);
+	if (dispatch.parentAgentId)
+		assertModelTransferAllowsNewAgentTurn(
+			latestAgentAttemptByDurableOrder(state, dispatch.parentAgentId),
+			dispatch.parentAgentId,
+		);
 	const precedingVerification = preceding ? attemptVerification(state, preceding) : undefined;
 	if (preceding && precedingVerification && !preceding.verification) {
 		attempts[preceding.attemptId] = { ...preceding, verification: precedingVerification };
@@ -582,6 +600,7 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 		attemptId,
 		taskId,
 		dispatch,
+		...(transfer ? { modelTransferSourceAttemptId: transfer.sourceAttemptId } : {}),
 		status: "queued",
 		...(typeof payload.grantId === "string" ? { grantId: payload.grantId } : {}),
 		checkpointIds: [],
@@ -838,6 +857,8 @@ export function assertAttemptLeaseTransition(
 	) {
 		throw new DurableTaskRuntimeError(`Attempt '${lease.attemptId}' lease dates are invalid.`);
 	}
+	if (attempt.modelTransferSourceAttemptId !== undefined && agentId !== attempt.dispatch.logicalLaneId)
+		throw new DurableTaskRuntimeError("A model transfer successor must lease its reserved logical agent.");
 	assertAttemptAgentBinding({ agentId, dispatch: attempt.dispatch });
 	if (agentId) {
 		const agent = state.agents[agentId];
@@ -940,67 +961,6 @@ export function assertRunningAttemptLease(
 	}
 	assertAttemptLeaseMatches(attempt, leaseId, fencingToken, occurredAt);
 	return attempt;
-}
-
-export function assertApprovalRequestTransition(
-	state: TaskRuntimeProjection,
-	aggregateId: string,
-	approval: ApprovalRequestContract,
-): void {
-	const expectedAggregateId = approval.attemptId ?? approval.taskId ?? approval.objectiveId;
-	if (aggregateId !== expectedAggregateId) {
-		throw new DurableTaskRuntimeError(`Approval target '${expectedAggregateId}' does not match its aggregate.`);
-	}
-	const objective = state.objectives[approval.objectiveId]?.objective;
-	if (!objective) throw new DurableTaskRuntimeError(`Unknown objective '${approval.objectiveId}'.`);
-	if (objective.status !== "active") {
-		throw new DurableTaskRuntimeError(`Objective '${approval.objectiveId}' is not active.`);
-	}
-	if (approval.attemptId && !approval.taskId) {
-		throw new DurableTaskRuntimeError("Attempt-scoped approval requires a taskId.");
-	}
-	if (approval.taskId) {
-		const task = state.tasks[approval.taskId];
-		if (!task || task.task.objectiveId !== approval.objectiveId) {
-			throw new DurableTaskRuntimeError(`Approval task '${approval.taskId}' does not belong to its objective.`);
-		}
-	}
-	if (approval.attemptId) {
-		const attempt = state.attempts[approval.attemptId];
-		if (!attempt || attempt.taskId !== approval.taskId) {
-			throw new DurableTaskRuntimeError(`Approval attempt '${approval.attemptId}' does not belong to its task.`);
-		}
-		if (attempt.status !== "queued" || attempt.grantId) {
-			throw new DurableTaskRuntimeError(`Approval attempt '${approval.attemptId}' is not awaiting policy.`);
-		}
-	}
-	const pendingForTarget = Object.values(state.approvals).find(
-		(candidate) =>
-			candidate.status === "pending" &&
-			candidate.request.objectiveId === approval.objectiveId &&
-			candidate.request.taskId === approval.taskId &&
-			candidate.request.attemptId === approval.attemptId,
-	);
-	if (pendingForTarget) {
-		throw new DurableTaskRuntimeError(`Target already awaits approval '${pendingForTarget.request.approvalId}'.`);
-	}
-}
-
-export function assertApprovalResolutionTransition(
-	state: TaskRuntimeProjection,
-	aggregateId: string,
-	resolution: ApprovalResolutionContract,
-): ApprovalRuntimeState {
-	const approval = state.approvals[resolution.approvalId];
-	if (!approval) throw new DurableTaskRuntimeError(`Unknown approval '${resolution.approvalId}'.`);
-	const expectedAggregateId = approval.request.attemptId ?? approval.request.taskId ?? approval.request.objectiveId;
-	if (aggregateId !== expectedAggregateId) {
-		throw new DurableTaskRuntimeError(`Resolved approval target '${expectedAggregateId}' does not match aggregate.`);
-	}
-	if (approval.status !== "pending") {
-		throw new DurableTaskRuntimeError(`Approval '${resolution.approvalId}' was already ${approval.status}.`);
-	}
-	return approval;
 }
 
 export function assertNotificationTarget(
@@ -1429,6 +1389,10 @@ export function reduceOrchestrationEvent(
 			assertRecordHasCapacity(agents, MAX_ORCHESTRATION_AGENT_BINDINGS, "agent binding");
 			if (agent.parentAgentId) {
 				const parent = agents[agent.parentAgentId];
+				assertModelTransferAllowsNewAgentTurn(
+					latestAgentAttemptByDurableOrder(state, agent.parentAgentId),
+					agent.parentAgentId,
+				);
 				if (!parent) throw new DurableTaskRuntimeError(`Unknown parent agent '${agent.parentAgentId}'.`);
 				if (parent.status === "retired") {
 					throw new DurableTaskRuntimeError(`Parent agent '${agent.parentAgentId}' is retired.`);
@@ -1493,6 +1457,13 @@ export function reduceOrchestrationEvent(
 			throw new DurableTaskRuntimeError(
 				"Standalone agent resume is unsupported; resume the suspended attempt atomically.",
 			);
+		}
+		case "model_transfer.requested":
+		case "model_transfer.successor_admitted":
+		case "model_transfer.successor_accepted":
+		case "model_transfer.settled": {
+			applyModelTransferEvent(state, event, applyAttemptQueued);
+			break;
 		}
 		case "attempt.queued": {
 			assertEventAggregateId(event, string(event.payload.taskId, "attempt.queued.taskId"), "Queued attempt task");
@@ -1587,9 +1558,13 @@ export function reduceOrchestrationEvent(
 			if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
 				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
 			}
+			const model = runningModelFromValue(event.payload.model, "attempt.model_moved.model");
+			const pinned = attempt.dispatch.executionContract?.worker.modelBinding;
+			if (attempt.modelTransferSourceAttemptId && (!pinned || !isDeepStrictEqual(model, pinned)))
+				throw new DurableTaskRuntimeError("A model transfer successor must keep its exact model binding.");
 			attempts[attemptId] = {
 				...attempt,
-				runningModel: runningModelFromValue(event.payload.model, "attempt.model_moved.model"),
+				runningModel: model,
 				updatedAt: event.occurredAt,
 			};
 			break;
@@ -2011,6 +1986,7 @@ export function reduceOrchestrationEvent(
 	state.eventDeliveries = rawDeliveries;
 	const result = { ...state, lastOrdinal: event.ordinal };
 	cacheProjectionSerializedBytes(result, serializedBytes);
+	carryPendingModelTransferSources(projection, result, event);
 	assertProjectionWithinLimits(result);
 	return result;
 }

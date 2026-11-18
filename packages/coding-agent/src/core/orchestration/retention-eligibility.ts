@@ -17,6 +17,7 @@ import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder, latestAgentAttemptsByDurableOrder } from "./attempt-ordering.ts";
 import type { AgentPrunedTurns } from "./contracts.ts";
+import { modelTransferIsPending } from "./model-transfer.ts";
 import { APPROVAL_NOTIFICATION_PREFIX, isUnboundDeliveredNotification } from "./notification-eviction.ts";
 import { MAX_RETENTION_PRUNE_RECORDS, type RetentionPrunedPayload, retentionArchiveId } from "./retention-event.ts";
 import {
@@ -506,7 +507,12 @@ function projectionHoldOf(
 		)
 	)
 		return "unfinished_task";
-	if (attempts.some((attempt) => !terminalAttemptStatus(attempt.status))) return "live_attempt";
+	if (
+		attempts.some(
+			(attempt) => !terminalAttemptStatus(attempt.status) || modelTransferIsPending(attempt.modelTransfer),
+		)
+	)
+		return "live_attempt";
 	// A notice carries no task id, so a session task unit is held only by a notice on one of its attempts.
 	if (
 		(isObjective && facts.pendingNoticeObjectives.has(unit.objectiveId)) ||

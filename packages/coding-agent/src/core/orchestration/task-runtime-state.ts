@@ -28,6 +28,7 @@ import type {
 	TaskContract,
 	WorkerResultContract,
 } from "./contracts.ts";
+import type { ModelTransferRecord } from "./model-transfer.ts";
 import type { WorkerReceiptAcknowledgement } from "./worker-receipt-publication.ts";
 
 export interface ObjectiveRuntimeState {
@@ -81,6 +82,12 @@ export interface AttemptVerification extends VerificationRecord {
 }
 
 export interface AttemptRuntimeState {
+	/** A model transfer is filed against the exact source generation. */
+	modelTransfer?: ModelTransferRecord;
+	/** Earlier definitively refused commands for this source, retained for exact replay. */
+	modelTransferRefusals?: readonly ModelTransferRecord[];
+	/** Present only on the exact reserved successor attempt. */
+	modelTransferSourceAttemptId?: string;
 	attemptId: string;
 	taskId: string;
 	dispatch: OrchestrationDispatchRequest;
@@ -238,6 +245,12 @@ export type AttemptDispatchReadiness =
 			objectiveStatus: "paused";
 	  }
 	| {
+			state: "waiting";
+			reasonCode: "model_transfer";
+			attemptId: string;
+			taskId: string;
+	  }
+	| {
 			state: "blocked";
 			reasonCode: "dependency_failed_or_cancelled";
 			attemptId: string;
@@ -339,4 +352,26 @@ export function attemptModelBinding(
 	attempt: Pick<AttemptRuntimeState, "runningModel" | "dispatch">,
 ): OrchestrationModelBinding | undefined {
 	return attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+}
+
+export type AttemptCancellationGuard =
+	| { expectedLastOrdinal: number; unleasedOnly: true }
+	| { transferCommandId: string };
+
+/** The commit ordinal extends the exact observed cancellation precondition across the append lock. */
+export function assertCancellationGuard(
+	attempt: AttemptRuntimeState,
+	ordinal: number,
+	guard?: AttemptCancellationGuard,
+): void {
+	if (!guard) return;
+	if ("unleasedOnly" in guard) {
+		if (ordinal !== guard.expectedLastOrdinal || attempt.lease)
+			throw new DurableTaskRuntimeError("Unleased cancellation evidence changed.");
+	} else if (
+		attempt.modelTransfer?.commandId !== guard.transferCommandId ||
+		attempt.modelTransfer.status !== "requested" ||
+		(attempt.status !== "queued" && attempt.status !== "suspended")
+	)
+		throw new DurableTaskRuntimeError("The parked model transfer source changed.");
 }

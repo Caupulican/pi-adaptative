@@ -21,11 +21,12 @@ import type { GoalState } from "../goals/goal-state.ts";
 import { agentThirdPartyOrigin } from "../orchestration/agent-turn-basis.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import type { AgentBindingContract, WorkerResultContract } from "../orchestration/contracts.ts";
+import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptAwaitsDispatch } from "../orchestration/task-runtime-state.ts";
-import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
-import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
+import { attemptAwaitsParent, attemptVerification } from "../orchestration/verification-identity.ts";
+import { assertWorkerReceiptAdmission, type WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -50,7 +51,6 @@ import {
 	type WorkerAgentBroadcastResult,
 	type WorkerAgentControlPort,
 	type WorkerAgentControlScope,
-	type WorkerAgentLaneResolution,
 	WorkerAgentMailbox,
 	type WorkerAgentMailboxResourceSnapshot,
 	type WorkerAgentMessage,
@@ -71,6 +71,11 @@ import {
 import { canonicalWorkerAgentIds } from "./worker-agent-id-set.ts";
 import { rejectGenericReplyOptions } from "./worker-agent-message-options.ts";
 import { WORKER_WAIT_DEFAULT_MS, WorkerAgentWaiter } from "./worker-agent-wait.ts";
+import {
+	assertWorkerMailboxAcceptsIntake,
+	sessionRootWorkerMessageOptions,
+	withModelTransferSourceMailbox,
+} from "./worker-control-mailbox-admission.ts";
 import {
 	type MandatoryTranscriptControlInput,
 	mailboxMessage,
@@ -93,7 +98,11 @@ import {
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import { type HostEventConsumingExecution, WorkerHostEventTransport } from "./worker-host-event-transport.ts";
-import { attemptAwaitsParent, attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
+import {
+	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
+	selectedWorkerAttempt,
+	workerAgentLane,
+} from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerMailPort } from "./worker-mail-ledger.ts";
 import { recordMailboxAdmission, type WorkerMailboxConversationMessage } from "./worker-mailbox-admission.ts";
@@ -145,7 +154,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	/** Exact attempt result for a terminal delivery, never a newer result selected by its task. */
 	getWorkerResult?(attemptId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	abortLane(laneId: string, reasonCode: string): void;
-	cancelLane(laneId: string, reasonCode: string): LaneRecord | undefined;
+	cancelLane(laneId: string, reasonCode: string, transfer?: ModelTransferRecord): LaneRecord | undefined;
 	taskStartHeadroomSkipReason?(agent: AgentBindingContract): string | undefined;
 	/**
 	 * False while the specialist's last execution still holds resources -- its tool surface has not
@@ -200,9 +209,6 @@ export interface WorkerAgentControlResourceSnapshot {
 }
 
 const MAX_BROADCAST_ERROR_CHARS = 512;
-
-/** Attempt statuses whose task has not reached a terminal outcome. */
-const LIVE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running", "suspended"]);
 
 export type { WorkerMailboxConversationMessage } from "./worker-mailbox-admission.ts";
 
@@ -477,7 +483,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.requireControl();
 		rejectGenericReplyOptions(options);
 		const agent = this.requireSessionPeer(agentId, { callerAgentId: options.senderAgentId });
-		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
 		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options);
 		this.notifyStateChangedBestEffort();
 		return { messageId: queued.messageId, queued: true };
@@ -499,7 +504,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const results = recipients.map(({ agentId, idempotencyKey }) => {
 			try {
 				const target = this.requireSessionPeer(agentId, { callerAgentId: senderAgentId });
-				this.assertAgentAcceptsNewMessages(target, idempotencyKey);
+
 				const messageOptions = senderAgentId
 					? {
 							senderAgentId,
@@ -552,7 +557,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.requireControl();
 		const agent = this.requireSessionPeer(agentId, { callerAgentId: options.senderAgentId });
 		if (agent.agentId === options.senderAgentId) throw new Error("A worker cannot message itself.");
-		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
 		return this.followUpAcceptedAgent(agent, message, options);
 	}
 
@@ -563,7 +567,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	): { messageId: string; queued: true } {
 		this.requireControl();
 		const agent = this.requireKnownAgent(agentId);
-		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
 		const queued = this.enqueuePeerMessage(agent, "follow_up", message, this.sessionRootMessageOptions(options));
 		this.notifyStateChangedBestEffort();
 		return { messageId: queued.messageId, queued: true };
@@ -1073,24 +1076,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	private sessionRootMessageOptions(options: SessionRootWorkerAgentMessageOptions): WorkerAgentMessageOptions {
 		const leader = options.fromLeader === undefined ? undefined : this.requireKnownAgent(options.fromLeader).agentId;
-		return {
-			senderAgentId: leader ?? this.sessionRootAddress,
-			// A leader's words are written by the root session's host, so they are admitted under the root's live origin.
-			...(leader === undefined ? {} : { receiptOrigin: this.options.captureReceiptOrigin?.() }),
-			...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
-			...(options.expectReply === true ? { expectReply: true } : {}),
-			...(options.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
-			...(options.delegationObjectiveId !== undefined
-				? { delegationObjectiveId: options.delegationObjectiveId }
-				: {}),
-			...(options.agentWords !== undefined ? { agentWords: options.agentWords } : {}),
-		};
-	}
-
-	private assertAgentAcceptsNewMessages(agent: AgentBindingContract, idempotencyKey?: string): void {
-		if (agent.status !== "retired") return;
-		if (this.isAcceptedControlReplay(agent.agentId, idempotencyKey)) return;
-		throw new Error(`Logical worker agent '${agent.agentId}' is retired.`);
+		return sessionRootWorkerMessageOptions(
+			options,
+			leader ?? this.sessionRootAddress,
+			leader === undefined ? undefined : this.options.captureReceiptOrigin?.(),
+		);
 	}
 
 	reconcileSessionRootReplies(): void {
@@ -1117,7 +1107,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	interruptWorkerAgent(
 		agentId: string,
 		scope: WorkerAgentControlScope = {},
-		options: { message?: string; force?: boolean } = {},
+		options: { message?: string; force?: boolean; deadlineCode?: "worker_model_transfer" } = {},
 	): { interrupted: boolean; mode?: "halt" | "suspend"; reason?: string } {
 		const { agent, attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt || (attempt.status !== "running" && attempt.status !== "leased")) {
@@ -1138,9 +1128,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				() => {
 					// The worker is inside something that outlived the deadline. Its state is retained; the
 					// parent hears about the cancellation through the same terminal handoff.
-					this.options.abortLane(laneId, "interrupt_report_deadline");
+					const reason = options.deadlineCode ?? "interrupt_report_deadline";
+					this.options.abortLane(laneId, reason);
 					try {
-						this.options.cancelLane(laneId, "interrupt_report_deadline");
+						this.options.cancelLane(laneId, reason);
 					} catch (error) {
 						// This runs on a timer, where a throw escapes as an uncaught exception that no owner can
 						// act on. The abort above was already signalled; report why the durable cancel did not commit.
@@ -1211,13 +1202,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	/** Ends `agent`'s `attempt` without the model-facing control gate, for the fleet's cancel (an owner's stop). */
-	cancelAgentAttempt(agent: AgentBindingContract, attempt: AttemptRuntimeState, reasonCode: string) {
-		// Steers were addressed to the task being cancelled. They settle with it, before the terminal
-		// record publishes: publishing reconciles the mailbox, and an undelivered steer would otherwise
-		// start as a brand-new turn the owner just cancelled.
-		if (LIVE_ATTEMPT_STATUSES.has(attempt.status)) this.deadLetterUndeliveredSteers(agent, reasonCode);
+	cancelAgentAttempt(
+		agent: AgentBindingContract,
+		attempt: AttemptRuntimeState,
+		reasonCode: string,
+		transfer?: ModelTransferRecord,
+	) {
+		// Settle steers before publishing cancellation, so mailbox reconciliation cannot start a new turn with them.
+		if (NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) this.deadLetterUndeliveredSteers(agent, reasonCode);
 		this.options.abortLane(attempt.taskId, reasonCode);
-		const record = this.options.cancelLane(attempt.taskId, reasonCode);
+		const record = this.options.cancelLane(attempt.taskId, reasonCode, transfer);
 		this.signalStateChanged();
 		return record;
 	}
@@ -1297,9 +1291,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return mailbox.deadLetterOrdinaryTask(messageId, reason);
 	}
 
-	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentLaneResolution | undefined {
+	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}) {
 		const { attempt } = this.controlledAgentAttempt(agentId, scope);
-		return attempt ? { laneId: attempt.taskId, status: attempt.status } : undefined;
+		return workerAgentLane(attempt);
 	}
 
 	readWorkerAgentLastText(agentId: string, laneId: string, scope: WorkerAgentControlScope = {}): string | undefined {
@@ -1759,8 +1753,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	} {
 		this.requireControl();
 		const agent = this.requireControllableAgent(agentId, scope);
-		const attempt = this.latestAgentAttempt(agent);
-		return { agent, attempt };
+		return { agent, attempt: this.latestAgentAttempt(agent) };
 	}
 
 	private getMailbox(agentId: string): WorkerAgentMailbox {
@@ -1774,10 +1767,16 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				parentSessionId: this.options.parentSessionId,
 				agentId,
 				projectClaim,
+				assertNewIntake: () =>
+					assertWorkerMailboxAcceptsIntake(this.options.getLifecycle().getTaskRuntimeSnapshot(), agentId),
 			});
 			this.mailboxes.set(agentId, mailbox);
 		}
 		return mailbox;
+	}
+
+	withModelTransferSourceAdmission<T>(agentId: string, publish: () => T): T {
+		return withModelTransferSourceMailbox(this.getMailbox(agentId), agentId, publish);
 	}
 
 	releaseQuiescentContext(agentId: string, release: () => void): boolean {
@@ -1920,7 +1919,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const delegationObjectiveId = replay ? undefined : (requestedDelegation ?? this.senderTurn(sender)?.objectiveId);
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
-			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.
 			return this.getMailbox(target.agentId).enqueueWithReceipt({
 				kind,
 				content,

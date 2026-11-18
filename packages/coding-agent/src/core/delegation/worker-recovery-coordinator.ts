@@ -9,6 +9,7 @@ import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
+import { modelTransferIsPending } from "../orchestration/model-transfer.ts";
 import { planReviewAnchorOfTask } from "../orchestration/plan-review-subjects.ts";
 import { planStepRankOfTask } from "../orchestration/plan-step-rank.ts";
 import { isReviewRun } from "../orchestration/review-verdict.ts";
@@ -66,6 +67,7 @@ export interface WorkerRecoveryCoordinatorOptions {
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue"> &
 		Partial<Pick<WorkerDispatchScheduler, "onQueueCapacityAvailable">>;
 	recoverWriteReservations(): void;
+	recoverModelTransfers?(): void;
 	publishTerminalRecord(record: LaneRecord): void;
 	publishTerminalRecords?(records: readonly LaneRecord[]): void;
 	/** Land the writes other hosts recorded for this parent before any terminal is republished; never throws. */
@@ -158,6 +160,7 @@ export class WorkerRecoveryCoordinator {
 			if (this.disposed) return;
 			if (!this.queueRecovered) {
 				const newlySuspendedAttemptIds = new Set(lifecycle.suspendBoundInProcessAttemptsForRestart());
+				this.options.recoverModelTransfers?.();
 				if (this.disposed) return;
 				try {
 					this.options.recoverWriteReservations();
@@ -331,6 +334,7 @@ export class WorkerRecoveryCoordinator {
 		const attempt = this.options.lifecycle.getActiveAttempt(args.laneId);
 		const record = this.options.lifecycle.getRecord(args.laneId);
 		if (!attempt || !record) return { scheduled: false, reason: "attempt_missing" };
+		if (modelTransferIsPending(attempt.modelTransfer)) return { scheduled: false, reason: "model_transfer" };
 		const retriesUsed = attempt.retry?.retriesUsed ?? 0;
 		const resetWaits = attempt.retry?.resetWaits ?? 0;
 		const decision = evaluateWorkerRetry({

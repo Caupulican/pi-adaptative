@@ -4,6 +4,7 @@
  * the record codecs so a small decoder module can read its fields without importing the codecs, which would form a cycle.
  */
 
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { DurableTaskRuntimeError } from "./task-runtime-state.ts";
 
@@ -26,4 +27,32 @@ export function dispatchIdentifier(value: unknown, label: string): string {
 		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
 	}
 	return identifier;
+}
+
+export function cancellationDetail(value: unknown, label: string): string {
+	const detail = string(value, label);
+	if (boundedRedactedDiagnosticText(detail) !== detail)
+		throw new DurableTaskRuntimeError(`${label} must be bounded, redacted diagnostic text.`);
+	return detail;
+}
+
+export function boolean(value: unknown, label: string): boolean {
+	if (typeof value !== "boolean") throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	return value;
+}
+
+export function stringArray(value: unknown, label: string): string[] {
+	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+		throw new DurableTaskRuntimeError(`${label} must be a string array.`);
+	}
+	return [...value];
+}
+
+export function isoDate(value: unknown, label: string): string {
+	const date = dispatchIdentifier(value, label);
+	const epochMs = Date.parse(date);
+	if (!Number.isFinite(epochMs) || Math.abs(epochMs) > MAX_DATE_EPOCH_MS || new Date(epochMs).toISOString() !== date) {
+		throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	}
+	return date;
 }

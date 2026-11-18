@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `delegate handoff` moves unfinished work to a requested model. The successor keeps the task, permissions, budget history and uncommitted files. The root can continue after admission and inspect the transfer with `delegate status`.
+
 ### Fixed
 
 - Workers can copy the recorded file path from a successful edit or write and cite a command result by its receipt ID in their completion report. The host checks the recorded command and exit outcome.

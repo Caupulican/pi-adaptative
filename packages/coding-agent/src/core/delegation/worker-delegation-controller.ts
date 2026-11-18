@@ -95,6 +95,7 @@ import type {
 	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { ledgerSkip, RungRefusedError, type StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import { costCeilingUsd, envelopeCostBudget, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import {
@@ -153,7 +154,6 @@ import { boundedLine, boundedText } from "../util/bounded-line.ts";
 import {
 	AsyncRetainedReleases,
 	type ReleaseAttemptResult,
-	type RetainedReleaseSnapshot,
 	RetainedReleases,
 	releaseFailureCause,
 } from "../util/resource-release.ts";
@@ -177,16 +177,8 @@ import {
 } from "./session-worker-claim.ts";
 import { verifierBrief } from "./verifier-brief.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
-import {
-	type WorkerAgentControlPort,
-	type WorkerAgentMailboxResourceSnapshot,
-	type WorkerGrantSummary,
-	workerAgentMessageId,
-} from "./worker-agent-control.ts";
-import {
-	WorkerAgentControlCoordinator,
-	type WorkerAgentControlResourceSnapshot,
-} from "./worker-agent-control-coordinator.ts";
+import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
+import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
 import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
 import {
 	bindBotSoul,
@@ -198,6 +190,7 @@ import {
 	type WorkerAuthorityResolution,
 	type WorkerAuthorityResolutionInput,
 } from "./worker-authority-resolver.ts";
+import { allocateWorkerBirth } from "./worker-birth-allocation.ts";
 import {
 	boundedWorkerClaimStrings,
 	isVerificationPending,
@@ -212,7 +205,6 @@ import { attemptStaysAtClose, handoffUnfinishedContexts } from "./worker-close-h
 import {
 	type WorkerContextForkSnapshot,
 	WorkerContextForkStore,
-	WorkerContextForkStoreError,
 	workerContextModelIdentity,
 } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
@@ -234,12 +226,9 @@ import {
 	startsOwnWorker,
 	type WorkerDelegationRequest,
 } from "./worker-delegation-request.ts";
+import type { WorkerDelegationResourceSnapshot } from "./worker-delegation-resource-snapshot.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
-import {
-	formatWorkerDispatchWait,
-	type WorkerDispatchResourceSnapshot,
-	WorkerDispatchScheduler,
-} from "./worker-dispatch-scheduler.ts";
+import { formatWorkerDispatchWait, WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { admittedRerunPlacement, lanePlacementAt } from "./worker-escalation.ts";
 import {
 	buildWorkerExecutionPlan,
@@ -265,7 +254,6 @@ import {
 	type WorkerFitRoutePort,
 } from "./worker-fit-route.ts";
 import {
-	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
 	evaluateReusableWorkerTaskAdmission,
 	pendingVerifierSubjectTaskIds,
@@ -281,6 +269,13 @@ import {
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerModelFailover } from "./worker-model-failover.ts";
+import { WorkerModelHandoffCoordinator } from "./worker-model-handoff.ts";
+import {
+	admitWorkerTransfer,
+	type ModelTransferPreflight,
+	preflightWorkerTransfer,
+	transferTaskInstructions,
+} from "./worker-model-transfer-admission.ts";
 import { interruptedWorkerMutationFields, retainCancelledWorkerMutationClaim } from "./worker-mutation-evidence.ts";
 import {
 	contractGrantsChildren,
@@ -329,11 +324,11 @@ import {
 	type WorkerTerminalHandoffDelivery,
 } from "./worker-terminal-handoff-coordinator.ts";
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
+import { assertTransferClaimRecoverable, canControlTransferSource } from "./worker-transfer-source.ts";
 import { collectWorkerTreeBudgetSeeds, workerTreeCanAdmitAttempt } from "./worker-tree-budget-coordinator.ts";
 import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
 	WorkerWriteReservationCoordinator,
-	type WorkerWriteReservationResourceSnapshot,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
@@ -398,36 +393,7 @@ type InFlightWorkerLedger = {
 	cwd: string;
 };
 
-export interface WorkerDelegationResourceSnapshot {
-	readonly ingressPromiseCount: number;
-	readonly executionPromiseCount: number;
-	readonly pendingPhysicalCleanups: readonly Readonly<
-		Pick<StartedDelegationAttempt, "attemptId" | "leaseId" | "fencingToken">
-	>[];
-	readonly executingHolds: readonly { readonly agentId: string; readonly count: number }[];
-	readonly inFlightLedgerCount: number;
-	readonly laneAbortControllerCount: number;
-	readonly shellSessionCount: number;
-	readonly pendingTerminalHandoffCount: number;
-	readonly scheduler: WorkerDispatchResourceSnapshot;
-	readonly reservations: WorkerWriteReservationResourceSnapshot;
-	/** Execution teardowns and project releases that failed and are retried on the release backoff. */
-	readonly retainedReleases: RetainedReleaseSnapshot;
-	readonly control: WorkerAgentControlResourceSnapshot;
-	readonly ownedProjectClaims: readonly {
-		readonly sessionId: string;
-		readonly claim: Readonly<SpecialistContextClaim>;
-		readonly agents: readonly {
-			readonly agentId: string;
-			readonly agentStatus: AgentBindingContract["status"];
-			readonly attemptId: string | undefined;
-			readonly attemptStatus: AttemptRuntimeState["status"] | undefined;
-			readonly executingHoldCount: number;
-			readonly mailboxLoaded: boolean;
-			readonly mailbox: WorkerAgentMailboxResourceSnapshot | undefined;
-		}[];
-	}[];
-}
+export type { WorkerDelegationResourceSnapshot } from "./worker-delegation-resource-snapshot.ts";
 
 /**
  * A worker resource release this controller retains for retry.
@@ -522,6 +488,7 @@ export class WorkerDelegationController {
 	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
+	readonly modelHandoffs: WorkerModelHandoffCoordinator;
 	private readonly publishedTerminalAttemptIds = new Set<string>();
 	/**
 	 * Specialists whose execution has not fully released its resources yet. An entry is added before
@@ -762,6 +729,7 @@ export class WorkerDelegationController {
 			lifecycle: this.lifecycle,
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
+			recoverModelTransfers: () => this.modelHandoffs.recover(),
 			// A placed job's worker is not resumed after a restart: its runner has ended the job as interrupted, so the lane
 			// ends with it instead of running unsupervised with no deadline and no cancel path.
 			endUnresumable: (attempt) => {
@@ -844,7 +812,7 @@ export class WorkerDelegationController {
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
 			messagesRead: (agentId, attemptId, ids) => this.deps.workerMail.messagesRead?.(agentId, attemptId, ids),
-			cancelLane: (laneId, reasonCode) => {
+			cancelLane: (laneId, reasonCode, transfer) => {
 				// A worker that was running reports what it changed even though it never got to speak.
 				const inFlight = this.inFlightLedgers.get(laneId);
 				const attemptStatus = inFlight ? this.getWorkerLifecycle().getActiveAttempt(laneId)?.status : undefined;
@@ -869,7 +837,7 @@ export class WorkerDelegationController {
 						// Only a persisted claim retires the ledger; a failed persist keeps it for a retry or shutdown.
 						this.inFlightLedgers.delete(laneId);
 					} else {
-						terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+						terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode, undefined, transfer);
 					}
 				} catch (error) {
 					// The lane is still owned and still durably live. A queued entry stays queued but can no
@@ -911,6 +879,46 @@ export class WorkerDelegationController {
 			getRunTurnOrigin: () => this.deps.getRunTurnOrigin?.(),
 			noteAttemptOwnerEpoch: (attemptId, ownerEpoch) =>
 				this.notifications.noteAttemptOwnerEpoch(attemptId, ownerEpoch),
+		});
+		this.modelHandoffs = new WorkerModelHandoffCoordinator({
+			lifecycle,
+			control: this.agentControl,
+			isolation: laneIsolation,
+			preflight: (source, target) => this.preflightModelTransfer(source, target),
+			start: (source, transfer, prepared) => this.startModelTransfer(source, transfer, prepared),
+			isSettled: (agentId) => this.isSpecialistSettled(agentId),
+			ownsSource: (source) =>
+				this.runsParentAttempt(source) &&
+				canControlTransferSource(source, this.agentControl.getProcessOwnerId(), this.deps.getSessionId(), () => {
+					const id = nativeAgentIdForAttempt(source);
+					const agent = id && this.lifecycle.getAgent(id);
+					if (!agent || agent.status === "retired") return { retired: !!agent };
+					return {
+						ownership: this.conversations.getProjectContextBinding(
+							agentConversation(this.conversationRoots(), agent),
+						)?.ownership,
+						held: this.projectClaims.get(agent.resumeContext.sessionId),
+					};
+				}),
+			claimSource: (source) => {
+				const transfer = source.modelTransfer;
+				const agent = transfer && this.lifecycle.getAgent(transfer.sourceAgentId);
+				const current = agent && this.lifecycle.getLatestAgentAttempt(agent.agentId);
+				if (
+					!agent ||
+					!current ||
+					current.attemptId !== source.attemptId ||
+					current.status !== source.status ||
+					current.modelTransfer?.commandId !== transfer?.commandId
+				)
+					throw new Error("The handoff source attempt or command has changed.");
+				const alreadyOwned = this.projectClaims.has(agent.resumeContext.sessionId);
+				if (agent.status !== "retired") this.claimAgentProjectContext(agent, source);
+				return () => {
+					if (!alreadyOwned) this.releaseSettledProjectContext(agent.agentId);
+				};
+			},
+			warn: (message) => this.safeWarn(message),
 		});
 		this.terminalHandoffs = new WorkerTerminalHandoffCoordinator({
 			deliver: (handoff) => this.deliverTerminalHandoff(handoff),
@@ -1028,7 +1036,10 @@ export class WorkerDelegationController {
 			released = true;
 			const held = (this.executingSpecialistIds.get(agentId) ?? 1) - 1;
 			if (held > 0) this.executingSpecialistIds.set(agentId, held);
-			else this.executingSpecialistIds.delete(agentId);
+			else {
+				this.executingSpecialistIds.delete(agentId);
+				this.modelHandoffs.signal(agentId);
+			}
 		};
 	}
 
@@ -1218,6 +1229,7 @@ export class WorkerDelegationController {
 		const shutdown = Promise.withResolvers<void>();
 		this.shutdownCompletion = shutdown.promise;
 		void shutdown.promise.catch(() => undefined);
+		const handoffsClosed = this.modelHandoffs.close();
 		this.scheduler.closeAdmission();
 		// The outcome follow-up stops placing rungs before the fleet that would place them is disposed.
 		this.outcomeFollowUp.close();
@@ -1324,6 +1336,7 @@ export class WorkerDelegationController {
 		this.shellSessionKeys.clear();
 		const completion = Promise.allSettled([
 			...shellShutdowns,
+			handoffsClosed,
 			this.joinWorkerCompletions(),
 			this.scheduler.waitForShutdown(),
 			this.settleLaneReleases(),
@@ -2933,10 +2946,13 @@ export class WorkerDelegationController {
 		});
 	}
 
-	private workerTreeAttemptAdmissionSkipReason(request: WorkerDelegationRequest): string | undefined {
-		if (!request.parentAgentId && !request.attemptOf) return undefined;
+	private workerTreeAttemptAdmissionSkipReason(
+		request: WorkerDelegationRequest,
+		taskId = request.attemptOf?.taskId ?? request.modelTransfer?.taskId,
+	): string | undefined {
+		if (!request.parentAgentId && !taskId) return undefined;
 		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
-		const attemptOf = request.attemptOf && latestTaskAttempt(snapshot, request.attemptOf.taskId);
+		const attemptOf = taskId ? latestTaskAttempt(snapshot, taskId) : undefined;
 		const rootAgentId = request.parentAgentId
 			? this.lifecycle.getAgent(request.parentAgentId)?.rootAgentId
 			: attemptOf
@@ -3225,7 +3241,7 @@ export class WorkerDelegationController {
 		}
 		const goal = this.goalForWorkerRequest(request);
 		const mode = this.workerContextForkMode(request, admission.executionContract);
-		const birth = this.workerBirth(request, mode);
+		const birth = request.modelTransfer ? { view: false, messages: [] } : this.workerBirth(request, mode);
 		const project = this.projectSelections.get(request);
 		const prepare = (birthContextForkReference: WorkerContextForkReference, laneId: string) => {
 			assertWorkerReceiptAdmission(request.receiptOrigin);
@@ -3240,6 +3256,7 @@ export class WorkerDelegationController {
 			const value = lifecycle.prepare(
 				{
 					instructions: admission.instructions,
+					...(request.modelTransfer ? { modelTransfer: request.modelTransfer } : {}),
 					knowledgeReferences: admission.knowledgeReferences,
 					subscriptions: admission.subscriptions,
 					...(request.delegationObjectiveId !== undefined
@@ -3317,73 +3334,18 @@ export class WorkerDelegationController {
 			});
 			return { executionPlan: admission.executionPlan, lifecycle, ...value };
 		}
-		for (let allocation = 0; allocation < DEFAULT_WORKER_FLEET_LIMITS.maxAgentsPerSession; allocation++) {
-			const preferred = allocation === 0 ? request.preferredAgentId?.trim() : undefined;
-			const snapshotBefore = preferred ? lifecycle.getTaskRuntimeSnapshot() : undefined;
-			const preferredAvailable =
-				preferred !== undefined &&
-				/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(preferred) &&
-				snapshotBefore?.tasks[preferred] === undefined &&
-				snapshotBefore?.agents[preferred] === undefined;
-			const laneId = preferredAvailable ? preferred : lifecycle.getNextAvailableLaneIdCandidate();
-			let proposedReference: WorkerContextForkReference | undefined;
-			try {
-				const capture = () =>
-					this.contextForks.captureAndPrepare({
-						logicalAgentId: laneId,
-						messages: birth.messages,
-						view: birth.view,
-						forkMode: mode,
-						readDurableReferences: () => this.durableWorkerContextForkReferences(),
-						isLogicalIdentityClaimed: () => {
-							const snapshot = lifecycle.getTaskRuntimeSnapshot();
-							return (
-								snapshot.tasks[laneId]?.attemptIds.some(
-									(attemptId) => snapshot.attempts[attemptId] !== undefined,
-								) ?? false
-							);
-						},
-						prepare: (birthContextForkReference) => {
-							proposedReference = birthContextForkReference;
-							return prepare(birthContextForkReference, laneId);
-						},
-					});
-				const captured =
-					project?.admission.kind === "allocated"
-						? this.projectDirectory.withPreparationScope(project.admission.allocation, capture)
-						: capture();
-				// Genuine lane creation (not a retry/resume/drain -- those all supply `existingRecord`
-				// and return earlier, above). Capture the owner epoch exactly once, here, at the same
-				// moment `goal`/`goalId` above is fixed into the durable dispatch -- never re-read on a
-				// later touch of this same laneId.
-				return { executionPlan: admission.executionPlan, lifecycle, ...captured.value };
-			} catch (error) {
-				if (error instanceof WorkerContextForkStoreError && error.code === "identity_claimed") continue;
-				const snapshot = lifecycle.getTaskRuntimeSnapshot();
-				const candidateTask = snapshot.tasks[laneId];
-				const candidateAttempts = candidateTask?.attemptIds.map((attemptId) => snapshot.attempts[attemptId]) ?? [];
-				const candidateOwnsDurableAttempt = candidateAttempts.some((attempt) => attempt !== undefined);
-				const sameRequestReplay = candidateAttempts.some(
-					(attempt) =>
-						attempt !== undefined &&
-						attempt.dispatch.instructions === admission.instructions &&
-						isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], admission.knowledgeReferences) &&
-						isDeepStrictEqual(attempt.dispatch.subscriptions ?? [], admission.subscriptions) &&
-						sameTaskBrief(attempt.dispatch.brief, request.brief) &&
-						attempt.dispatch.parentAgentId === request.parentAgentId &&
-						isDeepStrictEqual(attempt.dispatch.executionContract, admission.executionContract) &&
-						(proposedReference === undefined ||
-							isDeepStrictEqual(attempt.dispatch.birthContextForkReference, proposedReference)),
-				);
-				const corruptSnapshot =
-					error instanceof WorkerContextForkStoreError &&
-					(error.code === "snapshot_corrupt" || error.code === "snapshot_missing");
-				const generatedIdWasConcurrentlyClaimed =
-					candidateOwnsDurableAttempt && !sameRequestReplay && !corruptSnapshot;
-				if (!generatedIdWasConcurrentlyClaimed) throw error;
-			}
-		}
-		throw new Error("Worker logical-agent allocation retries were exhausted.");
+		const allocation = project?.admission.kind === "allocated" ? project.admission.allocation : undefined;
+		const captured = allocateWorkerBirth(
+			lifecycle,
+			this.contextForks,
+			request,
+			admission,
+			{ ...birth, forkMode: mode },
+			() => this.durableWorkerContextForkReferences(),
+			prepare,
+			(capture) => (allocation ? this.projectDirectory.withPreparationScope(allocation, capture) : capture()),
+		);
+		return { executionPlan: admission.executionPlan, lifecycle, ...captured };
 	}
 
 	private enqueuePreparedWorkerAttempt(
@@ -3630,7 +3592,10 @@ export class WorkerDelegationController {
 		return "released";
 	}
 
-	private claimAgentProjectContext(agent: AgentBindingContract): SpecialistContextClaim | undefined {
+	private claimAgentProjectContext(
+		agent: AgentBindingContract,
+		transferSource?: AttemptRuntimeState,
+	): SpecialistContextClaim | undefined {
 		const retained = this.projectClaims.get(agent.resumeContext.sessionId);
 		if (retained) {
 			// Re-adopted: a retained release of this claim must not release it under its new admission.
@@ -3644,13 +3609,21 @@ export class WorkerDelegationController {
 			...options,
 			specializationKey: binding.specializationKey,
 			owner: { parentSessionId: this.deps.getSessionId(), incarnation: this.agentControl.getProcessOwnerId() },
-			assertQueuedRecovery: (ownership) =>
-				assertQueuedWorkerContextRecoverable(
-					ownership,
-					this.deps.getSessionId(),
-					agent,
-					this.lifecycle.getTaskRuntimeSnapshot(),
-				),
+			assertBusyRecovery: (ownership) =>
+				transferSource?.lease
+					? assertTransferClaimRecoverable(
+							ownership,
+							this.deps.getSessionId(),
+							agent,
+							transferSource,
+							this.lifecycle.getTaskRuntimeSnapshot(),
+						)
+					: assertQueuedWorkerContextRecoverable(
+							ownership,
+							this.deps.getSessionId(),
+							agent,
+							this.lifecycle.getTaskRuntimeSnapshot(),
+						),
 		});
 		const claim = claimed.getProjectClaim()!;
 		this.projectClaims.set(agent.resumeContext.sessionId, claim);
@@ -4704,6 +4677,31 @@ export class WorkerDelegationController {
 		return admission.ok && this.holdsForLocalForeground(admission.shipment.model);
 	}
 
+	private transferPorts() {
+		return {
+			port: this.fitRoutePort(),
+			fit: this.fitRoute,
+			directories: this.directories,
+			isolation: this.laneIsolation,
+			resolveTarget: (input: Pick<WorkerAuthorityResolutionInput, "authority" | "modelPin" | "thirdParty">) =>
+				this.resolveWorkerAuthority(input),
+			recover: (source: AttemptRuntimeState) => this.recovery.recoveredRequest(source),
+			treeRefusal: (request: WorkerDelegationRequest, taskId: string) =>
+				this.workerTreeAttemptAdmissionSkipReason(request, taskId),
+		};
+	}
+
+	preflightModelTransfer(source: AttemptRuntimeState, targetModelRef: string): Promise<ModelTransferPreflight> {
+		return preflightWorkerTransfer(this.transferPorts(), source, targetModelRef);
+	}
+
+	startModelTransfer(source: AttemptRuntimeState, transfer: ModelTransferRecord, prepared: ModelTransferPreflight) {
+		const { request, admission } = admitWorkerTransfer(this.transferPorts(), source, transfer, prepared);
+		return admission.ok
+			? this.startInternal(request, admission.executionContract, admission)
+			: { started: false as const, skipReason: admission.skipReason };
+	}
+
 	private startInternal(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
@@ -5488,7 +5486,7 @@ export class WorkerDelegationController {
 		const workerRequest: WorkerRequest = withAttemptCostCeiling(
 			{
 				id: startedRecord.laneId,
-				instructions,
+				instructions: transferTaskInstructions(snapshot, prepared.attempt, instructions),
 				route: {
 					tier: "cheap",
 					risk: writeGranted ? "scoped-write" : "read-only",
@@ -5847,7 +5845,8 @@ export class WorkerDelegationController {
 				});
 				leaseHeartbeat.start();
 				// The lane's registration records which worker owns it (a no-op when the cwd is no lane, or another worker's).
-				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
+				if (!prepared.attempt?.modelTransferSourceAttemptId)
+					await this.laneIsolation?.bind(executionPlan.cwd, agentId);
 				// Resolve credentials before repository observation: a rejected or expired account fails admission without
 				// paying for a checkout-wide snapshot first. The executor resolves again at the provider boundary, so refreshed
 				// credentials are never pinned here. The start result waits for this point (startSettlement), naming the model.
@@ -5868,6 +5867,11 @@ export class WorkerDelegationController {
 						throw new Error(requestAuth.error);
 					}
 					this.credentialHealth.noteUsable(model);
+				}
+				if (prepared.attempt?.modelTransferSourceAttemptId) {
+					await this.laneIsolation?.assertTransferOwner(executionPlan.cwd, agentId);
+					workerSignal.throwIfAborted();
+					lifecycle.ledger.runtime.modelTransfers.acceptSuccessorStart(durableHandle);
 				}
 				startSettlement.settle();
 				const observer = this.deps.repositoryObserver;

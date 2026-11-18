@@ -37,7 +37,12 @@ export const FOREGROUND_HOLD_WAIT: WorkerDispatchWait = {
 export function readinessWait(reasonCode: string): WorkerDispatchWait {
 	return {
 		action: "wait",
-		reason: reasonCode === "objective_paused" ? "objective" : "dependencies",
+		reason:
+			reasonCode === "objective_paused"
+				? "objective"
+				: reasonCode === "model_transfer"
+					? "model_transfer"
+					: "dependencies",
 		detail: reasonCode,
 	};
 }

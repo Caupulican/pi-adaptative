@@ -14,7 +14,7 @@ import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/go
 import { type GoalState, isGoalExecutionActive, isGoalStoppedStatus } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { agentBasisTurnOrigin, agentNativeTurnCount, agentTurnBasis } from "./agent-turn-basis.ts";
-import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
+import { conversationTurnOrigin, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
 	AttemptUsageSnapshot,
@@ -32,13 +32,14 @@ import {
 	objectiveTakesNewWork,
 } from "./contracts.ts";
 import { OrchestrationEventStore } from "./event-store.ts";
+import { assertModelTransferAllowsNewAgentTurn, type ModelTransferDispatch } from "./model-transfer.ts";
+import { assertTaskAttemptBudgetForState } from "./risk-budget.ts";
 import {
 	type AttemptRuntimeState,
 	DurableTaskRuntime,
 	DurableTaskRuntimeError,
 	validateTaskDependencyIds,
 } from "./task-runtime.ts";
-import { assertTaskAttemptBudgetForState } from "./task-runtime-reducer.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
 import {
 	normalizeWorkerContextForkReference,
@@ -89,6 +90,7 @@ export interface DelegationLedgerOptions {
 }
 
 export interface PrepareDelegationInput {
+	modelTransfer?: ModelTransferDispatch;
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	subscriptions?: readonly HostEventSubscriptionInput[];
 	receiptOrigin?: OrchestrationDispatchRequest["receiptOrigin"];
@@ -273,6 +275,7 @@ export class DelegationOrchestrationLedger {
 	}
 
 	prepare(input: PrepareDelegationInput): AttemptRuntimeState {
+		if (input.modelTransfer) return this.prepareModelTransfer(input, input.modelTransfer);
 		const profile = input.executionContract.worker.profile;
 		const evidence = dispatchEvidence(input);
 		return this.prepareNormalized({
@@ -304,6 +307,37 @@ export class DelegationOrchestrationLedger {
 				...(input.modelRouteSource ? { modelRouteSource: input.modelRouteSource } : {}),
 				...(input.modelPinSource ? { modelPinSource: input.modelPinSource } : {}),
 			},
+		});
+	}
+
+	private prepareModelTransfer(input: PrepareDelegationInput, binding: ModelTransferDispatch): AttemptRuntimeState {
+		const snapshot = this.runtime.getSnapshot();
+		const source = snapshot.attempts[binding.sourceAttemptId];
+		const transfer = source?.modelTransfer;
+		if (
+			!source ||
+			!transfer ||
+			transfer.commandId !== binding.commandId ||
+			transfer.taskId !== input.laneId ||
+			transfer.taskId !== binding.taskId ||
+			transfer.successorAgentId !== binding.successorAgentId
+		)
+			throw new DurableTaskRuntimeError("Model transfer dispatch is unrelated to the reserved command.");
+		const turnOrigin = conversationTurnOrigin(snapshot, source);
+		const evidence = dispatchEvidence({ ...input, ...(turnOrigin?.thirdParty ? { turnOrigin } : {}) });
+		return this.runtime.modelTransfers.admit(binding.taskId, binding.sourceAttemptId, binding.commandId, {
+			taskId: binding.taskId,
+			profileId: input.executionContract.worker.profile.profileId,
+			instructions: input.instructions,
+			resourcePointerIds: source.dispatch.resourcePointerIds,
+			requirementIds: source.dispatch.requirementIds,
+			...(source.dispatch.parentAgentId ? { parentAgentId: source.dispatch.parentAgentId } : {}),
+			...evidence,
+			logicalLaneId: binding.successorAgentId,
+			executionContract: input.executionContract,
+			...(input.brief ? { brief: input.brief } : {}),
+			...(input.birthContextForkReference ? { birthContextForkReference: input.birthContextForkReference } : {}),
+			...(input.modelRouteSource ? { modelRouteSource: input.modelRouteSource } : {}),
 		});
 	}
 
@@ -377,6 +411,7 @@ export class DelegationOrchestrationLedger {
 		const taskId = workerTurnTaskId(agentId, controlMessageId ? { controlMessageId } : { sequence });
 		const existingTask = snapshot.tasks[taskId]?.task;
 		const basis = agentTurnBasis(snapshot, agent.agentId);
+		if (!existingTask) assertModelTransferAllowsNewAgentTurn(basis?.attempt, agentId);
 		const contract = basis?.dispatch.executionContract;
 		if (!basis || !contract) {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no immutable execution contract.`);
@@ -795,8 +830,13 @@ export class DelegationOrchestrationLedger {
 		};
 	}
 
-	cancel(attemptId: string, reasonCode: string, reasonDetail?: string): void {
-		this.runtime.cancelAttempt(attemptId, reasonCode, undefined, reasonDetail);
+	cancel(attemptId: string, reasonCode: string, reasonDetail?: string, transferCommandId?: string): void {
+		this.runtime.cancelAttempt(
+			attemptId,
+			reasonCode,
+			transferCommandId === undefined ? undefined : { transferCommandId },
+			reasonDetail,
+		);
 	}
 
 	/** Durable accounting total, or the latest checkpoint for an attempt predating accounting. */

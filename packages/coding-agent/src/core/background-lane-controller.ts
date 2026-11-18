@@ -101,8 +101,6 @@ import type {
 	WorkerAgentLaneResolution,
 	WorkerAgentMessageOptions,
 	WorkerAgentReplyResult,
-	WorkerAgentRetireOptions,
-	WorkerAgentRetireResult,
 	WorkerAgentTaskStartOptions,
 	WorkerAgentTranscriptOptions,
 	WorkerAgentWaitMode,
@@ -119,6 +117,7 @@ import { cancelTrackedLanes, stopSessionWorkers, type WorkerStopOutcome } from "
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
+import type { WorkerModelHandoffPort } from "./delegation/worker-lifecycle-controls.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
@@ -522,10 +521,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** The worker agent control of a surface that may delegate; any other surface has none to reach. */
-	private _agentControl() {
+	private _controllableWorkers() {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl();
+		return this._getWorkerController();
+	}
+
+	private _agentControl() {
+		return this._controllableWorkers().getAgentControl();
 	}
 
 	private _getWorkerController(): WorkerDelegationController {
@@ -1300,17 +1303,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		);
 	}
 
-	retireWorkerAgent(
-		agentId: string,
-		scope?: WorkerAgentControlScope,
-		options?: WorkerAgentRetireOptions,
-	): WorkerAgentRetireResult {
-		const control = this._agentControl();
-		const retired = options
-			? control.retireWorkerAgent(agentId, scope, options)
-			: control.retireWorkerAgent(agentId, scope);
+	handOffWorkerAgent(...args: Parameters<WorkerModelHandoffPort["handOffWorkerAgent"]>) {
+		return this._controllableWorkers().modelHandoffs.request(...args);
+	}
+
+	retireWorkerAgent(...args: Parameters<WorkerAgentControlPort["retireWorkerAgent"]>) {
+		const retired = this._agentControl().retireWorkerAgent(...args);
 		// The retirement is the event that frees the worker's worktree lane, when it had one.
-		if (!retired.replayed) this._getWorkerController().releaseRetiredAgentLane(agentId);
+		if (!retired.replayed) this._getWorkerController().releaseRetiredAgentLane(args[0]);
 		return retired;
 	}
 

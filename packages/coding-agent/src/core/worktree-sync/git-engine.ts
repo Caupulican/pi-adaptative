@@ -16,8 +16,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
-import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
+import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { withFileLock } from "../util/atomic-file.ts";
 import {
@@ -42,6 +41,10 @@ import {
 	type WorktreeSyncRefusal,
 } from "./codes.ts";
 import { WORKTREE_LANE_KEY_PATTERN } from "./lane-binding.ts";
+import { type BindLaneWorkerArgs, bindRegisteredLaneWorker, laneOwner, ownerConflicts } from "./lane-ownership.ts";
+
+export type { BindLaneWorkerArgs } from "./lane-ownership.ts";
+
 import {
 	acquireIntegrationLock,
 	appendAuditEvent,
@@ -345,14 +348,6 @@ export async function deriveLaneFacts(
 	};
 }
 
-/**
- * The process recorded as owning `lane`, or undefined when the record names no valid pid (it owns nothing). An owner
- * naming no host predates host recording and is judged as this host's; one without a start time is judged by pid alone.
- */
-function laneOwner(lane: LaneRegistration): ProcessOwner | undefined {
-	return isPositiveSafePid(lane.owner?.pid) ? lane.owner : undefined;
-}
-
 function sanitizeScope(scope: string): string {
 	const cleaned = scope
 		.toLowerCase()
@@ -447,54 +442,13 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 	});
 }
 
-/**
- * Does `lane` have a DIFFERENT, still-alive session owning it? Same `judgeOwner` rule used elsewhere:
- * only `dead` releases the claim, so a foreign-host owner, or one whose probe is inconclusive, conflicts. A lane with no
- * recorded owner, owned by THIS session, or whose owner is proven dead never conflicts --
- * `reconcile` already clears dead owners, but a race can still observe one here, and a dead owner
- * must never block land/release (D6, per R1: land/release ONLY -- sync/continue/abort_sync stay
- * ungated at the engine; worker cross-lane containment for those lives at the tool layer, D3).
- */
-function ownerConflicts(deps: WorktreeSyncEngineDeps, lane: LaneRegistration): boolean {
-	if (lane.ownerSessionId == null || lane.ownerSessionId === deps.sessionId) return false;
-	const owner = laneOwner(lane);
-	return owner !== undefined && judgeOwner(owner, deps) !== "dead";
-}
-
-export interface BindLaneWorkerArgs {
-	laneKey: string;
-	laneId: string;
-}
-
 export async function bindLaneWorker(
 	deps: WorktreeSyncEngineDeps,
 	args: BindLaneWorkerArgs,
 ): Promise<BindLaneWorkerResult> {
 	const ctx = await resolveRepoContext(deps);
 	if ("code" in ctx) return { code: "store_error", message: ctx.message };
-	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		const lane = await readLane(ctx.paths, args.laneKey);
-		if (!lane) return { code: "lane_not_found", message: `lane '${args.laneKey}' is not registered` };
-		if (lane.status !== "active")
-			return { code: "lane_not_active", message: `lane '${args.laneKey}' is ${lane.status}` };
-		if (lane.boundLaneId === args.laneId)
-			return { code: "already_bound", laneKey: args.laneKey, laneId: args.laneId };
-		if (lane.boundLaneId) {
-			return { code: "binding_conflict", laneKey: args.laneKey, boundLaneId: lane.boundLaneId };
-		}
-		const updated = { ...lane, boundLaneId: args.laneId, updatedAt: nowIso(deps) };
-		try {
-			await writeLane(ctx.paths, updated, ctx.write);
-			await appendAuditEvent(
-				ctx.paths,
-				{ event: "lane_worker_bound", laneKey: args.laneKey, laneId: args.laneId },
-				nowIso(deps),
-			);
-		} catch (error) {
-			return { code: "store_error", message: `lane binding persistence failed: ${String(error)}` };
-		}
-		return { code: "bound", laneKey: args.laneKey, laneId: args.laneId };
-	});
+	return bindRegisteredLaneWorker(ctx, deps, args);
 }
 
 export interface ReleaseLaneArgs {
@@ -502,11 +456,10 @@ export interface ReleaseLaneArgs {
 	/** Required as exactly "yes-discard-lane" to release a lane with unlanded commits or dirty files (G11). */
 	confirm?: string;
 	/**
-	 * Release only a lane bound to exactly this host lane id. A managed worker's closure releases the
-	 * lane it was dispatched into; the lane key it names is a caller claim, so a lane bound to another
-	 * worker (or to none) is refused rather than removed under its owner.
+	 * Require this worker binding under the registry lock. Null requires an unclaimed lane
+	 * (cleanup before dispatch), while an omitted expectation permits an operator release.
 	 */
-	expectBoundLaneId?: string;
+	expectBoundLaneId?: string | null;
 }
 
 export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLaneArgs): Promise<ReleaseLaneResult> {
@@ -514,10 +467,10 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 		const lane = await readLane(ctx.paths, args.laneKey);
 		if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
 		if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
-		if (args.expectBoundLaneId !== undefined && lane.boundLaneId !== args.expectBoundLaneId) {
+		if (args.expectBoundLaneId !== undefined && (lane.boundLaneId ?? null) !== args.expectBoundLaneId) {
 			return {
 				code: "lane_bound_elsewhere",
-				message: `lane '${lane.laneKey}' is ${lane.boundLaneId ? `bound to worker ${lane.boundLaneId}` : "not bound to a worker"}, not ${args.expectBoundLaneId}; it was not released`,
+				message: `lane '${lane.laneKey}' is ${lane.boundLaneId ? `bound to worker ${lane.boundLaneId}` : "not bound to a worker"}, expected ${args.expectBoundLaneId ?? "an unbound lane"}; it was not released`,
 			};
 		}
 		if (ownerConflicts(deps, lane)) {

@@ -172,6 +172,8 @@ export type BindLaneWorkerResult =
 	| { code: "binding_conflict"; laneKey: string; boundLaneId: string }
 	| { code: "lane_not_found"; message: string }
 	| { code: "lane_not_active"; message: string }
+	| { code: "lane_unbound"; message: string }
+	| { code: "lane_owner_conflict"; message: string }
 	| { code: "store_error"; message: string };
 
 export type CreateLaneResult =

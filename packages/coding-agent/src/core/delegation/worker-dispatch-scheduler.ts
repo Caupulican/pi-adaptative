@@ -13,6 +13,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 export type WorkerDispatchWaitReason =
 	| "capacity"
 	| "dependencies"
+	| "model_transfer"
 	| "objective"
 	| "write_reservation"
 	| "foreground"

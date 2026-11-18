@@ -90,6 +90,7 @@ export interface WorkerTreeBudgetSeed {
 }
 
 export interface WorkerTreeBudgetProjection {
+	tasks: Readonly<Record<string, { attemptIds: readonly string[] }>>;
 	agents: Readonly<Record<string, { rootAgentId: string }>>;
 	attempts: Readonly<
 		Record<
@@ -154,11 +155,22 @@ export function collectWorkerTreeBudgetSeeds(
 	rootAgentId: string,
 	treeTaskId: string,
 ): WorkerTreeBudgetSeed[] {
+	// A model handoff preserves the task but a fresh top-level worker has its own root id. Its
+	// earlier roots and their children already spent against this same budget.
+	const roots = new Set([rootAgentId]);
+	for (const id of snapshot.tasks[treeTaskId]?.attemptIds ?? []) {
+		const attempt = snapshot.attempts[id];
+		const agentId = attempt && nativeAgentIdForAttempt(attempt);
+		if (agentId && snapshot.agents[agentId]?.rootAgentId === agentId) roots.add(agentId);
+	}
 	const seeds: WorkerTreeBudgetSeed[] = [];
 	for (const attempt of Object.values(snapshot.attempts)) {
-		const attemptAgentId = nativeAgentIdForAttempt(attempt);
-		if (!attemptAgentId || snapshot.agents[attemptAgentId]?.rootAgentId !== rootAgentId) continue;
-		if (attemptAgentId === rootAgentId && attempt.taskId !== treeTaskId) continue;
+		const agentId = nativeAgentIdForAttempt(attempt);
+		if (!agentId) continue;
+		if (attempt.taskId !== treeTaskId) {
+			const root = snapshot.agents[agentId]?.rootAgentId;
+			if (!root || !roots.has(root) || roots.has(agentId)) continue;
+		}
 		const usage = projectAttemptUsage(attempt, snapshot.checkpoints);
 		seeds.push({ attemptId: attempt.attemptId, usage: usage ?? EMPTY_ATTEMPT_USAGE });
 	}

@@ -19,6 +19,7 @@ import {
 	type WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import { RUNG_REFUSAL_REASONS, type RungRefusalReason } from "../orchestration/delegation-ledger.ts";
+import { modelTransferSuppressesSourceEscalation } from "../orchestration/model-transfer.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type {
 	TaskEscalationRecord,
@@ -267,7 +268,7 @@ export class WorkerEscalation {
 	/** E12: run each listed requirement's host check once for the attempt, then re-record the outcome with the results. */
 	private async runChecks(outcome: Outcome, requirementIds: readonly string[]): Promise<void> {
 		const attemptId = outcome.attempts.at(-1)?.attemptId;
-		if (!attemptId || this.checkedAttempts.has(attemptId)) return;
+		if (!attemptId || this.checkedAttempts.has(attemptId) || this.transferOwnsSource(attemptId)) return;
 		this.checkedAttempts.add(attemptId);
 		const requirements = new Map((this.deps.goalState()?.requirements ?? []).map((entry) => [entry.id, entry]));
 		const cwd = this.checkCwd(attemptId);
@@ -276,7 +277,7 @@ export class WorkerEscalation {
 			const check = requirements.get(id)?.check;
 			if (!check) continue;
 			const result = await this.deps.requirementChecks.run(check, cwd, this.deps.signal);
-			if (this.deps.signal.aborted) return;
+			if (this.deps.signal.aborted || this.transferOwnsSource(attemptId)) return;
 			checks.push({ id, passed: result.passed });
 			if (result.passed) this.deps.requirementChecks.recordProof?.(attemptId, id, result);
 		}
@@ -286,6 +287,10 @@ export class WorkerEscalation {
 			failed: checks.filter((check) => !check.passed).length,
 		});
 		if (checks.length > 0) this.deps.recordChecks(attemptId, checks);
+	}
+
+	private transferOwnsSource(attemptId: string): boolean {
+		return modelTransferSuppressesSourceEscalation(this.deps.runtime.getSnapshot().attempts[attemptId]);
 	}
 
 	/**
@@ -304,17 +309,23 @@ export class WorkerEscalation {
 	/** Place one rung through `prepare` then `admit`; a refusal is logged and nothing is recorded. */
 	private async placeRung(outcome: Outcome, action: RerunAction): Promise<void> {
 		const taskId = outcome.taskId;
-		if (!taskId) return;
+		const sourceAttemptId = outcome.attempts.at(-1)?.attemptId;
+		if (!taskId || !sourceAttemptId) return;
 		const key = `escalation:${outcome.outcomeId}:r${action.rung}`;
 		const snapshot = this.deps.runtime.getSnapshot();
 		const task = snapshot.tasks[taskId];
-		if (!task || this.inFlight.has(key)) return;
+		if (
+			!task ||
+			this.inFlight.has(key) ||
+			modelTransferSuppressesSourceEscalation(snapshot.attempts[sourceAttemptId])
+		)
+			return;
 		if (task.escalations?.some((entry) => entry.outcomeId === outcome.outcomeId && entry.rung === action.rung))
 			return;
 		this.inFlight.add(key);
 		try {
 			const dispatch = await this.dispatchFor(snapshot, outcome, action, key);
-			if (!dispatch || this.deps.signal.aborted) {
+			if (!dispatch || this.deps.signal.aborted || this.transferOwnsSource(sourceAttemptId)) {
 				harnessLog.info("escalation", "an escalation rung has no admitted contract to repeat", {
 					outcomeId: outcome.outcomeId,
 					rung: action.rung,
@@ -322,7 +333,7 @@ export class WorkerEscalation {
 				return;
 			}
 			const prepared = await this.deps.fleet.prepare(dispatch, LOCAL_PLACEMENT, this.deps.signal);
-			if (this.deps.signal.aborted) return;
+			if (this.deps.signal.aborted || this.transferOwnsSource(sourceAttemptId)) return;
 			const decision = prepared.kind === "prepared" ? this.deps.fleet.admit(dispatch, LOCAL_PLACEMENT) : prepared;
 			if (decision.kind === "refused") {
 				const refusedAttemptId = outcome.attempts.at(-1)?.attemptId;

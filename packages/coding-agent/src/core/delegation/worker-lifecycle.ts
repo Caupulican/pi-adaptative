@@ -36,6 +36,7 @@ import {
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
 import type { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import { archiveIsCommitted, readRetentionArchives, retentionArchiveDir } from "../orchestration/retention-archive.ts";
 import { reviewEvidenceVerdict } from "../orchestration/review-verdict.ts";
 import type {
@@ -186,7 +187,7 @@ export class WorkerLifecycle {
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;
 	} {
-		let selectedLaneId = laneId;
+		let selectedLaneId = laneId ?? input.modelTransfer?.taskId;
 		if (!selectedLaneId) {
 			selectedLaneId = this.getNextAvailableLaneIdCandidate();
 		}
@@ -647,11 +648,18 @@ export class WorkerLifecycle {
 		return subject;
 	}
 
-	cancel(laneId: string, reasonCode: string, reasonDetail?: string): LaneRecord | undefined {
+	cancel(
+		laneId: string,
+		reasonCode: string,
+		reasonDetail?: string,
+		transfer?: ModelTransferRecord,
+	): LaneRecord | undefined {
 		const attempt = this.getActiveAttempt(laneId);
+		if (transfer && attempt?.attemptId !== transfer.sourceAttemptId)
+			throw new Error("The model transfer source changed.");
 		if (!attempt) return this.getRecord(laneId);
 		const wasOpen = NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status);
-		this.ledger.cancel(attempt.attemptId, reasonCode, reasonDetail);
+		this.ledger.cancel(attempt.attemptId, reasonCode, reasonDetail, transfer?.commandId);
 		if (wasOpen) this.outcomes.record(attempt.attemptId);
 		const record = this.getRecord(laneId);
 		if (record) this.enqueueTerminalNotification(record);

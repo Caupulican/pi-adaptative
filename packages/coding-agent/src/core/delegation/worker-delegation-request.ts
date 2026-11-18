@@ -19,6 +19,7 @@ import {
 	WORKER_ROLES,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
+import type { ModelTransferDispatch } from "../orchestration/model-transfer.ts";
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
@@ -255,6 +256,8 @@ export function parseWorkerParallelWorkIntent(value: unknown): WorkerParallelWor
 
 /** A profile is an optional preset; authority is compiled and persisted by the host. */
 export interface WorkerDelegationRequest {
+	/** Host-only link to the durable command that reserved this successor. */
+	modelTransfer?: ModelTransferDispatch;
 	instructions: string;
 	/** Exact canonical references for this task only; omission grants no owner knowledge. */
 	knowledge?: readonly KnowledgeGrantReference[];

@@ -37,6 +37,7 @@ import {
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
+import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
 import {
 	type SessionBundleDeletionReservation,
 	withSessionBundleAdmission,
@@ -66,6 +67,11 @@ import type {
 import { type WorkerConversationRoots, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
+import type {
+	WorkerAgentRetireOptions,
+	WorkerAgentRetireResult,
+	WorkerModelHandoffPort,
+} from "./worker-lifecycle-controls.ts";
 import { isPendingTaskBearingMessage, workerMailboxHasOpenObligation } from "./worker-mailbox-obligations.ts";
 import {
 	readWorkerMailboxRecord,
@@ -360,6 +366,7 @@ export interface WorkerAgentMailboxOptions extends WorkerConversationRoots {
 	parentSessionId: string;
 	agentId: string;
 	projectClaim?: SpecialistContextClaim;
+	assertNewIntake?: () => void;
 }
 
 export interface WorkerAgentMailboxResourceSnapshot {
@@ -524,25 +531,17 @@ export interface WorkerAgentView {
 	updatedAt: string;
 }
 
-export interface WorkerAgentRetireResult {
-	agent: WorkerAgentView;
-	retired: true;
-	replayed: boolean;
-}
-
-export interface WorkerAgentRetireOptions {
-	/** Dead-letter the agent's undelivered control messages instead of refusing to retire. */
-	discardPending?: boolean;
-}
+export type { WorkerAgentRetireOptions, WorkerAgentRetireResult } from "./worker-lifecycle-controls.ts";
 
 /** The task lane an agent identity currently stands for: its latest attempt. */
 export interface WorkerAgentLaneResolution {
+	modelTransfer?: ModelTransferRecord;
 	laneId: string;
 	status: AttemptStatus;
 }
 
 /** One canonical host port for model-facing logical-agent controls. */
-export interface WorkerAgentControlPort extends Partial<HostEventControlPort> {
+export interface WorkerAgentControlPort extends Partial<HostEventControlPort>, Partial<WorkerModelHandoffPort> {
 	/** Host-only evidence transport; model tools never construct a delivery binding. */
 	deliverHostEvent?(delivery: HostEventDelivery, signal: AbortSignal): Promise<"queued" | "dormant" | "unavailable">;
 	reconcileHostEventDelivery?(delivery: HostEventDelivery): void;
@@ -1597,6 +1596,7 @@ export class WorkerAgentMailbox {
 	private readonly parentSessionId: string;
 	private readonly agentId: string;
 	private readonly file: string;
+	private readonly assertNewIntake?: () => void;
 	private readonly listeners = new Set<() => void>();
 	private observedProjectReference?: WorkerMailboxContextReference;
 
@@ -1606,6 +1606,7 @@ export class WorkerAgentMailbox {
 		this.parentSessionId = assertIdentity(options.parentSessionId, "parent session id");
 		this.agentId = assertIdentity(options.agentId, "agent id");
 		this.file = workerMailboxPath(options.orchestrationHome, this.parentSessionId, this.agentId);
+		this.assertNewIntake = options.assertNewIntake;
 	}
 
 	getProjectClaim(): SpecialistContextClaim | undefined {
@@ -1653,14 +1654,9 @@ export class WorkerAgentMailbox {
 		return accepted.message;
 	}
 
-	/** Enqueue with exact creation evidence for an idempotent surrounding acceptance flow. */
 	/**
-	 * `onAdmitted` runs inside this transaction once EVERY deterministic refusal has been ruled out --
-	 * content and identity bounds, replay identity, pending capacity and encoded-byte admission -- and
-	 * immediately before the accepted message is written. It exists so a caller can materialize the
-	 * durable context an accepted message needs (its goal criteria) without persisting that context
-	 * for a start the mailbox is about to refuse. It must be synchronous and must not re-enter this
-	 * mailbox's lock; a throw from it refuses the admission with nothing written here.
+	 * Return exact creation or replay evidence. The synchronous onAdmitted hook runs under the
+	 * mailbox lock, after deterministic admission checks and before the new message is written.
 	 */
 	enqueueWithReceipt(input: {
 		kind: WorkerAgentMessageKind;
@@ -1829,9 +1825,9 @@ export class WorkerAgentMailbox {
 					completedReplay = true;
 					return state;
 				}
-				const pending = state.messages.filter(
-					(candidate) => candidate.deliveredAt === undefined && candidate.failedAt === undefined,
-				);
+				// Exact retained messages and receipts settle above. Only a fresh obligation needs admission.
+				this.assertNewIntake?.();
+				const pending = state.messages.filter(isPendingMessage);
 				if (
 					pending.filter((candidate) => hasExternalReplayAuthority(candidate) === externallyReplayOwned).length >=
 					MAX_MAILBOX_MESSAGES

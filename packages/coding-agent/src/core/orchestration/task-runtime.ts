@@ -21,6 +21,11 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
+import {
+	assertApprovalRequestTransition,
+	assertApprovalResolutionTransition,
+	pendingApprovalForTask,
+} from "./approval-transitions.ts";
 import { nextRetryStateFromValue } from "./attempt-retry-state.ts";
 import { beginAttemptUsageGeneration, recordAttemptGenerationUsage } from "./attempt-usage-generations.ts";
 import {
@@ -55,10 +60,12 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
+import { ModelTransferRuntime } from "./model-transfer-runtime.ts";
 import { assertNotificationCapacity } from "./notification-eviction.ts";
 import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
+import { assertTaskAttemptBudgetForState, parseInputRiskBudget } from "./risk-budget.ts";
 import {
 	approvalFromPayload,
 	assertAcceptanceCriteria,
@@ -69,7 +76,6 @@ import {
 	dispatchIdentifierArray,
 	executionGrantFromValue,
 	MAX_DATE_EPOCH_MS,
-	parseInputRiskBudget,
 	taskFromValue,
 	usageFromPayload,
 	usageGenerationIdentityFromValue,
@@ -90,8 +96,6 @@ import {
 	activeTaskAttempt,
 	assertAgentNotRetired,
 	assertAgentRetirementEligible,
-	assertApprovalRequestTransition,
-	assertApprovalResolutionTransition,
 	assertAttemptCheckpointTransition,
 	assertAttemptFinishTransition,
 	assertAttemptGrantTransition,
@@ -103,7 +107,6 @@ import {
 	assertObjectiveStatusTransition,
 	assertRetryBackoffElapsedAt,
 	assertRunningAttemptLease,
-	assertTaskAttemptBudgetForState,
 	assertTaskFailureTransition,
 	assertVerificationTransition,
 	attemptDispatchReadiness,
@@ -114,9 +117,11 @@ import {
 } from "./task-runtime-reducer.ts";
 import {
 	type ApprovalRuntimeState,
+	type AttemptCancellationGuard,
 	type AttemptDispatchReadiness,
 	type AttemptParentWriteBody,
 	type AttemptRuntimeState,
+	assertCancellationGuard,
 	type CreateObjectiveInput,
 	type CreateTaskInput,
 	DurableTaskRuntimeError,
@@ -172,6 +177,7 @@ export interface DurableTaskRuntimeOptions {
 
 export class DurableTaskRuntime {
 	readonly hostEvents: HostEventRuntime;
+	readonly modelTransfers: ModelTransferRuntime;
 	private readonly store: OrchestrationEventStore;
 	private readonly now: () => number;
 	private readonly createId: () => string;
@@ -185,6 +191,13 @@ export class DurableTaskRuntime {
 		this.createId = options.createId ?? randomUUID;
 		this.state = deepFreeze(readTaskRuntimeProjection(this.store));
 		this.compactCurrentProjection();
+		this.modelTransfers = new ModelTransferRuntime({
+			effectLockDirectory: this.store.rootDir,
+			findIdempotentEvent: (key) => this.store.findIdempotentEvent(key),
+			read: () => this.getSnapshot(),
+			commit: (event, assertAdmission) => this.commit(event, undefined, assertAdmission),
+			subscribe: (listener) => this.store.subscribe((event) => listener(event.aggregateId)),
+		});
 		this.hostEvents = new HostEventRuntime({
 			parentSessionId: this.store.sessionId,
 			read: () => this.getSnapshot(),
@@ -566,7 +579,7 @@ export class DurableTaskRuntime {
 	queueAttempt(taskId: string, dispatch: OrchestrationDispatchRequest, grantId?: string): AttemptRuntimeState {
 		this.refresh();
 		const task = this.requireDispatchableTask(taskId);
-		const pendingApproval = this.pendingApprovalForTask(taskId);
+		const pendingApproval = pendingApprovalForTask(this.state, taskId);
 		if (pendingApproval) {
 			throw new DurableTaskRuntimeError(
 				`Task '${taskId}' is awaiting approval '${pendingApproval.request.approvalId}'.`,
@@ -1060,15 +1073,12 @@ export class DurableTaskRuntime {
 	cancelAttempt(
 		attemptId: string,
 		reasonCode: string,
-		guard?: { expectedLastOrdinal: number; unleasedOnly: true },
+		guard?: AttemptCancellationGuard,
 		reasonDetail?: string,
 	): AttemptRuntimeState {
 		this.refresh();
 		const attempt = this.requireAttempt(attemptId);
-		// Setup recovery is conditional cancellation. The append's existing ordinal fence extends
-		// this proof through the durable write, so a competing lease/binding cannot be cancelled.
-		if (guard && (this.state.lastOrdinal !== guard.expectedLastOrdinal || attempt.lease))
-			throw new DurableTaskRuntimeError("Unleased cancellation evidence changed.");
+		assertCancellationGuard(attempt, this.state.lastOrdinal, guard);
 		if (terminalAttemptStatus(attempt.status)) return structuredClone(attempt);
 		if (!reasonCode.trim()) throw new DurableTaskRuntimeError("Cancellation reason is required.");
 		const detail = reasonDetail ? boundedRedactedDiagnosticText(reasonDetail) : undefined;
@@ -1521,18 +1531,6 @@ export class DurableTaskRuntime {
 			issuedAt: new Date(issuedAtMs).toISOString(),
 			expiresAt: new Date(expiresAtMs).toISOString(),
 		};
-	}
-
-	private pendingApprovalForTask(taskId: string): ApprovalRuntimeState | undefined {
-		const task = this.state.tasks[taskId];
-		if (!task) return undefined;
-		return Object.values(this.state.approvals).find(
-			(approval) =>
-				approval.status === "pending" &&
-				approval.request.attemptId === undefined &&
-				approval.request.objectiveId === task.task.objectiveId &&
-				(approval.request.taskId === undefined || approval.request.taskId === taskId),
-		);
 	}
 
 	private requireActiveObjectiveForAttempt(attempt: AttemptRuntimeState): void {
