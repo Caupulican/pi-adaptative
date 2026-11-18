@@ -31,14 +31,14 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
-import type { ContextGcReport } from "../context-gc.ts";
 import {
 	type ContextRelevanceScope,
 	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
 	CURATION_RELEVANCE_QUERY_MAX_CHARS,
 	contextRelevanceKey,
 } from "./brain-curator.ts";
-import type { PromptPolicyShadowReport } from "./context-prompt-policy.ts";
+import { type ContextGcReport, packedRecordLookup } from "./context-gc-report.ts";
+import { type PromptPolicyShadowReport, promptPolicyItems } from "./context-prompt-policy.ts";
 import {
 	CONTEXT_VISIBILITY_LONG_CHARS,
 	CONTEXT_VISIBILITY_SHORT_CHARS,
@@ -247,12 +247,12 @@ export function enforcePromptPolicy(
 	const currentQuery = settings.brainRelevance
 		? latestUserPromptText(sourceMessages, CURATION_RELEVANCE_QUERY_MAX_CHARS)
 		: "";
-	const nextMessages = messages.slice();
+	let nextMessages: AgentMessage[] | undefined;
 	const transientMessages: AgentMessage[] = [];
-	let changed = false;
+	let getPackedRecord: ReturnType<typeof packedRecordLookup> | undefined;
 	const items: PromptEnforcementItemReport[] = [];
 
-	for (const planItem of shadowReport.items) {
+	for (const planItem of promptPolicyItems(shadowReport)) {
 		const sourceMessage = sourceMessages[planItem.messageIndex];
 		const projectedMessage = messages[planItem.messageIndex];
 		if (
@@ -331,13 +331,13 @@ export function enforcePromptPolicy(
 		});
 		const relevanceKey = relevanceScope ? contextRelevanceKey(relevanceScope) : undefined;
 		const basePacked = isContextGcPacked(projectedMessage.details);
-		const gcRecord = gcReport?.records.find(
-			(record) => record.messageIndex === planItem.messageIndex && record.toolCallId === planItem.toolCallId,
-		);
-		const gcRetrievalId =
-			gcRecord?.retrievalAvailable && gcRecord.storagePath && gcRecord.key ? `context:${gcRecord.key}` : undefined;
-
 		if (basePacked) {
+			getPackedRecord ??= packedRecordLookup(gcReport?.records ?? []);
+			const gcRecord = getPackedRecord(planItem.messageIndex, planItem.toolCallId);
+			const gcRetrievalId =
+				gcRecord?.retrievalAvailable && gcRecord.storagePath && gcRecord.key
+					? `context:${gcRecord.key}`
+					: undefined;
 			if (decision.selected === "hidden" && gcRetrievalId) {
 				items.push({
 					itemId: planItem.itemId,
@@ -441,6 +441,7 @@ export function enforcePromptPolicy(
 				? projectedMessage.details
 				: {};
 		const action = decision.selected === "hidden" ? "artifact_stub" : "artifact_preview";
+		nextMessages ??= messages.slice();
 		nextMessages[planItem.messageIndex] = {
 			...projectedMessage,
 			content: [
@@ -466,7 +467,6 @@ export function enforcePromptPolicy(
 				},
 			},
 		};
-		changed = true;
 		items.push({
 			itemId: planItem.itemId,
 			toolCallId: planItem.toolCallId,
@@ -494,7 +494,7 @@ export function enforcePromptPolicy(
 		originalChars: items.reduce((sum, item) => sum + (item.enforced ? (item.originalChars ?? 0) : 0), 0),
 	}));
 	return {
-		messages: changed ? nextMessages : messages,
+		messages: nextMessages ?? messages,
 		transientMessages,
 		report: { turnIndex: shadowReport.turnIndex, items },
 		isCurrent,

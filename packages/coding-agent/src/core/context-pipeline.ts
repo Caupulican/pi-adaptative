@@ -36,7 +36,7 @@ import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import { messageContentRevision } from "../kernel/message-revision.ts";
 import { PrefixFold } from "../kernel/prefix-fold.ts";
-import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
+import type { CompactionEntry } from "../kernel/session/session-entries.ts";
 import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../kernel/usage.ts";
@@ -67,7 +67,6 @@ import {
 	ContextAuditHistory,
 	type ContextAuditOptions,
 	type ContextAuditReport,
-	contextToolRows,
 	runContextAudit,
 } from "./context/context-audit.ts";
 import {
@@ -87,6 +86,7 @@ import {
 	type PromptPolicyGcCorrelationReport,
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
+	promptPolicyItems,
 } from "./context/context-prompt-policy.ts";
 import { contextVisibilityExcerpt } from "./context/context-query-visibility.ts";
 import {
@@ -100,6 +100,10 @@ import { getToolResultText } from "./context/context-tool-result.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
 import { PathAliasRuntime, type PathAliasSyncResult } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
+import {
+	SessionToolResultEntries,
+	type SessionToolResultEntrySnapshot,
+} from "./context/session-tool-result-entries.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import {
 	applyContextGc,
@@ -161,7 +165,7 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
 }
 
 /**
- * A worker conversation's own context-policy state (agent parity): the audit memo and the messages it
+ * A worker conversation's own context-policy state (agent parity): the audit history and the messages it
  * was last filled for, and the lane's own tool surface. The head-only relevance curator never reaches a
  * lane, and a lane's reports are its own, never the root's inspection state.
  */
@@ -319,10 +323,7 @@ export class ContextPipeline {
 	private _hasTokenBudgetAnchor = false;
 	private _tokenBudgetAnchorCompactionId: string | undefined = undefined;
 	private _lastTokenBudgetAnchorKey: string | undefined = undefined;
-	/** Incremental current-branch lookup used by the per-turn audit. It retains only tool calls
-	 * still present in the provider-visible context, so compaction also bounds this cache. */
-	private _sessionEntryLookupCache: { leafId: string | null; byToolCallId: Map<string, string> } | undefined =
-		undefined;
+	private readonly _sessionToolResultEntries = new SessionToolResultEntries();
 	private readonly _auditHistory = new ContextAuditHistory();
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/** Each worker conversation's own context-policy lane (`planWorkerRequest`), by its agent id. */
@@ -512,102 +513,31 @@ export class ContextPipeline {
 		this._coveredChars.fold([]);
 		this._settledGcArtifactHolders.clear();
 		this._latestCompactionScan.reset();
+		this._sessionToolResultEntries.reset();
 		if (failures.length) throw new AggregateError(failures, "Context storage cleanup failed");
 	}
 
-	/**
-	 * Map tool-result call ids to persisted session-entry ids. Linear branch growth is handled
-	 * incrementally by walking only entries appended since the cached leaf; a branch switch falls
-	 * back to one full rebuild so lookups never leak entries from the abandoned branch.
-	 */
 	private _getLatestCompactionEntry(): CompactionEntry | null {
 		const sessionManager = this.deps.getSessionManager();
 		const index = resolveSessionEntryIndex(sessionManager);
 		return index ? this._latestCompactionScan.find(index) : getLatestCompactionEntry(sessionManager.getBranch());
 	}
 
-	private _buildSessionEntryIdLookup(
-		wantedToolCallIds: ReadonlySet<string>,
-	): (toolCallId: string) => string | undefined {
-		const resolveFrom = (byToolCallId: ReadonlyMap<string, string>) => (toolCallId: string) =>
-			byToolCallId.get(toolCallId);
-		const sessionManager = this.deps.getSessionManager();
-		const index = resolveSessionEntryIndex(sessionManager);
-		const leafId = index?.leafId;
-		const cached = this._sessionEntryLookupCache;
-		if (cached) {
-			let pruned: Map<string, string> | undefined;
-			for (const toolCallId of cached.byToolCallId.keys()) {
-				if (wantedToolCallIds.has(toolCallId)) continue;
-				pruned ??= new Map(cached.byToolCallId);
-				pruned.delete(toolCallId);
-			}
-			if (pruned) cached.byToolCallId = pruned;
-		}
-		if (index && leafId !== undefined) {
-			if (cached?.leafId === leafId) {
-				return resolveFrom(cached.byToolCallId);
-			}
-			if (cached) {
-				const appendedEntries: SessionEntry[] = [];
-				let cursor = leafId;
-				while (cursor !== null && cursor !== cached.leafId) {
-					const entry = index.getEntry(cursor);
-					if (!entry) break;
-					appendedEntries.push(entry);
-					cursor = entry.parentId;
-				}
-				if (cursor === cached.leafId) {
-					let appended: Map<string, string> | undefined;
-					for (let index = appendedEntries.length - 1; index >= 0; index--) {
-						const entry = appendedEntries[index];
-						if (
-							entry.type === "message" &&
-							entry.message.role === "toolResult" &&
-							wantedToolCallIds.has(entry.message.toolCallId)
-						) {
-							appended ??= new Map(cached.byToolCallId);
-							appended.set(entry.message.toolCallId, entry.id);
-						}
-					}
-					if (appended) cached.byToolCallId = appended;
-					cached.leafId = leafId;
-					return resolveFrom(cached.byToolCallId);
-				}
-			}
-		}
-
-		const byToolCallId = new Map<string, string>();
-		for (const entry of sessionManager.getBranch()) {
-			if (
-				entry.type === "message" &&
-				entry.message.role === "toolResult" &&
-				wantedToolCallIds.has(entry.message.toolCallId)
-			) {
-				byToolCallId.set(entry.message.toolCallId, entry.id);
-			}
-		}
-		if (leafId !== undefined) this._sessionEntryLookupCache = { leafId, byToolCallId };
-		return resolveFrom(byToolCallId);
+	private _buildSessionEntryIdLookup(): SessionToolResultEntrySnapshot {
+		return this._sessionToolResultEntries.capture(this.deps.getSessionManager());
 	}
 
-	/** Options shared by the memoized hot path and the no-memo full-scan path. */
-	private _sessionEntryIdResolver(messages: readonly AgentMessage[]): (toolCallId: string) => string | undefined {
-		return this._buildSessionEntryIdLookup(contextToolRows(messages).callIds);
-	}
-
-	private _buildContextAuditOptions(messages: AgentMessage[]): ContextAuditOptions {
+	private _buildContextAuditOptions(): ContextAuditOptions {
 		return {
 			turnIndex: this.deps.getTurnIndex(),
 			artifactStore: this._toolArtifactStore,
-			sessionEntryIdForToolCallId: this._sessionEntryIdResolver(messages),
 		};
 	}
 
-	private _buildContextProjectionOptions(messages: readonly AgentMessage[]): ContextProjectionOptions {
+	private _buildContextProjectionOptions(): ContextProjectionOptions {
 		return {
 			turnIndex: this.deps.getTurnIndex(),
-			sessionEntryIdForToolCallId: this._sessionEntryIdResolver(messages),
+			sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup().resolve,
 		};
 	}
 
@@ -655,7 +585,7 @@ export class ContextPipeline {
 		policyLane.toolNames = toolNames;
 		const contextPolicy = policyLane;
 		return new ProviderRequestContextController({
-			runContextAudit: (history) => this.runContextAudit(history, contextPolicy),
+			runContextAudit: (history, transients) => this.runContextAudit(history, transients, contextPolicy),
 			runPromptPolicyPlanning: (report) => this.runPromptPolicyPlanning(report, contextPolicy),
 			previewContextProjection: (history) => this.previewContextProjection(history, contextPolicy),
 			commitContextProjection: (projection) => this.commitContextProjection(projection, contextPolicy),
@@ -678,7 +608,7 @@ export class ContextPipeline {
 		if (lane) {
 			return buildContextProjection(messages, { turnIndex: this.deps.getTurnIndex() });
 		}
-		return buildContextProjection(messages, this._buildContextProjectionOptions(messages));
+		return buildContextProjection(messages, this._buildContextProjectionOptions());
 	}
 
 	/** Publish only the projection belonging to a provider plan that passed its currency gate. */
@@ -692,41 +622,24 @@ export class ContextPipeline {
 
 	/** Latest accepted root projection, or a pure full-scan preview for explicit messages. */
 	getContextProjection(messages?: readonly AgentMessage[]): ContextProjection {
-		if (messages) return buildContextProjection(messages, this._buildContextProjectionOptions(messages));
+		if (messages) return buildContextProjection(messages, this._buildContextProjectionOptions());
 		return this._latestContextProjection ?? emptyContextProjection(this.deps.getTurnIndex());
 	}
 
 	/**
-	 * Phase 1 observe-only audit pass (see context/context-audit.ts): converts live
-	 * toolResult messages into ContextItems and runs the existing retention/hard-constraint
-	 * evaluators over them, storing the latest deterministic report for tests/debugging.
-	 * Read-only with respect to messages, the transcript, and artifact references -- uses
-	 * `_toolArtifactStore` (the field), not `getToolArtifactStore()` (the getter), so a
-	 * session that never packed anything doesn't force-create a store/dir just to audit.
-	 * Never throws into a live turn: any failure degrades to an empty report.
-	 *
-	 * This is the memoized hot path (provider-request planning calls it every
-	 * round trip via agent-session.ts's one-line delegation). It reuses indexed rows from the
-	 * incremental design. `getContextAuditReport`/`getPromptPolicyReport`'s `messages`-arg
-	 * recompute variants deliberately do NOT go through this method (see
-	 * `_runContextAuditFullScan`), so a read-only debug/test peek at a hypothetical `messages`
-	 * array can never evict a live entry out of the hot-path memo.
+	 * Snapshot the durable tool results, this request's transient suffix and currently available evidence.
+	 * Each conversation owns its durable index. Inspection with explicit messages recomputes independently.
+	 * Reading the optional artifact-store field avoids creating storage solely for diagnostics.
 	 */
-	runContextAudit(messages: AgentMessage[], lane?: ContextPolicyLane): ContextAuditReport {
+	runContextAudit(
+		messages: AgentMessage[],
+		transients?: readonly AgentMessage[],
+		lane?: ContextPolicyLane,
+	): ContextAuditReport {
 		try {
-			if (lane) {
-				// A lane's tool results live in its own conversation, never on the root session's branch.
-				return runContextAudit(
-					messages,
-					{ turnIndex: this.deps.getTurnIndex(), artifactStore: this._toolArtifactStore },
-					lane.auditHistory.refresh(messages),
-				);
-			}
-			const report = runContextAudit(
-				messages,
-				this._buildContextAuditOptions(messages),
-				this._auditHistory.refresh(messages),
-			);
+			const options = this._buildContextAuditOptions();
+			if (lane) return lane.auditHistory.capture(messages, options, undefined, transients);
+			const report = this._auditHistory.capture(messages, options, this._buildSessionEntryIdLookup(), transients);
 			this._latestContextAuditReport = report;
 			return report;
 		} catch (error) {
@@ -742,7 +655,10 @@ export class ContextPipeline {
 	/** No-memo full-scan variant of {@link runContextAudit}, for read-only recompute callers. */
 	private _runContextAuditFullScan(messages: AgentMessage[]): ContextAuditReport {
 		try {
-			const report = runContextAudit(messages, this._buildContextAuditOptions(messages));
+			const report = runContextAudit(messages, {
+				...this._buildContextAuditOptions(),
+				sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup().resolve,
+			});
 			this._latestContextAuditReport = report;
 			return report;
 		} catch (error) {
@@ -775,7 +691,7 @@ export class ContextPipeline {
 	runPromptPolicyPlanning(auditReport: ContextAuditReport, lane?: ContextPolicyLane): PromptPolicyShadowReport {
 		let report: PromptPolicyShadowReport;
 		try {
-			report = planPromptPolicy(auditReport);
+			report = planPromptPolicy(auditReport, true);
 		} catch (error) {
 			harnessLog.warn("context", "prompt-policy planning failed; the turn runs with an empty plan", () =>
 				degradedFields(error),
@@ -802,10 +718,9 @@ export class ContextPipeline {
 	 * produced its report; never influences context-gc itself. Never throws into a live
 	 * turn: any failure degrades to an empty correlation.
 	 */
-	correlatePromptPolicyWithContextGc(gcReport: ContextGcReport): void {
-		const shadowReport = this._latestPromptPolicyReport ?? { turnIndex: this.deps.getTurnIndex(), items: [] };
+	correlatePromptPolicyWithContextGc(gcReport: ContextGcReport, shadowReport: PromptPolicyShadowReport): void {
 		try {
-			this._latestPromptPolicyGcCorrelation = correlateWithContextGc(shadowReport, gcReport);
+			this._latestPromptPolicyGcCorrelation = correlateWithContextGc(shadowReport, gcReport, true);
 		} catch (error) {
 			harnessLog.warn("context", "the prompt-policy and context-gc correlation failed; it is recorded empty", () =>
 				degradedFields(error),
@@ -872,7 +787,7 @@ export class ContextPipeline {
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			if (!settings.enabled) return;
 			const goal = latestUserPromptText(messages, CURATION_RELEVANCE_QUERY_MAX_CHARS);
-			for (const item of shadowReport.items) {
+			for (const item of promptPolicyItems(shadowReport)) {
 				if (!item.hasAvailableRetrievalPath) continue;
 				const message = messages[item.messageIndex];
 				if (message?.role !== "toolResult" || message.toolCallId !== item.toolCallId) continue;

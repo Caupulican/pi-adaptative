@@ -13,8 +13,8 @@
  * place that decides how a tool_output item's PolicyFeatures/HardConstraintFlags are built.
  */
 
-import type { ContextGcPackedRecord, ContextGcReport } from "../context-gc.ts";
-import type { ContextAuditReport } from "./context-audit.ts";
+import { auditItemsForPolicy, type ContextAuditItemReport, type ContextAuditReport } from "./context-audit.ts";
+import { type ContextGcPackedRecord, type ContextGcReport, contextGcPackReasons } from "./context-gc-report.ts";
 import type { ContextEvidenceRef, ContextItemKind, ContextRetentionClass, ContextSource } from "./context-item.ts";
 import type { RetentionAction } from "./context-retention.ts";
 import type { PolicyHardConstraintCode } from "./policy-types.ts";
@@ -61,28 +61,53 @@ export interface PromptPolicyShadowReport {
  * Deterministic re-shaping of an audit report into the shadow policy plan shape. Pure: no
  * I/O, no mutation, given the same audit report this always returns an equal result.
  */
-export function planPromptPolicy(auditReport: ContextAuditReport): PromptPolicyShadowReport {
+function projectPolicyItem(entry: ContextAuditItemReport): PromptPolicyItemReport {
 	return {
-		turnIndex: auditReport.turnIndex,
-		items: auditReport.items.map((entry) => ({
-			itemId: entry.item.id,
-			kind: entry.item.kind,
-			retentionClass: entry.item.retentionClass,
-			source: entry.item.source,
-			toolCallId: entry.toolCallId,
-			messageIndex: entry.messageIndex,
-			primaryRefType: entry.item.primaryRef?.type,
-			hasAvailableRetrievalPath: entry.item.primaryRef?.type === "artifact",
-			allowedRetentionActions: entry.retention.allowedActions,
-			hardConstraints: {
-				keepRaw: entry.keepRawHardConstraints,
-				packToArtifact: entry.packToArtifactHardConstraints,
-				dropFromPrompt: entry.dropFromPromptHardConstraints,
-				summarize: entry.summarizeHardConstraints,
-			},
-			appliedAction: "keep_raw",
-		})),
+		itemId: entry.item.id,
+		kind: entry.item.kind,
+		retentionClass: entry.item.retentionClass,
+		source: entry.item.source,
+		toolCallId: entry.toolCallId,
+		messageIndex: entry.messageIndex,
+		primaryRefType: entry.item.primaryRef?.type,
+		hasAvailableRetrievalPath: entry.item.primaryRef?.type === "artifact",
+		allowedRetentionActions: entry.retention.allowedActions,
+		hardConstraints: {
+			keepRaw: entry.keepRawHardConstraints,
+			packToArtifact: entry.packToArtifactHardConstraints,
+			dropFromPrompt: entry.dropFromPromptHardConstraints,
+			summarize: entry.summarizeHardConstraints,
+		},
+		appliedAction: "keep_raw",
 	};
+}
+
+const privatePolicyItems = new WeakMap<PromptPolicyShadowReport, () => PromptPolicyItemReport[]>();
+
+/** Internal read-only view. Editing an inspected shadow report cannot change enforcement or GC correlation. */
+export function promptPolicyItems(report: PromptPolicyShadowReport): readonly PromptPolicyItemReport[] {
+	return privatePolicyItems.get(report)?.() ?? report.items;
+}
+
+/** A live request owns the source snapshot and can defer the full diagnostic projection. */
+export function planPromptPolicy(auditReport: ContextAuditReport, deferItems = false): PromptPolicyShadowReport {
+	const turnIndex = auditReport.turnIndex;
+	if (!deferItems) return { turnIndex, items: auditReport.items.map(projectPolicyItem) };
+	let privateRows: PromptPolicyItemReport[] | undefined;
+	const project = () => {
+		privateRows ??= auditItemsForPolicy(auditReport).map(projectPolicyItem);
+		return privateRows;
+	};
+	let publicRows: PromptPolicyItemReport[] | undefined;
+	const report = {
+		turnIndex,
+		get items() {
+			publicRows ??= structuredClone(project());
+			return publicRows;
+		},
+	};
+	privatePolicyItems.set(report, project);
+	return report;
 }
 
 export interface PromptPolicyGcCorrelationEntry {
@@ -119,21 +144,32 @@ export interface PromptPolicyGcCorrelationReport {
 export function correlateWithContextGc(
 	shadowReport: PromptPolicyShadowReport,
 	gcReport: ContextGcReport,
+	deferEntries = false,
 ): PromptPolicyGcCorrelationReport {
-	const packedByToolCallId = new Map<string, ContextGcPackedRecord>();
-	for (const record of gcReport.records) packedByToolCallId.set(record.toolCallId, record);
+	const turnIndex = shadowReport.turnIndex;
+	// Eager callers can supply or edit their own GC records. Capture scalar reasons now,
+	// including the existing last-record-wins behavior for repeated tool-call IDs.
+	const reasons = contextGcPackReasons(gcReport, deferEntries);
 
-	const entries: PromptPolicyGcCorrelationEntry[] = shadowReport.items.map((item) => {
-		const gcRecord = packedByToolCallId.get(item.toolCallId);
-		return {
-			itemId: item.itemId,
-			toolCallId: item.toolCallId,
-			actuallyPackedByLegacyGc: gcRecord !== undefined,
-			gcPackReason: gcRecord?.reason,
-			policyWouldAllowPack: item.hardConstraints.packToArtifact.length === 0,
-			policyWouldAllowDrop: item.hardConstraints.dropFromPrompt.length === 0,
-		};
-	});
-
-	return { turnIndex: shadowReport.turnIndex, entries };
+	const project = (): PromptPolicyGcCorrelationEntry[] =>
+		(deferEntries ? promptPolicyItems(shadowReport) : shadowReport.items).map((item) => {
+			const gcPackReason = reasons.get(item.toolCallId);
+			return {
+				itemId: item.itemId,
+				toolCallId: item.toolCallId,
+				actuallyPackedByLegacyGc: gcPackReason !== undefined,
+				gcPackReason,
+				policyWouldAllowPack: item.hardConstraints.packToArtifact.length === 0,
+				policyWouldAllowDrop: item.hardConstraints.dropFromPrompt.length === 0,
+			};
+		});
+	if (!deferEntries) return { turnIndex, entries: project() };
+	let entries: PromptPolicyGcCorrelationEntry[] | undefined;
+	return {
+		turnIndex,
+		get entries() {
+			entries ??= project();
+			return entries;
+		},
+	};
 }

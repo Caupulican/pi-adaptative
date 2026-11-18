@@ -21,17 +21,16 @@
  */
 
 import type { ToolResultMessage } from "@caupulican/pi-ai";
-import { countHistoryWork } from "@caupulican/pi-ai/history-work";
+import { countHistoryWork, inheritHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { AgentMessage } from "../../kernel/index.ts";
 import {
 	type MessageHistoryVersion,
-	messageContentRevision,
 	messageHistoryVersion,
 	unchangedMessagePrefix,
 } from "../../kernel/message-revision.ts";
-import { PrefixFoldByFirstItem } from "../../kernel/prefix-fold.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 import {
+	type ContextArtifactRef,
 	type ContextEvidenceRef,
 	type ContextItem,
 	estimateByteLength,
@@ -41,6 +40,7 @@ import { evaluateRetentionEligibility, type RetentionEligibility } from "./conte
 import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
 import { evaluateHardConstraints } from "./policy-engine.ts";
 import type { HardConstraintFlags, PolicyFeatures, PolicyHardConstraintCode } from "./policy-types.ts";
+import type { SessionToolResultEntrySnapshot } from "./session-tool-result-entries.ts";
 
 export interface ContextAuditOptions {
 	/** Current turn index (AgentSession's own per-run counter); used as `createdAtTurn`. */
@@ -79,96 +79,35 @@ export interface BuiltToolOutputItem {
 	hasResolvedArtifact: boolean;
 }
 
-/**
- * Per-message memo of the expensive part of {@link buildToolOutputItem} (text extraction +
- * token/byte estimate + artifact `readRef` metadata), keyed by `AgentMessage` object identity
- * -- a replaced/rewritten message object is a new key, so it misses and recomputes with no
- * extra bookkeeping. Entries also carry the `messageIndex` they were built at: a message that
- * kept its identity but shifted index (e.g. a compaction survivor) is treated as a miss too,
- * since `messageIndex` feeds the transcript evidence ref.
- *
- * Ownership: the caller (`ContextPipeline`) owns a single long-lived instance across calls and
- * passes it in every pass; `runContextAudit` treats it as the previous pass's cache on read and
- * replaces its contents with exactly this pass's live entries before returning (a message no
- * longer present in `messages` is dropped, not retained) -- so the map never grows unbounded
- * across compaction rewrites or branch switches. Callers that must stay pure full-scans (tests,
- * read-only recompute paths) simply omit this parameter.
- */
-export type ContextAuditMemo = Map<
-	AgentMessage,
-	{ messageIndex: number; revision: number; built: BuiltToolOutputItem }
->;
-
-type ContextToolRows = {
-	rows: { message: ToolResultMessage; messageIndex: number }[];
-	callIds: Set<string>;
-};
-
-const toolRows = (): ContextToolRows => ({ rows: [], callIds: new Set<string>() });
-
-function collectToolRow(result: ContextToolRows, message: AgentMessage, messageIndex: number): void {
-	if (message.role !== "toolResult") return;
-	result.rows.push({ message, messageIndex });
-	result.callIds.add(message.toolCallId);
+interface ToolRow {
+	toolCallId: string;
+	toolName: string;
+	messageIndex: number;
+	artifactId: string | undefined;
+	tokenEstimate: number;
+	byteEstimate: number;
 }
 
-const indexedToolRows = new PrefixFoldByFirstItem<AgentMessage, ContextToolRows>(toolRows, collectToolRow);
-
-/** The audit and its transcript lookup need the same ordered set of tool-result rows. */
-export function contextToolRows(messages: readonly AgentMessage[]): ContextToolRows {
-	if (messageHistoryVersion(messages)) return indexedToolRows.fold(messages);
-	const result = toolRows();
-	countHistoryWork(messages, "oldRowsRead", messages.length);
-	messages.forEach((message, index) => {
-		collectToolRow(result, message, index);
-	});
-	return result;
-}
-
-export class ContextAuditHistory {
-	private readonly memo: ContextAuditMemo = new Map();
-	private version: MessageHistoryVersion | undefined;
-	private length = 0;
-
-	refresh(messages: readonly AgentMessage[]): ContextAuditMemo | undefined {
-		const version = messageHistoryVersion(messages);
-		if (!version || !this.version || unchangedMessagePrefix(this.version, version) < this.length) this.memo.clear();
-		this.version = version;
-		this.length = messages.length;
-		return version ? this.memo : undefined;
-	}
-
-	clear(): void {
-		this.refresh([]);
-	}
+function measureToolResult(message: ToolResultMessage, messageIndex: number): ToolRow {
+	const text = getToolResultText(message);
+	return {
+		toolCallId: message.toolCallId,
+		toolName: message.toolName,
+		messageIndex,
+		artifactId: getToolResultArtifactId(message.details),
+		tokenEstimate: estimateTokensFromText(text),
+		byteEstimate: estimateByteLength(text),
+	};
 }
 
 function buildToolOutputItem(
-	message: ToolResultMessage,
-	messageIndex: number,
-	options: ContextAuditOptions,
+	row: ToolRow,
+	turnIndex: number,
+	artifact: ContextArtifactRef | undefined,
+	sessionEntryId: string | undefined,
 ): BuiltToolOutputItem {
-	const text = getToolResultText(message);
-	const artifactId = getToolResultArtifactId(message.details);
-	const sessionEntryId = options.sessionEntryIdForToolCallId?.(message.toolCallId);
-
-	let primaryRef: ContextEvidenceRef | undefined;
-	let hasResolvedArtifact = false;
-	// createdAtTurn defaults to the current audit turn (an approximation -- see below) and
-	// is overridden with the real capture turn when an artifact ref resolves.
-	let createdAtTurn = options.turnIndex;
-	if (artifactId && options.artifactStore) {
-		// Metadata-only: never loads the artifact's payload just to check resolvability and
-		// grab ref fields (a per-turn audit pass over every artifact-backed result would
-		// otherwise re-read every payload off disk each turn for no reason).
-		const ref = options.artifactStore.readRef(artifactId);
-		if (ref) {
-			primaryRef = { type: "artifact", ref };
-			hasResolvedArtifact = true;
-			createdAtTurn = ref.createdAtTurn;
-		}
-	}
-
+	const { messageIndex } = row;
+	let primaryRef: ContextEvidenceRef | undefined = artifact && { type: "artifact", ref: { ...artifact } };
 	const evidenceRefs: ContextEvidenceRef[] = [];
 	if (sessionEntryId) {
 		const transcriptRef: ContextEvidenceRef = {
@@ -180,7 +119,7 @@ function buildToolOutputItem(
 	}
 
 	const item: ContextItem = {
-		id: `tool-output:${message.toolCallId}`,
+		id: `tool-output:${row.toolCallId}`,
 		kind: "tool_output",
 		retentionClass: "ephemeral",
 		source: "tool",
@@ -189,15 +128,15 @@ function buildToolOutputItem(
 		// deliberately not left silently wrong: no evaluator reads createdAtTurn today, but
 		// any future staleness/break-even math must use the real per-item value above, not
 		// this fallback, once one exists for non-artifact items too.
-		createdAtTurn,
-		summary: `${message.toolName} tool result`,
+		createdAtTurn: artifact?.createdAtTurn ?? turnIndex,
+		summary: `${row.toolName} tool result`,
 		primaryRef,
 		evidenceRefs: evidenceRefs.length > 0 ? evidenceRefs : undefined,
-		tokenEstimate: estimateTokensFromText(text),
-		byteEstimate: estimateByteLength(text),
+		tokenEstimate: row.tokenEstimate,
+		byteEstimate: row.byteEstimate,
 	};
 
-	return { item, hasResolvedArtifact };
+	return { item, hasResolvedArtifact: artifact !== undefined };
 }
 
 /**
@@ -259,61 +198,183 @@ export function buildToolResultContextItem(
 	messageIndex: number,
 	options: ContextAuditOptions,
 ): ContextItem {
-	return buildToolOutputItem(message, messageIndex, options).item;
+	const row = measureToolResult(message, messageIndex);
+	return buildToolOutputItem(
+		row,
+		options.turnIndex,
+		row.artifactId ? options.artifactStore?.readRef(row.artifactId) : undefined,
+		options.sessionEntryIdForToolCallId?.(row.toolCallId),
+	).item;
 }
 
-/**
- * Read-only audit pass: converts live toolResult messages into ContextItems and runs the
- * existing pure retention/hard-constraint evaluators over them. Never mutates `messages`,
- * the transcript, or artifact references -- deterministic given the same messages,
- * `turnIndex`, and artifact-store state (not a cross-turn stability guarantee: turnIndex
- * and artifact-backed createdAtTurn values are expected to change turn over turn).
- *
- * `memo`, if supplied, is an incremental-memo seam (see {@link ContextAuditMemo}): the
- * expensive `buildToolOutputItem` work is skipped and reused for a message whose object
- * identity AND index are unchanged from the previous pass. The turnIndex-dependent tail
- * (`createdAtTurn` for non-artifact-backed items) is re-derived fresh on every call
- * regardless of cache hit/miss, so output is byte-identical to a full recompute either way
- * -- omitting `memo` (or passing a throwaway `new Map()`) makes this a pure full scan, exactly
- * as before this parameter existed.
- */
-export function runContextAudit(
-	messages: AgentMessage[],
-	options: ContextAuditOptions,
-	memo?: ContextAuditMemo,
-): ContextAuditReport {
-	const items: ContextAuditItemReport[] = [];
-	const { rows } = contextToolRows(messages);
-	countHistoryWork(messages, "oldRowsRead", rows.length);
-	for (const { message, messageIndex } of rows) {
-		const cached = memo?.get(message);
-		const revision = messageContentRevision(message);
-		let built: BuiltToolOutputItem;
-		if (cached && cached.messageIndex === messageIndex && cached.revision === revision) built = cached.built;
-		else {
-			built = buildToolOutputItem(message, messageIndex, options);
-			memo?.set(message, { messageIndex, revision, built });
-		}
-		// Re-derive the turnIndex-dependent tail every call, cache hit or miss: a resolved
-		// artifact's real capture turn never changes (see buildToolOutputItem), while a
-		// non-artifact item's createdAtTurn is always the CURRENT audit turn -- exactly what a
-		// fresh buildToolOutputItem call would have produced, so this is a no-op on a cache
-		// miss and a correctness fix on a cache hit.
-		const item: ContextItem = built.hasResolvedArtifact
-			? built.item
-			: { ...built.item, createdAtTurn: options.turnIndex };
-		const features = buildPolicyFeatures(item, built, options.turnIndex);
-		const flags = buildHardConstraintFlags(built, options.artifactStore !== undefined);
-		items.push({
-			item,
-			toolCallId: message.toolCallId,
-			messageIndex,
-			retention: evaluateRetentionEligibility(item),
-			keepRawHardConstraints: evaluateHardConstraints("keep_raw", features, flags),
-			packToArtifactHardConstraints: evaluateHardConstraints("pack_to_artifact", features, flags),
-			dropFromPromptHardConstraints: evaluateHardConstraints("drop_from_prompt", features, flags),
-			summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
-		});
+function evaluateRow(
+	row: ToolRow,
+	built: BuiltToolOutputItem,
+	turnIndex: number,
+	storeAvailable: boolean,
+): ContextAuditItemReport {
+	const { item } = built;
+	const features = buildPolicyFeatures(item, built, turnIndex);
+	const flags = buildHardConstraintFlags(built, storeAvailable);
+	return {
+		item,
+		toolCallId: row.toolCallId,
+		messageIndex: row.messageIndex,
+		retention: evaluateRetentionEligibility(item),
+		keepRawHardConstraints: evaluateHardConstraints("keep_raw", features, flags),
+		packToArtifactHardConstraints: evaluateHardConstraints("pack_to_artifact", features, flags),
+		dropFromPromptHardConstraints: evaluateHardConstraints("drop_from_prompt", features, flags),
+		summarizeHardConstraints: evaluateHardConstraints("summarize", features, flags),
+	};
+}
+
+interface AuditIndex {
+	rows: ToolRow[];
+	artifactIds: Set<string>;
+}
+
+function emptyIndex(): AuditIndex {
+	return { rows: [], artifactIds: new Set() };
+}
+
+function appendRow(index: AuditIndex, row: ToolRow): void {
+	index.rows.push(row);
+	if (row.artifactId) index.artifactIds.add(row.artifactId);
+}
+
+/** A rewrite gets its own index so earlier reports keep their ordering and extent. */
+function forkIndex(index: AuditIndex, unchanged: number): AuditIndex {
+	const fork = emptyIndex();
+	for (const row of index.rows) {
+		if (row.messageIndex >= unchanged) break;
+		appendRow(fork, row);
 	}
-	return { turnIndex: options.turnIndex, items };
+	return fork;
+}
+
+function indexSuffix(
+	index: AuditIndex,
+	messages: readonly AgentMessage[],
+	start: number,
+	offset = 0,
+	workOwner = messages,
+): void {
+	countHistoryWork(workOwner, "auditSourceRowsVisited", messages.length - start);
+	// Measure before publishing. A malformed tool result must not leave a partially appended index on retry.
+	const appended: ToolRow[] = [];
+	for (let i = start; i < messages.length; i++) {
+		const message = messages[i];
+		if (message.role === "toolResult") appended.push(measureToolResult(message, offset + i));
+	}
+	for (const row of appended) appendRow(index, row);
+}
+
+const policyRows = new WeakMap<ContextAuditReport, () => ContextAuditItemReport[]>();
+
+/** Internal policy projections must be independent of edits to published debug rows. */
+export function auditItemsForPolicy(report: ContextAuditReport): readonly ContextAuditItemReport[] {
+	return policyRows.get(report)?.() ?? report.items;
+}
+
+/** Capture external metadata now. Lazy readers must see the store and transcript as of this request. */
+function captureReport(
+	index: AuditIndex,
+	messages: readonly AgentMessage[],
+	{ turnIndex, artifactStore, sessionEntryIdForToolCallId }: ContextAuditOptions,
+	defer: boolean,
+	transients?: readonly AgentMessage[],
+): ContextAuditReport {
+	const segments = [{ index, end: index.rows.length }];
+	if (transients?.length) {
+		const tail = emptyIndex();
+		indexSuffix(tail, transients, 0, messages.length, messages);
+		segments.push({ index: tail, end: tail.rows.length });
+	}
+	const storeAvailable = artifactStore !== undefined;
+	const artifacts = new Map<string, ContextArtifactRef | undefined>();
+	if (artifactStore) {
+		for (const segment of segments) {
+			for (const id of segment.index.artifactIds) {
+				if (artifacts.has(id)) continue;
+				const ref = artifactStore.readRef(id);
+				artifacts.set(id, ref && { ...ref });
+			}
+		}
+		countHistoryWork(messages, "auditArtifactRefsChecked", artifacts.size);
+	}
+	let canonical: ContextAuditItemReport[] | undefined;
+	function materialize(): ContextAuditItemReport[] {
+		if (canonical) return canonical;
+		const result: ContextAuditItemReport[] = [];
+		for (const { index, end } of segments) {
+			countHistoryWork(report, "auditRowsMaterialized", end);
+			for (let i = 0; i < end; i++) {
+				const row = index.rows[i];
+				const artifact = row.artifactId ? artifacts.get(row.artifactId) : undefined;
+				const built = buildToolOutputItem(row, turnIndex, artifact, sessionEntryIdForToolCallId?.(row.toolCallId));
+				result.push(evaluateRow(row, built, turnIndex, storeAvailable));
+			}
+		}
+		canonical = result;
+		return canonical;
+	}
+	let published: ContextAuditItemReport[] | undefined;
+	const report: ContextAuditReport = {
+		turnIndex,
+		get items() {
+			published ??= structuredClone(materialize());
+			return published;
+		},
+	};
+	inheritHistoryWork(messages, report);
+	policyRows.set(report, materialize);
+	if (!defer) materialize();
+	return report;
+}
+
+/** Full, independent recomputation for explicit diagnostics and caller-owned inputs. */
+export function runContextAudit(messages: readonly AgentMessage[], options: ContextAuditOptions): ContextAuditReport {
+	const index = emptyIndex();
+	indexSuffix(index, messages, 0);
+	return captureReport(index, messages, options, false);
+}
+
+/** Request-local reports share measured immutable tool facts up to the captured row count. */
+export class ContextAuditHistory {
+	private index = emptyIndex();
+	private version: MessageHistoryVersion | undefined;
+	private length = 0;
+
+	capture(
+		messages: readonly AgentMessage[],
+		options: Omit<ContextAuditOptions, "sessionEntryIdForToolCallId">,
+		sessionEntries?: SessionToolResultEntrySnapshot,
+		transients?: readonly AgentMessage[],
+	): ContextAuditReport {
+		const version = messageHistoryVersion(messages);
+		const snapshotOptions = { ...options, sessionEntryIdForToolCallId: sessionEntries?.resolve };
+		if (!version) {
+			this.clear();
+			const index = emptyIndex();
+			countHistoryWork(messages, "oldRowsRead", messages.length);
+			indexSuffix(index, messages, 0);
+			return captureReport(index, messages, snapshotOptions, true, transients);
+		}
+		const unchanged = this.version ? unchangedMessagePrefix(this.version, version) : 0;
+		const start = Math.min(unchanged, this.length);
+		const index = start < this.length ? forkIndex(this.index, start) : this.index;
+		if (start < this.length)
+			countHistoryWork(messages, "oldRowsRead", index.rows.length + Math.min(this.length, messages.length) - start);
+		indexSuffix(index, messages, start);
+		this.version = version;
+		this.length = messages.length;
+		this.index = index;
+		return captureReport(index, messages, snapshotOptions, true, transients);
+	}
+
+	clear(): void {
+		this.index = emptyIndex();
+		this.version = undefined;
+		this.length = 0;
+	}
 }

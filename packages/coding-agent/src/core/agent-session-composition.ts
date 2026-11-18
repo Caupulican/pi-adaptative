@@ -784,14 +784,15 @@ export function createSessionProviderRequestContext(
 		// A side trip reads its small brief, never the transcript (see ModelRouterController.projectTurnContext).
 		transformBase: async (messages) => owners.modelRouter().projectTurnContext(messages),
 		transformExtensions: memory.createContextProjection(owners.extensionRunner),
-		runContextAudit: (messages) => pipeline.runContextAudit(messages),
+		runContextAudit: (messages, transients) => pipeline.runContextAudit(messages, transients),
 		runPromptPolicyPlanning: (report) => pipeline.runPromptPolicyPlanning(report),
 		previewContextProjection: (messages) => pipeline.previewContextProjection(messages),
 		commitContextProjection: (projection) => pipeline.commitContextProjection(projection),
 		runMemoryRetrieval: (messages) => memory.runMemoryRetrieval(messages),
 		applyContextGc: (messages, writePayloads, frozenBelow) =>
 			pipeline.applyContextGc(messages, writePayloads, frozenBelow),
-		correlatePromptPolicyWithContextGc: (report) => pipeline.correlatePromptPolicyWithContextGc(report),
+		correlatePromptPolicyWithContextGc: (report, shadow) =>
+			pipeline.correlatePromptPolicyWithContextGc(report, shadow),
 		runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport) =>
 			pipeline.runPromptEnforcement(messages, report, undefined, { sourceMessages, frozenBelow, gcReport }),
 		enqueueRelevanceCuration: (messages, report) => pipeline.enqueueRelevanceCuration(messages, report),

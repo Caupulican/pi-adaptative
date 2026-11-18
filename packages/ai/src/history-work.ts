@@ -3,6 +3,9 @@ import type { Message } from "./types.ts";
 
 export interface HistoryWork {
 	oldRowsRead: number;
+	auditSourceRowsVisited: number;
+	auditArtifactRefsChecked: number;
+	auditRowsMaterialized: number;
 	coldPayloadLoads: number;
 	oldBytesRecompressed: number;
 	projectedRows: number;
@@ -22,6 +25,9 @@ const observations = new WeakMap<object, HistoryWork>();
 export function observeHistoryWork(owner: object): HistoryWork {
 	const work: HistoryWork = {
 		oldRowsRead: 0,
+		auditSourceRowsVisited: 0,
+		auditArtifactRefsChecked: 0,
+		auditRowsMaterialized: 0,
 		coldPayloadLoads: 0,
 		oldBytesRecompressed: 0,
 		projectedRows: 0,

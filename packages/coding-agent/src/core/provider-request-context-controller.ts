@@ -64,7 +64,7 @@ export interface ProviderRequestContextControllerDeps {
 		transientMessages: AgentMessage[];
 		isCurrent?(): boolean;
 	}>;
-	runContextAudit?(messages: AgentMessage[]): ContextAuditReport;
+	runContextAudit?(history: AgentMessage[], transients: readonly AgentMessage[]): ContextAuditReport;
 	runPromptPolicyPlanning?(report: ContextAuditReport): PromptPolicyShadowReport;
 	/** Capture the complete final provider-visible request without publishing speculative state. */
 	previewContextProjection?(messages: readonly AgentMessage[]): ContextProjection;
@@ -77,7 +77,7 @@ export interface ProviderRequestContextControllerDeps {
 		/** Already-sent boundary packing must not rewrite below (see `frozenPrefixLength`). */
 		frozenBelow: number,
 	): ContextGcResult;
-	correlatePromptPolicyWithContextGc?(report: ContextGcReport): void;
+	correlatePromptPolicyWithContextGc?(report: ContextGcReport, shadow: PromptPolicyShadowReport): void;
 	runPromptEnforcement?(
 		messages: AgentMessage[],
 		report: PromptPolicyShadowReport,
@@ -563,7 +563,7 @@ export class ProviderRequestContextController {
 		// passes below so they can never disagree about what is frozen.
 		const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, durableMessages);
 		const extensionMessages = appendPlanningMessages(durableMessages, providerTransients);
-		const auditReport = this.deps.runContextAudit?.(extensionMessages);
+		const auditReport = this.deps.runContextAudit?.(durableMessages, providerTransients);
 		const shadowReport = auditReport ? this.deps.runPromptPolicyPlanning?.(auditReport) : undefined;
 		const memoryReport = this.deps.runMemoryRetrieval
 			? await this.deps.runMemoryRetrieval(extensionMessages)
@@ -705,7 +705,7 @@ export class ProviderRequestContextController {
 					throw new Error("Committed provider request context diverged from its accepted plan");
 				}
 				previewGc.commit();
-				this.deps.correlatePromptPolicyWithContextGc?.(previewGc.report);
+				if (shadowReport) this.deps.correlatePromptPolicyWithContextGc?.(previewGc.report, shadowReport);
 				if (shadowReport) this.deps.enqueueRelevanceCuration?.(extensionMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration?.();
 				if (skillVault && !sameSkillSections(skillVault.commitSkillSections(), skillSections)) {

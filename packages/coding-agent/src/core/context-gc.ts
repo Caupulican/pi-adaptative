@@ -19,10 +19,13 @@ import {
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
+import { type ContextGcPackedRecord, type ContextGcReport, recordPack } from "./context/context-gc-report.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { writeFileAtomicSync } from "./util/atomic-file.ts";
+
+export type { ContextGcPackedRecord, ContextGcReport } from "./context/context-gc-report.ts";
 
 export interface SemanticMemoryGcSettings {
 	enabled?: boolean;
@@ -111,42 +114,6 @@ export interface ContextGcOptions extends NormalizedContextGcSettings {
 	 * own optional `frozenBelow` input, defaulting to 0 for callers outside the live provider-request path).
 	 */
 	frozenBelow: number;
-}
-
-export interface ContextGcPackedRecord {
-	toolName: string;
-	toolCallId: string;
-	messageIndex: number;
-	reason: "superseded-read" | "stale-tool-result" | "stale-semantic-memory" | "superseded-transient-record";
-	originalChars: number;
-	originalTokens: number;
-	packedTokens: number;
-	storagePath?: string;
-	/** True only when the context original is readable now; a planned path is not availability. */
-	retrievalAvailable: boolean;
-	path?: string;
-	command?: string;
-	key?: string;
-	/**
-	 * The result is an `artifact_retrieve` slice of an original already stored under `key`: the stub
-	 * points at that original and nothing new is stored.
-	 */
-	retrieved?: boolean;
-	/** Brain-curator semantic digest of the packed content (model-generated; advisory only). Arrives
-	 * already fenced in the untrusted-content boundary (see ContextGcCurationHooks.resolveDigest) —
-	 * render verbatim, never re-wrap. */
-	digest?: string;
-}
-
-export interface ContextGcReport {
-	enabled: boolean;
-	packedCount: number;
-	originalTokens: number;
-	packedTokens: number;
-	savedTokens: number;
-	records: ContextGcPackedRecord[];
-	/** The crossing's already-sent batch and the host's verdict on it, when one was offered. */
-	sentPrefixRewrite?: SentPrefixRewriteBatch & SentPrefixRewriteVerdict;
 }
 
 export interface ContextGcResult {
@@ -631,7 +598,7 @@ function emitMemoizedPack(pass: PackingPass, messageIndex: number, memo: PackedM
 	// one first write, so re-emitting it must not add a filesystem stat per packed item per request.
 	const record: ContextGcPackedRecord = { ...memo.record, messageIndex };
 	writePacked(pass, messageIndex, memo.packed, memo);
-	pass.report.records.push(record);
+	recordPack(pass.report, record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
 	pass.pending.push({ record, originalText: memo.originalText, availabilityOwner: memo.record });
@@ -811,7 +778,7 @@ function commitPackedMessage<TMessage extends AgentMessage>(
 		}
 	}
 	writePacked(pass, messageIndex, packed, accepted);
-	pass.report.records.push(record);
+	recordPack(pass.report, record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
 	pass.pending.push({
