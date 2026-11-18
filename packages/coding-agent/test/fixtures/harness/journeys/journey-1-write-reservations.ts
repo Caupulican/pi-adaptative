@@ -180,8 +180,10 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	).toBe(true);
 	world.processTable.advanceProcess();
 	const e13ProbeBase = world.processTable.probes.length;
+	const e13RecoveryIoBase = world.io.operations.length;
 	const e13Fresh = await world.createRootSession("root", { sessionManager: world.createSessionManager() });
-	const e13EntranceStoreBefore = e13StoreContent();
+	// Startup and later lane reads share recovery. Reading twice must not release the same lease again.
+	e13Fresh.session.getLaneRecords();
 	e13Fresh.session.getLaneRecords();
 	const e13EntranceProbes = world.processTable.probes.slice(e13ProbeBase);
 	expect(
@@ -189,9 +191,9 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		"the recovery entrance probes the exact dead owner pid with signal 0",
 	).toBe(true);
 	expect(
-		e13EntranceStoreBefore.some((content) => content.includes(e13OldLease.reservationId)),
-		"the exact old reservation is durable before the recovery entrance",
-	).toBe(true);
+		world.io.operations.slice(e13RecoveryIoBase).filter((op) => op.kind === "unlink" && op.path === e13StorePath),
+		"recovery removes the store holding the dead owner's exact lease once",
+	).toHaveLength(1);
 	expect(
 		e13StoreContent().some((content) => content.includes(e13OldLease.reservationId)),
 		"the recovery entrance releases the exact old reservation from the durable store",
