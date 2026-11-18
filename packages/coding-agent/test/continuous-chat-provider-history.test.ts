@@ -13,12 +13,21 @@ import {
 	renderPathAliasLegend,
 	renderPathAliasLegendFrame,
 } from "../src/core/comms/host-injection-records.ts";
+import {
+	liveWorkerHandoffOf,
+	recordLiveWorkerHandoff,
+	recordLiveWorkerReport,
+} from "../src/core/delegation/worker-handoff-provenance.ts";
 import { normalizeContinuousChatAppend } from "../src/core/memory/continuous-chat-contracts.ts";
-import { ContinuousChatIngestor } from "../src/core/memory/continuous-chat-ingest.ts";
+import {
+	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
+	ContinuousChatIngestor,
+} from "../src/core/memory/continuous-chat-ingest.ts";
 import {
 	continuousChatRequestHistory,
 	createContinuousChatPlanWrapper,
 } from "../src/core/memory/continuous-chat-projection.ts";
+import type { ProviderHistoryContinuation } from "../src/core/memory/continuous-chat-provider-history.ts";
 import { IcmTurnCoordinator } from "../src/core/memory/continuous-chat-turn-coordinator.ts";
 import type { AgentContext, AgentLoopConfig } from "../src/kernel/loop-config.ts";
 import { advanceMessageContentRevision } from "../src/kernel/message-revision.ts";
@@ -61,6 +70,11 @@ function fixture() {
 	const view = "<chat>\n</chat>";
 	const controls = {
 		covered: true,
+		continuation: {} as ProviderHistoryContinuation,
+		handoff: undefined as AgentMessage | undefined,
+		handoffValid: true,
+		handoffRead: undefined as ((message: AgentMessage) => boolean) | undefined,
+		beforeObserve: () => {},
 		budget: 48_000,
 		knowledge: "current fact",
 		totalMessages: 0,
@@ -89,7 +103,11 @@ function fixture() {
 			const handle = turns.current();
 			return handle && { handle, stateText: `time of turn ${handle.turnId}` };
 		},
-		canRetain: () => controls.covered,
+		proveContinuation: () => (controls.covered ? controls.continuation : undefined),
+		readLiveHandoffAttempts: (message) =>
+			controls.handoffValid && (controls.handoffRead?.(message) ?? controls.handoff === message)
+				? ["attempt"]
+				: undefined,
 		allowsHistoryTokens: (_model, tokens) => tokens <= controls.budget,
 	});
 	const config: AgentLoopConfig = {
@@ -116,11 +134,12 @@ function fixture() {
 		})),
 	};
 	const wires: Context[] = [];
-	async function begin(text: string) {
+	async function begin(text: string | AgentMessage) {
 		const previous = turns.current();
 		if (previous) turns.end(previous);
 		const handle = await turns.begin();
-		const user: UserMessage = { role: "user", content: text, timestamp: handle.turnId };
+		const user: AgentMessage =
+			typeof text === "string" ? { role: "user", content: text, timestamp: handle.turnId } : text;
 		source.messages.push(user);
 		handle.markStart(user);
 		return handle;
@@ -146,6 +165,7 @@ function fixture() {
 		});
 		const provider = await started.stream.result();
 		const final = { ...provider, streamEndAt: 42 };
+		controls.beforeObserve();
 		started.observeAssistant?.(provider, final);
 		source.messages.push(final);
 		return provider;
@@ -192,6 +212,137 @@ describe("continuous chat at the native provider boundary", () => {
 		await f.send();
 		expect(f.wires[3]!.messages.slice(0, next.length + 1)).toEqual([...next, second]);
 	});
+
+	it.each(["unchanged", "edited body", "replaced message"] as const)(
+		"carries one worker handoff and its report rows only when its exact opening stays on the wire (%s)",
+		async (variant) => {
+			const f = fixture();
+			await f.begin("Start the worker.");
+			const previous = await f.send();
+			const work = "Background work [Builder], chat ID 2: zoom({id:2,n:1,page:0})";
+			const handoff = createCustomMessage(
+				"background-worker-completion",
+				"Worker finished.",
+				true,
+				{},
+				new Date(3).toISOString(),
+			);
+			f.controls.continuation = { work: { text: work, isCurrent: () => true } };
+			f.controls.handoff = handoff;
+			f.controls.totalMessages = 3;
+			if (variant !== "unchanged")
+				f.controls.transform = async (messages) => [
+					variant === "edited body" ? { ...handoff, content: "Edited body." } : { ...handoff, details: {} },
+					...messages.slice(1),
+				];
+			await f.begin(handoff);
+			await f.send([{ type: "toolCall", name: "bash", id: "inspect", arguments: {} }]);
+			f.source.messages.push({
+				role: "toolResult",
+				toolName: "bash",
+				toolCallId: "inspect",
+				isError: false,
+				content: [{ type: "text", text: "Worker evidence." }],
+				timestamp: 4,
+			});
+			await f.send();
+			for (const request of f.wires.slice(1)) {
+				const text = JSON.stringify(request.messages);
+				if (variant !== "unchanged") {
+					expect(text).not.toContain("Start the worker.");
+					expect(text).not.toContain(work);
+				} else {
+					expect(request.messages.slice(0, f.wires[0]!.messages.length + 1)).toEqual([
+						...f.wires[0]!.messages,
+						previous,
+					]);
+					expect(text.split(work)).toHaveLength(2);
+					expect(text.split("Worker finished.")).toHaveLength(2);
+				}
+			}
+		},
+	);
+
+	it.each(["handoff", "report", "report before assistant"] as const)(
+		"opens a fresh window when retained %s evidence expires",
+		async (revoked) => {
+			const f = fixture();
+			await f.begin("Start the worker.");
+			await f.send();
+			const work = "Pinned worker report.";
+			let reportCurrent = true;
+			const handoff = createCustomMessage(
+				"background-worker-completion",
+				"Worker finished.",
+				true,
+				{},
+				new Date(3).toISOString(),
+			);
+			f.controls.continuation = { work: { text: work, isCurrent: () => reportCurrent } };
+			f.controls.handoff = handoff;
+			f.controls.totalMessages = 3;
+			if (revoked === "report before assistant")
+				f.controls.beforeObserve = () => {
+					reportCurrent = false;
+				};
+			await f.begin(handoff);
+			await f.send();
+			expect(JSON.stringify(f.wires[1]?.messages)).toContain(work);
+			f.controls.continuation = {};
+			if (revoked === "report before assistant") {
+				reportCurrent = true;
+			} else {
+				await f.begin("First follow-up.");
+				await f.send();
+				expect(JSON.stringify(f.wires[2]?.messages)).toContain(work);
+				if (revoked === "handoff") f.controls.handoffValid = false;
+				else reportCurrent = false;
+			}
+			await f.begin("Fresh follow-up.");
+			await f.send();
+			const wire = JSON.stringify(f.wires.at(-1)?.messages);
+			expect(wire).toContain("Fresh follow-up.");
+			expect(wire).not.toContain(work);
+			expect(wire).not.toContain("Worker finished.");
+		},
+	);
+
+	it.each([false, true])(
+		"starts fresh on another handoff for the same attempt (previous prefix retained: %s)",
+		async (retained) => {
+			const f = fixture();
+			if (retained) {
+				await f.begin("Start the worker.");
+				await f.send();
+			}
+			const first = createCustomMessage(
+				"background-worker-completion",
+				"Initial handoff.",
+				true,
+				{},
+				new Date(2).toISOString(),
+			);
+			const replay = createCustomMessage(
+				"background-worker-completion",
+				"Replayed handoff.",
+				true,
+				{},
+				new Date(3).toISOString(),
+			);
+			// Keep both inputs provable; a replay has fresh object identity but the same exact attempt.
+			f.controls.handoff = first;
+			f.controls.handoffRead = (message) => message === first || message === replay;
+			await f.begin(first);
+			await f.send();
+			if (retained) expect(JSON.stringify(f.wires[1]?.messages)).toContain("Start the worker.");
+			await f.begin(replay);
+			await f.send();
+			const wire = JSON.stringify(f.wires.at(-1)?.messages);
+			expect(wire).toContain("Replayed handoff.");
+			expect(wire).not.toContain("Initial handoff.");
+			expect(wire).not.toContain("Start the worker.");
+		},
+	);
 
 	it("ignores revisions outside the window and drops the window after an older dependency changes", async () => {
 		const f = fixture();
@@ -339,6 +490,19 @@ describe("continuous chat at the native provider boundary", () => {
 	);
 });
 
+it("binds a complete live handoff to its exact details and body", () => {
+	const details = { records: [{ attemptId: "attempt" }, { attemptId: "second" }] };
+	const content = "Two workers finished.";
+	recordLiveWorkerHandoff(details, content, details.records, 3);
+	expect(liveWorkerHandoffOf(details, content)).toBeUndefined();
+	recordLiveWorkerHandoff(details, content, [details.records[0]!, details.records[0]!], 2);
+	expect(liveWorkerHandoffOf(details, content)).toBeUndefined();
+	recordLiveWorkerHandoff(details, content, details.records, 2);
+	expect(liveWorkerHandoffOf(details, content)?.attemptIds).toEqual(["attempt", "second"]);
+	expect(liveWorkerHandoffOf({ ...details }, content)).toBeUndefined();
+	expect(liveWorkerHandoffOf(details, "Modified.")).toBeUndefined();
+});
+
 it("requires a live session message for every intervening project record", async () => {
 	const message: UserMessage = { role: "user", content: "Read this.", timestamp: 1 };
 	const entry: SessionEntry = {
@@ -348,8 +512,26 @@ it("requires a live session message for every intervening project record", async
 		timestamp: new Date(1).toISOString(),
 		message,
 	};
+	const reportData = { version: 1, name: "Builder", claimId: "attempt", text: "Finished.", timestamp: 2 };
+	const report: SessionEntry = {
+		type: "custom",
+		customType: CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
+		id: "report",
+		parentId: entry.id,
+		timestamp: new Date(2).toISOString(),
+		data: reportData,
+	};
+	const fabricated: SessionEntry = {
+		...report,
+		id: "fabricated",
+		parentId: report.id,
+		data: { ...reportData, claimId: "fabricated-attempt" },
+	};
+	recordLiveWorkerReport(reportData);
+	const entries = new Map([entry, report, fabricated].map((record) => [record.id, record]));
+	let nextId = 0;
 	const ingestor = new ContinuousChatIngestor({
-		readEntry: (id) => (id === entry.id ? entry : undefined),
+		readEntry: (id) => entries.get(id),
 		getParentInputConsumptionSource: () => ({
 			sessionId: "owner",
 			readEntries: async () => new Map(),
@@ -360,8 +542,8 @@ it("requires a live session message for every intervening project record", async
 			append: async (input) => ({
 				revision: 1,
 				deduplicated: false,
-				records: normalizeContinuousChatAppend(input).map((unit, id) => ({
-					id,
+				records: normalizeContinuousChatAppend(input).map((unit) => ({
+					id: nextId++,
 					schemaVersion: 1,
 					kind: unit.kind,
 					date: unit.date,
@@ -375,10 +557,29 @@ it("requires a live session message for every intervening project record", async
 		},
 		warn: () => {},
 	});
-	ingestor.ingestEntries("owner", [entry.id]);
+	ingestor.ingestEntries("owner", [entry.id, report.id, fabricated.id]);
 	await ingestor.flush();
-	expect(ingestor.coversLiveArrivals("owner", 0, 1, [message])).toBe(true);
-	expect(ingestor.coversLiveArrivals("owner", 0, 1, [{ ...message }])).toBe(false);
-	expect(ingestor.coversLiveArrivals("different-session", 0, 1, [message])).toBe(false);
-	expect(ingestor.coversLiveArrivals("owner", 0, 2, [message])).toBe(false);
+	expect(ingestor.proveLiveArrivals("owner", 0, 1, [message])?.reports).toEqual([]);
+	expect(ingestor.proveLiveArrivals("owner", 0, 1, [{ ...message }])).toBeUndefined();
+	expect(ingestor.proveLiveArrivals("different-session", 0, 1, [message])).toBeUndefined();
+	expect(ingestor.proveLiveArrivals("owner", 0, 2, [message])).toBeUndefined();
+	const authority = { attemptIds: ["attempt"], isReportOnBranch: (id: string) => id === report.id };
+	expect(ingestor.proveLiveArrivals("owner", 0, 2, [message], authority)?.reports).toEqual([
+		{ id: 1, attemptId: "attempt", name: "Builder" },
+	]);
+	expect(
+		ingestor.proveLiveArrivals("owner", 0, 2, [message], { ...authority, isReportOnBranch: () => false }),
+	).toBeUndefined();
+	expect(
+		ingestor.proveLiveArrivals("owner", 0, 2, [message], { ...authority, attemptIds: ["other"] }),
+	).toBeUndefined();
+	expect(
+		ingestor.proveLiveArrivals("owner", 0, 2, [message], { ...authority, attemptIds: ["attempt", "other"] }),
+	).toBeUndefined();
+	expect(
+		ingestor.proveLiveArrivals("owner", 0, 3, [message], {
+			attemptIds: ["attempt", "fabricated-attempt"],
+			isReportOnBranch: () => true,
+		}),
+	).toBeUndefined();
 });

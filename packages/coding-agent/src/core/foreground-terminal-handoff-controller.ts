@@ -26,6 +26,7 @@ import {
 	workerLaneStateCodes,
 } from "./delegation/worker-disposition.ts";
 import { FANOUT_LINE_MAX_CHARS, type FanoutGroupReport, fanoutNoteForLane } from "./delegation/worker-fanout.ts";
+import { recordLiveWorkerHandoff } from "./delegation/worker-handoff-provenance.ts";
 import { selectedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import {
 	type WorkerTerminalHandoffRecord,
@@ -654,27 +655,25 @@ export class ForegroundTerminalHandoffController {
 			const text = handoffProofTextByLane.get(record.laneId);
 			return text ? { ...record, proofSheet: { text } } : record;
 		});
+		const content = buildForegroundWorkerTerminalHandoffContent(delivered, {
+			wakeParent: wake.wakeParent,
+			totalCount: unread.length,
+		});
+		const details = {
+			v: COMMS_RECORD_VERSION,
+			records: detailRecords,
+			summary: createBackgroundActivitySummaryContract(
+				"agent",
+				prepared.map((entry) => entry.summaryItem),
+			),
+			...(thirdParty ? { thirdParty: true } : {}),
+			// Owner-facing transcript rendering only: the sheets quote worker-written strings.
+			...(proofSheets.length > 0 ? { [PROOF_SHEET_DETAILS_KEY]: proofSheets } : {}),
+			...(proofSheetFailures.length > 0 ? { [PROOF_SHEET_FAILURES_DETAILS_KEY]: proofSheetFailures } : {}),
+		};
+		if (!thirdParty) recordLiveWorkerHandoff(details, content, included, unread.length);
 		return {
-			message: {
-				customType: BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
-				content: buildForegroundWorkerTerminalHandoffContent(delivered, {
-					wakeParent: wake.wakeParent,
-					totalCount: unread.length,
-				}),
-				display: true,
-				details: {
-					v: COMMS_RECORD_VERSION,
-					records: detailRecords,
-					summary: createBackgroundActivitySummaryContract(
-						"agent",
-						prepared.map((entry) => entry.summaryItem),
-					),
-					...(thirdParty ? { thirdParty: true } : {}),
-					// Owner-facing transcript rendering only: the sheets quote worker-written strings.
-					...(proofSheets.length > 0 ? { [PROOF_SHEET_DETAILS_KEY]: proofSheets } : {}),
-					...(proofSheetFailures.length > 0 ? { [PROOF_SHEET_FAILURES_DETAILS_KEY]: proofSheetFailures } : {}),
-				},
-			},
+			message: { customType: BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE, content, display: true, details },
 			...wake,
 		};
 	}

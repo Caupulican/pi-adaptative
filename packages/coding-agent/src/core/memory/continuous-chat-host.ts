@@ -9,9 +9,11 @@ import { existsSync } from "node:fs";
 import type { ParentInputConsumptionSource } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
+import { liveWorkerHandoffOf } from "../delegation/worker-handoff-provenance.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./continuous-chat-compaction-adapter.ts";
-import { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
+import { ContinuousChatIngestor, type LiveWorkerReportArrival } from "./continuous-chat-ingest.ts";
 import {
 	type ContinuousChatLegacyEntrySource,
 	type ContinuousChatLegacySource,
@@ -31,9 +33,14 @@ import {
 	stageParentInputReconciliation,
 } from "./continuous-chat-parent-reconciliation.ts";
 import { type ContinuousChatProjectionSource, renderContinuousChatTurnState } from "./continuous-chat-projection.ts";
-import { type ContinuousChatCompactionPrefixHead, ContinuousChatRuntime } from "./continuous-chat-runtime.ts";
+import {
+	type ContinuousChatCompactionPrefixHead,
+	ContinuousChatRuntime,
+	type ContinuousChatTurnBoundary,
+} from "./continuous-chat-runtime.ts";
 import { ContinuousChatStore } from "./continuous-chat-store.ts";
 import type { ContinuousChatPort } from "./continuous-chat-tools.ts";
+import { continuousChatNodeFirstMessage, continuousChatNodeMessageCount } from "./continuous-chat-tree.ts";
 import { IcmTurnCoordinator } from "./continuous-chat-turn-coordinator.ts";
 import { ContinuousChatWorkerLog, type ContinuousChatWorkerTranscript } from "./continuous-chat-worker-log.ts";
 
@@ -47,6 +54,8 @@ export interface ContinuousChatHostPorts {
 	resetCompactionPrefix(): void;
 	resolveWorker(name: string): ContinuousChatWorkerTranscript | undefined;
 	readEntry(entryId: string): SessionEntry | undefined;
+	readLiveBranchMessageEntry?(message: AgentMessage): SessionEntry | undefined;
+	isLiveBranchEntry?(entryId: string): boolean;
 	getParentInputConsumptionSource(): ParentInputConsumptionSource;
 	/** The session's entry ids in order, and whether each one is durably written to the session file. */
 	entryIds(): readonly string[];
@@ -149,6 +158,9 @@ export class ContinuousChatHost {
 		allowsHistoryTokens: ContinuousChatProjectionSource["allowsHistoryTokens"],
 	): ContinuousChatProjectionSource {
 		const restricted = new WeakSet<object>();
+		let rendered:
+			| { boundary: ContinuousChatTurnBoundary; reports: readonly LiveWorkerReportArrival[]; text: string }
+			| undefined;
 		return {
 			current: () => {
 				const handle = this.turns.current();
@@ -158,23 +170,70 @@ export class ContinuousChatHost {
 				return { handle, stateText: renderContinuousChatTurnState(handle) };
 			},
 			allowsHistoryTokens,
-			canRetain: (previous, next, history) =>
-				!this.closed &&
-				sessionId() === this.options.sessionId &&
-				ownerScope() &&
-				this.turns.current() === next &&
-				!restricted.has(previous) &&
-				!restricted.has(next) &&
-				previous.turnId + 1 === next.turnId &&
-				previous.boundary.visibility.key === next.boundary.visibility.key &&
-				next.boundary.visibility.isCurrent() &&
-				previous.boundary.visibility.isCurrent() &&
-				this.ingestor.coversLiveArrivals(
+			readLiveHandoffAttempts: (message) => {
+				if (this.closed || sessionId() !== this.options.sessionId || message.role !== "custom") return undefined;
+				const handoff = liveWorkerHandoffOf(message.details, message.content);
+				if (!handoff) return undefined;
+				const canonical = this.options.readLiveBranchMessageEntry?.(message);
+				return canonical?.type === "custom_message" &&
+					canonical.customType === message.customType &&
+					canonical.details === message.details &&
+					canonical.content === message.content
+					? handoff.attemptIds
+					: undefined;
+			},
+			proveContinuation: (previous, next, history, opening) => {
+				if (
+					this.closed ||
+					sessionId() !== this.options.sessionId ||
+					!ownerScope() ||
+					this.turns.current() !== next ||
+					restricted.has(previous) ||
+					restricted.has(next) ||
+					previous.turnId + 1 !== next.turnId ||
+					previous.boundary.visibility.key !== next.boundary.visibility.key ||
+					!next.boundary.visibility.isCurrent() ||
+					!previous.boundary.visibility.isCurrent()
+				)
+					return undefined;
+				const handoff =
+					opening?.role === "custom" ? liveWorkerHandoffOf(opening.details, opening.content) : undefined;
+				const isReportOnBranch = this.options.isLiveBranchEntry;
+				const reportAuthority =
+					handoff && isReportOnBranch ? { attemptIds: handoff.attemptIds, isReportOnBranch } : undefined;
+				const arrivals = this.ingestor.proveLiveArrivals(
 					this.options.sessionId,
 					previous.boundary.totalMessages,
 					next.boundary.totalMessages,
 					history,
-				),
+					reportAuthority,
+				);
+				if (!arrivals) return undefined;
+				if (handoff) {
+					const terminal = history.at(-1);
+					if (!terminal || this.options.readLiveBranchMessageEntry?.(terminal)?.type !== "message")
+						return undefined;
+				}
+				if (!arrivals.reports.length) return {};
+				const { boundary } = next;
+				const { reports, isCurrent } = arrivals;
+				if (
+					rendered?.boundary !== boundary ||
+					rendered.reports.length !== reports.length ||
+					!rendered.reports.every(
+						(row, i) =>
+							row.id === reports[i]!.id &&
+							row.attemptId === reports[i]!.attemptId &&
+							row.name === reports[i]!.name,
+					)
+				) {
+					const text = renderRetainedWorkerReports(boundary, reports);
+					if (text === undefined) return undefined;
+					rendered = { boundary, reports, text };
+				}
+				const { visibility } = boundary;
+				return { work: { text: rendered.text, isCurrent: () => visibility.isCurrent() && isCurrent() } };
+			},
 		};
 	}
 
@@ -468,4 +527,30 @@ export class ContinuousChatHost {
 			await this.runtime.stop();
 		}
 	}
+}
+
+/** Preserve the exact pinned rows covering the new work, including any built summary, once per coordinate. */
+function renderRetainedWorkerReports(
+	boundary: ContinuousChatTurnBoundary,
+	reports: readonly LiveWorkerReportArrival[],
+): string | undefined {
+	const lines = boundary.view.split("\n");
+	if (lines.shift() !== "<chat>" || lines.pop() !== "</chat>" || lines.length !== boundary.viewCache.lines.length)
+		return undefined;
+	const rows: string[] = [];
+	let reportIndex = 0;
+	for (const [index, coordinate] of boundary.viewCache.lines.entries()) {
+		if (reportIndex === reports.length) break;
+		const first = continuousChatNodeFirstMessage(coordinate);
+		const end = first + continuousChatNodeMessageCount(coordinate.level);
+		const nextReport = reports[reportIndex]!;
+		if (nextReport.id < first) return undefined;
+		if (nextReport.id >= end) continue;
+		rows.push(lines[index]!);
+		do {
+			const report = reports[reportIndex++]!;
+			rows.push(`Background work [${report.name}], chat ID ${report.id}: zoom({id:${report.id},n:1,page:0})`);
+		} while (reportIndex < reports.length && reports[reportIndex]!.id < end);
+	}
+	return reportIndex === reports.length ? rows.join("\n") : undefined;
 }

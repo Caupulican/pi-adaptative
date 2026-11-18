@@ -1441,6 +1441,13 @@ export class AgentSession {
 				resetCompactionPrefix: () => this._continuousChatPrefix.reset(),
 				resolveWorker: (name) => this._backgroundLanes.openWorkerTranscript(name),
 				readEntry: (entryId) => this.sessionManager.getEntry(entryId),
+				readLiveBranchMessageEntry: (message) => {
+					const id = this.sessionManager.getMessageEntryId(message);
+					return id !== undefined && this.sessionManager.isEntryOnDurableBranch(id)
+						? this.sessionManager.getEntry(id)
+						: undefined;
+				},
+				isLiveBranchEntry: (id) => this.sessionManager.isEntryOnDurableBranch(id),
 				getParentInputConsumptionSource: () => this.sessionManager.getParentInputConsumptionSource(),
 				entryIds: () => this.sessionManager.getEntries().map((entry) => entry.id),
 				isEntryPersisted: (entryId) => this.sessionManager.isEntryPersisted(entryId),

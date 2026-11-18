@@ -9,9 +9,10 @@ import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { resolveParentInputConsumption } from "../../kernel/session/parent-input-consumption.ts";
 import { type ParentInputConsumptionSource, parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
-import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { CustomEntry, SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import { isExternalEvidenceMessage, parseWorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
+import { isLiveWorkerReport } from "../delegation/worker-handoff-provenance.ts";
 import { parseWorkerTranscriptReference } from "../delegation/worker-transcript-reference.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -200,6 +201,19 @@ export interface ContinuousChatIngestorDeps {
 // A live continuation only needs a short suffix. Older or untracked ranges fall back to the complete tree view.
 const MAX_TRACKED_ARRIVALS = 256;
 
+export interface LiveWorkerReportArrival {
+	readonly id: number;
+	readonly attemptId: string;
+	readonly name: string;
+}
+
+interface LiveArrivalProof {
+	readonly reports: readonly LiveWorkerReportArrival[];
+	isCurrent(): boolean;
+}
+
+type LiveArrival = { id: number; sessionId: string; entryId: string };
+
 type IngestTask = { kind: "entry"; sessionId: string; entryId: string };
 
 export class ContinuousChatIngestor {
@@ -211,7 +225,7 @@ export class ContinuousChatIngestor {
 	/** Set by a failed head, cleared when the head is logged. Every `settled()` rejects with it while it is set. */
 	private failure: Error | undefined;
 	private closed = false;
-	private readonly liveArrivals: Array<{ id: number; sessionId: string; entryId: string } | undefined> = [];
+	private readonly liveArrivals: Array<LiveArrival | undefined> = [];
 
 	constructor(deps: ContinuousChatIngestorDeps) {
 		this.deps = deps;
@@ -360,27 +374,70 @@ export class ContinuousChatIngestor {
 				sourceKey: piece.sourceKey ?? `${sessionId}:${entryId}:${piece.part}`,
 				source: { sessionId, entryId: piece.sourceEntryId ?? entryId },
 			});
-			// A derived report or imported record exists only in the tree until proven on the provider wire.
-			if (entry.type === "message" && piece.kind !== "work" && piece.sourceEntryId === undefined) {
-				for (const { id } of result.records) {
+			// Replayed appends cannot establish provenance for an arrival already present in the chat.
+			if (result.deduplicated || piece.sourceEntryId !== undefined) continue;
+			if ((entry.type === "message" && piece.kind !== "work") || this.liveWorkerReport(entry)) {
+				for (const record of result.records) {
+					if (record.source?.sessionId !== sessionId || record.source.entryId !== entryId) continue;
+					const { id } = record;
 					this.liveArrivals[id % MAX_TRACKED_ARRIVALS] = { id, sessionId, entryId };
 				}
 			}
 		}
 	}
 
-	/** Proves every intervening project record came from this turn's durable messages, using only bounded metadata. */
-	coversLiveArrivals(sessionId: string, first: number, end: number, history: readonly AgentMessage[]): boolean {
-		if (first === end) return true;
-		if (end < first || end - first > MAX_TRACKED_ARRIVALS) return false;
+	private liveWorkerReport(entry: SessionEntry): ContinuousChatWorkReportEntry | undefined {
+		if (entry.type !== "custom" || entry.customType !== CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE) return undefined;
+		const report = workReportEntry(entry.data);
+		return report && isLiveWorkerReport(entry.data, report.claimId) ? report : undefined;
+	}
+
+	/** Accounts for each arrival from the previous turn or from one of the current handoff's exact live reports. */
+	proveLiveArrivals(
+		sessionId: string,
+		first: number,
+		end: number,
+		history: readonly AgentMessage[],
+		handoff?: {
+			attemptIds: readonly string[];
+			isReportOnBranch(entryId: string): boolean;
+		},
+	): LiveArrivalProof | undefined {
+		if (end < first || end - first > MAX_TRACKED_ARRIVALS) return undefined;
 		const messages = new Set(history);
+		const attempts = new Set(handoff?.attemptIds);
+		const reports: LiveWorkerReportArrival[] = [];
+		const reportEntries = new Map<string, { id: string; entry: CustomEntry; data: unknown }>();
 		for (let id = first; id < end; id++) {
 			const arrival = this.liveArrivals[id % MAX_TRACKED_ARRIVALS];
-			if (arrival?.id !== id || arrival.sessionId !== sessionId) return false;
+			if (arrival?.id !== id || arrival.sessionId !== sessionId) return undefined;
 			const entry = this.deps.readEntry(arrival.entryId);
-			if (entry?.type !== "message" || !messages.has(entry.message)) return false;
+			if (!entry) return undefined;
+			if (entry.type === "message" && messages.has(entry.message)) continue;
+			if (entry.type !== "custom") return undefined;
+			const report = this.liveWorkerReport(entry);
+			if (!report || !attempts.has(report.claimId) || !handoff?.isReportOnBranch(entry.id)) return undefined;
+			const previous = reportEntries.get(report.claimId);
+			if (previous !== undefined && previous.entry !== entry) return undefined;
+			reportEntries.set(report.claimId, { id: entry.id, entry, data: entry.data });
+			reports.push({ id, attemptId: report.claimId, name: report.name });
 		}
-		return true;
+		if (reports.length > 0 && reportEntries.size !== attempts.size) return undefined;
+		return {
+			reports,
+			isCurrent: () => {
+				for (const { id, entry, data } of reportEntries.values()) {
+					if (
+						this.deps.readEntry(id) !== entry ||
+						entry.customType !== CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE ||
+						entry.data !== data ||
+						!handoff?.isReportOnBranch(id)
+					)
+						return false;
+				}
+				return true;
+			},
+		};
 	}
 
 	/**

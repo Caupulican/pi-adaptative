@@ -3,7 +3,7 @@
  * An eligible follow-up extends an accepted provider prefix and appends its own state and messages.
  */
 
-import type { Api, Model, TextContent } from "@caupulican/pi-ai";
+import type { TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import { isContextPlanDispatchCurrent } from "../../kernel/provider-request-planner.ts";
@@ -13,7 +13,10 @@ import type { ContinuousChatAudit } from "../extensions/builtin.ts";
 import type { ContinuousChatCacheTextContent, ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import { replayableAliasLegend, replayableBodyAliases } from "./continuous-chat-history-aliases.ts";
 import { ContinuousChatMessageDependencies, MAX_RETAINED_MESSAGES } from "./continuous-chat-message-dependencies.ts";
-import { ContinuousChatProviderHistory } from "./continuous-chat-provider-history.ts";
+import {
+	ContinuousChatProviderHistory,
+	type ProviderHistoryRetentionSource,
+} from "./continuous-chat-provider-history.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
 
 export const CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE = "continuous_chat_view";
@@ -24,10 +27,8 @@ const VIEW_BLOCK_LINES = 4;
 const VIEW_CLOSING_TAG = "</chat>";
 
 /** The running turn, with the live state fixed for its whole duration. */
-export interface ContinuousChatProjectionSource {
+export interface ContinuousChatProjectionSource extends Partial<ProviderHistoryRetentionSource> {
 	current(): { handle: IcmTurnHandle; stateText: string } | undefined;
-	canRetain?(previous: IcmTurnHandle, next: IcmTurnHandle, previousTurnHistory: readonly AgentMessage[]): boolean;
-	allowsHistoryTokens?(model: Model<Api>, tokens: number): boolean;
 }
 
 /** The turn's live state: its start instant in RFC 3339. Fixed per turn, so every plan of the turn stays current. */
@@ -322,9 +323,10 @@ export function createContinuousChatPlanWrapper(
 	let legendSent: readonly string[] = [];
 	// The running turn's carried head, memoized on its first request.
 	let carried: CarriedTurnHead | undefined;
-	const retention = source.canRetain
+	const retention = source.proveContinuation
 		? new ContinuousChatProviderHistory({
-				canRetain: source.canRetain,
+				proveContinuation: source.proveContinuation,
+				readLiveHandoffAttempts: source.readLiveHandoffAttempts,
 				allowsHistoryTokens: source.allowsHistoryTokens,
 			})
 		: undefined;
@@ -407,7 +409,12 @@ export function createContinuousChatPlanWrapper(
 				{
 					headMessages: head.wire.length,
 					legend: frameLegend,
-					bodyAliases: replayableBodyAliases(plan.messages, false),
+					bodyAliases: (handoff) => {
+						if (!handoff) return replayableBodyAliases(plan.messages, false);
+						const first = plan.messages[0];
+						if (!first || (request.sourceMessage?.(first) ?? first) !== handoff) return undefined;
+						return replayableBodyAliases(plan.messages.slice(1), false);
+					},
 					verifyAliases: plan.verifyPathAliases,
 				},
 				dependencies,

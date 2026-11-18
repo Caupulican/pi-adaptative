@@ -14,6 +14,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import type { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 import { getWorkerClaimSnapshots } from "./session-worker-claim.ts";
+import { recordLiveWorkerReport } from "./worker-handoff-provenance.ts";
 import { workerReportClaimText } from "./worker-report.ts";
 
 /** The terminal of one worker lane or attempt, as the lane records it. */
@@ -78,6 +79,7 @@ export class WorkerTerminalReport {
 			timestamp: Date.now(),
 			...(transcriptReference ? { transcriptReference } : {}),
 		};
+		recordLiveWorkerReport(report);
 		this.deps.getSessionManager().appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
 		try {
 			const context = this.botBindings.generationContext(name);

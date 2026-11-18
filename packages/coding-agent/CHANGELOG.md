@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Continuous chat can keep the previous model request intact when a worker hands its result back to the same session. The handoff adds the visible work-report rows and their zoom references.
 - Worker report reviews now show the paths recorded for the current attempt and explain how to correct a report without repeating a successful edit.
 
 ## [0.104.70] - 2026-11-18

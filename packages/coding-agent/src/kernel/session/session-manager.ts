@@ -1359,6 +1359,11 @@ export class SessionManager {
 		return customEntry !== undefined && this.byId.get(customEntry.id) === customEntry ? customEntry.id : undefined;
 	}
 
+	/** Whether this exact durably committed entry still belongs to the current branch. */
+	isEntryOnDurableBranch(entryId: string): boolean {
+		return this.isEntryDurableForSession(entryId) && this._getLifecycleActiveCache().positions.has(entryId);
+	}
+
 	private _appendEntry(entry: SessionEntry, beforeNotify?: () => void): void {
 		this._appendEntries([entry], undefined, undefined, { beforeNotify });
 	}
@@ -2441,7 +2446,7 @@ export class SessionManager {
 		const assertOrigin = (): void => {
 			const badFile = origin.sessionFile !== undefined && (!this.persist || origin.sessionFile !== this.sessionFile);
 			if (origin.sessionId !== this.sessionId || badFile) throw new Error("Parent input session identity changed.");
-			if (!this.getBranch().some((e) => e.id === origin.leafId) || !this.isEntryDurableForSession(origin.leafId))
+			if (!this.isEntryOnDurableBranch(origin.leafId))
 				throw new Error("Parent input origin is not on the current durable branch.");
 		};
 		if (!this.persist) {
