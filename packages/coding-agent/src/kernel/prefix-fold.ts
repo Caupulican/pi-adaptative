@@ -12,15 +12,17 @@
  * takes once per accepted request and logs (see `recordPrefixFoldWork`).
  */
 
-import { countHistoryWork } from "@caupulican/pi-ai/history-work";
+import { countHistoryWork, inheritHistoryWork } from "@caupulican/pi-ai/history-work";
 import { harnessLog } from "./harness-log.ts";
 import {
 	type MessageHistoryVersion,
 	messageAppendLineage,
 	messageContentEpoch,
 	messageHistoryVersion,
+	registerProjectedMessageHistory,
 	unchangedMessagePrefix,
 } from "./message-revision.ts";
+import type { AgentMessage } from "./types.ts";
 
 /** Element operations counted by the folds since the last take. */
 let foldOperations = 0;
@@ -191,6 +193,55 @@ export class PrefixFirstMatchByFirstItem<Item extends object> {
 			this.scans.set(first, scan);
 		}
 		return scan.find(items);
+	}
+}
+
+interface FilteredHistory {
+	readonly version: MessageHistoryVersion;
+	readonly length: number;
+	readonly projectedVersion: MessageHistoryVersion;
+	readonly projected: AgentMessage[];
+}
+
+/** A fixed visibility rule that preserves version evidence when immutable histories are filtered. */
+export class VersionedMessageFilter {
+	private readonly excluded: (message: AgentMessage) => boolean;
+	private readonly firstExcluded: PrefixFirstMatchByFirstItem<AgentMessage>;
+	private readonly projections = new WeakMap<AgentMessage, FilteredHistory>();
+
+	constructor(excluded: (message: AgentMessage) => boolean) {
+		this.excluded = excluded;
+		this.firstExcluded = new PrefixFirstMatchByFirstItem(excluded);
+	}
+
+	filter(messages: AgentMessage[], reuseCertifiedHistory = true): AgentMessage[] {
+		const version = reuseCertifiedHistory ? messageHistoryVersion(messages) : undefined;
+		const first = version ? messages[0] : undefined;
+		if (!version || !first) {
+			const filtered = messages.filter((message) => !this.excluded(message));
+			inheritHistoryWork(messages, filtered);
+			return filtered;
+		}
+		if (this.firstExcluded.find(messages) < 0) return messages;
+
+		const previous = this.projections.get(first);
+		if (previous?.version === version) {
+			inheritHistoryWork(messages, previous.projected);
+			return previous.projected;
+		}
+		const retained =
+			previous && unchangedMessagePrefix(previous.version, version) >= previous.length ? previous : undefined;
+		const projected = retained ? retained.projected.slice() : [];
+		const prefix = projected.length;
+		for (let index = retained?.length ?? 0; index < messages.length; index++) {
+			const message = messages[index]!;
+			if (!this.excluded(message)) projected.push(message);
+		}
+		countHistoryWork(messages, "copiedRows", prefix);
+		inheritHistoryWork(messages, projected);
+		const projectedVersion = registerProjectedMessageHistory(projected, retained?.projectedVersion, prefix);
+		this.projections.set(first, { version, length: messages.length, projectedVersion, projected });
+		return projected;
 	}
 }
 

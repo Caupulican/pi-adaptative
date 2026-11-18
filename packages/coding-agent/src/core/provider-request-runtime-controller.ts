@@ -212,13 +212,14 @@ export class ProviderRequestRuntimeController {
 				},
 			};
 		};
-		this.installedPlanContext = (request, signal) => {
-			const projected = this.planProjection ? this.planProjection(sessionPlanContext) : sessionPlanContext;
-			return projectParentInputs(projected, this.deps.parentInputs, () => this.deps.getSubmissionEpoch())(
-				request,
-				signal,
-			);
-		};
+		this.installedPlanContext = projectParentInputs(
+			(request, signal) => {
+				const projected = this.planProjection ? this.planProjection(sessionPlanContext) : sessionPlanContext;
+				return projected(request, signal);
+			},
+			this.deps.parentInputs,
+			() => this.deps.getSubmissionEpoch(),
+		);
 		// `transformContext` carries no `attempt`/`sentPrefixCount` of its own -- it is a strictly
 		// narrower legacy hook (messages in, messages out) that this controller keeps wired only so
 		// a config built WITHOUT `planContext` still degrades to something reasonable. INVESTIGATED,

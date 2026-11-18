@@ -1,13 +1,6 @@
 /** Select the memory records visible to a provider request, retaining the proven prefix across turns. */
-import { countHistoryWork, inheritHistoryWork } from "@caupulican/pi-ai/history-work";
 import type { AgentMessage } from "../../kernel/index.ts";
-import {
-	type MessageHistoryVersion,
-	messageHistoryVersion,
-	registerProjectedMessageHistory,
-	unchangedMessagePrefix,
-} from "../../kernel/message-revision.ts";
-import { PrefixFirstMatchByFirstItem } from "../../kernel/prefix-fold.ts";
+import { VersionedMessageFilter } from "../../kernel/prefix-fold.ts";
 import { TRANSCRIPT_FRONTIER_CUSTOM_TYPE } from "./transcript-memory-contracts.ts";
 
 /** Durable record kind carrying the tiered memory evidence block (and its cleared form). */
@@ -32,50 +25,8 @@ function hiddenFromProvider(message: AgentMessage, icm: boolean): boolean {
 	);
 }
 
-interface FilteredProviderHistory {
-	readonly sourceVersion: MessageHistoryVersion;
-	readonly sourceLength: number;
-	readonly projectedVersion: MessageHistoryVersion;
-	readonly projected: AgentMessage[];
-}
-
-export class ProviderContextVisibility {
-	private readonly firstHidden = new PrefixFirstMatchByFirstItem((message: AgentMessage) =>
-		hiddenFromProvider(message, this.icm),
-	);
-	private readonly projections = new WeakMap<AgentMessage, FilteredProviderHistory>();
-
-	private readonly icm: boolean;
-
+export class ProviderContextVisibility extends VersionedMessageFilter {
 	constructor(icm: boolean) {
-		this.icm = icm;
-	}
-
-	filter(messages: AgentMessage[], reuseCertifiedHistory: boolean): AgentMessage[] {
-		const sourceVersion = reuseCertifiedHistory ? messageHistoryVersion(messages) : undefined;
-		const first = sourceVersion ? messages[0] : undefined;
-		if (!sourceVersion || !first) return messages.filter((message) => !hiddenFromProvider(message, this.icm));
-		if (this.firstHidden.find(messages) < 0) return messages;
-
-		const previous = this.projections.get(first);
-		if (previous?.sourceVersion === sourceVersion) {
-			inheritHistoryWork(messages, previous.projected);
-			return previous.projected;
-		}
-		const retained =
-			previous && unchangedMessagePrefix(previous.sourceVersion, sourceVersion) >= previous.sourceLength
-				? previous
-				: undefined;
-		const projected = retained ? retained.projected.slice() : [];
-		const prefix = projected.length;
-		for (let index = retained?.sourceLength ?? 0; index < messages.length; index++) {
-			const message = messages[index]!;
-			if (!hiddenFromProvider(message, this.icm)) projected.push(message);
-		}
-		countHistoryWork(messages, "copiedRows", prefix);
-		inheritHistoryWork(messages, projected);
-		const projectedVersion = registerProjectedMessageHistory(projected, retained?.projectedVersion, prefix);
-		this.projections.set(first, { sourceVersion, sourceLength: messages.length, projectedVersion, projected });
-		return projected;
+		super((message) => hiddenFromProvider(message, icm));
 	}
 }

@@ -250,16 +250,17 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 	// artifact that record cites reads back whole. The retained second task's wait, answered from the cache, is the control.
 	if (!world.systemOne.enabled) {
 		const manager = world.createSessionManager();
-		manager.appendMessage({ role: "user", content: "List the background tasks as the checks run.", timestamp: 0 });
+		manager.appendMessage({ role: "user", content: "Read the archived check descriptions.", timestamp: 0 });
 		const archivedCount = 96;
 		for (let i = 0; i < archivedCount; i++) {
-			const id = `archived-list-${i}`;
+			const id = `archived-read-${i}`;
+			const path = `checks/check-${i}.txt`;
 			manager.appendMessage({
 				role: "assistant",
 				api: HARNESS_API,
 				provider: HARNESS_PROVIDER,
 				model: "root",
-				content: [{ type: "toolCall", id, name: "tool_task", arguments: { action: "list" } }],
+				content: [{ type: "toolCall", id, name: "read", arguments: { path } }],
 				stopReason: "toolUse",
 				timestamp: 2 * i + 1,
 				usage: createEmptyUsage(),
@@ -267,8 +268,8 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			manager.appendMessage({
 				role: "toolResult",
 				toolCallId: id,
-				toolName: "tool_task",
-				content: [{ type: "text", text: "No active tasks." }],
+				toolName: "read",
+				content: [{ type: "text", text: `Check ${i} completed.` }],
 				isError: false,
 				timestamp: 2 * i + 2,
 			});
@@ -466,7 +467,7 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 				?.relevanceKey;
 		const archived = r40eSession
 			.getPromptEnforcementReport()
-			.items.filter((entry) => entry.toolCallId.startsWith("archived-list-"));
+			.items.filter((entry) => entry.toolCallId.startsWith("archived-read-"));
 		expect(archived).toHaveLength(archivedCount);
 		expect(archived.every((item) => item.skipReason === "not_artifact_backed")).toBe(true);
 		const firstQuery = relevanceForFirstWait();
@@ -481,7 +482,10 @@ export async function runJourney2BackgroundAndStallPhase(world: HarnessWorld): P
 			r40eSession.prompt("Which archived check produced the second tail marker?"),
 		);
 		await withDeadline(trace, "R40e changed query settled", r40eSession.waitForForegroundIdle());
-		expect(followupWork.auditSourceRowsVisited).toBeGreaterThan(0);
+		expect(
+			followupWork.auditSourceRowsVisited,
+			"the follow-up adds work to the live foreground audit",
+		).toBeGreaterThan(0);
 		expect(followupWork.auditSourceRowsVisited).toBeLessThan(archivedCount);
 		expect(followupWork.auditRowsMaterialized).toBeGreaterThan(0);
 		expect(followupWork.auditRowsMaterialized).toBeLessThan(archivedCount);

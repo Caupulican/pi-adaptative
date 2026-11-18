@@ -2121,16 +2121,31 @@ export class SessionManager {
 			return undefined;
 		}
 		admission.assertCurrent();
+		let maySelect = false;
 		for (const owner of admission.owners.values()) {
 			if (owner.ownerEntryId && owner.selection?.isCurrent()) {
 				this.plannedParentNotes = owner.selection;
 				return owner.selection;
 			}
+			maySelect ||= !owner.used || owner.selection !== undefined;
 		}
-		for (const message of messages) {
-			const id = this._parentNoteOwnerId(message);
-			const owner = id && admission.owners.get(id);
-			if (!id || !owner) continue;
+		if (!maySelect) return undefined;
+
+		const present = new Set<string>();
+		const newest = messages.at(-1);
+		const appendedOwner = admission.owners.size === 1 && newest ? this._parentNoteOwnerId(newest) : undefined;
+		if (appendedOwner && admission.owners.has(appendedOwner)) {
+			present.add(appendedOwner);
+		} else {
+			// Preserve the first occurrence of each coalesced owner. Stop once every authorized owner is present.
+			for (const message of messages) {
+				const id = this._parentNoteOwnerId(message);
+				if (id && admission.owners.has(id)) present.add(id);
+				if (present.size === admission.owners.size) break;
+			}
+		}
+		for (const id of present) {
+			const owner = admission.owners.get(id)!;
 			if (owner.selection) {
 				if (owner.selection.isCurrent()) {
 					this.plannedParentNotes = owner.selection;
@@ -2140,11 +2155,7 @@ export class SessionManager {
 			}
 			if (owner.used) continue;
 			// Owner inputs coalesced in this request share one bounded batch, not one batch apiece.
-			for (const candidate of messages) {
-				const candidateId = this._parentNoteOwnerId(candidate);
-				const candidateOwner = candidateId && admission.owners.get(candidateId);
-				if (candidateOwner) candidateOwner.used = true;
-			}
+			for (const presentId of present) admission.owners.get(presentId)!.used = true;
 			const inputs: ParentNoteSelection["inputs"][number][] = [];
 			const notes: CustomMessage<unknown>[] = [];
 			for (const input of this._pendingParentBatch("next-owner-turn")) {
