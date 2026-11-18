@@ -116,7 +116,7 @@ export function rejectNativeToolProtocolResidue(
  */
 export function rejectToolCallsFromToolFreeResponse(
 	message: AssistantMessage,
-	/** The tools the run had before this request withheld them: a model may still write their calls as text. */
+	/** The run’s tool names also identify calls written as text in a closing response. */
 	knownTools: readonly AgentTool[] = [],
 ): AssistantMessage {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return message;

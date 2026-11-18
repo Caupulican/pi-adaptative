@@ -1,6 +1,7 @@
 /** Retains accepted per-message provider conversion within a single request scope. */
 
 import { countHistoryWork, historyWorkFallback } from "@caupulican/pi-ai/history-work";
+import type { ProviderToolSurface } from "@caupulican/pi-ai/stream";
 import type { Api, Context, Message, Model } from "@caupulican/pi-ai/types";
 import {
 	immutableHistoryMessage,
@@ -49,7 +50,20 @@ interface ProjectedHistory {
 	/** Cumulative wire count by source position, including filtered source messages. */
 	readonly offsets: number[];
 	readonly messages: readonly Message[];
-	final?: { readonly messages: readonly Message[]; readonly compactablePrefix: number; readonly scope: string };
+	final?: {
+		readonly messages: readonly Message[];
+		readonly compactablePrefix: number;
+		readonly imageFreeHistoryLength: number;
+		readonly scope: string;
+	};
+	disclosure?: {
+		readonly surface: ProviderToolSurface;
+		readonly historyLength: number;
+		readonly durableVersion: MessageHistoryVersion;
+		readonly durableLength: number;
+		readonly imageFree: boolean;
+		readonly requestOnly: { readonly start: number; readonly count: number };
+	};
 }
 
 const acceptedHistories = new WeakMap<object, ProjectedHistory>();
@@ -69,8 +83,10 @@ export function projectProviderMessages(options: {
 	if (retained && !previous) historyWorkFallback(work, "provider projection scope changed");
 	let shared = 0;
 	if (previous) {
-		if (version && previous.version) {
-			shared = Math.min(unchangedMessagePrefix(previous.version, version), previous.offsets.length - 1);
+		const currentPrefix =
+			version ?? messageHistoryVersion(messages, Math.min(messages.length, previous.offsets.length - 1));
+		if (currentPrefix && previous.version) {
+			shared = Math.min(unchangedMessagePrefix(previous.version, currentPrefix), previous.offsets.length - 1);
 		} else {
 			// Host plans may assemble a new array. Only previously certified immutable rows can match here.
 			const bound = Math.min(previous.sources.length, messages.length);
@@ -128,8 +144,13 @@ export function projectProviderMessages(options: {
 		headWire,
 		stableWire,
 		previousFinal: previous?.final,
+		previousDisclosure: previous?.disclosure,
 		reusedWire,
-		prepareAcceptance(final: ProjectedHistory["final"], insertedCount: number): (() => void) | undefined {
+		prepareAcceptance(
+			final: ProjectedHistory["final"],
+			insertedCount: number,
+			disclosure?: ProjectedHistory["disclosure"],
+		): (() => void) | undefined {
 			if (!owner || scope === undefined) return undefined;
 			let acceptedWire = final && final.compactablePrefix >= retainedWire ? final.messages : undefined;
 			if (!acceptedWire) {
@@ -139,6 +160,7 @@ export function projectProviderMessages(options: {
 				acceptedWire = prefix;
 			}
 			const snapshot = acceptedWire;
+			const retainedVersion = version ?? messageHistoryVersion(messages, retainedSourceCount);
 			return () => {
 				if (acceptedHistories.get(owner) !== retained) return;
 				// Only acceptance can extend the previous index. This avoids copying it on append.
@@ -148,17 +170,18 @@ export function projectProviderMessages(options: {
 					acceptedOffsets.push(offsets[index]!);
 				}
 				const acceptedSources = !version && previous ? previous.sources : [];
-				if (!version) {
+				if (!version && acceptedSources.length >= shared) {
 					acceptedSources.length = shared;
 					for (const source of sources) acceptedSources.push(source);
 				}
 				acceptedHistories.set(owner, {
 					scope,
-					version,
+					version: retainedVersion,
 					sources: acceptedSources,
 					offsets: acceptedOffsets,
 					messages: snapshot,
 					final,
+					disclosure,
 				});
 			};
 		},

@@ -12,6 +12,7 @@ import {
 	type ToolArgumentValidationTelemetryEvent,
 	validateToolArguments,
 } from "@caupulican/pi-ai/validation";
+import { closingRequestContext, type HaltReport, previousHaltMessage } from "./closing-request.ts";
 import {
 	assistantMessageText,
 	collapseDegenerateAssistantMessage,
@@ -535,12 +536,11 @@ async function runLoop(
 			// opens its own.
 			const haltRequest = config.getHaltRequest?.();
 			if (haltRequest) {
+				// Find a retried halt before fresh steering can obscure the instruction from the previous attempt.
+				let haltMessage = previousHaltMessage(currentContext.messages, haltRequest);
 				await processPendingMessages();
-				// A host re-attempting this run after a transient failure hands the same request back over a
-				// transcript that already carries it: the model is told once, not once per attempt.
-				const lastUser = currentContext.messages.findLast((message) => message.role === "user");
-				if (lastUser?.content !== haltRequest.userMessage) {
-					const haltMessage: AgentMessage = {
+				if (!haltMessage) {
+					haltMessage = {
 						role: "user",
 						content: haltRequest.userMessage,
 						timestamp: Date.now(),
@@ -562,8 +562,7 @@ async function runLoop(
 					streamFn,
 					previousAssistantForDegenerateCollapse,
 					verificationObligations,
-					haltRequest.closingPrompt,
-					true,
+					{ instruction: haltMessage, systemDirective: haltRequest.closingPrompt },
 				);
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -846,21 +845,11 @@ function endedOnEmptyReply(messages: readonly AgentMessage[]): boolean {
 	);
 }
 
-const RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT = [
-	"RUNAWAY STOP CLOSING TURN",
-	"The host stopped a repeated tool-call loop. No tools are available in this final request.",
-	"Write one concise factual closing message for the user: completed work, the unresolved operation or blocker, and the safest next action.",
-	"Do not claim unperformed work. Do not emit a tool call or tool-call markup.",
-].join("\n");
-
 /**
- * Spend one final provider request, with no tools, so a stopped run closes in the model's own words.
+ * Spend one final provider request so a stopped run closes in the model's own words.
  *
- * The harness never writes that message itself. Tools are removed from the request, so this request
- * cannot open another tool batch and cannot re-enter the loop; it runs through the same planned
- * provider boundary as every other request. If the run is aborted, or the configured provider-turn
- * limit leaves no budget, the run ends with no closing message rather than a fabricated one — and a
- * provider error keeps its own error message for the same reason.
+ * The closing request uses the ordinary provider planner. The response guard rejects tool calls
+ * before they reach the executor. Aborted runs and exhausted turn budgets skip the request.
  */
 async function streamToollessClosingTurn(
 	currentContext: AgentContext,
@@ -873,25 +862,13 @@ async function streamToollessClosingTurn(
 	streamFn?: StreamFn,
 	previousAssistant?: AssistantMessage,
 	verificationObligations?: VerificationObligationTracker,
-	closingPrompt: string = RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
-	instructionTail = false,
+	halt?: HaltReport,
 ): Promise<void> {
 	if (signal?.aborted) return;
 	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
 	continuationState.providerTurns++;
 	await emit({ type: "turn_start" });
-	// Same relocation as the main turn loop above: obligation text (if any) goes to
-	// `trailingInstruction`, never appended into `systemPrompt`. RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT
-	// itself stays in the system prompt - it is host-authored, stable text, and this is always the
-	// last request of the run, so there is no future turn whose cached prefix it could invalidate.
-	const closingContext: AgentContext = {
-		...currentContext,
-		systemPrompt: currentContext.systemPrompt ? `${currentContext.systemPrompt}\n\n${closingPrompt}` : closingPrompt,
-		trailingInstruction: verificationObligations?.requestInstruction(),
-		tools: [],
-		surfaceChange: "the tool-free closing request withholds every tool",
-		...(instructionTail ? { instructionTail } : {}),
-	};
+	const closingContext = closingRequestContext(currentContext, halt, verificationObligations);
 	const response = await streamAssistantResponse(
 		closingContext,
 		config,
@@ -900,7 +877,7 @@ async function streamToollessClosingTurn(
 		streamFn,
 		{
 			rejectToolCalls: true,
-			withheldTools: currentContext.tools ?? [],
+			closingTools: currentContext.tools ?? [],
 			verificationObligations,
 		},
 		previousAssistant,
@@ -937,8 +914,8 @@ type StartedAssistantResponse = {
 
 type AssistantResponsePolicy = {
 	rejectToolCalls?: boolean;
-	/** The run's tools a tool-free request withheld: a text-written call of one is still a tool call. */
-	withheldTools?: readonly AgentTool[];
+	/** Tools whose calls the closing response must reject, including calls written as text. */
+	closingTools?: readonly AgentTool[];
 	verificationObligations?: VerificationObligationTracker;
 };
 
@@ -1031,7 +1008,7 @@ async function streamAssistantResponse(
 		signal?.removeEventListener("abort", onOuterAbort);
 		const providerMessage = await response.stream.result();
 		let finalMessage = policy?.rejectToolCalls
-			? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
+			? rejectToolCallsFromToolFreeResponse(providerMessage, policy.closingTools)
 			: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
 		if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
 			finalMessage = { ...finalMessage, stopReason: "stop" };

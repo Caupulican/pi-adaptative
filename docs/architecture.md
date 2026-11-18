@@ -35,6 +35,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 |---|---|
 | `kernel/agent-loop.ts` | Agent loop that works with AgentMessage throughout. |
 | `kernel/agent.ts` | (no header comment) |
+| `kernel/closing-request.ts` | Builds the last request of a halted or runaway run and deduplicates a retried halt instruction. |
 | `kernel/compaction/branch-summarization.ts` | Branch summarization for tree navigation. |
 | `kernel/compaction/compaction.ts` | Context compaction for long sessions. |
 | `kernel/compaction/extraction.ts` | (no header comment) |
@@ -159,7 +160,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-125 kernel modules, 67 with a header comment.
+126 kernel modules, 68 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

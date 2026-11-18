@@ -13,6 +13,7 @@ import {
 	streamSimple,
 } from "@caupulican/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai/types";
+import { closingProviderHistory, preservesClosingInstruction } from "./closing-request.ts";
 import { harnessLog } from "./harness-log.ts";
 import type {
 	AgentContext,
@@ -28,7 +29,15 @@ import type {
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./loop-config.ts";
-import { isImmutableHistoryMessage, messageContentRevision, messageSourceOf } from "./message-revision.ts";
+import {
+	capturePublishedMessagePrefix,
+	isImmutableHistoryMessage,
+	messageContentRevision,
+	messageHistoryVersion,
+	messageSourceOf,
+	serializedMessagesEqual,
+	unchangedMessagePrefix,
+} from "./message-revision.ts";
 import { captureProviderMessageConverter } from "./messages.ts";
 import { recordPrefixFoldWork } from "./prefix-fold.ts";
 import {
@@ -37,7 +46,7 @@ import {
 	providerMessageProjectionScope,
 } from "./provider-message-projection.ts";
 import { estimateProviderRequestTokens, markImageFreeProviderMessages } from "./provider-request-estimator.ts";
-import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
+import { applyProviderRequestImageBudget, imageFreeProviderPrefix } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
 import { sealSystemPrompt } from "./sealed-directives.ts";
 import {
@@ -125,6 +134,18 @@ function writeSanitizerSentPrefixCount(config: AgentLoopConfig, count: number): 
 	sentPrefixFallback.set(config, { ...readFallbackEntry(config), sanitizerSentPrefixCount: count });
 }
 
+function sharedMessagePrefix(
+	previous: readonly AgentMessage[],
+	next: readonly AgentMessage[],
+	limit: number,
+	proven = 0,
+): number {
+	if (previous === next) return limit;
+	let shared = proven;
+	while (shared < limit && previous[shared] === next[shared]) shared++;
+	return shared;
+}
+
 /**
  * A replan (compaction) hands back a DIFFERENT history: only the leading messages it shares with the
  * previous history by reference are still bytes the provider has seen. Lower both marks to that shared
@@ -143,8 +164,7 @@ function lowerPrefixMarksToSharedPrefix(
 		next.length,
 		Math.max(readSentPrefixCount(config), readSanitizerSentPrefixCount(config)),
 	);
-	let shared = previous === next ? limit : 0;
-	while (shared < limit && previous[shared] === next[shared]) shared++;
+	const shared = sharedMessagePrefix(previous, next, limit);
 	if (readSentPrefixCount(config) > shared) writeSentPrefixCount(config, shared);
 	if (readSanitizerSentPrefixCount(config) > shared) {
 		writeSanitizerSentPrefixCount(config, shared);
@@ -371,25 +391,6 @@ async function buildContextPlan(
 }
 
 /**
- * Content fallback for the one case reference comparison alone cannot resolve: a host that
- * reconstructs an equivalent message at the same position (new object, identical content) is not a
- * real disturbance - nothing the provider would see actually changed. Only called for a message
- * whose reference already differs, never for the untouched common case. `AgentMessage` is plain
- * JSON-serializable data throughout this codebase (it round-trips through the session log), so
- * `JSON.stringify` equality is a direct, adequate proxy for "would this serialize to the same
- * bytes"; an incomparable pair (this should not happen for real message shapes) is treated as
- * disturbed rather than silently ignored, since a false positive here is inert noise on an optional
- * callback while a false negative would hide a real defect.
- */
-function messageContentEqual(a: AgentMessage, b: AgentMessage): boolean {
-	try {
-		return JSON.stringify(a) === JSON.stringify(b);
-	} catch {
-		return false;
-	}
-}
-
-/**
  * Detect whether a host-owned `planContext`/`transformContext` result rewrote, reordered, or
  * removed a message at or below `sentPrefixCount` - see `AgentLoopConfig.onSentPrefixDisturbance`.
  *
@@ -419,7 +420,7 @@ function detectSentPrefixDisturbance(
 		const before = input[index];
 		const after = output[index];
 		if (before === after) continue;
-		if (after !== undefined && messageContentEqual(before, after)) continue;
+		if (after !== undefined && serializedMessagesEqual(before, after)) continue;
 		disturbedCount++;
 		if (firstDisturbedIndex === -1) firstDisturbedIndex = index;
 	}
@@ -430,8 +431,9 @@ function detectSentPrefixDisturbance(
  * The envelope compaction cannot shrink: the protocol guard, the host's carried/frame head, live
  * request-only projections, and the newly appended transient tail. `historyWireCount` includes the
  * inserted live projections, while `headWireCount` ends immediately after them. Previously committed
- * transient records remain ordinary history between those two boundaries. Both counts come from the
- * same conversion used for dispatch and measurement, rather than from source-message cardinality.
+ * transient records remain ordinary history between those two boundaries. On a halt request the
+ * closing instruction is part of the mandatory tail. Both counts come from the same conversion
+ * used for dispatch and measurement, rather than from source-message cardinality.
  */
 function nonCompactableProviderContext(
 	context: Context,
@@ -462,11 +464,21 @@ function validateReplannedSourceContext(previous: AgentContext, next: AgentConte
 }
 
 /** Preserve the loop-owned messages array so shallow response-context projections observe compaction. */
-function adoptReplannedMessages(target: AgentContext, accepted: AgentContext, privateSnapshot: boolean): void {
+function adoptReplannedMessages(
+	target: AgentContext,
+	accepted: AgentContext,
+	privateSnapshot: boolean,
+	provenPrefix: number,
+): void {
 	if (target.messages === accepted.messages) return;
 	const messages = privateSnapshot ? accepted.messages : accepted.messages.slice();
-	target.messages.length = 0;
-	for (const message of messages) target.messages.push(message);
+	// A transient commit normally appends records. Preserve its unchanged history version;
+	// compaction and other replacements still discard everything after their shared prefix.
+	const limit = Math.min(target.messages.length, messages.length);
+	const shared = sharedMessagePrefix(target.messages, messages, limit, provenPrefix);
+	countHistoryWork(target.messages, "oldRowsRead", Math.min(shared + 1, limit) - provenPrefix);
+	target.messages.length = shared;
+	for (let index = shared; index < messages.length; index++) target.messages.push(messages[index]!);
 }
 
 /** Eager disclosure never iterates the activation history. Deferred disclosure reads it in transcript order. */
@@ -556,6 +568,7 @@ async function materializeContextPlan(
 			`Context plan nonCompactableHead must be an integer from 0 to ${plan.messages.length}, got ${nonCompactableHead}.`,
 		);
 	}
+	const providerHistory = closingProviderHistory(sourceContext, plan.messages, nonCompactableHead);
 	const envelope = {
 		systemPrompt: sealSystemPrompt(composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt)),
 		tools: projectToolsForProvider(sourceContext.tools),
@@ -573,20 +586,22 @@ async function materializeContextPlan(
 			conversation: config.conversationId ?? config.sessionId,
 			protocol: config.textToolCallProtocol,
 		});
-	const scope = converter && owner && !sourceContext.instructionTail ? scopeFor(envelope) : undefined;
+	const scope = converter && owner ? scopeFor(envelope) : undefined;
 	if (!converter) historyWorkFallback(work, "custom provider converter");
 	if (converter && !scope) historyWorkFallback(work, "unscoped provider projection");
 	const projected =
 		converter && scope !== undefined
-			? projectProviderMessages({ owner, work, scope, converter, messages: plan.messages, head: nonCompactableHead })
+			? projectProviderMessages({ owner, work, scope, converter, ...providerHistory })
 			: undefined;
-	const compactableMessages = projected?.wire ?? (await config.convertToLlm(plan.messages));
-	if (!projected) countHistoryWork(work, "providerRowsConverted", plan.messages.length);
+	const compactableMessages = projected?.wire ?? (await config.convertToLlm(providerHistory.messages));
+	if (!projected) countHistoryWork(work, "providerRowsConverted", providerHistory.messages.length);
 	history?.trackDependencies?.(compactableMessages);
 	// A custom bulk converter cannot opt in to the row-local projection.
 	const headWireCount =
 		projected?.headWire ??
-		(nonCompactableHead === 0 ? 0 : (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length);
+		(providerHistory.head === 0
+			? 0
+			: (await config.convertToLlm(providerHistory.messages.slice(0, providerHistory.head))).length);
 	const convertTail = (rows: AgentMessage[]) =>
 		projected && converter ? convertProviderWireRows(rows, converter) : config.convertToLlm(rows);
 	const requestOnlyWireMessages =
@@ -607,11 +622,18 @@ async function materializeContextPlan(
 	const compactableWireCount = compactableMessages.length;
 	const llmMessages: Message[] = projected ? compactableMessages : compactableMessages.slice();
 	countHistoryWork(work, "copiedRows", projected === undefined ? compactableWireCount : 0);
+	const instruction = sourceContext.instructionTail ? llmMessages.pop() : undefined;
+	if (sourceContext.instructionTail && !preservesClosingInstruction(providerHistory.messages.at(-1)!, instruction)) {
+		throw new Error("Provider message conversion did not preserve the closing instruction.");
+	}
+	const historyWireCount = compactableWireCount - Number(instruction !== undefined);
+	const headHistoryWireCount = Math.min(headWireCount, historyWireCount);
 	if (requestOnlyWireMessages.length > 0) {
-		countHistoryWork(work, "copiedRows", Math.max(0, (projected?.reusedWire ?? 0) - headWireCount));
-		llmMessages.splice(headWireCount, 0, ...requestOnlyWireMessages);
+		countHistoryWork(work, "copiedRows", Math.max(0, (projected?.reusedWire ?? 0) - headHistoryWireCount));
+		llmMessages.splice(headHistoryWireCount, 0, ...requestOnlyWireMessages);
 	}
 	for (const message of newTransientWireMessages) llmMessages.push(message);
+	if (instruction) llmMessages.push(instruction);
 	signal?.throwIfAborted();
 
 	const sourceProviderContext: Context = {
@@ -622,23 +644,65 @@ async function materializeContextPlan(
 	};
 	// Deferred-tool activation reads the whole transcript, not the planned view: a folded view drops the search or call
 	// that activated a tool while still showing the model it used that tool (see `discloseToolSchemas`).
+	const compactablePrefix = requestOnlyWireMessages.length === 0 ? historyWireCount : headHistoryWireCount;
+	const rawRequestOnly = { start: headHistoryWireCount, count: requestOnlyWireMessages.length };
+	const previousDisclosure = projected?.previousDisclosure;
+	// A fold can conceal a rewritten search even when every planned row matches. Activation reuse
+	// needs both the accepted planned prefix and the full durable prefix that fed the search index.
+	const liveDurablePrefix =
+		sourceContext.instructionTail && previousDisclosure
+			? messageHistoryVersion(sourceContext.messages, previousDisclosure.durableLength)
+			: undefined;
+	const closingDisclosure =
+		previousDisclosure &&
+		liveDurablePrefix &&
+		unchangedMessagePrefix(previousDisclosure.durableVersion, liveDurablePrefix) >=
+			previousDisclosure.durableLength &&
+		projected.reusedWire >= previousDisclosure.historyLength
+			? {
+					surface: previousDisclosure.surface,
+					historyLength: previousDisclosure.historyLength,
+					previousRequestOnly: previousDisclosure.requestOnly,
+					requestOnly: rawRequestOnly,
+				}
+			: undefined;
 	const protocolMaterialized = materializeProviderRequest(
 		sourceProviderContext,
 		config,
 		config.model,
 		toolActivationHistory(sourceContext.messages),
+		closingDisclosure ?? (projected && !sourceContext.instructionTail ? "capture" : undefined),
 	);
-	const compactablePrefix = requestOnlyWireMessages.length === 0 ? compactableWireCount : headWireCount;
-	const knownImageFreePrefix =
+	// Raw immutable history and the currently approved knowledge note have separate lifetimes.
+	const imageFreeHistoryLength =
 		protocolMaterialized.context.messages === llmMessages && projected?.previousFinal
-			? Math.min(projected.reusedWire, projected.previousFinal.compactablePrefix, compactablePrefix)
-			: 0;
+			? Math.min(projected.reusedWire, projected.previousFinal.imageFreeHistoryLength, historyWireCount)
+			: closingDisclosure && previousDisclosure?.imageFree
+				? Math.min(previousDisclosure.historyLength, historyWireCount)
+				: 0;
+	const knownImageFreePrefix = imageFreeProviderPrefix(
+		imageFreeHistoryLength,
+		headHistoryWireCount,
+		requestOnlyWireMessages,
+		protocolMaterialized.usesTextToolProtocol && protocolMaterialized.context.messages.length > 0,
+	);
 	const budgeted = applyProviderRequestImageBudget(
 		protocolMaterialized.context,
 		config.model,
 		undefined,
 		knownImageFreePrefix,
 	);
+	const durableVersion = protocolMaterialized.toolSurface && messageHistoryVersion(sourceContext.messages);
+	const projectionDisclosure = durableVersion &&
+		protocolMaterialized.toolSurface && {
+			surface: protocolMaterialized.toolSurface,
+			historyLength: historyWireCount,
+			durableVersion,
+			durableLength: sourceContext.messages.length,
+			requestOnly: rawRequestOnly,
+			imageFree:
+				projected?.stableWire === true && !budgeted.outcome && budgeted.context === protocolMaterialized.context,
+		};
 	const materialized =
 		budgeted.context === protocolMaterialized.context
 			? protocolMaterialized
@@ -647,12 +711,13 @@ async function materializeContextPlan(
 	history?.trackDependencies?.(materialized.context.messages);
 	const nonCompactableContext = nonCompactableProviderContext(
 		materialized.context,
-		compactableWireCount + requestOnlyWireMessages.length,
+		historyWireCount + requestOnlyWireMessages.length,
 		materialized.usesTextToolProtocol,
-		headWireCount + requestOnlyWireMessages.length,
+		headHistoryWireCount + requestOnlyWireMessages.length,
 	);
 	const requestOnlyMessageRange = {
-		start: (materialized.usesTextToolProtocol && materialized.context.messages.length > 0 ? 1 : 0) + headWireCount,
+		start:
+			(materialized.usesTextToolProtocol && materialized.context.messages.length > 0 ? 1 : 0) + headHistoryWireCount,
 		count: requestOnlyWireMessages.length,
 	};
 	const finalScope = scopeFor(materialized.context);
@@ -666,6 +731,7 @@ async function materializeContextPlan(
 			? {
 					messages: llmMessages,
 					compactablePrefix,
+					imageFreeHistoryLength: historyWireCount,
 					scope: finalScope,
 				}
 			: undefined;
@@ -673,11 +739,14 @@ async function materializeContextPlan(
 		materialized,
 		nonCompactableContext,
 		requestOnlyMessageRange,
-		pendingTransientRecords,
-		transientDecisions: reconciliation.decisions,
-		nativeHistory: !materialized.usesTextToolProtocol && !sourceContext.instructionTail,
+		// Any freshly rendered informational records on a halt request are request-local.
+		// Persisting them would place them behind the already-persisted closing instruction.
+		pendingTransientRecords: sourceContext.instructionTail ? [] : pendingTransientRecords,
+		transientDecisions: sourceContext.instructionTail ? [] : reconciliation.decisions,
+		nativeHistory: !materialized.usesTextToolProtocol,
 		transientTail: newTransientMessages,
 		projected,
+		projectionDisclosure,
 		projectionFinal,
 		blockImages: converter?.policy,
 	};
@@ -726,6 +795,12 @@ export async function startPlannedAgentProviderRequestWithId(
 	let sourceContext = projectSystemPrompt
 		? { ...initialContext, systemPrompt: projectSystemPrompt(initialContext.systemPrompt) }
 		: initialContext;
+	if (sourceContext.instructionTail === true) {
+		const instruction = sourceContext.messages.at(-1);
+		if (instruction?.role !== "user")
+			throw new Error("A closing provider request needs its durable user instruction.");
+		sourceContext = { ...sourceContext, instructionTail: instruction };
+	}
 	let admissionAttempt = 0;
 	let stalePlanCount = 0;
 	const prefixState: ProviderRequestPrefixState =
@@ -830,7 +905,12 @@ export async function startPlannedAgentProviderRequestWithId(
 				nativeHistory: fresh.nativeHistory,
 				certifiedWire: fresh.projectionFinal !== undefined,
 			};
-			const continued = historyCandidate && plan.providerHistory?.offer(historyCandidate);
+			let continued = historyCandidate && plan.providerHistory?.offer(historyCandidate);
+			if (continued && sourceContext.instructionTail) {
+				const instruction = fresh.materialized.context.messages.at(-1);
+				const tail = continued.messages.at(-1);
+				if (!instruction || !preservesClosingInstruction(instruction, tail)) continued = undefined;
+			}
 			// A prior wire prefix is optional. Its size is checked before admission, which always receives
 			// the very context transport will send. The fresh envelope remains the compactable floor.
 			const materialized = continued
@@ -841,10 +921,13 @@ export async function startPlannedAgentProviderRequestWithId(
 			// A certified array is the transport's immutable request value. Callbacks receive this same value.
 			certifyProviderProjection(fresh.projected, projectionFinal);
 			inheritHistoryWork(initialContext.messages, materialized.context.messages);
-			const acceptProjection = fresh.projected?.prepareAcceptance(
-				projectionFinal,
-				fresh.requestOnlyMessageRange.count,
-			);
+			const acceptProjection = sourceContext.instructionTail
+				? undefined
+				: fresh.projected?.prepareAcceptance(
+						projectionFinal,
+						fresh.requestOnlyMessageRange.count,
+						continued ? undefined : fresh.projectionDisclosure,
+					);
 
 			if (plan.isCurrent?.() === false) {
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
@@ -868,7 +951,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					throw new Error(`Provider request admission exceeded ${MAX_PROVIDER_REQUEST_REPLANS} replans`);
 				}
 				lowerPrefixMarksToSharedPrefix(config, sourceContext.messages, admission.context.messages);
-				sourceContext = admission.context;
+				sourceContext = { ...sourceContext, messages: admission.context.messages };
 				admissionAttempt++;
 				stalePlanCount = 0;
 				continue;
@@ -924,6 +1007,11 @@ export async function startPlannedAgentProviderRequestWithId(
 			// comment for why these records are safe to fold into durable history with no special
 			// exemption from ordinary compaction/GC once the pack-freeze horizon moves past them.
 			const beforeTransientCommit = sourceContext;
+			const beforeTransientCount = sourceContext.messages.length;
+			const transientAppendCurrent =
+				pendingTransientRecords.length > 0 && sourceContext.messages === initialContext.messages
+					? capturePublishedMessagePrefix(() => initialContext.messages, beforeTransientCount)
+					: undefined;
 			sourceContext = await commitTransientRecords(
 				sourceContext,
 				pendingTransientRecords,
@@ -950,7 +1038,12 @@ export async function startPlannedAgentProviderRequestWithId(
 			recordPrefixFoldWork(sourceContext.messages.length, plan.messages.length);
 			// A transient commit produced a private array. The loop keeps its own live array after adoption.
 			const privateSnapshot = sourceContext !== beforeTransientCommit;
-			adoptReplannedMessages(initialContext, sourceContext, privateSnapshot);
+			adoptReplannedMessages(
+				initialContext,
+				sourceContext,
+				privateSnapshot,
+				transientAppendCurrent?.() ? beforeTransientCount : 0,
+			);
 			prefixState.acceptSource?.(initialContext.messages);
 			keepPlan = true;
 			if (config.onProviderRequestSnapshot && !privateSnapshot && !config.borrowProviderSnapshotSource) {

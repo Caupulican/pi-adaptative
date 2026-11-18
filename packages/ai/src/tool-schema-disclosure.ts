@@ -58,6 +58,26 @@ export interface ToolSchemaDisclosureRequestMetrics extends ToolSchemaDisclosure
 	searchResolutionMs: number | null;
 }
 
+/** A prior harness search expansion, indexed before any text protocol guard is added. */
+export interface DisclosedSearchResult {
+	readonly index: number;
+	readonly text: string;
+}
+
+/** The accepted declaration order and search expansions of the same scoped conversation. */
+export interface AcceptedToolDisclosure {
+	readonly activatedToolNames: readonly string[];
+	readonly searchResults: readonly DisclosedSearchResult[];
+}
+
+/** A report reuses immutable raw history while its inserted request-local rows may move or change. */
+export interface ClosingToolDisclosure<Surface extends AcceptedToolDisclosure = AcceptedToolDisclosure> {
+	readonly surface: Surface;
+	readonly historyLength: number;
+	readonly previousRequestOnly: { readonly start: number; readonly count: number };
+	readonly requestOnly: { readonly start: number; readonly count: number };
+}
+
 /** One request's disclosure: the plan, and the deferred tools its own history activated (in activation order). */
 export interface ToolSchemaDisclosureDecision {
 	plan: ToolSchemaDisclosurePlan;
@@ -441,8 +461,14 @@ function sameTools(left: readonly Tool[], right: readonly Tool[]): boolean {
 export function discloseToolSchemas(
 	model: ToolSchemaDisclosureModel,
 	context: Context,
-	options: { forcedToolName?: string; appendActivated: boolean; activationHistory?: Iterable<Message> },
-): { context: Context; decision: ToolSchemaDisclosureDecision } {
+	options: {
+		forcedToolName?: string;
+		appendActivated: boolean;
+		activationHistory?: Iterable<Message>;
+		closing?: ClosingToolDisclosure;
+		captureSearchResults?: boolean;
+	},
+): { context: Context; decision: ToolSchemaDisclosureDecision; searchResults?: readonly DisclosedSearchResult[] } {
 	const tools = context.tools ?? [];
 	const plan = planToolSchemaDisclosure(model, tools);
 	if (plan.mode === "native" || plan.mode === "disclosed")
@@ -469,11 +495,38 @@ export function discloseToolSchemas(
 		for (const tool of matches ?? []) activate(tool.name);
 		return matches;
 	};
-	for (const message of options.activationHistory ?? []) activateFrom(message);
+	const closing = options.closing;
+	if (closing) {
+		for (const name of closing.surface.activatedToolNames) activate(name);
+	} else {
+		for (const message of options.activationHistory ?? []) activateFrom(message);
+	}
 	let messages: Message[] | undefined;
-	for (const [index, message] of context.messages.entries()) {
-		const matches = activateFrom(message);
-		if (matches === undefined || message.role !== "toolResult") continue;
+	const searchResults: DisclosedSearchResult[] | undefined = options.captureSearchResults ? [] : undefined;
+	// The stored expansion positions precede the text guard and include the old insertion.
+	// Resolve each to a raw history index, then place it around this request's current insertion.
+	if (closing) {
+		const old = closing.previousRequestOnly;
+		const fresh = closing.requestOnly;
+		for (const result of closing.surface.searchResults) {
+			if (result.index >= old.start && result.index < old.start + old.count) continue;
+			const raw = result.index < old.start ? result.index : result.index - old.count;
+			if (raw >= closing.historyLength) break;
+			const index = raw < fresh.start ? raw : raw + fresh.count;
+			const message = context.messages[index]!;
+			if (message.role !== "toolResult") continue;
+			messages ??= context.messages.slice();
+			messages[index] = { ...message, content: [{ type: "text", text: result.text }] };
+		}
+	}
+	const rewrite = (index: number): void => {
+		const message = context.messages[index]!;
+		const matches = closing
+			? message.role === "toolResult"
+				? searchResultTools(plan, message)
+				: undefined
+			: activateFrom(message);
+		if (matches === undefined || message.role !== "toolResult") return;
 		const cached = rewrittenSearchResults.get(message);
 		const rewritten: ToolResultMessage =
 			cached && sameTools(cached.matches, matches)
@@ -482,8 +535,17 @@ export function discloseToolSchemas(
 		if (rewritten !== cached?.message) rewrittenSearchResults.set(message, { matches, message: rewritten });
 		messages ??= context.messages.slice();
 		messages[index] = rewritten;
+		const content = rewritten.content[0];
+		if (searchResults && content?.type === "text") searchResults.push({ index, text: content.text });
+	};
+	let suffixStart = closing?.historyLength ?? 0;
+	if (closing && closing.requestOnly.start < suffixStart) {
+		const { start, count } = closing.requestOnly;
+		for (let index = start; index < start + count; index++) rewrite(index);
+		suffixStart += count;
 	}
-	if (options.forcedToolName !== undefined) activate(options.forcedToolName);
+	for (let index = suffixStart; index < context.messages.length; index++) rewrite(index);
+	if (!closing && options.forcedToolName !== undefined) activate(options.forcedToolName);
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
 	const sentTools: Tool[] = [];
 	for (const tool of tools) {
@@ -499,6 +561,7 @@ export function discloseToolSchemas(
 	return {
 		context: { ...context, ...(messages ? { messages } : {}), tools: sentTools },
 		decision: { plan, activatedToolNames: [...activated] },
+		searchResults,
 	};
 }
 

@@ -1,16 +1,20 @@
 import {
 	type Api,
+	type AssistantMessage,
 	AssistantMessageEventStream,
 	type Context,
 	createEmptyUsage,
 	type ImageContent,
 	type Model,
+	NON_VISION_USER_IMAGE_PLACEHOLDER,
 	type ToolResultMessage,
 	type UserMessage,
 } from "@caupulican/pi-ai";
 import { observeHistoryWork, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
 import { expect, it } from "vitest";
 import { applyContextGc } from "../src/core/context-gc.ts";
+import { buildWorkerHaltRequest, WorkerLaneHalts } from "../src/core/delegation/worker-halt.ts";
+import { createAgentLoopContinuationState, runAgentLoop } from "../src/kernel/agent-loop.ts";
 import type { AgentContext, AgentLoopConfig } from "../src/kernel/loop-config.ts";
 import {
 	advanceMessageContentRevision,
@@ -27,6 +31,7 @@ import {
 
 import { startPlannedAgentProviderRequestWithId } from "../src/kernel/provider-request-planner.ts";
 import { createToolFailureContextMemory } from "../src/kernel/tool-failure-memory.ts";
+import { HOST_REQUEST_ONLY_DETAILS } from "../src/kernel/transient-records.ts";
 
 const visionModel: Model<Api> = {
 	id: "vision",
@@ -40,6 +45,22 @@ const visionModel: Model<Api> = {
 	maxTokens: 1000,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
+
+function assistantReply(
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"],
+): AssistantMessage {
+	return {
+		role: "assistant",
+		api: visionModel.api,
+		provider: visionModel.provider,
+		model: visionModel.id,
+		content,
+		usage: createEmptyUsage(),
+		stopReason,
+		timestamp: 2,
+	};
+}
 
 it("recomputes admission for an in-place edit even when the wire array and message retain their identity", () => {
 	const message: UserMessage = { role: "user", content: "short", timestamp: 0 };
@@ -190,6 +211,225 @@ it.each([100, 1_000, 10_000])("projects only the new suffix over %s accepted row
 	expect(edited.work.providerRowsConverted).toBe(3);
 	expect(providerMessagePrefix(edited.dispatched!.messages)?.count).toBe(rows - 2);
 	expect(edited.dispatched!.messages[rows - 2]?.content).toBe("Edited input.");
+
+	// The worker's final report is an ordinary append to the accepted history, including a recent edit.
+	const halt = buildWorkerHaltRequest("Summarize the remaining work.");
+	const instruction = fixture.userRow(halt.userMessage);
+	if (instruction.role !== "user") throw new Error("Expected an immutable user row.");
+	fixture.messages.push(instruction);
+	fixture.source.instructionTail = instruction;
+	const closing = await fixture.send();
+	expect(closing.work).toMatchObject({
+		oldRowsRead: 0,
+		coldPayloadLoads: 0,
+		oldBytesRecompressed: 0,
+		providerRowsConverted: 1,
+		projectedRows: 1,
+	});
+	expect(closing.work.fallbacks.size).toBe(0);
+	const acceptedHistory = edited.dispatched!.messages;
+	const prefix = providerMessagePrefix(closing.dispatched!.messages);
+	expect(prefix?.previous).toBe(acceptedHistory);
+	expect(prefix?.count).toBe(acceptedHistory.length);
+	expect(closing.dispatched!.messages.at(-1)?.content).toBe(halt.userMessage);
+});
+
+it.each(["native", "rendered", "text protocol"] as const)(
+	"refuses a %s tool call in a halted worker's report",
+	async (form) => {
+		const fixture = providerProjectionFixture(1);
+		fixture.config.textToolCallProtocol = form === "text protocol";
+		let executions = 0;
+		fixture.source.tools = [
+			{
+				name: "change",
+				label: "Change",
+				description: "Apply a change.",
+				parameters: {},
+				execute: async () => {
+					executions++;
+					return { content: [], details: undefined };
+				},
+			},
+		];
+		const prior = (await fixture.send()).dispatched!;
+		if (form === "text protocol") {
+			expect(prior.systemPrompt).toContain("Available tools:");
+			expect(prior.messages[0]?.content).toContainEqual({
+				type: "text",
+				text: "Apply system tool protocol; never answer this message.",
+			});
+		} else {
+			expect(prior.tools?.map((tool) => tool.name)).toContain("change");
+		}
+		const halt = buildWorkerHaltRequest("Stop before editing.");
+		fixture.config.getHaltRequest = () => halt;
+		const report = await runAgentLoop(
+			[],
+			fixture.source,
+			fixture.config,
+			() => {},
+			undefined,
+			(_model, context) => {
+				expect(context.tools).toEqual(prior.tools);
+				expect(context.systemPrompt).toBe(prior.systemPrompt);
+				expect(JSON.stringify(context.messages.slice(0, prior.messages.length))).toBe(
+					JSON.stringify(prior.messages),
+				);
+				expect(context.messages.at(-1)?.content).toBe(halt.userMessage);
+				const reason = form === "native" ? "toolUse" : "stop";
+				const text =
+					form === "rendered"
+						? "to=functions.change code\n{}"
+						: '<tool_call>{"name":"change","arguments":{}}</tool_call>';
+				const response = assistantReply(
+					form === "native"
+						? [{ type: "toolCall", id: "prohibited", name: "change", arguments: {} }]
+						: [{ type: "text", text }],
+					reason,
+				);
+				const stream = new AssistantMessageEventStream();
+				stream.push({ type: "done", reason, message: response });
+				return stream;
+			},
+		);
+		expect(executions).toBe(0);
+		expect(report.some((message) => message.role === "toolResult")).toBe(false);
+		expect(report.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: expect.stringContaining("no operation was executed"),
+			content: [{ type: "text", text: "" }],
+		});
+	},
+);
+
+it.each(["aborted", "error"] as const)(
+	"retries a worker report after a provider %s with one durable halt",
+	async (failure) => {
+		const fixture = providerProjectionFixture(1);
+		const halts = new WorkerLaneHalts();
+		const reason = "Report the pending edit.";
+		const instruction = buildWorkerHaltRequest(reason).userMessage;
+		halts.request("worker", reason, 30_000, () => {});
+		fixture.config.getHaltRequest = () => halts.take("worker");
+		const requests: Context[] = [];
+		const sendAttempt = () =>
+			runAgentLoop(
+				[],
+				fixture.source,
+				fixture.config,
+				() => {},
+				undefined,
+				(_model, context) => {
+					requests.push(context);
+					const stream = new AssistantMessageEventStream();
+					if (requests.length === 1) {
+						stream.push({
+							type: "error",
+							reason: failure,
+							error: { ...assistantReply([], failure), errorMessage: "Transport interrupted." },
+						});
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: assistantReply([{ type: "text", text: "The edit is pending." }], "stop"),
+						});
+					}
+					return stream;
+				},
+			);
+		try {
+			const failed = await sendAttempt();
+			expect(failed.at(-1)).toMatchObject({ role: "assistant", stopReason: failure });
+			fixture.messages.push(...failed);
+			const clarification = "Include the filename in the report.";
+			fixture.config.getSteeringMessages = async () => [fixture.userRow(clarification)];
+			const resumed = await sendAttempt();
+			expect(resumed.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(requests.at(-1)?.messages.at(-2)).toMatchObject({ content: clarification });
+			expect(
+				[...fixture.messages, ...resumed].filter((row) => row.role === "user" && row.content === instruction),
+			).toHaveLength(1);
+			expect(requests).toHaveLength(2);
+			for (const request of requests) {
+				expect(request.messages.filter((row) => row.role === "user" && row.content === instruction)).toHaveLength(
+					1,
+				);
+				expect(request.messages.at(-1)).toMatchObject({ role: "user", content: instruction });
+			}
+		} finally {
+			halts.clear("worker");
+		}
+	},
+);
+
+it.each(["aborted", "exhausted turn budget"] as const)("skips a worker report request when %s", async (stop) => {
+	const fixture = providerProjectionFixture(1);
+	fixture.config.getHaltRequest = () => buildWorkerHaltRequest("Stop before editing.");
+	fixture.config.maxProviderTurns = 1;
+	const state = createAgentLoopContinuationState();
+	if (stop === "exhausted turn budget") state.providerTurns = 1;
+	const turnsBefore = state.providerTurns;
+	let dispatches = 0;
+	const report = await runAgentLoop(
+		[],
+		fixture.source,
+		fixture.config,
+		() => {},
+		stop === "aborted" ? AbortSignal.abort() : undefined,
+		() => {
+			dispatches++;
+			throw new Error("Unexpected closing request");
+		},
+		state,
+	);
+	expect(dispatches).toBe(0);
+	expect(state.providerTurns).toBe(turnsBefore);
+	expect(report.some((row) => row.role === "assistant")).toBe(false);
+});
+
+it("keeps the durable halt instruction last when admission replans around a failed report", async () => {
+	const fixture = providerProjectionFixture(3);
+	const request = buildWorkerHaltRequest("Stop and report the remaining work.");
+	const halt: UserMessage = { role: "user", content: request.userMessage, timestamp: 1 };
+	const failedReport = assistantReply([], "error");
+	const retained = fixture.messages[2]!;
+	fixture.messages.push(halt, failedReport);
+	fixture.source.instructionTail = halt;
+	fixture.config.planContext = async ({ messages }) => ({
+		messages,
+		transientMessages: [
+			createCustomMessage("closing-test-note", "Fresh context note.", false, undefined, new Date(0).toISOString()),
+		],
+	});
+	const attempts: number[] = [];
+	fixture.config.admitProviderRequest = ({ attempt, context, nonCompactableContext, sourceContext }) => {
+		attempts.push(attempt);
+		expect(context.messages.at(-1)?.content).toBe(request.userMessage);
+		expect(nonCompactableContext.messages.at(-1)?.content).toBe(request.userMessage);
+		expect(context.messages.at(-2)?.content).toEqual([
+			{ type: "text", text: expect.stringContaining("Fresh context note.") },
+		]);
+		if (attempt === 0) {
+			return {
+				action: "replan",
+				context: {
+					systemPrompt: sourceContext.systemPrompt,
+					tools: sourceContext.tools,
+					messages: [retained, halt, failedReport],
+				},
+			};
+		}
+		return { action: "send" };
+	};
+
+	const closing = await fixture.send();
+	expect(attempts).toEqual([0, 1]);
+	expect(closing.dispatched?.messages.at(-1)?.content).toBe(request.userMessage);
+	expect(closing.dispatched?.messages).toHaveLength(4);
+	expect(fixture.messages).toEqual([retained, halt, failedReport]);
 });
 
 it("does not retain the suffix of a refused dispatch and invalidates on projection policy changes", async () => {
@@ -322,4 +562,113 @@ it("extends an accepted packed tool result without replaying the old tool body",
 		coldPayloadLoads: 0,
 		providerRowsConverted: 1,
 	});
+});
+
+function deferredHaltFixture(text: boolean) {
+	const fixture = providerProjectionFixture(3);
+	fixture.config.textToolCallProtocol = text;
+	fixture.source.tools = ["tool_search", ...Array.from({ length: 12 }, (_, i) => `command_${i}`)].map((name) => ({
+		name,
+		label: name,
+		description: name === "tool_search" ? "Load schemas by name." : name.repeat(500),
+		parameters: {},
+		execute: async () => {
+			throw new Error("The report may not execute a tool.");
+		},
+	}));
+	const search = (name: string) =>
+		immutableHistoryMessage({
+			role: "toolResult",
+			toolCallId: name,
+			toolName: "tool_search",
+			isError: false,
+			timestamp: 2,
+			content: [{ type: "text", text: "Search finished." }],
+			details: { kind: "deferred_tool_schema_search", query: `select:${name}`, maxResults: 1 },
+		})!;
+	const halt = fixture.userRow(buildWorkerHaltRequest("Report the pending discovery.").userMessage);
+	if (halt.role !== "user") throw new Error("Expected an immutable halt instruction.");
+	const sendReport = () => {
+		fixture.messages.push(halt);
+		fixture.source.instructionTail = halt;
+		return fixture.send();
+	};
+	return { ...fixture, search, halt, sendReport };
+}
+
+it.each([false, true])(
+	"keeps accepted deferred declarations when a search completes just before halt (text=%s)",
+	async (text) => {
+		const fixture = deferredHaltFixture(text);
+		let noteStart = 0;
+		let noteTexts = ["First worker note."];
+		fixture.config.planContext = async ({ messages }) => ({
+			messages,
+			nonCompactableHead: noteStart,
+			transientMessages: noteTexts.map((note) =>
+				createCustomMessage("worker-note", note, false, HOST_REQUEST_ONLY_DETAILS, new Date(0).toISOString()),
+			),
+		});
+		fixture.messages.push(fixture.search("command_10"));
+		const accepted = (await fixture.send()).dispatched!;
+		if (!text) {
+			expect(accepted.tools?.map((tool) => tool.name)).toContain("command_10");
+			expect(accepted.tools?.map((tool) => tool.name)).not.toContain("command_11");
+		}
+		// Move the live note across the accepted search, and change its length and content.
+		noteStart = fixture.messages.length;
+		noteTexts = ["Updated worker note.", "Second worker note."];
+		fixture.messages.push(fixture.search("command_11"));
+		const report = (await fixture.sendReport()).dispatched!;
+		expect(report.tools).toEqual(accepted.tools);
+		expect(report.systemPrompt).toBe(accepted.systemPrompt);
+		if (text) expect(report.messages[0]).toBe(accepted.messages[0]);
+		const guardCount = Number(text);
+		expect(report.messages.slice(guardCount, guardCount + noteStart)).toEqual(
+			accepted.messages.slice(guardCount + 1),
+		);
+		expect(
+			report.messages
+				.slice(guardCount + noteStart, guardCount + noteStart + noteTexts.length)
+				.map((row) => row.content),
+		).toEqual(noteTexts.map((note) => [{ type: "text", text: note }]));
+		expect(report.messages.at(-2)).toMatchObject({
+			role: "toolResult",
+			content: [{ type: "text", text: expect.stringContaining('"name":"command_11"') }],
+		});
+		expect(report.messages.at(-1)?.content).toBe(fixture.halt.content);
+	},
+);
+
+it("checks a new image inserted before a halted worker's accepted image-free history", async () => {
+	const fixture = deferredHaltFixture(true);
+	fixture.config.model = { ...visionModel, input: ["text"] };
+	let note: string | ImageContent[] = "Worker knowledge.";
+	fixture.config.planContext = async ({ messages }) => ({
+		messages,
+		transientMessages: [
+			createCustomMessage("worker-note", note, false, HOST_REQUEST_ONLY_DETAILS, new Date(0).toISOString()),
+		],
+	});
+	await fixture.send();
+	note = [{ type: "image", mimeType: "image/png", data: "AQID" }];
+	const report = (await fixture.sendReport()).dispatched!;
+	expect(report.messages[1]?.content).toEqual([{ type: "text", text: NON_VISION_USER_IMAGE_PLACEHOLDER }]);
+	expect(report.messages.at(-1)?.content).toBe(fixture.halt.content);
+});
+
+it("recomputes halt disclosure if a projected-out search changes in durable history", async () => {
+	const fixture = deferredHaltFixture(false);
+	fixture.config.planContext = async ({ messages }) => ({
+		messages: messages.filter((row) => row.role !== "toolResult"),
+	});
+	const index = fixture.messages.length;
+	fixture.messages.push(fixture.search("command_10"));
+	const before = (await fixture.send()).dispatched!;
+	expect(before.tools?.map((tool) => tool.name)).toContain("command_10");
+	fixture.messages[index] = fixture.search("command_11");
+	const report = (await fixture.sendReport()).dispatched!;
+	const visible = report.tools?.map((tool) => tool.name);
+	expect(visible).toContain("command_11");
+	expect(visible).not.toContain("command_10");
 });

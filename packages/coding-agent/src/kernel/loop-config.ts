@@ -364,8 +364,10 @@ export interface AgentRunawayStopInfo {
 export interface AgentHaltRequest {
 	/** Injected into the transcript before the closing request, so the model sees why it stopped. */
 	userMessage: string;
-	/** Host-authored system text for the tool-free closing request. */
-	closingPrompt: string;
+	/** A host that requires a separate system directive can supply it for this one request. */
+	closingPrompt?: string;
+	/** The host has never delivered this halt. Its first delivery needs no transcript lookup. */
+	firstDelivery?: boolean;
 }
 
 export interface ToolValidationEscalationEvent {
@@ -855,8 +857,7 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 	/**
 	 * Host halt request, polled before every provider request. When it returns a request the loop
 	 * injects `userMessage` into the transcript, spends one final tool-free provider request so the
-	 * model authors its own report (the same closing turn a runaway stop uses, with `closingPrompt`
-	 * in place of the runaway text), and ends the run. A tool batch already executing finishes first.
+	 * model authors its own report and ends the run. A tool batch already executing finishes first.
 	 * The host owns what the report means; the loop never writes the report itself.
 	 *
 	 * Contract: must not throw or reject. The loop acts on the first request it receives and ends the
@@ -1089,5 +1090,5 @@ export interface AgentContext {
 	 * failure ledger, verification obligations) after it, so the instruction stays the last thing the
 	 * model reads. Records already in the transcript are untouched.
 	 */
-	instructionTail?: boolean;
+	instructionTail?: boolean | Extract<AgentMessage, { role: "user" }>;
 }

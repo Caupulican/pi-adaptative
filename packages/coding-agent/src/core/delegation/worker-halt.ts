@@ -4,13 +4,6 @@ import { boundedText } from "../util/bounded-line.ts";
 /** Longest parent reason carried into the worker's transcript and the claim. */
 export const MAX_WORKER_HALT_REASON_CHARS = 1_000;
 
-const HALT_CLOSING_PROMPT = [
-	"HALT CLOSING TURN",
-	"The parent interrupted this worker. No tools are available in this final request.",
-	"Write one concise factual report for the parent: completed work, unfinished work, the exact state of anything you touched, and the safest next step.",
-	"Do not claim unperformed work. Do not emit a tool call or tool-call markup.",
-].join("\n");
-
 /** The parent's reason, trimmed; a longer one keeps its head and tail and is never cut inside a path. */
 export function normalizeWorkerHaltReason(reason: string | undefined): string | undefined {
 	const trimmed = reason?.trim();
@@ -18,15 +11,14 @@ export function normalizeWorkerHaltReason(reason: string | undefined): string | 
 	return boundedText(trimmed, MAX_WORKER_HALT_REASON_CHARS);
 }
 
-/** What the worker is told, and the closing instruction its one tool-free request runs under. */
+/** The complete instruction appended to the worker conversation for its final report. */
 export function buildWorkerHaltRequest(reason: string | undefined): AgentHaltRequest {
 	return {
 		userMessage: [
 			"[Worker control halt]",
 			`The parent stopped your work${reason ? `: ${reason}` : "."}`,
-			"Do not continue the task. Reply now with your report for the parent: what you finished, what is unfinished, the exact state of anything you touched, and what you would do next.",
+			"Stop work and reply in plain text. Give the parent a concise factual report of what you finished, what remains, the exact state of anything you touched, and the safest next step. Do not call tools or write tool-call markup.",
 		].join("\n"),
-		closingPrompt: HALT_CLOSING_PROMPT,
 	};
 }
 
@@ -62,10 +54,11 @@ export class WorkerLaneHalts {
 	take(laneId: string): AgentHaltRequest | undefined {
 		const halt = this.halts.get(laneId);
 		if (!halt) return undefined;
+		const firstDelivery = !halt.delivered;
 		halt.delivered = true;
 		clearTimeout(halt.deadline);
 		halt.deadline = undefined;
-		return buildWorkerHaltRequest(halt.reason);
+		return { ...buildWorkerHaltRequest(halt.reason), firstDelivery };
 	}
 
 	has(laneId: string): boolean {

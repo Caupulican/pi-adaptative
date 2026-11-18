@@ -141,6 +141,21 @@ export function hasInlineImages(messages: readonly Message[]): boolean {
 	return inlineImageScans.find(messages) >= 0;
 }
 
+/** Map an image-free history prefix through a request-local insertion and an optional text guard. */
+export function imageFreeProviderPrefix(
+	historyLength: number,
+	insertAt: number,
+	inserted: readonly Message[],
+	textGuard: boolean,
+): number {
+	if (historyLength === 0) return 0;
+	if (insertAt > historyLength) return historyLength + Number(textGuard);
+	// A knowledge note can change on every request. Inspect those fresh rows before skipping
+	// the rest of the already-checked history. An inserted image must reach the normal budget.
+	const prefix = inserted.some(hasInlineImage) ? insertAt : historyLength + inserted.length;
+	return prefix + Number(textGuard);
+}
+
 /**
  * Applies high-water/low-water image eviction to a request-local Context copy. Durable history is
  * never mutated; evicted images are replaced with explicit anti-hallucination notices.

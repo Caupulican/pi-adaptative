@@ -398,6 +398,15 @@ export class ImmutableMessageHistory {
 	}
 }
 
+/** Compare the wire bytes of reconstructed message records when their references differ. */
+export function serializedMessagesEqual(left: AgentMessage, right: AgentMessage): boolean {
+	try {
+		return JSON.stringify(left) === JSON.stringify(right);
+	} catch {
+		return false;
+	}
+}
+
 /** Match an immediate immutable snapshot to its source at the revision it captured. */
 export function sameMessageContents(left: AgentMessage | undefined, right: AgentMessage): boolean {
 	if (!left) return false;

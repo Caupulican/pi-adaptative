@@ -18,7 +18,6 @@ import {
 	enqueueRoot,
 	loadBotToolStep,
 	MODEL_ID,
-	offeredTools,
 	onlyAgentOn,
 	PHASE_JUDGMENTS,
 	reached,
@@ -135,13 +134,18 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		leaderLast: {} as Record<string, unknown>,
 		helperLast: {} as Record<string, unknown>,
 	};
-	/** What a halted worker's one closing request is: the parent's stop in its conversation, and no tool to call. */
-	const closingRequest = (request: ScriptedRequest) => ({
-		toldToStop: carries(request, "[Worker control halt]"),
-		tools: offeredTools(request).length,
-	});
+	/** A closing report appends the parent's halt while keeping the worker's accepted provider surface. */
+	const closingRequest = (request: ScriptedRequest, previous: ScriptedRequest | undefined) => {
+		if (!previous) throw new Error("Missing worker request before the halt.");
+		expect(request.context.systemPrompt).toBe(previous.context.systemPrompt);
+		expect(JSON.stringify(request.context.tools)).toBe(JSON.stringify(previous.context.tools));
+		const last = request.context.messages.at(-1);
+		return { toldToStop: last?.role === "user" && JSON.stringify(last.content).includes("[Worker control halt]") };
+	};
 	const leaderHeld = createBarrier();
 	const helperHeld = createBarrier();
+	let leaderWorkingRequest: ScriptedRequest | undefined;
+	let helperWorkingRequest: ScriptedRequest | undefined;
 
 	enqueueBot(
 		world,
@@ -165,13 +169,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			name: "j7-stop-held",
 			gate: leaderHeld.promise,
+			check: (request) => {
+				leaderWorkingRequest = request;
+			},
 			// Still working when the stop arrives: a call is under way, so the run has a next request for the stop to take.
 			reply: listPeersCall("j7-stop-held-1"),
 		},
 		{
 			name: "j7-stop-report",
 			check: (request) => {
-				seen.leaderLast = closingRequest(request);
+				seen.leaderLast = closingRequest(request, leaderWorkingRequest);
 			},
 			reply: { content: [{ type: "text", text: STOPPED_LEADER_REPORT }] },
 		},
@@ -199,12 +206,15 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			name: "j7-stop-helper-held",
 			gate: helperHeld.promise,
+			check: (request) => {
+				helperWorkingRequest = request;
+			},
 			reply: listPeersCall("j7-stop-helper-held-1"),
 		},
 		{
 			name: "j7-stop-helper-report",
 			check: (request) => {
-				seen.helperLast = closingRequest(request);
+				seen.helperLast = closingRequest(request, helperWorkingRequest);
 			},
 			reply: { content: [{ type: "text", text: STOPPED_HELPER_REPORT }] },
 		},
@@ -344,8 +354,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	await withDeadline(trace, "J7 leg 6: the root is idle", session.waitForForegroundIdle());
 	expect(
 		{ leader: seen.leaderLast, helper: seen.helperLast },
-		"each stopped worker gets one closing request: it is told the parent stopped it, and it is offered no tool",
-	).toEqual({ leader: { toldToStop: true, tools: 0 }, helper: { toldToStop: true, tools: 0 } });
+		"each stopped worker receives the halt as its final instruction",
+	).toEqual({ leader: { toldToStop: true }, helper: { toldToStop: true } });
 	const stopOutcome = seen.stopNotice.find((line) => line.startsWith("Leader "));
 	expect(
 		{

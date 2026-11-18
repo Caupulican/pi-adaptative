@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import type { ModelTransferRecord } from "../../../../src/core/orchestration/model-transfer.ts";
 import type { AgentMessage } from "../../../../src/kernel/index.ts";
-import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
+import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { handoffBlocks, J9_ROOT_JUDGMENTS, J9_ROOT_REPLY, J9_SETTINGS, workerReport } from "./journey-9-shared.ts";
 import { CREDENTIAL_HANDOFF_WARNINGS, refuseAfterCheckout } from "./journey-11-model-handoff-refusal.ts";
 import { LIMITS_PATH, latestBatchResults, NO_DELIVERY_CLAIMS, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
@@ -12,6 +12,8 @@ import { LIMITS_PATH, latestBatchResults, NO_DELIVERY_CLAIMS, ORIGINAL_LIMITS, r
 const TASK = "Update the retry limit in limits.ts in the isolated src workspace and verify its new value.";
 const BLOCKED_SUMMARY = "The retry edit is present; an independent reader must verify the value.";
 const BLOCKER = "The owner requested an independent reader.";
+const HISTORY_ROWS = 32;
+const HISTORY = Array.from({ length: HISTORY_ROWS }, (_, index) => `Evidence line ${index + 1}`).join("\n");
 const TARGET = `${HARNESS_PROVIDER}/worker-b`;
 
 function receiptFor(messages: readonly AgentMessage[], callId: string) {
@@ -29,6 +31,7 @@ async function exercise(
 	const delegate = (label: string, args: Record<string, unknown>) =>
 		calls(id(label), [{ id: id(label), name: "delegate", arguments: args }]);
 	const done = (label: string) => text(id(label), J9_ROOT_REPLY);
+	let lastWorkingRequest: ScriptedRequest | undefined;
 	const afterEdit = createBarrier();
 	const sourceGate = createBarrier();
 	const blockedWake = createBarrier();
@@ -60,6 +63,20 @@ async function exercise(
 				return true;
 			},
 		});
+	if (sourceStatus === "running") {
+		// Distinct real reads build the accepted worker history without spending a model request per row.
+		world.provider.enqueue(
+			"worker-a",
+			calls(
+				id("evidence"),
+				Array.from({ length: HISTORY_ROWS }, (_, index) => ({
+					id: id(`evidence-${index}`),
+					name: "read",
+					arguments: { path: "evidence.txt", offset: index + 1, limit: 1 },
+				})),
+			),
+		);
+	}
 	world.provider.enqueue(
 		"worker-a",
 		calls(id("edit"), [
@@ -86,6 +103,7 @@ async function exercise(
 				expect(latestBatchResults(request)).toContainEqual(
 					expect.objectContaining({ toolName: "edit", isError: false }),
 				);
+				lastWorkingRequest = request;
 				afterEdit.release();
 			},
 		},
@@ -94,8 +112,24 @@ async function exercise(
 		world.provider.enqueue("worker-a", {
 			...text(id("halt-report"), "The partial retry edit is in limits.ts. Verify its value before completing."),
 			check: (request) => {
-				expect(JSON.stringify(request.context.messages)).toContain("[Worker control halt]");
-				expect(request.context.tools ?? []).toHaveLength(0);
+				if (!lastWorkingRequest) throw new Error("The source never reached its working request.");
+				const previous = lastWorkingRequest.context;
+				const prefix = previous.messages.length;
+				expect(
+					previous.messages.filter((row) => row.role === "toolResult" && row.toolName === "read" && !row.isError),
+				).toHaveLength(HISTORY_ROWS);
+				expect(previous.tools?.some((tool) => tool.name === "edit")).toBe(true);
+				expect(request.context.systemPrompt).toBe(previous.systemPrompt);
+				expect(JSON.stringify(request.context.tools)).toBe(JSON.stringify(previous.tools));
+				expect(JSON.stringify(request.context.messages.slice(0, prefix))).toBe(JSON.stringify(previous.messages));
+				const haltRows = request.context.messages.filter(
+					(row) => row.role === "user" && JSON.stringify(row.content).includes("[Worker control halt]"),
+				);
+				expect(haltRows).toHaveLength(1);
+				expect(request.context.messages.at(-1)).toBe(haltRows[0]);
+				expect(request.context.messages.slice(prefix)).toContainEqual(
+					expect.objectContaining({ role: "toolResult", toolCallId: id("working-read") }),
+				);
 			},
 		});
 	const wait = <T>(label: string, promise: Promise<T>) => withDeadline(world.trace, id(label), promise);
@@ -281,13 +315,9 @@ export async function runWorkerModelHandoffJourney(): Promise<void> {
 		{
 			name: "worker-model-handoff",
 			journey: 11,
-			// The source's final report removes its tools and receives the interrupt-specific system prompt.
-			warningAllowances: [
-				...CREDENTIAL_HANDOFF_WARNINGS,
-				/^Prompt cache prefix changed between requests: system prompt changed .*HALT CLOSING TURN.*\. Cache reuse may be reduced from that point\.$/,
-			],
-			repository: { committed: { "src/limits.ts": ORIGINAL_LIMITS } },
-			files: { [LIMITS_PATH]: ORIGINAL_LIMITS },
+			warningAllowances: [...CREDENTIAL_HANDOFF_WARNINGS],
+			repository: { committed: { "src/limits.ts": ORIGINAL_LIMITS, "src/evidence.txt": HISTORY } },
+			files: { [LIMITS_PATH]: ORIGINAL_LIMITS, [projectPath("src", "evidence.txt")]: HISTORY },
 		},
 		async (world) => {
 			await exercise(world, "running");

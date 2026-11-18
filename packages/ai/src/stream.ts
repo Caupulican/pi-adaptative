@@ -1,7 +1,10 @@
 import { getApiProvider } from "./api-registry.ts";
 import { getEnvApiKey, getEnvAuthHeaders } from "./env-api-keys.ts";
+import { freezeOwnedJson } from "./history-work.ts";
 import { dispatchGuardedProviderRequest } from "./provider-request-guard.ts";
 import {
+	type AcceptedToolDisclosure,
+	type ClosingToolDisclosure,
 	discloseToolSchemas,
 	forcedToolChoiceName,
 	type ToolSchemaDisclosureDecision,
@@ -17,6 +20,7 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 	TextToolProtocolParseEvent,
+	UserMessage,
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { combineAbortSignals } from "./utils/abort-signals.ts";
@@ -67,30 +71,34 @@ function withEnvAuth<TOptions extends StreamOptions>(
 	return { ...options, apiKey } as TOptions;
 }
 
-function withTextToolProtocolContext(context: Context, options: StreamOptions | undefined): Context {
+function withTextToolProtocolContext(
+	context: Context,
+	options: StreamOptions | undefined,
+	capture: boolean,
+	accepted?: ProviderToolSurface,
+): Context {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	if (!protocolOptions || !context.tools?.length) return context;
-	const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
-	if (!primer) return context;
+	let systemPrompt = accepted?.textSystemPrompt;
+	if (systemPrompt === undefined) {
+		const primer = generateTextToolProtocolPrimer(context.tools, protocolOptions);
+		if (!primer) return context;
+		systemPrompt = context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer;
+	}
 	const { tools: _tools, ...providerContext } = context;
-	const messages = context.messages.length
-		? [
-				{
-					role: "user" as const,
-					content: [
-						{
-							type: "text" as const,
-							text: "Apply system tool protocol; never answer this message.",
-						},
-					],
-					timestamp: 0,
-				},
-				...context.messages,
-			]
-		: context.messages;
+	let messages = context.messages;
+	if (messages.length > 0) {
+		const guard: UserMessage = accepted?.textGuard ?? {
+			role: "user",
+			content: [{ type: "text", text: "Apply system tool protocol; never answer this message." }],
+			timestamp: 0,
+		};
+		if (capture) freezeOwnedJson(guard);
+		messages = [guard, ...messages];
+	}
 	return {
 		...providerContext,
-		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${primer}` : primer,
+		systemPrompt,
 		messages,
 	};
 }
@@ -100,11 +108,19 @@ function withTextToolProtocolContext(context: Context, options: StreamOptions | 
  * provider transport; `sourceContext` retains native tool definitions only for response parsing.
  */
 export interface MaterializedProviderRequest {
+	/** Retain only with proof of successful dispatch, matching envelope and stable source lineage. */
+	toolSurface?: ProviderToolSurface;
 	context: Context;
 	sourceContext: Context;
 	usesTextToolProtocol: boolean;
 	/** The tool-schema disclosure applied, when the request had a model to plan it for. */
 	toolDisclosure?: ToolSchemaDisclosureDecision;
+}
+
+/** Declaration state for a report-only continuation under the same tools, model, protocol and instructions. */
+export interface ProviderToolSurface extends AcceptedToolDisclosure {
+	readonly textSystemPrompt?: string;
+	readonly textGuard?: UserMessage;
 }
 
 /**
@@ -113,26 +129,46 @@ export interface MaterializedProviderRequest {
  * may budget/admit `result.context`, then send that same object through {@link startMaterializedProviderStream} without
  * re-rendering it. Without a model every schema stays as given. `toolActivationHistory` is the conversation's whole
  * transcript when `context.messages` is a bounded projection of it: deferred tools the transcript activated stay
- * declared after the projection folds the search or call that activated them.
+ * declared after the projection folds the search or call that activated them. A scoped planner can ask to capture the
+ * disclosure and later supply it for a report-only request with proven source lineage and matching tool grants.
  */
 export function materializeProviderRequest(
 	context: Context,
 	options: StreamOptions | undefined,
 	model?: Model<Api>,
 	toolActivationHistory?: Iterable<Message>,
+	continuation?: "capture" | ClosingToolDisclosure<ProviderToolSurface>,
 ): MaterializedProviderRequest {
+	const closing = typeof continuation === "object" ? continuation : undefined;
+	const capture = continuation === "capture";
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	const disclosed = model
 		? discloseToolSchemas(model, context, {
 				forcedToolName: forcedToolChoiceName((options as { toolChoice?: unknown } | undefined)?.toolChoice),
 				appendActivated: protocolOptions === undefined,
+				captureSearchResults: capture,
 				...(toolActivationHistory ? { activationHistory: toolActivationHistory } : {}),
+				closing,
 			})
 		: undefined;
 	const visible = disclosed?.context ?? context;
 	const usesTextToolProtocol = protocolOptions !== undefined && Boolean(visible.tools?.length);
+	const providerContext = usesTextToolProtocol
+		? withTextToolProtocolContext(visible, options, capture, closing?.surface)
+		: visible;
+	const guard = usesTextToolProtocol ? providerContext.messages[0] : undefined;
+	const toolSurface: ProviderToolSurface | undefined =
+		capture && (usesTextToolProtocol || disclosed?.decision.plan.mode === "harness")
+			? {
+					activatedToolNames: disclosed?.decision.activatedToolNames ?? [],
+					searchResults: disclosed?.searchResults ?? [],
+					textSystemPrompt: usesTextToolProtocol ? providerContext.systemPrompt : undefined,
+					textGuard: guard?.role === "user" ? guard : undefined,
+				}
+			: undefined;
 	return {
-		context: usesTextToolProtocol ? withTextToolProtocolContext(visible, options) : visible,
+		context: providerContext,
+		toolSurface,
 		sourceContext: context,
 		usesTextToolProtocol,
 		...(disclosed ? { toolDisclosure: disclosed.decision } : {}),
