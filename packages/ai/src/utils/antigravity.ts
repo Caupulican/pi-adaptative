@@ -73,6 +73,9 @@ export function antigravityHeaders(
 	};
 }
 
+// The account-advertised catalog includes model descriptions as well as capabilities.
+const MAX_ANTIGRAVITY_CATALOG_BYTES = 1024 * 1024;
+
 export async function antigravityRequest(
 	token: string,
 	method: string,
@@ -86,6 +89,7 @@ export async function antigravityRequest(
 			init: { method: "POST", body: JSON.stringify(body) },
 			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 			label: `Antigravity ${method}`,
+			...(method === "fetchAvailableModels" ? { maxResponseBytes: MAX_ANTIGRAVITY_CATALOG_BYTES } : {}),
 			createError: (message, status, retryAfterMs) => Object.assign(new Error(message), { status, retryAfterMs }),
 		}),
 	);
@@ -335,9 +339,9 @@ export function antigravityProjectId(account: Record<string, unknown>): string {
  * version is refreshed instead of silently running models without what it lacks. Version 3 adds
  * adaptive thinking levels and the discovery client's version. Version 4 retains level-based
  * Gemini presets independently of the adaptive-thinking flag. Version 5 retains Hydrogen XHigh
- * catalog level 100; older catalogs omit it.
+ * catalog level 100. Version 6 rebuilds catalogs retained when larger discovery responses were rejected.
  */
-export const ANTIGRAVITY_CATALOG_VERSION = 5;
+export const ANTIGRAVITY_CATALOG_VERSION = 6;
 
 export async function discoverAntigravityAccount(
 	token: string,

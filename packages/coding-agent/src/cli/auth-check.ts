@@ -1,8 +1,8 @@
 import { findEnvKeys, getEnvApiKey } from "@caupulican/pi-ai/env-api-keys";
 import { getProviders } from "@caupulican/pi-ai/models";
-import { getOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { getOAuthProvider, getOAuthProviders } from "@caupulican/pi-ai/oauth";
 import chalk from "chalk";
-import { AuthStorage, type OAuthCredential } from "../core/auth-storage.ts";
+import { AuthStorage } from "../core/auth-storage.ts";
 import { ModelRegistry } from "../core/model-registry.ts";
 import { resolveCliModel } from "../core/model-resolver.ts";
 
@@ -70,31 +70,33 @@ export async function checkProviderAuth(
 		}
 
 		if (stored.type === "oauth") {
-			const oauthCred = stored as OAuthCredential;
-			const expiresAt = new Date(oauthCred.expires).toISOString();
-			const expiresInMs = oauthCred.expires - Date.now();
-			const isExpired = expiresInMs <= 0;
-			const isExpiringSoon = !isExpired && expiresInMs < 5 * 60 * 1000;
-
-			let status: ProviderAuthReport["status"] = isExpired ? "expired" : isExpiringSoon ? "expiring_soon" : "valid";
+			let credential = stored;
+			const metadataStale = getOAuthProvider(provider)?.needsRefresh;
 			let tokenRefreshed = false;
 			let error: string | undefined;
-
-			if ((isExpired || isExpiringSoon) && !options.noRefresh) {
+			if (!options.noRefresh && (credential.expires - Date.now() < 5 * 60_000 || metadataStale?.(credential))) {
 				try {
-					const apiKey = await authStorage.getApiKey(provider);
-					if (apiKey) {
-						status = "valid";
-						tokenRefreshed = true;
-					} else {
-						status = "error";
-						error = "Token refresh returned no API key";
+					const apiKey = await authStorage.getOAuthApiKey(provider);
+					const current = authStorage.get(provider);
+					if (!apiKey || current?.type !== "oauth") error = "Token refresh returned no stored OAuth credential";
+					else {
+						tokenRefreshed = current.access !== credential.access || current.expires !== credential.expires;
+						credential = current;
+						if (metadataStale?.(current)) error = "Provider account metadata could not be refreshed";
 					}
 				} catch (err) {
-					status = "error";
 					error = err instanceof Error ? err.message : String(err);
 				}
 			}
+			const expiresAt = new Date(credential.expires).toISOString();
+			const expiresInMs = credential.expires - Date.now();
+			const status = error
+				? "error"
+				: expiresInMs <= 0
+					? "expired"
+					: expiresInMs < 5 * 60_000
+						? "expiring_soon"
+						: "valid";
 
 			return {
 				provider,
@@ -230,7 +232,7 @@ Options:
   --provider <name>   Inspect a specific provider
   --model <pattern>   Inspect the provider for a model pattern
   --json              Output report in JSON format
-  --no-refresh        Do not attempt to refresh expired or expiring OAuth tokens
+  --no-refresh        Read stored credentials without refreshing tokens or provider account metadata
   --help, -h          Show this help message
 `);
 		return true;

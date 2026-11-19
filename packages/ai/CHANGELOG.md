@@ -4,6 +4,10 @@
 
 - Compatible follow-up requests reuse accepted conversation and tool prefixes, including when an interrupted worker sends its closing report.
 
+### Fixed
+
+- Antigravity subscription discovery now accepts model lists up to 1 MiB and refreshes older cached catalogs. Gemini 4 Neon presets appear when the account advertises them.
+
 ## [0.104.70] - 2026-11-18
 
 ### Fixed

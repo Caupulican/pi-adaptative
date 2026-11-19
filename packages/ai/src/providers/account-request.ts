@@ -5,6 +5,7 @@ export interface AccountJsonRequest {
 	headers: Headers;
 	init?: RequestInit;
 	signal?: AbortSignal;
+	maxResponseBytes?: number;
 	fetch?: typeof fetch;
 	label: string;
 	createError(message: string, status?: number, retryAfterMs?: number): Error;
@@ -20,6 +21,7 @@ function retryAfterMs(response: Response): number | undefined {
 }
 
 export async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string | undefined> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError("Invalid response byte limit");
 	if (!response.body) return "";
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
@@ -46,9 +48,10 @@ export async function readBoundedResponseText(response: Response, maxBytes: numb
 }
 
 async function readBoundedText(response: Response, request: AccountJsonRequest): Promise<string> {
-	const text = await readBoundedResponseText(response, MAX_ACCOUNT_RESPONSE_BYTES);
+	const limit = request.maxResponseBytes ?? MAX_ACCOUNT_RESPONSE_BYTES;
+	const text = await readBoundedResponseText(response, limit);
 	if (text === undefined) {
-		throw request.createError(`${request.label} response exceeded the 256 KiB limit`, response.status);
+		throw request.createError(`${request.label} response exceeded the ${limit / 1024} KiB limit`, response.status);
 	}
 	return text;
 }

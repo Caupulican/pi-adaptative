@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAntigravityCredits } from "../src/providers/antigravity-credits.ts";
 import { ANTIGRAVITY_USAGE_ACCOUNTING, mergeGoogleUsage, projectGoogleUsage } from "../src/providers/google-usage.ts";
 import {
+	ANTIGRAVITY_CATALOG_VERSION,
 	antigravityThinkingBudget,
 	antigravityThinkingLevel,
+	discoverAntigravityAccount,
 	parseAntigravityModels,
 	resolveAntigravityProjectOnce,
 } from "../src/utils/antigravity.ts";
@@ -11,6 +13,43 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Antigravity packaged provider", () => {
+	it("discovers new advertised presets from a catalog larger than an ordinary account response", async () => {
+		const entry = { maxTokens: 1048576, maxOutputTokens: 262144, supportsThinking: true, thinkingLevel: 100 };
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "project" }))
+			.mockResolvedValueOnce(
+				Response.json({
+					description: "x".repeat(320000),
+					models: { "gemini-4-neon-xhigh": entry, "gemini-unlisted": entry },
+					agentModelSorts: [{ groups: [{ modelIds: ["gemini-4-neon-xhigh"] }] }],
+				}),
+			);
+		vi.stubGlobal("fetch", fetchMock);
+		const account = await discoverAntigravityAccount("fixture");
+		expect(account.catalogVersion).toBe(ANTIGRAVITY_CATALOG_VERSION);
+		expect(Object.keys(account.modelCatalog as object)).toEqual(["gemini-4-neon-xhigh"]);
+		expect(parseAntigravityModels(account.modelCatalog)[0]).toMatchObject({
+			id: "gemini-4-neon-xhigh",
+			defaultThinkingLevel: "xhigh",
+			contextWindow: 1048576,
+			maxTokens: 262144,
+		});
+	});
+
+	it("keeps separate response bounds for project and model discovery", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn<typeof fetch>()
+				.mockResolvedValueOnce(Response.json({ description: "x".repeat(262144) }))
+				.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "project" }))
+				.mockResolvedValueOnce(new Response("x".repeat(1024 * 1024 + 1))),
+		);
+		await expect(discoverAntigravityAccount("fixture")).rejects.toThrow("256 KiB");
+		await expect(discoverAntigravityAccount("fixture")).rejects.toThrow("1024 KiB");
+	});
+
 	it("keeps an independent waiter alive when a shared project lookup caller cancels", async () => {
 		let deliver!: (response: Response) => void;
 		let requestSignal: AbortSignal | undefined;

@@ -242,6 +242,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 
 Current behavior:
 - `/model` and `--list-models` list entries by model `id`.
+- After upgrading Pi, `pi auth check --provider google-antigravity` refreshes an outdated subscription catalog. Use `pi --list-models gemini-4-neon` to see which Neon presets your account offers.
 - `--list-models` shows `text-tools: yes` when `textToolCallProtocol` is enabled for a model.
 - The configured `name` is used for model matching and detail/status text.
 
