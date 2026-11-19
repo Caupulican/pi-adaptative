@@ -99,6 +99,7 @@ export interface BackgroundLaneControllerDeps
 	/** What the session's routine runtime holds (`routine-holder.ts`): undefined for a child session that holds none. */
 	routineScope(): RoutineScope | undefined;
 	/** The session standing's capabilities the lanes read (session-standing.ts). */
+	readonly hostedChannels?: "daemon";
 	readonly standing: Pick<
 		SessionCapabilities,
 		| "ownsProcessSingletons"

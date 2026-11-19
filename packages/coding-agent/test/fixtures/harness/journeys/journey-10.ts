@@ -42,6 +42,7 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { awayScheduledJob } from "./journey-10-away-scheduled-job.ts";
 import { scheduledBotJob } from "./journey-10-bot-scheduled-job.ts";
+import { passivePhoneSendRetry } from "./journey-10-phone-retry.ts";
 import {
 	batchResultById,
 	enqueueHubRoot,
@@ -1192,6 +1193,7 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		expect(await world.disposeSessionInBody(sessionHub), "Hub session disposes cleanly").toBeUndefined();
 	}
 
+	await passivePhoneSendRetry(world);
 	await awayScheduledJob(world);
 	expect(world.network?.open, "zero leaked virtual TCP sockets or servers after closing link").toBe(0);
 

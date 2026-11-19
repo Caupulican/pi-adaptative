@@ -29,9 +29,12 @@ interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn" 
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
 }
 
-/** Attaches the session to a bot session host: its process's shared one where it owns the process singletons, else one of its own. */
+/** Desktop roots share a bot host. Daemon phone sessions and children get private hosts for explicit deliveries. */
 export function attachBotSessions(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionAttachment {
-	return attachBotSessionHost(botSessionHostPorts(deps, own), deps.standing.ownsProcessSingletons);
+	return attachBotSessionHost(
+		botSessionHostPorts(deps, own),
+		deps.standing.ownsProcessSingletons && !deps.hostedChannels,
+	);
 }
 
 /** The root session's facts for the bot model rules: its foreground model, model access, allowance and model policy. */

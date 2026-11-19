@@ -6,8 +6,10 @@ import { OWED_INBOX_SWEEP_MS } from "../../../../src/core/bots/bot-session-owed-
 import { createBuiltInChannelProvider } from "../../../../src/core/channels/built-in-providers.ts";
 import { ChannelJournal } from "../../../../src/core/channels/channel-journal.ts";
 import { DAEMON_TICK_MS } from "../../../../src/core/delegation/bot-daemon.ts";
+import { launchDetachedBotDaemon } from "../../../../src/core/delegation/bot-daemon-launch.ts";
 import { FleetMachines } from "../../../../src/core/remote/fleet-machines.ts";
 import { linkHostOwner, RUNNER_LOCK } from "../../../../src/core/remote/host-lock.ts";
+import { JobStore } from "../../../../src/core/remote/job-store.ts";
 import { enrollJoin, renameIdentity } from "../../../../src/core/remote/registry.ts";
 import { readRoutineBotJobResults, routineJobStatusLines } from "../../../../src/core/remote/routine-job-results.ts";
 import { formatRoutineList } from "../../../../src/modes/interactive/bot-team-lines.ts";
@@ -18,10 +20,10 @@ import { createOwnerBot, enqueueBot } from "./journey-7-shared.ts";
 import {
 	enqueueJoinerJob,
 	joinerJobReached,
+	PLAN_CALL_JUDGMENTS,
 	planCallSteps,
 	planUpdateStep,
 	reportStep,
-	whenMachine,
 	writeRemoteSettings,
 } from "./journey-10-shared.ts";
 import { currentRequestCarries, flushedSessionManager } from "./shared.ts";
@@ -52,7 +54,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			defaultProvider: HARNESS_PROVIDER,
 			defaultModel: "root",
 			modelFavorites: SCRIPTED_TRACKS.map((modelId) => ({ provider: HARNESS_PROVIDER, modelId })),
-			systemOne: { enabled: false },
+			systemOne: { enabled: world.systemOne.enabled },
 		}),
 	);
 	seedTelegramToken(world, hubDir);
@@ -65,7 +67,10 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 		await wait(words, sent);
 		return api.texts().at(-1);
 	};
-	world.systemOne.enterPhase("j10-closed-desktop", {});
+	world.systemOne.enterPhase("j10-closed-desktop", {
+		misses_request_part: PLAN_CALL_JUDGMENTS.misses_request_part,
+		brief_self_contained: PLAN_CALL_JUDGMENTS.brief_self_contained,
+	});
 	await withFakeBotApi(world, api, async () => {
 		const launched = world.processes.runNextBotDaemon({ channelProviders: createBuiltInChannelProvider });
 		const polling = api.nextPoll(undefined);
@@ -74,19 +79,21 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			agentDir: hubDir,
 			sessionManager: manager,
 			settings,
-			systemOneEnabled: false,
 		});
-		await wait("desktop serves Telegram and starts the daemon", Promise.all([launched, polling]));
+		const [daemon] = await wait("desktop serves Telegram and starts the daemon", Promise.all([launched, polling]));
 		const hub = open.session.backgroundLanes.getRemoteHub();
 		const address = "127.0.0.1";
 		const port = await hub.listen(address, 0);
 		const invite = hub.add(peerName);
-		enrollJoin(peerDir, invite.address, invite.token);
+		expect(
+			enrollJoin(peerDir, invite.address, invite.token),
+			"an address placeholder cannot enroll a peer",
+		).toBeUndefined();
+		expect(enrollJoin(peerDir, `${address}:${port}`, invite.token)).toMatchObject({ hubName, name: peerName });
 		writeRemoteSettings(world, peerDir, { repos: [{ path: HARNESS_PROJECT_CWD, ready: true }], jobRoom: 1 });
 		const peer = await world.createRootSession("worker-b", {
 			agentDir: peerDir,
 			sessionManager: world.createSessionManager(peerDir),
-			systemOneEnabled: false,
 			settings: {
 				...settings,
 				channels: { link: { mode: "explicit", allowedSenders: [hubName], replyMode: "auto" } },
@@ -95,7 +102,11 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 		await peer.session.backgroundLanes.getRemoteHub().start();
 		const ready = (row: ReturnType<FleetMachines["list"]>[number]) =>
 			row.machineId === peerId && row.online && row.facts?.accepts.jobs === true && row.facts.checkouts.length === 1;
-		await wait("desktop pairs with the read-only executor", whenMachine(hub.jobs!, ready));
+		const fleet = new FleetMachines(hubDir);
+		await wait(
+			"desktop pairs with the read-only executor",
+			world.io.waitForMutation(() => fleet.list().some(ready)),
+		);
 		createOwnerBot(open.session, bot, "worker-c", soul);
 		const savedAt = open.session.backgroundLanes.captureBotScheduleOrigin();
 		const store = open.session.getBotTeamStore();
@@ -114,7 +125,6 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			"daemon serves the same phone after the desktop closes",
 			world.io.waitForMutation(() => journal.read().result.holder?.away === true),
 		);
-		const fleet = new FleetMachines(hubDir);
 		await wait(
 			"the paired machine reconnects to the detached daemon",
 			world.io.waitForMutation(() => fleet.list().some(ready)),
@@ -125,6 +135,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 		const executing = createBarrier();
 		const release = createBarrier();
 		const completed = createBarrier();
+		const busyTurn = createBarrier();
 		const calls = planCallSteps(
 			"away-limits",
 			{
@@ -170,16 +181,77 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			const offline = world.io.waitForMutation(() =>
 				fleet.list().some((row) => row.machineId === peerId && !row.online),
 			);
-			world.network!.disconnectClients(address, port);
-			await wait("link drops while the worker holds its result", offline);
+			const heal = world.network!.partitionTcp(address, port);
+			const peerJobs = new JobStore(peerDir);
+			const hubJobs = new JobStore(hubDir);
+			const placed = hubJobs.out.list();
+			expect(placed).toHaveLength(1);
+			const jobId = placed[0]!.jobId;
+			try {
+				await wait("link drops while the worker holds its result", offline);
+				release.release();
+				await wait(
+					"the disconnected executor commits its outcome",
+					world.io.waitForMutation(() =>
+						peerJobs.in
+							.list()
+							.some(
+								(job) =>
+									job.jobId === jobId &&
+									job.state === "terminal" &&
+									job.outbox.some((item) => item.frame.t === "job.outcome" && item.seq > job.ackedSeq),
+							),
+					),
+				);
+				expect(hubJobs.out.list()).toMatchObject([{ jobId, state: "accepted" }]);
+				expect(hubJobs.out.list()[0]?.outcome).toBeUndefined();
+				expect(await wait("the first daemon stops before receipt", daemon.stop())).toBe(0);
+				const restarted = world.processes.runNextBotDaemon({ channelProviders: createBuiltInChannelProvider });
+				const launch = launchDetachedBotDaemon({
+					store,
+					cwd: HARNESS_PROJECT_CWD,
+					clock: world.timers.port("routines"),
+					warn: (message) => world.warnings.push(message),
+				});
+				expect(launch.started).toBe(true);
+				const next = await wait("a new daemon starts from the saved hub", restarted);
+				expect(next.launch.token).not.toBe(daemon.launch.token);
+				expect(hubJobs.out.list()[0]?.outcome).toBeUndefined();
+			} finally {
+				heal();
+			}
 			await wait(
 				"daemon reconnects the executor on the same port",
 				world.io.waitForMutation(() => fleet.list().some(ready)),
 			);
-			release.release();
+			await wait(
+				"the executor retires the acknowledged outcome",
+				world.io.waitForMutation(() =>
+					peerJobs.in
+						.list()
+						.some((job) => job.jobId === jobId && job.ackedSeq === job.seq && job.outbox.length === 0),
+				),
+			);
+			expect(hubJobs.out.list()).toMatchObject([{ jobId, state: "terminal", outcome: { summary } }]);
+			world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
 			await wait("the scheduled bot receives the remote result", completed.promise);
+			expect(hubJobs.out.list()[0]?.appliedAt).toEqual(expect.any(Number));
 			const status = await phone(3, "status");
 			expect(status).toContain(summary);
+			const firstSteer = "Look at the completed inspection before answering my follow-up.";
+			const started = createBarrier();
+			enqueueBot(world, "j10-away-bot", "worker-c", soul, {
+				name: "away-phone-busy",
+				gate: busyTurn.promise,
+				check: (request) => {
+					expect(currentRequestCarries(request, firstSteer)).toBe(true);
+					started.release();
+				},
+				reply: { content: [{ type: "text", text: "I have reviewed it." }] },
+			});
+			expect(await phone(4, `steer ${firstSteer}`)).toContain("Steering queued");
+			world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
+			await wait("the first phone turn occupies the bot", started.promise);
 			const steer = "Summarize the completed retry inspection.";
 			const answer = "The retry budget is three.";
 			enqueueBot(world, "j10-away-bot", "worker-c", soul, {
@@ -187,8 +259,15 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 				check: (request) => expect(currentRequestCarries(request, steer)).toBe(true),
 				reply: { content: [{ type: "text", text: answer }] },
 			});
-			expect(await phone(4, `steer ${steer}`)).toContain("Steering queued");
+			expect(await phone(5, `steer ${steer}`)).toContain("Steering queued");
 			world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
+			expect(await phone(6, "status")).toContain(jobId);
+			const commands = journal.read().result.ownerTaskCommands!;
+			expect(commands.find((command) => command.words === firstSteer)?.state).toBe("running");
+			expect(commands.find((command) => command.words === steer)?.state).toBe("queued");
+			expect(readRemoteBotHost(hubDir, bot, "journey-observer")?.hostKind).toBe("daemon");
+			expect(world.provider.reached).not.toContain("j10-away-bot:away-phone-followup");
+			busyTurn.release();
 			await wait(
 				"the daemon settles the phone follow-up in the saved project",
 				world.io.waitForMutation(
@@ -205,13 +284,13 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 							) === true,
 				),
 			);
-			expect(await phone(5, "stop task")).toContain(`Paused task ${routineId}`);
+			expect(world.provider.reached.filter((step) => step === "j10-away-bot:away-phone-followup")).toHaveLength(1);
+			expect(await phone(7, "stop task")).toContain(`Paused task ${routineId}`);
 			expect(rootCalls()).toBe(before);
 			const returning = await world.createRootSession("root", {
 				agentDir: hubDir,
 				sessionManager: world.openSessionManager(manager.getSessionFile()!, hubDir),
 				settings,
-				systemOneEnabled: false,
 			});
 			const returnedHub = returning.session.backgroundLanes.getRemoteHub();
 			await returnedHub.start();
@@ -236,7 +315,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			});
 			const results = readRoutineBotJobResults(hubDir, history[0]!);
 			expect(results).toHaveLength(1);
-			expect(results[0]).toMatchObject({ machine: peerName, summary });
+			expect(results[0]).toMatchObject({ jobId, machine: peerName, summary });
 			expect(status).toContain(results[0]!.jobId);
 			const desktop = formatRoutineList([observed.getRoutine(routineId)!], undefined, (row) =>
 				routineJobStatusLines(observed, row),
@@ -247,6 +326,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 				1,
 			);
 		} finally {
+			busyTurn.release();
 			release.release();
 		}
 	});

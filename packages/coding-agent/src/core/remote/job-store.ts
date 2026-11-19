@@ -72,6 +72,7 @@ import {
 	splitRecordName,
 } from "./job-record-name.ts";
 
+import { placedJobTerminal } from "./outcome-adapter.ts";
 import { createRoutineJob, pruneRoutineJob } from "./routine-job-index.ts";
 import { isRoutineJobScope } from "./routine-job-origin.ts";
 
@@ -674,6 +675,7 @@ export const placedRecordName = (executorId: string, jobId: string): string => `
  * any store over the directory drops it for all of them.
  */
 const placedPasses = new Map<string, PlacedPass>();
+const unappliedTerminalOwners = new WeakMap<PlacedPass, ReadonlySet<string>>();
 
 /** Both stores of one agent directory. */
 export class JobStore {
@@ -701,6 +703,21 @@ export class JobStore {
 			if (placedPasses.get(dir) === pass) placedPasses.delete(dir);
 		});
 		return pass;
+	}
+
+	/** Sessions that must reopen to apply a placed job's terminal. All bots in a sweep share one scan. */
+	hasUnappliedTerminal(sessionId: string): boolean {
+		const pass = this.placedScan();
+		let owners = unappliedTerminalOwners.get(pass);
+		if (!owners) {
+			const pending = new Set<string>();
+			for (const job of pass.valid.values()) {
+				if (job.appliedAt === undefined && placedJobTerminal(job)) pending.add(job.ownerSession);
+			}
+			owners = pending;
+			unappliedTerminalOwners.set(pass, owners);
+		}
+		return owners.has(sessionId);
 	}
 
 	/** Drops the directory's pass after a write to `out`: every store over the directory reads it again. */

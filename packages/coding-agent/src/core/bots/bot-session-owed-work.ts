@@ -16,6 +16,7 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { OWNER_STOPPED_REASON, WHOLE_FLEET_STOP_SCOPE } from "../delegation/worker-fleet-stop.ts";
 import { nextWorkerDueAt, owesWorkerExecutionAt } from "../delegation/worker-owed-work.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { JobStore } from "../remote/job-store.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import {
 	alarmAt,
@@ -225,6 +226,7 @@ export class BotOwedWork {
 	private readonly openRetries: BotOpenRetries;
 	/** What each bot's worker bundle owes. */
 	private readonly workerWork = new WorkerWorkLedger();
+	private placedJobs?: JobStore;
 	/** What each closed bot's saved session file holds of a usage stop and a goal, read once per file identity. */
 	private readonly savedSessions = new SavedSessionLedger();
 	/** The goal each bot's session held when it last closed (`closed`), kept in its home. */
@@ -360,7 +362,10 @@ export class BotOwedWork {
 	owesLoadedExecution(agentId: string, home: OrchestrationHome, sessionId: string): boolean {
 		const read = this.workerWork.read(agentId, home, sessionId);
 		if (read.kind === "unreadable" && read.fresh) this.notReadable(agentId, read.error);
-		return read.kind === "facts" && owesWorkerExecutionAt(read.facts, this.ports.timers().now());
+		return (
+			(read.kind === "facts" && owesWorkerExecutionAt(read.facts, this.ports.timers().now())) ||
+			this.owesPlacedTerminal(sessionId)
+		);
 	}
 
 	/**
@@ -368,11 +373,13 @@ export class BotOwedWork {
 	 * its saved session `saved` continues what a usage limit stopped (`savedUsageResumeAt`), and now for what it owes
 	 * ({@link armOwedAt}). A saved session that does not read arms no usage wait, and the owner is told.
 	 */
-	unhosted(agentId: string, saved = this.savedRead(agentId)): void {
+	unhosted(agentId: string, saved?: SavedBotSession): void {
+		// Observing a home or record can reach a passive session. Only a host serving owed work takes it up.
+		if (this.sweep === undefined) return;
 		// Each bot on its own: every bot is asked in turn (an attach, the home watch), and one whose files do not read is told
 		// once per cause, as the periodic listing tells it, never holding back the bots after it.
 		try {
-			this.armOwedAt(agentId, this.usageResumeAt(agentId, saved));
+			this.armOwedAt(agentId, this.usageResumeAt(agentId, saved ?? this.savedRead(agentId)));
 		} catch (error) {
 			this.tellAskFailed(agentId, error, interfaceText().botTeam.botReadAgain.everyMinute);
 		}
@@ -482,7 +489,7 @@ export class BotOwedWork {
 	 * on the provider admission clock, and at the next retry its workers wait on (read from its bundle, by
 	 * {@link openIfOwed}, which runs now), on the host's; any earlier usage alarm ends.
 	 */
-	armOwedAt(agentId: string, usageResumeAt: number | undefined): void {
+	private armOwedAt(agentId: string, usageResumeAt: number | undefined): void {
 		this.armUsageWait(agentId, usageResumeAt);
 		this.openIfOwed(agentId);
 	}
@@ -526,6 +533,12 @@ export class BotOwedWork {
 		this.workerWork.forget(agentId);
 	}
 
+	/** The link has persisted a terminal that only the bot's own session can apply to its managed lane. */
+	private owesPlacedTerminal(sessionId: string): boolean {
+		this.placedJobs ??= new JobStore(this.ports.agentDir());
+		return this.placedJobs.hasUnappliedTerminal(sessionId);
+	}
+
 	/** What the workers of the bot's saved session `sessionId` owe, read from its bundle. */
 	private workerFacts(agentId: string, sessionId: string): BundleRead {
 		return this.workerWork.read(agentId, botSessionHome(this.ports.agentDir(), agentId, sessionId), sessionId);
@@ -542,14 +555,18 @@ export class BotOwedWork {
 		nowMs: number,
 	):
 		| { readonly owed: boolean; readonly dueAt: number | undefined }
-		| { readonly unreadable: unknown; readonly fresh: boolean } {
+		| { readonly unreadable: unknown; readonly fresh: boolean; readonly owed: boolean } {
 		const read = this.workerFacts(agentId, sessionId);
-		if (read.kind === "none") return { owed: false, dueAt: undefined };
-		if (read.kind === "unreadable") return { unreadable: read.error, fresh: read.fresh };
+		if (read.kind === "none") return { owed: this.owesPlacedTerminal(sessionId), dueAt: undefined };
+		if (read.kind === "unreadable")
+			return { unreadable: read.error, fresh: read.fresh, owed: this.owesPlacedTerminal(sessionId) };
 		const { facts } = read;
 		const offered = this.offered.get(agentId);
 		return {
-			owed: owesWorkerExecutionAt(facts, nowMs) || facts.deliveryItems.some((item) => offered?.has(item) !== true),
+			owed:
+				owesWorkerExecutionAt(facts, nowMs) ||
+				facts.deliveryItems.some((item) => offered?.has(item) !== true) ||
+				this.owesPlacedTerminal(sessionId),
 			dueAt: nextWorkerDueAt(facts, nowMs),
 		};
 	}
@@ -564,7 +581,7 @@ export class BotOwedWork {
 		const sessionId = this.savedRead(agentId)?.id;
 		if (sessionId === undefined) return false;
 		const owed = this.workerOwed(agentId, sessionId, this.ports.timers().now());
-		return "unreadable" in owed ? owed.fresh : owed.owed;
+		return owed.owed || ("unreadable" in owed && owed.fresh);
 	}
 
 	/**
@@ -743,7 +760,7 @@ export class BotOwedWork {
 	 * would share one open and arm its next attempt twice, and dropping the later ask would miss a change made after the
 	 * running one read the bot.
 	 */
-	openIfOwed(agentId: string, swept = false): void {
+	private openIfOwed(agentId: string, swept = false): void {
 		const running = this.asking.get(agentId);
 		if (running) {
 			running.again = { swept: (running.again?.swept ?? true) && swept };
@@ -864,7 +881,7 @@ export class BotOwedWork {
 		// Its workers' work, and the next time they come due.
 		const owed = worked && !stopWaiting ? this.workerOwed(agentId, worked.id, nowMs) : undefined;
 		if (owed && "unreadable" in owed) fail(owed.unreadable);
-		const workers = owed !== undefined && "owed" in owed && owed.owed;
+		const workers = owed?.owed === true;
 		// A usage wait that ended continues the saved session's turn: owed only by a session that ran.
 		const usage = worked !== undefined && !stopWaiting && this.usageDue.has(agentId);
 		// An unfinished goal its load takes up continues it, where the settings it opens with let a goal continue on its own

@@ -1092,7 +1092,7 @@ export class BotSessionHost {
 					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
 			);
 		// A closed session owed work the old record could not run (a wake refused at its start) is taken up on the new one.
-		else if (!entry) this.owed.openIfOwed(record.agentId);
+		else if (!entry) this.owed.unhosted(record.agentId);
 	}
 
 	/**

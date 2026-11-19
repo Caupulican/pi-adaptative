@@ -144,11 +144,6 @@ export interface CreateAgentSessionOptions extends SessionHostOptions {
 	/** Removed: pass `standing: { kind: "bot", agentId }`. */ holdsOwnWatches?: never;
 	/** The role of the session's lifetime lease; default `session`. The phone session holds `channel-host`, a bot's own `bot-host`. */
 	bundleLeaseRole?: SessionLeaseRole;
-	/**
-	 * `daemon`: the bot daemon's channel host serves this session's channels, so the session starts none, takes no channel
-	 * hold and never launches or reconciles the daemon.
-	 */
-	hostedChannels?: "daemon";
 	/** A host that attaches turn observers after construction calls session.startBackgroundInputs() when ready. */
 	backgroundInputStartup?: "host";
 	/** Models available for cycling (Ctrl+P in interactive mode) */
@@ -838,7 +833,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 			});
 			constructed = session;
-			if (options.hostedChannels === "daemon") session.backgroundLanes.hostChannelsInDaemon();
 			sessionRef.current = session;
 			// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
 			const getExtensionRunner = (): ExtensionRunner => {

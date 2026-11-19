@@ -237,7 +237,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
 	private readonly _routines: SessionRoutines;
-	private _channelsHostedByDaemon = false;
 	/** The root session's keeping of the detached bot daemon: its start, lease re-ensure and the owner's start and stop. */
 	private readonly _daemonKeeper: BotDaemonKeeper;
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
@@ -393,7 +392,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			cwd: () => deps.getCwd(),
 			isDisposed: () => deps.isDisposed(),
 			keepsDaemon: () => this._routines.scope() === "session",
-			channelsHostedByDaemon: () => this._channelsHostedByDaemon,
+			channelsHostedByDaemon: () => deps.hostedChannels === "daemon",
 			ownsHostDuties: () => deps.standing.ownsHostDuties,
 			awayService: () => this.getAwayService(),
 			botsOwed: (goalsContinue) => this._botHost.host.botsOwed(goalsContinue),
@@ -1466,11 +1465,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._routines.scope();
 	}
 
-	/** The daemon hosts this phone session's channels and remote listener. Set before session inputs start. */
-	hostChannelsInDaemon(): void {
-		this._channelsHostedByDaemon = true;
-	}
-
 	/** Starts the persistent routines, remote hub, channels and failing-CI review owned by this session. */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
@@ -1481,11 +1475,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				.then((problem) => {
 					if (problem) this._safeWarn(problem);
 				});
-		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this.channels.start();
+		if (standing.ownsHostDuties && !this.deps.hostedChannels) this.channels.start();
 		if (standing.answersForCheckout && !this.deps.isDisposed()) this._getActAhead().start();
 		this._getRetention().scheduleFromIdle();
 		// Bot sessions owed work a closed process left are opened here (the daemon leaves them); its phone session hosts none.
-		if (standing.ownsProcessSingletons && !this._channelsHostedByDaemon) this._botHost.hostOwed();
+		if (standing.ownsProcessSingletons && !this.deps.hostedChannels) this._botHost.hostOwed();
 		if (standing.managesBots) this._rootBots.replies.start();
 	}
 
@@ -1555,7 +1549,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy and this session serves its channels. */
 	private createChannelReplyToolDefinition(): ToolDefinition | undefined {
-		return this.deps.standing.ownsHostDuties && !this._channelsHostedByDaemon && this.channels.hasExplicitPolicy()
+		return this.deps.standing.ownsHostDuties && !this.deps.hostedChannels && this.channels.hasExplicitPolicy()
 			? createChannelReplyToolDefinition(this.channels)
 			: undefined;
 	}
@@ -1813,7 +1807,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				timers: this.deps.getTimers().port("orchestration"),
 				jobs: {
 					session: this,
-					placementOnly: !this.deps.standing.ownsProcessSingletons || this._channelsHostedByDaemon,
+					placementOnly: !this.deps.standing.ownsProcessSingletons || !!this.deps.hostedChannels,
 					routineJobScope: (receipt) => placedRoutineJobScope(this.deps.getSessionManager(), receipt),
 					sessionId: () => this.deps.getSessionId(),
 					cwd: () => this.deps.getCwd(),

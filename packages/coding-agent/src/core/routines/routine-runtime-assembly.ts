@@ -545,7 +545,7 @@ export class RoutineRuntimeAssembly {
 			isMeteredAttempt: (attempt) => this.host.workerController().attemptIsMetered(attempt),
 		});
 		const scheduler = new RoutineSchedulerController({
-			...(scope === "session"
+			...(scope === "session" && !this.deps.hostedChannels
 				? {
 						namedBotClock: new NamedBotScheduleClock({
 							agentDir: this.deps.getAgentDir(),

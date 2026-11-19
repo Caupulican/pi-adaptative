@@ -930,8 +930,12 @@ export function createGoalProofWrites(deps: {
  */
 export function sessionHostLaneDeps(
 	config: AgentSessionConfig,
-): Pick<BackgroundLaneControllerDeps, "botAgentId" | "runCostBound" | "runModelHold" | "watchCommandBase"> {
+): Pick<
+	BackgroundLaneControllerDeps,
+	"hostedChannels" | "botAgentId" | "runCostBound" | "runModelHold" | "watchCommandBase"
+> {
 	return {
+		hostedChannels: config.hostedChannels,
 		botAgentId: config.standing.kind === "bot" ? config.standing.agentId : undefined,
 		runCostBound: config.workerRunCostBound,
 		runModelHold: config.workerRunModelHold,

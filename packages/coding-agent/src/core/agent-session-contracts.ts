@@ -157,6 +157,8 @@ export type AgentSessionEvent =
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
 export interface AgentSessionConfig {
+	/** The daemon serves this phone session and owns unattended work for its project. */
+	hostedChannels?: "daemon";
 	agent: Agent;
 	/**
 	 * Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr, one line per
@@ -287,6 +289,7 @@ export interface AgentSessionConfig {
  */
 export type SessionHostOptions = Pick<
 	AgentSessionConfig,
+	| "hostedChannels"
 	| "admitRun"
 	| "ownerNoticeLine"
 	| "workerRunCostBound"
@@ -297,9 +300,24 @@ export type SessionHostOptions = Pick<
 
 /** The host's options of `options`, and only those, for the session's config. */
 export function sessionHostOptions(options: SessionHostOptions): SessionHostOptions {
-	const { admitRun, ownerNoticeLine, workerRunCostBound, workerRunModelHold, watchCommandBase, onClosingWarnings } =
-		options;
-	return { admitRun, ownerNoticeLine, workerRunCostBound, workerRunModelHold, watchCommandBase, onClosingWarnings };
+	const {
+		hostedChannels,
+		admitRun,
+		ownerNoticeLine,
+		workerRunCostBound,
+		workerRunModelHold,
+		watchCommandBase,
+		onClosingWarnings,
+	} = options;
+	return {
+		hostedChannels,
+		admitRun,
+		ownerNoticeLine,
+		workerRunCostBound,
+		workerRunModelHold,
+		watchCommandBase,
+		onClosingWarnings,
+	};
 }
 
 export interface ExtensionBindings {

@@ -193,6 +193,7 @@ export class VirtualNetwork {
 	}
 
 	private readonly servers = new Map<string, VirtualServer>();
+	private readonly partitions = new Set<string>();
 	private readonly options: VirtualNetworkOptions;
 	private liveSockets = 0;
 	private nextPort = 40_000;
@@ -249,6 +250,15 @@ export class VirtualNetwork {
 		server.disconnectClients();
 	}
 
+	/** Cut a TCP link and refuse redials to its endpoint until the partition is lifted, even across a listener restart. */
+	partitionTcp(host: string, port: number): () => void {
+		const endpoint = `tcp:${host}:${port}`;
+		if (this.partitions.has(endpoint)) throw new Error(`TCP endpoint already partitioned: ${endpoint}`);
+		this.disconnectClients(host, port);
+		this.partitions.add(endpoint);
+		return () => this.partitions.delete(endpoint);
+	}
+
 	readonly createServer = (onConnection?: (socket: VirtualSocket) => void): VirtualServer =>
 		new VirtualServer(this, onConnection);
 
@@ -290,7 +300,7 @@ export class VirtualNetwork {
 						? target.host
 						: "127.0.0.1";
 			const server = this.resolveTcpServer(host, port);
-			if (!server?.listening) {
+			if (!server?.listening || this.partitions.has(`tcp:${host}:${port}`)) {
 				client.destroy(Object.assign(new Error(`connect ECONNREFUSED ${host}:${port}`), { code: "ECONNREFUSED" }));
 				return;
 			}

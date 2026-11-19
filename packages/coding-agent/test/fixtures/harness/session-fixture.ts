@@ -3732,7 +3732,7 @@ export class HarnessWorld {
 	/** Root session in normal user-facing mode, bound to the scripted root track `modelId`. */
 	async createRootSession(
 		modelId = "root",
-		options: {
+		options: Pick<CreateAgentSessionOptions, "hostedChannels"> & {
 			readonly sessionManager?: SessionManager;
 			readonly agentDir?: string;
 			/** Project directory for this owner; defaults to the world's project. */
@@ -3882,6 +3882,7 @@ export class HarnessWorld {
 		}
 		const { session, getExtensionRunner, extensionsResult } = await createAgentSession({
 			cwd,
+			hostedChannels: options.hostedChannels,
 			agentDir,
 			// Closing warnings (a session's terminal disclosures) reach the world's warnings, not the process's stderr, unless the creation
 			// supplies its own sink (`null`: none).
