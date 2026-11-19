@@ -468,7 +468,7 @@ export class RemoteHubController {
 	send(name: string, text: string): string {
 		const id = this.requireHub(name).send(name, text);
 		harnessLog.debug("link", "a message was sent to a machine", { machine: name, chars: text.length });
-		this.chats.append(name, { at: Date.now(), from: "hub", text, id });
+		this.chats.append(name, { at: this.timers.now(), from: "hub", text, id });
 		return id;
 	}
 
@@ -487,7 +487,7 @@ export class RemoteHubController {
 		});
 		if (placed.kind === "refused") throw new Error(placed.reason);
 		harnessLog.debug("link", "a conversation turn was placed on a machine", { machine: name, chars: text.length });
-		this.chats.append(name, { at: Date.now(), from: "hub", text, id: placed.handle.jobId });
+		this.chats.append(name, { at: this.timers.now(), from: "hub", text, id: placed.handle.jobId });
 		return placed.handle.jobId;
 	}
 
@@ -529,7 +529,7 @@ export class RemoteHubController {
 		transport: JobTransport,
 	): void {
 		harnessLog.debug("link", "a machine answered", { machine, chars: text.length, interim: final === false });
-		this.chats.append(machine, { at: Date.now(), from: "machine", text, id });
+		this.chats.append(machine, { at: this.timers.now(), from: "machine", text, id });
 		if (final !== false) transport.completeAsk(machineId, id, text);
 		this.notify([machine]);
 		this.queuePreview(machine);

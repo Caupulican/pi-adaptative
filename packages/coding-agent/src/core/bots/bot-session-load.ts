@@ -57,6 +57,8 @@ export interface BotSessionEntry {
 	sender: BotSender;
 	/** The root it was built for: what defines it is compiled, and its settings read, as that root's (another root's message does not rebuild it). */
 	readonly builtFor: BotSender;
+	/** Working directory supplied to this loaded session, even after its original root detaches. */
+	readonly cwd: string;
 	/** What defined the session when it was built (`BotSessionDefinition.key`). */
 	readonly profileKey: string;
 	/** The bot's own dollar ceilings (`BotSessionDefinition.spendBudget`). */
@@ -261,6 +263,7 @@ export class BotSessionLoader {
 				modelRef: `${model.provider}/${model.id}`,
 				sender,
 				builtFor: sender,
+				cwd,
 				profileKey: definition.key,
 				spendBudget: definition.spendBudget,
 				unsubscribe: () => {},

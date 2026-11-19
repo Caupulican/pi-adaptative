@@ -87,7 +87,7 @@ async function givePhoneCommand(
 				item.reply = reply;
 			}
 		});
-	if (command.projectBound && realPathIdentity(command.cwd) !== realPathIdentity(entry.builtFor.cwd())) {
+	if (command.projectBound && realPathIdentity(command.cwd) !== realPathIdentity(entry.cwd)) {
 		finish("The selected occurrence belongs to a different project. Check its status before steering again.");
 		return;
 	}

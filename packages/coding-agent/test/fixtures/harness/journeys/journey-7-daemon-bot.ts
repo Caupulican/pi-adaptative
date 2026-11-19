@@ -206,7 +206,8 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 
 	const neighbor = await open(otherProject);
 	const oneShot = save(neighbor, "neighbor-checkout", foreignPrompt, false);
-	const store = neighbor.getBotTeamStore();
+	let store = neighbor.getBotTeamStore();
+	let neighborOpen = true;
 	const runs = (routineId: string) => {
 		store.reload();
 		return store.listRoutineOccurrences({ routineId });
@@ -228,6 +229,14 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 	let replacement: typeof author | undefined;
 	try {
 		world.timers.advance("routines", intervalMs);
+		await withDeadline(
+			world.trace,
+			"the neighbor clock delivered to the durable inbox",
+			world.io.waitForMutation(() =>
+				readBotInbox(agentDir, bot, () => undefined).some(({ message }) => message.text === foreignPrompt),
+			),
+		);
+		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
 		await withDeadline(world.trace, "the neighbor's scheduled bot turn is in flight", held.promise);
 		expect(runs(oneShot.routineId)).toHaveLength(1);
 		expect(runs(recurring.routineId), "the neighbor root cannot take the closed project's slot").toEqual([]);
@@ -259,6 +268,10 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 		expect(botSessionFilesText(world, bot, agentDir)).not.toContain(prompt);
 		expect(readBotInbox(agentDir, bot, () => undefined).some(({ message }) => message.text === prompt)).toBe(true);
 
+		// A shared host outlives the detached root. Its running tools still belong to the neighboring checkout.
+		store = main.getBotTeamStore();
+		expect(await world.disposeSessionInBody(neighbor)).toBeUndefined();
+		neighborOpen = false;
 		release.release();
 		const answered = (answer: string) =>
 			withDeadline(
@@ -269,6 +282,7 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 		await answered(answers[0]!);
 		world.timers.advance("routines", intervalMs);
 		await main.tickPersistentRoutines();
+		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
 		await answered(answers[1]!);
 		const settled = runs(recurring.routineId);
 		expect(
@@ -302,6 +316,6 @@ export async function runJourney7ProjectBotSchedules(world: HarnessWorld): Promi
 	} finally {
 		release.release();
 		if (replacement) expect(await world.disposeSessionInBody(replacement)).toBeUndefined();
-		expect(await world.disposeSessionInBody(neighbor)).toBeUndefined();
+		if (neighborOpen) expect(await world.disposeSessionInBody(neighbor)).toBeUndefined();
 	}
 }

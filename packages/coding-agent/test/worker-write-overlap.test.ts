@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
-import { hostFindingBlockerLine } from "../src/core/autonomy/host-findings.ts";
 import { validateWorkerClaim } from "../src/core/delegation/worker-claim.ts";
-import { interruptedWorkerMutationFields } from "../src/core/delegation/worker-mutation-evidence.ts";
+import {
+	applyWorkerHostFindings,
+	interruptedWorkerMutationFields,
+} from "../src/core/delegation/worker-mutation-evidence.ts";
 import { WorkerWriteOverlapTracker } from "../src/core/delegation/worker-write-overlap.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 
@@ -76,12 +78,15 @@ describe("concurrent worker write claims", () => {
 				reasonCodes: [],
 			},
 		};
-		expect(validateWorkerClaim({ claim, request, cwd: checkout }).outcome).toBe("allow");
+		const acceptance = validateWorkerClaim({ claim, request, cwd: checkout });
+		expect(acceptance.outcome).toBe("allow");
 		shell.uncertain = true;
 		tracker.end("shell");
-		claim.hostFindings = tracker.findingsFor("writer");
-		claim.blockers = claim.hostFindings.map(hostFindingBlockerLine);
-		const gate = validateWorkerClaim({ claim, request, cwd: checkout });
+		const reviewed = applyWorkerHostFindings(
+			{ claim, acceptance, accepted: true, reasonCode: "worker_completed", laneStatus: "succeeded", costUsd: 0 },
+			tracker.findingsFor("writer"),
+		);
+		expect(reviewed.reasonCode).toBe("worker_host_findings");
 		const result = createWorkerResultContract({
 			handle: {
 				objectiveId: "objective",
@@ -91,9 +96,9 @@ describe("concurrent worker write claims", () => {
 				fencingToken: 1,
 				expiresAt: at,
 			},
-			claim,
+			claim: reviewed.claim,
 			cwd: checkout,
-			accepted: gate.outcome === "allow",
+			accepted: reviewed.accepted,
 			wallClockMs: 10,
 			toolCalls: 1,
 			createdAt: at,

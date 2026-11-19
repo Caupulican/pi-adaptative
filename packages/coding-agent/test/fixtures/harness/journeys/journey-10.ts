@@ -1,13 +1,12 @@
 import "../builtin-install.ts";
 import lockfile from "proper-lockfile";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import { botTeamStoreFile, configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { usageReceiptOf } from "../../../../src/core/cost/usage-receipt.ts";
 import type { PlanNodeSpec } from "../../../../src/core/plan/plan-graph.ts";
 import { placementFor } from "../../../../src/core/plan/plan-placement.ts";
 import { recordPeerDown, recordPeerFacts, recordPeerUp } from "../../../../src/core/remote/fleet-machines.ts";
-import { RemoteHubController } from "../../../../src/core/remote/hub-controller.ts";
 import type { RemoteJobEvent } from "../../../../src/core/remote/job-client.ts";
 import { CAP_FEATURE, JOBS_FEATURE } from "../../../../src/core/remote/job-protocol.ts";
 import {
@@ -982,34 +981,9 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		let releaseStore: (() => void) | undefined;
 		let previewAlarm: number | undefined;
 		const originalLockSync = lockfile.lockSync;
-		const receivedDescriptor = Object.getOwnPropertyDescriptor(RemoteHubController.prototype, "received");
-		if (!receivedDescriptor || typeof receivedDescriptor.value !== "function")
-			throw new Error("The hub receive owner is unavailable.");
-		const received = receivedDescriptor.value as (
-			this: RemoteHubController,
-			machine: string,
-			id: string,
-			text: string,
-			final: boolean | undefined,
-		) => void;
-		const originalNow = Date.now;
-		const replyTime = originalNow();
-		// Pin only these two synchronous real receive calls; transport, durable append and finalization stay unchanged.
-		Object.defineProperty(RemoteHubController.prototype, "received", {
-			...receivedDescriptor,
-			value(this: RemoteHubController, machine: string, id: string, text: string, final: boolean | undefined) {
-				if (this !== hub || (text !== askAnswer && text !== newerAnswer)) {
-					received.call(this, machine, id, text, final);
-					return;
-				}
-				Date.now = () => replyTime;
-				try {
-					received.call(this, machine, id, text, final);
-				} finally {
-					Date.now = originalNow;
-				}
-			},
-		});
+		const replyClock = world.timers.port("orchestration");
+		const clockRead = vi.spyOn(replyClock, "now");
+		let replyTime: number;
 		let storeLockAttempts = 0;
 		const assertStoreContended = () => {
 			let contention: unknown;
@@ -1044,6 +1018,8 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 				rosterBefore,
 			);
 			const beforeReplyAlarms = new Set(world.timers.armedSnapshot("orchestration").map((alarm) => alarm.handle));
+			replyTime = replyClock.now();
+			clockRead.mockReturnValue(replyTime);
 			releaseAnswer.release();
 			await withDeadline(trace, "J10 leg 4: ask reply wakes hub", askWake.promise);
 			await withDeadline(trace, "J10 leg 4: hub idle after ask", sessionHub.waitForForegroundIdle());
@@ -1126,7 +1102,7 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 				"the second reply coalesces into the existing retry",
 			).toEqual([previewAlarm]);
 		} finally {
-			Object.defineProperty(RemoteHubController.prototype, "received", receivedDescriptor);
+			clockRead.mockRestore();
 			lockfile.lockSync = originalLockSync;
 			releaseAnswer.release();
 			releaseStore?.();

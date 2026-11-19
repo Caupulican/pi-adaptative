@@ -21,7 +21,6 @@ import {
 	isEdgeOperationGranted,
 	thirdPartyEdgeRefusal,
 } from "../autonomy/edge-policy.ts";
-import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
 import { getHarnessWriteProtectedPaths, thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
@@ -150,7 +149,7 @@ import { sessionSystemOneReviewerDeps } from "../system-one/session-source.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
-import { boundedLine, boundedText } from "../util/bounded-line.ts";
+import { boundedLine } from "../util/bounded-line.ts";
 import {
 	AsyncRetainedReleases,
 	type ReleaseAttemptResult,
@@ -276,7 +275,11 @@ import {
 	preflightWorkerTransfer,
 	transferTaskInstructions,
 } from "./worker-model-transfer-admission.ts";
-import { interruptedWorkerMutationFields, retainCancelledWorkerMutationClaim } from "./worker-mutation-evidence.ts";
+import {
+	applyWorkerHostFindings,
+	interruptedWorkerMutationFields,
+	retainCancelledWorkerMutationClaim,
+} from "./worker-mutation-evidence.ts";
 import {
 	contractGrantsChildren,
 	type NestedWorkerStart,
@@ -326,7 +329,7 @@ import {
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
 import { assertTransferClaimRecoverable, canControlTransferSource } from "./worker-transfer-source.ts";
 import { collectWorkerTreeBudgetSeeds, workerTreeCanAdmitAttempt } from "./worker-tree-budget-coordinator.ts";
-import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
+import { WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
 	WorkerWriteReservationCoordinator,
 	type WorkerWriteReservationWaitYield,
@@ -6052,37 +6055,7 @@ export class WorkerDelegationController {
 					...(this.inFlightLedgers.get(startedRecord.laneId)?.getHostFindings() ?? []),
 					...(laneFinding ? [laneFinding] : []),
 				];
-				const boundedFindings = boundHostFindings(hostFindings);
-				const reviewedOutcome: WorkerRunOutcome =
-					hostFindings.length === 0
-						? reportReviewedOutcome
-						: {
-								...reportReviewedOutcome,
-								...(reportReviewedOutcome.accepted
-									? {
-											accepted: false,
-											reasonCode: "worker_host_findings",
-											acceptance: {
-												outcome: "ask-user" as const,
-												gate: "worker_host_findings",
-												reasonCode: "worker_host_findings",
-												message: boundedText(
-													hostFindings.map(hostFindingBlockerLine).join("; "),
-													MAX_WORKER_CLAIM_BLOCKER_CHARS,
-												),
-											},
-										}
-									: {}),
-								claim: {
-									...reportReviewedOutcome.claim,
-									parentReviewRequired: true,
-									hostFindings: boundedFindings,
-									blockers: [
-										...boundedFindings.map(hostFindingBlockerLine),
-										...(reportReviewedOutcome.claim.blockers ?? []),
-									].slice(0, MAX_WORKER_CLAIM_BLOCKERS),
-								},
-							};
+				const reviewedOutcome = applyWorkerHostFindings(reportReviewedOutcome, hostFindings);
 				const resultReceipts = recordWorkerReceiptAcceptance(receiptFacts, reviewedOutcome, verificationRequired);
 				if (resultReceipts.status === "unavailable")
 					this.safeWarn(

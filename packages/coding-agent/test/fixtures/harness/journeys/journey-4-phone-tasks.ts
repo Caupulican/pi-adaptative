@@ -8,6 +8,7 @@ import { ChannelJournal } from "../../../../src/core/channels/channel-journal.ts
 import { MAX_PHONE_TASK_COMMANDS } from "../../../../src/core/channels/owner-task.ts";
 import { PersistentBotTeamStore } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import { captureWorkerReceiptOrigin } from "../../../../src/core/delegation/worker-receipt-origin.ts";
+import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { queueNamedBotSchedule } from "../../../../src/core/routines/named-bot-schedule.ts";
 import type { RoutineOccurrence } from "../../../../src/core/routines/routine-contract.ts";
 import { routineBotMessageOrigin } from "../../../../src/core/routines/routine-parent-input.ts";
@@ -257,6 +258,7 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 			from: { pid: process.pid, sessionId: late.parentOrigin.sessionId, cwd: pinned.botProjectCwd },
 			at: nowMs,
 		});
+		const warningMark = world.warnings.length;
 		const dest = join(botInboxDir(agentDir, "Atlas"), basename(legacy.file));
 		world.io.writeFileSync(dest, `${JSON.stringify(legacy.message)}\n`, { mode: 0o600 });
 		world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
@@ -266,7 +268,15 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 			"legacy late delivery refused before its bot uses a model",
 			world.io.waitForMutation(() => world.io.existsSync(refused)),
 		);
-		expect(JSON.parse(world.io.readFileSync(refused, "utf8").toString()).reason).toContain("owner stopped");
+		const reason = JSON.parse(world.io.readFileSync(refused, "utf8").toString()).reason;
+		expect(reason).toContain("owner stopped");
+		const warning = interfaceText().botTeam.botInboxRefused("Atlas", reason);
+		await withDeadline(
+			world.trace,
+			"the host reported the refused legacy delivery",
+			world.whenWarnings(warningMark, (seen) => seen.includes(warning)),
+		);
+		expect(world.warnings.splice(warningMark)).toEqual([warning]);
 		expect(world.provider.requests).toHaveLength(requests);
 	});
 }

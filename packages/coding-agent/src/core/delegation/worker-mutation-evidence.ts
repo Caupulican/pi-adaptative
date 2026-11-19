@@ -12,10 +12,16 @@ import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { isProvablyObservationalToolCall } from "../model-router/tool-escalation.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime-state.ts";
+import { boundedText } from "../util/bounded-line.ts";
 import { readWorkerActionMutationProgress } from "./worker-action-journal.ts";
 import type { AppliedActionsReport } from "./worker-actions.ts";
-import { collectBoundedWorkerClaimChangedFiles } from "./worker-claim.ts";
+import {
+	collectBoundedWorkerClaimChangedFiles,
+	MAX_WORKER_CLAIM_BLOCKER_CHARS,
+	MAX_WORKER_CLAIM_BLOCKERS,
+} from "./worker-claim.ts";
 import type { WorkerConversation } from "./worker-conversation-store.ts";
+import type { WorkerRunOutcome } from "./worker-runner.ts";
 import { boundHostFindings } from "./worker-write-overlap.ts";
 
 type MutationProgressStore = Pick<
@@ -166,6 +172,39 @@ export class WorkerMutationEvidence {
 			this.options.onPersistenceFailure(`Worker mutation uncertainty could not be persisted: ${String(error)}`);
 		}
 	}
+}
+
+/** Apply host observations after report review. Preserve any earlier refusal as the primary reason. */
+export function applyWorkerHostFindings(
+	outcome: WorkerRunOutcome,
+	findings: readonly WorkerHostFinding[],
+): WorkerRunOutcome {
+	if (findings.length === 0) return outcome;
+	const bounded = boundHostFindings(findings);
+	return {
+		...outcome,
+		accepted: false,
+		...(outcome.accepted
+			? {
+					reasonCode: "worker_host_findings",
+					acceptance: {
+						outcome: "ask-user" as const,
+						gate: "worker_host_findings",
+						reasonCode: "worker_host_findings",
+						message: boundedText(findings.map(hostFindingBlockerLine).join("; "), MAX_WORKER_CLAIM_BLOCKER_CHARS),
+					},
+				}
+			: {}),
+		claim: {
+			...outcome.claim,
+			parentReviewRequired: true,
+			hostFindings: bounded,
+			blockers: [...bounded.map(hostFindingBlockerLine), ...(outcome.claim.blockers ?? [])].slice(
+				0,
+				MAX_WORKER_CLAIM_BLOCKERS,
+			),
+		},
+	};
 }
 
 /** Interrupted claims share the same review fields regardless of how the execution stopped. */

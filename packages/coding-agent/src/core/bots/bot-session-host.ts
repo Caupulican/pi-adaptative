@@ -551,7 +551,7 @@ export class BotSessionHost {
 	private async giveRecord(agentId: string, message: BotInboxMessage): Promise<BotInboxGiven> {
 		const entry = this.entries.get(agentId);
 		if (!entry || this.stopped) return "gone";
-		if (message.projectBound && realPathIdentity(entry.builtFor.cwd()) !== realPathIdentity(message.from.cwd)) {
+		if (message.projectBound && realPathIdentity(entry.cwd) !== realPathIdentity(message.from.cwd)) {
 			if (!this.isBusy(entry) && !unfinishedGoalProgress(entry.session.getGoalStateSnapshot()))
 				this.closeIfIdle(entry, true);
 			return this.entries.has(agentId) ? "keep" : "gone";
@@ -922,7 +922,7 @@ export class BotSessionHost {
 	leaveIdleToRoots(): void {
 		const agentDir = this.ports.agentDir();
 		for (const entry of [...this.entries.values()]) {
-			if (!this.ports.leavesTo?.(entry.builtFor.cwd()) || this.holdsLoaded(entry)) continue;
+			if (!this.ports.leavesTo?.(entry.cwd) || this.holdsLoaded(entry)) continue;
 			if (this.inboxMayHold(agentDir, entry.agentId)) continue;
 			void this.close(entry.agentId).catch((error: unknown) =>
 				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
