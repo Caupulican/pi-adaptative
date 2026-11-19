@@ -1,9 +1,3 @@
-## [Unreleased]
-
-### Fixed
-
-- On Windows, background file watchers resolve short directory names before subscribing. Sessions can run under paths such as `RUNNER~1` without crashing when a file changes.
-
 ## [0.104.71] - 2026-11-19
 
 ### Added
@@ -36,6 +30,8 @@
 - Shared-checkout worker reviews flag uncertain peer writes. Paired-machine enrollment rejects unfilled host placeholders.
 
 - The coding evaluator initializes its isolated Git repositories on Windows using a regular configuration file.
+
+- On Windows, background file watchers resolve short directory names before subscribing. Sessions can run under paths such as `RUNNER~1` without crashing when a file changes.
 
 ## [0.104.70] - 2026-11-18
 
