@@ -242,7 +242,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 
 Current behavior:
 - `/model` and `--list-models` list entries by model `id`.
-- After an upgrade, an online Pi launch refreshes outdated subscription catalogs before resolving model names. Offline mode uses the stored catalog. To retry discovery explicitly, run `pi auth check --provider google-antigravity`. Use `pi --list-models gemini-4-neon` to see which Neon presets your account offers.
+- After an upgrade, an online Pi launch refreshes outdated subscription catalogs before resolving model names. Offline mode uses the stored catalog. To retry discovery explicitly, run `pi auth check --provider google-antigravity`. Use `pi --list-models gemini-4-neon` to see which Neon presets your account offers. In the interactive app, Shift+Tab cycles through the available presets in order (Low, Medium, High, XHigh) and wraps to the first. Each step selects the corresponding subscription model ID.
 - `--list-models` shows `text-tools: yes` when `textToolCallProtocol` is enabled for a model.
 - The configured `name` is used for model matching and detail/status text.
 

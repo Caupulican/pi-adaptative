@@ -5,7 +5,13 @@
 - `delegate handoff` moves unfinished work to a requested model. The successor keeps the task, permissions, budget history and uncommitted files. The root can continue after admission and inspect the transfer with `delegate status`.
 - From the source checkout, `npm run eval:coding` compares direct work with automatic delegation on independently graded coding tasks. It reports first-pass acceptance, correction turns, elapsed time, worker outcomes, and API-equivalent cost. Live trials and pinned-worker probes are opt-in.
 
+### Changed
+
+- SDK callers must now await `session.cycleThinkingLevel()` and handle model-switch errors.
+
 ### Fixed
+
+- Shift+Tab reaches XHigh in Gemini Neon and Hydrogen when the subscription offers that preset.
 
 - On Linux, loading the native file finder skips socket lookups during its libc check. Concurrent provider turns can continue without waiting on those lookups. Failed worktree land checks now return the captured gate diagnostic, and edit receipts show changes to multiple trailing line breaks.
 - The final-answer verifier recognizes files integrated by a successful worktree landing, typed lane commits and the configured landing check.

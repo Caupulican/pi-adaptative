@@ -309,44 +309,29 @@ export class ModelSelectionController {
 		}
 	}
 
-	/**
-	 * Cycle to next thinking level.
-	 * @returns New level, or undefined if model doesn't support thinking
-	 */
-	cycleThinkingLevel(): ThinkingLevel | undefined {
+	/** Next user-selectable effort. A fixed Antigravity preset requires a real model switch. */
+	nextThinkingSelection(): Model<Api> | ThinkingLevel | undefined {
 		if (!this.supportsThinking()) return undefined;
 		const model = this.deps.getModel();
-		const family = model ? antigravityGeminiEffortFamily(model) : undefined;
+		const family = model && antigravityGeminiEffortFamily(model);
 		if (family && model) {
+			const registry = this.deps.getModelRegistry();
 			const scoped = this.deps.getScopedModels();
-			const candidates =
-				scoped.length > 0 ? scoped.map((entry) => entry.model) : this.deps.getModelRegistry().getAvailable();
+			const candidates = scoped.length ? scoped.map((entry) => entry.model) : registry.getAvailable();
 			const variants = candidates.filter(
-				(candidate) =>
-					antigravityGeminiEffortFamily(candidate) === family &&
-					this.deps.getModelRegistry().hasConfiguredAuth(candidate),
+				(candidate) => antigravityGeminiEffortFamily(candidate) === family && registry.hasConfiguredAuth(candidate),
 			);
-			const levels = ANTIGRAVITY_EFFORT_ORDER.filter((level) =>
-				variants.some((candidate) => candidate.defaultThinkingLevel === level),
+			const index = ANTIGRAVITY_EFFORT_ORDER.indexOf(
+				model.defaultThinkingLevel as (typeof ANTIGRAVITY_EFFORT_ORDER)[number],
 			);
-			if (levels.length > 1) {
-				const currentIndex = levels.indexOf(model.defaultThinkingLevel as (typeof levels)[number]);
-				const nextLevel = levels[(currentIndex + 1) % levels.length]!;
-				const nextModel = variants.find((candidate) => candidate.defaultThinkingLevel === nextLevel)!;
-				void this.setModel(nextModel).catch((error: unknown) => {
-					this.deps.emit({ type: "warning", message: error instanceof Error ? error.message : String(error) });
-				});
-				return nextLevel;
+			for (let offset = 1; offset < ANTIGRAVITY_EFFORT_ORDER.length; offset++) {
+				const level = ANTIGRAVITY_EFFORT_ORDER[(index + offset) % ANTIGRAVITY_EFFORT_ORDER.length];
+				const sibling = variants.find((variant) => variant.defaultThinkingLevel === level);
+				if (sibling) return sibling;
 			}
 		}
-
 		const levels = this.getAvailableThinkingLevels();
-		const currentIndex = levels.indexOf(this.deps.getThinkingLevel());
-		const nextIndex = (currentIndex + 1) % levels.length;
-		const nextLevel = levels[nextIndex];
-
-		this.setThinkingLevel(nextLevel);
-		return nextLevel;
+		return levels[(levels.indexOf(this.deps.getThinkingLevel()) + 1) % levels.length];
 	}
 
 	/**

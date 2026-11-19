@@ -1543,7 +1543,7 @@ export class InteractiveMode {
 			handleCtrlC: () => this.handleCtrlC(),
 			handleCtrlD: () => this.handleCtrlD(),
 			handleCtrlZ: () => this.handleCtrlZ(),
-			cycleThinkingLevel: () => this.cycleThinkingLevel(),
+			cycleThinkingLevel: () => this.cycleThinkingLevel().catch((error: Error) => this.showError(error.message)),
 			cycleModel: (direction) => this.cycleModel(direction),
 			handleDebugCommand: () => this.slashCommands.handleDebugCommand(),
 			showModelSelector: (input) => this.showModelSelector(input),
@@ -2368,8 +2368,8 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private cycleThinkingLevel(): void {
-		const newLevel = this.session.cycleThinkingLevel();
+	private async cycleThinkingLevel(): Promise<void> {
+		const newLevel = await this.session.cycleThinkingLevel();
 		const words = interfaceText().interactive;
 		if (newLevel === undefined) {
 			this.showStatus(words.thinkingUnsupported);

@@ -325,7 +325,7 @@ Set the reasoning/thinking level for models that support it.
 
 Levels: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
 
-Note: `"xhigh"` is only supported by OpenAI codex-max models.
+The active model determines which levels it accepts. An Antigravity preset accepts its catalog effort.
 
 Response:
 ```json
@@ -334,7 +334,7 @@ Response:
 
 #### cycle_thinking_level
 
-Cycle through available thinking levels. Returns `null` data if model doesn't support thinking.
+Cycle through available thinking levels. For fixed Antigravity Gemini presets, this switches to the corresponding available model ID. The response reports the applied level, or an error if the session rejects the switch. A model without thinking support returns `null` data.
 
 ```json
 {"type": "cycle_thinking_level"}

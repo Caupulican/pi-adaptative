@@ -4211,10 +4211,6 @@ export class AgentSession {
 		};
 	}
 
-	// =========================================================================
-	// Model Management
-	// =========================================================================
-
 	/**
 	 * An explicit model selection (`/model`, a model cycle, RPC, an extension): the selected model becomes
 	 * the conversation's talker, so the opening route never replaces it.
@@ -4234,7 +4230,7 @@ export class AgentSession {
 			validate();
 			await this._switchSessionModel(model, options, validate);
 			validate();
-			this._modelAccess.recordTalker(model, ["model selected"]);
+			if (modelsAreEqual(model, this.model)) this._modelAccess.recordTalker(model, ["model selected"]);
 		} finally {
 			reader?.release();
 		}
@@ -4278,10 +4274,6 @@ export class AgentSession {
 		}
 	}
 
-	// =========================================================================
-	// Thinking Level Management
-	// =========================================================================
-
 	setThinkingLevel(level: ThinkingLevel, options: { persistSettings?: boolean } = {}): void {
 		this._setThinkingLevel(level, options);
 	}
@@ -4298,8 +4290,19 @@ export class AgentSession {
 		);
 	}
 
-	cycleThinkingLevel(): ThinkingLevel | undefined {
-		return this._runtimeAdmission.mutateResources("thinking level", () => this._modelSelection.cycleThinkingLevel());
+	async cycleThinkingLevel(): Promise<ThinkingLevel | undefined> {
+		const reader = await this._runtimeAdmission.admit("model", "thinking level cycle");
+		const validate = () => reader.assertCurrent();
+		try {
+			validate();
+			const next = this._modelSelection.nextThinkingSelection();
+			if (!next) return undefined;
+			if (typeof next === "string") this._setThinkingLevel(next, {}, validate);
+			else await this._setModel(next, {}, validate);
+			return this.thinkingLevel;
+		} finally {
+			reader.release();
+		}
 	}
 
 	getAvailableThinkingLevels(): ThinkingLevel[] {
@@ -4309,10 +4312,6 @@ export class AgentSession {
 	supportsThinking(): boolean {
 		return this._modelSelection.supportsThinking();
 	}
-
-	// =========================================================================
-	// Queue Mode Management
-	// =========================================================================
 
 	/**
 	 * Set steering message mode.

@@ -636,7 +636,7 @@ export async function runRpcMode(
 			}
 
 			case "cycle_thinking_level": {
-				const level = session.cycleThinkingLevel();
+				const level = await session.cycleThinkingLevel();
 				if (!level) {
 					return success(id, "cycle_thinking_level", null);
 				}
