@@ -1,9 +1,3 @@
-## [Unreleased]
-
-### Fixed
-
-- The coding evaluator initializes its isolated Git repositories on Windows using a regular configuration file.
-
 ## [0.104.71] - 2026-11-19
 
 ### Added
@@ -34,6 +28,8 @@
 - Worker report reviews now show the paths recorded for the current attempt and explain how to correct a report without repeating a successful edit.
 - Phone tasks can retain their bot identity across retries and desktop shutdown. The daemon owns unattended schedules and resumes unapplied results from paired machines after restart.
 - Shared-checkout worker reviews flag uncertain peer writes. Paired-machine enrollment rejects unfilled host placeholders.
+
+- The coding evaluator initializes its isolated Git repositories on Windows using a regular configuration file.
 
 ## [0.104.70] - 2026-11-18
 
