@@ -91,7 +91,7 @@ export const DIALOGS = {
 		bedrockRegion: (region: string) => `Bedrock region: ${region}`,
 		finishSignIn: "Complete the IAM Identity Center sign-in in your browser.",
 		apiKeyPrompt: "Enter API key:",
-		manualCodePrompt: "Paste redirect URL below, or complete login in browser:",
+		manualCodePrompt: "Paste the requested code or redirect URL, or finish signing in in your browser.",
 		waitingForAuth: "Waiting for authentication...",
 		configureFailed: (provider: string) => `Failed to configure ${provider}: `,
 		signInFailed: (provider: string) => `Failed to sign in to ${provider}: `,

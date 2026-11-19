@@ -77,6 +77,7 @@ async function generatePKCE(): Promise<{ verifier: string; challenge: string }> 
 
 async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
+	const expectedState = crypto.randomUUID();
 
 	const authParams = new URLSearchParams({
 		code: "true",
@@ -86,16 +87,19 @@ async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OAuthCred
 		scope: SCOPES,
 		code_challenge: challenge,
 		code_challenge_method: "S256",
-		state: verifier,
+		state: expectedState,
 	});
 
 	callbacks.onAuth({ url: `${AUTHORIZE_URL}?${authParams.toString()}` });
 
 	const authCode = await callbacks.onPrompt({ message: "Paste the authorization code:" });
-	const [code, state] = authCode.split("#");
+	const [code, state, extra] = authCode.trim().split("#", 3);
+	if (!code || state !== expectedState || extra !== undefined) throw new Error("Invalid authorization code or state");
 
 	const tokenResponse = await fetch(TOKEN_URL, {
 		method: "POST",
+		redirect: "error",
+		signal: callbacks.signal,
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
 			grant_type: "authorization_code",
@@ -108,7 +112,8 @@ async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OAuthCred
 	});
 
 	if (!tokenResponse.ok) {
-		throw new Error(`Token exchange failed: ${await tokenResponse.text()}`);
+		await tokenResponse.body?.cancel();
+		throw new Error(`Token exchange failed (HTTP ${tokenResponse.status})`);
 	}
 
 	const data = (await tokenResponse.json()) as {
@@ -127,6 +132,7 @@ async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OAuthCred
 async function refreshAnthropicToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
 	const response = await fetch(TOKEN_URL, {
 		method: "POST",
+		redirect: "error",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
 			grant_type: "refresh_token",
@@ -136,7 +142,8 @@ async function refreshAnthropicToken(credentials: OAuthCredentials): Promise<OAu
 	});
 
 	if (!response.ok) {
-		throw new Error(`Token refresh failed: ${await response.text()}`);
+		await response.body?.cancel();
+		throw new Error(`Token refresh failed (HTTP ${response.status})`);
 	}
 
 	const data = (await response.json()) as {

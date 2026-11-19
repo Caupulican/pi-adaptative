@@ -20,6 +20,8 @@ export type OAuthPrompt = {
 
 export type OAuthAuthInfo = {
 	url: string;
+	/** Alternate sign-in link for a browser on another machine. */
+	manualUrl?: string;
 	instructions?: string;
 };
 

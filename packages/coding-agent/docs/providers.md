@@ -16,7 +16,7 @@ Pi supports subscription-based providers via OAuth and API key providers via env
 Use `/login` in interactive mode, then select a provider, or pass one directly (for example `/login chatgpt` or `/login claude`):
 
 - ChatGPT Plus/Pro (Codex)
-- Claude Pro/Max
+- Claude Pro/Max — `/login claude`. Use the browser on the machine running Pi, or open the manual sign-in link on another machine and paste the complete `code#state` shown on the last page.
 - GitHub Copilot
 - Google Antigravity — `/login google-antigravity`. Discovers the agent models available to your Google account.
 - xAI (Grok/X subscription) — `/login xai`. Signs in with SuperGrok or X Premium via device-code OAuth; `XAI_API_KEY` remains available as an API key under [API Keys](#api-keys) for metered access instead.

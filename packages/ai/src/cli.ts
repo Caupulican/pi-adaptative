@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createInterface } from "node:readline";
+import { createInterface } from "node:readline/promises";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { getOAuthProvider, getOAuthProviders } from "./utils/oauth/index.ts";
 import type { OAuthCredentials, OAuthProviderId } from "./utils/oauth/types.ts";
@@ -8,8 +8,14 @@ import type { OAuthCredentials, OAuthProviderId } from "./utils/oauth/types.ts";
 const AUTH_FILE = "auth.json";
 const PROVIDERS = getOAuthProviders();
 
-function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-	return new Promise((resolve) => rl.question(question, resolve));
+function openPrompt() {
+	const input = createInterface({ input: process.stdin, output: process.stdout });
+	const lifetime = new AbortController();
+	input.once("close", () => lifetime.abort(new Error("Input closed before sign-in completed")));
+	return {
+		ask: (question: string) => input.question(question, { signal: lifetime.signal }),
+		close: () => input.close(),
+	};
 }
 
 function loadAuth(): Record<string, { type: "oauth" } & OAuthCredentials> {
@@ -32,16 +38,24 @@ async function login(providerId: OAuthProviderId): Promise<void> {
 		process.exit(1);
 	}
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
-	const promptFn = (msg: string) => prompt(rl, `${msg} `);
+	let input: ReturnType<typeof openPrompt> | undefined;
+	const promptFn = (msg: string) => {
+		input ??= openPrompt();
+		return input.ask(`${msg} `);
+	};
 
 	try {
 		const credentials = await provider.login({
 			onAuth: (info) => {
 				console.log(`\nOpen this URL in your browser:\n${info.url}`);
 				if (info.instructions) console.log(info.instructions);
+				if (info.manualUrl) console.log(info.manualUrl);
 				console.log();
 			},
+			onManualCodeInput:
+				provider.id === "anthropic" && process.stdin.isTTY
+					? () => promptFn("Paste the full authorization code, including the #:")
+					: undefined,
 			onDeviceCode: (info) => {
 				console.log(`\nOpen this URL in your browser:\n${info.verificationUri}`);
 				console.log(`Enter code: ${info.userCode}`);
@@ -68,7 +82,7 @@ async function login(providerId: OAuthProviderId): Promise<void> {
 
 		console.log(`\nCredentials saved to ${AUTH_FILE}`);
 	} finally {
-		rl.close();
+		input?.close();
 	}
 }
 
@@ -107,15 +121,15 @@ Examples:
 		let provider = args[1] as OAuthProviderId | undefined;
 
 		if (!provider) {
-			const rl = createInterface({ input: process.stdin, output: process.stdout });
+			const input = openPrompt();
 			console.log("Select a provider:\n");
 			for (let i = 0; i < PROVIDERS.length; i++) {
 				console.log(`  ${i + 1}. ${PROVIDERS[i].name}`);
 			}
 			console.log();
 
-			const choice = await prompt(rl, `Enter number (1-${PROVIDERS.length}): `);
-			rl.close();
+			const choice = await input.ask(`Enter number (1-${PROVIDERS.length}): `);
+			input.close();
 
 			const index = parseInt(choice, 10) - 1;
 			if (index < 0 || index >= PROVIDERS.length) {

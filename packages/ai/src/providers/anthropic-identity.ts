@@ -3,7 +3,6 @@ import {
 	ANTHROPIC_OAUTH_PROTOCOL,
 	type AnthropicClientIdentity,
 	type AnthropicOAuthProtocol,
-	createAnthropicClientIdentity,
 	PACKAGED_ANTHROPIC_IDENTITY,
 	REVIEWED_CLAUDE_INSTALLATIONS,
 } from "./anthropic-compatibility-profile.ts";
@@ -82,10 +81,7 @@ export class AnthropicCompatibilityResolver {
 						(profile) => profile.version === result.version && profile.sha256 === result.sha256,
 					)
 				: undefined;
-		const identity =
-			reviewed && result.status === "inspected"
-				? createAnthropicClientIdentity(result.version)
-				: PACKAGED_ANTHROPIC_IDENTITY;
+		const identity = reviewed?.identity ?? PACKAGED_ANTHROPIC_IDENTITY;
 		const inspection = reviewed ? "reviewed" : result.status === "inspected" ? "unreviewed" : result.status;
 		const installedVersion = result.status === "inspected" ? result.version : undefined;
 		const warning =
@@ -97,7 +93,7 @@ export class AnthropicCompatibilityResolver {
 		return Object.freeze({
 			identity,
 			oauth: reviewed?.oauth ?? ANTHROPIC_OAUTH_PROTOCOL,
-			source: reviewed ? "installed" : "packaged",
+			source: reviewed?.identity ? "installed" : "packaged",
 			inspection,
 			installedVersion,
 			warning,

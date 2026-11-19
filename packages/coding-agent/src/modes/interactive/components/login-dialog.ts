@@ -12,6 +12,7 @@ import { DynamicBorder } from "./dynamic-border.ts";
  */
 export class LoginDialogComponent extends Container implements Focusable {
 	private contentContainer: Container;
+	private readonly promptContainer = new Container();
 	private input: Input;
 	private tui: TUI;
 	private abortController = new AbortController();
@@ -105,7 +106,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/**
 	 * Called by onAuth callback - show URL and optional instructions
 	 */
-	showAuth(url: string, instructions?: string): void {
+	showAuth(url: string, instructions?: string, manualUrl?: string): void {
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
 		this.showAddress(url);
@@ -115,6 +116,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.contentContainer.addChild(new Text(theme.fg("warning", instructions), 1, 0));
 		}
 
+		if (manualUrl) this.showAddress(manualUrl);
 		openBrowser(url);
 		this.tui.requestRender();
 	}
@@ -145,34 +147,24 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
 	}
 
-	/**
-	 * Show input for manual code/URL entry (for callback server providers)
-	 */
+	/** Allow callback-based providers to request a paste alongside browser sign-in. */
 	showManualInput(prompt: string): Promise<string> {
-		this.contentContainer.addChild(new Spacer(1));
-		this.contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
-		this.contentContainer.addChild(this.input);
-		this.contentContainer.addChild(
-			new Text(`(${keyHint("tui.select.cancel", interfaceText().dialogs.login.toCancel)})`, 1, 0),
-		);
-		this.tui.requestRender();
-
-		return this.waitForInput();
+		return this.showPrompt(prompt);
 	}
 
-	/**
-	 * Called by onPrompt callback - show prompt and wait for input
-	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
-	 */
+	/** Replace the active prompt while preserving the sign-in links and progress. */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
 		const words = interfaceText().dialogs.login;
-		this.contentContainer.addChild(new Spacer(1));
-		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
+		this.contentContainer.removeChild(this.promptContainer);
+		this.promptContainer.clear();
+		this.contentContainer.addChild(this.promptContainer);
+		this.promptContainer.addChild(new Spacer(1));
+		this.promptContainer.addChild(new Text(theme.fg("text", message), 1, 0));
 		if (placeholder) {
-			this.contentContainer.addChild(new Text(theme.fg("dim", words.examplePlaceholder(placeholder)), 1, 0));
+			this.promptContainer.addChild(new Text(theme.fg("dim", words.examplePlaceholder(placeholder)), 1, 0));
 		}
-		this.contentContainer.addChild(this.input);
-		this.contentContainer.addChild(
+		this.promptContainer.addChild(this.input);
+		this.promptContainer.addChild(
 			new Text(
 				`(${keyHint("tui.select.cancel", words.toCancel)}, ${keyHint("tui.select.confirm", words.toSubmit)})`,
 				1,

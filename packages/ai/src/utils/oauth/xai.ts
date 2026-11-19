@@ -126,9 +126,11 @@ function requestFailure(action: string, response: OAuthHttpResponse): Error {
 function parseDeviceCode(body: JsonObject): XaiDeviceCode {
 	const interval = body.interval;
 	const verificationUriComplete = body.verification_uri_complete;
+	const userCode = requiredString(body, "user_code");
+	if (/[^A-Za-z0-9-]/.test(userCode)) throw new Error("Invalid xAI OAuth response field: user_code");
 	return {
 		deviceCode: requiredString(body, "device_code"),
-		userCode: requiredString(body, "user_code"),
+		userCode,
 		verificationUri: validateVerificationUri(requiredString(body, "verification_uri")),
 		verificationUriComplete:
 			typeof verificationUriComplete === "string" && verificationUriComplete.length > 0
@@ -218,14 +220,7 @@ async function pollForTokens(device: XaiDeviceCode, signal?: AbortSignal): Promi
 
 			const error = response.body.error;
 			if (error === "authorization_pending") return { status: "pending" };
-			if (error === "slow_down") {
-				const interval = response.body.interval;
-				return {
-					status: "slow_down",
-					intervalSeconds:
-						typeof interval === "number" && Number.isFinite(interval) && interval > 0 ? interval : undefined,
-				};
-			}
+			if (error === "slow_down") return { status: "slow_down" };
 			if (error === "access_denied" || error === "authorization_denied") {
 				return { status: "failed", message: "xAI device authorization was denied" };
 			}

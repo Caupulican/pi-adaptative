@@ -606,21 +606,18 @@ export class AuthDialogsController {
 		);
 	}
 
-	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
+	private openProviderLoginDialog(providerId: string, providerName: string): LoginDialogComponent {
 		this.cancelActiveDialog();
+		// The mounted authentication operation owns completion and editor restoration.
+		const dialog = new LoginDialogComponent(this.ui.tui, providerId, () => {}, providerName);
+		this.mountLoginDialog(dialog);
+		return dialog;
+	}
+
+	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
+		const dialog = this.openProviderLoginDialog(providerId, providerName);
 		const previousModel = this.session.model;
 		const text = interfaceText().dialogs.authDialogs;
-
-		const dialog = new LoginDialogComponent(
-			this.ui.tui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
-
-		this.mountLoginDialog(dialog);
 		await this.runMountedLoginDialog(
 			dialog,
 			async () => {
@@ -666,63 +663,14 @@ export class AuthDialogsController {
 	}
 
 	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
-		this.cancelActiveDialog();
-		const providerInfo = this.modelRegistry.authStorage
-			.getOAuthProviders()
-			.find((provider) => provider.id === providerId);
+		const dialog = this.openProviderLoginDialog(providerId, providerName);
 		const previousModel = this.session.model;
 		const text = interfaceText().dialogs.authDialogs;
-
-		// Providers that use callback servers (can paste redirect URL)
-		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
-
-		// Create login dialog component
-		const dialog = new LoginDialogComponent(
-			this.ui.tui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
-
-		// Show dialog in editor container
-		this.mountLoginDialog(dialog);
-
-		// Promise for manual code input (racing with callback server)
-		let manualCodeResolve: ((code: string) => void) | undefined;
-		let manualCodeReject: ((err: Error) => void) | undefined;
-		const manualCodePromise = new Promise<string>((resolve, reject) => {
-			manualCodeResolve = resolve;
-			manualCodeReject = reject;
-		});
-
 		await this.runMountedLoginDialog(
 			dialog,
 			() =>
 				this.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
-					onAuth: (info: { url: string; instructions?: string }) => {
-						dialog.showAuth(info.url, info.instructions);
-
-						if (usesCallbackServer) {
-							// Show input for manual paste, racing with callback
-							dialog
-								.showManualInput(text.manualCodePrompt)
-								.then((value) => {
-									if (value && manualCodeResolve) {
-										manualCodeResolve(value);
-										manualCodeResolve = undefined;
-									}
-								})
-								.catch(() => {
-									if (manualCodeReject) {
-										manualCodeReject(new Error("Login cancelled"));
-										manualCodeReject = undefined;
-									}
-								});
-						}
-						// For Anthropic: onPrompt is called immediately after
-					},
+					onAuth: (info) => dialog.showAuth(info.url, info.instructions, info.manualUrl),
 
 					onDeviceCode: (info) => {
 						dialog.showDeviceCode(info);
@@ -739,7 +687,7 @@ export class AuthDialogsController {
 
 					onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialog, prompt),
 
-					onManualCodeInput: () => manualCodePromise,
+					onManualCodeInput: () => dialog.showManualInput(text.manualCodePrompt),
 
 					signal: dialog.signal,
 				}),
