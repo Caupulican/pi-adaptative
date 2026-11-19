@@ -6,7 +6,7 @@ import {
 	type RetryBackoffEnd,
 	RetryController,
 } from "../kernel/reliability/index.ts";
-import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
 import { RunToolManifests } from "./autonomy-status/tool-manifest.ts";
 import type { BillingFailoverControllerDeps } from "./billing-failover-controller.ts";
@@ -121,8 +121,8 @@ export interface ForegroundRecoveryControllerDeps
 	/** Directory the exhausted-provider registry shares with sibling processes; omitted keeps it process-local. */
 	exhaustedStoreDir?: string;
 	emit(event: ForegroundRecoveryEvent): void;
-	/** The session branch a run extends, root to leaf (`SessionManager.getBranch`): where the run's authority is read from. */
-	getBranchEntries(): readonly SessionEntry[];
+	/** The latest decisive origin on the branch a new run extends. */
+	getInheritedOrigin(): TurnOriginRecord | undefined;
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	/** The provider refused the model for this account: move the turn to a replacement, returning its ref. */
 	replaceUnsupportedModel?(message: AssistantMessage): Promise<string | undefined>;
@@ -1053,7 +1053,7 @@ export class ForegroundRecoveryController {
 			this.setConsumingRun(true);
 			this.recoveryRoundSignal = atRoundCap() ? undefined : signal;
 			// The run answers whoever the branch last answered, then its opening messages, until a later message decides again.
-			this.turnOrigin.begin(mode === "continue" ? [] : [messages ?? []].flat(), this.deps.getBranchEntries());
+			this.turnOrigin.begin(mode === "continue" ? [] : [messages ?? []].flat(), this.deps.getInheritedOrigin());
 			this.toolManifests.beginRoot(lease?.epoch, this.turnOrigin.origin(), Date.now());
 			if (mode !== "continue") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");

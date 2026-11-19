@@ -43,6 +43,8 @@ export interface OperatorPovSource {
 	isUsingSubscription(): boolean;
 	getTaskMetrics?(): TaskExecutionMetrics | undefined;
 	getSessionWorkState?(): SessionWorkState;
+	getWorkerCounts?(): { readonly running: number; readonly queued: number };
+	getRunningBackgroundToolCount?(): number;
 	getSelfCompactionView?(): SelfCompactionView;
 	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
 	getCiStatus?(): CiStatusView | undefined;
@@ -68,6 +70,8 @@ export type OperatorPovSegmentId =
 	| "route"
 	| "system-one"
 	| "peer-findings"
+	| "workers"
+	| "background-tools"
 	| "tps"
 	| "task"
 	| "cache"
@@ -158,7 +162,11 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const livenessFault = Boolean(workState?.livenessFault);
 	const needsInput = control.owner === "user" || workState?.phase === "waiting_user";
 	const idle =
-		!needsInput && !livenessFault && (workState ? workState.phase === "idle" : isIdleProjection(projection));
+		!needsInput &&
+		!livenessFault &&
+		(workState
+			? workState.phase === "idle" || workState.phase === "waiting_worker" || workState.phase === "waiting_tool"
+			: isIdleProjection(projection));
 
 	let phaseLabel = operator.working;
 	let phaseTone: "accent" | "warning" | "error" | "success" | undefined;
@@ -185,7 +193,10 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseLabel = operator.ready;
 		phaseTone = undefined;
 		phaseBare = true;
-		phaseValue = projection.current_action || operator.readyValue;
+		phaseValue =
+			workState?.phase === "waiting_worker" || workState?.phase === "waiting_tool"
+				? operator.readyValue
+				: projection.current_action || operator.readyValue;
 	} else if (workState?.phase === "system_one_evaluating") {
 		phaseLabel = operator.systemOneEvaluating;
 		phaseTone = "accent";
@@ -198,11 +209,6 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseLabel = operator.retrying;
 		phaseTone = "warning";
 		phaseValue = projection.why || projection.current_action || operator.retryingValue;
-	} else if (workState?.phase === "waiting_tool" || workState?.phase === "waiting_worker") {
-		// Only background work runs: the foreground turn is over, so its last action is not what is happening.
-		phaseLabel = operator.background;
-		phaseTone = undefined;
-		phaseValue = workState.label;
 	} else {
 		// The activity row above already says that it is working, and for how long: this row says on what.
 		phaseLabel = operator.working;
@@ -247,6 +253,46 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			compact: `⚑ ${peerFindingCount}`,
 			dropOrder: 30,
 			tone: "warning",
+			bare: true,
+		});
+	}
+
+	const workerCounts = source.getWorkerCounts?.();
+	const runningWorkers = workerCounts?.running ?? 0;
+	const queuedWorkers = workerCounts?.queued ?? 0;
+	if (runningWorkers + queuedWorkers > 0) {
+		let fullText: string;
+		let compactText: string;
+		if (runningWorkers > 0 && queuedWorkers > 0) {
+			fullText = `⚙ ${operator.workersRunningAndQueued(runningWorkers, queuedWorkers)}`;
+			compactText = `⚙ ${runningWorkers}r·${queuedWorkers}q`;
+		} else if (runningWorkers > 0) {
+			fullText = `⚙ ${operator.workersRunning(runningWorkers)}`;
+			compactText = `⚙ ${runningWorkers}w`;
+		} else {
+			fullText = `⚙ ${operator.workersQueued(queuedWorkers)}`;
+			compactText = `⚙ ${queuedWorkers}q`;
+		}
+		segments.push({
+			id: "workers",
+			label: operator.workers,
+			value: fullText,
+			compact: compactText,
+			dropOrder: 55,
+			tone: runningWorkers > 0 ? "accent" : "warning",
+			bare: true,
+		});
+	}
+
+	const runningBgTools = source.getRunningBackgroundToolCount?.() ?? 0;
+	if (runningBgTools > 0) {
+		segments.push({
+			id: "background-tools",
+			label: operator.backgroundTools,
+			value: `⚙ ${operator.backgroundToolsRunning(runningBgTools)}`,
+			compact: `⚙ ${runningBgTools}t`,
+			dropOrder: 52,
+			tone: "accent",
 			bare: true,
 		});
 	}

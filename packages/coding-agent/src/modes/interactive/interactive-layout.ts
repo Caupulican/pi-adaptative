@@ -64,6 +64,7 @@ export interface InteractiveLayoutPort {
 	readonly keybindings: KeybindingsManager;
 	readonly extensionUiHost: Pick<ExtensionUiHost, "renderWidgets">;
 	readonly activeToolCalls: { readonly size: number; hasActive(toolCallId: string): boolean };
+	refreshActivityLane?: () => void;
 	getSession(): AgentSession;
 	getSessionManager(): SessionManager;
 	getEditor(): EditorComponent;
@@ -385,6 +386,7 @@ export class InteractiveLayout {
 		const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
 			flow.observeLanes(records);
 			this.settleCompletedGoal();
+			port.refreshActivityLane?.();
 			port.ui.requestRender();
 		});
 		// Every settled System One evaluation is Execution evidence and changes the Decider row and the graph.
@@ -493,6 +495,18 @@ export class InteractiveLayout {
 			},
 			getSessionWorkState: () => port.getSession().getSessionWorkState(),
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
+			getWorkerCounts: () => {
+				const records = port.getSession().getLaneRecords();
+				let running = 0;
+				let queued = 0;
+				for (const record of records) {
+					if (record.status === "running") running++;
+					else if (record.status === "queued") queued++;
+				}
+				return { running, queued };
+			},
+			getRunningBackgroundToolCount: () =>
+				port.getSession().getResourceSnapshot().backgroundToolTasks.runningTaskIds.length,
 			getCiStatus: () => port.ciStatus?.readStatus(),
 			getGoalState: () => port.getSession().getGoalStateSnapshot(),
 			getWatchCount: () => this.watchCount?.read() ?? 0,

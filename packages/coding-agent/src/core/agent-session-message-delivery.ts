@@ -99,7 +99,7 @@ export class AgentSessionMessageDelivery {
 			this.ports.pendingNextTurnMessages().push(appMessage);
 		} else if (
 			this.ports.getSessionWorkState().phase !== "continuation_armed" &&
-			this.ports.getSessionWorkState().busy &&
+			this.ports.getSessionWorkState().foregroundBusy &&
 			!this.ports.foregroundRecovery().ownsSubmission(submissionLease)
 		) {
 			if (options?.deliverAs === "followUp") {

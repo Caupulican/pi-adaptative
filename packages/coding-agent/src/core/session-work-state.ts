@@ -44,6 +44,7 @@ export interface SessionWorkStateInput {
 export interface SessionWorkState {
 	readonly phase: CanonicalWorkPhase;
 	readonly busy: boolean;
+	readonly foregroundBusy: boolean;
 	readonly label: string;
 	readonly epoch?: number;
 	readonly sessionId?: string;
@@ -83,18 +84,18 @@ export function deriveSessionWorkState(input: SessionWorkStateInput): SessionWor
 	} else if (input.isSystemOneEvaluating || input.isSemanticEvaluating) {
 		phase = "system_one_evaluating";
 		label = "System One evaluating";
-	} else if (input.hasRunningWorker) {
-		phase = "waiting_worker";
-		label = "Worker in flight";
-	} else if (input.hasRunningTool) {
-		phase = "waiting_tool";
-		label = "Tool executing";
 	} else if (input.hasSubmissionLease || input.isRunActive) {
 		phase = "foreground_preparing";
 		label = "Preparing turn";
 	} else if (input.hasPendingContinuation) {
 		phase = "continuation_armed";
 		label = "Continuation armed";
+	} else if (input.hasRunningWorker) {
+		phase = "waiting_worker";
+		label = "Worker in flight";
+	} else if (input.hasRunningTool) {
+		phase = "waiting_tool";
+		label = "Tool executing";
 	} else if (input.isDone) {
 		phase = "done";
 		label = "Done";
@@ -106,9 +107,26 @@ export function deriveSessionWorkState(input: SessionWorkStateInput): SessionWor
 	// Busy means any active execution or transition is pending; user must not start uncoordinated new turn.
 	const busy = phase !== "idle" && phase !== "waiting_user" && phase !== "blocked" && phase !== "done";
 
+	const foregroundBusy =
+		!input.isAwaitingUser &&
+		!input.isBlocked &&
+		!livenessFault &&
+		!input.isDone &&
+		Boolean(
+			input.isCompacting ||
+				input.isRetrying ||
+				input.isStreaming ||
+				input.isSystemOneEvaluating ||
+				input.isSemanticEvaluating ||
+				input.hasSubmissionLease ||
+				input.isRunActive ||
+				input.hasPendingContinuation,
+		);
+
 	return {
 		phase,
 		busy,
+		foregroundBusy,
 		label,
 		epoch: input.epoch,
 		sessionId: input.sessionId,

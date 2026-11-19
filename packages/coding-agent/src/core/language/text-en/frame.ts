@@ -95,6 +95,8 @@ export const FRAME = {
 		proof: "PROOF",
 		cache: "CACHE",
 		context: "CTX",
+		workers: "Workers",
+		backgroundTools: "Background tools",
 		/** What a phase says when no live action describes it. */
 		livenessValue: "active objective without execution path",
 		needsInputValue: "waiting for your input",
@@ -115,6 +117,10 @@ export const FRAME = {
 		costRoot: (amount: string) => `root ${amount}`,
 		costSub: (amount: string) => `sub ${amount}`,
 		costIcm: (amount: string) => `ICM ${amount}`,
+		workersRunning: (count: number) => `${count} ${count === 1 ? "worker" : "workers"}`,
+		workersQueued: (count: number) => `${count} queued`,
+		workersRunningAndQueued: (running: number, queued: number) => `${running} running · ${queued} queued`,
+		backgroundToolsRunning: (count: number) => `${count} ${count === 1 ? "tool" : "tools"}`,
 		/** The prompt cache has run out. */
 		cacheCold: "cold",
 	},

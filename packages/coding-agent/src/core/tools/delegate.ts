@@ -1484,7 +1484,7 @@ const DELEGATE_DESCRIPTION_CORE =
 // result surfaces later through the event-driven terminal handoff and a bounded transcript/status read. The
 // synchronous wiring awaits `runWorkerDelegation` and answers in the same call, so it omits this suffix.
 const ASYNC_DELEGATE_DESCRIPTION_SUFFIX =
-	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn, read the report after the handoff (delegate status; transcript pages on demand, or in full when the handoff says h READ_ALL), and use wait/wait_many only when this turn cannot proceed without the result.";
+	"start returns as soon as the lane starts and its terminal handoff wakes the parent: continue independent work or end the turn so you stay free to orchestrate and the terminal handoff wakes you; read the report after the handoff (delegate status; transcript pages on demand, or in full when the handoff says h READ_ALL), and use wait/wait_many only when an in-turn synchronous dependency truly cannot wait for a handoff wake.";
 
 // Fresh-start authority clause; an owner model pin policy replaces it (see createDelegateToolDefinition).
 const DELEGATE_AUTHORITY_CLAUSE = `Fresh start: omit overrides to inherit. Allowed overrides are model, thinkingLevel, path, writePaths, and toolNames. On start, agentId reuses an existing worker. ${delegateCallGuidance(["start"])}`;

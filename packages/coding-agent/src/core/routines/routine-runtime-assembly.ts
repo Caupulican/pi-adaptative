@@ -34,7 +34,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
-import { latestDecisiveEntry, turnAuthorityOf } from "../turn-origin.ts";
+import { latestBranchOrigin, turnAuthorityOf } from "../turn-origin.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type GithubWatchLink, GithubWatchPoller } from "../watches/github-watch-poller.ts";
 import {
@@ -839,7 +839,7 @@ export class RoutineRuntimeAssembly {
 			return shutdown;
 		};
 		// The authority of the turn a call runs in: the latest decisive origin of the branch it extends.
-		const authority = () => turnAuthorityOf(latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin);
+		const authority = () => turnAuthorityOf(latestBranchOrigin(this.deps.getSessionManager()));
 		const turn = () => ({ kind: "turn" as const, authority: authority() });
 		const watchPort: SessionWatchPort = {
 			arm: ({ forRequirement, ...watch }, toolCallId, signal) =>

@@ -32,7 +32,7 @@ export const bashSchema = Type.Object({
 	background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own shell from the current directory with the session's exports (its own cd and exports do not persist) and waits only for file writes emitted earlier in this message. Use only when other work can proceed meanwhile, never followed by an immediate tool_task wait. Unset: a command whose last work only waits on outside state (gh run watch, a release script, a polling loop) starts as a task too; false keeps it in the foreground. Without the tool_task tool it runs in the foreground.",
+				"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own shell from the current directory with the session's exports (its own cd and exports do not persist) and waits only for file writes emitted earlier in this message. Use when other work can proceed or to keep the session free while it runs—end the turn and let the completion wake-up resume you—never followed by an immediate tool_task wait. Unset: a command whose last work only waits on outside state (gh run watch, a release script, a polling loop) starts as a task too; false keeps it in the foreground. Without the tool_task tool it runs in the foreground.",
 		}),
 	),
 	broadSearch: Type.Optional(

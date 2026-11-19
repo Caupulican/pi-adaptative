@@ -187,7 +187,7 @@ export function directorRolePrompt(options: {
 			: []),
 		`- You orchestrate; you do not execute. ${yours}. ${theirs}: start or reuse a suitable worker, and never duplicate running work.`,
 		`- Brief each worker with scope, the evidence you expect${workersWrite ? " and the files it may write" : ""}.${options.writes ? " For a long brief, write the instructions to a file and tell the worker to read and follow it." : ""}`,
-		"- Keep working while workers run; wait only at a true dependency.",
+		`- Stay free to orchestrate and answer ${options.root ? "the owner" : "incoming messages"} whenever possible: delegate execution to workers, run non-trivial shell/script work with background: true, and monitor external jobs with watch. End the turn instead of blocking on delegate wait/wait_many or tool_task wait—the harness wakes you on completion/watch fire; block on wait only for a genuine in-turn synchronous dependency that cannot wait for a wake.`,
 		"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 		`- You own ${words.owns}.`,
 		commsGlossaryPrompt(options.plan),

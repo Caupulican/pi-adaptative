@@ -80,7 +80,7 @@ function runningWaitText(record: BackgroundToolTaskRecord, end: WaitEndReason, r
 	if (end.kind === "aborted") {
 		return `${record.summary}\nWait aborted after the task ran ${seconds}s; the task keeps running and ${handoff}`;
 	}
-	return `${record.summary}\nStill running after ${seconds}s. Wait again when its result is your next dependency; otherwise continue other work, ${handoff}`;
+	return `${record.summary}\nStill running after ${seconds}s. End the turn to stay free (${handoff}) or continue independent work; call wait only when an in-turn synchronous dependency truly requires blocking.`;
 }
 
 /**
@@ -101,7 +101,7 @@ function projectList(records: readonly BackgroundToolTaskRecord[]): string {
 		...included.map((record) => `${record.taskId}: ${record.status}`),
 		...(omitted > 0 ? [`${omitted} older task(s) omitted from this bounded snapshot.`] : []),
 		"Status only: a finished task's output still arrives in its completion wake-up, or from wait.",
-		"Do not poll. Continue independent work, or call wait once only when a running task is a dependency.",
+		"Do not poll. End the turn to stay free (completion arrives in the wake-up) or continue independent work; call wait only when a task's output was omitted or an in-turn synchronous dependency truly requires blocking.",
 	].join("\n");
 }
 

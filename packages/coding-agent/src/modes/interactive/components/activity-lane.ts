@@ -299,6 +299,7 @@ interface AggregateGroup {
 	tag: string;
 	count: number;
 	waiting: boolean;
+	kind?: ActivityLaneKind;
 }
 
 interface LaneSlots {
@@ -360,9 +361,10 @@ function classifySlots(items: readonly ActivityLaneItem[]): LaneSlots {
 				const waiting = item.status === "waiting" || inputCalls.has(item.id);
 				running.push(waiting ? { ...item, status: "waiting" } : item);
 				const tag = normalizeActivityTag(item.tag, item.kind);
-				const group = groups.get(tag) ?? { tag, count: 0, waiting: false };
+				const group = groups.get(tag) ?? { tag, count: 0, waiting: false, kind: item.kind };
 				group.count += 1;
 				if (waiting) group.waiting = true;
+				if (item.kind === "worker") group.kind = "worker";
 				groups.set(tag, group);
 				break;
 			}
@@ -649,8 +651,9 @@ export function renderActivityLaneLine(
 	};
 
 	const preferredPlanWidth = Math.max(PLAN_TEXT_MIN, Math.min(visibleWidth(planText), TURN_TEXT_MAX));
+	const hasWorkerGroup = slots.groups.some((g) => g.kind === "worker");
 	if (planText && planBudget() < preferredPlanWidth && eventPart) eventPart = "";
-	if (planText && planBudget() < preferredPlanWidth && concurrencyPart) concurrencyPart = "";
+	if (planText && planBudget() < preferredPlanWidth && concurrencyPart && !hasWorkerGroup) concurrencyPart = "";
 
 	const planAvailable = Math.max(0, planBudget());
 	const planPart = planText ? theme.fg(planColor, truncateToWidth(planText, planAvailable, "…")) : "";
@@ -943,19 +946,20 @@ export class ActivityLaneComponent implements Component {
 
 	/** Submission identity and settlement are owned by the existing foreground lease. */
 	syncForegroundActivity(
-		activity: { sessionId: string; epoch?: number; busy: boolean },
+		activity: { sessionId: string; epoch?: number; busy: boolean; foregroundBusy?: boolean },
 		label = interfaceText().frame.activity.preparing,
 	): void {
+		const isBusy = activity.foregroundBusy ?? activity.busy;
 		if (this.sessionKey !== activity.sessionId) {
 			this.replaceCanonical(activity.sessionId, { laneRecords: [] });
 		}
-		if (activity.busy && activity.epoch !== undefined) {
+		if (isBusy && activity.epoch !== undefined) {
 			if (this.foregroundEpoch === activity.epoch) return;
 			this.removeMatching(isParentRuntimeItem);
 			this.foregroundEpoch = activity.epoch;
 			this.foregroundOutcome = undefined;
 			this.start({ id: RUNTIME_TURN_ACTIVITY_ID, kind: "runtime", label });
-		} else if ((!activity.busy || activity.epoch === undefined) && this.foregroundEpoch !== undefined) {
+		} else if ((!isBusy || activity.epoch === undefined) && this.foregroundEpoch !== undefined) {
 			// The submission ended when its lease did. Background work (a backgrounded tool, an armed
 			// continuation, System One checking the answer) keeps the session busy, but it has its own
 			// rows; holding the turn row open for it reported a finished turn as still preparing.

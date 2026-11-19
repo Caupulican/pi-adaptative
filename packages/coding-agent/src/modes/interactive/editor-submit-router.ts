@@ -70,7 +70,7 @@ export class EditorSubmitRouter {
 			// Enter means "stop and take it now", the one gesture Escape-then-retype used to be.
 			const workState = this.host.session.getSessionWorkState();
 			if (
-				(workState.busy || this.host.session.isStreaming || this.host.session.isRetrying) &&
+				(workState.foregroundBusy || this.host.session.isStreaming || this.host.session.isRetrying) &&
 				this.queue.hasQueuedMessages()
 			)
 				await this.queue.sendQueuedMessagesNow();
@@ -240,7 +240,7 @@ export class EditorSubmitRouter {
 			this.host.showWarning(interfaceText().interactive.foregroundBusy(builtin.name, keyText("app.interrupt")));
 			return;
 		}
-		if (!builtin && workState.busy && (!isCommandText || foregroundTurnLive)) {
+		if (!builtin && workState.foregroundBusy && (!isCommandText || foregroundTurnLive)) {
 			const images = this.host.takeClipboardImagesForText(text);
 			this.host.editor.addToHistory?.(text, pasted);
 			this.host.editor.setText("");

@@ -870,7 +870,7 @@ const IMMEDIATE_GOAL_CONTROL_PATTERN =
 
 export interface GoalEditorSubmitHost {
 	readonly session: Pick<AgentSession, "isCompacting" | "isStreaming" | "isRetrying"> & {
-		getSessionWorkState?: () => { busy: boolean };
+		getSessionWorkState?: () => { busy: boolean; foregroundBusy?: boolean };
 	};
 	readonly editor: Pick<EditorComponent, "setText">;
 	handleGoalCommand(text: string): Promise<void>;
@@ -884,8 +884,10 @@ export async function tryHandleGoalEditorSubmit(
 	host: GoalEditorSubmitHost,
 ): Promise<boolean> {
 	if (text !== "/goal" && !text.startsWith("/goal ")) return false;
+	const workState = host.session.getSessionWorkState?.();
 	const workIsActive =
-		host.session.getSessionWorkState?.().busy ??
+		workState?.foregroundBusy ??
+		workState?.busy ??
 		(host.session.isCompacting || host.session.isStreaming || host.session.isRetrying);
 	if (workIsActive && (queueAsFollowUp || !IMMEDIATE_GOAL_CONTROL_PATTERN.test(text))) return false;
 	host.editor.setText("");

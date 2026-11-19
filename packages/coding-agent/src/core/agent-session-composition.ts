@@ -171,7 +171,7 @@ export function createSessionOperatorProjection(deps: SessionOperatorProjectionW
 				question: question.header || question.question,
 			};
 		},
-		isForegroundBusy: () => deps.getSessionWorkState().busy,
+		isForegroundBusy: () => deps.getSessionWorkState().foregroundBusy,
 		// The invalidation signal for both branch-walking reads above: every input they derive
 		// from is a persisted session entry.
 		getSessionEntryCount: () => deps.sessionManager.getEntryCount(),

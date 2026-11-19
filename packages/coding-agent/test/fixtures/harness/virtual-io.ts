@@ -31,6 +31,7 @@ interface VirtualNode {
 	modified: number;
 	changed?: number;
 	identity: number;
+	links: number;
 	/** Permission bits a creator or `chmod` gave a file; absent means the default, 0644. */
 	mode?: number;
 }
@@ -256,6 +257,7 @@ export class VirtualFileSystem {
 	readonly operations: IoOperation[] = [];
 	readonly cwd: string;
 	private readonly nodes = new Map<string, VirtualNode>();
+	private readonly children = new Map<string, Set<string>>();
 	private readonly descriptors = new Map<number, OpenFile>();
 	private readonly watchers = new Set<VirtualWatcher>();
 	private nextWatcher = 1;
@@ -587,6 +589,44 @@ export class VirtualFileSystem {
 		return this.lastModified;
 	}
 
+	/** Bind a directory entry and keep hard-link counts for open descriptors, including after unlink. */
+	private bindPath(path: string, node: VirtualNode): void {
+		const previous = this.nodes.get(path);
+		if (previous === node) return;
+		if (previous) previous.links--;
+		node.links++;
+		this.nodes.set(path, node);
+		const parent = dirname(path);
+		if (parent === path || previous) return;
+		let entries = this.children.get(parent);
+		if (!entries) {
+			entries = new Set();
+			this.children.set(parent, entries);
+		}
+		entries.add(path);
+	}
+
+	private dropPath(path: string): void {
+		const node = this.nodes.get(path);
+		if (!node) return;
+		node.links--;
+		this.nodes.delete(path);
+		const parent = dirname(path);
+		const entries = this.children.get(parent);
+		entries?.delete(path);
+		if (entries?.size === 0) this.children.delete(parent);
+	}
+
+	/** Snapshot the names under a path before a recursive operation changes their directory entries. */
+	private subtreePaths(path: string): string[] {
+		const paths = [path];
+		for (let index = 0; index < paths.length; index++) {
+			const children = this.children.get(paths[index]!);
+			if (children) for (const child of children) paths.push(child);
+		}
+		return paths;
+	}
+
 	private touchDirectory(path: string): void {
 		const node = this.nodes.get(path);
 		if (node?.kind !== "directory") return;
@@ -781,12 +821,13 @@ export class VirtualFileSystem {
 			node.changed = node.modified;
 		} else {
 			const stamp = this.stamp();
-			this.nodes.set(path, {
+			this.bindPath(path, {
 				kind: "file",
 				data,
 				modified: stamp,
 				changed: stamp,
 				identity: this.nextIdentity++,
+				links: 0,
 			});
 			this.touchDirectory(dirname(path));
 		}
@@ -807,12 +848,13 @@ export class VirtualFileSystem {
 			this.mkdirSync(parent, { recursive: true });
 		}
 		const stamp = this.stamp();
-		this.nodes.set(path, {
+		this.bindPath(path, {
 			kind: "directory",
 			data: Buffer.alloc(0),
 			modified: stamp,
 			changed: stamp,
 			identity: this.nextIdentity++,
+			links: 0,
 		});
 		this.touchDirectory(parent);
 		this.note("mkdir", path);
@@ -876,7 +918,7 @@ export class VirtualFileSystem {
 			mode: node.kind === "directory" ? 0o40755 : linked !== undefined ? 0o120777 : 0o100000 | (node.mode ?? 0o644),
 			dev: 1,
 			ino: node.identity,
-			nlink: [...this.nodes.values()].filter((linked) => linked === node).length,
+			nlink: node.links,
 			uid: 1000,
 			gid: 1000,
 			rdev: 0,
@@ -916,10 +958,11 @@ export class VirtualFileSystem {
 		const path = this.realpathSync(value, "scandir", "readdir");
 		if (this.nodes.get(path)?.kind !== "directory") throw this.failure("readdir", "ENOTDIR", path, "scandir");
 		this.fault({ kind: "readdir", path }, "before");
-		const children = [...this.nodes].filter(([child]) => child !== path && dirname(child) === path);
+		const children = [...(this.children.get(path) ?? [])];
 		const entries = children
-			.sort(([left], [right]) => left.localeCompare(right))
-			.map(([child, node]) => {
+			.sort((left, right) => left.localeCompare(right))
+			.map((child) => {
+				const node = this.nodes.get(child)!;
 				if (!(options as { withFileTypes?: boolean } | undefined)?.withFileTypes) return basename(child);
 				return {
 					name: basename(child),
@@ -976,8 +1019,8 @@ export class VirtualFileSystem {
 		if (!this.nodes.has(path)) throw this.failure("unlink", "ENOENT", path, "unlink");
 		if (this.nodes.get(path)?.kind === "directory") throw this.failure("unlink", "EISDIR", path, "unlink");
 		const node = this.nodes.get(path)!;
-		this.nodes.delete(path);
-		if ([...this.nodes.values()].includes(node)) node.changed = this.stamp();
+		this.dropPath(path);
+		if (node.links > 0) node.changed = this.stamp();
 		this.touchDirectory(dirname(path));
 		this.note("unlink", path);
 		this.fault({ kind: "unlink", path }, "after");
@@ -991,10 +1034,8 @@ export class VirtualFileSystem {
 			if (flags?.force) return;
 			throw this.failure("rm", "ENOENT", path, syscall);
 		}
-		const children = [...this.nodes.keys()].filter((child) => child.startsWith(`${path}${sep}`));
-		if (children.length && !flags?.recursive) throw this.failure("rm", "ENOTEMPTY", path, syscall);
-		for (const child of children) this.nodes.delete(child);
-		this.nodes.delete(path);
+		if (this.children.has(path) && !flags?.recursive) throw this.failure("rm", "ENOTEMPTY", path, syscall);
+		for (const entry of this.subtreePaths(path)) this.dropPath(entry);
 		this.touchDirectory(dirname(path));
 		this.note("rm", path);
 		this.fault({ kind: "rm", path }, "after");
@@ -1006,12 +1047,12 @@ export class VirtualFileSystem {
 		this.fault({ kind: "rename", path: from, destination: to }, "before");
 		if (!this.nodes.has(from) || !this.nodes.has(dirname(to)))
 			throw this.failure("rename", "ENOENT", from, "rename", to);
-		const entries = [...this.nodes].filter(([path]) => path === from || path.startsWith(`${from}${sep}`));
+		const entries = this.subtreePaths(from).map((path) => [path, this.nodes.get(path)!] as const);
 		const stamp = this.stamp();
 		for (const [path, node] of entries) {
-			this.nodes.delete(path);
+			this.dropPath(path);
 			if (path === from) node.changed = stamp;
-			this.nodes.set(`${to}${path.slice(from.length)}`, node);
+			this.bindPath(`${to}${path.slice(from.length)}`, node);
 		}
 		this.touchDirectory(dirname(from));
 		if (dirname(to) !== dirname(from)) this.touchDirectory(dirname(to));
@@ -1030,7 +1071,7 @@ export class VirtualFileSystem {
 		if (!node || !this.nodes.has(dirname(to))) throw this.failure("link", "ENOENT", from, "link", to);
 		if (node.kind === "directory") throw this.failure("link", "EPERM", from, "link", to);
 		if (this.nodes.has(to)) throw this.failure("link", "EEXIST", to, "link", from);
-		this.nodes.set(to, node);
+		this.bindPath(to, node);
 		node.changed = this.stamp();
 		this.touchDirectory(dirname(to));
 		this.log({ kind: "link", path: from, destination: to });
@@ -1046,13 +1087,14 @@ export class VirtualFileSystem {
 		if (!this.nodes.has(dirname(to))) throw this.failure("symlink", "ENOENT", to, "symlink", destination);
 		if (this.nodes.has(to)) throw this.failure("symlink", "EEXIST", to, "symlink", destination);
 		const stamp = this.stamp();
-		this.nodes.set(to, {
+		this.bindPath(to, {
 			kind: "symlink",
 			data: Buffer.alloc(0),
 			target: destination,
 			modified: stamp,
 			changed: stamp,
 			identity: this.nextIdentity++,
+			links: 0,
 		});
 		this.touchDirectory(dirname(to));
 		this.log({ kind: "symlink", path: to, destination });

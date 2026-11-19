@@ -357,7 +357,7 @@ import {
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
-import { checkedExtensionMessage } from "./turn-origin.ts";
+import { checkedExtensionMessage, latestBranchOrigin } from "./turn-origin.ts";
 import { type RestoredUsageWait, UsageResetResume } from "./usage-reset-resume.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
@@ -1729,7 +1729,7 @@ export class AgentSession {
 			failureCorpus: this._failureCorpus,
 			getContextWindow: () => this.model?.contextWindow ?? 0,
 			exhaustedStoreDir: join(providerAdmissionDir(this._agentDir), "exhausted"),
-			getBranchEntries: () => this.sessionManager.getBranch(),
+			getInheritedOrigin: () => latestBranchOrigin(this.sessionManager),
 			emit: (event) => {
 				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
 				// recovered provider failure leaves a session record a census can count.
@@ -2208,7 +2208,7 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			recordManagedLane: (event, host) => this._backgroundLanes.recordManagedLane(event, host),
 			handoffKnowledge: this._backgroundLanes.handoffKnowledge(this._memory),
-			isForegroundBusy: () => this.getSessionWorkState().busy,
+			isForegroundBusy: () => this.getSessionWorkState().foregroundBusy,
 			getPendingMessageCount: () => this.deliverablePendingMessageCount,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,

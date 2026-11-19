@@ -49,7 +49,7 @@ export const pythonSchema = Type.Object(
 		background: Type.Optional(
 			Type.Boolean({
 				description:
-					"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own process (working directory and environment changes do not persist) and waits only for file writes emitted earlier in this message. Use only when other work can proceed meanwhile, never followed by an immediate tool_task wait; without the tool_task tool it runs in the foreground.",
+					"Start as a session task and return its task id without waiting; the result arrives in the completion wake-up. Runs in its own process (working directory and environment changes do not persist) and waits only for file writes emitted earlier in this message. Use when other work can proceed or to keep the session free while it runs—end the turn and let the completion wake-up resume you—never followed by an immediate tool_task wait; without the tool_task tool it runs in the foreground.",
 			}),
 		),
 		fullOutput: Type.Optional(

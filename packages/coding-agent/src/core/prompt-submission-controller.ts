@@ -437,7 +437,7 @@ export class PromptSubmissionController {
 			this.deps.ownerInputs.whenDelivered(input.inputId, () => evidence.answerInCurrentTurn(answers));
 		// What the queued record keeps of an owner-channel input: the owner's words, as the owner sees and takes them back.
 		const recordedText = channelWords ? ownerChannel.ownerText : text;
-		const busyAtSubmission = this.deps.getSessionWorkState().busy;
+		const busyAtSubmission = this.deps.getSessionWorkState().foregroundBusy;
 		const queuedBehavior = options?.internalContextType ? undefined : options?.streamingBehavior;
 		// A queued submission (the owner's, or an extension's such as a peer message) is pending from this
 		// moment, in submission order, before anything below can await: it is visible, takeable, and
@@ -521,7 +521,7 @@ export class PromptSubmissionController {
 			throw error;
 		}
 		const submissionLease = this.deps.foregroundRecovery.tryAcquireSubmission(runtimeLease);
-		if (!submissionLease && this.deps.getSessionWorkState().busy && options?.streamingBehavior) {
+		if (!submissionLease && this.deps.getSessionWorkState().foregroundBusy && options?.streamingBehavior) {
 			// Queued submissions prepare one at a time, in submission order, but the next one waits only
 			// for this one's PREPARATION (queued, withdrawn, or its own turn started), never its whole turn.
 			// An input that became queued while the preemption above awaited is pending from here, before that

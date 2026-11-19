@@ -637,6 +637,7 @@ export class InteractiveMode {
 			footer: this.footer,
 			footerDataProvider: this.footerDataProvider,
 			activityLane: this.activityLane,
+			refreshActivityLane: () => this.refreshActivityLane(),
 			keybindings: this.keybindings,
 			extensionUiHost: this.extensionUiHost,
 			activeToolCalls: this.activeToolCalls,
@@ -1073,7 +1074,7 @@ export class InteractiveMode {
 	public toolActivityKind(toolName: string): ActivityLaneKind {
 		if (toolName === "task_steps") return "task";
 		if (toolName === "goal") return "goal";
-		if (toolName === "delegate") return "worker";
+		if (toolName === "delegate" || toolName === "assign" || toolName === "plan") return "worker";
 		return "tool";
 	}
 
@@ -1774,15 +1775,14 @@ export class InteractiveMode {
 
 	private syncForegroundActivity(): void {
 		const activity = this.session.getSessionWorkState();
-		if (activity.busy && activity.epoch !== undefined) {
+		if (activity.foregroundBusy && activity.epoch !== undefined)
 			this.layout.workbench?.beginCycle(this.sessionManager.getCwd(), activity.epoch);
-		}
 		this.activityLane?.setParentVisible(this.workingVisible && !this.workingIndicatorOptions);
 		this.activityLane?.syncForegroundActivity({ ...activity, sessionId: activity.sessionId ?? "unknown" });
-		if (activity.busy && this.workingVisible && this.workingIndicatorOptions && !this.loadingAnimation) {
+		if (activity.foregroundBusy && this.workingVisible && this.workingIndicatorOptions && !this.loadingAnimation) {
 			this.loadingAnimation = this.createWorkingLoader();
 			this.statusContainer.addChild(this.loadingAnimation);
-		} else if (!activity.busy && this.loadingAnimation) {
+		} else if (!activity.foregroundBusy && this.loadingAnimation) {
 			this.stopWorkingLoader();
 		}
 	}
@@ -2349,7 +2349,7 @@ export class InteractiveMode {
 		// editor's own chord-free ">>" form. Commands are never prefixed: they run as commands.
 		else if (this.editor.onSubmit) {
 			const isCommandText = text.startsWith("/") || text.startsWith("!");
-			const keepFollowUp = this.session.getSessionWorkState().busy && !isCommandText;
+			const keepFollowUp = this.session.getSessionWorkState().foregroundBusy && !isCommandText;
 			this.editor.setText("");
 			await this.editor.onSubmit(
 				keepFollowUp ? `>>${text}` : text,

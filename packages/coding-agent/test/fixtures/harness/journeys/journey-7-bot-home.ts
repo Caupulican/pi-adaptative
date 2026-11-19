@@ -33,7 +33,7 @@ import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fl
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
 import { managerSessionHomeNow } from "../../../../src/core/orchestration-homes.ts";
 import { processLockHolder } from "../../../../src/core/remote/host-lock.ts";
-import { branchHoldsTurnRef } from "../../../../src/core/turn-origin.ts";
+import { branchHoldsTurnRef, latestBranchOrigin } from "../../../../src/core/turn-origin.ts";
 import {
 	acquireSessionBundleLease,
 	orchestrationHomeHoldsSession,
@@ -146,7 +146,9 @@ export async function runJourney7BotHomePhase(world: HarnessWorld): Promise<void
 /** A replay of a bot delivery reads only entries added since the last decision on this branch. */
 function verifyBotDeliveryRefReads(world: HarnessWorld): void {
 	const manager = world.createSessionManager();
-	const parent = manager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+	const inbound = { role: "user" as const, content: "start", timestamp: 1 };
+	stampTurnOrigin(inbound, { v: 1, k: "inbound-channel", thirdParty: true, channel: "link" });
+	const parent = manager.appendMessage(inbound);
 	const mail = { role: "user" as const, content: "scheduled message", timestamp: 2 };
 	stampTurnOrigin(mail, { v: 1, k: "routine", channel: "routine", ref: "j7-routine-delivery" });
 	manager.appendMessage(mail);
@@ -168,6 +170,31 @@ function verifyBotDeliveryRefReads(world: HarnessWorld): void {
 	expect(parentsRead).toBe(1);
 	manager.branch(parent);
 	expect(branchHoldsTurnRef(branch, "j7-routine-delivery")).toBe(false);
+
+	expect(latestBranchOrigin(branch)?.thirdParty).toBe(true);
+	manager.appendCustomEntry("operator-view", {});
+	parentsRead = 0;
+	expect(latestBranchOrigin(branch)?.thirdParty).toBe(true);
+	expect(parentsRead).toBe(1);
+	expect(latestBranchOrigin(branch)?.thirdParty).toBe(true);
+	expect(parentsRead).toBe(1);
+	const typed = { role: "user" as const, content: "continue here", timestamp: 4 };
+	stampTurnOrigin(typed, { v: 1, k: "owner-typed" });
+	manager.appendMessage(typed);
+	expect(latestBranchOrigin(branch)?.k).toBe("owner-typed");
+	manager.branch(parent);
+	expect(latestBranchOrigin(branch)?.k).toBe("inbound-channel");
+
+	const file = manager.getSessionFile()!;
+	const header = JSON.stringify(manager.getHeader());
+	const replacement = { ...manager.getEntry(parent), turnOrigin: { v: 1, k: "owner-typed" } };
+	world.io.seed(file, `${header}\n${JSON.stringify(replacement)}\n`);
+	manager.setSessionFile(file);
+	expect(manager.getLeafId()).toBe(parent);
+	expect(latestBranchOrigin(branch)?.k).toBe("owner-typed");
+	world.io.seed(file, `${header}\n`);
+	manager.setSessionFile(file);
+	expect(latestBranchOrigin(branch)).toBeUndefined();
 }
 
 /** Read two saved bot chats in turn. Count actual descriptor bytes on the session files. */

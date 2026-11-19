@@ -8,11 +8,14 @@ import {
 	readSessionSystemPromptOverride,
 } from "./session-system-prompt-override.ts";
 import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
-import { isThirdPartyOrigin, latestDecisiveEntry, type TurnOriginRecord } from "./turn-origin.ts";
+import { isThirdPartyOrigin, latestBranchOrigin, type TurnOriginRecord } from "./turn-origin.ts";
 
 export interface SessionSystemPromptControllerDeps {
 	builder: SystemPromptBuilder;
-	getSessionManager(): Pick<SessionManager, "getLatestCustomEntryOnBranch" | "appendCustomEntry" | "getBranch">;
+	getSessionManager(): Pick<
+		SessionManager,
+		"getLatestCustomEntryOnBranch" | "appendCustomEntry" | "getLeafEntry" | "getEntryCount" | "getEntry"
+	>;
 	isStreaming(): boolean;
 	getActiveToolNames(): string[];
 	getModel(): Model<Api> | undefined;
@@ -84,7 +87,7 @@ export class SessionSystemPromptController {
 	 * party's message a delivery run opens with, a steer, a follow-up) decides the variant of the request that carries it.
 	 */
 	forRequest(prompt: string): string {
-		const origin = this.deps.getRunOrigin() ?? latestDecisiveEntry(this.deps.getSessionManager().getBranch())?.origin;
+		const origin = this.deps.getRunOrigin() ?? latestBranchOrigin(this.deps.getSessionManager());
 		return isThirdPartyOrigin(origin) ? this.deps.builder.withholdMemory(prompt) : prompt;
 	}
 

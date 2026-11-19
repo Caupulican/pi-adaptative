@@ -180,7 +180,7 @@ function workerFacts(
 	}
 	return {
 		hasRunningWorker: running,
-		busyBesideWorkers: deriveSessionWorkState({ ...input, hasRunningWorker: false }).busy,
+		busyBesideWorkers: deriveSessionWorkState(input).foregroundBusy,
 		workerLanes:
 			lanes.length === 0
 				? { kind: "none" }

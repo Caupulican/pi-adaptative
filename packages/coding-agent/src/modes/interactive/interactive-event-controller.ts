@@ -310,7 +310,7 @@ export class InteractiveEventController {
 				if (
 					!this.port.getSession().isStreaming &&
 					this.loadingAnimation &&
-					!this.port.getSession().getSessionWorkState().busy
+					!this.port.getSession().getSessionWorkState().foregroundBusy
 				)
 					this.port.runtimeStatus.stopWorkingLoader();
 				this.port.ui.requestRender();
@@ -318,7 +318,7 @@ export class InteractiveEventController {
 
 			case "agent_start": {
 				const activity = this.port.getSession().getSessionWorkState();
-				if (activity.busy && activity.epoch !== undefined) {
+				if (activity.foregroundBusy && activity.epoch !== undefined) {
 					this.port.getWorkbench()?.beginCycle(this.port.getSessionManager().getCwd(), activity.epoch);
 				}
 				this.port.activityLane?.syncForegroundActivity({ ...activity, sessionId: activity.sessionId ?? "unknown" });
@@ -564,7 +564,10 @@ export class InteractiveEventController {
 				const details = event.result.details;
 				const carriesVerification =
 					!!details && typeof details === "object" && "piVerification" in (details as Record<string, unknown>);
-				if (["task_steps", "goal", "delegate", "plan", "peer"].includes(event.toolName) || carriesVerification) {
+				if (
+					["task_steps", "goal", "delegate", "assign", "plan", "peer"].includes(event.toolName) ||
+					carriesVerification
+				) {
 					this.port.refreshActivityLane();
 				}
 				const workbench = this.port.getWorkbench();
@@ -597,7 +600,7 @@ export class InteractiveEventController {
 					const block = misalignmentBlock(finalAssistant);
 					if (block) this.port.offerMisalignmentContinuation(block);
 				}
-				if (this.loadingAnimation && !this.port.getSession().getSessionWorkState().busy) {
+				if (this.loadingAnimation && !this.port.getSession().getSessionWorkState().foregroundBusy) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
 					this.port.statusContainer.clear();
@@ -682,7 +685,7 @@ export class InteractiveEventController {
 				}
 				void this.port.flushCompactionQueue({ willRetry: event.willRetry });
 				if (this.loadingAnimation) {
-					if (this.port.getSession().getSessionWorkState().busy)
+					if (this.port.getSession().getSessionWorkState().foregroundBusy)
 						this.loadingAnimation.setMessage(this.port.runtimeStatus.getWorkingLoaderMessage());
 					else this.port.runtimeStatus.stopWorkingLoader();
 				}

@@ -623,6 +623,34 @@ export function branchHoldsTurnRef(manager: TurnRefBranch, ref: string): boolean
 	return refs.has(ref);
 }
 
+function decisiveEntryOrigin(entry: SessionEntry | undefined): TurnOriginRecord | undefined {
+	const origin = entry && entryTurnOrigin(entry);
+	return origin && isDecisiveOrigin(origin) ? origin : undefined;
+}
+
+const decisiveHeads = new WeakMap<
+	TurnRefBranch,
+	{ leaf: SessionEntry | undefined; origin: TurnOriginRecord | undefined }
+>();
+
+/** The authority a new turn inherits. Ordinary appends need only the suffix; a switch follows its own ancestry. */
+export function latestBranchOrigin(manager: TurnRefBranch): TurnOriginRecord | undefined {
+	const leaf = manager.getLeafEntry();
+	const cached = decisiveHeads.get(manager);
+	if (cached && cached.leaf === leaf) return cached.origin;
+	let origin: TurnOriginRecord | undefined;
+	visitSessionAncestry(leaf, { size: manager.getEntryCount(), get: (id) => manager.getEntry(id) }, (entry) => {
+		if (cached?.leaf === entry) {
+			origin = cached.origin;
+			return false;
+		}
+		origin = decisiveEntryOrigin(entry);
+		return origin ? false : undefined;
+	});
+	decisiveHeads.set(manager, { leaf, origin });
+	return origin;
+}
+
 /** The latest entry of `branch` (root to leaf) whose origin decides a run's authority, with that origin. */
 export function latestDecisiveEntry(
 	branch: readonly SessionEntry[],
@@ -630,8 +658,8 @@ export function latestDecisiveEntry(
 ): { readonly index: number; readonly entry: SessionEntry; readonly origin: TurnOriginRecord } | undefined {
 	for (let index = Math.min(before, branch.length) - 1; index >= 0; index--) {
 		const entry = branch[index];
-		const origin = entry === undefined ? undefined : entryTurnOrigin(entry);
-		if (entry && origin && isDecisiveOrigin(origin)) return { index, entry, origin };
+		const origin = decisiveEntryOrigin(entry);
+		if (entry && origin) return { index, entry, origin };
 	}
 	return undefined;
 }
@@ -669,10 +697,10 @@ export class RunTurnOrigin {
 	 * continuation), read back to its latest decisive entry. Entries keep their identities through compaction, so a
 	 * summarized history still names who it last answered. The messages that open the run are then noted in order.
 	 */
-	begin(opening: readonly AgentMessage[], branch: readonly SessionEntry[]): void {
+	begin(opening: readonly AgentMessage[], inherited: TurnOriginRecord | undefined): void {
 		this.active = true;
 		this.addressedRef = undefined;
-		this.latest = latestDecisiveEntry(branch)?.origin;
+		this.latest = inherited;
 		this.decidedInRun = false;
 		for (const message of opening) this.note(message);
 		this.openedWith = [...opening];
