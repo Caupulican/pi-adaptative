@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The coding evaluator initializes its isolated Git repositories on Windows using a regular configuration file.
+
 ## [0.104.71] - 2026-11-19
 
 ### Added

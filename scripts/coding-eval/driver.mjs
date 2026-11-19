@@ -1,8 +1,7 @@
 // Prepare independent repositories and supervise each session outside its own event loop.
 import { execFileSync, fork } from "node:child_process";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { devNull } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../packages/coding-agent/src/config.ts";
 import { killTreeNow } from "../../packages/coding-agent/src/kernel/reliability/process-tree.ts";
 
@@ -11,11 +10,11 @@ export function saveJson(path, data) {
 	renameSync(path + ".tmp", path);
 }
 
-function fixtureEnvironment() {
+function fixtureEnvironment(cwd) {
 	return {
-		...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+		...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_"))),
 		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_CONFIG_GLOBAL: devNull,
+		GIT_CONFIG_GLOBAL: resolve(cwd, ".git", "fixture.gitconfig"),
 		GIT_AUTHOR_NAME: "Pi Evaluation",
 		GIT_COMMITTER_NAME: "Pi Evaluation",
 		GIT_AUTHOR_EMAIL: "pi@localhost",
@@ -29,13 +28,17 @@ export function seedWorkspace(cwd, task) {
 		mkdirSync(dirname(join(cwd, name)), { recursive: true });
 		writeFileSync(join(cwd, name), contents);
 	}
-	const env = fixtureEnvironment();
+	const env = fixtureEnvironment(cwd);
+	// Native Git reads this ordinary empty file on every platform. An empty template and
+	// isolated configuration leave the new repository with no hooks or global signing policy.
+	mkdirSync(dirname(env.GIT_CONFIG_GLOBAL), { mode: 0o700 });
+	writeFileSync(env.GIT_CONFIG_GLOBAL, "", { mode: 0o600, flag: "wx" });
 	Object.assign(env, {
 		GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
 		GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
 	});
 	const git = (...args) =>
-		execFileSync("git", ["-c", `core.hooksPath=${devNull}`, "-c", "commit.gpgSign=false", ...args], {
+		execFileSync("git", args, {
 			cwd,
 			env,
 			stdio: "pipe",
@@ -74,7 +77,7 @@ export async function supervise({
 		const seedCommit = seedWorkspace(cwd, task);
 		const input = join(trialDir, "input.json");
 		saveJson(input, { ...config, agentDir, seedCommit });
-		const env = { ...fixtureEnvironment(), [ENV_AGENT_DIR]: agentDir, [ENV_SESSION_DIR]: join(agentDir, "sessions") };
+		const env = { ...fixtureEnvironment(cwd), [ENV_AGENT_DIR]: agentDir, [ENV_SESSION_DIR]: join(agentDir, "sessions") };
 		const child = fork(entry, [input], {
 			cwd,
 			env,
