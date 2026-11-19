@@ -212,7 +212,11 @@ the parent. Nothing below refuses a command, blocks a worker or reverts a change
   `changedFiles`: what its `write`/`edit` tools and reported actions changed) and when it ran. When a worker
   finishes, every path that another worker, whose run overlapped in time, also changed is reported as a
   `worker_write_overlap:` blocker naming the path and both workers; the claim then requires parent review.
-  Neither worker is blocked. A shell redirect or a script a worker runs is not in `changedFiles`. A claim carries
+  A shell redirect or script can change files without supplying paths. When the host records such uncertainty,
+  overlapping workers in the same checkout receive a `worker_mutation_uncertain:` finding if one has a
+  tracked change the other could have affected. The finding names both workers and a tracked file to inspect.
+  If the command starts after the writer has already reported, the shell worker carries the finding when it
+  reports. Separate Git worktrees have distinct checkout identities. A claim carries
   at most 8 host findings; a final `host_findings:` line states how many more were omitted. A worker the parent
   cancels (or that is stopped by session dispose) carries the same bounded, attributed findings on its
   cancelled claim; the parent already reviews every cancelled claim.

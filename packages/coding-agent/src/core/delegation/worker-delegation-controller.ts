@@ -5710,7 +5710,6 @@ export class WorkerDelegationController {
 						failedSteps.set(label, step);
 					}
 				};
-				runRetryableStep("end worker write overlap", () => this.writeOverlaps.end(startedRecord.laneId));
 				this.inFlightLedgers.delete(startedRecord.laneId);
 				this.laneAbortControllers.delete(startedRecord.laneId);
 				runRetryableStep("clear worker lane halt", () => this.agentControl.clearLaneHalt(startedRecord.laneId));
@@ -5732,6 +5731,8 @@ export class WorkerDelegationController {
 				// reservation coordinator, so it does not hold the specialist or its project claim. A release
 				// that fails while the owner shuts down is not retried by anyone: it keeps all three.
 				if (toolsReleased) {
+					// Peers may still publish claims while a child is closing or after disposal fails.
+					runRetryableStep("end worker write overlap", () => this.writeOverlaps.end(durableHandle.attemptId));
 					this.runTeardownStep(
 						"release worker write reservation",
 						() =>
@@ -5822,10 +5823,12 @@ export class WorkerDelegationController {
 			try {
 				// Register before the first execution await: disposal sees the live mutable ledger.
 				this.writeOverlaps.begin({
+					attemptId: durableHandle.attemptId,
 					laneId: startedRecord.laneId,
 					agentId,
 					cwd: executionPlan.cwd,
 					changedFiles: () => executor.ledger.changedFiles,
+					hasUncertainMutation: () => executor.ledger.mutationFinding() !== undefined,
 				});
 				this.inFlightLedgers.set(startedRecord.laneId, {
 					changedFiles: executor.ledger.changedFiles,
@@ -5833,7 +5836,7 @@ export class WorkerDelegationController {
 						const mutationFinding = executor.ledger.mutationFinding();
 						return [
 							...(mutationFinding ? [mutationFinding] : []),
-							...this.writeOverlaps.findingsFor(startedRecord.laneId),
+							...this.writeOverlaps.findingsFor(durableHandle.attemptId),
 							...(protectedPathWatch?.finishFindings() ?? []),
 						];
 					},

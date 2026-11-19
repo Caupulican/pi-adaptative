@@ -1,20 +1,8 @@
-/**
- * Concurrent-write attribution between in-process workers.
- *
- * Workers share a checkout and are deliberately not serialized: a worker with no explicit workspace holds no
- * write reservation, so two of them can write the same file at the same time. Serializing them would cost
- * long durable work, so the host attributes instead: it remembers which files each worker changed and when it
- * ran, and when a worker finishes it reports every path another worker, whose run overlapped in time, also
- * changed. The finding names the path and both workers, goes to the parent as a claim blocker (parent review),
- * and never blocks either worker.
- *
- * Only changes the host can see are compared: the files a worker's `write`/`edit` tools and reported actions
- * changed (the claim's `changedFiles`). A shell redirect or a script a worker runs is not in that set.
- */
-
+/** Attributes concurrent in-process writes and carries unknown workspace effects into peer claim review. */
 import path from "node:path";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
+import { findRepositoryGitPaths, realPathIdentity } from "../autonomy/path-scope.ts";
 import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 
 const MAX_FINISHED_SPANS = 128;
@@ -26,30 +14,54 @@ const MAX_FINDINGS = 12;
 const MAX_PATH_CHARS = 300;
 
 export interface WorkerWriteSpanInput {
+	attemptId: string;
 	laneId: string;
 	agentId: string;
 	/** The directory this worker's relative changed files resolve against. */
 	cwd: string;
 	/** The worker's live changed-file set while it runs (cwd-relative or absolute). */
 	changedFiles: () => Iterable<string>;
+	/** True once the host has recorded an operation whose workspace effects it cannot confirm. */
+	hasUncertainMutation: () => boolean;
+}
+
+interface PeerEvidence {
+	laneId: string;
+	agentId: string;
+	checkout: string;
+	files: ReadonlySet<string>;
+	uncertain: boolean;
 }
 
 interface ActiveSpan extends WorkerWriteSpanInput {
-	startedAt: number;
+	checkout: string;
+	/** Only peers that physically ran alongside this span. Snapshots are shared between active peers. */
+	finished: PeerEvidence[];
+	incompleteHistory: boolean;
 }
 
-interface FinishedSpan {
-	laneId: string;
-	agentId: string;
-	startedAt: number;
-	endedAt: number;
-	files: ReadonlySet<string>;
+function snapshot(span: ActiveSpan): PeerEvidence {
+	const files = new Set<string>();
+	for (const file of span.changedFiles()) files.add(path.resolve(span.cwd, file));
+	return {
+		laneId: span.laneId,
+		agentId: span.agentId,
+		checkout: span.checkout,
+		files,
+		uncertain: span.hasUncertainMutation(),
+	};
 }
 
-function absoluteFiles(cwd: string, files: Iterable<string>): Set<string> {
-	const resolved = new Set<string>();
-	for (const file of files) resolved.add(path.resolve(cwd, file));
-	return resolved;
+function uncertainPeerFinding(writer: PeerEvidence, peer: PeerEvidence): WorkerHostFinding | undefined {
+	if (!peer.uncertain || writer.checkout !== peer.checkout) return undefined;
+	for (const file of writer.files) {
+		if (peer.files.has(file)) continue; // The exact-path finding already identifies both writers.
+		return hostFinding(
+			"mutation_uncertain",
+			`Worker ${peer.laneId} (agent ${peer.agentId}) ran an operation with unknown file effects in the same checkout as worker ${writer.laneId} (agent ${writer.agentId}). Their runs overlapped. Check ${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} and the writer's other tracked changes before accepting them.`,
+		);
+	}
+	return undefined;
 }
 
 const MAX_CLAIM_HOST_FINDINGS = 8;
@@ -72,74 +84,72 @@ export function boundHostFindings(findings: readonly WorkerHostFinding[]): Worke
 
 export class WorkerWriteOverlapTracker {
 	private readonly active = new Map<string, ActiveSpan>();
-	private finished: FinishedSpan[] = [];
 
-	/** Start tracking one worker run. */
-	begin(span: WorkerWriteSpanInput, now = Date.now()): void {
-		this.active.set(span.laneId, { ...span, startedAt: now });
+	begin(span: WorkerWriteSpanInput): void {
+		const physicalCwd = realPathIdentity(span.cwd);
+		const checkout = findRepositoryGitPaths(physicalCwd)?.root ?? physicalCwd;
+		this.active.set(span.attemptId, { ...span, checkout, finished: [], incompleteHistory: false });
 	}
 
-	/**
-	 * One finding per path this worker changed that another worker, whose run overlapped this one, also
-	 * changed. Read-only: it can be asked repeatedly (and again after the run ends) and never alters a worker.
-	 */
-	findingsFor(laneId: string, now = Date.now()): WorkerHostFinding[] {
-		const mine = this.active.get(laneId);
-		if (!mine) return [];
-		const myFiles = absoluteFiles(mine.cwd, mine.changedFiles());
-		if (myFiles.size === 0) return [];
-		const others: { laneId: string; agentId: string; files: ReadonlySet<string> }[] = [];
-		for (const other of this.active.values()) {
-			if (other.laneId === laneId || other.agentId === mine.agentId) continue;
-			others.push({
-				laneId: other.laneId,
-				agentId: other.agentId,
-				files: absoluteFiles(other.cwd, other.changedFiles()),
-			});
-		}
-		for (const done of this.finished) {
-			if (done.laneId === laneId || done.agentId === mine.agentId) continue;
-			if (done.endedAt < mine.startedAt || done.startedAt > now) continue;
-			others.push(done);
-		}
+	/** The same evidence feeds normal completion, failure and cancellation. */
+	findingsFor(attemptId: string): WorkerHostFinding[] {
+		const span = this.active.get(attemptId);
+		if (!span) return [];
+		const mine = snapshot(span);
+		if (!mine.files.size && !mine.uncertain) return [];
 		const findings: WorkerHostFinding[] = [];
 		let omitted = 0;
-		for (const other of others) {
-			for (const file of myFiles) {
+		const compare = (other: PeerEvidence) => {
+			for (const [writer, peer] of [
+				[mine, other],
+				[other, mine],
+			] as const) {
+				const finding = uncertainPeerFinding(writer, peer);
+				if (!finding) continue;
+				if (findings.length < MAX_FINDINGS) findings.push(finding);
+				else omitted++;
+			}
+			for (const file of mine.files) {
 				if (!other.files.has(file)) continue;
 				if (findings.length >= MAX_FINDINGS) {
-					omitted += 1;
+					omitted++;
 					continue;
 				}
 				findings.push(
 					hostFinding(
 						"overlap",
-						`${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} was changed by both worker ${laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
+						`${quotedSpan(boundedText(file, MAX_PATH_CHARS, { path: true }))} was changed by both worker ${mine.laneId} (agent ${mine.agentId}) and worker ${other.laneId} (agent ${other.agentId}) while their runs overlapped, with no write reservation between them. Neither was blocked; compare both changes before accepting either.`,
 					),
 				);
 			}
+		};
+		if (span.incompleteHistory) {
+			findings.push(
+				hostFinding(
+					"omitted",
+					"Concurrent worker write history exceeded its limit. Review the final state of this worker's changes and those of its peers.",
+				),
+			);
 		}
-		if (omitted > 0) findings.push(hostFinding("overlap", `${omitted} further overlapping path(s) not listed.`));
+		for (const other of this.active.values()) {
+			if (other.agentId !== mine.agentId) compare(snapshot(other));
+		}
+		for (const other of span.finished) compare(other);
+		if (omitted > 0)
+			findings.push(hostFinding("omitted", `${omitted} further concurrent-write finding(s) not listed.`));
 		return findings;
 	}
 
-	/** The run ended: keep what it changed and when, for the runs that overlapped it and finish later. */
-	end(laneId: string, now = Date.now()): void {
-		const span = this.active.get(laneId);
+	end(attemptId: string): void {
+		const span = this.active.get(attemptId);
 		if (!span) return;
-		this.active.delete(laneId);
-		this.finished.push({
-			laneId,
-			agentId: span.agentId,
-			startedAt: span.startedAt,
-			endedAt: now,
-			files: absoluteFiles(span.cwd, span.changedFiles()),
-		});
-		// A finished run only matters to a run that started before it ended: drop what predates every active run.
-		const earliestActive = Math.min(
-			Number.POSITIVE_INFINITY,
-			...[...this.active.values()].map((entry) => entry.startedAt),
-		);
-		this.finished = this.finished.filter((entry) => entry.endedAt >= earliestActive).slice(-MAX_FINISHED_SPANS);
+		this.active.delete(attemptId);
+		const done = snapshot(span);
+		if (!done.files.size && !done.uncertain) return;
+		for (const peer of this.active.values()) {
+			if (peer.agentId === done.agentId || (!done.files.size && peer.checkout !== done.checkout)) continue;
+			if (peer.finished.length < MAX_FINISHED_SPANS) peer.finished.push(done);
+			else peer.incompleteHistory = true;
+		}
 	}
 }
