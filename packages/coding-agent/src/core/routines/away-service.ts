@@ -25,11 +25,13 @@
  * file present means nothing is run. Only an install, an uninstall, the explicit `status` and the restart that replaces
  * a daemon of an older build run the service manager.
  */
+
 import { createHash } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { APP_NAME } from "../../config.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { configFile, stateFile } from "../agent-paths.ts";
 import { daemonServiceEnvironment, environmentOnlyCredentialNames } from "../daemon-environment.ts";
 import { BOT_DAEMON_COMMAND } from "../delegation/bot-daemon-command.ts";
@@ -570,7 +572,7 @@ function awaitDaemonLease(
 		signal?.addEventListener("abort", finish, { once: true });
 		const leaseFile = daemonLeasePath(store.getStoreFilePath());
 		try {
-			watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
+			watcher = watchPath(dirname(leaseFile), { persistent: false }, (_event, filename) => {
 				if (filename !== null && filename.toString() !== basename(leaseFile)) return;
 				if (accepts(read())) finish();
 			});

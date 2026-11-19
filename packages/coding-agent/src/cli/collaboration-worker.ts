@@ -1,4 +1,3 @@
-import { watch } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
@@ -16,7 +15,7 @@ import { memberPeerInvocation } from "../core/collaboration/peer-credential-stor
 import { COLLABORATION_WORK_RUN } from "../core/collaboration/state-directory.ts";
 import { executeCollaborationTurn } from "../core/collaboration/turn-runner.ts";
 import { readOwnProcessStartTime } from "../kernel/reliability/process-tree.ts";
-import { canonicalizeWatchDir } from "../utils/fs-watch.ts";
+import { watchPath } from "../utils/fs-watch.ts";
 import { acquireWorkRun } from "../utils/work-directory.ts";
 
 const answerSchema = Type.Union([
@@ -106,7 +105,7 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 		const subscribeReport = (listener: () => void) => {
 			// Every other directory watch in this package canonicalizes first; libuv hard-aborts the
 			// process on Windows when a watched directory is reached through a non-canonical alias.
-			const watcher = watch(canonicalizeWatchDir(directory), { persistent: false }, (_event, file) => {
+			const watcher = watchPath(directory, { persistent: false }, (_event, file) => {
 				if (file === null || file.toString().endsWith(".json")) listener();
 			});
 			watcher.on("error", (err) => {

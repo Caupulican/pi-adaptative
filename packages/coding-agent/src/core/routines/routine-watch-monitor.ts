@@ -14,9 +14,10 @@
  * full journal may see no store change that would offer it.
  */
 
-import { type FSWatcher, statSync, watch as watchDirectory } from "node:fs";
+import { type FSWatcher, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { processMatrixDir } from "../process-matrix/store.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -339,7 +340,7 @@ export class RoutineWatchMonitor {
 			}
 		for (const [key, target] of wanted) {
 			if (watch.watchers.has(key)) continue;
-			const watcher = watchDirectory(
+			const watcher = watchPath(
 				target.directory,
 				{ persistent: false, recursive: target.recursive },
 				(_event, filename) => {

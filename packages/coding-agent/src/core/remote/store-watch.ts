@@ -4,8 +4,9 @@
  * and are handled once. Event-driven only; a directory that cannot be watched is reported, never polled.
  */
 
-import { type FSWatcher, mkdirSync, watch } from "node:fs";
+import { type FSWatcher, mkdirSync } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 
 const SETTLE_MS = 150;
 
@@ -29,7 +30,7 @@ export class DirectoryWatch {
 		for (const dir of this.dirs) {
 			try {
 				mkdirSync(dir, { recursive: true });
-				const watcher = watch(dir, { persistent: false }, (_event, filename) => {
+				const watcher = watchPath(dir, { persistent: false }, (_event, filename) => {
 					const name = filename?.toString();
 					if (name === undefined || name.endsWith(".json")) this.changed();
 				});

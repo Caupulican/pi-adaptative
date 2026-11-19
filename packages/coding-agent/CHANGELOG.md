@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, background file watchers resolve short directory names before subscribing. Sessions can run under paths such as `RUNNER~1` without crashing when a file changes.
+
 ## [0.104.71] - 2026-11-19
 
 ### Added

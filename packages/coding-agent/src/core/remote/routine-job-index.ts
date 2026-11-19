@@ -1,7 +1,9 @@
 /** Exact placed-job references of a bot's scheduled occurrence. The canonical job still owns all state and results. */
-import { existsSync, type FSWatcher, mkdirSync, opendirSync, rmSync, watch, writeFileSync } from "node:fs";
+
+import { existsSync, type FSWatcher, mkdirSync, opendirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { readOptionalBoundedTextFileSync } from "../../kernel/storage/bounded-file.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { parseNamedFile, RECORD_EXTENSION, recordFileName, splitRecordName } from "./job-record-name.ts";
 import { isRoutineJobScope } from "./routine-job-origin.ts";
@@ -62,7 +64,7 @@ function watchOccurrenceStop(dir: string, abort: AbortController): () => void {
 	const follow = () => {
 		if (!existsSync(dir)) return;
 		try {
-			const exact = watch(dir, { persistent: false }, (_event, file) => {
+			const exact = watchPath(dir, { persistent: false }, (_event, file) => {
 				if (file === null || file.toString() === "stopped") check();
 			}).on("error", failed);
 			watcher?.close();
@@ -72,7 +74,7 @@ function watchOccurrenceStop(dir: string, abort: AbortController): () => void {
 			failed(error);
 		}
 	};
-	watcher = watch(dirname(dir), { persistent: false }, (_event, file) => {
+	watcher = watchPath(dirname(dir), { persistent: false }, (_event, file) => {
 		if (file === null || file.toString() === basename(dir)) follow();
 	}).on("error", failed);
 	follow();

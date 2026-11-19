@@ -1,6 +1,5 @@
-import { watch } from "node:fs";
 import { basename } from "node:path";
-import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import type { ProcessParentOwnershipSource } from "../process-matrix/runtime.ts";
 import type { CollaborationWorkerRefusal } from "./job-record.ts";
 import { CollaborationJobStore } from "./job-store.ts";
@@ -84,7 +83,7 @@ export function createCollaborationPeerAuthority(address: CollaborationPeerAddre
 		read: () => store.getPeerParentOwnership(jobId, senderId, token()),
 		subscribe: (changed, onError) => {
 			const file = basename(store.path(jobId));
-			const watcher = watch(canonicalizeWatchDir(stateDirectory), { persistent: false }, (_event, name) => {
+			const watcher = watchPath(stateDirectory, { persistent: false }, (_event, name) => {
 				if (name === null || name.toString() === file) changed();
 			});
 			watcher.on("error", (error) => {

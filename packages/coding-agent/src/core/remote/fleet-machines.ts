@@ -6,7 +6,7 @@
  * reads as offline from the time it was last seen: a crashed link holder never leaves a peer looking connected.
  */
 
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
@@ -15,7 +15,7 @@ import {
 	ownProcessOwner,
 	type ProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
-import { closeWatcher, FS_WATCH_RETRY_DELAY_MS } from "../../utils/fs-watch.ts";
+import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchPath } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -195,7 +195,7 @@ export class FleetMachines {
 		const dir = join(this.agentDir, "remote");
 		try {
 			mkdirSync(dir, { recursive: true });
-			const watcher = watch(dir, { persistent: false }, (_event, filename) => {
+			const watcher = watchPath(dir, { persistent: false }, (_event, filename) => {
 				if (this.watcher === watcher && (filename === null || filename.toString() === FILE)) this.notify();
 			});
 			watcher.on("error", (error) => {

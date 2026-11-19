@@ -6,10 +6,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { type FSWatcher, watch } from "node:fs";
+import type { FSWatcher } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import type { JobFrame, LinkPeerListener } from "./job-protocol.ts";
 import { type HubMachineLinkState, reportHubMachines } from "./link-context.ts";
 import { offeredPairingSecret } from "./pairing.ts";
@@ -208,7 +209,7 @@ export class RemoteHub {
 
 	private watchRecords(): void {
 		try {
-			this.recordsWatcher = watch(join(this.agentDir, "remote"), { persistent: false }, (_event, filename) => {
+			this.recordsWatcher = watchPath(join(this.agentDir, "remote"), { persistent: false }, (_event, filename) => {
 				if (filename !== null && filename.toString() !== "machines.json") return;
 				this.cutUnadmitted();
 			});

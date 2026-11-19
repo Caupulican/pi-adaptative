@@ -9,7 +9,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
@@ -20,6 +20,7 @@ import {
 	ownProcessOwner,
 	type ProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -196,7 +197,7 @@ export function watchHostLockRelease(agentDir: string, onReleased: () => void, n
 	mkdirSync(dir, { recursive: true });
 	let watcher: FSWatcher | undefined;
 	try {
-		watcher = watch(dir, { persistent: false }, (_event, filename) => {
+		watcher = watchPath(dir, { persistent: false }, (_event, filename) => {
 			if ((filename === null || filename.toString() === file) && !existsSync(path)) onReleased();
 		});
 		watcher.on("error", () => {

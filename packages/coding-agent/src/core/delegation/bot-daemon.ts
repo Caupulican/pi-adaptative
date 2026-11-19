@@ -30,10 +30,12 @@
  * A lock held by another process through every bounded retry (`ELOCKED`) skips one renewal or report write: renewal
  * recurs well inside the lease's stale window, due routines stay due and reports are written on the next tick.
  */
-import { type FSWatcher, statSync, watch } from "node:fs";
+
+import { type FSWatcher, statSync } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
 import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import { ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { type BotDaemonHost, startBotDaemonHost } from "../bots/bot-daemon-host.ts";
@@ -371,7 +373,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 	// A lease the watcher could not read is reported once per cause and left to the renewal tick, which renews or ends on it.
 	let leaseWatchTold: string | undefined;
 	try {
-		watcher = watch(dirname(leaseFile), { persistent: false }, (_event, filename) => {
+		watcher = watchPath(dirname(leaseFile), { persistent: false }, (_event, filename) => {
 			if (stopping || (filename !== null && filename.toString() !== basename(leaseFile))) return;
 			let ours: boolean;
 			try {

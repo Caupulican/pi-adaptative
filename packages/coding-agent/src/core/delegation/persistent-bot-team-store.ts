@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -472,7 +473,7 @@ export class PersistentBotTeamStore {
 			});
 		};
 		// Watch the directory: atomic rename replaces the file inode.
-		this.watcher = watch(dirname(this.filePath), { persistent: false }, (_event, filename) => {
+		this.watcher = watchPath(dirname(this.filePath), { persistent: false }, (_event, filename) => {
 			if (filename === null || filename.toString() === basename(this.filePath)) refresh();
 		});
 		this.watcher.on("error", (error) => {

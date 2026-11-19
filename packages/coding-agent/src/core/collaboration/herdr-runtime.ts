@@ -1,10 +1,9 @@
-import { watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess, waitForChildProcess } from "../../utils/child-process.ts";
-import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { getToolPath } from "../../utils/tools-manager.ts";
 import { collaborationDir } from "../agent-paths.ts";
 import { writeFileAtomic } from "../util/atomic-file.ts";
@@ -147,7 +146,7 @@ export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<
 			});
 	};
 	// Install before spawn; readiness is triggered by socket/session filesystem creation, not output polling.
-	const watcher = watch(canonicalizeWatchDir(sessionDir), probe);
+	const watcher = watchPath(sessionDir, {}, probe);
 	watcher.on("error", (error) => failReadiness(error));
 	const child = spawnProcess(executable, ["--session", options.session, "server"], {
 		env,

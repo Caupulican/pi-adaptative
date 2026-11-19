@@ -13,9 +13,9 @@
  * These are rechecks of shared resource facts (a slot, a limit, a stop), not completion detection.
  */
 
-import { type FSWatcher, mkdirSync, watch } from "node:fs";
+import { type FSWatcher, mkdirSync } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
+import { watchPath } from "../../utils/fs-watch.ts";
 
 /** What one watched directory reads and reports. */
 export interface DirectoryWatchSpec {
@@ -72,7 +72,7 @@ function start(key: string, active: ActiveWatch): void {
 	try {
 		mkdirSync(active.spec.dir, { recursive: true });
 		active.digest = active.spec.read();
-		active.watcher = watch(canonicalizeWatchDir(active.spec.dir), { persistent: false }, (_event, filename) => {
+		active.watcher = watchPath(active.spec.dir, { persistent: false }, (_event, filename) => {
 			if (generation !== active.generation) return;
 			const name = filename === null ? undefined : filename.toString();
 			if (name === undefined || active.spec.relevant(name)) schedule(active, generation);

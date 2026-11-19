@@ -4,7 +4,8 @@
  * owner. The watch is open only while its owner wants it, and it never keeps the process alive.
  */
 
-import { type FSWatcher, watch } from "node:fs";
+import type { FSWatcher } from "node:fs";
+import { watchPath } from "../../utils/fs-watch.ts";
 
 export interface JournalDirWatchDeps {
 	/** The directory the journals are in. */
@@ -33,7 +34,7 @@ export class JournalDirWatch {
 		}
 		if (this.watcher) return;
 		try {
-			const watcher = watch(this.deps.dir(), { persistent: false }, (_event, filename) => {
+			const watcher = watchPath(this.deps.dir(), { persistent: false }, (_event, filename) => {
 				// A journal is replaced by a rename onto `<name>.json`; its lock and temporary files change nothing.
 				if (this.watcher !== watcher || (filename !== null && !String(filename).endsWith(".json"))) return;
 				this.deps.onChange();

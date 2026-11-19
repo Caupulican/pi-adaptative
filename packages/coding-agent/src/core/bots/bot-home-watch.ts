@@ -10,8 +10,9 @@
  * (`botHomeName` is not always the id).
  */
 
-import { type FSWatcher, mkdirSync, readdirSync, statSync, watch } from "node:fs";
+import { type FSWatcher, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { watchPath } from "../../utils/fs-watch.ts";
 import { botsDir } from "../agent-paths.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -118,7 +119,7 @@ export function watchBotHomes(
 			if (there) fail(asError(error));
 			else gone();
 		};
-		const watcher = watch(path, { persistent: false }, (_event, filename) => {
+		const watcher = watchPath(path, { persistent: false }, (_event, filename) => {
 			if (closed || filename === null) return;
 			try {
 				onName(filename.toString());
