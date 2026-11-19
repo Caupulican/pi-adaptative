@@ -486,7 +486,7 @@ function isLinkPort(value: unknown): value is number {
 
 /** `host:port` (a bracketed IPv6 host allowed), or undefined. */
 export function parseAddress(raw: string): { host: string; port: number } | undefined {
-	const match = /^(?:\[([^\]]+)\]|([^:\s]+)):(\d{1,5})$/.exec(raw.trim());
+	const match = /^(?:\[([^\]<>\s]+)\]|([^:\s<>]+)):(\d{1,5})$/.exec(raw.trim());
 	if (!match) return undefined;
 	const port = Number(match[3]);
 	return isLinkPort(port) ? { host: match[1] ?? match[2]!, port } : undefined;
