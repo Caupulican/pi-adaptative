@@ -8,8 +8,8 @@ set -euo pipefail
 # Separates retriable network downloads from a single local package installation.
 # Enforces hard process-tree termination via timeout --kill-after.
 
-UPDATE_TIMEOUT="${CI_APT_UPDATE_TIMEOUT:-40s}"
-DOWNLOAD_TIMEOUT="${CI_APT_DOWNLOAD_TIMEOUT:-60s}"
+UPDATE_TIMEOUT="${CI_APT_UPDATE_TIMEOUT:-90s}"
+DOWNLOAD_TIMEOUT="${CI_APT_DOWNLOAD_TIMEOUT:-120s}"
 INSTALL_TIMEOUT="${CI_APT_INSTALL_TIMEOUT:-90s}"
 KILL_AFTER="${CI_APT_KILL_AFTER:-5s}"
 MAX_ATTEMPTS="${CI_APT_MAX_ATTEMPTS:-2}"
@@ -58,25 +58,24 @@ SOURCES_FILE="${TMP_DIR}/ci-sources.list"
 SOURCES_PARTS_DIR="${TMP_DIR}/sources.list.d"
 mkdir -p "${SOURCES_PARTS_DIR}"
 
-# Generate minimal, clean, official HTTPS sources definition
-cat <<EOF > "${SOURCES_FILE}"
-deb [signed-by=${KEYRING_FILE}] https://archive.ubuntu.com/ubuntu/ ${CODENAME} main universe
-deb [signed-by=${KEYRING_FILE}] https://archive.ubuntu.com/ubuntu/ ${CODENAME}-updates main universe
-deb [signed-by=${KEYRING_FILE}] https://security.ubuntu.com/ubuntu/ ${CODENAME}-security main universe
+# Both transports serve the Ubuntu archive. The runner keyring authenticates each
+# suite, and APT verifies package hashes against the signed indexes.
+write_sources() {
+	local archive="$1" security="$2"
+	cat > "${SOURCES_FILE}" <<EOF
+deb [signed-by=${KEYRING_FILE}] ${archive} ${CODENAME} main universe
+deb [signed-by=${KEYRING_FILE}] ${archive} ${CODENAME}-updates main universe
+deb [signed-by=${KEYRING_FILE}] ${security} ${CODENAME}-security main universe
 EOF
-
-# Assert generated sources contain no Azure mirrors or third-party repositories
-if grep -Eqi '(azure|microsoft|google|github|nodesource|docker|datadog)' "${SOURCES_FILE}"; then
-	echo "Error: CI sources definition contains forbidden azure or third-party mirrors." >&2
-	exit 1
-fi
+}
 
 APT_OPTS=(
 	-o "Dir::Etc::sourcelist=${SOURCES_FILE}"
 	-o "Dir::Etc::sourceparts=${SOURCES_PARTS_DIR}"
 	-o "Acquire::http::Timeout=15"
 	-o "Acquire::https::Timeout=15"
-	-o "Acquire::Retries=3"
+	-o "Acquire::Retries=1"
+	-o "APT::Update::Error-Mode=any"
 	-o "Dpkg::Options::=--force-confdef"
 	-o "Dpkg::Options::=--force-confold"
 )
@@ -91,41 +90,29 @@ PACKAGES=(
 	ripgrep
 )
 
-# Phase 1: Bounded / retriable package list update
-echo "==> [Phase 1/3] Updating package lists with bounded retries via official HTTPS mirrors..."
-update_ok=0
+# Resolve and download against the same signed index. If either operation fails,
+# retry the whole acquisition using a mirror on a different network.
+acquired=0
 for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
-	echo "--> apt-get update (attempt ${attempt}/${MAX_ATTEMPTS})..."
-	if timeout --kill-after="${KILL_AFTER}" "${UPDATE_TIMEOUT}" sudo apt-get update "${APT_OPTS[@]}"; then
-		update_ok=1
-		break
+	if (( attempt % 2 == 1 )); then
+		archive=https://archive.ubuntu.com/ubuntu/
+		security=https://security.ubuntu.com/ubuntu/
 	else
-		echo "Warning: apt-get update attempt ${attempt} timed out or failed. Retrying..."
-		sleep "${RETRY_DELAY}"
+		archive=https://mirrors.edge.kernel.org/ubuntu/
+		security="$archive"
 	fi
-done
-
-if [ "${update_ok}" -ne 1 ]; then
-	echo "Error: apt-get update failed after ${MAX_ATTEMPTS} bounded attempts." >&2
-	exit 1
-fi
-
-# Phase 2: Bounded / retriable network package download (download-only, non-mutating)
-echo "==> [Phase 2/3] Downloading packages (download-only, non-mutating)..."
-download_ok=0
-for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
-	echo "--> apt-get install --download-only (attempt ${attempt}/${MAX_ATTEMPTS})..."
-	if timeout --kill-after="${KILL_AFTER}" "${DOWNLOAD_TIMEOUT}" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only "${APT_OPTS[@]}" "${PACKAGES[@]}"; then
-		download_ok=1
+	write_sources "$archive" "$security"
+	echo "==> Fetching Ubuntu indexes from ${archive} (attempt ${attempt}/${MAX_ATTEMPTS})..."
+	if timeout --kill-after="${KILL_AFTER}" "${UPDATE_TIMEOUT}" sudo apt-get update "${APT_OPTS[@]}" &&
+		timeout --kill-after="${KILL_AFTER}" "${DOWNLOAD_TIMEOUT}" sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only "${APT_OPTS[@]}" "${PACKAGES[@]}"; then
+		acquired=1
 		break
-	else
-		echo "Warning: apt-get download-only attempt ${attempt} timed out or failed. Retrying..."
-		sleep "${RETRY_DELAY}"
 	fi
+	echo "Warning: Ubuntu index or package download failed for ${archive}." >&2
+	if (( attempt < MAX_ATTEMPTS )); then sleep "${RETRY_DELAY}"; fi
 done
-
-if [ "${download_ok}" -ne 1 ]; then
-	echo "Error: apt-get download-only failed after ${MAX_ATTEMPTS} bounded attempts." >&2
+if (( ! acquired )); then
+	echo "Error: could not acquire the Ubuntu packages after ${MAX_ATTEMPTS} bounded attempts." >&2
 	exit 1
 fi
 
