@@ -15,6 +15,7 @@ import {
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
 import { defaultModelPerProvider } from "../model-resolver.ts";
+import { antigravityGeminiEffortFamily } from "../models/antigravity-effort.ts";
 import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import {
 	type HarnessCapability,
@@ -342,7 +343,10 @@ function collectRoutedWorkerModels(
 	const configuredOrder =
 		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
 		input.routing.routeProviders;
-	const ordered = configuredOrder.length > 0 ? configuredOrder : [...STICKY_WORKHORSE_MODEL_REFS];
+	const ordered =
+		configuredOrder.length > 0
+			? configuredOrder
+			: [STICKY_WORKHORSE_MODEL_REFS[0], "google-antigravity/gemini-3.8-flash-low", STICKY_WORKHORSE_MODEL_REFS[1]];
 	const available = modelRegistry.getAvailable();
 	// Automatic candidates are ACCOUNTS: providers with a stored credential (OAuth or API key). A
 	// provider that merely needs no auth (a local llama-cpp server, a models.json entry with a
@@ -462,6 +466,18 @@ function selectModelBinding(
 								: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
 			});
 			const order = routed.map(bind);
+			// An explicit effort request can select a capable sibling on the same routed account. Pins and explicitly named models bypass this path.
+			if (explicitThinking && order[0]?.thinkingLevel !== explicitThinking) {
+				const family = antigravityGeminiEffortFamily(routed[0]!);
+				const sibling =
+					family &&
+					routed.findIndex(
+						(model, index) =>
+							antigravityGeminiEffortFamily(model) === family &&
+							order[index]?.thinkingLevel === explicitThinking,
+					);
+				if (typeof sibling === "number" && sibling > 0) order.unshift(...order.splice(sibling, 1));
+			}
 			// The harness's own choice moves to the front; the routed order behind it stays the worker's way out.
 			const chosen = routeChoice
 				? order.findIndex(

@@ -134,6 +134,7 @@ export interface PlanRubricCaseScore {
 	readonly language: PlanRubricEvalLanguage;
 	readonly level: PlanRubricEvalLevel;
 	readonly reading: RubricReading;
+	readonly sufficient: boolean;
 	readonly correct: boolean;
 }
 
@@ -141,6 +142,8 @@ export interface PlanRubricEvalSummary {
 	readonly cases: readonly PlanRubricCaseScore[];
 	/** The share of cases whose criterion reading matches its label. */
 	readonly agreement: number;
+	/** Cases with enough evidence to participate in a production vote. */
+	readonly sufficient: number;
 	/** Cases whose reading settled neither way (open, or unanswered). */
 	readonly open: number;
 }
@@ -164,12 +167,14 @@ export async function measurePlanRubric(
 			language: testCase.language,
 			level: testCase.level,
 			reading,
+			sufficient: judged?.[0]?.reading.sufficient === "hard_pass",
 			correct: reading === expectedReading(testCase.level),
 		});
 	}
 	const correct = scores.filter((score) => score.correct).length;
 	return {
 		cases: scores,
+		sufficient: scores.filter((score) => score.sufficient).length,
 		agreement: scores.length === 0 ? 1 : correct / scores.length,
 		open: scores.filter((score) => score.reading === "open").length,
 	};
@@ -195,5 +200,6 @@ export function formatPlanRubricEval(summary: PlanRubricEvalSummary): string {
 		`criterion reading agreement ${percent(summary.agreement)} (need ${percent(PLAN_GRAPH_EVAL_THRESHOLDS.agreement)})`,
 	);
 	lines.push(`open readings across the rubric set: ${summary.open}`);
+	lines.push(`candidates clearing vote evidence sufficiency: ${summary.sufficient}/${summary.cases.length}`);
 	return lines.join("\n");
 }

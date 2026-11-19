@@ -10,6 +10,7 @@
 import { type CommsErrRecord, commsErr } from "../comms/comms-records.ts";
 import { laneWorkerRefusalSkipRemedy } from "../model-capability.ts";
 import type { CommsErrCode, CommsHintCode } from "../provider-prompt-contracts.ts";
+import { WORKER_BRIEF_GUIDANCE } from "./assign-tool-name.ts";
 
 const START_EXAMPLE = '{"action":"start","instructions":"<worker brief>"}';
 const MODEL_START_EXAMPLE = '{"action":"start","model":"sol","instructions":"<worker brief>"}';
@@ -17,7 +18,8 @@ const FOLLOW_UP_EXAMPLE = '{"action":"follow_up","agentId":"<returned agentId>",
 
 export function delegateCallGuidance(actions: readonly string[]): string {
 	return [
-		actions.includes("start") && `Start ${START_EXAMPLE}. To select a favorite: ${MODEL_START_EXAMPLE}.`,
+		actions.includes("start") &&
+			`Start ${START_EXAMPLE}. ${WORKER_BRIEF_GUIDANCE} Scope edits with writePaths. Choose a favorite with ${MODEL_START_EXAMPLE}, or an exact model with "model":{"provider":"<provider>","modelId":"<modelId>"}.`,
 		actions.includes("handoff") &&
 			'Transfer the current task and its workspace to a new model with {"action":"handoff","agentId":"<source agentId>","model":"<favorite or provider/modelId>"}. The successor runs in the background. Read progress with status on the source agentId.',
 		actions.includes("follow_up") && `Continue ${FOLLOW_UP_EXAMPLE}.`,

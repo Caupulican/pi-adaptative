@@ -4,19 +4,28 @@ import type { AgentToolResult } from "../../kernel/types.ts";
 import {
 	MAX_TASK_DONE_CHARS,
 	MAX_TASK_GOAL_CHARS,
+	MAX_TASK_NOTE_CHARS,
 	MAX_TASK_OUT_OF_SCOPE,
 	renderCommsErrView,
 } from "../comms/comms-records.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { ASSIGN_TOOL_NAME } from "./assign-tool-name.ts";
+import { ASSIGN_TOOL_NAME, WORKER_BRIEF_GUIDANCE } from "./assign-tool-name.ts";
 import { type DelegateErrRecord, type DelegateRemedy, renderDelegateRemedyLines } from "./delegate-rejections.ts";
 
 const schema = Type.Object(
 	{
 		task: Type.String({
 			minLength: 1,
-			description: "What the worker must do, in plain words, with the file paths it needs.",
+			description: WORKER_BRIEF_GUIDANCE,
 		}),
+		context: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_TASK_NOTE_CHARS,
+				description:
+					"The relevant facts from the owner's request that the worker cannot read in its files. Include exact mappings, expected values and exceptions needed for this slice.",
+			}),
+		),
 		files: Type.Optional(
 			Type.Array(Type.String({ minLength: 1 }), {
 				maxItems: 64,
@@ -48,6 +57,7 @@ const schema = Type.Object(
 const ASSIGN_FIELD_OF: Readonly<Record<string, string>> = {
 	instructions: "task",
 	goal: "task",
+	note: "context",
 	doneWhen: "doneWhen",
 	outOfScope: "outOfScope",
 	writePaths: "files",
@@ -55,7 +65,7 @@ const ASSIGN_FIELD_OF: Readonly<Record<string, string>> = {
 	thinkingLevel: "deep",
 };
 
-const ASSIGN_SCHEMA_FRAGMENT = `${ASSIGN_TOOL_NAME} required: task; optional: files, deep, doneWhen, outOfScope; minimal call {"task":"<task>"}`;
+const ASSIGN_SCHEMA_FRAGMENT = `${ASSIGN_TOOL_NAME} required: task; optional: context, files, deep, doneWhen, outOfScope; minimal call {"task":"<task>"}`;
 
 /** The task's goal line: its C1 and DEL control characters removed (they cannot sit in a brief's one line), trimmed. */
 function goalLineOf(task: string): string {
@@ -122,8 +132,8 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 		name: ASSIGN_TOOL_NAME,
 		label: "Assign",
 		description:
-			"Hand a task to a worker: assign {task, files?, deep?, doneWhen?, outOfScope?}. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files you name) and queue slot, and its result arrives as an event, so carry on with other work. Use deep only for a hard problem. Starting several independent tasks in one turn runs them in parallel. Use delegate only to follow up on, wait for or inspect workers.",
-		promptSnippet: "Hand work to a worker (task, files, deep, doneWhen, outOfScope)",
+			"Hand a task to a worker: assign {task, context?, files?, deep?, doneWhen?, outOfScope?}. Workers receive only this brief. Put the slice's exact requirements from the owner in context when the files do not state them. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files you name) and queue slot, and its result arrives as an event, so carry on with other work. Use deep only for a hard problem. Starting several independent tasks in one turn runs them in parallel. Use delegate only to follow up on, wait for or inspect workers.",
+		promptSnippet: `Assign one worker with task, context, files, deep, doneWhen and outOfScope. ${WORKER_BRIEF_GUIDANCE}`,
 		neverDefer: true,
 		parameters: schema,
 		// As for delegate: the refusal view reaches the model as the failure record's evidence.
@@ -143,6 +153,7 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 					// A one-line task is the brief's goal, so the done-when and out-of-scope lines travel as record fields
 					// the worker reads and the result's proof sheet repeats; a longer task is folded into plain words.
 					...(isBriefGoal(goal) ? { goal } : { instructions: input.task }),
+					...(input.context ? { note: input.context } : {}),
 					...(input.doneWhen ? { doneWhen: input.doneWhen } : {}),
 					...(input.outOfScope && input.outOfScope.length > 0 ? { outOfScope: input.outOfScope } : {}),
 					...(files && files.length > 0 ? { writePaths: files } : { readOnly: true }),

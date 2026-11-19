@@ -311,7 +311,7 @@ there; the rest are starting points kept until an evaluation on this harness's o
 | yes/no | `operation_request` | asks at 0.8, clearly does not at 0.2 | |
 | yes/no | `plan_review` | defect steers at 0.8, sound at or below 0.5 | probed live on planted plan defects; absence looser than 0.10 by written reason (below) |
 | yes/no | `completion` | outcome holds at 0.7, defect absent at or below 0.5, claim supported at 0.5 | measured on the completion eval set, 2026-09-25 |
-| yes/no | `orchestration` | accept 0.9, absence at or below 0.1 | no soft band: between is `open`; plan graphs, briefs, pair sufficiency, routing doubts; measurement pending the owner's run of `npm run eval:plan-graph` (24 labelled plan graphs in English, Portuguese, Spanish and Chinese, `evals/plan-graph-eval.ts`) |
+| yes/no | `orchestration` | accept 0.9, absence at or below 0.1 | An intermediate probability leaves the question open. See the measured planning results below. |
 | yes/no | knowledge | 0.9 | admission and grounding |
 | Choice | `reversible` | P(option) 0.7 | |
 | Choice | `route` | P(option) 0.88, lead 0.15 | preflight and postflight route |
@@ -320,6 +320,21 @@ there; the rest are starting points kept until an evaluation on this harness's o
 | Choice | `destructive` | P(option) 0.9, then a confirmation step | identifying the intent never performs it |
 | Choice | follow-up | decide at 0.9, ask a narrower question from 0.8 | the authority line |
 | Score | any | confidence at least 0.5, then 0.7 of the mass on one side of the boundary | below the floor a Score decides nothing |
+
+On 2026-11-19, a hosted run of `npm run eval:plan-graph` measured the existing English,
+Portuguese, Spanish and Chinese cases. Replaying the retained answers with abstentions counted
+as misses gave coverage agreement on 12/24 graphs and brief agreement on 4/8 briefs. All eight
+dependency pairs remained open. On these cases the pair-sufficiency probability ranged from 0.24
+to 0.55. The positive cutoff is 0.90.
+
+On that same run, settled-result agreement was 8/16 on whether dependent work must change, 3/16
+on whether the result supplied enough evidence, 5/8 on contradictory findings and 0/8 on whether
+the findings supplied enough evidence. Vote grading matched 12/16 criteria. None of the 16
+candidates cleared the separate evidence-sufficiency requirement for choosing a winner.
+All eight agreement measures fell below the existing 90% calibration target. From the repo root,
+`npm run eval:plan-graph -- --dump <path>` retains the synthetic inputs, answers and score distributions.
+
+A second hosted calibration on the same cases supplied every vote criterion in the shared state. On the retained graph answers, using the existing advisory band for coverage notes and cycle-checked ordering gave 18/24 coverage decisions and 7/8 dependency decisions matching their labels. Brief agreement remained 4/8 under the orchestration band, which governs attaching more context. Eleven graph readings stayed open. On the live result questions, agreement was 9/16 for changes, 9/16 for evidence, 7/8 for contradictions and 1/8 for finding evidence. Vote criteria agreed on 8/16, and 0/16 candidates cleared vote sufficiency. Unanswered or ambiguous readings still count as misses. A fresh hosted run with the final questions gave 19/24 for coverage, 7/8 for dependencies, 4/8 for briefs, 9/16 for changes, 9/16 for result evidence, 6/8 for contradictions, 0/8 for finding evidence, and 9/16 for rubric criteria. No candidate cleared vote sufficiency. These are calibration results on known cases. Where the vote needs independent checks, settled advisory Score support breaks ties between candidates with the same number of strictly met criteria. It cannot declare a winner.
 
 `operation_effect` and `plan_review` share one presence band and accept absence at or below 0.5, looser than
 the 0.10 the owner's rule sets for requiring absence. The written reason: an absence reading in either family

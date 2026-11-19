@@ -22,6 +22,7 @@ import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from 
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
 import type { WorkUnitRecord } from "../work-units.ts";
+import { EPOCH_CHANGED_PATHS_CAP } from "../worktree-sync/codes.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
 export type ClaimReceiptEvent =
@@ -215,6 +216,31 @@ export function collectClaimReceiptEvents(
 				if (outcome !== undefined && outcome === workerCommandOutcome(proof)) checkPassed = outcome === "passed";
 			}
 		}
+		const args = (call.arguments ?? {}) as Record<string, unknown>;
+		if (result.toolName === "worktree_sync" && result.details && typeof result.details === "object") {
+			const detail = result.details as Record<string, unknown>;
+			const succeeded = ok && detail.code === "ok";
+			if (
+				args.action === "git_commit" &&
+				detail.action === args.action &&
+				(succeeded || detail.code === "git_failed")
+			)
+				countDelivery(commits, succeeded);
+			const land = args.action === "land";
+			if (checkPassed === undefined && (land || args.action === "check")) {
+				if (detail.code === "gate_failed") checkPassed = false;
+				else if (succeeded && (land ? detail.gate === "passed" : detail.action === "check")) checkPassed = true;
+			}
+			if (
+				land &&
+				succeeded &&
+				Array.isArray(detail.changedPaths) &&
+				detail.changedPaths.length <= EPOCH_CHANGED_PATHS_CAP &&
+				detail.changedPaths.every((path) => typeof path === "string" && path.length > 0)
+			) {
+				for (const path of detail.changedPaths) if (!filesChanged.includes(path)) filesChanged.push(path);
+			}
+		}
 		if (checkPassed !== undefined) {
 			if (checkPassed) counts.passed += 1;
 			else counts.failed += 1;
@@ -227,7 +253,6 @@ export function collectClaimReceiptEvents(
 			nonTestChecks.failed += goalChecks.failed;
 			nonTestChecks.lastPassed = goalChecks.failed === 0;
 		}
-		const args = (call.arguments ?? {}) as Record<string, unknown>;
 		if (SHELL_TOOLS.has(result.toolName) && typeof args.command === "string") {
 			if (COMMIT.test(args.command)) countDelivery(commits, ok);
 			if (PUSH.test(args.command)) countDelivery(pushes, ok);
@@ -364,7 +389,7 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 		findings.push({
 			kind: "files_changed",
 			verdict: "unsupported",
-			reason: "the answer says files were changed; no edit or write succeeded during this work",
+			reason: "the answer says files were changed; no file change was recorded during this work",
 		});
 	return findings;
 }

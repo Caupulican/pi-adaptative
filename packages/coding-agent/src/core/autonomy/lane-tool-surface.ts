@@ -51,7 +51,7 @@ import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
 import { createFindTool, type FindToolOptions } from "../tools/find.ts";
 import { createGrepTool, type GrepToolOptions } from "../tools/grep.ts";
 import { createLookupToolDefinition } from "../tools/lookup.ts";
-import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
+import { LOOKUP_SUB_TOOL_NAMES, LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { createLsTool, type LsToolOptions } from "../tools/ls.ts";
 import type { NestedCallHost, NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
@@ -355,7 +355,7 @@ function createLaneTools(
 		["ls", () => createLsTool(cwd, shared.ls)],
 		["repo_read", () => createRepoReadTool(cwd, shared.repoRead)],
 		...(nestedHost
-			? [[LOOKUP_TOOL_NAME, () => wrapToolDefinition(createLookupToolDefinition(nestedHost))] as const]
+			? [[LOOKUP_TOOL_NAME, () => wrapToolDefinition(createLookupToolDefinition(nestedHost, names))] as const]
 			: []),
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
@@ -543,7 +543,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			: patterns.allow.filter(
 					(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
 				);
-	const allowedTools = yoloSurface
+	const selectedTools = yoloSurface
 		? candidateNames.filter((name) => !readOnlyDropped.includes(name))
 		: options.grant
 			? candidateNames.filter((name) => compiledToolNames.has(name) && !readOnlyDropped.includes(name))
@@ -553,11 +553,22 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 						!matchesResourceProfilePattern(name, patterns.block) &&
 						!readOnlyDropped.includes(name),
 				);
+	const hasLookupOperation = LOOKUP_SUB_TOOL_NAMES.some((name) => selectedTools.includes(name));
+	const allowedTools = hasLookupOperation ? selectedTools : selectedTools.filter((name) => name !== LOOKUP_TOOL_NAME);
 	const allowedToolSet = new Set<string>(allowedTools);
 	// The rule above that left each candidate off the surface, for the run's tool manifest.
 	const withheld: ToolDecision[] = [
 		...candidateNames.flatMap((name): ToolDecision[] => {
 			if (allowedToolSet.has(name)) return [];
+			if (name === LOOKUP_TOOL_NAME && !hasLookupOperation)
+				return [
+					{
+						tool: name,
+						code: "tool-selection",
+						owner: "worker profile",
+						detail: "no batch lookup operation was granted",
+					},
+				];
 			if (readOnlyDropped.includes(name))
 				return [{ tool: name, code: "read-only-lane", owner: "read-only lane", detail: "the tool can edit" }];
 			if (options.grant)
@@ -755,15 +766,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				},
 			}
 		: options.sharedToolOptions;
-	// A lane with a read-only shell and no `network.http` never makes the host download software for it: its shell, grep
-	// and find resolve a managed tool (ripgrep, fd) only when it is already installed.
+	// Provisioning search tools reaches the network even in a file-only writer. Use installed tools on every lane without a network grant.
 	const installedToolsOnly = { managedToolResolver: resolveInstalledManagedTool };
-	const sharedToolOptions: SharedLaneToolOptions | undefined = offline
+	const sharedToolOptions: SharedLaneToolOptions | undefined = !networkGranted
 		? {
 				...processToolOptions,
 				bash: { ...processToolOptions?.bash, ...installedToolsOnly },
-				grep: { ...processToolOptions?.grep, ...installedToolsOnly },
-				find: { ...processToolOptions?.find, ...installedToolsOnly },
+				grep: { ...processToolOptions?.grep, ...installedToolsOnly, fff: false },
+				find: { ...processToolOptions?.find, ...installedToolsOnly, fff: false },
 			}
 		: processToolOptions;
 	// A lookup request or a script's tool call runs through the lane's watched, path-alias-expanded tools (credential

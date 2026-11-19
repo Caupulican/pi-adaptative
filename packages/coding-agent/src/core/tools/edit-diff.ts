@@ -582,6 +582,20 @@ export function generateUnifiedPatch(path: string, oldContent: string, newConten
 	});
 }
 
+/** Visible EOF evidence when an exact edit leaves multiple line breaks. Both inputs use normalized LF. */
+export function editEndingNotice(before: string, after: string): string {
+	if (!after.endsWith("\n\n")) return "";
+	const lineBreaks = (text: string) => {
+		let end = text.length;
+		while (end > 0 && text.charCodeAt(end - 1) === 10) end--;
+		return text.length - end;
+	};
+	const current = lineBreaks(after);
+	const previous = lineBreaks(before);
+	if (current === previous) return "";
+	return `\nFile ending now has ${current} consecutive line breaks (previously ${previous}). Exact edits preserve the line breaks outside oldText.`;
+}
+
 const MODEL_DIFF_MAX_LINES = 48;
 const MODEL_DIFF_MAX_CHARS = 4000;
 

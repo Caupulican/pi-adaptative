@@ -1,6 +1,6 @@
 /**
- * The ceiling a session holds over every worker it starts. A session that lends its workers the owner's reach (the root:
- * `SessionCapabilities.lendsOwnerReach`) answers "unbounded": a worker of it is bounded by its profile, the edge mode and
+ * The ceiling a session holds over every worker it starts. A session that lends its workers the owner's reach (the unconfined root:
+ * `SessionCapabilities.lendsOwnerReach` with no path or shell confinement) answers "unbounded": a worker of it is bounded by its profile, the edge mode and
  * the session's envelope reads (its budget, inherited tool surface, denied tools and default capabilities), as before.
  * Any other session holds its workers to its own reach: a worker of it writes, reads, runs commands, reaches the network
  * and holds capabilities no wider than the session itself.
@@ -188,7 +188,12 @@ export function workerCeilingOf(
 	standing: Pick<SessionCapabilities, "lendsOwnerReach">,
 	source: WorkerCeilingSource,
 ): WorkerCeiling {
-	return standing.lendsOwnerReach ? "unbounded" : sessionWorkerCeiling(source);
+	if (standing.lendsOwnerReach) {
+		const scope = source.getSessionConfinement();
+		if (!scope.readScope && !scope.writeRoots && !scope.readOnlyShell && scope.deniedPaths.length === 0)
+			return "unbounded";
+	}
+	return sessionWorkerCeiling(source);
 }
 
 /** Where a worker's directory lies among the worktree lanes (`WorkerLaneIsolation`). */

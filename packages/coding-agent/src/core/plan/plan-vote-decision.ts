@@ -35,6 +35,8 @@ export type RubricReading = "meets" | "fails" | "open";
 export interface CandidateReading {
 	readonly memberId: string;
 	readonly sufficient: NoulReading;
+	/** Advisory Score support used only to break a tie for an independent check. */
+	readonly verificationSupport?: number;
 	readonly criteria: readonly RubricReading[];
 }
 
@@ -163,17 +165,21 @@ function checkOrReadAll(input: VoteStepInput, exit: string, gaps: readonly strin
 		: { kind: "auto_verify", top, exit };
 }
 
-/** The two candidates with the most met criteria, ties in record order; undefined with fewer than two candidates. */
+/** The two candidates with the most met criteria, ties by advisory support then record order; undefined with fewer than two candidates. */
 function topTwo(input: VoteStepInput): readonly [string, string] | undefined {
 	const { record, facts, readings } = input;
 	if (facts.candidates.length < 2) return undefined;
-	const met = (memberId: string) =>
-		readings?.find((reading) => reading.memberId === memberId)?.criteria.filter((value) => value === "meets")
-			.length ?? 0;
-	const position = (memberId: string) => record.nodes.findIndex((node) => node.id === memberId);
-	const ranked = [...facts.candidates].sort(
-		(a, b) => met(b.memberId) - met(a.memberId) || position(a.memberId) - position(b.memberId),
-	);
+	const ranked = facts.candidates
+		.map(({ memberId }) => {
+			const reading = readings?.find((entry) => entry.memberId === memberId);
+			return {
+				memberId,
+				met: reading?.criteria.filter((value) => value === "meets").length ?? 0,
+				support: reading?.verificationSupport ?? 0,
+				position: record.nodes.findIndex((node) => node.id === memberId),
+			};
+		})
+		.sort((a, b) => b.met - a.met || b.support - a.support || a.position - b.position);
 	const [first, second] = ranked;
 	return first && second ? [first.memberId, second.memberId] : undefined;
 }

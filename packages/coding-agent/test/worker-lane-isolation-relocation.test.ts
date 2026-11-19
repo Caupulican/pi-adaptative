@@ -2,8 +2,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { SessionConfinement } from "../src/core/autonomy/session-confinement.ts";
 import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { WorkerLaneIsolation } from "../src/core/delegation/worker-lane-isolation.ts";
+import { workerCeilingOf } from "../src/core/delegation/worker-parent-ceiling.ts";
 import { releaseLane, type WorktreeSyncEngineDeps } from "../src/core/worktree-sync/git-engine.ts";
 import { readLane, syncStorePaths, writeLane } from "../src/core/worktree-sync/store.ts";
 import { findLaneByDirectory } from "../src/core/worktree-sync/worker-lane.ts";
@@ -180,5 +182,31 @@ describe("worker lane lookup from a nested workspace", () => {
 		} finally {
 			rmSync(temp, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("the scope lent by an SDK owner session", () => {
+	const tools = ["read", "write", "edit"];
+	const base = { deniedPaths: [], credentialExposure: "deny" as const, shellEnvironment: () => ({}) };
+	const source = (confinement: SessionConfinement) => ({
+		getSessionConfinement: () => confinement,
+		getForegroundToolNames: () => tools,
+		getCapabilityEnvelope: () => undefined,
+	});
+
+	it("preserves host reach for an unconfined owner", () => {
+		expect(workerCeilingOf({ lendsOwnerReach: true }, source(base))).toBe("unbounded");
+	});
+
+	it("holds child grants to explicit read and write roots and process capabilities", () => {
+		const scope = {
+			...base,
+			readScope: { cwd: root, readRoots: [root], deniedPaths: [outside] },
+			writeRoots: [root],
+			deniedPaths: [outside],
+		};
+		const ceiling = workerCeilingOf({ lendsOwnerReach: true }, source(scope));
+		expect(ceiling).toMatchObject({ readRoots: [root], writeRoots: [root], deniedPaths: [outside] });
+		expect(ceiling !== "unbounded" && ceiling.capabilities.includes("process.exec")).toBe(false);
 	});
 });

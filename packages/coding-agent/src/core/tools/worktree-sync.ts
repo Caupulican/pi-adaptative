@@ -360,7 +360,11 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 					});
 					if (landed.code !== "ok") {
 						return respond(
-							[`[${landed.code}] ${landed.message}${landed.paths ? `\n${landed.paths.join("\n")}` : ""}`],
+							[
+								`[${landed.code}] ${landed.message}`,
+								...(landed.paths ?? []),
+								...(landed.code === "gate_failed" && landed.gitStderr ? [landed.gitStderr] : []),
+							],
 							landed,
 						);
 					}

@@ -255,7 +255,10 @@ export type AbortSyncResult =
 	  >;
 
 export type LandResult =
-	| { code: "ok"; laneKey: string; epoch: number; mainSha: string; gate: "passed" | "off" }
+	| ({ code: "ok"; laneKey: string; epoch: number; mainSha: string; gate: "passed" | "off" } & Pick<
+			LandingTransaction,
+			"changedPaths" | "changedPathsTruncated"
+	  >)
 	| WorktreeSyncRefusal<
 			| "not_a_git_repo"
 			| "default_branch_unresolved"

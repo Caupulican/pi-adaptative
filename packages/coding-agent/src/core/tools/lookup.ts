@@ -38,26 +38,42 @@ const lookupReadSchema = Type.Pick(readSchema, ["path", "offset", "limit", "tail
 const lookupSearchSchema = Type.Pick(grepSchema, ["pattern", "path", "glob", "limit"]);
 const lookupListSchema = Type.Pick(readSchema, ["path"]);
 
-const lookupRequestSchema = Type.Union([
-	Type.Object({ read: lookupReadSchema }, { additionalProperties: false, description: "Read one file." }),
-	Type.Object({ list: lookupListSchema }, { additionalProperties: false, description: "List one directory." }),
-	Type.Object({ repo: repoReadSchema }, { additionalProperties: false, description: "One repo_read git read." }),
-	Type.Object({ search: lookupSearchSchema }, { additionalProperties: false, description: "Search file contents." }),
-]);
+const lookupFields = {
+	read: Type.Object({ read: lookupReadSchema }, { additionalProperties: false, description: "Read one file." }),
+	list: Type.Object({ list: lookupListSchema }, { additionalProperties: false, description: "List one directory." }),
+	repo: Type.Object({ repo: repoReadSchema }, { additionalProperties: false, description: "One repo_read git read." }),
+	search: Type.Object(
+		{ search: lookupSearchSchema },
+		{ additionalProperties: false, description: "Search file contents." },
+	),
+} as const;
 
-const lookupSchema = Type.Object(
-	{
-		requests: Type.Array(lookupRequestSchema, {
-			minItems: 1,
-			maxItems: MAX_LOOKUP_REQUESTS,
-			description:
-				"Independent requests, each exactly one of {read:{path,offset?,limit?,tail?,mode?}}, {list:{path}}, {repo:{action,...}}, {search:{pattern,path?,glob?,limit?}}. Results come back in order.",
-		}),
-	},
-	{ additionalProperties: false },
-);
+const lookupTools = { read: "read", list: "read", repo: "repo_read", search: "grep" } as const satisfies Record<
+	keyof typeof lookupFields,
+	LookupSubToolName
+>;
 
-export type LookupToolInput = Static<typeof lookupSchema>;
+export type LookupToolInput = { requests: Static<(typeof lookupFields)[keyof typeof lookupFields]>[] };
+
+function lookupSurface(available?: readonly string[]) {
+	const kinds = (Object.keys(lookupFields) as (keyof typeof lookupFields)[]).filter(
+		(kind) => !available || available.includes(lookupTools[kind]),
+	);
+	const variants = kinds.map((kind) => lookupFields[kind]);
+	const request = variants.length === 1 ? variants[0]! : Type.Union(variants);
+	const parameters = Type.Object(
+		{
+			requests: Type.Array(request, {
+				minItems: 1,
+				maxItems: MAX_LOOKUP_REQUESTS,
+				description: "Independent requests, each selecting one operation. Results come back in order.",
+			}),
+		},
+		{ additionalProperties: false },
+	);
+	return { parameters, kinds: kinds.join(", ") };
+}
+
 type LookupRequest = LookupToolInput["requests"][number];
 export type LookupKind = "read" | "list" | "repo" | "search";
 
@@ -100,7 +116,7 @@ function planRequest(request: LookupRequest): PlannedCall {
 		return {
 			kind: "read",
 			label: singleLine(`read ${read.path}${outline ? " (outline)" : ""}`),
-			toolName: "read",
+			toolName: lookupTools.read,
 			args: definedFields(read),
 			continuation: (shown, outcome) => {
 				if (outline) return "read the part you need with offset and limit";
@@ -117,7 +133,7 @@ function planRequest(request: LookupRequest): PlannedCall {
 		return {
 			kind: "list",
 			label: singleLine(`list ${request.list.path}`),
-			toolName: "read",
+			toolName: lookupTools.list,
 			args: definedFields(request.list),
 			continuation: () => "list a narrower subdirectory",
 		};
@@ -127,7 +143,7 @@ function planRequest(request: LookupRequest): PlannedCall {
 		return {
 			kind: "repo",
 			label: singleLine(`repo ${repo.action}${repo.path ? ` ${repo.path}` : ""}`),
-			toolName: "repo_read",
+			toolName: lookupTools.repo,
 			args: definedFields(repo),
 			continuation: () => "narrow with paths, revisions or a smaller limit",
 		};
@@ -136,7 +152,7 @@ function planRequest(request: LookupRequest): PlannedCall {
 	return {
 		kind: "search",
 		label: singleLine(`search ${search.pattern}${search.path ? ` in ${search.path}` : ""}`),
-		toolName: "grep",
+		toolName: lookupTools.search,
 		args: definedFields(search),
 		continuation: () => "narrow with path or glob, or lower limit",
 	};
@@ -183,16 +199,17 @@ function lookupWarnings(details: LookupToolDetails | undefined): string[] {
 
 export function createLookupToolDefinition(
 	host: NestedCallHost,
-): ToolDefinition<typeof lookupSchema, LookupToolDetails> {
+	available?: readonly string[],
+): ToolDefinition<ReturnType<typeof lookupSurface>["parameters"], LookupToolDetails> {
+	const { parameters, kinds } = lookupSurface(available);
 	return {
 		name: LOOKUP_TOOL_NAME,
 		label: "lookup",
 		readOnly: true,
-		description:
-			"Use for 2 or more independent reads, directory listings, git reads (repo_read arguments) or content searches: up to 12 requests in one call instead of one round each. Every request is admitted and executed exactly like its dedicated tool; results come back as one labeled section per request in order, a refused or failed request does not affect the others, and a section cut to its share of the output bound names the offset or narrower call to use.",
-		promptSnippet: "Several independent reads, listings, git reads and searches in one call",
+		description: `Batch up to ${MAX_LOOKUP_REQUESTS} independent requests. Available operations: ${kinds}. Each uses its dedicated tool's admission and returns its own result in order.`,
+		promptSnippet: `Batch independent requests (${kinds})`,
 		neverDefer: true,
-		parameters: lookupSchema,
+		parameters,
 		async execute(toolCallId, input: LookupToolInput, signal?: AbortSignal) {
 			const startedAt = Date.now();
 			const planned = input.requests.map(planRequest);

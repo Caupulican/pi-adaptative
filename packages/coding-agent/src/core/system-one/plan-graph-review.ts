@@ -13,7 +13,8 @@
  * state), each J4 candidate one request, all in flight together. The engine takes one state per request, so this
  * isolation costs one request per group; System One answers each request's questions in parallel.
  *
- * Every answer is read on the `orchestration` family (accept at 0.90, require absence at 0.10, no soft band); a
+ * Coverage notes and cycle-checked scheduling suggestions use the advisory family. Brief judgments use the
+ * orchestration family because an annotation can attach additional context to the worker. A
  * reading between the cuts, or an unanswered question, is `open` and becomes a doubt, never an action. A request that
  * does not answer within its bound (`PLAN_REQUEST_TIMEOUT_MS` each, `PLAN_GRAPH_REVIEW_TIMEOUT_MS` for the review) is
  * unanswered: its exits fall to the code facts and the plan records a doubt. Exits, first
@@ -27,23 +28,18 @@
  * 7. J4 absent (not self-contained) -> `annotate` that node; J4 between the cuts -> a doubt.
  * 8. Otherwise -> `accept`.
  *
- * Measurement owed: the `orchestration` family ships with a labelled question set per program. Only J1's wording
- * is measured (as `JEV-PLAN-REVIEW`'s `misses_request_part`, in its own steps state); J2, J3 and J4 are unmeasured,
- * and so is J1 over plan-graph steps, until a labelled `JEV-PLAN-GRAPH` set (sound graphs and planted defects: a
- * missing part, a hidden dependency, a pair that cannot be told apart, a brief that leans on the root's context,
- * written in more than one language) is answered once and its cuts re-decided offline from the saved answers. That
- * set lives with the other System One measurements in `src/core/system-one/evals/` (its cases under
- * `evals/corpus/`), run by its own `eval:` package script like `eval:completion`.
+ * The multilingual graph corpus measures the production decisions. The evaluator retains the probabilities and
+ * abstentions so a change to a decision rule can be replayed on the same observations.
  */
 
 import { SYSTEM_TIMER_PORT } from "../../kernel/timer-port.ts";
-import { type NoulDirection, type NoulReading, readNoul } from "../decision/noul.ts";
+import { type NoulReading, readNoul } from "../decision/noul.ts";
 import { type PlanJudgmentRef, type PlanNodeSpec, planPathExists } from "../plan/plan-graph.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
 import { withinPlanRequestBound } from "./plan-request-bound.ts";
 import { PLAN_REVIEW_PROGRAM } from "./plan-review.ts";
-import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
+import { noteDecisionTrace, type SemanticTraceReading } from "./semantic-evaluation-ledger.ts";
 
 /** J1 is `JEV-PLAN-REVIEW`'s measured question, asked over the same `request` and `steps` state keys. */
 const MISSES_REQUEST_PART = PLAN_REVIEW_PROGRAM.decisions[0] satisfies { readonly id: "misses_request_part" };
@@ -57,7 +53,7 @@ export const PLAN_GRAPH_PROGRAM = {
 		MISSES_REQUEST_PART,
 		{
 			id: "needs_output_of",
-			instruction: "Does `later` need a result that only `earlier` produces?",
+			instruction: "Does completing `later.does` require the change described by `earlier.does`?",
 			criteria: {
 				true: "`later` reads, changes or builds on something that does not exist until `earlier` has done its work.",
 				false: "`later` can be done fully without anything `earlier` produces.",
@@ -65,17 +61,16 @@ export const PLAN_GRAPH_PROGRAM = {
 		},
 		{
 			id: "pair_evidence_sufficient",
-			instruction:
-				"Do `earlier` and `later` state enough about what each reads and produces to tell whether `later` needs the result of `earlier`?",
+			instruction: "Can you tell from the two task descriptions which work products they concern?",
 			criteria: {
-				true: "Both steps name what they read and what they produce, so the dependency can be read from them.",
-				false: "What one of the steps reads or produces is unstated or only implied.",
+				true: "Each task identifies the feature or artifact it acts on. The two targets can be compared even when they are unrelated.",
+				false: "At least one task refers to unnamed work or missing context, so its target cannot be identified.",
 			},
 		},
 		{
 			id: "brief_self_contained",
 			instruction:
-				"Can `step` be done from its own text and the results of the steps in `inputs` alone, without knowledge that only the planner holds?",
+				"Does `step.does` identify a concrete task that a worker can carry out using the workspace and the listed inputs?",
 			criteria: {
 				true: "Everything the step needs is in its text, the files it names or its inputs' results.",
 				false: "The step relies on context it does not state, such as an earlier conversation or an unnamed decision.",
@@ -87,12 +82,12 @@ export const PLAN_GRAPH_PROGRAM = {
 type PlanGraphQuestionId = (typeof PLAN_GRAPH_PROGRAM.decisions)[number]["id"];
 
 /** The end each question needs and the family it is read on; J1 asks for a defect, the rest for a property. */
-const DIRECTION: Readonly<Record<PlanGraphQuestionId, NoulDirection>> = {
-	misses_request_part: "required_false",
-	needs_output_of: "required_true",
-	pair_evidence_sufficient: "required_true",
-	brief_self_contained: "required_true",
-};
+const READINGS = {
+	misses_request_part: { direction: "required_false", family: "advisory" },
+	needs_output_of: { direction: "required_true", family: "advisory" },
+	pair_evidence_sufficient: { direction: "required_true", family: "advisory" },
+	brief_self_contained: { direction: "required_true", family: "orchestration" },
+} as const satisfies Record<PlanGraphQuestionId, SemanticTraceReading>;
 
 /** The question that reads the owner's `request`. */
 const REQUEST_QUESTIONS: ReadonlySet<string> = new Set(["misses_request_part"]);
@@ -129,6 +124,8 @@ export interface PlanGraphReview {
 	readonly open: readonly (PlanGraphPairRef & { readonly why: string })[];
 	/** Exit 6: the plan does not cover the whole request. */
 	readonly gap: boolean;
+	readonly coverageReading: NoulReading;
+	readonly briefReadings: Readonly<Record<string, NoulReading>>;
 	/** Exit 7: node ids whose brief gets the root's recent context at release. */
 	readonly annotate: readonly string[];
 	/** What System One could not settle, in plain words. */
@@ -163,6 +160,8 @@ const UNJUDGED_REVIEW = {
 	addEdges: [],
 	open: [],
 	gap: false,
+	coverageReading: "unasked",
+	briefReadings: {},
 	annotate: [],
 	nodeDoubts: {},
 	judgments: [],
@@ -240,7 +239,8 @@ function ask(engine: OperationEffectEngine, group: ReviewGroup, signal: AbortSig
 }
 
 function read(answered: AnsweredGroup, id: PlanGraphQuestionId): NoulReading {
-	return readNoul(answered.evaluation.answers?.[id], DIRECTION[id], "orchestration");
+	const { direction, family } = READINGS[id];
+	return readNoul(answered.evaluation.answers?.[id], direction, family);
 }
 
 /** Why a pair stayed open, from its two readings; undefined when exit 3 or 4 settles it. */
@@ -321,8 +321,7 @@ export async function reviewPlanGraph(
 			decision: `plan graph review of ${subject}: ${exit}`,
 			drove: answer.group.decisions.map((decision) => decision.id),
 			exit,
-			read: (id) =>
-				id in DIRECTION ? { family: "orchestration", direction: DIRECTION[id as PlanGraphQuestionId] } : undefined,
+			read: (id) => (Object.hasOwn(READINGS, id) ? READINGS[id as PlanGraphQuestionId] : undefined),
 		});
 		const ledgerRef = answer.evaluation.evaluationId;
 		if (ledgerRef === undefined) return;
@@ -377,9 +376,11 @@ export async function reviewPlanGraph(
 
 	// Exit 7.
 	const annotate: string[] = [];
+	const briefReadings: Record<string, NoulReading> = Object.create(null);
 	thin.forEach((node, index) => {
 		const answer = thinGroups[index] as AnsweredGroup;
 		const reading = read(answer, "brief_self_contained");
+		briefReadings[node.id] = reading;
 		if (reading === "hard_fail") annotate.push(node.id);
 		else if (reading !== "hard_pass")
 			stepDoubt(node.id, `whether step "${node.id}" can be done from its brief alone`);
@@ -395,6 +396,8 @@ export async function reviewPlanGraph(
 		addEdges,
 		open,
 		gap,
+		coverageReading: coverage,
+		briefReadings,
 		annotate,
 		doubts: [...doubts, ...unasked],
 		nodeDoubts,

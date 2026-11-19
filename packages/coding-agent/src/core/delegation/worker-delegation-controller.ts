@@ -4100,9 +4100,9 @@ export class WorkerDelegationController {
 		for (const binding of admission.shipment.profile.modelPolicy.candidates) {
 			const model = this.deps.getModelRegistry().find(binding.provider, binding.modelId);
 			if (!this.isWorkerRouteModelAvailable(model)) continue;
-			for (const thinkingLevel of ["medium", "high"] as const) {
+			for (const thinkingLevel of new Set([binding.thinkingLevel, "medium", "high"] as const)) {
 				if (profiles.length >= 8) break;
-				if (!getSupportedThinkingLevels(model).includes(thinkingLevel)) continue;
+				if (!thinkingLevel || !getSupportedThinkingLevels(model).includes(thinkingLevel)) continue;
 				const selectedBinding = { provider: binding.provider, modelId: binding.modelId, thinkingLevel };
 				if (profiles.some((profile) => isDeepStrictEqual(profile.admission.shipment.modelBinding, selectedBinding)))
 					continue;
@@ -4125,7 +4125,7 @@ export class WorkerDelegationController {
 		}
 		const boundedSignal = signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal;
 		const criteria =
-			"Select the lightest adequate host profile. Use medium effort for clear coding tasks; use higher supported effort for complex reasoning or strict JSON tasks. Each profile starts one worker session with fixed model and effort. Task:\n";
+			"Select the lightest adequate host profile. Prefer the lightest offered effort for a bounded edit or inspection. Use higher effort for unresolved design or reasoning. Each profile starts one worker session with fixed model and effort. Task:\n";
 		if (criteria.length + request.instructions.length > MAX_ROUTE_CHOICE_REQUEST_CHARACTERS) return admission;
 		let decision: Awaited<ReturnType<typeof chooseHostRouteProfile>>;
 		try {

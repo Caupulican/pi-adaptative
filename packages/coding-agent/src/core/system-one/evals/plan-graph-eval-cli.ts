@@ -3,10 +3,15 @@
  * REAL System One, with the credentials a session uses, and prints agreement per question (coverage J1, dependency
  * J2 with J3, brief J4), then the labelled plan result set (R3: whether a result changes a dependent step, and whether two
  * findings contradict), then the labelled vote rubric set (S6: whether a candidate meets each criterion). Exits non-zero while
- * any question is below the accept cut. Each case spends a few System One
- * requests, so the owner runs it; the judgments keep their pending-measurement status until it has.
+ * any scored question is below the accept cut. An optional dump includes all three summaries and the synthetic
+ * requests and answers. Each case spends a few System One requests.
  */
 import { writeFileSync } from "node:fs";
+import type {
+	DecisionEngine,
+	DecisionEngineProgram,
+	RetentionAnswer,
+} from "../../compaction/evidence-retention-planner.ts";
 import { createRetentionDecisionEngine } from "../../compaction/retention-decision-engine.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../../decision/engines/typesafe-system-one-engine.ts";
 import { resolveSystemOneEvalAdapter, runEvalCliEntry } from "./eval-cli.ts";
@@ -55,16 +60,40 @@ async function main(argv: string[]): Promise<number> {
 		return 2;
 	}
 	// The executor's own engine shape: the batched-question engine over the TypeSafe System One decision engine.
-	const engine = createRetentionDecisionEngine(new TypeSafeSystemOneDecisionEngine(setup.adapter));
+	const live = createRetentionDecisionEngine(new TypeSafeSystemOneDecisionEngine(setup.adapter));
+	const dumpIndex = argv.indexOf("--dump");
+	type Observation = {
+		program: DecisionEngineProgram;
+		state: Record<string, unknown> | undefined;
+		model: string | undefined;
+		answers: Record<string, RetentionAnswer> | null;
+	};
+	const observations: Observation[] = [];
+	const engine: DecisionEngine =
+		dumpIndex < 0
+			? live
+			: {
+					...live,
+					async evaluate(program, state, options) {
+						const row: Observation = { program, state, model: live.model, answers: null };
+						observations.push(row);
+						const evaluation = await live.evaluate(program, state, options);
+						row.answers = evaluation.answers ?? null;
+						row.model = evaluation.model ?? live.model;
+						return evaluation;
+					},
+				};
 	const summary = await runPlanGraphEval(engine, PLAN_GRAPH_EVAL_CASES);
 	process.stdout.write(`${formatPlanGraphEval(summary)}\n`);
 	const results = await measurePlanResults(engine);
 	process.stdout.write(`\n${formatPlanResultsEval(results)}\n`);
 	const rubric = await measurePlanRubric(engine);
 	process.stdout.write(`\n${formatPlanRubricEval(rubric)}\n`);
-	const dumpIndex = argv.indexOf("--dump");
 	if (dumpIndex >= 0)
-		writeFileSync(argv[dumpIndex + 1] ?? "plan-graph-eval.json", `${JSON.stringify(summary, null, 2)}\n`);
+		writeFileSync(
+			argv[dumpIndex + 1] ?? "plan-graph-eval.json",
+			`${JSON.stringify({ ...summary, results, rubric, observations }, null, 2)}\n`,
+		);
 	return planGraphEvalPasses(summary) && planResultsEvalPasses(results) && planRubricEvalPasses(rubric) ? 0 : 1;
 }
 

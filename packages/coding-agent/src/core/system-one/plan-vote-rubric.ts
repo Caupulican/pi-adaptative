@@ -13,7 +13,7 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerReportChange } from "../autonomy/contracts.ts";
 import { readNoul } from "../decision/noul.ts";
-import { RUBRIC_FAIL_MASS, RUBRIC_MEET_MASS, scoreBoundaryMass } from "../decision/thresholds.ts";
+import { RUBRIC_FAIL_MASS, RUBRIC_MEET_MASS, scoreBoundaryMass, scoreSettled } from "../decision/thresholds.ts";
 import { OUTCOME_LIMITS, type Outcome } from "../delegation/worker-outcome-contract.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -62,17 +62,21 @@ export function rubricProgram(criteria: readonly string[]) {
 		description:
 			"How well a settled plan step's result meets each criterion of its vote, and whether its evidence is enough to judge it on all of them.",
 		decisions: [
-			...criteria.map((criterion, index) => ({
+			...criteria.map((_, index) => ({
 				kind: "score" as const,
 				id: criterionId(index),
-				instruction: `How well does \`candidate\` meet: ${criterion}?`,
+				instruction: `How well does the work reported in \`candidate\` satisfy \`criteria[${index}]\`?`,
 				levels: RUBRIC_LEVELS,
 			})),
 			{
 				kind: "boolean" as const,
 				id: SUFFICIENT_ID,
 				instruction:
-					"Does `candidate`'s evidence (changes, checks, excerpt) show enough to judge it on every criterion?",
+					"Can the reported changes, open items and checks in `candidate` establish a verdict for each requirement in `criteria`?",
+				criteria: {
+					true: "The report gives concrete facts to judge each requirement, including facts that show a requirement failed.",
+					false: "At least one requirement cannot be judged because the corresponding behavior is unspecified.",
+				},
 			},
 		],
 	};
@@ -112,18 +116,21 @@ export interface RubricJudgment {
 }
 
 /** The reading of one criterion from its Score answer: met or failed at the rubric's cuts, open between or unanswered. */
+const meetsRequirement = (level: number) => level >= 2;
+
 function criterionReading(answer: unknown): RubricReading {
-	const mass = scoreBoundaryMass(answer, (level) => level >= 2);
+	const mass = scoreBoundaryMass(answer, meetsRequirement);
 	if (mass === undefined) return "open";
 	if (mass >= RUBRIC_MEET_MASS) return "meets";
 	return mass <= RUBRIC_FAIL_MASS ? "fails" : "open";
 }
 
 /** The candidate's evidence as the rubric reads it: plain worker words are fenced here, once, for each question. */
-function candidateState(evidence: VoteCandidateEvidence): Record<string, unknown> {
+function candidateState(evidence: VoteCandidateEvidence, criteria: readonly string[]): Record<string, unknown> {
 	const fence = (text: string) => wrapUntrustedText(text, `plan-vote:${evidence.memberId}`);
 	const { packet } = evidence;
 	return {
+		criteria,
 		candidate: {
 			status: packet.status,
 			changed_files: packet.changedFiles,
@@ -155,7 +162,8 @@ export async function judgeCandidates(
 	const settled = await Promise.allSettled(
 		candidates.map((candidate) =>
 			withinPlanRequestBound(
-				(signal) => engine.evaluate(program, candidateState(candidate), { consequence: "medium", signal }),
+				(signal) =>
+					engine.evaluate(program, candidateState(candidate, criteria), { consequence: "medium", signal }),
 				{ caller: options.signal },
 			),
 		),
@@ -164,11 +172,14 @@ export async function judgeCandidates(
 	const judgments = candidates.map((candidate, index): RubricJudgment => {
 		const outcome = settled[index];
 		const evaluation = outcome?.status === "fulfilled" ? outcome.value : undefined;
+		const answers = criteria.map((_, position) => evaluation?.answers?.[criterionId(position)]);
 		return {
 			reading: {
 				memberId: candidate.memberId,
 				sufficient: readNoul(evaluation?.answers?.[SUFFICIENT_ID], "required_true", "orchestration"),
-				criteria: criteria.map((_, position) => criterionReading(evaluation?.answers?.[criterionId(position)])),
+				criteria: answers.map(criterionReading),
+				verificationSupport: answers.filter((answer) => scoreSettled(answer, meetsRequirement) === "on_side")
+					.length,
 			},
 			...(evaluation ? { evaluation } : {}),
 		};

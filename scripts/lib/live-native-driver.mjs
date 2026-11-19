@@ -2,8 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runInNewContext } from "node:vm";
-import { transformSync } from "esbuild";
+import { fixtureObservation } from "./fixture-module.mjs";
 
 const liveObserverSource = fileURLToPath(new URL("./live-session-observer.mjs", import.meta.url));
 
@@ -11,16 +10,10 @@ const liveObserverSource = fileURLToPath(new URL("./live-session-observer.mjs", 
 export function assertSlugifyEdit(source) {
 	if (!/\/\*\*[^\r\n]*\*\/\s*(?:export\s+)?(?:function\s+slugify\b|const\s+slugify\b)/.test(source))
 		throw new Error("the requested one-line JSDoc comment above slugify is missing");
-	const compiled = transformSync(source, { loader: "ts", format: "cjs", target: "es2022" }).code;
-	const result = runInNewContext(
-		`const module = { exports: {} }; const exports = module.exports;\n${compiled}\n["Hello, world!", "Pi's harness.", "Plain Text"].map(value => module.exports.slugify(value));`,
-		Object.create(null),
-		{ timeout: 1000, contextCodeGeneration: { strings: false, wasm: false }, microtaskMode: "afterEvaluate" },
-	);
-	if (JSON.stringify(result) !== JSON.stringify(["hello-world", "pis-harness", "plain-text"])) {
-		throw new Error(
-			`the edited slugify does not strip punctuation and preserve its prior behavior: ${JSON.stringify(result)}`,
-		);
+	const examples = ["Hello, world!", "Pi's harness.", "Plain Text", "Two \t  words!"];
+	const result = fixtureObservation(source, `${JSON.stringify(examples)}.map(value => module.exports.slugify(value))`);
+	if (result !== JSON.stringify(["hello-world", "pis-harness", "plain-text", "two-words"])) {
+		throw new Error("the edited slugify does not strip punctuation and collapse whitespace");
 	}
 }
 

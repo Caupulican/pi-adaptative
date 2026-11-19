@@ -1,3 +1,4 @@
+import { isAbsolute, relative } from "node:path";
 import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../kernel/index.ts";
 import type { WorkerControlBody } from "../../kernel/worker-control-stamp.ts";
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
@@ -171,17 +172,22 @@ export const EARLIER_SESSION_NOTE =
 /** The task prompt and the range inside it that holds the task text, so a reader slices the task instead of parsing the frame. */
 export function buildWorkerUserPromptParts(
 	request: WorkerRequest,
-	options: { earlierSession?: boolean; reportTool?: boolean } = {},
+	options: { earlierSession?: boolean; reportTool?: boolean; cwd?: string } = {},
 ): { prompt: string; body: WorkerControlBody } {
 	const lead = [...(options.earlierSession ? [EARLIER_SESSION_NOTE] : []), "TASK"].join("\n");
 	const from = lead.length + 1;
+	const paths = request.envelope.capabilities.includes("filesystem.write") ? request.envelope.allowedPaths : undefined;
+	const displayPath = (path: string) => (options.cwd && isAbsolute(path) ? relative(options.cwd, path) || "." : path);
 	return {
 		prompt: [
 			lead,
 			request.instructions,
 			"END TASK",
+			...(paths?.length
+				? [`Write grant (change only what the task requests): ${JSON.stringify(paths.map(displayPath))}`]
+				: []),
 			options.reportTool
-				? "Finish by calling submit_report."
+				? "Work from the assignment and its named sources. If an essential input is missing there, report missing_input and name the fact the parent can supply. Finish by calling submit_report."
 				: 'Do not replace the worker claim envelope; put requested detail inside "summary" and "findings".',
 		].join("\n"),
 		body: { from, to: from + request.instructions.length },
@@ -484,6 +490,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const promptParts = buildWorkerUserPromptParts(options.request, {
 		earlierSession: options.earlierSession === true,
 		reportTool: options.reportTool === true,
+		cwd: options.cwd,
 	});
 	// The bounded envelope keeps only a refusal's code and text, so the typed refusal is taken here, before it is flattened.
 	const captured: { refusal?: WorkerBudgetRefusalContract } = {};

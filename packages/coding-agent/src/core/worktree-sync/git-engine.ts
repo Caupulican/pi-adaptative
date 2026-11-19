@@ -1329,14 +1329,17 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 				if (postGateConflict) return postGateConflict;
 			}
 
-			const landingTransaction: LandingTransaction = {
+			const landingFacts = {
 				laneKey: lane.laneKey,
-				priorMainSha: mainShaNow,
-				testedTipSha: tipSha,
+				gate: args.gate === "on" ? ("passed" as const) : ("off" as const),
 				changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
 				changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+			};
+			const landingTransaction: LandingTransaction = {
+				priorMainSha: mainShaNow,
+				testedTipSha: tipSha,
+				...landingFacts,
 				lockToken: acquisition.token,
-				gate: args.gate === "on" ? "passed" : "off",
 				stage: "ready_to_merge",
 			};
 			await writeLandingTransaction(ctx.paths, landingTransaction, ctx.write);
@@ -1374,8 +1377,8 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 					previousMainSha: mainShaNow,
 					landedLaneKey: lane.laneKey,
 					landedAt: at,
-					changedPaths: changed.slice(0, EPOCH_CHANGED_PATHS_CAP),
-					changedPathsTruncated: changed.length > EPOCH_CHANGED_PATHS_CAP,
+					changedPaths: landingFacts.changedPaths,
+					changedPathsTruncated: landingFacts.changedPathsTruncated,
 				},
 				ctx.write,
 			);
@@ -1389,19 +1392,13 @@ export async function landLane(deps: WorktreeSyncEngineDeps, args: LandLaneArgs)
 					mainSha: tipSha,
 					previousMainSha: mainShaNow,
 					changedFiles: changed.length,
-					gate: args.gate === "on" ? "passed" : "off",
+					gate: landingTransaction.gate,
 				},
 				at,
 			);
 			await writeLandingTransaction(ctx.paths, { ...landingTransaction, stage: "audit_logged" }, ctx.write);
 			await clearLandingTransaction(ctx.paths);
-			return {
-				code: "ok",
-				laneKey: lane.laneKey,
-				epoch: epochNumber,
-				mainSha: tipSha,
-				gate: args.gate === "on" ? "passed" : "off",
-			};
+			return { code: "ok", epoch: epochNumber, mainSha: tipSha, ...landingFacts };
 		} finally {
 			await releaseIntegrationLock(ctx.paths, acquisition.token, { now: deps.now });
 		}

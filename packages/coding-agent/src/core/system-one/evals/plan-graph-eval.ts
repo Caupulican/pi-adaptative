@@ -358,7 +358,7 @@ export function planGraphEvalInput(testCase: PlanGraphEvalCase): PlanGraphReview
 export interface PlanGraphCaseScore {
 	readonly id: string;
 	readonly language: PlanGraphEvalLanguage;
-	readonly gap: { readonly correct: boolean };
+	readonly gap: { readonly reading: "gap" | "covered" | "open"; readonly correct: boolean };
 	readonly pairs: readonly {
 		readonly pair: string;
 		readonly reading: "edge" | "independent" | "open";
@@ -366,7 +366,7 @@ export interface PlanGraphCaseScore {
 	}[];
 	readonly thin: readonly {
 		readonly id: string;
-		readonly reading: "annotated" | "standing";
+		readonly reading: "annotated" | "standing" | "open";
 		readonly correct: boolean;
 	}[];
 }
@@ -390,22 +390,26 @@ export async function runPlanGraphEval(
 		const pairs = testCase.pairs.map((pair) => {
 			const key = `${pair.earlier}>${pair.later}`;
 			const edge = review.addEdges.some((ref) => ref.earlier === pair.earlier && ref.later === pair.later);
-			const open = review.open.some((ref) => ref.earlier === pair.earlier && ref.later === pair.later);
+			const open =
+				review.unjudged || review.open.some((ref) => ref.earlier === pair.earlier && ref.later === pair.later);
 			const reading = edge ? "edge" : open ? "open" : "independent";
 			return { pair: key, reading, correct: pair.needs ? reading === "edge" : reading === "independent" } as const;
 		});
 		const thin = testCase.thin.map((entry) => {
-			const annotated = review.annotate.includes(entry.id);
+			const answer = review.briefReadings[entry.id];
+			const reading = answer === "hard_pass" ? "standing" : answer === "hard_fail" ? "annotated" : "open";
 			return {
 				id: entry.id,
-				reading: annotated ? ("annotated" as const) : ("standing" as const),
-				correct: entry.selfContained !== annotated,
-			};
+				reading,
+				correct: reading === (entry.selfContained ? "standing" : "annotated"),
+			} as const;
 		});
+		const gap =
+			review.coverageReading === "hard_fail" ? "gap" : review.coverageReading === "hard_pass" ? "covered" : "open";
 		scores.push({
 			id: testCase.id,
 			language: testCase.language,
-			gap: { correct: review.gap === testCase.gap },
+			gap: { reading: gap, correct: gap === (testCase.gap ? "gap" : "covered") },
 			pairs,
 			thin,
 		});
@@ -421,7 +425,9 @@ function summarize(scores: readonly PlanGraphCaseScore[]): PlanGraphEvalSummary 
 	const coverage = scores.map((score) => score.gap.correct);
 	const pairs = scores.flatMap((score) => score.pairs);
 	const brief = scores.flatMap((score) => score.thin);
-	const open = pairs.filter((pair) => pair.reading === "open").length;
+	const open = [...scores.map((score) => score.gap), ...pairs, ...brief].filter(
+		(entry) => entry.reading === "open",
+	).length;
 	return {
 		cases: scores,
 		agreement: {

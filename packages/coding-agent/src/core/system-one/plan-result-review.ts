@@ -32,7 +32,8 @@ export const PLAN_RESULTS_PROGRAM = {
 	decisions: [
 		{
 			id: "changes_dependent_work",
-			instruction: "Does `result` change what `dependent` must do, beyond what its own text says?",
+			instruction:
+				"Does a change, unresolved item or finding in `result` invalidate an assumption in `dependent.does`?",
 			criteria: {
 				true: "The result reports something (an open item, a changed interface, a finding) that makes `dependent`'s stated task wrong, incomplete or unnecessary.",
 				false: "`dependent` can be done as written with this result.",
@@ -41,10 +42,10 @@ export const PLAN_RESULTS_PROGRAM = {
 		{
 			id: "result_evidence_sufficient",
 			instruction:
-				"Does `result` state enough (changes, open items, findings) to tell whether `dependent` must change?",
+				"Does `result` identify concrete work or an outstanding requirement that can be compared to `dependent.does`?",
 			criteria: {
-				true: "The result names what it changed and what it left open.",
-				false: "The result's changes or open items are unstated.",
+				true: "A named change, finding or open item establishes what happened. A clearly unrelated change can also settle the comparison.",
+				false: "The report gives only a status or vague summary with no identifiable change, finding or open item.",
 			},
 		},
 		{
@@ -57,7 +58,8 @@ export const PLAN_RESULTS_PROGRAM = {
 		},
 		{
 			id: "finding_evidence_sufficient",
-			instruction: "Do `a` and `b` say enough about the cited place to tell whether they contradict?",
+			instruction:
+				"Do `a.summary` and `b.summary` each make a concrete claim about behavior at the shared location in `cite`?",
 			criteria: {
 				true: "Each states its claim about the cited place.",
 				false: "One of the claims is vague about the place.",

@@ -92,6 +92,16 @@ describe("reduced tool output in continuous chat", () => {
 		expect(evidence).toContain("3 lines omitted. No session file recorded.");
 	});
 
+	it("advertises only admitted lookup operations on restricted surfaces", () => {
+		const host = {
+			resolveTool: () => undefined,
+			admit: async () => ({ kind: "refused" as const, reason: "unavailable" }),
+		};
+		const surface = (names: string[]) => createLookupToolDefinition(host, names).parameters.properties.requests.items;
+		expect(surface(["read"])).toMatchObject({ anyOf: [{ required: ["read"] }, { required: ["list"] }] });
+		expect(surface(["grep"])).toMatchObject({ required: ["search"] });
+	});
+
 	it("persists the lookup's own cut and only the finalized producer evidence", async () => {
 		const source = Array.from({ length: 1800 }, (_, i) => `source ${100 + i} abcdefghijklmnop`).join("\n");
 		const lookup = wrapToolDefinition(

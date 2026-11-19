@@ -15,6 +15,7 @@ import {
 	type EditDiffError,
 	type EditDiffResult,
 	type EditMatchPlan,
+	editEndingNotice,
 	generateDiffString,
 	generateUnifiedPatch,
 	normalizeToLF,
@@ -774,7 +775,7 @@ function buildEditToolDefinition(
 								type: "text",
 								// Name the codec in the answer: a byte-preserving edit through a resolved encoding
 								// is a different guarantee from a plain UTF-8 write, and the reader must see it.
-								text: `Successfully replaced ${edits.length} block(s) in ${path}. The changed region now reads (new-file line numbers; no need to read it back):\n${boundedDiffForModel(diffResult.diff)}\nTo copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.${
+								text: `Successfully replaced ${edits.length} block(s) in ${path}. The changed region now reads (new-file line numbers; no need to read it back):\n${boundedDiffForModel(diffResult.diff)}${editEndingNotice(baseContent, newContent)}\nTo copy these exact bytes to a different new path, call write once for that path with contentRef ${contentReference.contentRef}.${
 									completedRound.encodingRecovery
 										? `\n[edited through the python codec as ${completedRound.encodingRecovery.encoding} (${completedRound.encodingRecovery.source})]`
 										: ""

@@ -110,6 +110,21 @@ export function getLastFffLoadError(): string | undefined {
 	return lastFffLoadError;
 }
 
+// The native loader reads glibcVersionRuntime from a synchronous Node diagnostic report. Resolving
+// every open provider socket in that report can block all concurrent turns. Restore the caller's
+// report configuration as soon as require returns, including when the binding fails to load.
+function requireFffBinding(load: ModuleRequire, id: string): unknown {
+	const report = process.report;
+	if (process.platform !== "linux" || !report || !("excludeNetwork" in report) || report.excludeNetwork !== false)
+		return load(id);
+	report.excludeNetwork = true;
+	try {
+		return load(id);
+	} finally {
+		report.excludeNetwork = false;
+	}
+}
+
 function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 	if (!requireFff.resolve) return undefined;
 	try {
@@ -119,7 +134,7 @@ function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 			for (const candidateEntry of FFF_DIST_CANDIDATE_ENTRIES) {
 				const candidate = join(pkgDir, candidateEntry);
 				if (existsSync(candidate)) {
-					return requireFff(candidate);
+					return requireFffBinding(requireFff, candidate);
 				}
 			}
 		} catch {
@@ -127,7 +142,7 @@ function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 		}
 		const ffiPath = requireFff.resolve("ffi-rs");
 		const fffEntry = findFffNodeDistEntry(ffiPath);
-		return fffEntry ? requireFff(fffEntry) : undefined;
+		return fffEntry ? requireFffBinding(requireFff, fffEntry) : undefined;
 	} catch (error) {
 		return recordFffLoadError(error);
 	}
@@ -135,7 +150,7 @@ function loadFffNodeDistEntry(requireFff: ModuleRequire): unknown | undefined {
 
 function loadFffNodeWith(requireFff: ModuleRequire): unknown | undefined {
 	try {
-		return requireFff("@ff-labs/fff-node");
+		return requireFffBinding(requireFff, "@ff-labs/fff-node");
 	} catch (error) {
 		// bun --compile cannot resolve the bare specifier from an external node_modules tree even
 		// when createRequire is rooted at the managed package.json. Keep this error only if the
@@ -160,7 +175,7 @@ export function loadFffNodeFromManagedInstall(managedToolsDirectory: string = ge
 		const candidate = join(packageDir, candidateEntry);
 		if (!existsSync(candidate)) continue;
 		try {
-			const loaded = createRequire(candidate)(candidate);
+			const loaded = requireFffBinding(createRequire(candidate), candidate);
 			lastFffLoadError = undefined;
 			return loaded;
 		} catch (error) {

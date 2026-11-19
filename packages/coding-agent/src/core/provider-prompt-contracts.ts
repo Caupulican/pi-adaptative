@@ -366,7 +366,14 @@ export function buildWorkerSystemPrompt(capabilities: {
 		"Durable worker; use tools; host enforces grant.",
 		WORKER_DECISION_RIGHTS_RULE,
 		...(capabilities.write
-			? ["Write/edit tools and actions are path-scoped; touch only that scope."]
+			? [
+					"Read the named targets, then use write/edit for the requested changes inside that scope.",
+					...(!capabilities.process
+						? [
+								"Verify the changed source against the acceptance conditions using the edit result or a targeted read. Report that inspection in findings and leave command checks empty. If executing a check is required, tell the parent which check remains.",
+							]
+						: []),
+				]
 			: ["The workspace tools are read-only; do not claim file changes."]),
 		...(capabilities.process
 			? [

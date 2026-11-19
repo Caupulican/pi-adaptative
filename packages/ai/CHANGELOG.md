@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Compatible follow-up requests reuse accepted conversation and tool prefixes, including when an interrupted worker sends its closing report.
+
 ## [0.104.70] - 2026-11-18
 
 ### Fixed

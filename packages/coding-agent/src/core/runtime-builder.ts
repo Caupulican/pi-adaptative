@@ -2049,15 +2049,15 @@ export class RuntimeBuilder {
 			// admission, so it is offered only where at least one of those tools is allowed; a kind whose tool is
 			// withheld refuses at the request.
 			const admitNestedToolCall = this.deps.admitNestedToolCall;
-			if (
-				admitNestedToolCall &&
-				toolAccess.allows(LOOKUP_TOOL_NAME) &&
-				LOOKUP_SUB_TOOL_NAMES.filter((name) => toolAccess.allows(name)).length > 0
-			) {
-				const lookupToolDefinition: ToolDef = createLookupToolDefinition({
-					resolveTool: (name) => this._toolRegistry.get(name),
-					admit: admitNestedToolCall,
-				});
+			const lookupTools = LOOKUP_SUB_TOOL_NAMES.filter((name) => toolAccess.allows(name));
+			if (admitNestedToolCall && toolAccess.allows(LOOKUP_TOOL_NAME) && lookupTools.length) {
+				const lookupToolDefinition: ToolDef = createLookupToolDefinition(
+					{
+						resolveTool: (name) => this._toolRegistry.get(name),
+						admit: admitNestedToolCall,
+					},
+					lookupTools,
+				);
 				this._baseToolDefinitions.set(LOOKUP_TOOL_NAME, lookupToolDefinition);
 			}
 			if (toolAccess.allows("ask_question")) {

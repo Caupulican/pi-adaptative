@@ -43,6 +43,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Task steps](task-steps.md) - native session checklist, slash commands, persistence, and delegation migration.
 - [Plans](plans.md) - the root's whole decomposition of a goal as steps and joins, run by the harness, shown in the work panel, `/status` and `/plan`.
 - [Task directories](task-directories.md) - multiple projects, persistent task pins, status pages, and explicit reattachment.
+- [Coding evaluation](coding-evaluation.md) - compare direct coding and automatic delegation on matched tasks.
 - [Work lifecycle](work-lifecycle.md) - canonical five-phase Survey-to-delivery contract, adaptive solo/team routing, verification, and checkpoint boundaries.
 - [Native Python](python.md) - uv-managed bounded Python execution, provisioning, output limits, and cross-platform file guidance.
 - [Managed data tools](managed-data-tools.md) - pinned rg, jq, and Rust jscpd provisioning without project files.

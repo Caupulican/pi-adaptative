@@ -3,14 +3,25 @@
 ### Added
 
 - `delegate handoff` moves unfinished work to a requested model. The successor keeps the task, permissions, budget history and uncommitted files. The root can continue after admission and inspect the transfer with `delegate status`.
+- From the source checkout, `npm run eval:coding` compares direct work with automatic delegation on independently graded coding tasks. It reports first-pass acceptance, correction turns, elapsed time, worker outcomes, and API-equivalent cost. Live trials and pinned-worker probes are opt-in.
 
 ### Fixed
 
+- On Linux, loading the native file finder skips socket lookups during its libc check. Concurrent provider turns can continue without waiting on those lookups. Failed worktree land checks now return the captured gate diagnostic, and edit receipts show changes to multiple trailing line breaks.
+- The final-answer verifier recognizes files integrated by a successful worktree landing, typed lane commits and the configured landing check.
+- Workers receive their admitted edit paths and can check file-only changes by inspection. Assignments can carry exact requirements in a separate context field. Worker file searches use installed tools when their grant lacks network access.
+- Adaptive routing offers a candidate’s supported effort preset to the route judge, including Flash Low. Deep assignments can select a higher admitted preset from the same Gemini family.
+- Plan coverage notes and cycle-checked scheduling decisions use the advisory confidence band. Context attachment and vote sufficiency retain their orchestration threshold.
+- A worker started by a scoped SDK owner inherits the session's read and write limits. Its batch lookup lists the operations available in its lane.
+- Planning judgments receive the task and result fields they compare. Vote evidence judgments receive every criterion, and the calibration report counts candidates with sufficient evidence.
+- The plan evaluator counts uncertain and unanswered graph judgments as misses. Its optional JSON file retains the graph, settled-result and vote scores along with the model answers.
 - Reopening a parent with a pending worker report now waits for tool registration before sending its first model request.
 - Interrupted workers append the report request to their conversation and reuse eligible provider history. The closing response cannot execute tools.
 - Workers can copy the recorded file path from a successful edit or write and cite a command result by its receipt ID in their completion report. The host checks the recorded command and exit outcome.
 - Continuous chat can keep the previous model request intact when a worker hands its result back to the same session. The handoff adds the visible work-report rows and their zoom references.
 - Worker report reviews now show the paths recorded for the current attempt and explain how to correct a report without repeating a successful edit.
+- Phone tasks can retain their bot identity across retries and desktop shutdown. The daemon owns unattended schedules and resumes unapplied results from paired machines after restart.
+- Shared-checkout worker reviews flag uncertain peer writes. Paired-machine enrollment rejects unfilled host placeholders.
 
 ## [0.104.70] - 2026-11-18
 

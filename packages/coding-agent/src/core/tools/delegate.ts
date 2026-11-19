@@ -71,6 +71,7 @@ import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer
 import { hasRolePins, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
+import { WORKER_BRIEF_GUIDANCE } from "./assign-tool-name.ts";
 import {
 	createDelegateEventParameterSchemas,
 	DELEGATE_EVENT_ACTIONS,
@@ -236,8 +237,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			instructions: Type.Optional(
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
-					description:
-						"Free-text leaf-worker task, the alternative to goal (send exactly one). Workers run no tests, test files or test runs unless the task says the owner asked.",
+					description: `Free-text leaf-worker task, the alternative to goal (send exactly one). ${WORKER_BRIEF_GUIDANCE} Workers run no tests unless the task says the owner asked.`,
 				}),
 			),
 			goal: Type.Optional(
