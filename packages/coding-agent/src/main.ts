@@ -1,8 +1,7 @@
 /**
  * Main entry point for the coding agent CLI.
  *
- * This file handles CLI argument parsing and translates them into
- * createAgentSession() options. The SDK does the heavy lifting.
+ * Parses CLI arguments into createAgentSession() options.
  */
 
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
@@ -10,7 +9,7 @@ import type { Api, Model } from "@caupulican/pi-ai/types";
 import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import { type AppMode, type Args, type Mode, parseArgs, printHelp, resolveAppMode } from "./cli/args.ts";
-import { handleAuthCommand } from "./cli/auth-check.ts";
+import { handleAuthCommand, refreshStaleModelCatalogs } from "./cli/auth-check.ts";
 import { runCollaborationPeer } from "./cli/collaboration-peer.ts";
 import { runCollaborationWorker } from "./cli/collaboration-worker.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
@@ -804,6 +803,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
 	const authStorage = AuthStorage.create();
+	if (!offlineMode && !parsed.help) await refreshStaleModelCatalogs(authStorage);
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,

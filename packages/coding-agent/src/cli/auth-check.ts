@@ -51,6 +51,16 @@ export function parseAuthCheckArgs(args: string[]): AuthCheckOptions {
 	return options;
 }
 
+/** Upgrade stored, provider-owned model catalogs before CLI model selection on an online launch. */
+export async function refreshStaleModelCatalogs(storage: AuthStorage): Promise<void> {
+	for (const provider of storage.getOAuthProviders()) {
+		const stored = storage.get(provider.id);
+		if (!provider.modifyModels || stored?.type !== "oauth" || !provider.needsRefresh?.(stored)) continue;
+		const report = await checkProviderAuth(provider.id, storage, {});
+		if (report.error) console.error(`Could not refresh the ${provider.id} model catalog. Using cached models.`);
+	}
+}
+
 export async function checkProviderAuth(
 	provider: string,
 	authStorage: AuthStorage,
@@ -71,10 +81,13 @@ export async function checkProviderAuth(
 
 		if (stored.type === "oauth") {
 			let credential = stored;
-			const metadataStale = getOAuthProvider(provider)?.needsRefresh;
+			const oauthProvider = getOAuthProvider(provider);
 			let tokenRefreshed = false;
 			let error: string | undefined;
-			if (!options.noRefresh && (credential.expires - Date.now() < 5 * 60_000 || metadataStale?.(credential))) {
+			if (
+				!options.noRefresh &&
+				(credential.expires - Date.now() < 5 * 60_000 || oauthProvider?.needsRefresh?.(credential))
+			) {
 				try {
 					const apiKey = await authStorage.getOAuthApiKey(provider);
 					const current = authStorage.get(provider);
@@ -82,7 +95,8 @@ export async function checkProviderAuth(
 					else {
 						tokenRefreshed = current.access !== credential.access || current.expires !== credential.expires;
 						credential = current;
-						if (metadataStale?.(current)) error = "Provider account metadata could not be refreshed";
+						if (oauthProvider?.needsRefresh?.(current))
+							error = "Provider account metadata could not be refreshed";
 					}
 				} catch (err) {
 					error = err instanceof Error ? err.message : String(err);
