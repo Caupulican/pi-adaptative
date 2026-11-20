@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- You can send a new prompt while workers or background tools run. The terminal shows how many workers are running or queued and how many background tools are active.
+
 ## [0.104.71] - 2026-11-19
 
 ### Added
