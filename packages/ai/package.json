@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-ai",
-	"version": "0.104.71",
+	"version": "0.104.72",
 	"private": true,
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
