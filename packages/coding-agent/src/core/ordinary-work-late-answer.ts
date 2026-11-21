@@ -7,6 +7,7 @@
 import { assistantAnswerTextParts } from "../kernel/assistant-answer.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { OrdinaryWorkRecord } from "./ordinary-work-store.ts";
+import { awaitsLaunchedWork } from "./ordinary-work-wait.ts";
 import { entryTurnOrigin, isDecisiveOrigin, isHostContextEntry } from "./turn-origin.ts";
 
 /** What one model call of the request's later turns cost, by the model that made it. */
@@ -36,7 +37,9 @@ export function readOrdinaryLateAnswer(
 	afterEntryId: string,
 ): OrdinaryLateAnswer {
 	if (!record) return { state: "none", spend: [] };
-	if (record.status === "active" || record.status === "waiting") return { state: "pending" };
+	// A request held because its worker kept it waiting past every check still settles when that worker reports.
+	if (record.status === "active" || record.status === "waiting" || awaitsLaunchedWork(record))
+		return { state: "pending" };
 	const read = turns();
 	const start = read.findIndex((entry) => entry.id === afterEntryId);
 	if (start === -1) return { state: "none", spend: [] };

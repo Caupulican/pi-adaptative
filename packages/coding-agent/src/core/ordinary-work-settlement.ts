@@ -13,7 +13,7 @@ import {
 	ORDINARY_WORK_MAX_CONTINUATIONS,
 	type OrdinaryWorkStopEvidence,
 } from "./ordinary-work-policy.ts";
-import { ORDINARY_WORK_WORKER_WAIT_MS } from "./ordinary-work-wait.ts";
+import { awaitsLaunchedWork, ORDINARY_WORK_WORKER_WAIT_MS } from "./ordinary-work-wait.ts";
 import { ownerRequestForJudge } from "./security/owner-paste-boundary.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { withinPlanRequestBound } from "./system-one/plan-request-bound.ts";
@@ -45,11 +45,12 @@ export async function reviewOrdinaryWork(
 	if (signal.aborted || !mayDispatch()) return;
 	const evidence = work.evidence(expected);
 	if (!evidence) return;
-	if (expected.status === "waiting" && expected.reason !== "waiting") return;
+	const awaiting = awaitsLaunchedWork(expected);
+	if (expected.status === "waiting" && !awaiting) return;
 	const { reports, fresh } = ordinaryCompletionReports(evidence);
 	// A request waiting on work it launched is reviewed for new evidence, or once its wait on that work ran out.
 	const waitExpired = expected.status === "waiting" && work.workerWaitExpired(evidence);
-	if (!fresh && ((expected.status === "waiting" && !waitExpired) || options.requireFreshCompletion)) return;
+	if (!fresh && ((awaiting && !waitExpired) || options.requireFreshCompletion)) return;
 	const tail = evidence.messages.at(-1);
 	const terminal = tail?.role === "assistant" ? tail : undefined;
 	const answer = !options.missingFinal && terminal?.stopReason === "stop" ? terminal : undefined;

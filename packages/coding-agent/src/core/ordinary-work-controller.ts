@@ -27,6 +27,7 @@ import {
 	ordinaryWorkIsTerminal,
 } from "./ordinary-work-store.ts";
 import {
+	awaitsLaunchedWork,
 	ORDINARY_WORK_WAIT_RECHECK_MS,
 	ordinaryWorkerWaitDeadline,
 	pendingLaunchedAttempts,
@@ -659,7 +660,7 @@ export class OrdinaryWorkController {
 			(current?.status === "unverified" && current.reason === "process_interrupted")
 		)
 			return this.evidence(current);
-		if (current?.status === "waiting" && current.reason === "waiting") {
+		if (current && awaitsLaunchedWork(current)) {
 			const evidence = this.evidence(current);
 			if (!evidence) return undefined;
 			if (ordinaryCompletionReports(evidence).fresh || this.workerWaitExpired(evidence)) return evidence;

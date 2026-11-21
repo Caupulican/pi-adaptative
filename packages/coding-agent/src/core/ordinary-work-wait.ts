@@ -14,6 +14,17 @@ import {
 } from "./orchestration/task-runtime-state.ts";
 import type { OrdinaryWorkRecord } from "./ordinary-work-store.ts";
 
+/**
+ * A request still waiting on work it launched: waiting for it, or held for the owner once its automatic checks on that
+ * work ran out. Either reopens when the work reports.
+ */
+export function awaitsLaunchedWork(record: Pick<OrdinaryWorkRecord, "status" | "reason">): boolean {
+	return (
+		(record.status === "waiting" && record.reason === "waiting") ||
+		(record.status === "owner_needed" && record.reason === "worker_wait_exhausted")
+	);
+}
+
 /** The same bound as a goal's never-hang wait on a bound worker. */
 export const ORDINARY_WORK_WORKER_WAIT_MS = DEFAULT_GOAL_WORKER_WAIT_MS;
 

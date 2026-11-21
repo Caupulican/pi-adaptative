@@ -903,7 +903,8 @@ That wait is bounded like a goal's wait on a bound worker: 60 minutes after the 
 the latest retry a pending attempt was given, so a worker waiting out a usage reset is not checked on early. When the
 bound passes, that host fact spends one of the three continuations on a turn that checks the worker and cancels it,
 redirects it or keeps waiting. A request that keeps waiting is bounded again from then. With no continuation left it
-is held as `owner_needed` with reason `worker_wait_exhausted`.
+is held as `owner_needed` with reason `worker_wait_exhausted`; that request still reopens for review when the worker
+reports, and a phone chat waiting on its final answer still receives it then.
 A decisive actionable disposition and a soft-pass or hard-pass `report_ready` answer select an
 answer-only review using the shared gating bands. If the actionable disposition is decisive, report
 readiness is ambiguous and overall evidence earns a soft pass, Pi records `report_review_needed`.
