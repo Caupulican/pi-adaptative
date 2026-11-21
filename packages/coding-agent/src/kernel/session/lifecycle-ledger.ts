@@ -730,11 +730,20 @@ function resultForRecord(record: SessionLifecycleToolRecord): SessionLifecycleTo
 	return record.result ?? record.results[0];
 }
 
+/**
+ * Inspect the lifecycle receipts of `entries`. When they are a slice that starts mid-branch (one request's turns),
+ * `precedes(id)` tells whether an entry lies on the branch before the slice: a compaction in the slice may keep a tail
+ * that starts there, and that reference is sound, not dangling.
+ */
 export function inspectSessionLifecycle(
 	entries: readonly SessionEntry[],
 	leafId?: string | null,
+	precedes?: (entryId: string) => boolean,
 ): SessionLifecycleInspection {
 	const index = indexSessionLifecycle(entries, leafId);
+	// An entry before the slice sits before every entry of it.
+	const keptPosition = (entryId: string): number | undefined =>
+		index.entryPositions.get(entryId) ?? (precedes?.(entryId) ? -1 : undefined);
 	const duplicateRequestSnapshots: RequestSnapshotEntry[] = [];
 	const requestIds = new Set<string>();
 	const snapshotsByRequest = new Map<string, RequestSnapshotEntry>();
@@ -883,7 +892,7 @@ export function inspectSessionLifecycle(
 		if (!record.start && record.end) unmatchedCompactionEnds.push(record.end);
 		if (record.start) {
 			const startPosition = index.entryPositions.get(record.start.id);
-			const firstKeptPosition = index.entryPositions.get(record.start.firstKeptEntryId);
+			const firstKeptPosition = keptPosition(record.start.firstKeptEntryId);
 			if (firstKeptPosition === undefined || startPosition === undefined || firstKeptPosition >= startPosition) {
 				invalidCompactionReferences.push(compactionId);
 			}
@@ -896,9 +905,7 @@ export function inspectSessionLifecycle(
 					? index.entriesById.get(record.end.compactionEntryId)
 					: undefined;
 				const finalFirstKeptPosition =
-					compactionEntry?.type === "compaction"
-						? index.entryPositions.get(compactionEntry.firstKeptEntryId)
-						: undefined;
+					compactionEntry?.type === "compaction" ? keptPosition(compactionEntry.firstKeptEntryId) : undefined;
 				if (
 					!record.end.compactionEntryId ||
 					index.entryTypes.get(record.end.compactionEntryId) !== "compaction" ||

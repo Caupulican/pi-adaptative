@@ -525,7 +525,22 @@ export class OrdinaryWorkController {
 			return ownerAuthority;
 		});
 		if (!ownerAuthority || entries[0]?.id !== opening.id) return undefined;
-		const lifecycle = inspectSessionLifecycle(entries);
+		// The request's turns start mid-branch: a compaction among them may keep a tail that starts before its opening.
+		let earlier: Set<string> | undefined;
+		const lifecycle = inspectSessionLifecycle(entries, undefined, (entryId) => {
+			if (!earlier) {
+				earlier = new Set();
+				const ids = earlier;
+				visitSessionAncestry(
+					manager.getEntry(opening.id),
+					{ size: manager.getEntryCount(), get: (id) => manager.getEntry(id) },
+					(entry) => {
+						if (entry.id !== opening.id) ids.add(entry.id);
+					},
+				);
+			}
+			return earlier.has(entryId);
+		});
 		const unresolvedToolCallIds = [
 			...lifecycle.unknownToolOutcomes.map((entry) => entry.callId),
 			...lifecycle.unmatchedToolStarts.map((entry) => entry.callId),
