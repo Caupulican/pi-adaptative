@@ -24,6 +24,7 @@
 - A phone request that was answered with an acknowledgement while its worker ran now sends its final answer to the same chat when the request settles. The answer uses the usual reply and draft rules, and it is never sent twice.
 - A message sent while a request waits on its worker joins that request instead of leaving it waiting forever. The worker's result settles it, and the final answer goes to the chat of the latest message.
 - A request taken over by an explicit goal settles when the goal completes or is cancelled, instead of waiting forever. A phone request that started the goal then receives the goal's final answer.
+- A phone request whose final answer arrives after an acknowledgement now counts the metered spend of its later turns against the owner pool's daily bound. Until the request settles, it holds the per-turn reservation.
 - A request no longer waits unseen on a worker that stops reporting. After 60 minutes, or 60 minutes after the worker's scheduled retry, one automatic continuation checks the worker. When no continuation is left, the request asks the owner.
 
 ## [0.104.72] - 2026-11-20

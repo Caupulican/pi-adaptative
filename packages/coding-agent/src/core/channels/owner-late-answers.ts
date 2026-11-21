@@ -3,9 +3,10 @@
  * answered while its request still worked (a worker it launched kept it waiting) records the entry of that answer; once
  * the hosting session reports the request settled, its final answer goes to the same chat through the owner reply path.
  * The mark is cleared before the send, as a reply is marked replied before it is sent: a crash loses the late answer
- * rather than sending it twice. It owns that mark and nothing else of the journal.
+ * rather than sending it twice. The same update adds what the request's later turns spent to the batch, so the owner pool
+ * holds the whole request. It owns that mark and that spend and nothing else of the journal.
  */
-import type { OrdinaryLateAnswer } from "../ordinary-work-late-answer.ts";
+import type { OrdinaryLateAnswer, OrdinaryLateSpend } from "../ordinary-work-late-answer.ts";
 import type { ChannelBatchRecord, ChannelJournal } from "./channel-journal.ts";
 import type { OwnerChannelControl } from "./owner-channel-types.ts";
 
@@ -18,6 +19,8 @@ export interface LateAnswerPass {
 	readonly sessionId: string;
 	/** The hosting session's control handle; absent or unreadable while its session is replaced. */
 	control(): OwnerChannelControl | undefined;
+	/** The metered dollars of later model calls, as a turn's own spend is counted (`batch-outcome.ts`). */
+	meteredUsd(spend: readonly OrdinaryLateSpend[]): number;
 }
 
 /**
@@ -64,10 +67,12 @@ export async function routeLateAnswers(
 			continue;
 		const late = readLateAnswer(pass, batch.id, after);
 		if (!late || late.state === "pending") continue;
+		const usd = pass.meteredUsd(late.spend);
 		const claimed = pass.journal.update(pass.now, (state) => {
 			const current = state.batches.find((entry) => entry.id === batch.id);
 			if (current?.state !== "replied" || current.lateAnswerAfter !== after) return false;
 			delete current.lateAnswerAfter;
+			if (usd > 0) current.usd = (current.usd ?? 0) + usd;
 			return true;
 		}).result;
 		if (claimed && late.state === "ready") await send(batch, late.text);

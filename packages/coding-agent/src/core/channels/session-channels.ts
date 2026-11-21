@@ -42,7 +42,7 @@ import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type AwayChannelServing, awayHostUnmetered, channelServedBy } from "./away-channels.ts";
-import type { BatchBranchSource, BatchOutcome } from "./batch-outcome.ts";
+import { type BatchBranchSource, type BatchOutcome, meteredSpendUsd } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelAwayUntold,
@@ -1952,6 +1952,7 @@ export class SessionChannels {
 			now: this.now(),
 			sessionId: this.sessionId(),
 			control: () => (ownerChannelWired(this.deps) ? this.deps.ownerControl?.() : undefined),
+			meteredUsd: (spend) => meteredSpendUsd(spend, this.deps.getModelRegistry?.()),
 		};
 	}
 

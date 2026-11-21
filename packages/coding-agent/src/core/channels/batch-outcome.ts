@@ -32,6 +32,14 @@ export interface BatchSpendBilling extends ModelBilling {
 	find(provider: string, modelId: string): Model<Api> | undefined;
 }
 
+/** What later model calls of an owner request cost in metered (API) spend (`meteredUsd` each). */
+export function meteredSpendUsd(
+	spend: readonly { readonly provider: string; readonly model: string; readonly usd: number }[],
+	billing: BatchSpendBilling | undefined,
+): number {
+	return spend.reduce((sum, call) => sum + meteredUsd(call.usd, call.provider, call.model, billing), 0);
+}
+
 /** What an assistant message cost in metered (API) spend: none when its model runs on a subscription (`isMeteredSpend`). */
 function meteredUsd(usd: number, provider: string, modelId: string, billing: BatchSpendBilling | undefined): number {
 	if (usd === 0 || !billing) return usd;
@@ -56,7 +64,10 @@ export type BatchOutcome =
 			readonly text: string;
 			readonly truncated?: true;
 			readonly usd: number;
-			/** The session entry of the answer: an owner request may owe its chat a later answer after it. */
+			/**
+			 * The last session entry this outcome read, the answer or a model call after it whose spend `usd` holds: an owner
+			 * request may owe its chat a later answer, and the spend of its later turns, after it.
+			 */
 			readonly entryId?: string;
 	  }
 	| { readonly kind: "unanswered"; readonly reason: UnansweredReason; readonly usd: number };
@@ -86,13 +97,16 @@ export function readBatchOutcome(
 	let usd = 0;
 	let sawCommentary = false;
 	let candidate: { text: string; truncated?: true; entryId?: string } | undefined;
+	let spentThrough: string | undefined;
 	let awaitingReservation = false;
 	let failedEntryId: string | undefined;
 	let retryRequestId: string | undefined;
 	let generation = 0;
 	let revision = 0;
 	const finish = (reason: UnansweredReason): BatchOutcome =>
-		candidate ? { kind: "answered", ...candidate, usd } : { kind: "unanswered", reason, usd };
+		candidate
+			? { kind: "answered", ...candidate, ...(spentThrough ? { entryId: spentThrough } : {}), usd }
+			: { kind: "unanswered", reason, usd };
 	for (let i = index + 1; i < branch.length; i++) {
 		const entry = branch[i];
 		if (!entry || isHostContextEntry(entry)) continue;
@@ -139,6 +153,7 @@ export function readBatchOutcome(
 		retryRequestId = undefined;
 		const message = entry.message;
 		usd += meteredUsd(message.usage?.cost?.total ?? 0, message.provider, message.model, billing);
+		if (entry.id) spentThrough = entry.id;
 		if (message.stopReason === "aborted") return finish("aborted");
 		if (generation > 0 && message.stopReason === "error") {
 			if (!entry.id) return finish("no_answer");

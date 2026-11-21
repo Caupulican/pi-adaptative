@@ -150,8 +150,8 @@ export interface OwnerChannelCharge extends RoutineAwayCharge {
 
 /**
  * What one owner turn charges its channel's owner pool for 24 hours after it was accepted: the larger of the per-turn
- * bound and its recorded spend while it runs, and its recorded spend once settled, answered or not (a turn the owner
- * stopped costs what it spent, not a whole per-turn bound).
+ * bound and its recorded spend while it runs (or its request still works toward a late answer), and its recorded spend
+ * once settled, answered or not (a turn the owner stopped costs what it spent, not a whole per-turn bound).
  */
 function ownerBatchCharge(
 	channel: string,
@@ -163,7 +163,8 @@ function ownerBatchCharge(
 	const until = batch.acceptedAt + DAY_MS;
 	if (until <= now) return undefined;
 	const usd = batch.usd ?? 0;
-	const charged = batch.state === "accepted" ? Math.max(maxUsdPerTurn, usd) : usd;
+	const running = batch.state === "accepted" || batch.lateAnswerAfter !== undefined;
+	const charged = running ? Math.max(maxUsdPerTurn, usd) : usd;
 	return { pool: `owner:${channel}`, micros: awaySpendMicros(charged), until };
 }
 
