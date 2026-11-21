@@ -17,6 +17,7 @@ import { LIMITS_PATH, latestBatchResults, ORIGINAL_LIMITS, requestTexts } from "
 const LABEL = "worker-wait";
 const REQUEST = "Inspect the retry configuration and report the configured retry count.";
 const ANSWER = "The configured retry count in src/limits.ts is three.";
+const KEEP_WAITING = "Keep waiting for the worker.";
 const CHECK_ON_WORKER =
 	"A worker this request launched has not reported its result within 60 minutes. Check its progress, then cancel it, redirect it, or keep waiting for it, and say which. Do not redo its work while it still runs.";
 
@@ -133,7 +134,7 @@ export async function exerciseWorkerWaitBound(world: HarnessWorld): Promise<void
 		// is held again when that bound passes with no continuation left.
 		world.systemOne.enterPhase(`${LABEL}-keep-waiting`, {});
 		world.provider.enqueue("root", text(`${LABEL}-keep-waiting`, J9_ROOT_REPLY));
-		await wait("keep-waiting", session.prompt("Keep waiting for the worker."));
+		await wait("keep-waiting", session.prompt(KEEP_WAITING));
 		await wait("keep-waiting-idle", session.waitForForegroundIdle());
 		expect(rows(), "the owner's reply joins the held request instead of opening another").toEqual([
 			expect.objectContaining({ status: "waiting", reason: "waiting", continuationCount: 3 }),
@@ -180,7 +181,8 @@ export async function exerciseWorkerWaitBound(world: HarnessWorld): Promise<void
 		if (world.systemOne.enabled) {
 			expect(reviews, "one stop judgment, on the delivered answer").toHaveLength(1);
 			expect(reviews[0]?.state).toMatchObject({
-				request: REQUEST,
+				// The owner's reply to the hold joined the request, so the request judged is both of the owner's messages.
+				request: `${REQUEST}\n\n${KEEP_WAITING}`,
 				answer: ANSWER,
 				hostFacts: {
 					terminalStopReason: "stop",
