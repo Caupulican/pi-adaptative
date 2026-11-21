@@ -6,6 +6,7 @@ import { expect } from "vitest";
 import { SOUL_FILE_NAME } from "../../../../src/core/agent-identity.ts";
 import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { textContentPrefix } from "../../../../src/core/context/message-text.ts";
 import { defineTool } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
@@ -355,7 +356,8 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				const serialized = JSON.stringify(request.context);
 				expect(
 					request.context.messages.some(
-						(message) => message.role === "user" && JSON.stringify(message.content).includes(TASK_REQUEST),
+						// Matched on the text: JSON escapes the backslashes of a Windows path inside the request.
+						(message) => message.role === "user" && textContentPrefix(message.content).includes(TASK_REQUEST),
 					),
 					"the retained owner request reaches the post-compaction wire",
 				).toBe(true);
@@ -790,7 +792,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 				(entry) =>
 					entry.type === "message" &&
 					entry.message.role === "user" &&
-					JSON.stringify(entry.message.content).includes(TASK_REQUEST),
+					textContentPrefix(entry.message.content).includes(TASK_REQUEST),
 			),
 		"the task remains in the raw retained tail",
 	).toBe(true);
