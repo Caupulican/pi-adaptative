@@ -9,7 +9,7 @@
 
 import type { RoutineStatusItem, StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
 import type { ChannelServedBy } from "../../channels/away-channels.ts";
-import type { ChannelRuntimeState } from "../../channels/session-channels.ts";
+import type { ChannelRuntimeState } from "../../channels/channel-views.ts";
 import type { BotDaemonEnd } from "../../delegation/bot-team-routine-helpers.ts";
 import type { HostEventConnectionView } from "../../events/host-event-contract.ts";
 import type { KnowledgeCollectionInactiveReason } from "../../memory/knowledge-collector.ts";

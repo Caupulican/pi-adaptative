@@ -41,7 +41,7 @@ import { englishText, type InterfaceText, interfaceText } from "../language/inte
 import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
-import { type AwayChannelServing, awayHostUnmetered, type ChannelServedBy, channelServedBy } from "./away-channels.ts";
+import { type AwayChannelServing, awayHostUnmetered, channelServedBy } from "./away-channels.ts";
 import type { BatchBranchSource, BatchOutcome } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
@@ -82,6 +82,13 @@ import {
 	isValidChannelName,
 	type ResolvedChannelPolicy,
 } from "./channel-policy.ts";
+import type {
+	ChannelDraftView,
+	ChannelHeldSenderView,
+	ChannelJournalSummary,
+	ChannelRuntimeState,
+	ChannelStateView,
+} from "./channel-views.ts";
 import { JournalDirWatch } from "./journal-dir-watch.ts";
 import {
 	listedOwnerDigests,
@@ -117,6 +124,7 @@ import {
 	readOwnerControlStatus,
 	sendOwnerControlReply,
 } from "./owner-control.ts";
+import { type LateAnswerPass, oweLateAnswer, routeLateAnswers } from "./owner-late-answers.ts";
 import { OwnerMeteredMoves, type OwnerMoveRun } from "./owner-metered-moves.ts";
 import {
 	channelAwayNotice,
@@ -212,72 +220,6 @@ interface OwnerRun extends OwnerMoveRun {
 	accepted: boolean;
 	stopped: false | OwnerChannelStop;
 	unobserve?: () => void;
-}
-
-export type ChannelRuntimeState =
-	| "not_configured"
-	| "invalid"
-	| "ignored"
-	| "served_elsewhere"
-	| "starting"
-	| "armed"
-	| "suspended"
-	| "capped"
-	| "stopped";
-
-/** The read-only view of one registered channel. */
-export interface ChannelStateView {
-	readonly name: string;
-	readonly state: ChannelRuntimeState;
-	readonly detail?: string;
-}
-
-/** One channel's daily bounds used, and what its journal holds undelivered. */
-export interface ChannelJournalSummary {
-	readonly name: string;
-	/** Turns delivered in the last 24 hours against `maxWakesPerDay`. */
-	readonly wakes: { readonly used: number; readonly max: number };
-	/** Metered (API) dollars the channel's turns cost in the last 24 hours against `maxUsdPerDay`. */
-	readonly spendUsd: { readonly used: number; readonly max: number };
-	readonly pendingMessages: number;
-	readonly pendingDrafts: number;
-	/** Messages held back (unverified, not allowlisted, or a burst) since the journal began. */
-	readonly heldTotal: number;
-	readonly gaps: number;
-	/** Who serves the channel now, by its journal: this session, the daemon (no session open), another session, nobody. */
-	readonly servedBy: ChannelServedBy;
-	/** Reply drafts the daemon wrote while no session was open that still wait for the owner. */
-	readonly awayDrafts: number;
-	/**
-	 * Dollars the channel's owner pool holds over the last 24 hours against `ownerMaxUsdPerDay` (`owner-channel.ts`);
-	 * only while the policy lists owner senders.
-	 */
-	readonly ownerSpendUsd?: { readonly used: number; readonly max: number };
-	/** Present while the policy lists owner senders and sets `ownerAuthority: "full"`. */
-	readonly ownerFullAuthority?: true;
-	/** Present while the dollar bounds are lifted: the highest usage window of the subscription, in percent. */
-	readonly ownerQuotaUsedPercent?: number;
-}
-
-/** One reply draft as the owner's release tool lists it. */
-export interface ChannelDraftView {
-	readonly id: string;
-	readonly channel: string;
-	readonly reason: string;
-	readonly createdAt: string;
-	readonly text: string;
-	/**
-	 * `waiting`: nothing claimed it. `sending`: a settle is sending it now. `unknown`: a send was claimed and its session
-	 * ended before it recorded the outcome, so the message may or may not have reached its conversation.
-	 */
-	readonly status: "waiting" | "sending" | "unknown";
-}
-
-/** A verified, not allowlisted sender whose id the sender chose, as the owner's release tool lists it (fenced). */
-export interface ChannelHeldSenderView {
-	readonly channel: string;
-	readonly id: string;
-	readonly heldAt: string;
 }
 
 /** What a session exposes: a deployment wrapper registers providers and reads their states; it never starts them. */
@@ -1142,6 +1084,9 @@ export class SessionChannels {
 				if (runtime.holding) this.ownerNotice(name, policy);
 				const state = this.journal(name).read().result;
 				const waiting = await this.routeReplies(name, policy, state.batches);
+				await routeLateAnswers(this.latePass(name), state.batches, (batch, text) =>
+					this.sendOwnerAnswer(name, policy, batch, text, 0, "replied"),
+				);
 				if (!runtime.holding || !policy) {
 					if (!waiting && !runtime.offering) runtime.draining = false;
 					continue;
@@ -1885,7 +1830,9 @@ export class SessionChannels {
 
 	/**
 	 * Keep a turn's answer as a draft for `draftReason`, or when it cannot be sent as is; otherwise mark the batch replied
-	 * and send it, keeping it as a draft when sending fails. Whether it was kept as a draft without being sent.
+	 * and send it, keeping it as a draft when sending fails. A late answer (`from` replied) was claimed before, by its
+	 * cleared mark (`owner-late-answers.ts`). Drafted: kept as a draft without being sent; unsent: another pass settled the
+	 * batch, or the send failed and left a draft.
 	 */
 	private async deliverReply(
 		name: string,
@@ -1894,16 +1841,17 @@ export class SessionChannels {
 		usd: number,
 		provider: ChannelProvider | undefined,
 		draftReason: string | undefined,
-	): Promise<boolean> {
+		from: "accepted" | "replied" = "accepted",
+	): Promise<"sent" | "drafted" | "unsent"> {
 		const formatted = formatChannelReply(text, provider?.capabilities);
 		const reason =
 			draftReason ?? (formatted.ok ? undefined : `the reply is ${formatted.reason.replaceAll("_", " ")}`);
 		if (reason || !formatted.ok || !provider) {
-			this.keepDraft(name, batch, text, reason ?? "the channel is not running", usd);
-			return true;
+			this.keepDraft(name, batch, text, reason ?? "the channel is not running", usd, from);
+			return "drafted";
 		}
 		// Recorded before sending: a crash mid-send loses the reply rather than sending it twice.
-		if (!this.settleBatch(name, batch.id, "replied", usd, undefined)) return false;
+		if (from === "accepted" && !this.settleBatch(name, batch.id, "replied", usd, undefined)) return "unsent";
 		let accepted: readonly string[] = [];
 		try {
 			await sendReplyParts(provider, batch, formatted.parts, [], (digests) => {
@@ -1921,15 +1869,14 @@ export class SessionChannels {
 				? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
 				: undefined;
 			this.keepDraft(name, batch, text, said ? `sending failed: ${said}` : "sending failed", 0, "replied", accepted);
+			return "unsent";
 		}
-		return false;
+		return "sent";
 	}
 
 	/**
-	 * Settle an owner turn that ended. Its answer goes back to the owner's private chat whatever `replyMode` says, while
-	 * the channel still holds owner authority for that sender; it waits as a draft when the policy went, the authority
-	 * lapsed, the channel is not running or it cannot be sent as is, and when it looks like it holds a secret (the chat is
-	 * told it waits). Marked replied before it is sent, as every reply is.
+	 * Settle an owner turn that ended. An answer sent while the request still works (a worker it launched runs on) owes
+	 * the chat the request's final answer (`owner-late-answers.ts`).
 	 */
 	private async routeOwnerReply(
 		name: string,
@@ -1956,9 +1903,26 @@ export class SessionChannels {
 				);
 			return;
 		}
+		const delivery = await this.sendOwnerAnswer(name, policy, batch, outcome.text, outcome.usd, "accepted");
+		if (delivery === "sent" && outcome.entryId) oweLateAnswer(this.latePass(name), batch.id, outcome.entryId);
+	}
+
+	/**
+	 * An owner answer goes back to the owner's private chat whatever `replyMode` says, while the channel still holds owner
+	 * authority for that sender; it waits as a draft when the policy went, the authority lapsed, the channel is not running
+	 * or it cannot be sent as is, and when it looks like it holds a secret (the chat is told it waits).
+	 */
+	private async sendOwnerAnswer(
+		name: string,
+		policy: ResolvedChannelPolicy | undefined,
+		batch: ChannelBatchRecord,
+		text: string,
+		usd: number,
+		from: "accepted" | "replied",
+	): Promise<"sent" | "drafted" | "unsent"> {
 		const provider = this.registry.getChannel(name);
 		const ownerPolicy = this.ownerPolicy(name);
-		const secret = hasMaskableSecretText(outcome.text);
+		const secret = hasMaskableSecretText(text);
 		const draftReason = !policy
 			? "the channel's policy was removed"
 			: !ownerPolicy ||
@@ -1970,13 +1934,25 @@ export class SessionChannels {
 					: !provider || (this.runtime(name).state !== "armed" && this.runtime(name).state !== "capped")
 						? "the channel is not running"
 						: undefined;
-		const drafted = await this.deliverReply(name, batch, outcome.text, outcome.usd, provider, draftReason);
-		if (drafted && secret)
+		const delivery = await this.deliverReply(name, batch, text, usd, provider, draftReason, from);
+		if (delivery === "drafted" && secret)
 			void this.ownerPush.push(
 				name,
 				`held:${batch.id}`,
 				"Answer held: it looks like it contains a secret; read it at the terminal (channel_reply).",
 			);
+		return delivery;
+	}
+
+	/** The owed answers of `name`, read from the hosting session's control handle (`owner-late-answers.ts`). */
+	private latePass(name: string): LateAnswerPass {
+		return {
+			name,
+			journal: this.journal(name),
+			now: this.now(),
+			sessionId: this.sessionId(),
+			control: () => (ownerChannelWired(this.deps) ? this.deps.ownerControl?.() : undefined),
+		};
 	}
 
 	/**

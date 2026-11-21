@@ -18,6 +18,7 @@ import { getOwnerEvidenceSnapshots, isCompleteOwnerSource, type OwnerWords } fro
 import { modelTransferIsPending } from "./orchestration/model-transfer.ts";
 import { type TaskRuntimeProjection, terminalAttemptStatus } from "./orchestration/task-runtime-state.ts";
 import { ordinaryCompletionReports } from "./ordinary-work-completions.ts";
+import { type OrdinaryLateAnswer, readOrdinaryLateAnswer } from "./ordinary-work-late-answer.ts";
 import { ORDINARY_REPORTING_RESERVATION, type OrdinaryReportingRequirements } from "./ordinary-work-policy.ts";
 import {
 	ORDINARY_WORK_LOOKUP_BATCH,
@@ -134,6 +135,32 @@ export class OrdinaryWorkController {
 		} catch {
 			return { state: "unavailable", reason: "storage_unavailable" };
 		}
+	}
+
+	/**
+	 * What the request opened by owner batch `ref` of `channel` still owes that chat after the answer at `afterEntryId`
+	 * was sent (`ordinary-work-late-answer.ts`). Undefined when this session cannot tell: ordinary work is off or not
+	 * persisted, its store is not loaded, or the batch's opening is not on this session's branch.
+	 */
+	lateAnswer(channel: string, ref: string, afterEntryId: string): OrdinaryLateAnswer | undefined {
+		const manager = this.deps.getSessionManager();
+		if (!this.deps.isEnabled() || !manager.isPersisted()) return undefined;
+		const store = this.cachedStore ?? this.deps.peekStore?.();
+		if (!store) return undefined;
+		const branch = manager.getBranch();
+		const index = branch.findIndex((entry) => {
+			const origin = entryTurnOrigin(entry);
+			return origin?.k === "owner-channel" && origin.channel === channel && origin.ref === ref;
+		});
+		const opening = branch[index];
+		if (!opening) return undefined;
+		// Read with payloads, as the stop evidence is (a cold answer's text is not on the plain branch), and only from the
+		// sent answer on, once the request settled.
+		return readOrdinaryLateAnswer(
+			store.get(manager.getSessionId(), opening.id),
+			() => manager.getFullHistoryChainWithPayloads(undefined, afterEntryId),
+			afterEntryId,
+		);
 	}
 
 	private readCurrent(store = this.readStore(), includeTerminal = false): OrdinaryWorkRecord | undefined {

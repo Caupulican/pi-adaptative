@@ -4,7 +4,8 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { operationTextResult as result } from "../tools/operation-result.ts";
 import { digest } from "./channel-journal.ts";
 import { CHANNEL_REPLY_TOOL_NAME } from "./channel-tool-names.ts";
-import type { ChannelDraftView, SessionChannels } from "./session-channels.ts";
+import type { ChannelDraftView } from "./channel-views.ts";
+import type { SessionChannels } from "./session-channels.ts";
 
 const parameters = Type.Object(
 	{

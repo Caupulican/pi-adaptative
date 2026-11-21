@@ -21,6 +21,7 @@
 - An explicit `--extension` selection keeps its provider and commands when auto-discovery finds the same file.
 - Fresh OAuth sign-ins can be cancelled. A credential that cannot be saved stays usable for the current session and is marked session-only.
 - A request no longer counts as finished while a worker it started is still running. The request waits until that worker ends, including across a model handoff or restart, and is reviewed when the result arrives.
+- A phone request that was answered with an acknowledgement while its worker ran now sends its final answer to the same chat when the request settles. The answer uses the usual reply and draft rules, and it is never sent twice.
 
 ## [0.104.72] - 2026-11-20
 

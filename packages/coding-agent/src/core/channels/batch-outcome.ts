@@ -51,7 +51,14 @@ export type UnansweredReason =
 /** How a delivered batch's turn ended, read from the session branch. */
 export type BatchOutcome =
 	| { readonly kind: "waiting"; readonly usd: number }
-	| { readonly kind: "answered"; readonly text: string; readonly truncated?: true; readonly usd: number }
+	| {
+			readonly kind: "answered";
+			readonly text: string;
+			readonly truncated?: true;
+			readonly usd: number;
+			/** The session entry of the answer: an owner request may owe its chat a later answer after it. */
+			readonly entryId?: string;
+	  }
 	| { readonly kind: "unanswered"; readonly reason: UnansweredReason; readonly usd: number };
 
 /** The metered foreground answers to the stamped input, through any host-reserved revisions of that same opening. */
@@ -78,7 +85,7 @@ export function readBatchOutcome(
 	const billing = source.getModelRegistry?.();
 	let usd = 0;
 	let sawCommentary = false;
-	let candidate: { text: string; truncated?: true } | undefined;
+	let candidate: { text: string; truncated?: true; entryId?: string } | undefined;
 	let awaitingReservation = false;
 	let failedEntryId: string | undefined;
 	let retryRequestId: string | undefined;
@@ -141,7 +148,11 @@ export function readBatchOutcome(
 		if (message.stopReason !== "stop" && message.stopReason !== "length") continue;
 		const text = assistantAnswerTextParts(message).filter(Boolean).join("\n").trim();
 		if (text) {
-			candidate = message.stopReason === "length" ? { text, truncated: true } : { text };
+			candidate = {
+				text,
+				...(message.stopReason === "length" ? { truncated: true as const } : {}),
+				...(entry.id ? { entryId: entry.id } : {}),
+			};
 			if (!batch.owner) return finish("no_answer");
 			awaitingReservation = true;
 			continue;

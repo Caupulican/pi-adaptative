@@ -10,6 +10,7 @@ import type { MeteredMoveGate } from "../agent-session-model-access.ts";
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
 import type { OrdinaryWorkStatusSnapshot } from "../autonomy-status/ordinary-work.ts";
 import type { OrdinaryWorkAbortIntent } from "../ordinary-work-controller.ts";
+import type { OrdinaryLateAnswer } from "../ordinary-work-late-answer.ts";
 import type { SubscriptionAllowance } from "../provider-admission/subscription-allowance.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 
@@ -177,6 +178,11 @@ export interface OwnerWaitingView {
  */
 export interface OwnerChannelControl extends OwnerDraftDecisions {
 	ordinaryWork?(channel: string, ownsBatch: (sessionId: string, ref: string) => boolean): OrdinaryWorkStatusSnapshot;
+	/**
+	 * The final answer the request opened by owner batch `ref` of `channel` owes that chat after the answer at
+	 * `afterEntryId` was sent; undefined when the hosting session cannot tell.
+	 */
+	lateAnswer?(channel: string, ref: string, afterEntryId: string): OrdinaryLateAnswer | undefined;
 	/** Hears each draft the hosting session holds on a remote-owner run (to show it to the phone); returns the unsubscribe. */
 	onDraftHeld(listener: (view: OwnerDraftView) => void): () => void;
 	/**

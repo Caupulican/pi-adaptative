@@ -14,7 +14,7 @@ import { parentInputOriginalDetails } from "../../kernel/session/parent-input-le
 import { outwardDraftStates } from "../agent-session-edge.ts";
 import type { EdgeClass, EdgeGrantSource, EdgeGrantView } from "../autonomy/edge-policy.ts";
 import type { AwayChannelStatus } from "../channels/away-channels.ts";
-import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/session-channels.ts";
+import type { ChannelJournalSummary, ChannelRuntimeState, ChannelStateView } from "../channels/channel-views.ts";
 import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import type { SpendBilling } from "../cost/request-spend-budget.ts";
 import { type DaemonBotsOwed, OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";

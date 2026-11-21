@@ -345,6 +345,17 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 		successorGate.release();
 		await wait("successor", complete.promise);
 		await wait("root-idle", reopened.session.waitForForegroundIdle());
+		if (api) {
+			// The acknowledgement left the request waiting on its worker; its final answer follows to the same chat.
+			const isAnswer = (item: (typeof api.sent)[number]) => item.body.text === answer;
+			const lateAnswer = async () => {
+				while (!api.sent.some(isAnswer)) await api.nextSend();
+			};
+			await wait("owner-late-answer", lateAnswer());
+			expect(api.sent.filter(isAnswer).map((item) => item.body)).toEqual([
+				expect.objectContaining({ chat_id: String(OWNER_ID), text: answer }),
+			]);
+		}
 		const finished = fresh.getTaskRuntimeSnapshot()!;
 		expect(finished.attempts[source.attemptId]).toMatchObject({
 			status: "cancelled",

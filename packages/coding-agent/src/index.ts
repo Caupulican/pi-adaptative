@@ -56,11 +56,8 @@ export {
 export type { SessionAutonomyStatus, StatusSection } from "./core/autonomy-status/autonomy-status.ts";
 export { formatSessionAutonomyStatus } from "./core/autonomy-status/format.ts";
 export type { RunToolManifest, ToolDecision, ToolDecisionCode } from "./core/autonomy-status/tool-manifest.ts";
-export type {
-	ChannelRuntimeState,
-	ChannelStateView,
-	SessionChannelsView,
-} from "./core/channels/session-channels.ts";
+export type { ChannelRuntimeState, ChannelStateView } from "./core/channels/channel-views.ts";
+export type { SessionChannelsView } from "./core/channels/session-channels.ts";
 export { type ChatExtensionOptions, piChatExtension } from "./core/chat/extension.ts";
 export { type CollaborationExtensionOptions, piCollaborationExtension } from "./core/collaboration/extension.ts";
 export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";

@@ -108,6 +108,11 @@ export interface ChannelBatchRecord {
 	readonly senderDigest?: string;
 	/** The held draft this owner turn performs, approved from the owner's chat: at most one turn per draft. */
 	readonly approval?: string;
+	/**
+	 * The session entry of the answer this replied owner batch was sent while its request still worked: the request's
+	 * final answer after it is owed to the same chat (`owner-late-answers.ts`). Cleared before that answer is sent.
+	 */
+	lateAnswerAfter?: string;
 }
 
 /** A private chat an owner message was admitted from: where the owner's updates are pushed. */
@@ -298,7 +303,8 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 		(value.owner === undefined || value.owner === true) &&
 		(value.quota === undefined || value.quota === true) &&
 		(value.senderDigest === undefined || isString(value.senderDigest)) &&
-		(value.approval === undefined || isString(value.approval))
+		(value.approval === undefined || isString(value.approval)) &&
+		(value.lateAnswerAfter === undefined || (value.owner === true && isString(value.lateAnswerAfter)))
 	);
 }
 
@@ -473,8 +479,12 @@ export function isDraftOpen(draft: Pick<ChannelDraftRecord, "state">): boolean {
 function prune(state: ChannelJournalState, now: number): void {
 	state.seen = state.seen.filter((entry) => now - entry.at < SEEN_RETENTION_MS).slice(-MAX_SEEN);
 	state.held = state.held.slice(-MAX_HELD);
+	// An answer a request still owes its owner chat keeps its batch for a week, then is given up.
+	for (const batch of state.batches)
+		if (batch.lateAnswerAfter !== undefined && now - batch.acceptedAt >= SEEN_RETENTION_MS)
+			delete batch.lateAnswerAfter;
 	const settledBatches = state.batches.filter(
-		(batch) => batch.state !== "accepted" && now - batch.acceptedAt >= DAY_MS,
+		(batch) => batch.state !== "accepted" && batch.lateAnswerAfter === undefined && now - batch.acceptedAt >= DAY_MS,
 	);
 	const dropBatches = new Set(settledBatches.slice(0, Math.max(0, state.batches.length - MAX_BATCHES)));
 	state.batches = state.batches.filter((batch) => !dropBatches.has(batch));

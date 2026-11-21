@@ -12,7 +12,7 @@
 			"transport": "sendReplyParts(",
 			"enclosing": ["deliverReply"],
 			"count": 1,
-			"reason": "live reply: settleBatch marks the batch replied before the send, and a failed send keeps the answer as a draft"
+			"reason": "live reply: settleBatch marks the batch replied before the send (a late owner answer is claimed by clearing its owed mark first), and a failed send keeps the answer as a draft"
 		},
 		{
 			"file": "packages/coding-agent/src/core/routines/routine-intake.ts",
@@ -75,7 +75,7 @@
 			"transport": "provider.send(",
 			"enclosing": ["sendReplyParts"],
 			"count": 1,
-			"reason": "the part transport: its callers record the reply first (settleDraft claims the draft through claimThenEffect; deliverReply marks the batch replied before it sends); a draft send journals each accepted part before the next, and a live reply keeps the accepted parts with the draft it leaves on failure"
+			"reason": "the part transport: its callers record the reply first (settleDraft claims the draft through claimThenEffect; deliverReply marks the batch replied, or a late owner answer clears its owed mark, before it sends); a draft send journals each accepted part before the next, and a live reply keeps the accepted parts with the draft it leaves on failure"
 		},
 		{
 			"file": "packages/coding-agent/src/core/channels/owner-control.ts",

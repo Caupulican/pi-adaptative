@@ -41,7 +41,7 @@ const MAX_DRAFT_LISTENERS = 8;
 /** What the owner channel uses of the session: its submission path, its agent's events and abort, and its warnings. */
 export interface OwnerChannelSessionHost {
 	prompt(text: string, options?: PromptOptions): Promise<void>;
-	readonly ordinaryWork: Pick<OrdinaryWorkController, "onAbort" | "readStatus">;
+	readonly ordinaryWork: Pick<OrdinaryWorkController, "onAbort" | "readStatus" | "lateAnswer">;
 	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void; abort(reason: string): void };
 	/** The session's canonical work state: whether it works now, and why it rests when it does not. */
 	getSessionWorkState(): OwnerSessionWork;
@@ -133,6 +133,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 						origin.ref !== undefined &&
 						ownsBatch(sessionId, origin.ref),
 				),
+			lateAnswer: (channel, ref, afterEntryId) => this.host.ordinaryWork.lateAnswer(channel, ref, afterEntryId),
 			waiting: () => {
 				const shown = new Set(
 					decisions.drafts().flatMap((draft) => (isRemoteOwnerOrigin(draft.origin) ? [draft.id] : [])),
