@@ -15,8 +15,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { type OrdinaryWorkStatusSnapshot, ordinaryWorkStatusSnapshot } from "./autonomy-status/ordinary-work.ts";
 import { textContentPrefix } from "./context/message-text.ts";
 import { getOwnerEvidenceSnapshots, isCompleteOwnerSource, type OwnerWords } from "./learning/owner-evidence-ledger.ts";
-import { modelTransferIsPending } from "./orchestration/model-transfer.ts";
-import { type TaskRuntimeProjection, terminalAttemptStatus } from "./orchestration/task-runtime-state.ts";
+import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
 import { ordinaryCompletionReports } from "./ordinary-work-completions.ts";
 import { type OrdinaryLateAnswer, readOrdinaryLateAnswer } from "./ordinary-work-late-answer.ts";
 import { ORDINARY_REPORTING_RESERVATION, type OrdinaryReportingRequirements } from "./ordinary-work-policy.ts";
@@ -27,9 +26,15 @@ import {
 	type OrdinaryWorkStore,
 	ordinaryWorkIsTerminal,
 } from "./ordinary-work-store.ts";
+import {
+	ORDINARY_WORK_WAIT_RECHECK_MS,
+	ordinaryWorkerWaitDeadline,
+	pendingLaunchedAttempts,
+} from "./ordinary-work-wait.ts";
 import { isCompatibleOwnerSourceEntry, isOwnerSpokenInputId, type OwnerInputDelivery } from "./owner-input-ledger.ts";
 import { ownerRequestForJudge } from "./security/owner-paste-boundary.ts";
 import { entryTurnOrigin, isDecisiveOrigin } from "./turn-origin.ts";
+import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type TimerSource, type WallAlarm } from "./util/timer-port.ts";
 
 export type { OrdinaryWorkRecord, OrdinaryWorkStatus } from "./ordinary-work-store.ts";
 
@@ -73,6 +78,10 @@ interface OrdinaryWorkControllerDeps {
 	now?: () => number;
 	/** The durable task runtime, when this session has loaded one; the source of the launched-work fact. */
 	getTaskRuntimeSnapshot?(): TaskRuntimeProjection | undefined;
+	/** The session's timers: the `ordinary-work` clock stamps records and arms the wait alarm. */
+	timers?: TimerSource;
+	/** A request's wait on the work it launched ran out: review it now (`ordinary-work-wait.ts`). */
+	onWorkerWaitExpired?(): void;
 }
 
 export class OrdinaryWorkController {
@@ -83,6 +92,7 @@ export class OrdinaryWorkController {
 	private cachedStore: OrdinaryWorkStore | undefined;
 	private warnedUnavailableSession: string | undefined;
 	private storageReadFailed = false;
+	private waitAlarm: WallAlarm | undefined;
 	private anchor:
 		| {
 				manager: SessionManager;
@@ -478,6 +488,13 @@ export class OrdinaryWorkController {
 		}
 	}
 
+	/** The session closes: its wait alarm stops, and its work is released (`release`). */
+	dispose(): void {
+		this.waitAlarm?.stop();
+		this.waitAlarm = undefined;
+		this.release();
+	}
+
 	/** A graceful process close retains work and drops only this controller's lease. */
 	release(): void {
 		this.reportingReservation = undefined;
@@ -566,27 +583,47 @@ export class OrdinaryWorkController {
 	}
 
 	/**
-	 * How many worker attempts dispatched from this request's own turns have not reached a terminal status, read from the
-	 * durable task runtime by each attempt's receipt origin (a model-transfer successor inherits it). A suspended attempt
-	 * counts: every suspension (restart, retry, interrupt, model transfer) parks work its lane still owes. So does a source
-	 * a model transfer cancelled before its reserved successor was admitted. Undefined when the session has no task
-	 * runtime loaded: the count is then unknown, not zero.
+	 * How many worker attempts dispatched from this request's own turns still owe their result
+	 * (`pendingLaunchedAttempts`). Undefined when the session has no task runtime loaded: the count is then unknown, not
+	 * zero.
 	 */
 	pendingLaunchedWork(evidence: OrdinaryWorkEvidence): number | undefined {
 		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
+		return snapshot && pendingLaunchedAttempts(snapshot, evidence.record.sessionId, evidence.entries).length;
+	}
+
+	/** The request of `evidence` waits on work it launched and its wait has run out (`ordinary-work-wait.ts`). */
+	workerWaitExpired(evidence: OrdinaryWorkEvidence): boolean {
+		const deadline = this.workerWaitDeadline(evidence.record, evidence.entries);
+		return deadline !== undefined && this.now() >= deadline;
+	}
+
+	/**
+	 * Arm the one alarm for when `record`, waiting on the work its turns (`entries`) launched, runs out of wait. The alarm
+	 * asks for a review, and asks again every `ORDINARY_WORK_WAIT_RECHECK_MS` while the record has not moved (the session
+	 * could not review yet); a review that took moves it and ends the alarm.
+	 */
+	armWorkerWait(record: OrdinaryWorkRecord, entries: readonly SessionEntry[]): void {
+		this.waitAlarm?.stop();
+		this.waitAlarm = undefined;
+		const deadline = this.deps.onWorkerWaitExpired && this.workerWaitDeadline(record, entries);
+		if (deadline === undefined) return;
+		const clock = this.clock();
+		const fire = (): void => {
+			this.waitAlarm = undefined;
+			if (!this.deps.isEnabled() || !this.isCurrent(record)) return;
+			this.waitAlarm = alarmAt(clock, clock.now() + ORDINARY_WORK_WAIT_RECHECK_MS, fire);
+			this.deps.onWorkerWaitExpired?.();
+		};
+		this.waitAlarm = alarmAt(clock, deadline, fire);
+	}
+
+	private workerWaitDeadline(record: OrdinaryWorkRecord, entries: readonly SessionEntry[]): number | undefined {
+		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
 		if (!snapshot) return undefined;
-		const scope = new Set(evidence.entries.map((entry) => entry.id));
-		let pending = 0;
-		for (const attempt of Object.values(snapshot.attempts)) {
-			const origin = attempt.dispatch.receiptOrigin;
-			if (
-				origin?.sessionId === evidence.record.sessionId &&
-				scope.has(origin.leafId) &&
-				(!terminalAttemptStatus(attempt.status) || modelTransferIsPending(attempt.modelTransfer))
-			)
-				pending++;
-		}
-		return pending;
+		const orchestration = this.deps.timers?.port("orchestration") ?? SYSTEM_TIMER_PORT;
+		const pending = pendingLaunchedAttempts(snapshot, record.sessionId, entries);
+		return ordinaryWorkerWaitDeadline(record, pending, this.now(), orchestration.now());
 	}
 
 	/** Recovery reads an existing DB record. It never enrolls historical owner messages or executes a recorded tool. */
@@ -609,7 +646,9 @@ export class OrdinaryWorkController {
 			return this.evidence(current);
 		if (current?.status === "waiting" && current.reason === "waiting") {
 			const evidence = this.evidence(current);
-			if (evidence && ordinaryCompletionReports(evidence).fresh) return evidence;
+			if (!evidence) return undefined;
+			if (ordinaryCompletionReports(evidence).fresh || this.workerWaitExpired(evidence)) return evidence;
+			this.armWorkerWait(current, evidence.entries);
 		}
 		return undefined;
 	}
@@ -683,7 +722,11 @@ export class OrdinaryWorkController {
 		);
 	}
 
+	private clock(): TimerPort {
+		return this.deps.timers?.port("ordinary-work") ?? SYSTEM_TIMER_PORT;
+	}
+
 	private now(): number {
-		return (this.deps.now ?? Date.now)();
+		return this.deps.now?.() ?? this.clock().now();
 	}
 }

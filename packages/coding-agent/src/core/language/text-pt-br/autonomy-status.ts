@@ -285,6 +285,8 @@ export const AUTONOMY_STATUS = {
 			explicit_goal_owns_request: "Um objetivo explícito agora é responsável por este trabalho.",
 			goal_completed: "O objetivo explícito que assumiu este trabalho o concluiu.",
 			goal_cancelled: "O objetivo explícito que assumiu este trabalho foi cancelado.",
+			worker_wait_exhausted:
+				"Um worker lançado por esta solicitação a manteve esperando além de todas as verificações automáticas; decida se continua esperando.",
 			system_bound: "Um limite de execução ou supervisão do host interrompeu a rodada.",
 		},
 		budget: (used: number, limit: number) => `Continuações automáticas: ${used}/${limit} utilizadas.`,

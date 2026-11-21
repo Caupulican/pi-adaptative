@@ -222,6 +222,8 @@ export const AUTONOMY_STATUS = {
 			explicit_goal_owns_request: "An explicit goal now owns this work.",
 			goal_completed: "The explicit goal that took over this work completed it.",
 			goal_cancelled: "The explicit goal that took over this work was cancelled.",
+			worker_wait_exhausted:
+				"A worker this request launched kept it waiting past every automatic check; decide whether to keep waiting.",
 			system_bound: "A host execution or supervision bound stopped the run.",
 		},
 		budget: (used: number, limit: number) => `Automatic continuations: ${used}/${limit} spent.`,

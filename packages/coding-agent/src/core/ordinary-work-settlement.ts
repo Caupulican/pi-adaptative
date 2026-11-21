@@ -13,6 +13,7 @@ import {
 	ORDINARY_WORK_MAX_CONTINUATIONS,
 	type OrdinaryWorkStopEvidence,
 } from "./ordinary-work-policy.ts";
+import { ORDINARY_WORK_WORKER_WAIT_MS } from "./ordinary-work-wait.ts";
 import { ownerRequestForJudge } from "./security/owner-paste-boundary.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { withinPlanRequestBound } from "./system-one/plan-request-bound.ts";
@@ -46,7 +47,9 @@ export async function reviewOrdinaryWork(
 	if (!evidence) return;
 	if (expected.status === "waiting" && expected.reason !== "waiting") return;
 	const { reports, fresh } = ordinaryCompletionReports(evidence);
-	if ((expected.status === "waiting" || options.requireFreshCompletion) && !fresh) return;
+	// A request waiting on work it launched is reviewed for new evidence, or once its wait on that work ran out.
+	const waitExpired = expected.status === "waiting" && work.workerWaitExpired(evidence);
+	if (!fresh && ((expected.status === "waiting" && !waitExpired) || options.requireFreshCompletion)) return;
 	const tail = evidence.messages.at(-1);
 	const terminal = tail?.role === "assistant" ? tail : undefined;
 	const answer = !options.missingFinal && terminal?.stopReason === "stop" ? terminal : undefined;
@@ -83,7 +86,23 @@ export async function reviewOrdinaryWork(
 	// A worker this request launched still owes its result: a host fact, so the request waits without a judgment.
 	const pendingLaunched = work.pendingLaunchedWork(evidence);
 	if (pendingLaunched !== undefined && pendingLaunched > 0) {
-		work.checkpoint(held, { status: "waiting", reason: "waiting", frontierEntryId: evidence.entries.at(-1)?.id });
+		if (!waitExpired) {
+			const waiting = work.checkpoint(held, {
+				status: "waiting",
+				reason: "waiting",
+				frontierEntryId: evidence.entries.at(-1)?.id,
+			});
+			if (waiting) work.armWorkerWait(waiting, evidence.entries);
+			return;
+		}
+		// Its wait ran out, also a host fact: one continuation checks on the work; with none left the owner decides.
+		const reserved = work.reserveContinuation(held);
+		if (reserved) return workerWaitContinuation(reserved);
+		work.checkpoint(held, {
+			status: "owner_needed",
+			reason: "worker_wait_exhausted",
+			frontierEntryId: evidence.entries.at(-1)?.id,
+		});
 		return;
 	}
 	const resultCount = evidence.messages.filter((message) => message.role === "toolResult").length;
@@ -221,6 +240,23 @@ export async function reviewOrdinaryWork(
 			revision: reserved.revision,
 			...(revision ? { reportingRevision: true } : {}),
 			...(judgment.responseMode === "answer_only" ? { responseMode: "answer_only" } : {}),
+		},
+		timestamp: Date.now(),
+	};
+}
+
+/** The continuation an expired wait on launched work spends: the foreground checks the workers it is waiting on. */
+function workerWaitContinuation(reserved: OrdinaryWorkRecord): AgentMessage {
+	return {
+		role: "custom",
+		customType: ORDINARY_WORK_CONTINUATION_TYPE,
+		display: false,
+		content: `A worker this request launched has not reported its result within ${ORDINARY_WORK_WORKER_WAIT_MS / 60_000} minutes. Check its progress, then cancel it, redirect it, or keep waiting for it, and say which. Do not redo its work while it still runs.`,
+		details: {
+			sessionId: reserved.sessionId,
+			openingEntryId: reserved.openingEntryId,
+			generation: reserved.generation,
+			revision: reserved.revision,
 		},
 		timestamp: Date.now(),
 	};

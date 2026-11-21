@@ -30,6 +30,7 @@ const REASONS = [
 	"explicit_goal_owns_request",
 	"goal_completed",
 	"goal_cancelled",
+	"worker_wait_exhausted",
 	"system_bound",
 ] as const;
 export type OrdinaryWorkStatusReason = (typeof REASONS)[number];

@@ -899,6 +899,11 @@ the request's own turns has not reached a terminal status in the durable task ru
 asked. A suspended attempt counts: restart, retry, interrupt and model transfer all park work the lane still owes. So
 does a source a model transfer cancelled while its reserved successor is not yet admitted. The host facts then report every launched worker as finished, or the inventory as unchecked when
 no task runtime is loaded. Detached tools are not inventoried.
+That wait is bounded like a goal's wait on a bound worker: 60 minutes after the request started waiting, or after
+the latest retry a pending attempt was given, so a worker waiting out a usage reset is not checked on early. When the
+bound passes, that host fact spends one of the three continuations on a turn that checks the worker and cancels it,
+redirects it or keeps waiting. A request that keeps waiting is bounded again from then. With no continuation left it
+is held as `owner_needed` with reason `worker_wait_exhausted`.
 A decisive actionable disposition and a soft-pass or hard-pass `report_ready` answer select an
 answer-only review using the shared gating bands. If the actionable disposition is decisive, report
 readiness is ambiguous and overall evidence earns a soft pass, Pi records `report_review_needed`.

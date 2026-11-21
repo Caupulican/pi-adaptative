@@ -37,6 +37,9 @@ export {
  *   what is left of it, all on this port. The goal session's own stamps (pause, resume, system stops, accounting) and
  *   the goal's wall-clock budget stay on the system clock.
  * - `worker-wait`: the bound of a delegate wait and the watchdog of its blocked write-reservation restore.
+ * - `ordinary-work`: the clock ordinary request records are stamped on, and the alarm for when a request's wait on the
+ *   workers it launched runs out (`ordinary-work-wait.ts`). A worker retry's instant is read from `orchestration` and
+ *   carried over as an offset.
  * - `compaction-retry`: the backoff between attempts of a compaction whose summarizer request failed transiently.
  * - `worker-provider-retry`: the backoff between a worker's transiently failed provider request and its retry.
  * - `worker-accounting`: retry of a received worker usage receipt whose persistence or publication failed.
@@ -82,6 +85,7 @@ export type TimerOwner =
 	| "worker-lease"
 	| "goal-continuation"
 	| "worker-wait"
+	| "ordinary-work"
 	| "compaction-retry"
 	| "worker-provider-retry"
 	| "worker-accounting"

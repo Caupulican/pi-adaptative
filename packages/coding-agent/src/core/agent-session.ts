@@ -759,6 +759,8 @@ export class AgentSession {
 			peekStore: () => this._semanticPlane.peekDecisionLedger()?.ordinaryWork,
 			reportingRequirements: () => this._memory.reportingRequirements(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+			timers: config.timers,
+			onWorkerWaitExpired: () => this.restoreOrdinaryWorkAfterResume(),
 			isEnabled: () => !this._disposed && this._caps.ownsWorkLifecycle,
 			ownershipGoalId: () => this._goals.getOwnershipGoalId(),
 			mayReview: () =>
@@ -3539,7 +3541,7 @@ export class AgentSession {
 		const { completion, safely, trackRequired, finish } = createSessionShutdownTracker();
 		this._disposeCompletion = completion.then(() => this._runtimeAdmission.releaseBundle());
 		void this._disposeCompletion.catch(() => undefined);
-		safely(() => this.ordinaryWork.release());
+		safely(() => this.ordinaryWork.dispose());
 		this._disposed = true;
 		this._ownerReturnBrief.dispose();
 		trackRequired(() => this._analytics.dispose());
