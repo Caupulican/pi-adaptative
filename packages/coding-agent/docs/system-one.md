@@ -896,7 +896,8 @@ receipt and complete coverage of its recorded foreground receipts and background
 same Jev assessment also asks whether the requested answer can be written from the completed
 results alone. Pending worker attempts are a host fact, not a judgment: while a worker attempt dispatched from
 the request's own turns has not reached a terminal status in the durable task runtime, the request waits and no judge is
-asked. A suspended attempt counts: restart, retry, interrupt and model transfer all park work the lane still owes. The host facts then report every launched worker as finished, or the inventory as unchecked when
+asked. A suspended attempt counts: restart, retry, interrupt and model transfer all park work the lane still owes. So
+does a source a model transfer cancelled while its reserved successor is not yet admitted. The host facts then report every launched worker as finished, or the inventory as unchecked when
 no task runtime is loaded. Detached tools are not inventoried.
 A decisive actionable disposition and a soft-pass or hard-pass `report_ready` answer select an
 answer-only review using the shared gating bands. If the actionable disposition is decisive, report
