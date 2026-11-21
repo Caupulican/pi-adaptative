@@ -1,5 +1,26 @@
 ## [Unreleased]
 
+### Added
+
+- Ordinary requests survive a restart. Pi records each request in its decision database, reviews it when the agent stops, and continues unfinished work at most three times. `/status` and RPC `get_autonomy_status` show whether the request is active, held or settled.
+- The bundled `delete-comment` skill audits and fixes code comments in a scope. A single worker can run it. It deletes tautological and stale comments, records decisions in ADRs, files issues for workarounds and tightens a source-comment ratchet.
+- Owner-confirmed reporting rules, such as naming the source file, are checked before a reply counts as complete.
+
+### Changed
+
+- Worker dispatches and follow-ups accept long briefs. The dispatch or mailbox record stores the full body.
+- Compaction keeps the most recent whole owner statements, so corrections survive long sessions.
+- Phone and bot status tells the original sender whether a follow-up is queued, running or finished, and whether a reply was saved as a draft.
+
+### Fixed
+
+- A refusal or quota failure stays with the account and endpoint that received it. Switching accounts no longer excludes a model that works on the new account.
+- Cache expiry follows the cache policy that was actually sent.
+- A process with the session open can no longer cancel a request whose tool is still running in another process.
+- A file operation refused before it runs is recorded as refused, not as executed and failed.
+- An explicit `--extension` selection keeps its provider and commands when auto-discovery finds the same file.
+- Fresh OAuth sign-ins can be cancelled. A credential that cannot be saved stays usable for the current session and is marked session-only.
+
 ## [0.104.72] - 2026-11-20
 
 ### Changed
