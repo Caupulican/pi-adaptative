@@ -32,7 +32,7 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 	world.io.seed(configFile(world.agentDir, "MEMORY.md"), `${preference}\n`);
 	const providerMark = world.provider.requests.length;
 	const judgmentMark = world.systemOne.decoded.length;
-	const stopJudgments = (disposition: "waiting" | "owner_needed" | "fulfilled") => ({
+	const stopJudgments = (disposition: "owner_needed" | "fulfilled") => ({
 		disposition: { kind: "choice" as const, choice: disposition, confidence: 0.99 },
 		delivered_in_answer: { kind: "noul" as const, probability: disposition === "fulfilled" ? 0.99 : 0.01 },
 		evidence_sufficient: { kind: "noul" as const, probability: 0.99 },
@@ -55,7 +55,8 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 				}
 			: {}),
 	};
-	world.systemOne.enterPhase("handoff-restart", { ...J9_ROOT_JUDGMENTS, ...stopJudgments("waiting") });
+	// The request waits on its launched worker as a host fact: no stop judgment is asked while that worker runs.
+	world.systemOne.enterPhase("handoff-restart", J9_ROOT_JUDGMENTS);
 	const owner = await world.createRootSession("root", { settings, sessionManager: world.createSessionManager() });
 	const wait = <T>(label: string, pending: Promise<T>) =>
 		withDeadline(world.trace, `handoff-restart-${label}`, pending);
@@ -147,10 +148,7 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 			owner.session.getDecisionLedger()!.ordinaryWork.forSession(owner.sessionManager.getSessionId());
 		expect(records()).toHaveLength(1);
 		const opening = records()[0]!;
-		expect(opening).toMatchObject({
-			status: world.systemOne.enabled ? "waiting" : "unverified",
-			continuationCount: 0,
-		});
+		expect(opening).toMatchObject({ status: "waiting", reason: "waiting", continuationCount: 0 });
 		expect((await owner.session.autonomyStatus()).ordinaryWork).toMatchObject({
 			status: "available",
 			value: { state: opening.status, continuationsUsed: 0, continuationLimit: 3 },
@@ -415,9 +413,10 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 		} else expect(finished.attempts[transfer.successorAttemptId]!.result!.usage.totalTokens).toBeGreaterThan(0);
 		const reviews = world.systemOne.decoded.slice(judgmentMark).filter((item) => "disposition" in item.questions);
 		if (world.systemOne.enabled) {
-			expect(reviews.length).toBeGreaterThanOrEqual(2);
+			expect(reviews.length).toBeGreaterThanOrEqual(1);
 			const adjudicatedRequest = api ? expect.stringContaining(request) : request;
-			expect(reviews[0]?.state).toMatchObject({ request: adjudicatedRequest, answer: J9_ROOT_REPLY });
+			// No stop judgment is asked while the launched worker, then its successor, still runs.
+			expect(reviews.map((item) => (item.state as { answer?: unknown }).answer)).not.toContain(J9_ROOT_REPLY);
 			expect(reviews.at(-1)?.state).toMatchObject({
 				request: adjudicatedRequest,
 				answer,
@@ -425,7 +424,7 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 					terminalStopReason: "stop",
 					finalAnswerPresent: true,
 					foregroundCallsSettled: true,
-					pendingBackgroundWork: "not_checked",
+					pendingBackgroundWork: "workers_reported",
 				},
 			});
 		} else expect(reviews).toEqual([]);

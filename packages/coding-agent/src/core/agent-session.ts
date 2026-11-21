@@ -758,10 +758,10 @@ export class AgentSession {
 			getStore: () => this.getDecisionLedger()?.ordinaryWork,
 			peekStore: () => this._semanticPlane.peekDecisionLedger()?.ordinaryWork,
 			reportingRequirements: () => this._memory.reportingRequirements(),
+			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			isEnabled: () => !this._disposed && this._caps.ownsWorkLifecycle,
 			hasActiveGoal: () => this._goals.getOwnershipGoalId() !== undefined,
 			mayReview: () =>
-				!this._disposed &&
 				!this.runtimeUpdates.shouldStopAfterTurn() &&
 				!this.deliverablePendingMessageCount &&
 				!this._hasPendingIdleContinuation() &&

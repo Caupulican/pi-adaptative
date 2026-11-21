@@ -80,6 +80,12 @@ export async function reviewOrdinaryWork(
 			warn("The request remains open. Its execution record is ambiguous, so automatic continuation stopped.");
 		return;
 	}
+	// A worker this request launched still owes its result: a host fact, so the request waits without a judgment.
+	const pendingLaunched = work.pendingLaunchedWork(evidence);
+	if (pendingLaunched !== undefined && pendingLaunched > 0) {
+		work.checkpoint(held, { status: "waiting", reason: "waiting", frontierEntryId: evidence.entries.at(-1)?.id });
+		return;
+	}
 	const resultCount = evidence.messages.filter((message) => message.role === "toolResult").length;
 	const note =
 		"Only the listed receipts are evidence. Omitted results cannot establish success, failure, or missing work.";
@@ -139,7 +145,7 @@ export async function reviewOrdinaryWork(
 			foregroundCallsSettled: true,
 			foregroundReceipts: { recorded: resultCount, included: complete.length },
 			backgroundReports: { recorded: reports.length, included: background.length },
-			pendingBackgroundWork: "not_checked",
+			pendingBackgroundWork: pendingLaunched === undefined ? "not_checked" : "workers_reported",
 		},
 		receipts: receiptParts.join("\n"),
 	};

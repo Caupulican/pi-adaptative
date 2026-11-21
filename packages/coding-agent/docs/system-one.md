@@ -894,7 +894,10 @@ the session cannot repeatedly invoke the same failed judge.
 For an interrupted request with no final answer, at least one fully represented settled foreground
 receipt and complete coverage of its recorded foreground receipts and background reports, that
 same Jev assessment also asks whether the requested answer can be written from the completed
-results alone. The host facts explicitly leave the inventory of pending background work unchecked.
+results alone. Pending worker attempts are a host fact, not a judgment: while a worker attempt dispatched from
+the request's own turns is queued, leased or running in the durable task runtime, the request waits and no judge is
+asked. A suspended attempt can be waiting on the owner, so the judgment still decides that case. The host facts then report every launched worker as finished, or the inventory as unchecked when
+no task runtime is loaded. Detached tools are not inventoried.
 A decisive actionable disposition and a soft-pass or hard-pass `report_ready` answer select an
 answer-only review using the shared gating bands. If the actionable disposition is decisive, report
 readiness is ambiguous and overall evidence earns a soft pass, Pi records `report_review_needed`.

@@ -20,6 +20,7 @@
 - A file operation refused before it runs is recorded as refused, not as executed and failed.
 - An explicit `--extension` selection keeps its provider and commands when auto-discovery finds the same file.
 - Fresh OAuth sign-ins can be cancelled. A credential that cannot be saved stays usable for the current session and is marked session-only.
+- A request no longer counts as finished while a worker it started is still running. The request waits until that worker ends, including across a model handoff or restart, and is reviewed when the result arrives.
 
 ## [0.104.72] - 2026-11-20
 

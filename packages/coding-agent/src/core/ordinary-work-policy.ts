@@ -33,7 +33,11 @@ export interface OrdinaryWorkStopHostFacts {
 	readonly foregroundCallsSettled: true;
 	readonly foregroundReceipts: { readonly recorded: number; readonly included: number };
 	readonly backgroundReports: { readonly recorded: number; readonly included: number };
-	readonly pendingBackgroundWork: "not_checked";
+	/**
+	 * workers_reported: every worker attempt this request launched is terminal (a pending one keeps the request waiting
+	 * before any judgment). not_checked: no task runtime was loaded to count them. Detached tools are not inventoried.
+	 */
+	readonly pendingBackgroundWork: "workers_reported" | "not_checked";
 }
 
 export interface OrdinaryWorkStopEvidence {
