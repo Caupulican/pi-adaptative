@@ -250,12 +250,13 @@ export class OrdinaryWorkStore {
 		);
 	}
 
+	/** A follow-up owner input joins a request that is active or waiting on work it launched; the request is active again. */
 	addOwnerInput(expected: OrdinaryWorkRecord, entryId: string, now: number): OrdinaryWorkRecord | undefined {
 		const row = this.database
-			.prepare(`UPDATE ordinary_work SET frontier_entry_id = ?,
+			.prepare(`UPDATE ordinary_work SET frontier_entry_id = ?, status = 'active',
 			generation = generation + 1, revision = revision + 1, updated_at = ?, reason = NULL
 			WHERE session_id = ? AND opening_entry_id = ? AND revision = ? AND generation = ?
-			AND status = 'active' AND lease_id IS ? RETURNING *`)
+			AND (status = 'active' OR (status = 'waiting' AND reason = 'waiting')) AND lease_id IS ? RETURNING *`)
 			.get(
 				entryId,
 				now,

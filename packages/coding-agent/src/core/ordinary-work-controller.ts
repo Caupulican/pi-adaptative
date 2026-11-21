@@ -152,15 +152,36 @@ export class OrdinaryWorkController {
 			const origin = entryTurnOrigin(entry);
 			return origin?.k === "owner-channel" && origin.channel === channel && origin.ref === ref;
 		});
-		const opening = branch[index];
-		if (!opening) return undefined;
+		if (index === -1) return undefined;
 		// Read with payloads, as the stop evidence is (a cold answer's text is not on the plain branch), and only from the
 		// sent answer on, once the request settled.
 		return readOrdinaryLateAnswer(
-			store.get(manager.getSessionId(), opening.id),
+			this.requestContaining(store, manager.getSessionId(), branch, index),
 			() => manager.getFullHistoryChainWithPayloads(undefined, afterEntryId),
 			afterEntryId,
 		);
+	}
+
+	/**
+	 * The request whose turns hold the owner input at `branch[index]`: the one it opened, or the nearest earlier request it
+	 * joined as a follow-up (that request's frontier reached it). An input no request took (an explicit goal owned the
+	 * work) has none.
+	 */
+	private requestContaining(
+		store: OrdinaryWorkStore,
+		sessionId: string,
+		branch: readonly SessionEntry[],
+		index: number,
+	): OrdinaryWorkRecord | undefined {
+		for (let i = index; i >= 0; i--) {
+			const entry = branch[i]!;
+			if (!isCompatibleOwnerSourceEntry(entry)) continue;
+			const record = store.get(sessionId, entry.id);
+			if (!record) continue;
+			if (i === index) return record;
+			return branch.findIndex((candidate) => candidate.id === record.frontierEntryId) >= index ? record : undefined;
+		}
+		return undefined;
 	}
 
 	private readCurrent(store = this.readStore(), includeTerminal = false): OrdinaryWorkRecord | undefined {
@@ -268,8 +289,13 @@ export class OrdinaryWorkController {
 		if (current && !this.mayAcquire(current))
 			throw new Error("Ordinary owner work is leased by another live session process.");
 		let record: OrdinaryWorkRecord | undefined;
+		// A follow-up joins the request still active, or waiting on work it launched: that work stays in the request's scope,
+		// so its result settles the request the follow-up became part of.
+		const joins =
+			(current?.status === "active" && current.leaseId === this.lease.id) ||
+			(current?.status === "waiting" && current.reason === "waiting");
 		try {
-			if (current?.status === "active" && current.leaseId === this.lease.id)
+			if (current && joins)
 				record =
 					current.frontierEntryId === pending.entryId
 						? current
