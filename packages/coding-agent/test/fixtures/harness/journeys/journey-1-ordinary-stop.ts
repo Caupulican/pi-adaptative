@@ -59,7 +59,7 @@ export async function runOrdinaryStopPhase(world: HarnessWorld): Promise<void> {
 							terminalStopReason: "stop",
 							finalAnswerPresent: true,
 							foregroundCallsSettled: true,
-							pendingBackgroundWork: "not_checked",
+							pendingBackgroundWork: "workers_reported",
 						},
 					}),
 			},

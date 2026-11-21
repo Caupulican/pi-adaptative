@@ -15,8 +15,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { type OrdinaryWorkStatusSnapshot, ordinaryWorkStatusSnapshot } from "./autonomy-status/ordinary-work.ts";
 import { textContentPrefix } from "./context/message-text.ts";
 import { getOwnerEvidenceSnapshots, isCompleteOwnerSource, type OwnerWords } from "./learning/owner-evidence-ledger.ts";
-import type { AttemptStatus } from "./orchestration/contracts.ts";
-import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
+import { type TaskRuntimeProjection, terminalAttemptStatus } from "./orchestration/task-runtime-state.ts";
 import { ordinaryCompletionReports } from "./ordinary-work-completions.ts";
 import { ORDINARY_REPORTING_RESERVATION, type OrdinaryReportingRequirements } from "./ordinary-work-policy.ts";
 import {
@@ -67,9 +66,6 @@ interface OrdinaryWorkControllerDeps {
 	/** The durable task runtime, when this session has loaded one; the source of the launched-work fact. */
 	getTaskRuntimeSnapshot?(): TaskRuntimeProjection | undefined;
 }
-
-/** Attempt statuses in which a launched worker still owes its result without waiting on anyone. */
-const OWED_ATTEMPT_STATUSES: ReadonlySet<AttemptStatus> = new Set(["queued", "leased", "running"]);
 
 export class OrdinaryWorkController {
 	private reportingReservation?: { record: OrdinaryWorkRecord; snapshot: OrdinaryReportingRequirements; text: string };
@@ -474,10 +470,10 @@ export class OrdinaryWorkController {
 	}
 
 	/**
-	 * How many worker attempts dispatched from this request's own turns are queued, leased or running, read from the
+	 * How many worker attempts dispatched from this request's own turns have not reached a terminal status, read from the
 	 * durable task runtime by each attempt's receipt origin (a model-transfer successor inherits it). A suspended attempt
-	 * is not counted: it may wait on the owner, which the stop judgment decides. Undefined when the session has no task
-	 * runtime loaded: the count is then unknown, not zero.
+	 * counts: every suspension (restart, retry, interrupt, model transfer) parks work its lane still owes. Undefined when
+	 * the session has no task runtime loaded: the count is then unknown, not zero.
 	 */
 	pendingLaunchedWork(evidence: OrdinaryWorkEvidence): number | undefined {
 		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
@@ -489,7 +485,7 @@ export class OrdinaryWorkController {
 			if (
 				origin?.sessionId === evidence.record.sessionId &&
 				scope.has(origin.leafId) &&
-				OWED_ATTEMPT_STATUSES.has(attempt.status)
+				!terminalAttemptStatus(attempt.status)
 			)
 				pending++;
 		}
