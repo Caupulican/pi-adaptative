@@ -26,7 +26,7 @@
 - A request taken over by an explicit goal settles when the goal completes or is cancelled, instead of waiting forever. A phone request that started the goal then receives the goal's final answer.
 - A request that compacted while it worked, keeping a tail older than the request's own first message, is no longer held as an ambiguous execution record.
 - A phone request whose final answer arrives after an acknowledgement now counts the metered spend of its later turns against the owner pool's daily bound.
-- A request no longer waits unseen on a worker that stops reporting. After 60 minutes, or 60 minutes after the worker's scheduled retry, one automatic continuation checks the worker. When no continuation is left, the request asks the owner.
+- A request no longer waits unseen on a worker that stops reporting. After 60 minutes, or 60 minutes after the worker's scheduled retry, one automatic continuation checks the worker. When no continuation is left, the request asks the owner, and it still settles on the turn the worker's report wakes, without a restart. The owner's reply joins that request instead of opening a new one.
 
 ## [0.104.72] - 2026-11-20
 

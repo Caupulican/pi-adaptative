@@ -322,7 +322,7 @@ export class OrdinaryWorkController {
 		if (goalId !== undefined) {
 			this.pendingOpening = undefined;
 			// Only a request still working is handed over; one already settled or held keeps its own outcome.
-			if (current?.status === "active" || (current?.status === "waiting" && current.reason === "waiting"))
+			if (current?.status === "active" || (current !== undefined && awaitsLaunchedWork(current)))
 				this.checkpoint(current, { status: "waiting", reason: goalHandoffReason(goalId) });
 			return undefined;
 		}
@@ -342,11 +342,11 @@ export class OrdinaryWorkController {
 		if (current && !this.mayAcquire(current))
 			throw new Error("Ordinary owner work is leased by another live session process.");
 		let record: OrdinaryWorkRecord | undefined;
-		// A follow-up joins the request still active, or waiting on work it launched: that work stays in the request's scope,
-		// so its result settles the request the follow-up became part of.
+		// A follow-up joins the request still active, or waiting on work it launched (also once its automatic checks on that
+		// work ran out): that work stays in the request's scope, so its result settles the request the follow-up became part of.
 		const joins =
 			(current?.status === "active" && current.leaseId === this.lease.id) ||
-			(current?.status === "waiting" && current.reason === "waiting");
+			(current !== undefined && awaitsLaunchedWork(current));
 		try {
 			if (current && joins)
 				record =

@@ -297,7 +297,9 @@ export function reviewForegroundStop(
 	const mayDispatch = () => available() && ordinary.mayReview();
 	if (!mayDispatch()) return;
 	const expected = ordinary.work.current();
-	if (!expected || (expected.status !== "active" && expected.status !== "waiting")) return;
+	// A request held for the owner because its worker outlasted every check reopens on the turn that worker's report wakes.
+	if (!expected || (expected.status !== "active" && expected.status !== "waiting" && !awaitsLaunchedWork(expected)))
+		return;
 	return reviewOrdinaryWork(ordinary.work, ordinary.judges, {
 		expected,
 		signal,
