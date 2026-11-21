@@ -49,7 +49,7 @@ export function unrelatedOrdinaryStopDefaults(
 		typeof facts.interrupted !== "boolean" ||
 		typeof facts.finalAnswerPresent !== "boolean" ||
 		facts.foregroundCallsSettled !== true ||
-		facts.pendingBackgroundWork !== "not_checked" ||
+		!["workers_reported", "not_checked"].includes(facts.pendingBackgroundWork) ||
 		!["stop", "length", "toolUse", "error", "aborted", "missing"].includes(facts.terminalStopReason)
 	)
 		return;
