@@ -299,6 +299,8 @@ export function formatCostBreakdownLines(overview: UsageOverview, width: number)
 		);
 	if (session.costEstimate || overview.today.costEstimate) lines.push(theme.fg("dim", text.estimatesNote));
 	else if (session.subscription) lines.push(theme.fg("dim", text.subscriptionNote));
+	if (session.unresolvedUsageRequests || session.usageAccountingIncomplete)
+		lines.push(theme.fg("warning", interfaceText().reports.cost.unresolvedUsage(session.unresolvedUsageRequests)));
 	if (session.apiEquivalentPartial)
 		lines.push(
 			theme.fg("warning", text.partialTotal(session.modelUnknownTokens ?? 0, session.modelUnknownOperations ?? 0)),

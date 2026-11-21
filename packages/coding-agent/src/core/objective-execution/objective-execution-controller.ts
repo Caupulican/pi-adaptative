@@ -39,6 +39,7 @@ import {
 	SteeringSemanticFailedError,
 	type SystemOneSteeringPlane,
 } from "../steering/index.ts";
+import { readObjectiveWorkClass } from "../steering/programs.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	type CandidateSnapshot,
@@ -91,7 +92,6 @@ import {
 	composeObjectiveRoute,
 	INDEPENDENT_VERIFICATION_REASON_CODE,
 	SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE,
-	workClassFromRouteChoice,
 } from "./objective-route-policy.ts";
 import {
 	projectBoundedCombinedState,
@@ -628,7 +628,7 @@ export class ObjectiveExecutionController {
 				// read here: external blockers and worker waits come from deterministic facts.
 				semantic = {
 					workRemaining: settledAnswer(cert.answers.work_remaining),
-					missingWorkClass: workClassFromRouteChoice(cert.answers.missing_work_class),
+					missingWorkClass: readObjectiveWorkClass(cert.answers, cert.unsure_semantic_predicates),
 					independentWorkerRequired: settledAnswer(cert.answers.independent_worker_required),
 					capabilityEscalationRequired: settledAnswer(cert.answers.capability_escalation_required),
 					semanticProgress: spAns?.level ?? spAns?.score,

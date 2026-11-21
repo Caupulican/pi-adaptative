@@ -183,6 +183,7 @@ export class ForegroundLifecycleController {
 	 * carry a requestId on `AssistantMessage` itself.
 	 */
 	private lastRequestId: string | undefined;
+	private retryOfAssistantEntryId: string | undefined;
 	/** Exact transport model captured with `lastRequestId`; session model state may already differ. */
 	private lastRequestModel: { provider: string; id: string; accountKey: string } | undefined;
 
@@ -209,6 +210,7 @@ export class ForegroundLifecycleController {
 		this.completedProviderMessages = new WeakSet();
 		this.terminalProviderRequests.clear();
 		this.lastRequestId = undefined;
+		this.retryOfAssistantEntryId = undefined;
 		this.lastRequestModel = undefined;
 	}
 
@@ -240,7 +242,12 @@ export class ForegroundLifecycleController {
 			id: context.model.id,
 			accountKey: context.providerAccountKey ?? provider,
 		};
-		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
+		const retryOfAssistantEntryId = this.retryOfAssistantEntryId;
+		this.retryOfAssistantEntryId = undefined;
+		this.deps.sessionManager.appendRequestSnapshot({
+			...buildRequestSnapshotInput(context, this.deps.sessionManager),
+			...(retryOfAssistantEntryId ? { retryOfAssistantEntryId } : {}),
+		});
 		this.deps.sessionManager.recordParentInputWakeRequest(requestId, context.context.messages);
 		const deliveredNoteIds = this.deps.sessionManager.recordParentNoteRequest(
 			requestId,
@@ -324,6 +331,11 @@ export class ForegroundLifecycleController {
 		event: ProviderRetryLifecycleEvent,
 	): { provider: string; id: string; accountKey: string } | undefined {
 		const model = this.lastRequestModel;
+		const failed = this.deps.agent.state.messages.at(-1);
+		this.retryOfAssistantEntryId =
+			event.type === "auto_retry_start" && failed?.role === "assistant" && failed.stopReason === "error"
+				? this.getPersistedMessageEntryId(failed)
+				: undefined;
 		const data =
 			event.type === "auto_retry_start"
 				? {

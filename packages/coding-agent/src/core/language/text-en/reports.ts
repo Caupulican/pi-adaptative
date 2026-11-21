@@ -24,9 +24,14 @@ export const REPORTS = {
 		reports: (count: number) => ` (${count} reports)`,
 		recorded: "RECORDED (unmodified usage totals):",
 		historicalAccounting: (status: string) => `Historical accounting ${status}`,
+		unresolvedUsage: (count?: number) =>
+			count
+				? `Usage remains unresolved for ${count} ${count === 1 ? "request" : "requests"}. The total may be incomplete.`
+				: "Usage accounting is incomplete. The total may be incomplete.",
 		partialCatalogTotal: (tokens: number, operations: number) =>
-			`Catalog-equivalent total is partial: ${tokens} tokens / ${operations} operations have no recorded model.`,
-		partialTodayPricing: (tokens: number) => `Today's pricing is partial: ${tokens} tokens have no recorded model.`,
+			`Catalog-equivalent total is partial: some usage lacks pricing or model attribution.${tokens || operations ? ` ${tokens} tokens / ${operations} operations have no recorded model.` : ""}`,
+		partialTodayPricing: (tokens: number) =>
+			`Today's pricing is partial: some usage lacks pricing or model attribution.${tokens ? ` ${tokens} tokens have no recorded model.` : ""}`,
 		icmSummaries: "ICM history summaries (included in CURRENT):",
 		icmCalls: (count: number) => ` (${count} calls)`,
 		today: "TODAY (host local day):",

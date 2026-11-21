@@ -937,7 +937,7 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		name,
 		label: options.label ?? "Ask Question",
 		description:
-			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user outranks AGENTS.md once they choose. Never ask for decisions fixed by owner profile or policy. A skipped or cancelled answer is owner intent: do not repeat it immediately; proceed safely or report the unresolved boundary.",
+			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. Follow the session's rule-authority decision for conflicts with written instructions. Ask about a conflict when it still needs the owner's choice. Never ask for decisions fixed by owner profile or policy. A skipped or cancelled answer is owner intent: do not repeat it immediately; proceed safely or report the unresolved boundary.",
 		promptSnippet: "Ask the owner a multiple-choice question",
 		neverDefer: true,
 		parameters: askQuestionSchema,

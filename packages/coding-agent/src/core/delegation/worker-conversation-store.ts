@@ -93,6 +93,7 @@ import {
 	type SpecialistContextOwner,
 	type SpecialistContextOwnership,
 } from "../orchestration/specialist-context-ownership.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import { buildRequestSnapshotInput } from "../request-snapshot-fingerprints.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -122,7 +123,11 @@ import {
 } from "./worker-mailbox-record.ts";
 import { WorkerRequestPrefix } from "./worker-request-prefix.ts";
 import { equalWorkerTranscriptValues } from "./worker-transcript-equality.ts";
-import { boundedTranscriptJsonBytes, projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
+import {
+	boundedTranscriptJsonBytes,
+	projectWorkerTranscriptForInspection,
+	workerRecoveryEntryCharge,
+} from "./worker-transcript-projection.ts";
 import { WorkerTranscriptProviderHistory } from "./worker-transcript-provider-history.ts";
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
@@ -131,6 +136,8 @@ export const EXISTING_WORKER_FILE_LOCK_OPTIONS = Object.freeze({ createParentDir
 export const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
 const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 const MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES = 16 * 1024;
+// Canonical JSON can escape each body code unit into six ASCII bytes; addresses, stamps and the entry frame are bounded.
+const MAX_MAILBOX_TRANSCRIPT_ENTRY_BYTES = 6 * MAX_WORKER_BRIEF_CHARS + 64 * 1024;
 export const MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES = 64;
 export const MAX_WORKER_TRANSCRIPT_PAGE_BYTES = 128 * 1024;
 
@@ -788,9 +795,10 @@ function attemptUsageBoundaryIndex(
 
 function exactUserText(message: WorkerSessionMessage): string | undefined {
 	if (!isRawWorkerTranscriptMessage(message) || message.role !== "user") return undefined;
-	if (typeof message.content === "string") return message.content;
+	const content = message.content;
+	if (typeof content === "string") return content;
 	let text = "";
-	for (const block of message.content) {
+	for (const block of content) {
 		if (block.type !== "text") return undefined;
 		text += block.text;
 	}
@@ -816,17 +824,26 @@ function scanWorkerControlTranscript(
 	const matchCounts = new Map<string, number>();
 	visitWorkerSessionEntries(sessionManager, 0, sessionManager.getEntryCount(), (entry, _index, persistedBytes) => {
 		if (entry.type !== "message" || entry.message.role !== "user") return;
+		let coldId: string | undefined;
 		if (persistedBytes !== undefined) {
-			for (const messageId of expectedById.keys()) {
-				if (coldWorkerControlPrefixContains(sessionManager, entry.id, messageId)) {
-					throw new Error("Worker control transcript identity conflicts with oversized persisted content.");
-				}
+			const control = parseWorkerControlRecord(entry.workerControl);
+			if (control) {
+				if ((control.k !== "steer" && control.k !== "follow_up") || !expectedById.has(control.id)) return;
+				coldId = control.id;
+			} else {
+				coldId = [...expectedById.keys()].find((id) =>
+					coldWorkerControlPrefixContains(sessionManager, entry.id, id),
+				);
+				if (!coldId) return;
 			}
-			return;
+			// Only hydrate the matching, size-bounded entry. An id in a prefix is never proof of delivery.
+			if (persistedBytes > MAX_MAILBOX_TRANSCRIPT_ENTRY_BYTES)
+				throw new Error("Worker control transcript identity conflicts with oversized persisted content.");
 		}
 		const content = exactUserText(entry.message);
-		if (content === undefined) return;
-		const messageId = workerControlMessageId(entry, content);
+		const messageId = content === undefined ? undefined : workerControlMessageId(entry, content);
+		if (coldId !== undefined && messageId !== coldId)
+			throw new Error("Worker control transcript identity conflicts with its persisted content.");
 		if (!messageId || !expectedById.has(messageId)) return;
 		if (expectedById.get(messageId) !== content) {
 			throw new Error("Worker control transcript identity conflicts with existing content.");
@@ -1119,15 +1136,22 @@ export class WorkerConversation {
 				const entries: WorkerSessionEntry[] = [];
 				const messages: { entryId: string; message: Message }[] = [];
 				let bytes = 2;
+				let remainingBodyChars = MAX_WORKER_BRIEF_CHARS;
 				let omitted = false;
 				visitWorkerSessionEntries(sessionManager, boundary + 1, end, (entry, _index, persistedBytes) => {
 					if (omitted) return;
-					const size = persistedBytes ?? boundedTranscriptJsonBytes(entry, MAX_WORKER_TRANSCRIPT_PAGE_BYTES);
-					if (bytes + size + 1 > MAX_WORKER_TRANSCRIPT_PAGE_BYTES) {
+					const charge = workerRecoveryEntryCharge(
+						entry,
+						persistedBytes,
+						MAX_WORKER_TRANSCRIPT_PAGE_BYTES - bytes - 1,
+						remainingBodyChars,
+					);
+					if (bytes + charge.bytes + 1 > MAX_WORKER_TRANSCRIPT_PAGE_BYTES) {
 						omitted = true;
 						return;
 					}
-					bytes += size + 1;
+					bytes += charge.bytes + 1;
+					remainingBodyChars -= charge.bodyChars;
 					entries.push(entry);
 					const message = rawWorkerTranscriptMessage(entry);
 					if (!message || !isWireNativeWorkerTranscriptMessage(message)) return;

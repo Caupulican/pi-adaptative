@@ -8,7 +8,9 @@
  */
 
 import { type CommsErrRecord, commsErr } from "../comms/comms-records.ts";
+import { MAX_WORKER_MESSAGE_CHARS } from "../delegation/worker-agent-message-options.ts";
 import { laneWorkerRefusalSkipRemedy } from "../model-capability.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import type { CommsErrCode, CommsHintCode } from "../provider-prompt-contracts.ts";
 import { WORKER_BRIEF_GUIDANCE } from "./assign-tool-name.ts";
 
@@ -19,25 +21,49 @@ const FOLLOW_UP_EXAMPLE = '{"action":"follow_up","agentId":"<returned agentId>",
 export function delegateCallGuidance(actions: readonly string[]): string {
 	return [
 		actions.includes("start") &&
-			`Start ${START_EXAMPLE}. ${WORKER_BRIEF_GUIDANCE} Scope edits with writePaths. Choose a favorite with ${MODEL_START_EXAMPLE}, or an exact model with "model":{"provider":"<provider>","modelId":"<modelId>"}.`,
+			`Start ${START_EXAMPLE}. ${WORKER_BRIEF_GUIDANCE} Scope edits with writePaths. Omit toolNames to inherit available tools. Choose a favorite with ${MODEL_START_EXAMPLE}, or an exact model with "model":{"provider":"<provider>","modelId":"<modelId>"}.`,
 		actions.includes("handoff") &&
 			'Transfer the current task and its workspace to a new model with {"action":"handoff","agentId":"<source agentId>","model":"<favorite or provider/modelId>"}. The successor runs in the background. Read progress with status on the source agentId.',
+		actions.includes("review") &&
+			'Review mutations with {"action":"review","laneId":"<laneId>"} or agentId. Use profileId and brief fields such as note only on start.',
 		actions.includes("follow_up") && `Continue ${FOLLOW_UP_EXAMPLE}.`,
 	]
 		.filter(Boolean)
 		.join(" ");
 }
 
+/** Recovery for an instruction or message that cannot travel intact through its durable transport. */
+export function delegateInlineLimitGuidance(field: "instructions" | "message"): string {
+	return field === "instructions"
+		? `A worker brief can contain up to ${MAX_WORKER_BRIEF_CHARS} characters. Shorten the brief or cite files already in the worker's workspace.`
+		: `A worker message can contain up to ${MAX_WORKER_MESSAGE_CHARS} characters. Split the message or cite files already in the worker's workspace.`;
+}
+
 /** Correct a rejected shape without copying its brief into the prompt or executing an inferred action. */
 export function delegateValidationCorrection(args: unknown, actions: readonly string[]): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
-	const { action = "start" } = args as Record<string, unknown>;
+	const { action = "start", task, instructions, message, slices } = args as Record<string, unknown>;
 	if (typeof action !== "string" || !actions.includes(action)) {
 		if (action === "spawn" && actions.includes("start"))
 			return `Use ${START_EXAMPLE} with the original brief. To select a favorite: ${MODEL_START_EXAMPLE}.`;
 		if (action === "followup" && actions.includes("follow_up"))
 			return `Use ${FOLLOW_UP_EXAMPLE} with the original message.`;
 		return `Available delegate actions: ${actions.join(", ")}. ${delegateCallGuidance(actions)}`.trim();
+	}
+	const tooLong = (value: unknown, limit: number) => typeof value === "string" && value.length > limit;
+	if (
+		action === "start" &&
+		(tooLong(instructions, MAX_WORKER_BRIEF_CHARS) ||
+			tooLong(task, MAX_WORKER_BRIEF_CHARS) ||
+			(Array.isArray(slices) && slices.some((slice) => tooLong(slice?.instructions, MAX_WORKER_BRIEF_CHARS))))
+	)
+		return delegateInlineLimitGuidance("instructions");
+	if (
+		["follow_up", "send", "broadcast", "reply"].includes(action) &&
+		(tooLong(message, MAX_WORKER_MESSAGE_CHARS) ||
+			(["follow_up", "send"].includes(action) && tooLong(task, MAX_WORKER_MESSAGE_CHARS)))
+	) {
+		return delegateInlineLimitGuidance("message");
 	}
 	return undefined;
 }
@@ -273,6 +299,13 @@ const TOOL_CAPABILITY_MISSING_PREFIX = "orchestration_tool_capability_missing:";
 
 /** The refusal record for a `delegate start` the host skipped, keyed by its `skipReason` code. */
 export function delegateStartRejection(reason: string): CommsErrRecord {
+	if (reason === "worker_private_memory_scope") {
+		return commsErr({
+			c: "E_AUTH",
+			h: "NARROW",
+			m: "The worker workspace or write grant reaches private Pi memory. Use a project workspace and grant selected knowledge records. The owner reviews taste proposals with /taste proposals and confirms each with /taste accept <id>.",
+		});
+	}
 	if (reason.startsWith(DUPLICATE_OF_PREFIX)) {
 		const laneId = reason.slice(DUPLICATE_OF_PREFIX.length);
 		return commsErr({

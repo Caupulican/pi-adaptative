@@ -538,9 +538,10 @@ export class ForegroundTerminalHandoffController {
 	private prepareWorkerDelivery(records: readonly WorkerTerminalHandoffRecord[]): TerminalDeliveryPlan | undefined {
 		const unread = records.filter((record) => record.observedAt === undefined);
 		if (unread.length === 0) return undefined;
+		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
 		const prepared = unread.map((record, index) => {
-			const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId, record.attemptId);
-			const claim = snapshot?.claim;
+			const origin = record.attemptId && snapshot?.attempts[record.attemptId]?.dispatch.receiptOrigin;
+			const claim = this.deps.getWorkerClaimSnapshot?.(record.laneId, record.attemptId)?.claim;
 			const outputArtifact =
 				index < 8
 					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
@@ -560,6 +561,7 @@ export class ForegroundTerminalHandoffController {
 				},
 				laneId: record.laneId,
 				...(record.attemptId ? { attemptId: record.attemptId } : {}),
+				...(origin ? { served: { sessionId: origin.sessionId, leafId: origin.leafId } } : {}),
 				status: record.status,
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(record.reasonDetail ? { reasonDetail: record.reasonDetail } : {}),
@@ -611,7 +613,6 @@ export class ForegroundTerminalHandoffController {
 		}));
 		const wake = this.resolveWake(unread);
 		// A report of work a third party's words reached opens a third-party run (`customTurnOrigin`).
-		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
 		// A Path A verifier reconciles into its subject's result, which carries the single worker proof sheet for that work.
 		const sheetRecords = included.filter((record) => {
 			const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;

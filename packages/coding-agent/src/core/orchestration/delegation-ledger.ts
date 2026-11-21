@@ -204,8 +204,7 @@ function activeAttempt(attempt: AttemptRuntimeState): boolean {
 /**
  * The durable task description is a BOUNDED PROJECTION of the authoritative brief. A task contract
  * bounds `description` at `MAX_ORCHESTRATION_DESCRIPTION_LENGTH`; a dispatched brief may be as long
- * as `MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH`. The brief itself is never shortened -- it is
- * persisted verbatim on `dispatch.instructions`, which is what the worker actually receives -- and
+ * as the worker brief limit. The durable dispatch retains its complete instructions, and
  * the projection says so explicitly instead of ending mid-sentence.
  */
 const TASK_DESCRIPTION_ELISION = "\n[bounded task description; the complete brief is on this task's dispatch]";

@@ -9,6 +9,7 @@ import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branc
 import { runJourney1KnowledgePhase } from "./journey-1-knowledge.ts";
 import { runJourney1KnowledgeWorkersPhase } from "./journey-1-knowledge-workers.ts";
 import { runMistralResponseJourney } from "./journey-1-mistral-response.ts";
+import { runOrdinaryStopPhase } from "./journey-1-ordinary-stop.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
 import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
 import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
@@ -141,6 +142,7 @@ export async function runJourney1(): Promise<void> {
 			await runSummaryAccountingJourney(world);
 			await runSummaryRecoveryJourney(world);
 			await runMistralResponseJourney(world);
+			await runOrdinaryStopPhase(world);
 			await runJourney1OwnerLifecyclePhase(world);
 			await runJourney1FffHostAttributionPhase(world);
 			await runJourney1ToolLifecyclePhase(world);

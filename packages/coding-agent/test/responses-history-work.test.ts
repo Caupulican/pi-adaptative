@@ -35,6 +35,56 @@ function project() {
 	};
 }
 
+it("masks quoted passwords in a historical tool result while retaining the original record", () => {
+	const row: Message = {
+		role: "toolResult",
+		toolName: "python",
+		toolCallId: "prior-call",
+		isError: false,
+		timestamp: 1,
+		content: [{ type: "text", text: "legacy sudo password 'example phrase'; unrelated row" }],
+		details: {
+			preview: "passphrase is 'example phrase'",
+			nested: { password: "example phrase" },
+			json: '{"password":"example phrase","key":"public identifier"}',
+		},
+	};
+	const user: Message = {
+		role: "user",
+		timestamp: 0,
+		content: 'Search for the source expression password = "example phrase".',
+	};
+	const code: Message = {
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		timestamp: 0,
+		stopReason: "toolUse",
+		usage: createEmptyUsage(),
+		content: [
+			{ type: "toolCall", name: "python", id: "prior-call", arguments: { code: 'password = "example phrase"' } },
+		],
+	};
+	const context = new CredentialRequestProjection().prepare(
+		model,
+		{ messages: [row, user, code] },
+		hide,
+		hide,
+	).context;
+	expect(context.messages[1]).toBe(user);
+	expect(context.messages[2]).toBe(code);
+	expect(context.messages[0]).toMatchObject({
+		content: [{ text: "legacy sudo [REDACTED]; unrelated row" }],
+		details: {
+			preview: "[REDACTED]",
+			nested: { password: "<mocked:password>" },
+			json: '{"password":"<mocked:password>","key":"public identifier"}',
+		},
+	});
+	expect(row.content[0]).toMatchObject({ text: expect.stringContaining("example phrase") });
+});
+
 it.each([100, 1_000, 10_000])(
 	"retracts provisional tool output without reading any of %d old payloads",
 	async (size) => {

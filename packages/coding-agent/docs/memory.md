@@ -247,3 +247,10 @@ Reading what was already approved does not need construction. With the hierarchy
 - **Handoff.** Each finished batch leaves a bounded terminal record (counts and causes). Failures and self-stops are shown through the session warning path; a success is diagnostics only and never starts a chat turn.
 
 `/memory history` and `context_audit` add a hierarchy section: state, jobs by state, accepted nodes, oldest backlog, the frontier revision and size, recent failure classes and the last batch. `/memory history` also prints the real stop reason, failure causes and recovery findings; `context_audit` shows failure classes only.
+
+
+### Confirmed requirements about replies
+
+An owner can ask Pi to remember how it should report something, such as naming the source file whenever it reports a configuration setting. Pi classifies that preference when it is admitted. An uncertain classification leaves the preference available as guidance. A confirmed rule can affect verification of an ordinary reply after it is exposed in the accepted request.
+
+The decision database binds a classification to the exact record and scope. Revising or forgetting the preference invalidates the old proof. A manually edited persona entry can guide replies; enforcement requires attributable owner evidence. An omitted rule cannot be sent to a separate reviewer merely to decide whether it applies. When that prevents a complete check, Pi reports an unverified reply.

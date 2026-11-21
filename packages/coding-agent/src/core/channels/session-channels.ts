@@ -42,7 +42,7 @@ import { isProcessAlive } from "../process-liveness.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type AwayChannelServing, awayHostUnmetered, type ChannelServedBy, channelServedBy } from "./away-channels.ts";
-import { type BatchBranchSource, type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
+import type { BatchBranchSource, BatchOutcome } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelAwayUntold,
@@ -74,6 +74,7 @@ import {
 	MAX_REPLY_CHARS,
 	parseInboundChannelEvent,
 	plainLabel,
+	readChannelReply,
 } from "./channel-message.ts";
 import {
 	type ChannelPolicyResolution,
@@ -99,20 +100,21 @@ import {
 import type {
 	OwnerChannelControl,
 	OwnerChannelOrigin,
+	OwnerChannelStop,
 	OwnerControl,
 	OwnerDecisionBy,
 	OwnerDraftView,
 	OwnerQuotaAllowance,
-	OwnerWaitingView,
 	SessionChannelsOwnerDeps,
 } from "./owner-channel-types.ts";
 import {
 	approvalTurnText,
 	decideOwnerDraft,
-	draftInScope,
 	MAX_STATUS_DRAFTS,
+	ownerBatchesByRef,
 	parseOwnerControl,
 	presentDraft,
+	readOwnerControlStatus,
 	sendOwnerControlReply,
 } from "./owner-control.ts";
 import { OwnerMeteredMoves, type OwnerMoveRun } from "./owner-metered-moves.ts";
@@ -205,9 +207,10 @@ const MAX_STATUS_PRESENTATIONS = 3;
 
 /** An owner turn this session offered or runs: its `live` closure, its spend observer, whether it was stopped. */
 interface OwnerRun extends OwnerMoveRun {
+	readonly ownerSessionId?: string;
 	readonly live: () => boolean;
 	accepted: boolean;
-	stopped: boolean;
+	stopped: false | OwnerChannelStop;
 	unobserve?: () => void;
 }
 
@@ -285,10 +288,11 @@ export interface SessionChannelsDeps extends SessionChannelsOwnerDeps, Pick<Batc
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
 	/** Where owner turns run when not in this session (the daemon's phone session); this session's own when omitted. */
-	getOwnerSessionManager?(): Pick<SessionManager, "getBranch">;
+	getOwnerSessionManager?(): Pick<SessionManager, "getBranch"> & Partial<Pick<SessionManager, "getSessionId">>;
 	getChannelPolicies(): ReadonlyMap<string, ChannelPolicyResolution>;
 	subscribeSettings(listener: () => void): () => void;
 	subscribeForegroundActivity(listener: () => void): () => void;
+	isForegroundBusy(): boolean;
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
 	/**
 	 * Whether the owner is told: the notice is kept for their next turn (`HarnessNoticeController.observe`). `onLost`
@@ -642,7 +646,7 @@ export class SessionChannels {
 		try {
 			for (const batch of this.journal(name).read().result.batches) {
 				if (batch.state !== "accepted" || batch.sessionId !== sessionId) continue;
-				const outcome = readBatchOutcome(this.deps, name, batch, now);
+				const outcome = readChannelReply(this.deps, name, batch, now);
 				if (outcome.kind === "answered")
 					this.keepDraft(name, batch, outcome.text, "the daemon stopped serving the channel", outcome.usd);
 				else this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined);
@@ -1360,8 +1364,8 @@ export class SessionChannels {
 				await sendOwnerControlReply(this.deps.warn, name, provider, event, eventDigest, admission.reply, true);
 			return;
 		}
-		if (update.result === "control" && control && senderDigest !== undefined)
-			queueMicrotask(() => void this.runOwnerControl(name, event, eventDigest, senderDigest, control));
+		if (update.result === "control" && control && provider && senderDigest !== undefined)
+			queueMicrotask(() => void this.runOwnerControl(name, event, eventDigest, senderDigest, control, provider));
 	}
 
 	/** Name at most a platform-assigned id and the key: never the sender's label, words or an id they chose. */
@@ -1546,8 +1550,12 @@ export class SessionChannels {
 		eventDigests: readonly string[],
 		allowlisted: boolean,
 		now: number,
+		ownerRun?: OwnerRun,
 	): ChannelBatchRecord {
+		const ownerSessionId = ownerRun?.ownerSessionId;
 		return {
+			...(ownerRun ? { owner: true as const } : {}),
+			...(ownerSessionId && ownerSessionId !== sessionId ? { ownerSessionId } : {}),
 			id: batchId,
 			sessionId,
 			pid: process.pid,
@@ -1669,9 +1677,9 @@ export class SessionChannels {
 					return false;
 				}
 				const now = this.now();
-				const base = this.acceptedBatch(batchId, sessionId, latest, delivered, true, now);
+				const base = this.acceptedBatch(batchId, sessionId, latest, delivered, true, now, run);
 				const quota = ownerDollarsApply(this.ownerQuota(policy)) || run.metered ? {} : { quota: true as const };
-				this.recordAccepted(name, { ...base, owner: true, senderDigest, ...quota }, now);
+				this.recordAccepted(name, { ...base, senderDigest, ...quota }, now);
 				return true;
 			},
 		);
@@ -1691,7 +1699,8 @@ export class SessionChannels {
 		onAccepted: (accepted: boolean, run: OwnerRun) => boolean,
 	): void {
 		const delivery = this.deps.ownerDelivery;
-		const run: OwnerRun = { name, live, accepted: false, stopped: false };
+		const ownerSessionId = this.deps.getOwnerSessionManager?.().getSessionId?.();
+		const run: OwnerRun = { name, live, ownerSessionId, accepted: false, stopped: false };
 		if (!delivery) {
 			onAccepted(false, run);
 			return;
@@ -1725,7 +1734,7 @@ export class SessionChannels {
 			}
 			// Stopped before its run existed: the earlier abort found nothing to end, so the run is ended now.
 			if (run.stopped) {
-				this.abortOwnerRun(origin.ref, name);
+				this.abortOwnerRun(origin.ref, name, run.stopped);
 				// A stopped core routes nothing more: nothing would settle the batch that ends the observation.
 				if (!this.started) run.unobserve?.();
 			} else if (!run.live()) this.stopOwnerRun(origin.ref, run, "authority");
@@ -1750,7 +1759,7 @@ export class SessionChannels {
 		const run = this.ownerRuns.get(ref);
 		if (!run) return;
 		if (run.stopped) {
-			this.abortOwnerRun(ref, run.name);
+			this.abortOwnerRun(ref, run.name, run.stopped);
 			return;
 		}
 		const policy = this.policy(run.name);
@@ -1770,9 +1779,9 @@ export class SessionChannels {
 		if (!policy || ownerDollarsApply(this.ownerQuota(policy))) this.ownerMoves.reserve("charge");
 	}
 
-	private abortOwnerRun(ref: string, name: string): void {
+	private abortOwnerRun(ref: string, name: string, stop: OwnerChannelStop): void {
 		try {
-			this.deps.ownerDelivery?.abortRun(ref);
+			this.deps.ownerDelivery?.abortRun(ref, stop);
 		} catch (error) {
 			this.deps.warn(
 				`Channel ${name}: an owner turn could not be aborted (${error instanceof Error ? error.message : String(error)}).`,
@@ -1792,8 +1801,12 @@ export class SessionChannels {
 				harnessLog.warn("channels", "an owner turn was stopped at a spend bound", fields);
 			else harnessLog.info("channels", "an owner turn was stopped", fields);
 		}
-		run.stopped = true;
-		this.abortOwnerRun(ref, run.name);
+		const stop: OwnerChannelStop = {
+			reason: `owner channel ${why ?? (this.started ? "supervision" : "shutdown")}`,
+			ordinaryWork: why === "owner" ? "cancel" : why === undefined && !this.started ? "preserve" : "hold",
+		};
+		run.stopped = stop;
+		this.abortOwnerRun(ref, run.name, stop);
 		if (!this.started) {
 			run.unobserve?.();
 			this.ownerRuns.delete(ref);
@@ -1805,7 +1818,6 @@ export class SessionChannels {
 		this.scheduleWork();
 	}
 
-	/** The owner turn of `ref` was settled: it is no longer kept. */
 	private endOwnerRun(ref: string): void {
 		const run = this.ownerRuns.get(ref);
 		if (!run) return;
@@ -1827,7 +1839,7 @@ export class SessionChannels {
 		let waiting = false;
 		for (const batch of batches) {
 			if (batch.state !== "accepted" || batch.sessionId !== sessionId) continue;
-			const outcome = readBatchOutcome(this.deps, name, batch, now);
+			const outcome = readChannelReply(this.deps, name, batch, now);
 			if (outcome.kind === "waiting") {
 				waiting = true;
 				continue;
@@ -2089,11 +2101,7 @@ export class SessionChannels {
 		for (const [name, runtime] of this.runtimes) {
 			if (!runtime.holding || view.origin.k !== "owner-channel" || view.origin.channel !== name) continue;
 			const policy = this.ownerPolicy(name);
-			const batch = policy
-				? this.journal(name)
-						.read()
-						.result.batches.find((entry) => entry.id === ref && entry.owner === true)
-				: undefined;
+			const batch = policy ? ownerBatchesByRef(this.journal(name).read().result.batches, ref).get(ref) : undefined;
 			// Shown only to the identity whose message opened the run, in the chat that message came from.
 			if (!policy || batch?.senderDigest === undefined) continue;
 			await this.ownerPush.present(
@@ -2107,28 +2115,32 @@ export class SessionChannels {
 		}
 	}
 
-	/** The sender digest of each owner batch of the channel by its id (the ref of the turn it opened). */
-	private ownerOpeners(name: string): (ref: string) => string | undefined {
-		const batches = this.journal(name).read().result.batches;
-		return (ref) => batches.find((batch) => batch.id === ref && batch.owner === true)?.senderDigest;
-	}
-
 	/** Answer one owner control word; it never becomes a turn. Replies go to the chat it came from. */
 	private async runOwnerControl(
 		name: string,
 		event: InboundChannelEvent,
 		eventDigest: string,
-		senderDigest: string,
+		admittedSenderDigest: string,
 		control: OwnerControl,
+		admittedProvider: ChannelProvider,
 	): Promise<void> {
 		const policy = this.started ? this.policy(name) : undefined;
 		const provider = this.registry.getChannel(name);
-		if (!policy || !provider) return;
+		if (
+			!policy ||
+			!provider ||
+			provider !== admittedProvider ||
+			!ownerChannelWired(this.deps) ||
+			!ownerAdmission(provider, event, policy)
+		)
+			return;
+		const senderDigest = ownerSenderDigest(name, event.senderId, provider);
+		if (senderDigest !== admittedSenderDigest) return;
 		const reply = (text: string, key: string) =>
 			sendOwnerControlReply(this.deps.warn, name, provider, event, key, text, true);
 		try {
 			if (control.kind === "status") {
-				const status = this.ownerStatus(name, policy, event.conversationKey, senderDigest);
+				const status = this.ownerStatus(name, policy, event, senderDigest);
 				await reply(status.reply, eventDigest);
 				for (const view of status.present)
 					await this.ownerPush.present(
@@ -2154,12 +2166,13 @@ export class SessionChannels {
 			} catch {
 				handle = undefined;
 			}
+			const batches = this.journal(name).read().result.batches;
 			const result = decideOwnerDraft(control, {
 				channel: name,
 				control: handle,
 				by,
 				terminalOnlyClasses: policy.ownerTerminalOnlyClasses,
-				openerOf: this.ownerOpeners(name),
+				openerOf: (ref) => ownerBatchesByRef(batches, ref).get(ref)?.senderDigest,
 				presentedAt: (draftId) => this.ownerPush.presentedAt(name, draftId, event.conversationKey),
 				receivedAt: event.receivedAt,
 				// The approval's reply is English (`decideOwnerDraft`), so is the refusal it names.
@@ -2194,6 +2207,7 @@ export class SessionChannels {
 		eventDigest: string,
 		approvedReply: string,
 	): void {
+		const sessionId = this.sessionId();
 		const provider = this.registry.getChannel(name);
 		// The approval run re-issues the held call, so it runs under the channel's authority mode as the policy reads now.
 		const origin: OwnerChannelOrigin = {
@@ -2220,8 +2234,7 @@ export class SessionChannels {
 				}
 				const now = this.now();
 				const batch: ChannelBatchRecord = {
-					...this.acceptedBatch(by.ref, this.sessionId(), event, [eventDigest], true, now),
-					owner: true,
+					...this.acceptedBatch(by.ref, sessionId, event, [eventDigest], true, now, run),
 					senderDigest: by.senderDigest,
 					approval: view.id,
 					...(ownerDollarsApply(this.ownerQuota(policy)) || run.metered ? {} : { quota: true as const }),
@@ -2245,39 +2258,29 @@ export class SessionChannels {
 	private ownerStatus(
 		name: string,
 		policy: ResolvedChannelPolicy,
-		conversationKey: string,
+		event: InboundChannelEvent,
 		senderDigest: string,
 	): { readonly reply: string; readonly present: readonly OwnerDraftView[] } {
 		const now = this.now();
 		const state = this.journal(name).read().result;
 		const quota = this.ownerQuota(policy);
-		let drafts: readonly OwnerDraftView[] = [];
-		let calls: OwnerWaitingView | undefined;
-		const openerOf = this.ownerOpeners(name);
-		try {
-			const control = this.deps.ownerControl?.();
-			drafts = (control?.drafts() ?? []).filter(
-				(view) => view.state === "pending" && draftInScope(view, name, senderDigest, openerOf),
-			);
-			calls = control?.waiting();
-		} catch {
-			// What was read stands: a list that could not be read is left out of the reply.
-		}
+		const { conversationKey } = event;
+		const details = readOwnerControlStatus(this.deps, name, state, event, senderDigest);
 		const shown = (view: OwnerDraftView) => this.ownerPush.presentedAt(name, view.id, conversationKey) !== undefined;
 		const facts = {
+			...details,
 			room: ownerRoom(name, state, policy, now, !ownerDollarsApply(quota)),
 			refusal: this.ownerTurnRefusal(name, policy, state, now),
 			quota,
 			running: [...this.ownerRuns.values()].some((run) => run.name === name && run.accepted && !run.stopped),
 			waiting: state.pending.filter((entry) => entry.owner === true && entry.conversationKey === conversationKey)
 				.length,
-			drafts: drafts.map((view) => ({ id: view.id, classes: view.classes, shown: shown(view) })),
-			calls,
+			drafts: details.drafts.map((view) => ({ id: view.id, classes: view.classes, shown: shown(view) })),
 			suppressed: this.ownerPush.takeSuppressed(name),
 		};
 		return {
 			reply: ownerStatusReply(name, policy, facts, MAX_STATUS_DRAFTS),
-			present: drafts.filter((view) => !shown(view)).slice(0, MAX_STATUS_PRESENTATIONS),
+			present: details.drafts.filter((view) => !shown(view)).slice(0, MAX_STATUS_PRESENTATIONS),
 		};
 	}
 

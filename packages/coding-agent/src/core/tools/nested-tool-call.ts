@@ -136,11 +136,10 @@ export interface NestedCallOutcome extends NestedOutputEvidence {
 /** A sub-call that is admitted and waiting to run, or one already settled. */
 export type StartedNestedCall = { run: () => Promise<NestedCallOutcome> } | { settled: NestedCallOutcome };
 
-export const refusedNestedOutcome = (reason: string): NestedCallOutcome => ({
-	status: "refused",
-	text: `refused: ${reason}`,
-	reason,
-});
+export function refusedNestedOutcome(diagnostic: string, correction?: string): NestedCallOutcome {
+	const reason = correction ? `${diagnostic} ${correction}` : diagnostic;
+	return { status: "refused", text: `refused: ${reason}`, reason };
+}
 const errorOutcome = (message: string): NestedCallOutcome => ({
 	status: "error",
 	text: `error: ${message}`,
@@ -154,7 +153,7 @@ function describeError(error: unknown): string {
 /** A thrown refusal is a guard answering before the operation; any other throw is a failed operation. */
 function outcomeFromThrown(error: unknown): NestedCallOutcome {
 	const denial = readAgentToolPolicyDeniedError(error);
-	if (denial) return refusedNestedOutcome(denial.message);
+	if (denial) return refusedNestedOutcome(denial.message, denial.correction);
 	const execution = readAgentToolExecutionError(error);
 	if (execution?.failureCode === "credential_access_blocked") return refusedNestedOutcome(execution.message);
 	return errorOutcome(describeError(error));
@@ -258,11 +257,7 @@ export async function startNestedCall(
 	}
 	if (admission.kind === "refused") {
 		binding?.release();
-		return {
-			settled: refusedNestedOutcome(
-				admission.correction ? `${admission.reason} ${admission.correction}` : admission.reason,
-			),
-		};
+		return { settled: refusedNestedOutcome(admission.reason, admission.correction) };
 	}
 	const executor = binding?.tool ?? tool;
 	return {
@@ -279,6 +274,11 @@ export async function startNestedCall(
 				try {
 					result = await executor.execute(id, args as never, signal);
 				} catch (error) {
+					const denial = readAgentToolPolicyDeniedError(error);
+					if (denial) {
+						admission.abandon();
+						return refusedNestedOutcome(denial.message, denial.correction);
+					}
 					thrown = outcomeFromThrown(error);
 					result = { content: [{ type: "text", text: thrown.text }], details: undefined, isError: true };
 				}

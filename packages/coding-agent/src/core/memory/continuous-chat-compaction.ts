@@ -59,7 +59,7 @@ export interface ContinuousChatCompactionConversation {
 /** A reason new compactions wait: the owner's words, and how long until the reason may have lifted (the runtime wakes then). */
 export interface ContinuousChatDispatchHold {
 	readonly message: string;
-	readonly reasons: readonly ("spend" | "provider" | "accounting")[];
+	readonly reasons: readonly ("spend" | "provider" | "accounting" | "configuration")[];
 	readonly retryInMs: number;
 }
 

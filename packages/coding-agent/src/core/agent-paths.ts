@@ -178,17 +178,22 @@ export function projectMemoryDir(agentDir: string, projectKey: string): string {
 	if (!/^[a-f0-9]{16}$/i.test(projectKey)) {
 		throw new TypeError("Project memory key must be a 16-character hexadecimal digest.");
 	}
-	return join(agentDir, "memory", "projects", projectKey.toLowerCase());
+	return join(projectMemoryRoot(agentDir), projectKey.toLowerCase());
+}
+
+/** Canonical private storage for learned knowledge and project memory, including SQLite journals and backups. */
+export function agentMemoryDir(agentDir: string): string {
+	return join(agentDir, "memory");
 }
 
 /** `<agentDir>/memory/projects` -- every project's hot memory; private to the main lane. */
 export function projectMemoryRoot(agentDir: string): string {
-	return join(agentDir, "memory", "projects");
+	return join(agentMemoryDir(agentDir), "projects");
 }
 
 /** Canonical learned knowledge in the user ICM catalog; shared across project conversations. */
 export function knowledgeDatabaseFile(agentDir: string): string {
-	return join(agentDir, "memory", "knowledge.sqlite");
+	return join(agentMemoryDir(agentDir), "knowledge.sqlite");
 }
 
 /** Managed-state sidecar for a project's MEMORY.md (drift detection, like the global files). */

@@ -5,7 +5,10 @@ import type { Api, AssistantMessage, Model, ProviderResponseTicket, Usage } from
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import type { SessionSemanticUsageDelivery } from "../src/core/cost/semantic-usage-delivery.ts";
-import { ContinuousChatAccountingHold } from "../src/core/memory/continuous-chat-compaction.ts";
+import {
+	ContinuousChatAccountingHold,
+	ContinuousChatCompactionCoordinator,
+} from "../src/core/memory/continuous-chat-compaction.ts";
 import { ContinuousChatCompactionAdapter } from "../src/core/memory/continuous-chat-compaction-adapter.ts";
 import { validateContinuousChatSummaryModel } from "../src/core/memory/continuous-chat-settings.ts";
 import { ContinuousChatSpendMeter } from "../src/core/memory/continuous-chat-spend.ts";
@@ -42,7 +45,7 @@ function setup(fs?: FaultableFs) {
 	let now = 0;
 	let timerId = 0;
 	const scheduled = new Map<number, () => void>();
-	let current = model;
+	let current: Model<Api> | undefined = model;
 	let session = "session-a";
 	let refuseLease = false;
 	let refuseIdentity = false;
@@ -143,7 +146,10 @@ function setup(fs?: FaultableFs) {
 	const adapter = new ContinuousChatCompactionAdapter({
 		spend,
 		usage: () => owner,
-		summary: () => ({ ok: true, model: current, reference: "test", thinkingLevel: "minimal" }),
+		summary: () =>
+			current
+				? { ok: true, model: current, reference: "test", thinkingLevel: "minimal" }
+				: { ok: false, reason: "Summary model is unset." },
 		prefixHead: () => ({ systemPrompt: "", tools: [], model: undefined }),
 		complete: (options: IsolatedCompletionOptions) => {
 			const invoke = (): Promise<IsolatedCompletionResult> => {
@@ -199,6 +205,7 @@ function setup(fs?: FaultableFs) {
 		start,
 		settle,
 		settlePhysical,
+		endLogical: (index: number) => finish[index]!({ text: "", usage: missing, stopReason: "error" }),
 		abandon: (index: number) => reject[index]!(new Error("logical caller stopped")),
 		failPhysical: (index: number) => tickets[index]!.failed(new Error("transport failed")),
 		unresolved,
@@ -242,7 +249,7 @@ function setup(fs?: FaultableFs) {
 		advance: (ms: number) => {
 			now += ms;
 		},
-		switchModel: (next: Model<Api>) => {
+		switchModel: (next: Model<Api> | undefined) => {
 			current = next;
 		},
 		switchSession: (next: string) => {
@@ -312,6 +319,18 @@ describe("continuous chat response accounting circuit", () => {
 		).toBe(false);
 	});
 
+	it("holds dispatch before claiming model work while the summary model is unset", () => {
+		const h = setup();
+		h.switchModel(undefined);
+		expect(h.adapter.dispatchHold()).toMatchObject({
+			reasons: ["configuration"],
+			message: "Summary model is unset.",
+		});
+		h.switchModel(model);
+		expect(h.adapter.dispatchHold()).toBeUndefined();
+		expect(h.ticketCount()).toBe(0);
+	});
+
 	it("settles explicitly declared zero pricing with positive measured tokens", async () => {
 		const h = setup();
 		h.switchModel({ ...model, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -376,6 +395,50 @@ describe("continuous chat response accounting circuit", () => {
 		h.advance(120_000);
 		await expect(h.start()).rejects.toBeInstanceOf(ContinuousChatAccountingHold);
 		expect(h.adapter.dispatchHold()).toBeDefined();
+	});
+
+	it("releases a node when the logical timeout precedes physical usage and charges its late receipt once", async () => {
+		const h = setup();
+		const appendNode = vi.fn(async () => true);
+		const coordinator = new ContinuousChatCompactionCoordinator(h.adapter, {
+			readNode: async () => undefined,
+			appendNode,
+		});
+		const text = "A".repeat(4096);
+		const run = () =>
+			coordinator.run({
+				prefix,
+				target: {
+					kind: "leaf",
+					record: {
+						schemaVersion: 1,
+						kind: "user",
+						id: 0,
+						date: "2026-11-19T15:37:50.000Z",
+						sourceKey: "user",
+						text,
+						textBytes: text.length,
+					},
+				},
+			});
+		const first = run();
+		await vi.waitFor(() => expect(h.ticketCount()).toBe(1));
+		h.endLogical(0);
+		await expect(first).resolves.toEqual({ status: "cancelled", replies: 0 });
+		await expect(run()).resolves.toEqual({ status: "cancelled", replies: 0 });
+		expect(h.ticketCount()).toBe(1);
+		expect(appendNode).not.toHaveBeenCalled();
+		expect(h.unresolved).toHaveLength(1);
+		const late = { ...measured, cost: { ...measured.cost, total: 0.25 } };
+		h.settlePhysical(0, late);
+		h.settlePhysical(0, late);
+		expect(h.retained).toHaveLength(1);
+		expect(JSON.parse(readFileSync(h.spendFile, "utf8")).usd).toBe(0.25);
+		const replay = run();
+		await vi.waitFor(() => expect(h.ticketCount()).toBe(2));
+		h.settle(1, measured);
+		await expect(replay).resolves.toMatchObject({ status: "published" });
+		expect(appendNode).toHaveBeenCalledTimes(1);
 	});
 
 	it("retains measured cost before holding a mismatched or tokenless response", async () => {

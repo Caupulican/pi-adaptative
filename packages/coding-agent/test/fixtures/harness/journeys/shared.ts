@@ -155,11 +155,11 @@ export const CAPTURED_ACCESS = localFileMutationIntentOperations.access;
 
 /**
  * The summarizer's scripted checkpoint. Production verifies it against the session's facts (read/edited files,
- * the active request, mandatory rules, open problems, done actions) and accepts it only when it carries them.
+ * mandatory rules, open problems and done actions). The owner request remains in the retained tail.
  */
 export const COMPACTION_SUMMARY = [
 	"## Active Task",
-	`User: Read ${LIMITS_PATH}, change MAX_RETRIES from 3 to 5, and remember that I prefer tabs over spaces.`,
+	"(none)",
 	"",
 	"### Mandatory Rules",
 	"(none)",
@@ -1323,50 +1323,22 @@ export function isGateCommandRefusal(details: unknown): boolean {
 	return typeof details === "object" && details !== null && "code" in details && details.code === "gate_command_unset";
 }
 
-/** What a refused completion must leave alone: the goal's status, requirements and evidence (its usage counters move with every turn). */
-export function goalCompletionFacts(session: AgentSession): string {
-	const goal = session.getGoalStateSnapshot();
-	return JSON.stringify({ status: goal?.status, requirements: goal?.requirements, evidence: goal?.evidence });
-}
-
 /** The rule facts of a root session, the session these rule checks read: it lends its workers memory reads. */
 const ROOT_RULE_FACTS = { servesLaneMemory: servesLaneMemoryFor(sessionCapabilities({ kind: "root" })) };
 
-/**
- * The first model-driven completion of a context that passed every deterministic completion check is refused once, before the
- * completion is judged, with the host's noticed-items rule: an error result whose whole text is the rule block that production
- * formats (`RULE <id>`, then the body) and the instruction to complete again. The goal is untouched, so the identical call that
- * follows is accepted. `factsBefore` is `goalCompletionFacts` taken when the refused call was planned.
- */
-export function assertCompletionRuleRefusal(
-	request: ScriptedRequest,
-	label: string,
-	session: AgentSession,
-	factsBefore: string | undefined,
-): void {
+/** The model has received the host's full completion rule on a successful goal result before it asks to finish. */
+export function assertCompletionRuleVisible(request: ScriptedRequest): void {
 	const hook = loadRuleHooks(ROOT_RULE_FACTS).find((candidate) => candidate.topic === "noticed-items");
-	if (hook === undefined) throw new Error(`${label}: the noticed-items rule does not exist`);
-	const instruction = "Review your proof output for relevant noticed items; resolve them, then call complete again.";
-	const expected = `${formatRuleHook(hook, { packageRoot: "" })}\n\n${instruction}`;
-	const refused = latestBatchResults(request).find((result) => result.toolName === "goal");
-	if (refused?.isError !== true || refused.text !== expected) {
-		const seen = refused?.text.slice(0, 400) ?? "no goal result";
-		throw new Error(`${label}: the first completion was not refused with the rule: ${seen}`);
-	}
-	const details = lastToolResultDetails(session, "goal");
-	if (!isRecordObject(details) || details.applied !== false) {
-		throw new Error(`${label}: the refusal reports an applied completion: ${JSON.stringify(details)}`);
-	}
-	// The delivered-once check reads the rule ids from the result's details (they outlive its text), so the refusal lists its own.
-	const delivered: unknown = details[RULE_IDS_DETAIL_KEY];
-	if (!Array.isArray(delivered) || delivered.length !== 1 || delivered[0] !== hook.id) {
-		const listed = JSON.stringify(delivered);
-		throw new Error(`${label}: the refusal lists ${listed} as its delivered rules, not [${hook.id}]`);
-	}
-	const status = session.getGoalStateSnapshot()?.status;
-	if (status === "completed" || goalCompletionFacts(session) !== factsBefore) {
-		throw new Error(`${label}: the refused completion changed the goal (status ${status})`);
-	}
+	if (!hook) throw new Error("Missing noticed-items rule");
+	const expected = formatRuleHook(hook, { packageRoot: "" });
+	const delivered = request.context.messages.some(
+		(message) =>
+			message.role === "toolResult" &&
+			message.toolName === "goal" &&
+			!message.isError &&
+			message.content.some((part) => part.type === "text" && part.text.includes(expected)),
+	);
+	expect(delivered, "the model received the completion rule with its goal evidence").toBe(true);
 }
 
 /**
@@ -1615,22 +1587,28 @@ export function icmReadScheduler(
 	};
 }
 
-/**
- * Lets the chat's foreground quiet window pass. The runtime starts no summary until its foreground has been quiet for
- * `CONTINUOUS_CHAT_FOREGROUND_QUIET_MS` after the last turn, on the chat's own timer, which a journey drives (virtual time).
- * Waits for the turn that just ended to arm the window, then advances it. The window is the first alarm the chat arms after a
- * turn, so a journey calls this before it waits for, or counts, the summary requests that turn made due.
- */
+/** Advance the actual foreground quiet alarm; configuration holds and retries can have been armed earlier. */
 export async function icmEndForegroundQuiet(world: HarnessWorld): Promise<void> {
-	const delay = await withDeadline(
+	const quiet = await withDeadline(
 		world.trace,
 		"the chat's foreground quiet window is armed",
-		world.timers.whenArmed("continuous-chat"),
+		(async () => {
+			for (;;) {
+				const timer = world.timers
+					.armedSnapshot("continuous-chat")
+					.filter((entry) => entry.delayMs === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS)
+					.sort((left, right) => left.remainingMs - right.remainingMs)[0];
+				if (timer) return timer;
+				await world.timers.nextArmed("continuous-chat");
+			}
+		})(),
 	);
-	expect(delay, "the first alarm the chat arms after a turn is its foreground quiet window").toBe(
-		CONTINUOUS_CHAT_FOREGROUND_QUIET_MS,
-	);
-	expect(world.timers.advance("continuous-chat", delay), "exactly the quiet window falls due").toBe(1);
+	expect(quiet.delayMs).toBe(CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
+	expect(
+		world.timers.advance("continuous-chat", Math.max(0, quiet.remainingMs)),
+		"exactly the quiet window falls due",
+	).toBe(1);
+	expect(world.timers.armedSnapshot("continuous-chat").some((timer) => timer.handle === quiet.handle)).toBe(false);
 }
 
 /**

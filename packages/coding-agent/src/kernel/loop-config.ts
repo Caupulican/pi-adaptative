@@ -382,6 +382,8 @@ export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
 
 /** Input for one replay-safe context-planning attempt. */
 export interface AgentContextPlanRequest {
+	/** Opening of this request, including an internal follow-up whose instructions apply to this request only. */
+	requestOpening?: AgentMessage;
 	/** Effective model captured with this request's authentication before planning. */
 	model?: Model<Api>;
 	/** Sanitized durable history used as the compactable portion of this request. */
@@ -629,6 +631,7 @@ export interface FollowUpState {
 
 export interface AgentLoopConfig extends AgentStreamOptions {
 	model: Model<any>;
+	resolveResponseMode?: (context: AgentContext) => "answer_only" | "default" | undefined;
 
 	/**
 	 * Run-scoped storage for the provider-request prefix high-water mark; see
@@ -1063,6 +1066,7 @@ export interface AgentLoopConfig extends AgentStreamOptions {
 
 /** Context snapshot passed into the low-level agent loop. */
 export interface AgentContext {
+	requestOpening?: AgentMessage;
 	/** The held system prompt; a request sends it through `AgentLoopConfig.projectSystemPrompt` when one is set. */
 	systemPrompt: string;
 	/** Transcript visible to the model. */

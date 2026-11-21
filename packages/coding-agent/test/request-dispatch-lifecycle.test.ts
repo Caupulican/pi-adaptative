@@ -11,9 +11,18 @@ import {
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import { captureWorkerReceiptOrigin } from "../src/core/delegation/worker-receipt-origin.ts";
 import { ForegroundLifecycleAdapter } from "../src/core/foreground-lifecycle-adapter.ts";
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
+import { projectParentInputs } from "../src/core/parent-input-projection.ts";
 import { Agent } from "../src/kernel/agent.ts";
+import { convertToLlm } from "../src/kernel/messages.ts";
+import {
+	parentInputConsumptionOf,
+	parentInputMessage,
+	parentWakeContent,
+	parentWakeOf,
+} from "../src/kernel/session/parent-input-ledger.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
 
 const model: Model<Api> = {
@@ -142,21 +151,23 @@ describe.each([false, true])("durable dispatch lifecycle, text protocol=%s", (te
 	);
 });
 
+function startRequest(manager: SessionManager, requestId: string) {
+	manager.appendRequestSnapshot({
+		requestId,
+		reason: "initial",
+		api: model.api,
+		provider: model.provider,
+		modelId: model.id,
+		effectiveConfigFingerprint: "config",
+		systemFingerprint: "system",
+		toolsFingerprint: "tools",
+		historyFingerprint: "history",
+		messageEntryIds: [],
+	});
+}
+
 it("resolves the latest request's exact call across appends and branch changes", () => {
 	const manager = SessionManager.inMemory(ownerSessionStorageRoots(process.cwd()), process.cwd());
-	const startRequest = (requestId: string) =>
-		manager.appendRequestSnapshot({
-			requestId,
-			reason: "initial",
-			api: model.api,
-			provider: model.provider,
-			modelId: model.id,
-			effectiveConfigFingerprint: "config",
-			systemFingerprint: "system",
-			toolsFingerprint: "tools",
-			historyFingerprint: "history",
-			messageEntryIds: [],
-		});
 	const assistant = (): AssistantMessage => ({
 		role: "assistant",
 		content: [{ type: "toolCall", id: "reused-call", name: "lookup", arguments: {} }],
@@ -170,13 +181,13 @@ it("resolves the latest request's exact call across appends and branch changes",
 
 	const resolve = (name = "lookup") => manager.activeProviderToolInvocationIdentity("reused-call", name);
 	expect(() => resolve()).toThrow("no accepted provider request");
-	startRequest("first");
+	startRequest(manager, "first");
 	const firstAssistant = manager.appendMessage(assistant());
 	const firstIdentity = resolve();
 	manager.appendCustomEntry("test-unrelated");
 	expect(resolve()).toBe(firstIdentity);
 
-	startRequest("second");
+	startRequest(manager, "second");
 	expect(() => resolve()).toThrow("missing or ambiguous");
 	manager.appendMessage(assistant());
 	expect(resolve()).not.toBe(firstIdentity);
@@ -186,4 +197,87 @@ it("resolves the latest request's exact call across appends and branch changes",
 
 	manager.branch(firstAssistant);
 	expect(resolve()).toBe(firstIdentity);
+});
+
+it("retries an interrupted parent wake after an unrelated assistant answer and settles only its bound answer", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "pi-parent-wake-"));
+	try {
+		const roots = ownerSessionStorageRoots(join(directory, "agent"));
+		let manager = SessionManager.create(directory, roots, join(directory, "sessions"));
+		const content = "Validate the pending background result.";
+		manager.appendParentInput(
+			parentInputMessage(
+				{
+					deliveryId: "pending-background-result",
+					payloadDigest: "a".repeat(64),
+					origin: captureWorkerReceiptOrigin(manager),
+				},
+				{ customType: "plan-update", content, display: true },
+			),
+		);
+		const wake = manager.beginParentInputWake()!;
+		const finish = (requestId: string, stopReason: "error" | "stop", text: string) => {
+			const answer = manager.appendMessage({
+				role: "assistant",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: createEmptyUsage(),
+				content: [{ type: "text", text }],
+				stopReason,
+				timestamp: Date.now(),
+			});
+			manager.appendProviderRequestTerminal(requestId, stopReason === "stop" ? "completed" : "error", answer);
+		};
+		const project = () =>
+			projectParentInputs(
+				async ({ messages }) => ({ messages }),
+				manager,
+				() => 1,
+			)({ messages: manager.buildSessionContext().messages, attempt: 0, sentPrefixCount: 0 });
+		const endFailed = manager.activateParentInputWake(wake.wakeId);
+		startRequest(manager, "failed");
+		manager.recordParentInputWakeRequest("failed", convertToLlm((await project()).messages));
+		finish("failed", "error", "Provider rejected the request.");
+		endFailed();
+		manager.appendMessage({ role: "user", content: "Separate owner question.", timestamp: Date.now() });
+		startRequest(manager, "owner-only");
+		finish("owner-only", "stop", "Answer to the owner's separate question.");
+		manager = SessionManager.open(manager.getSessionFile()!, roots);
+		expect(manager.getParentInputWake()).toEqual(wake);
+		const inactive = await project();
+		expect(JSON.stringify(convertToLlm(inactive.messages))).not.toContain(content);
+		const endRetry = manager.activateParentInputWake(wake.wakeId);
+		const canonical = manager.buildSessionContext().messages;
+		expect(canonical.at(-1)?.role).toBe("assistant");
+		const plan = await project();
+		const wire = convertToLlm(plan.messages);
+		expect(wire.at(-1)).toMatchObject({ role: "user", content: parentWakeContent(wake.wakeId, wake.inputs) });
+		expect(plan.messages).toHaveLength(canonical.length + 1);
+		expect(manager.buildSessionContext().messages).toEqual(canonical);
+		startRequest(manager, "retry");
+		expect(() => manager.recordParentInputWakeRequest("retry", convertToLlm(canonical))).toThrow(
+			"ends with an assistant",
+		);
+		const ownerAnswer = canonical.at(-1)!;
+		if (ownerAnswer.role !== "assistant") throw new Error("Expected the separate owner answer.");
+		expect(() =>
+			manager.recordParentInputWakeRequest("retry", [
+				{ ...ownerAnswer, content: [{ type: "text", text: content }] },
+				wire.at(-1)!,
+			]),
+		).toThrow("every exact selected parent input");
+		manager.recordParentInputWakeRequest("retry", wire);
+		finish("retry", "stop", "Background result validated.");
+		manager.settleParentInputWake(wake.wakeId);
+		endRetry();
+		expect(plan.isDispatchCurrent?.()).toBe(false);
+		expect(manager.getPendingParentInputs()).toHaveLength(0);
+		expect(manager.getEntries().filter(parentWakeOf)).toHaveLength(1);
+		expect(manager.getEntries().flatMap((entry) => parentInputConsumptionOf(entry) ?? [])).toMatchObject([
+			{ mode: "turn", requestId: "retry", authorizationEntryId: wake.entryId, inputs: wake.inputs },
+		]);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });

@@ -60,6 +60,7 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 	async login(callbacks) {
 		callbacks.signal?.throwIfAborted();
 		const { verifier, challenge } = await generatePKCE();
+		callbacks.signal?.throwIfAborted();
 		const state = base64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
 		const params = new URLSearchParams({
 			client_id: CLIENT_ID,
@@ -81,7 +82,7 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 			callbacks.signal,
 		);
 		callbacks.signal?.throwIfAborted();
-		const parsed = parseAuthorizationInput(input);
+		const parsed = parseAuthorizationInput(input, REDIRECT_URI);
 		if (!parsed.code || (parsed.state !== undefined && parsed.state !== state))
 			throw new Error("Invalid Antigravity authorization code or state");
 		const credentials = await exchangeToken(

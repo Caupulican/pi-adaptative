@@ -124,7 +124,7 @@ export function planCountWords(counts: PlanCounts): string[] {
 	const words = interfaceText().autonomyCommands.plan;
 	const heldElsewhere = counts.held - counts.heldOnOwner;
 	return [
-		words.doneCount(counts.settled, counts.total),
+		words.doneCount(counts.accepted, counts.total),
 		counts.running > 0 ? words.running(counts.running) : undefined,
 		counts.waiting > 0 ? words.waiting(counts.waiting) : undefined,
 		counts.heldOnOwner > 0 ? words.needsYou(counts.heldOnOwner) : undefined,
@@ -197,7 +197,7 @@ export function planStatusLine(view: Pick<PlanView, "title" | "status" | "counts
 	const { counts } = view;
 	const heldElsewhere = counts.held - counts.heldOnOwner;
 	const parts = [
-		words.doneCount(counts.settled, counts.total),
+		words.doneCount(counts.accepted, counts.total),
 		counts.running > 0 ? words.running(counts.running) : undefined,
 		heldElsewhere > 0 ? words.statusLineHeldElsewhere(heldElsewhere) : undefined,
 		counts.heldOnOwner > 0 ? words.statusLineWaitingOnOwner(steps(counts.heldOnOwner)) : undefined,
@@ -257,7 +257,7 @@ function inspectClosedPlan(view: PlanView): string {
 		view.version,
 		words.status[view.status],
 		reason,
-		view.counts.settled,
+		view.counts.accepted,
 		view.counts.total,
 	);
 }

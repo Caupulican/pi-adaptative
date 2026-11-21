@@ -22,8 +22,11 @@ import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { visitSessionAncestry } from "../kernel/session/session-tree.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
+import { TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../kernel/tool-failure-memory.ts";
+import { classifyTransientRecord } from "../kernel/transient-records.ts";
 import type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import {
+	isOwnerTurnOrigin,
 	isRecordedDeliveryOrigin,
 	MAX_TURN_ORIGIN_REF_CHARS,
 	MAX_TURN_ORIGIN_SHOWN_CHARS,
@@ -32,7 +35,10 @@ import {
 	UNREADABLE_TURN_ORIGIN,
 } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
-import { VERIFICATION_DISMISSAL_CUSTOM_TYPE } from "../kernel/verification-obligations.ts";
+import {
+	VERIFICATION_DISMISSAL_CUSTOM_TYPE,
+	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+} from "../kernel/verification-obligations.ts";
 import { parseWorkerControlRecord, type WorkerControlRecord, workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { OUTWARD_DRAFT_CUSTOM_TYPE, OUTWARD_DRAFT_STATE_CUSTOM_TYPE } from "./agent-session-edge.ts";
 import { TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE } from "./automation/task-automation-runtime-adapter.ts";
@@ -87,6 +93,7 @@ import { MEMORY_EVIDENCE_CUSTOM_TYPE } from "./memory-controller.ts";
 import { MODEL_POOL_POLICY_CUSTOM_TYPE } from "./model-router/owner-model-policy.ts";
 import { SIDE_TRIP_CONTEXT_CUSTOM_TYPE } from "./model-router/side-trip-brief.ts";
 import { SESSION_TASK_PROFILE_CUSTOM_TYPE } from "./orchestration/session-task-profile-store.ts";
+import { ORDINARY_WORK_CONTINUATION_TYPE } from "./ordinary-work-policy.ts";
 import { OWNER_RETURN_BRIEF_CUSTOM_TYPE } from "./owner-decisions/return-brief.ts";
 import { isHostInputId, isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
 import { PIPELINE_RUN_CUSTOM_TYPE } from "./pipelines/types.ts";
@@ -296,6 +303,7 @@ function customTurnOrigin(customType: string, wrapped: unknown): TurnOriginRecor
 				hostEvent && typeof hostEvent === "object" ? Reflect.get(hostEvent, "authorship") : undefined;
 			return authorship === undefined ? { v: 1, k: "host-event" } : { v: 1, k: "host-event", thirdParty: true };
 		}
+		case ORDINARY_WORK_CONTINUATION_TYPE:
 		case HARNESS_NOTICE_CUSTOM_TYPE:
 		case WATCH_AUTO_ARM_CUSTOM_TYPE:
 			return { v: 1, k: "harness" };
@@ -368,6 +376,21 @@ export function entryTurnOrigin(entry: SessionEntry): TurnOriginRecord | undefin
 	);
 }
 
+const kernelPlannerTypes = new Set([TOOL_FAILURE_LEDGER_TRANSIENT_KIND, VERIFICATION_OBLIGATION_TRANSIENT_KIND]);
+
+/** Before the planner recorded its provenance, its two kernel type names were also writable through the extension API. */
+export function isHostContextEntry(entry: SessionEntry): boolean {
+	return (
+		entry.type === "custom_message" &&
+		!entry.display &&
+		isHostReservedCustomType(entry.customType) &&
+		!(isPlainRecord(entry.details) && "parentInput" in entry.details) &&
+		customTurnOrigin(entry.customType, entry.details).k === "extension-message" &&
+		(entry.origin === "local" ||
+			(!kernelPlannerTypes.has(entry.customType) && classifyTransientRecord(entry.content, entry.details).transient))
+	);
+}
+
 let hostReservedTypes: ReadonlySet<string> | undefined;
 
 /**
@@ -385,6 +408,8 @@ let hostReservedTypes: ReadonlySet<string> | undefined;
 function hostReservedCustomTypes(): ReadonlySet<string> {
 	hostReservedTypes ??= new Set<string>([
 		...HOST_TURN_CUSTOM_TYPES,
+		...kernelPlannerTypes,
+		ORDINARY_WORK_CONTINUATION_TYPE,
 		BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
 		PLAN_UPDATE_CUSTOM_TYPE,
 		HOST_EVENT_CUSTOM_TYPE,
@@ -547,7 +572,7 @@ export function ownerOriginKind(
 	if (entry.type !== "message" || entry.message.role !== "user") return undefined;
 	const origin = entryTurnOrigin(entry);
 	if (origin === undefined) return index < stampedStart ? "owner-typed" : undefined;
-	return origin.k === "owner-typed" || origin.k === "owner-channel" ? origin.k : undefined;
+	return isOwnerTurnOrigin(origin) ? origin.k : undefined;
 }
 
 /** The extension's message once its custom type is checked (see {@link assertExtensionCustomType}). */

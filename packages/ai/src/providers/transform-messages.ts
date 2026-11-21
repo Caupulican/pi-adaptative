@@ -9,6 +9,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { sameAntigravityGeminiPresetFamily } from "./google-model-family.ts";
 
 export const INTERRUPTED_TOOL_RESULT_TEXT =
 	'[harness] {"state":"interrupted","outcome":"unknown","reason":"missing_terminal_result","next_action":"Inspect side effects before retrying; do not assume the operation failed."}';
@@ -120,7 +121,8 @@ export class MessageTransformCursor {
 			const isSameModel =
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
-				assistantMsg.model === model.id;
+				(assistantMsg.model === model.id ||
+					(model.api === "google-antigravity" && sameAntigravityGeminiPresetFamily(assistantMsg.model, model.id)));
 
 			const transformedContent = assistantMsg.content.flatMap((block) => {
 				if (block.type === "thinking") {

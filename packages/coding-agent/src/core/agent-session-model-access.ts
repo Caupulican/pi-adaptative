@@ -5,6 +5,8 @@
  */
 
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { modelsAreEqual } from "@caupulican/pi-ai/models";
+import { getProviderResponseAccount } from "@caupulican/pi-ai/stream";
 import type { Agent } from "../kernel/agent.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ThinkingLevel } from "../kernel/types.ts";
@@ -65,6 +67,23 @@ export class AgentSessionModelAccess {
 		this.ports = ports;
 	}
 
+	private requestIdentityIsStable?: () => boolean;
+
+	bindRequestIdentity(): void {
+		const agent = this.ports.agent();
+		const { streamFn, onPayload } = agent;
+		this.requestIdentityIsStable = () => agent.streamFn === streamFn && agent.onPayload === onPayload;
+	}
+
+	canReuseAccountIdentity(): boolean {
+		const extensions = this.ports.extensionRunner();
+		return (
+			this.requestIdentityIsStable?.() === true &&
+			!extensions?.hasHandlers("before_provider_headers") &&
+			!extensions?.hasHandlers("before_provider_request")
+		);
+	}
+
 	/** Why a model cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
 	unusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined {
 		if (this.ports.foregroundRecovery().isModelExhausted(`${model.provider}/${model.id}`))
@@ -77,21 +96,23 @@ export class AgentSessionModelAccess {
 	}
 
 	/**
-	 * A provider refused the model for the owner's account: it is never routed to again this session,
-	 * and the turn moves to the model that replaces it. Returns the replacement's ref, or undefined.
+	 * A refusal follows the sending account. The current turn can move only while it still uses that account and model.
 	 */
-	async replaceUnsupportedModel(message: AssistantMessage): Promise<string | undefined> {
-		const refused = this.ports.modelRegistry().find(message.provider, message.model) ?? this.ports.model();
-		if (!refused) return undefined;
-		this.ports.accountModels().markRefused(refused, message.errorMessage ?? "model not supported");
-		if (this.pinned) return undefined;
+	async replaceUnsupportedModel(message: AssistantMessage, signal?: AbortSignal): Promise<string | undefined> {
+		const receipt = getProviderResponseAccount(message);
+		if (!receipt) return undefined;
+		const accounts = this.ports.accountModels();
+		await accounts.markRefused(receipt, message.errorMessage ?? "model not supported");
+		if (signal?.aborted) return undefined;
+		const identity = { provider: receipt.provider, id: receipt.model };
+		const refused = this.ports.model();
+		if (this.pinned || !refused || !modelsAreEqual(refused, identity) || !accounts.isCurrentRefusal(receipt, refused))
+			return undefined;
 		const from = `${refused.provider}/${refused.id}`;
 		// A routed turn's model is the turn's, never the session's: its replacement stays inside the
 		// routed turn, whose end restores the owner's model; the session model is never changed from here.
 		if (this.ports.modelRouter().isRoutedTurnOn(refused)) {
-			const routed = this.ports
-				.modelRouter()
-				.replaceRefusedRoutedModel(refused, this.ports.accountModels().accountDefault(refused.provider));
+			const routed = this.ports.modelRouter().replaceRefusedRoutedModel(refused, accounts.accountDefault(refused));
 			if (!routed) {
 				this.ports.emit({
 					type: "warning",
@@ -106,7 +127,7 @@ export class AgentSessionModelAccess {
 			});
 			return to;
 		}
-		return this.leaveUnavailableSessionModel();
+		return this.leaveUnavailableSessionModel(() => !signal?.aborted && accounts.isCurrentRefusal(receipt, refused));
 	}
 
 	/**
@@ -114,24 +135,25 @@ export class AgentSessionModelAccess {
 	 * default for the account (the owner's saved default is left alone), with a warning naming both. Returns
 	 * the replacement's ref, or undefined when there is nothing to leave or nothing to move to.
 	 */
-	async leaveUnavailableSessionModel(): Promise<string | undefined> {
+	async leaveUnavailableSessionModel(stillCurrent?: () => boolean): Promise<string | undefined> {
 		const current = this.ports.model();
 		if (this.pinned) return undefined;
 		if (!current || this.ports.accountModels().availability(current) !== "unavailable") return undefined;
 		const from = `${current.provider}/${current.id}`;
 		const why = this.ports.accountModels().unavailableReason(current) ?? "unavailable";
-		const replacement = this.ports.accountModels().accountDefault(current.provider);
+		const replacement = this.ports.accountModels().accountDefault(current);
 		if (!replacement) {
 			// Only a fetched listing can say the account offers nothing else: without one, no alternative could be chosen at all.
 			this.ports.emit({
 				type: "warning",
-				message: this.ports.accountModels().hasListing(current.provider)
+				message: this.ports.accountModels().hasListing(current)
 					? `${from} is not available on this account (${why}), and the account offers no other ${current.provider} model pi knows.`
 					: `${from} is not available on this account (${why}), and no ${current.provider} account model listing is available to choose a replacement from.`,
 			});
 			return undefined;
 		}
 		await this.ports.switchSessionModel(replacement, { persistSettings: false });
+		if (!modelsAreEqual(this.ports.model(), replacement) || stillCurrent?.() === false) return undefined;
 		this.moveTalker(replacement, `${from} unavailable on this account`);
 		const to = `${replacement.provider}/${replacement.id}`;
 		this.ports.emit({

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Api, Message, Model } from "@caupulican/pi-ai";
 import { countHistoryWork, historyWorkFallback, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
+import { harnessLog } from "../kernel/harness-log.ts";
 import type { ProviderRequestSnapshotContext } from "../kernel/index.ts";
 import { isImmutableHistoryMessage } from "../kernel/message-revision.ts";
 import type { RequestSnapshotEntry } from "../kernel/session/session-entries.ts";
@@ -486,6 +487,7 @@ export function compareRequestPrefix(
 
 function recordRequestPrefix(
 	sessionManager: SessionManager,
+	requestId: string,
 	lane: string,
 	envelope: Omit<LaneRequestPrefix, "messages" | "exactMessages">,
 	wire: readonly Message[],
@@ -513,6 +515,29 @@ function recordRequestPrefix(
 	const divergence = append
 		? compareRequestPrefixStrict(previous.prefix, current, wire, wire.length)
 		: compareRequestPrefix(previous?.prefix, current, wire);
+	const index = divergence.firstDivergentIndex;
+	if (
+		previous &&
+		index !== undefined &&
+		(divergence.firstDivergentKind === "toolResult" || divergence.firstDivergentKind === "user")
+	) {
+		harnessLog.debug("context", "request history row changed", () => {
+			const message = wire[index];
+			return {
+				requestId,
+				lane,
+				index,
+				role: message?.role,
+				previousCount: previous.prefix.messages.length,
+				messageCount: wire.length,
+				previousRowFingerprint: previous.prefix.messages[index],
+				rowFingerprint: messages[index],
+				...(message?.role === "toolResult"
+					? { toolName: message.toolName, callFingerprint: fingerprint(message.toolCallId) }
+					: {}),
+			};
+		});
+	}
 	lanes.set(lane, { wire: proof ? wire : undefined, prefix: current });
 	return { history: sampledHistoryFingerprint(messages.length, (index) => messages[index]!), divergence };
 }
@@ -578,6 +603,7 @@ export function buildRequestSnapshotInput(
 	const requestOnlyMessageRange = context.requestOnlyMessageRange;
 	const prefix = recordRequestPrefix(
 		sessionManager,
+		context.requestId,
 		cacheLaneKey(ref.api, ref.provider, ref.modelId),
 		{
 			system: systemFingerprint,

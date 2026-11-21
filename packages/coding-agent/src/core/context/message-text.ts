@@ -2,6 +2,7 @@
  * Projects bounded text out of message content blocks and out of the latest user prompt and assistant response without rebuilding history.
  */
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { assistantResultText } from "../../kernel/assistant-answer.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import {
 	type MessageHistoryVersion,
@@ -9,7 +10,8 @@ import {
 	unchangedMessagePrefix,
 } from "../../kernel/message-revision.ts";
 
-export function textContentPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
+export function textContentPrefix(content: string | readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
+	if (typeof content === "string") return content.length > maxChars ? content.slice(0, maxChars) : content;
 	const chunks: string[] = [];
 	let length = 0;
 	let found = false;
@@ -63,12 +65,8 @@ export function latestUserPromptText(messages: readonly AgentMessage[], maxChars
 	for (let index = messages.length - 1; index >= (retained?.length ?? 0); index--) {
 		const message = messages[index];
 		if (message?.role !== "user") continue;
-		if (typeof message.content === "string") {
-			result = message.content.length > maxChars ? message.content.slice(0, maxChars) : message.content;
-			break;
-		}
 		const text = textContentPrefix(message.content, maxChars);
-		if (text.length > 0) {
+		if (typeof message.content === "string" || text.length > 0) {
 			result = text;
 			break;
 		}
@@ -98,9 +96,5 @@ export function latestAssistantText(messages: readonly AgentMessage[]): string |
 	}
 	if (!message) return undefined;
 
-	const chunks: string[] = [];
-	for (const content of message.content) {
-		if (content.type === "text") chunks.push(content.text);
-	}
-	return chunks.join("").trim() || undefined;
+	return assistantResultText(message).trim() || undefined;
 }

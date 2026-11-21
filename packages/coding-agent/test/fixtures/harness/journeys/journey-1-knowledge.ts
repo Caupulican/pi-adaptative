@@ -23,12 +23,14 @@ const GROUNDED = {
 	grounded: { kind: "noul", probability: 0.98 },
 	basis: { kind: "choice", choice: "explicit", confidence: 0.98 },
 	requested: { kind: "noul", probability: 0.98 },
+	reporting_requirement: { kind: "noul", probability: 0.02 },
 } as const;
 const SAME_SLOT = { same_0: { kind: "noul", probability: 0.98 } } as const;
 /** The session model's own answers when System One is off: the same meaning, reported without calibration. */
 const JUDGED_REQUESTED = [
 	{ id: "grounded", value: true, confidence: 0.98 },
 	{ id: "basis", selected: "explicit", confidence: 0.98 },
+	{ id: "reporting_requirement", value: false, confidence: 0.98 },
 	{ id: "requested", value: true, confidence: 0.98 },
 ] as const;
 const JUDGED_SAME_SLOT = [{ id: "same_0", value: true, confidence: 0.98 }] as const;

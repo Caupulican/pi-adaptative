@@ -7,7 +7,7 @@
  * - too_many: more candidates than VOTE_CANDIDATE_LIMIT; read all.
  * - V1_divergent: two or more candidates, every one a writing step, whose changed files are pairwise disjoint: the vote
  *   compared different work, so nothing is chosen and the lead reads all (nothing is held). It reads only the record's
- *   facts, so it runs before V0 and spares the automatic checks a comparison that has no common ground.
+ *   facts, so the executor can skip the rubric for work that has no common ground.
  * - V0_unjudged: no readings (System One absent, failed or out of bound).
  * - V2_evidence_open: a candidate's evidence sufficiency reading is not a pass.
  * - V3 (a filter): a candidate with a failed criterion is not eligible.
@@ -15,15 +15,13 @@
  * - V4_winner: exactly one eligible candidate, every criterion met.
  * - V5_choose: two or more eligible candidates, every criterion met; System One's Choice names the winner among them.
  *
- * The exits that do not name a winner (V0, V2, V6, and V5 without a Choice winner) try an automatic verify of the two top
- * candidates, once per vote (`voteCheckNodes`), and read all when there is no room or fewer than two candidates. After both
- * checks settle, the vote re-decides from their verdicts (`verifiedVote`): one accepted names that candidate, otherwise read all.
+ * An open vote returns the reports to the root. Checks already declared in the graph settle from their recorded verdicts.
  */
 
 import type { NoulReading } from "../decision/noul.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import type { PlanNodeSpec, PlanRecord } from "./plan-graph.ts";
-import { voteCheckNodes, voteCriteria } from "./plan-revision.ts";
+import { voteCriteria } from "./plan-revision.ts";
 
 /** Most candidates a vote judges; a vote with more reads all. */
 export const VOTE_CANDIDATE_LIMIT = 8;
@@ -35,8 +33,6 @@ export type RubricReading = "meets" | "fails" | "open";
 export interface CandidateReading {
 	readonly memberId: string;
 	readonly sufficient: NoulReading;
-	/** Advisory Score support used only to break a tie for an independent check. */
-	readonly verificationSupport?: number;
 	readonly criteria: readonly RubricReading[];
 }
 
@@ -57,32 +53,15 @@ export type VoteExit =
 	| { readonly kind: "too_many" }
 	| { readonly kind: "V0_unjudged" }
 	| { readonly kind: "V1_divergent" }
-	| { readonly kind: "V2_evidence_open"; readonly members: readonly string[] }
+	| { readonly kind: "V2_evidence_open"; readonly members: readonly string[]; readonly gaps: readonly string[] }
 	| { readonly kind: "V4_winner"; readonly memberId: string }
 	| { readonly kind: "V5_choose"; readonly eligible: readonly string[] }
 	| { readonly kind: "V6_none_eligible"; readonly gaps: readonly string[] };
 
-/** The verdict of a vote whose two automatic checks settled: one accepted names its candidate, otherwise neither decides. */
-export type VerifiedVote =
-	| { readonly kind: "V7_verified"; readonly memberId: string }
-	| { readonly kind: "V8_verify_unsettled" };
-
-/** What the executor does next: name the winner, hold the step for re-planning, add the automatic checks, or read all. */
+/** A supported winner or the reasons the root must decide from the candidate reports. */
 export type VoteStep =
-	| { readonly kind: "winner"; readonly memberId: string; readonly exit: string }
-	| { readonly kind: "hold"; readonly detail: string }
-	| { readonly kind: "auto_verify"; readonly top: readonly [string, string]; readonly exit: string }
-	| { readonly kind: "read_all"; readonly exit: string; readonly gaps: readonly string[] };
-
-export interface VoteStepInput {
-	readonly record: PlanRecord;
-	readonly vote: PlanNodeSpec;
-	readonly facts: VoteFacts;
-	readonly readings: readonly CandidateReading[] | undefined;
-	readonly exit: VoteExit;
-	/** V5's Choice: the winner System One named among the eligible candidates, or undefined when it named none. */
-	readonly choice?: string | undefined;
-}
+	| { readonly kind: "winner"; readonly memberId: string }
+	| { readonly kind: "read_all"; readonly gaps: readonly string[] };
 
 /** A vote's facts: its criteria, and each candidate's writing step and the files it changed. */
 export function voteFacts(
@@ -113,7 +92,8 @@ export function decideVote(facts: VoteFacts, readings: readonly CandidateReading
 	const insufficient = readings
 		.filter((reading) => reading.sufficient !== "hard_pass")
 		.map((reading) => reading.memberId);
-	if (insufficient.length > 0) return { kind: "V2_evidence_open", members: insufficient };
+	if (insufficient.length > 0)
+		return { kind: "V2_evidence_open", members: insufficient, gaps: gapsOf(facts.criteria, readings) };
 	const eligible = readings.filter((reading) => !reading.criteria.includes("fails"));
 	if (eligible.length === 0 || eligible.some((reading) => reading.criteria.includes("open")))
 		return { kind: "V6_none_eligible", gaps: gapsOf(facts.criteria, readings) };
@@ -122,66 +102,41 @@ export function decideVote(facts: VoteFacts, readings: readonly CandidateReading
 	return { kind: "V5_choose", eligible: eligible.map((reading) => reading.memberId) };
 }
 
-/** The step an exit takes. The automatic check is offered only when the record has room for it; otherwise the vote reads all. */
-export function voteStep(input: VoteStepInput): VoteStep {
-	const { exit } = input;
+/** An inconclusive comparison returns to the root in the same plan version. */
+export function voteStep(exit: VoteExit, choice?: string): VoteStep {
 	switch (exit.kind) {
 		case "too_many":
-			return readAll(exit.kind, []);
+			return { kind: "read_all", gaps: ["The candidate count exceeds the comparison limit."] };
 		case "V1_divergent":
-			return readAll(exit.kind, []);
-		case "V4_winner":
-			return { kind: "winner", memberId: exit.memberId, exit: exit.kind };
-		case "V5_choose":
-			return input.choice !== undefined && exit.eligible.includes(input.choice)
-				? { kind: "winner", memberId: input.choice, exit: exit.kind }
-				: checkOrReadAll(input, exit.kind, []);
-		case "V6_none_eligible":
-			return checkOrReadAll(input, exit.kind, exit.gaps);
+			return { kind: "read_all", gaps: ["The candidates changed disjoint files and did different work."] };
 		case "V0_unjudged":
+			return { kind: "read_all", gaps: ["The vote received no rubric judgment."] };
 		case "V2_evidence_open":
-			return checkOrReadAll(input, exit.kind, []);
+			return {
+				kind: "read_all",
+				gaps: [`The rubric evidence is inconclusive for ${exit.members.join(", ")}.`, ...exit.gaps],
+			};
+		case "V4_winner":
+			return { kind: "winner", memberId: exit.memberId };
+		case "V5_choose":
+			return choice !== undefined && exit.eligible.includes(choice)
+				? { kind: "winner", memberId: choice }
+				: {
+						kind: "read_all",
+						gaps: [`The qualifying candidates have no clear winner: ${exit.eligible.join(", ")}.`],
+					};
+		case "V6_none_eligible":
+			return { kind: "read_all", gaps: exit.gaps };
 	}
 }
 
-/** The verdict of a vote whose checks settled: exactly one accepted check names its candidate; both or neither reads all. */
-export function verifiedVote(
-	checks: readonly { readonly memberId: string; readonly accepted: boolean }[],
-): VerifiedVote {
+/** A vote with checks in its stored graph honors their verdicts, including on resume. */
+export function verifiedVote(checks: readonly { readonly memberId: string; readonly accepted: boolean }[]): VoteStep {
 	const accepted = checks.filter((check) => check.accepted);
-	const only = accepted.length === 1 ? accepted[0] : undefined;
-	return only ? { kind: "V7_verified", memberId: only.memberId } : { kind: "V8_verify_unsettled" };
-}
-
-function readAll(exit: string, gaps: readonly string[]): VoteStep {
-	return { kind: "read_all", exit, gaps };
-}
-
-function checkOrReadAll(input: VoteStepInput, exit: string, gaps: readonly string[]): VoteStep {
-	const top = topTwo(input);
-	if (top === undefined) return readAll(exit, gaps);
-	return voteCheckNodes(input.record, input.vote.id, top, input.record.version + 1) === undefined
-		? readAll("V9_no_room", gaps)
-		: { kind: "auto_verify", top, exit };
-}
-
-/** The two candidates with the most met criteria, ties by advisory support then record order; undefined with fewer than two candidates. */
-function topTwo(input: VoteStepInput): readonly [string, string] | undefined {
-	const { record, facts, readings } = input;
-	if (facts.candidates.length < 2) return undefined;
-	const ranked = facts.candidates
-		.map(({ memberId }) => {
-			const reading = readings?.find((entry) => entry.memberId === memberId);
-			return {
-				memberId,
-				met: reading?.criteria.filter((value) => value === "meets").length ?? 0,
-				support: reading?.verificationSupport ?? 0,
-				position: record.nodes.findIndex((node) => node.id === memberId),
-			};
-		})
-		.sort((a, b) => b.met - a.met || b.support - a.support || a.position - b.position);
-	const [first, second] = ranked;
-	return first && second ? [first.memberId, second.memberId] : undefined;
+	const [only] = accepted;
+	return only && accepted.length === 1
+		? { kind: "winner", memberId: only.memberId }
+		: { kind: "read_all", gaps: ["The independent checks did not identify a single winner."] };
 }
 
 /** Two or more writing candidates whose changed files share no path: they did different work. */

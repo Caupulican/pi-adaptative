@@ -5,7 +5,19 @@
  * these types, so callers keep importing them from there.
  */
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+
+/** The maximum full peer message or reply, including an attached body. */
+export const MAX_WORKER_MESSAGE_CHARS = MAX_WORKER_BRIEF_CHARS;
+/** On disk, older mailbox records store bodies up through this length in the content field directly. */
+export const INLINE_WORKER_MESSAGE_CHARS = 4_096;
+
+/** Preserve the established trim of inline coordination text and the exact body of an attached message. */
+export function normalizeWorkerMessageContent(text: string): string {
+	const trimmed = text.trim();
+	return !trimmed || text.length <= INLINE_WORKER_MESSAGE_CHARS ? trimmed : text;
+}
 
 /**
  * Host-only: the words are another agent's (a bot's reply to the worker's mail), written by the session but not its own,

@@ -1,4 +1,5 @@
 /** Commands over the durable task ledger for an exact worker-model transfer. */
+
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -11,6 +12,7 @@ import {
 	type OrchestrationEvent,
 	toJsonObject,
 } from "./contracts.ts";
+import { dispatchForStorage } from "./dispatch-storage.ts";
 import {
 	type ModelTransferInput,
 	type ModelTransferRecord,
@@ -133,7 +135,8 @@ export class ModelTransferRuntime {
 		const transfer = modelTransferByCommand(requireAttempt(state, sourceAttemptId), commandId);
 		if (!transfer || transfer.taskId !== taskId || transfer.status === "refused")
 			throw new DurableTaskRuntimeError("Model transfer is unavailable for successor admission.");
-		const normalized = dispatchFromValue(dispatch, "model transfer dispatch");
+		const stored = dispatchForStorage(dispatch);
+		const normalized = dispatchFromValue(stored, "model transfer dispatch");
 		if (transfer.status !== "requested") {
 			const successor = requireAttempt(state, transfer.successorAttemptId);
 			if (!isDeepStrictEqual(successor.dispatch, normalized))
@@ -146,7 +149,11 @@ export class ModelTransferRuntime {
 				aggregateId: taskId,
 				actor: "runtime",
 				idempotencyKey: eventKey("successor", sourceAttemptId, commandId),
-				payload: toJsonObject({ sourceAttemptId, commandId, dispatch: normalized }),
+				payload: toJsonObject({
+					sourceAttemptId,
+					commandId,
+					dispatch: { ...normalized, instructions: stored.instructions },
+				}),
 			},
 			() => assertWorkerReceiptAdmission(dispatch.receiptOrigin),
 		);

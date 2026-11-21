@@ -25,6 +25,7 @@ import {
 	normalizedHeaderTimestamp,
 	type SemanticUsageLedgerIdentity,
 	type SemanticUsageLedgerPort,
+	sameIdentity,
 	semanticUsageCanonicalDataMatches,
 } from "./session-ledger-port.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "./usage-records.ts";
@@ -249,10 +250,7 @@ export function captureSummarySpendIdentity(
 		disposed ||
 		!identity.persisted ||
 		!journalSlotOf(identity) ||
-		identity.sessionId !== bound.sessionId ||
-		identity.sessionFile !== bound.sessionFile ||
-		identity.headerTimestamp !== bound.headerTimestamp ||
-		identity.persisted !== bound.persisted ||
+		!sameIdentity(identity, bound) ||
 		ledger.persistenceUncertain()
 	)
 		throw new Error("Summary spend requires the same durable session identity");
@@ -266,6 +264,7 @@ export function samePayload(left: TypeSafeUsageReceipt, right: TypeSafeUsageRece
 
 export function requestMatchesReceipt(request: UnresolvedUsageRequest, receipt: TypeSafeUsageReceipt): boolean {
 	return (
+		request.requestId === receipt.receiptId &&
 		request.provider === receipt.provider &&
 		request.model === receipt.model &&
 		request.route === receipt.route &&
@@ -696,12 +695,19 @@ async function scanCanonicalSummary(
 	return found;
 }
 
-async function recoverSummarySpend(
-	identity: SemanticUsageLedgerIdentity,
+/** Reconcile canonical proof only against its still-standing reservation or receipt under the sidecar lock. */
+export function reconcileCanonicalSummarySpend(
 	slot: JournalSlot,
 	request: UnresolvedUsageRequest,
-): Promise<void> {
-	const receipt = await scanCanonicalSummary(identity, request);
+	receipt: TypeSafeUsageReceipt,
+): void {
+	if (
+		request.summarySpendPending !== true ||
+		request.route !== "history_summary" ||
+		request.origin.sessionId !== slot.sessionId ||
+		!requestMatchesReceipt(request, receipt)
+	)
+		throw new SemanticUsageJournalError("corrupt", "canonical summary proof does not match its reservation");
 	const record: JournalRecord = {
 		reportId: receipt.receiptId,
 		payload: receipt,
@@ -715,12 +721,14 @@ async function recoverSummarySpend(
 			throw new SemanticUsageJournalError("corrupt", "canonical summary recovery found a receipt conflict");
 		const standing = current.records.find((candidate) => candidate.reportId === receipt.receiptId);
 		const unresolved = current.unresolved?.find((candidate) => candidate.requestId === receipt.receiptId);
-		if (standing && (!samePayload(standing.payload, receipt) || !requestMatchesReceipt(request, standing.payload)))
+		if (standing && !samePayload(standing.payload, receipt))
 			throw new SemanticUsageJournalError(
 				"corrupt",
 				"canonical summary recovery conflicts with the standing receipt",
 			);
-		if (!standing && (!unresolved || !isDeepStrictEqual(unresolved, request))) return current;
+		if (unresolved && !isDeepStrictEqual(unresolved, request))
+			throw new SemanticUsageJournalError("corrupt", "canonical summary reservation changed before recovery");
+		if (!standing && !unresolved) return current;
 		return retainRecordChange(slot, record, {})(current);
 	});
 }
@@ -737,18 +745,20 @@ function drainSummaryRecoveryQueue(): void {
 			activeSummaryRecoveryScans -= 1;
 			drainSummaryRecoveryQueue();
 		};
-		void recoverSummarySpend(job.identity, journalSlotOf(job.identity)!, job.request).then(
-			() => {
-				summaryRecoveryJobs.delete(key);
-				finish();
-			},
-			() => {
-				job.running = false;
-				job.failures = Math.min(job.failures + 1, 7);
-				job.retryAt = Date.now() + Math.min(1_000 * 2 ** (job.failures - 1), 60_000);
-				finish();
-			},
-		);
+		void scanCanonicalSummary(job.identity, job.request)
+			.then((receipt) => reconcileCanonicalSummarySpend(journalSlotOf(job.identity)!, job.request, receipt))
+			.then(
+				() => {
+					summaryRecoveryJobs.delete(key);
+					finish();
+				},
+				() => {
+					job.running = false;
+					job.failures = Math.min(job.failures + 1, 7);
+					job.retryAt = Date.now() + Math.min(1_000 * 2 ** (job.failures - 1), 60_000);
+					finish();
+				},
+			);
 	}
 }
 

@@ -819,7 +819,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const mailbox = this.getMailbox(agent.agentId);
 		const correlatedAttempt = this.controlMessageAttemptById(agent.agentId, messageId);
 		if (correlatedAttempt) {
-			if (correlatedAttempt.dispatch.instructions !== message.trim()) {
+			if (correlatedAttempt.dispatch.instructions !== message) {
 				throw new WorkerControlIdentityConflictError(
 					"Worker control idempotency identity conflicts with its durable dispatch.",
 				);

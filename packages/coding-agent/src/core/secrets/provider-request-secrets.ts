@@ -1,4 +1,5 @@
 import type { Api, Context, Model } from "@caupulican/pi-ai";
+import { maskHistoricalToolPasswords } from "./credential-content-mock.ts";
 import {
 	type ContentPath,
 	CredentialContentProjectionError,
@@ -186,7 +187,7 @@ export function createProviderRequestSecretPolicy(
 			});
 		}
 	}
-	const contextString: CredentialStringProjector = (path, text, parent) => {
+	const contextString: CredentialStringProjector = (path, text, parent, root) => {
 		const trusted = contextStrings.get(JSON.stringify(path));
 		if (
 			api === "anthropic-messages" &&
@@ -199,7 +200,15 @@ export function createProviderRequestSecretPolicy(
 			if (signed && signed.original === field(parent, "thinkingSignature") && redact(text) !== text)
 				throw new CredentialContentProjectionError("signed-content");
 		}
-		return trusted?.original === text ? trusted.projected : redact(text);
+		if (trusted?.original === text) return trusted.projected;
+		if (
+			path[0] === "messages" &&
+			typeof path[1] === "number" &&
+			(path[2] === "details" || (path[2] === "content" && path[4] === "text" && field(parent, "type") === "text")) &&
+			field(at(root, ["messages", path[1]]), "role") === "toolResult"
+		)
+			return redact(maskHistoricalToolPasswords(text, path[2] === "details" ? path.slice(3) : undefined));
+		return redact(text);
 	};
 	const protocolItem = (path: ContentPath, parent: unknown, root: unknown) => {
 		const type = field(parent, "type");

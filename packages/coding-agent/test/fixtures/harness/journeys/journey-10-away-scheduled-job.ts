@@ -252,6 +252,7 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 			expect(await phone(4, `steer ${firstSteer}`)).toContain("Steering queued");
 			world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
 			await wait("the first phone turn occupies the bot", started.promise);
+			expect(await phone(5, "status")).toContain("Phone steer: running");
 			const steer = "Summarize the completed retry inspection.";
 			const answer = "The retry budget is three.";
 			enqueueBot(world, "j10-away-bot", "worker-c", soul, {
@@ -259,9 +260,11 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 				check: (request) => expect(currentRequestCarries(request, steer)).toBe(true),
 				reply: { content: [{ type: "text", text: answer }] },
 			});
-			expect(await phone(5, `steer ${steer}`)).toContain("Steering queued");
+			expect(await phone(6, `steer ${steer}`)).toContain("Steering queued");
 			world.timers.advance("bot-sessions", OWED_INBOX_SWEEP_MS);
-			expect(await phone(6, "status")).toContain(jobId);
+			const queued = await phone(7, "status");
+			expect(queued).toContain(jobId);
+			expect(queued).toContain("Phone steer: Steering queued");
 			const commands = journal.read().result.ownerTaskCommands!;
 			expect(commands.find((command) => command.words === firstSteer)?.state).toBe("running");
 			expect(commands.find((command) => command.words === steer)?.state).toBe("queued");
@@ -285,7 +288,8 @@ export async function awayScheduledJob(world: HarnessWorld): Promise<void> {
 				),
 			);
 			expect(world.provider.reached.filter((step) => step === "j10-away-bot:away-phone-followup")).toHaveLength(1);
-			expect(await phone(7, "stop task")).toContain(`Paused task ${routineId}`);
+			expect(await phone(8, "status")).toContain(answer);
+			expect(await phone(9, "stop task")).toContain(`Paused task ${routineId}`);
 			expect(rootCalls()).toBe(before);
 			const returning = await world.createRootSession("root", {
 				agentDir: hubDir,

@@ -127,7 +127,7 @@ export class QueuedMessageController {
 		const images = entries.flatMap((entry) => entry.images ?? []);
 		this.host.activityLane?.announce(interfaceText().queue.interrupting(entries.length), "neutral");
 		try {
-			await this.host.session.abort("send now");
+			await this.host.session.abort("send now", { ordinaryWork: "transfer" });
 			// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
 			// submitted before that is refused as busy.
 			await this.host.session.waitForForegroundIdle();

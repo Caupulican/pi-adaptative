@@ -391,6 +391,8 @@ export interface AgentToolResult<T> {
 	 * ran the operation to completion and `isError` only reports the operation's own negative status.
 	 */
 	errorKind?: AgentToolErrorKind;
+	/** A rejected argument the tool instructs the caller to omit. The ledger retains the corrected call’s scoped digest. */
+	repairOmittingField?: string;
 	/**
 	 * On an `operation_outcome` error: repeating the identical call is expected to answer differently, because
 	 * this refusal itself changed what the host will accept (a rule delivered once, then the call passes). The

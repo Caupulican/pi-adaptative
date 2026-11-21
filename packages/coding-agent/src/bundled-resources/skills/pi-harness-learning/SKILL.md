@@ -5,23 +5,32 @@ description: "Use when reflecting on agent behavior, explaining why Pi did somet
 
 # Pi Harness Learning
 
+## How to use the skill
+
 Use this skill to turn hard-won session experience into durable memory and better
 Pi harness behavior. Keep changes global/user-scoped unless the user explicitly
 asks for project-local `.pi/`, `.agents/`, `.codex/`, or `.omx/` assets.
 
-## When to Use
+### When to Use
 
 - Reflecting on Pi/agent behavior after a correction, repeated friction, tool failure, or successful new workflow.
 - Deciding whether to store Automata memory or improve a user-level skill, prompt, extension/tool, role agent, or core harness behavior.
 - Running learning/provider sweeps, skill audits, or Auto Learn review loops.
 
-## Do Not Use For
+### Do Not Use For
 
 - Product code implementation without a reusable harness lesson.
 - Storing transient task progress, logs, or one-off status as durable learning.
 - Package-managed skills/extensions unless the user explicitly asks to modify that package source.
 
-## Safety boundaries
+## North Star
+
+Retain a lesson where it can improve the next comparable task. Use memory for a
+durable fact or preference, and a discoverable skill for a repeatable procedure.
+
+## Core Sections
+
+### Safety boundaries
 
 - Do not reveal hidden chain-of-thought. Explain operational reasoning at a high
   level: inputs considered, instruction sources, tool evidence, and trade-offs.
@@ -34,7 +43,7 @@ asks for project-local `.pi/`, `.agents/`, `.codex/`, or `.omx/` assets.
   only when the behavior needs events, UI, tools, background work, or automatic
   runtime intervention.
 
-## Introspection workflow
+### Introspection workflow
 
 Use when the user asks why the agent behaved a certain way or wants an
 `/introspect`-style analysis.
@@ -56,7 +65,7 @@ Use when the user asks why the agent behaved a certain way or wants an
 6. If a durable lesson is clear, follow the Automata recording workflow before
    or after proposing harness changes.
 
-## Learning-review and continuous-learning extensions
+### Learning-review and continuous-learning extensions
 
 If the `learning-review` extension is loaded, use these commands for session-level
 learning passes:
@@ -79,7 +88,7 @@ reading large raw histories or adding skills:
 - `learning_skill_audit` checks for trigger overlap, name collisions, and 90%-similar skills before creating or splitting skills.
 - `learning_notify_agents` sends durable learning-update notices only to running background agents whose task/agent/cwd metadata matches the update tags. Non-dry tool delivery requires a recent outcome id with confirmed non-dry Automata changes; automatic rounds notify only after such changes.
 
-## Longitudinal auto-evolution protocol
+### Longitudinal auto-evolution protocol
 
 Use when improving Pi's tooling capabilities or agent behavior from stored chat
 history. This is not single-session summarization.
@@ -129,7 +138,7 @@ history. This is not single-session summarization.
 10. Leave an audit artifact with evidence sources, recurrence count, chosen
    layer, action/approval need, expected benefit, risk, and validation.
 
-## After-action learning workflow
+### After-action learning workflow
 
 Use after overcoming a nontrivial challenge, repeated failure, confusing tool
 behavior, bad assumption, or user correction.
@@ -162,30 +171,14 @@ behavior, bad assumption, or user correction.
 6. For peer-validation tasks, do not treat review as complete until bridge replies or non-responses are captured in artifacts, each peer finding has a fixed/deferred disposition with validation evidence, final peer PASS/no-blockers is recorded when available, and `update_task` is called only after those artifacts are saved.
 7. Report exactly what was stored or changed, with file paths.
 
-## Skill and prompt architecture workflow
+### Turning a lesson into a skill
 
-Use when a session reveals a repeatable process worth turning into a skill, prompt template, or system prompt.
+Describe the outcome in the words a user or delegating agent would use to find
+it. Search the existing skills for that job. If one fits, refine it in its
+owning scope. Use `skill-architect` for the instructions and review criteria,
+and `skill-creator` for the package, worker eligibility and validation.
 
-1. Enforce the **One Job Rule**. If the request contains two distinct jobs, split it before drafting.
-2. Choose the **Freedom Dial**:
-   - **High Freedom** for judgment work with many valid answers. Write principles, examples, mental models, and decision criteria.
-   - **Low Freedom** for precision work with one correct result. Write exact steps and checks; variation is failure.
-3. Draft under 500 lines, ideally under 350. If it is longer, it is doing too much.
-4. Use the **5-Part Skill Anatomy**:
-   - **Face**: routing logic under 1,000 characters — code name, one-sentence description, trigger contexts, and 5-15 literal trigger phrases.
-   - **Brain**: instructions matched to the Freedom Dial, with enough freedom for judgment or rigid steps for precision.
-   - **Memory**: move heavy/rarely needed material into `references/`, `scripts/`, or `assets/`; include exact phrases like `Read references/examples.md`.
-   - **Spine**: use these exact Markdown headers in order: `## How to use the skill`, `## North Star`, `## Core Sections`, `## Anti-Patterns`, `## Examples`, `## Self-Check`, `## Known Gaps`.
-   - **Pulse**: one term per concept, no time-stamped language, concrete examples, honest known gaps, and a self-check before final output.
-5. For any skill/prompt/tool instruction that tells an agent how to help, include or inherit the core engineering principles: think before coding, surface assumptions/confusion/tradeoffs, simplicity first, surgical changes only, goal-driven execution with verifiable success criteria, and loop until proof.
-6. Preserve the human-on-the-edge mandate in durable instructions: humans approve credentials, destructive operations, push/tag/release/publish, authority expansion, and material product-choice changes.
-7. If the skill/prompt manages autonomous or iterative work, include an explicit loop contract: verifiable end state, active roadmap/phase selection, state/config artifacts over hardcoded behavior, compound-knowledge reads each pass, independent clean-context QA for worker output, hard stops after 5 failed repair attempts or 2 no-progress cycles, and a Definition of Done tied to schema/lint/artifact checks (and tests only when the owner asked for tests).
-8. Always quote the frontmatter `description` as a YAML string; unquoted descriptions containing `:` or other YAML metacharacters can break discovery. Use double quotes by default and escape embedded `"` or `\`.
-9. Save user-level skills under `~/.pi/agent/skills/<name>/SKILL.md` by default. Use project-local skills only when the user asks.
-10. Validate the skill name matches the directory, frontmatter parses with `name` and `description`, line count is under 500, and `learning_skill_audit` reports no harmful overlap.
-11. For user-facing skill generation, first state the chosen Freedom Dial and why, then output the complete copy-pasteable skill in one Markdown code block.
-
-## Pi-native implementation guide
+### Pi-native implementation guide
 
 - Prompt templates: `~/.pi/agent/prompts/*.md`; good for explicit slash-command
   workflows with arguments.
@@ -196,7 +189,7 @@ Use when a session reveals a repeatable process worth turning into a skill, prom
 - Role agents: `~/.pi/agent/agents/*.md`; good for reusable delegated worker
   personas with bounded file ownership and validation expectations.
 
-## Session-bounded UX/state mandate for Pi assets
+### Session-bounded UX/state mandate for Pi assets
 
 When changing or creating Pi extensions, tools, role agents, skills, task lists,
 agent-runtime surfaces, notifications, or TUI widgets:
@@ -220,9 +213,22 @@ agent-runtime surfaces, notifications, or TUI widgets:
   tests, with same-cwd/two-session tests and width-constrained render tests, whenever
   the asset touches UI, notifications, task state, agents, tools, or background processing.
 
-## Output format
+## Anti-Patterns
 
-When reporting a learning pass, keep it compact:
+Copying one user's repository rule into a bundled skill turns a local preference
+into a default for other projects. Keep that rule in its authorized scope.
+
+## Examples
+
+A comment-audit skill declares an external write for filing issues. Pi filters
+it out of the worker's skill list even though the audit and repair happen in
+the checkout. Capture the eligibility lesson in skill authoring and have the
+comment skill return the issue draft to the parent for authorized filing.
+
+## Self-Check
+
+Identify the evidence, why this owner fits and how to find the result again.
+Use this format for a learning pass.
 
 ```text
 Learning pass:
@@ -231,3 +237,8 @@ Learning pass:
 - Evidence: <key files, commands, or user correction>
 - Next harness idea: <optional>
 ```
+
+## Known Gaps
+
+Stored history and the active tool surface vary by session. Report which sources
+were available and distinguish a proposed improvement from an applied edit.

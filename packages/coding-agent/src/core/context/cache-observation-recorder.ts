@@ -1,4 +1,7 @@
+import type { AssistantMessage } from "@caupulican/pi-ai";
+import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import type { CacheObservationRow } from "../operator-projection/decision-ledger-store.ts";
+import { type CacheExpiryPolicy, cacheExpiryPolicyKey } from "./cache-survival.ts";
 
 /** The lane a provider cache lives on: the exact model behind an API. */
 export function cacheLaneKey(api: string, provider: string, modelId: string): string {
@@ -6,6 +9,7 @@ export function cacheLaneKey(api: string, provider: string, modelId: string): st
 }
 
 export interface CacheObservationInput {
+	readonly cachePolicy?: CacheExpiryPolicy;
 	/** The session whose history the request carried: a gap is measured on one history, never across two. */
 	readonly sessionId: string;
 	readonly lane: string;
@@ -60,6 +64,7 @@ export function compactionLineage(timestamp: number | undefined): string {
 
 /** A session lane's last recorded response: when it ended and how large its prompt was. */
 export interface CacheObservationSeed {
+	readonly cachePolicy?: CacheExpiryPolicy;
 	readonly respondedAt: number;
 	readonly promptTokens: number;
 }
@@ -85,7 +90,11 @@ export class CacheObservationRecorder {
 		if (promptTokens <= 0) return undefined;
 		const key = `${input.sessionId}\u0000${input.lane}`;
 		const previous = this.lanes.has(key) ? this.lanes.get(key) : this.seed?.(input.sessionId, input.lane);
-		this.lanes.set(key, { respondedAt: input.respondedAt, promptTokens });
+		this.lanes.set(key, {
+			respondedAt: input.respondedAt,
+			promptTokens,
+			...(input.cachePolicy ? { cachePolicy: input.cachePolicy } : {}),
+		});
 		const gapMs =
 			previous && input.requestOpenedAt !== undefined
 				? Math.max(0, input.requestOpenedAt - previous.respondedAt)
@@ -100,7 +109,16 @@ export class CacheObservationRecorder {
 				: input.prefixIntact
 					? "true"
 					: "false";
+		const measuredCachePolicy =
+			previous?.cachePolicy?.cacheTouched &&
+			previous.cachePolicy.kind !== "unknown" &&
+			input.cachePolicy &&
+			cacheExpiryPolicyKey(previous.cachePolicy) === cacheExpiryPolicyKey(input.cachePolicy)
+				? previous.cachePolicy
+				: undefined;
 		return {
+			...(input.cachePolicy ? { cachePolicy: input.cachePolicy } : {}),
+			...(measuredCachePolicy ? { measuredCachePolicy } : {}),
 			lane: input.lane,
 			observedAt: input.respondedAt,
 			promptTokens,
@@ -113,4 +131,67 @@ export class CacheObservationRecorder {
 			...(input.holder ? { holder: input.holder } : {}),
 		};
 	}
+}
+
+export function readCacheExpiryPolicy(value: unknown, lane: string): CacheExpiryPolicy | undefined {
+	let parsed = value;
+	if (typeof value === "string") {
+		try {
+			parsed = JSON.parse(value);
+		} catch {
+			return;
+		}
+	}
+	if (
+		!isPlainRecord(parsed) ||
+		parsed.lane !== lane ||
+		typeof parsed.accountScope !== "string" ||
+		!parsed.accountScope ||
+		parsed.accountScope.length > 256 ||
+		!["fixed", "automatic", "disabled", "unknown"].includes(String(parsed.kind)) ||
+		typeof parsed.wirePolicy !== "string" ||
+		parsed.wirePolicy.length > 512 ||
+		!Number.isSafeInteger(parsed.capturedAt) ||
+		Number(parsed.capturedAt) < 0 ||
+		typeof parsed.cacheTouched !== "boolean" ||
+		(parsed.kind === "fixed"
+			? !Number.isSafeInteger(parsed.ttlMs) || Number(parsed.ttlMs) <= 0 || Number(parsed.ttlMs) > 3_600_000
+			: parsed.ttlMs !== undefined)
+	)
+		return;
+	return {
+		lane,
+		accountScope: parsed.accountScope,
+		kind: parsed.kind as CacheExpiryPolicy["kind"],
+		wirePolicy: parsed.wirePolicy,
+		capturedAt: parsed.capturedAt as number,
+		cacheTouched: parsed.cacheTouched,
+		...(parsed.ttlMs !== undefined ? { ttlMs: parsed.ttlMs as number } : {}),
+	};
+}
+
+export function messageCachePolicy(message: AssistantMessage): CacheExpiryPolicy | undefined {
+	if (message.responseModel && message.responseModel !== message.model) return;
+	const diagnostic = message.diagnostics?.findLast((entry) => entry.type === "provider_cache_policy");
+	const captured = diagnostic?.details;
+	if (
+		!isPlainRecord(captured) ||
+		captured.api !== message.api ||
+		captured.provider !== message.provider ||
+		captured.modelId !== message.model
+	)
+		return;
+	const lane = cacheLaneKey(message.api, message.provider, message.model);
+	return readCacheExpiryPolicy(
+		{
+			lane,
+			accountScope: captured.accountScope,
+			ttlMs: captured.ttlMs,
+			kind: captured.kind,
+			wirePolicy: captured.wirePolicy,
+			capturedAt: diagnostic?.timestamp,
+			cacheTouched: message.usage.cacheRead + message.usage.cacheWrite > 0,
+		},
+		lane,
+	);
 }

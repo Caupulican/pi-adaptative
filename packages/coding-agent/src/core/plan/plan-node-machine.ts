@@ -29,7 +29,7 @@ export const PLAN_NODE_MACHINE = defineMachine<PlanNodeState, PlanNodeState>({
 	initial: "planned",
 	transitions: {
 		planned: onward("ready", "admitted", "settled", "held", "superseded", "cancelled"),
-		ready: onward("planned", "admitted", "running", "settled", "superseded", "cancelled"),
+		ready: onward("planned", "admitted", "running", "settled", "held", "superseded", "cancelled"),
 		admitted: onward("planned", "running", "settled", "held", "superseded", "cancelled"),
 		running: onward("planned", "admitted", "settled", "held", "superseded", "cancelled"),
 		held: onward("planned", "ready", "settled", "superseded", "cancelled"),
@@ -40,9 +40,9 @@ export const PLAN_NODE_MACHINE = defineMachine<PlanNodeState, PlanNodeState>({
 	describe: {
 		planned: "waiting for earlier steps",
 		ready: "ready to start",
-		admitted: "starting",
+		admitted: "admitted, waiting",
 		running: "running",
-		settled: "done",
+		settled: "settled",
 		held: "held",
 		superseded: "replaced",
 		cancelled: "stopped",

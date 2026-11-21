@@ -518,6 +518,38 @@ export async function runJourney1ProactivityInvestigation(world: HarnessWorld): 
 			"kernel-allowed",
 		]);
 		expect(readCount(kernelIo, denied)).toBe(0);
+		const atCap = world.provider.requests.length;
+		world.provider.enqueue(
+			"root",
+			calls("bounded-verification", [{ id: "check-once", name: "fixture_check", arguments: { path: SOURCE_PATH } }]),
+		);
+		const bounded = await withDeadline(
+			trace,
+			"a failed verification honors the child's turn cap",
+			kernel.session.runIsolatedCompletion({
+				systemPrompt: "Check the checklist once.",
+				cacheRetention: "none",
+				messages: [{ role: "user", content: "Check the supplied file.", timestamp: Date.now() }],
+				tools: [
+					{
+						...read,
+						name: "fixture_check",
+						execute: async () => ({
+							content: [{ type: "text", text: "The checklist check failed." }],
+							details: { piVerification: { version: 1, id: "checklist", status: "failed" } },
+						}),
+					},
+				],
+				maxTurns: 1,
+				finalTextPrompt: "Summarize the evidence.",
+			}),
+		);
+		expect(world.provider.requests.length - atCap).toBe(1);
+		expect(bounded.stopReason).toBe("toolUse");
+		expect(bounded.messages?.at(-1)).toMatchObject({
+			role: "toolResult",
+			details: { piVerification: { id: "checklist", status: "failed" } },
+		});
 	} finally {
 		await surface.dispose();
 		await kernel.close();

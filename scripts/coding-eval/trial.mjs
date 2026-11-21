@@ -86,7 +86,6 @@ function evidence(session) {
 		!costs.apiEquivalentPartial &&
 		!metrics.apiEquivalentPartial &&
 		metrics.models.some((m) => m.role === "root" && m.calls > 0) &&
-		metrics.models.every((m) => m.calls === 0 || m.costUsd > 0) &&
 		session.getDurableCumulativeUsage().settled &&
 		!spend?.missingOutcomes &&
 		!spend?.missingCosts &&

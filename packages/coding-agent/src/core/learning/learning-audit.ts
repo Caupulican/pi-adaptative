@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import type { LearningDecision } from "../autonomy/contracts.ts";
 import {
+	isOwnerPreferenceAttestation,
+	type OwnerPreferenceAttestation,
+} from "../memory/owner-preference-attestations.ts";
+import {
 	appendSessionSnapshot,
 	getSessionSnapshots,
 	type SessionSnapshotCodec,
@@ -60,6 +64,7 @@ export interface LearningAuditRecord {
 	reasonCode: string;
 	decision: LearningDecision;
 	rollback?: LearningRollbackPlan;
+	ownerPreference?: OwnerPreferenceAttestation;
 	/** For action "rollback": the audit id of the applied change this record undoes. */
 	rollbackOf?: string;
 	createdAt: string;
@@ -213,6 +218,7 @@ export function isLearningAuditRecord(value: unknown): value is LearningAuditRec
 		return false;
 	}
 	if (record.rollback !== undefined && !isLearningRollbackPlan(record.rollback)) return false;
+	if (record.ownerPreference !== undefined && !isOwnerPreferenceAttestation(record.ownerPreference)) return false;
 	return typeof record.createdAt === "string";
 }
 
@@ -220,6 +226,7 @@ export function cloneLearningAuditRecordForStorage(record: LearningAuditRecord):
 	return {
 		...record,
 		decision: { ...record.decision },
+		...(record.ownerPreference ? { ownerPreference: { ...record.ownerPreference } } : {}),
 		...(record.rollback ? { rollback: { ...record.rollback } } : {}),
 	};
 }

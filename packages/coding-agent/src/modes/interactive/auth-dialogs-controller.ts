@@ -15,6 +15,7 @@ import { getProviders, type Model, type OAuthProviderId, type OAuthSelectPrompt 
 import type { Component, TUI } from "@caupulican/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { CredentialPersistenceError } from "../../core/auth-storage.ts";
 import {
 	activateVerifiedBedrockScope,
 	BEDROCK_PROVIDER_ID,
@@ -95,6 +96,7 @@ export interface AuthDialogsControllerDeps {
 
 export class AuthDialogsController {
 	private readonly deps: AuthDialogsControllerDeps;
+	private authRevision = 0;
 	private activeLoginDialog: LoginDialogComponent | undefined;
 	private activeLoginDialogOnUnmount: (() => void) | undefined;
 	private suppressActiveLoginDialogUnmount = false;
@@ -118,6 +120,7 @@ export class AuthDialogsController {
 	}
 
 	cancelActiveDialog(): void {
+		this.authRevision++;
 		const cancelSelector = this.activeOAuthSelectorCancel;
 		this.activeOAuthSelectorCancel = undefined;
 		cancelSelector?.();
@@ -169,20 +172,40 @@ export class AuthDialogsController {
 
 	private async runMountedLoginDialog(
 		dialog: LoginDialogComponent,
-		authenticate: () => Promise<void>,
-		onAuthenticated: () => Promise<void>,
+		authenticate: () => Promise<void> | Promise<boolean>,
+		onAuthenticated: (persisted: boolean) => Promise<void>,
 		errorPrefix: string,
 		cancellationMessages: readonly string[] = LOGIN_CANCELLATION_MESSAGES,
 	): Promise<void> {
+		const revision = this.authRevision;
+		let persisted: boolean;
 		try {
-			await authenticate();
-			if (!this.restoreEditorFromDialog(dialog)) return;
-			await onAuthenticated();
+			persisted = (await authenticate()) !== false;
 		} catch (error: unknown) {
-			if (!this.restoreEditorFromDialog(dialog)) return;
-			const message = error instanceof Error ? error.message : String(error);
-			if (!cancellationMessages.includes(message)) this.ui.showError(`${errorPrefix}${message}`);
+			if (error instanceof CredentialPersistenceError && error.operation === "save") {
+				persisted = false;
+			} else {
+				if (!this.restoreEditorFromDialog(dialog)) return;
+				const message = error instanceof Error ? error.message : String(error);
+				if (!cancellationMessages.includes(message)) this.ui.showError(`${errorPrefix}${message}`);
+				return;
+			}
 		}
+		if (!this.restoreEditorFromDialog(dialog)) return;
+		try {
+			await onAuthenticated(persisted);
+		} catch (error) {
+			this.reportSessionUpdateError(revision, error);
+		}
+	}
+
+	private reportSessionUpdateError(revision: number, error: unknown): void {
+		if (revision === this.authRevision)
+			this.ui.showError(
+				interfaceText().dialogs.authDialogs.sessionUpdateFailed(
+					error instanceof Error ? error.message : String(error),
+				),
+			);
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
@@ -216,21 +239,10 @@ export class AuthDialogsController {
 	}
 
 	private getLogoutProviderOptions(): AuthSelectorProvider[] {
-		const authStorage = this.modelRegistry.authStorage;
-		const options: AuthSelectorProvider[] = [];
-
-		for (const providerId of authStorage.list()) {
-			const credential = authStorage.get(providerId);
-			if (!credential) {
-				continue;
-			}
-			options.push({
-				id: providerId,
-				name: this.modelRegistry.getProviderDisplayName(providerId),
-				authType: credential.type,
-			});
-		}
-
+		const options = this.modelRegistry.authStorage.listForRemoval().map((option) => ({
+			...option,
+			name: this.modelRegistry.getProviderDisplayName(option.id),
+		}));
 		return options.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
@@ -265,20 +277,31 @@ export class AuthDialogsController {
 	}
 
 	private async logoutProvider(providerOption: AuthSelectorProvider): Promise<void> {
+		const revision = this.authRevision;
+		const text = interfaceText().dialogs.authDialogs;
+		let persisted = true;
 		try {
 			this.modelRegistry.authStorage.logout(providerOption.id);
+		} catch (error) {
+			if (!(error instanceof CredentialPersistenceError)) {
+				this.ui.showError(text.logoutFailed(error instanceof Error ? error.message : String(error)));
+				return;
+			}
+			persisted = false;
+			this.ui.showError(text.credentialRemovalNotSaved(providerOption.name));
+		}
+		try {
 			await this.session.refreshModelsAfterAuthChange(providerOption.id);
+			if (revision !== this.authRevision) return;
 			await this.ui.updateAvailableProviderCount();
-			const text = interfaceText().dialogs.authDialogs;
+			if (!persisted || revision !== this.authRevision) return;
 			const message =
 				providerOption.authType === "oauth"
 					? text.loggedOut(providerOption.name)
 					: text.apiKeyRemoved(providerOption.name);
 			this.ui.showStatus(message);
 		} catch (error: unknown) {
-			this.ui.showError(
-				interfaceText().dialogs.authDialogs.logoutFailed(error instanceof Error ? error.message : String(error)),
-			);
+			this.reportSessionUpdateError(revision, error);
 		}
 	}
 
@@ -356,6 +379,7 @@ export class AuthDialogsController {
 	}
 
 	async showOAuthSelector(mode: "login" | "logout", providerReference?: string): Promise<void> {
+		this.cancelActiveDialog();
 		if (mode === "login") {
 			if (providerReference) {
 				const providerOptions = this.getLoginProviderOptions();
@@ -400,10 +424,14 @@ export class AuthDialogsController {
 		providerName: string,
 		authType: "oauth" | "api_key",
 		previousModel: Model<any> | undefined,
+		persisted: boolean,
 	): Promise<void> {
-		await this.session.refreshModelsAfterAuthChange(providerId);
+		const revision = this.authRevision;
 		const text = interfaceText().dialogs.authDialogs;
-		if (providerId === TYPESAFE_PROVIDER) {
+		if (!persisted) this.ui.showError(text.credentialNotSaved(providerName));
+		await this.session.refreshModelsAfterAuthChange(providerId);
+		if (revision !== this.authRevision) return;
+		if (persisted && providerId === TYPESAFE_PROVIDER) {
 			this.ui.showStatus(text.typesafeStatus);
 			return;
 		}
@@ -412,7 +440,7 @@ export class AuthDialogsController {
 
 		let selectedModel: Model<any> | undefined;
 		let selectionError: string | undefined;
-		if (isUnknownModel(previousModel)) {
+		if (persisted && isUnknownModel(previousModel) && isUnknownModel(this.session.model)) {
 			const availableModels = this.modelRegistry.getAvailable();
 			const providerModels = availableModels.filter((model) => model.provider === providerId);
 			if (!hasDefaultModelProvider(providerId)) {
@@ -437,8 +465,10 @@ export class AuthDialogsController {
 		}
 
 		await this.ui.updateAvailableProviderCount();
+		if (revision !== this.authRevision) return;
 		this.ui.invalidateFooter();
 		this.ui.updateEditorBorderColor();
+		if (!persisted) return;
 		if (selectedModel) {
 			this.ui.showStatus(text.statusSelected(actionLabel, selectedModel.id, getAuthPath()));
 			void this.ui.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
@@ -623,10 +653,10 @@ export class AuthDialogsController {
 			async () => {
 				const apiKey = (await dialog.showPrompt(text.apiKeyPrompt)).trim();
 				if (!apiKey) throw new Error(text.apiKeyEmpty);
-				const saved = this.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
-				if (saved === false) throw new Error(text.apiKeyNotSaved);
+				return this.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
 			},
-			() => this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel),
+			(persisted) =>
+				this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel, persisted),
 			text.saveApiKeyFailed(providerName),
 		);
 	}
@@ -691,7 +721,8 @@ export class AuthDialogsController {
 
 					signal: dialog.signal,
 				}),
-			() => this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel),
+			(persisted) =>
+				this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel, persisted),
 			text.loginFailed(providerName),
 		);
 	}

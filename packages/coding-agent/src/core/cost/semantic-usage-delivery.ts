@@ -41,6 +41,7 @@ import {
 	journalSlotOf,
 	parseUnresolvedUsageRequest,
 	readJournal,
+	reconcileCanonicalSummarySpend,
 	requestMatchesReceipt,
 	retainRecordChange,
 	SEMANTIC_USAGE_JOURNAL_MAX_RECORD_BYTES,
@@ -58,6 +59,7 @@ import {
 	normalizedReport,
 	type SemanticUsageLedgerIdentity,
 	type SemanticUsageLedgerPort,
+	sameIdentity,
 } from "./session-ledger-port.ts";
 import { type SemanticUsageReport, semanticUsageReportOf } from "./usage-records.ts";
 
@@ -94,10 +96,10 @@ export interface SemanticUsageProjection {
 	/** Changes whenever the held set or the live identity binding changes, so a memoized reader can tell its totals are stale. */
 	readonly revision: number;
 	readonly reports: readonly SemanticUsageReport[];
-	/**
-	 * Paid history summary spend the bounded journal had no room for: one sum, counted live and not durable (a reopened
-	 * session does not have it).
-	 */
+	/** Dispatched usage with no measured receipt; numeric totals remain a lower bound. */
+	readonly unresolved?: number;
+	readonly uncertain?: true;
+	/** Overflow history spend counts live; it has no durable copy for reopen. */
 	readonly overflow?: { readonly usage: Usage; readonly reports: number };
 }
 
@@ -266,19 +268,6 @@ function classifyJournalFailure(error: unknown): JournalFailure {
 	return { reason: "storage_refused", cause: boundedCause(`usage journal write failed: ${errorCodeOf(error)}`) };
 }
 
-function sameIdentity(left: SemanticUsageLedgerIdentity, right: SemanticUsageLedgerIdentity): boolean {
-	return (
-		left.sessionId === right.sessionId &&
-		left.sessionFile === right.sessionFile &&
-		left.headerTimestamp === right.headerTimestamp &&
-		left.persisted === right.persisted
-	);
-}
-
-/**
- * Removes the record the payload names. A record of the same identity with another payload is another obligation and
- * stays: an acknowledgement never removes a different receipt's copy.
- */
 /**
  * Why a receipt has no journal copy: the journal's record format or size bound. These bounds belong to the journal only, so
  * such a receipt still gets its ledger row appended and verified; it is just never retained.
@@ -613,6 +602,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 				undefined,
 			);
 		this.unresolved.set(request.requestId, structuredClone(request));
+		this.revision += 1;
 		this.notifySpending();
 		try {
 			// Journal recovery and spending listeners can invalidate admission after the write.
@@ -842,17 +832,13 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	}
 
 	pendingProjection(): SemanticUsageProjection {
-		// Held reports belong to the bound identity. Once the live session has moved on they are that identity's evidence,
-		// not this session's spend, so they leave the projection (and the revision changes, so memoized totals refresh).
 		const matches = sameIdentity(this.ledger.identity(), this.bound);
 		if (matches !== this.projectionMatches) {
 			this.projectionMatches = matches;
 			this.revision += 1;
 		}
-		// Ordered by the persisted creation time, then the report id: a live owner and one reopened from the sidecar sum the
-		// same reports in the same order, so their totals are equal to the last bit. Held reports with no journal copy
-		// (unretained) are paid spend, so the live total counts them; no durable record can carry them into a reopened owner,
-		// so a reopened total is lower by exactly that unretained spend. A disclosed, bounded non-durability.
+		// Stable order preserves exact totals after reopen. Unretained reports count live,
+		// but their disclosed non-durability means their spend cannot survive reopen.
 		const reports = matches
 			? [...this.held.values()]
 					.sort(
@@ -862,7 +848,15 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 					)
 					.map((entry) => entry.report)
 			: [];
-		return { revision: this.revision, reports, ...(matches && this.overflow ? { overflow: this.overflow } : {}) };
+		return {
+			revision: this.revision,
+			reports,
+			...(matches && this.unresolved.size ? { unresolved: this.unresolved.size } : {}),
+			...(matches && this.bound.persisted && (this.baselineUncertain || !this.loaded)
+				? { uncertain: true as const }
+				: {}),
+			...(matches && this.overflow ? { overflow: this.overflow } : {}),
+		};
 	}
 
 	spending(operationPrefix: string, operationId: string, counts?: SpendCounts): SemanticOperationSpending {
@@ -1078,8 +1072,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		) {
 			const canonical = this.ledger.findCanonical(receipt.receiptId);
 			if (canonical) {
+				if (canonical.conflictingDuplicate) return this.conflict(receipt);
 				const state = this.ledger.physicalState(canonical.entryId, report);
-				if (state === "persisted") return { kind: "physically_recorded", scope: "ledger" };
+				if (state === "persisted") return this.confirmedSummaryReceipt(request, receipt);
 				if (state === "conflict") return this.conflict(receipt);
 			}
 		}
@@ -1351,6 +1346,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		const changed = this.unresolved.delete(reportId);
 		this.undispatchedRequests.delete(reportId);
 		this.warnedRequests.delete(reportId);
+		this.revision += Number(changed);
 		if (changed) this.notifySpending();
 	}
 
@@ -1456,10 +1452,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		}
 	}
 
-	/**
-	 * One journal write under its lock. A success recovers that write operation only. Corrupt content that is moved aside
-	 * takes every other held record's journal copy with it, so those records are retained again into the fresh journal.
-	 */
+	/** Locked writes recover only that operation; quarantine requires re-retaining the other held copies. */
 	private writeJournal(
 		operation: WriteOperation,
 		slot: JournalSlot,
@@ -1574,28 +1567,35 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		return true;
 	}
 
+	/** A physically proven summary is replayed only against the meter's standing reservation. */
+	private confirmedSummaryReceipt(
+		request: UnresolvedUsageRequest | undefined,
+		receipt: TypeSafeUsageReceipt,
+	): SemanticUsageOutcome {
+		if (request?.summarySpendPending) {
+			if (!this.boundSlot) return { kind: "unretained", reason: "storage_refused", cause: UNSAFE_SESSION_ID_CAUSE };
+			try {
+				reconcileCanonicalSummarySpend(this.boundSlot, request, receipt);
+			} catch (error) {
+				return { kind: "unretained", ...this.failJournal("retain", error) };
+			}
+		}
+		return { kind: "physically_recorded", scope: "ledger" };
+	}
+
 	/** Recover a crash between canonical persistence and removal of pre-dispatch uncertainty. */
 	private reconcileUnresolved(): void {
 		const slot = this.boundSlot;
 		if (!slot || this.isDisposed || !sameIdentity(this.bound, this.ledger.identity())) return;
 		for (const [id, request] of this.unresolved) {
 			const row = this.ledger.findCanonical(id);
-			if (!row || !isPlainRecord(row.data)) continue;
+			if (!row || row.conflictingDuplicate || !isPlainRecord(row.data)) continue;
 			const { reportId, ...data } = row.data;
 			const receipt = parseTypeSafeUsageReceipt({ ...data, receiptId: reportId });
 			if (!receipt || !requestMatchesReceipt(request, receipt)) continue;
 			if (this.ledger.physicalState(row.entryId, semanticUsageReportOf(receipt)) !== "persisted") continue;
 			if (request.summarySpendPending === true) {
-				const entry: HeldReceipt = {
-					payload: receipt,
-					report: semanticUsageReportOf(receipt),
-					createdAt: new Date().toISOString(),
-					retained: false,
-					journalable: true,
-					summarySpendPending: true,
-					canonicalConfirmed: true,
-				};
-				if (this.retain(entry, slot) === "failed") continue;
+				if (this.confirmedSummaryReceipt(request, receipt).kind === "unretained") continue;
 				this.clearUnresolved(id);
 				continue;
 			}

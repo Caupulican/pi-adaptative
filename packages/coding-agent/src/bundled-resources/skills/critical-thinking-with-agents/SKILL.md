@@ -1,6 +1,6 @@
 ---
 name: critical-thinking-with-agents
-description: "Protocol for keeping ownership of a result when agents do the work: read the stakes from code facts and decide what to hand off and what reasoning to keep, take a brief with audience, out of scope and a tangible done line, form a hypothesis or ask for a blind-spot pass, report evidence first (commands and outputs before prose, what the checks covered and did not, decisions and assumptions), run the fresh-context self-critique and the 'did I miss anything' pass, hear the counter-argument from a different model, offer the owner a quiz on high-stakes changes, and pass source refs instead of a previous agent's summary. Use when delegating, briefing a worker or a plan, writing a final report, reviewing a worker's result, or when the owner says 'did you miss anything', 'what did you decide', 'what did the checks not cover', 'argue the other side', 'quiz me'."
+description: "Protocol for keeping ownership of a result when agents do the work: read the stakes from code facts and decide what to hand off and what reasoning to keep, take a brief with audience, out of scope and a tangible done line, form a hypothesis or ask for a blind-spot pass, report evidence first (commands and outputs before prose, what the checks covered and did not, decisions and assumptions), check whether an independent review covers the delivered revision, seek a counter-argument for a consequential choice, offer the owner a quiz on high-stakes changes, and pass source refs instead of a previous agent's summary. Use when delegating, briefing a worker or a plan, writing a final report, reviewing a worker's result, or when the owner says 'did you miss anything', 'what did you decide', 'what did the checks not cover', 'argue the other side', 'quiz me'."
 ---
 
 # Critical thinking with agents
@@ -9,7 +9,7 @@ description: "Protocol for keeping ownership of a result when agents do the work
 
 Load this skill when work is handed to an agent (a worker, a plan step, a leader, a routine) or when a result comes back to be reported or reviewed. It decides three things: how much reasoning stays with the root, what a brief must contain, and what a report must show before its prose.
 
-Freedom: low freedom for the report order, the brief fields and the stakes reading (apply them exactly); high freedom for the hypothesis, the blind-spot questions and the counter-argument.
+Use the brief to communicate the outcome, scope and evidence. Use judgment in choosing a hypothesis, review question or counter-argument.
 
 The host renders a proof sheet when a goal completes, a worker result arrives or a plan's combined result settles. Read it first: it lists the commands that ran, what each check covered, what no check covered and the stakes. A goal's sheet leads the goal tool's result, so you read it too; a worker's sheet is shown to the owner only, because it quotes worker-written strings. This skill is how the agent works so that sheet has something true to show.
 
@@ -28,11 +28,11 @@ Stakes are facts the agent can see, never a feeling. Count them before choosing 
 - Money: paid calls, purchases, spend against a budget.
 - Others affected: shared branches, other lanes' files, external channels, other users.
 
-No fact present: offload fully and report briefly. One or more present: keep the reasoning (the plan, the decision, the final check) at the root and delegate only the execution. Read `references/stakes-and-brief.md` for the full reading and the hand-off table.
+Use the stakes to decide which choices need the director's judgment. Workers can make reversible implementation decisions within their assignment. Read `references/stakes-and-brief.md` for the hand-off table.
 
 ### Take a brief before work starts
 
-A non-trivial task starts with four facts: who the result is for, what is out of scope, the tangible finish line (a passing check, a screenshot, a log or a trace), and the owner's own words for the ask. When one is missing and the task is non-trivial, ask the owner once with `ask_question` (one question, the options you can see). When intent stays fuzzy after one answer, switch to interview mode: short questions, one at a time, until the done line is checkable.
+Build the brief from the owner's request, applicable instructions and the files. Give the worker the outcome and an observable finish line. Include audience and exclusions where they affect the work. Use a reversible assumption for an ordinary implementation choice. Ask the owner only when available evidence leaves a choice that would materially change the outcome, authority, risk or acceptance. Continue independent work while that choice is open.
 
 Carry the brief into every hand-off: `delegate` (with `goal`), `assign` and each `plan` step take `doneWhen` and `outOfScope`; the worker reads them as `Done when:` and `Out of scope:` lines and the result's proof sheet repeats them. Goals use requirements with checks as their done line.
 
@@ -58,7 +58,7 @@ If you cannot say what the checks would miss, ask for a real review. Read `refer
 
 ### Self-critique in a fresh context
 
-Before calling high-stakes work done, get a review from a context that did not do the work. The host does not start one on its own for a goal or a plan yet; use the `peer` tool at stage `delivery`, pasting the original brief, the diff and the receipts (not your summary). A worker whose profile requires independent verification already gets a verifier, and that verifier now reads the task as dispatched, not only the summary. The three questions are fixed: did the work miss a requirement; what would the checks miss; what did the agent decide silently. Then run one final pass on your own: "did I miss anything?" against the brief, line by line.
+For high-stakes work, check which independent review already covers the delivered revision and requirements. A profile verifier or plan verification step can supply it. For uncovered material claims, give a fresh reviewer the precise question, the original brief, the diff and the receipts. Reconcile the answer against the evidence before delivery.
 
 ### Hear the other side
 
@@ -110,9 +110,9 @@ Decided: kept the old writer behind its flag; assumed the sample file is represe
 ## Self-Check
 
 - Stakes read from facts, and the hand-off matches them.
-- Brief has audience, out of scope and a tangible done line, or one question was asked.
+- The worker can identify the requested outcome, its scope and the evidence to return.
 - Report order: commands and outputs, coverage, not covered, decisions, then prose.
-- High stakes: fresh-context review done or requested; the final "did I miss anything" pass done.
+- For high-stakes work, the review covers this revision and its material claims, or the report names the remaining gap.
 - Every hand-off carries source refs.
 
 ## Known Gaps

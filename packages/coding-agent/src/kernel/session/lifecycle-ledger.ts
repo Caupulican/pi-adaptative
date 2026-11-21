@@ -103,6 +103,7 @@ function fieldsForType(type: string): readonly string[] {
 		case "request_snapshot":
 			return [
 				"requestId",
+				"retryOfAssistantEntryId",
 				"reason",
 				"api",
 				"provider",
@@ -171,6 +172,8 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 	switch (record.type) {
 		case "request_snapshot":
 			assertExternalId(record.requestId, "requestId");
+			if (record.retryOfAssistantEntryId !== undefined)
+				assertSessionEntryId(record.retryOfAssistantEntryId, "retryOfAssistantEntryId");
 			if (record.reason !== "initial" && record.reason !== "resume" && record.reason !== "change") {
 				throw lifecycleValidationError("reason", "expected initial, resume, or change");
 			}
@@ -290,6 +293,35 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 				if ("error" in record) assertBoundedString(record.error, "error", MAX_LIFECYCLE_PAYLOAD_CHARS);
 			}
 			break;
+	}
+}
+
+export function validateRequestSnapshotReferences(
+	entry: RequestSnapshotEntry,
+	cache: { requestIds: ReadonlySet<string>; positions: ReadonlyMap<string, number> },
+	entries: ReadonlyMap<string, SessionEntry>,
+): void {
+	if (cache.requestIds.has(entry.requestId)) {
+		throw new Error(`Duplicate request snapshot identity: ${entry.requestId}.`);
+	}
+	if (entry.retryOfAssistantEntryId !== undefined) {
+		const failed = entries.get(entry.retryOfAssistantEntryId);
+		if (
+			failed?.type !== "message" ||
+			failed.message.role !== "assistant" ||
+			failed.message.stopReason !== "error" ||
+			!cache.positions.has(failed.id)
+		)
+			throw new Error("A retry must reference a failed assistant response on its branch.");
+	}
+	for (const messageEntryId of entry.messageEntryIds) {
+		const messageEntry = entries.get(messageEntryId);
+		if (messageEntry?.type !== "message") {
+			throw new Error(`Request snapshot references a non-message entry: ${messageEntryId}.`);
+		}
+		if (!cache.positions.has(messageEntryId)) {
+			throw new Error(`Request snapshot message is outside the active branch: ${messageEntryId}.`);
+		}
 	}
 }
 

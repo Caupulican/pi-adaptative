@@ -110,6 +110,7 @@ export interface AgentOptions {
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
+	resolveResponseMode?: AgentLoopConfig["resolveResponseMode"];
 	/**
 	 * Observability hook for a host-owned `planContext`/`transformContext` disturbing the
 	 * already-sent prefix. See `AgentLoopConfig.onSentPrefixDisturbance` for the full contract. Not a
@@ -279,6 +280,7 @@ export class Agent {
 	) => ProviderRequestAdmissionResult | Promise<ProviderRequestAdmissionResult>;
 	public onProviderRequestSnapshot?: AgentLoopConfig["onProviderRequestSnapshot"];
 	public resolveRequestReasoning?: AgentLoopConfig["resolveRequestReasoning"];
+	public resolveResponseMode?: AgentLoopConfig["resolveResponseMode"];
 	public onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
 	public requestPreflight?: AgentLoopConfig["requestPreflight"];
 	public projectSystemPrompt?: AgentLoopConfig["projectSystemPrompt"];
@@ -372,6 +374,7 @@ export class Agent {
 		this.admitProviderRequest = options.admitProviderRequest;
 		this.onProviderRequestSnapshot = options.onProviderRequestSnapshot;
 		this.resolveRequestReasoning = options.resolveRequestReasoning;
+		this.resolveResponseMode = options.resolveResponseMode;
 		this.onSentPrefixDisturbance = options.onSentPrefixDisturbance;
 		this.requestPreflight = options.requestPreflight;
 		this.projectSystemPrompt = options.projectSystemPrompt;
@@ -679,6 +682,13 @@ export class Agent {
 		await this.runContinuation();
 	}
 
+	/** Host-admitted follow-up to the same logical request, preserving its provider and repeated-tool limits. */
+	async continueWith(message: AgentMessage): Promise<void> {
+		if (this.activeRun || !this.loopContinuationState)
+			throw new AgentBusyError("An idle, previously started run is required.");
+		await this.runPromptMessages([message], {}, this.loopContinuationState);
+	}
+
 	private normalizePromptInput(
 		input: string | AgentMessage | AgentMessage[],
 		images?: ImageContent[],
@@ -701,15 +711,14 @@ export class Agent {
 	private async runPromptMessages(
 		messages: AgentMessage[],
 		options: { skipInitialSteeringPoll?: boolean } = {},
+		previous?: AgentLoopContinuationState,
 	): Promise<void> {
 		// Seeded from the persistent, SESSION-scoped mark - NOT the zero-arg default, which would
 		// re-arm the sanitizer's dedup-erasure across the whole prior session on every new prompt.
 		// See ProviderRequestPrefixState in types.ts.
-		const continuationState = createAgentLoopContinuationState(
-			this.sanitizerSentPrefixCount,
-			this.sanitizerMemory,
-			this.sentPrefixCount,
-		);
+		const continuationState =
+			previous ??
+			createAgentLoopContinuationState(this.sanitizerSentPrefixCount, this.sanitizerMemory, this.sentPrefixCount);
 		this.loopContinuationState = continuationState;
 		await this.runWithLifecycle(async (signal) => {
 			try {
@@ -844,6 +853,7 @@ export class Agent {
 			onProviderRequestSnapshot: this.onProviderRequestSnapshot,
 			borrowProviderSnapshotSource: this.onProviderRequestSnapshot === this.borrowedProviderSnapshotCallback,
 			resolveRequestReasoning: this.resolveRequestReasoning,
+			resolveResponseMode: this.resolveResponseMode,
 			onSentPrefixDisturbance: this.onSentPrefixDisturbance,
 			requestPreflight: this.requestPreflight,
 			getApiKey: this.getApiKey,

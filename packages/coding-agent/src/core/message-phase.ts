@@ -1,27 +1,6 @@
 import type { AssistantMessage, TextContent } from "@caupulican/pi-ai";
 
-const MAX_TEXT_SIGNATURE_CHARS = 4096;
-
-export type AssistantTextPhase = "commentary" | "final_answer";
-
-/** Read OpenAI Responses phase metadata without trusting arbitrary signature JSON shapes. */
-export function assistantTextPhase(content: Pick<TextContent, "textSignature">): AssistantTextPhase | undefined {
-	const signature = content.textSignature;
-	if (!signature?.startsWith("{") || signature.length > MAX_TEXT_SIGNATURE_CHARS) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(signature);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-		const descriptor = Object.getOwnPropertyDescriptor(parsed, "phase");
-		if (!descriptor || !("value" in descriptor)) return undefined;
-		return descriptor.value === "commentary" || descriptor.value === "final_answer" ? descriptor.value : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-export function isAssistantCommentary(content: Pick<TextContent, "textSignature">): boolean {
-	return assistantTextPhase(content) === "commentary";
-}
+import { isAssistantCommentary } from "../kernel/assistant-answer.ts";
 
 /** User-facing prose, optionally including commentary; control payloads never become conversation. */
 export function isAssistantDisplayText(content: TextContent, showCommentary = false): boolean {

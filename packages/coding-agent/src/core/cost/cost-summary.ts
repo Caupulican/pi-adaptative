@@ -1,6 +1,7 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { ChargedRanges } from "./charged-ranges.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 import { chargedRangeOf } from "./session-usage.ts";
@@ -41,6 +42,8 @@ export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals 
 }
 
 export interface SessionCostSummary extends CurrentSessionCostTotals {
+	unresolvedUsageRequests?: number;
+	usageAccountingIncomplete?: true;
 	todayApiEquivalentPartial?: boolean;
 	todayModelUnknownTokens?: number;
 	todayModelUnknownOperations?: number;
@@ -112,6 +115,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 					accumulator.ownCost += resolved.total;
 					accumulator.reportedOwnCost = (accumulator.reportedOwnCost ?? 0) + resolved.reportedTotal;
 					if (resolved.estimated) accumulator.costEstimate = "base-rates";
+					if (!resolved.pricingComplete) accumulator.apiEquivalentPartial = true;
 					recordUnknownModel(accumulator, part.usage, part.provider, part.model);
 				}
 			}
@@ -135,6 +139,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 				accumulator.reportedOwnCost = (accumulator.reportedOwnCost ?? 0) + resolved.reportedTotal;
 			}
 			if (resolved.estimated) accumulator.costEstimate = "base-rates";
+			if (!resolved.pricingComplete) accumulator.apiEquivalentPartial = true;
 			recordUnknownModel(accumulator, report.usage, report.provider, report.model);
 			continue;
 		}
@@ -145,6 +150,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 			if (accumulator.seenSubagentReportIds.has(receipt.reportId)) continue;
 			accumulator.seenSubagentReportIds.add(receipt.reportId);
 			const cost = receipt.costUsd ?? 0;
+			if (receipt.costUsd === undefined) accumulator.apiEquivalentPartial = true;
 			accumulator.subagentCost += cost;
 			accumulator.reportedSubagentCost = (accumulator.reportedSubagentCost ?? 0) + cost;
 			accumulator.subagentReports += 1;
@@ -168,6 +174,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 			accumulator.subagentCost += resolved.total;
 			accumulator.reportedSubagentCost = (accumulator.reportedSubagentCost ?? 0) + resolved.reportedTotal;
 			if (resolved.estimated) accumulator.costEstimate = "base-rates";
+			if (!resolved.pricingComplete) accumulator.apiEquivalentPartial = true;
 			accumulator.subagentReports += 1;
 			recordUnknownModel(accumulator, part.usage, part.provider, part.model);
 		}
@@ -204,14 +211,18 @@ export function projectPendingSemanticCost(
 	let costEstimate = accumulator.costEstimate;
 	let reportedOwnCost = accumulator.reportedOwnCost ?? accumulator.ownCost;
 	let reportedSubagentCost = accumulator.reportedSubagentCost ?? accumulator.subagentCost;
+	const attribution = { ...accumulator };
 	for (const report of pending) {
 		const resolved = resolveEffectiveEntryCost(report.usage, {
 			model: report.model,
 			provider: report.provider,
 			kind: "semantic",
 			costStatus: report.costStatus,
+			priceKnown: report.priceKnown,
 		});
 		if (!resolved || accumulator.seenSemanticReportIds.has(report.reportId)) continue;
+		if (!resolved.pricingComplete) attribution.apiEquivalentPartial = true;
+		recordUnknownModel(attribution, report.usage, report.provider, report.model);
 		const total = resolved.total;
 		// History summary spend is background spend: the same classification as its recorded row.
 		if (report.route === "history_summary") {
@@ -237,9 +248,9 @@ export function projectPendingSemanticCost(
 		if (overflow.usage.cost.estimate === "base-rates") costEstimate = "base-rates";
 	}
 	return {
-		modelUnknownTokens: accumulator.modelUnknownTokens,
-		modelUnknownOperations: accumulator.modelUnknownOperations,
-		apiEquivalentPartial: accumulator.apiEquivalentPartial,
+		modelUnknownTokens: attribution.modelUnknownTokens,
+		modelUnknownOperations: attribution.modelUnknownOperations,
+		apiEquivalentPartial: attribution.apiEquivalentPartial,
 		reportedOwnCost,
 		reportedSubagentCost,
 		reportedCost: reportedOwnCost + reportedSubagentCost,
@@ -349,6 +360,8 @@ export function formatFooterCostParts(
 	options: { subscription?: boolean } = {},
 ): string[] {
 	const parts: string[] = [];
+	if (summary.unresolvedUsageRequests || summary.usageAccountingIncomplete)
+		parts.push(interfaceText().reports.cost.unresolvedUsage(summary.unresolvedUsageRequests));
 	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(summary);
 	if (summary.currentCost > 0 || hasSubagentCostSignal(summary) || options.subscription) {
 		parts.push(`CURRENT:${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}`);
@@ -358,25 +371,25 @@ export function formatFooterCostParts(
 	if (icmReports > 0 || icmCost > 0) {
 		parts.push(`ICM:${formatCost(icmCost, precision)}`);
 	}
-	if (summary.apiEquivalentPartial) parts.push(`MODEL UNKNOWN:${summary.modelUnknownTokens ?? 0} tokens`);
+	if (summary.apiEquivalentPartial) parts.push("API EQUIVALENT PARTIAL");
 	if (summary.todayCost > 0 || summary.todayPending) {
 		parts.push(
 			`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayPending ? " (partial; updating)" : ""}`,
 		);
 	}
-	if (summary.todayApiEquivalentPartial)
-		parts.push(`TODAY MODEL UNKNOWN:${summary.todayModelUnknownTokens ?? 0} tokens`);
+	if (summary.todayApiEquivalentPartial) parts.push("TODAY API EQUIVALENT PARTIAL");
 	return parts;
 }
 
 export function formatStatusCostSummary(summary: SessionCostSummary, precision = 4): string {
 	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(summary);
 	const parts = [
-		...(summary.apiEquivalentPartial
-			? [`PARTIAL API EQUIVALENT (${summary.modelUnknownTokens ?? 0} tokens without model attribution)`]
+		...(summary.unresolvedUsageRequests || summary.usageAccountingIncomplete
+			? [interfaceText().reports.cost.unresolvedUsage(summary.unresolvedUsageRequests)]
 			: []),
+		...(summary.apiEquivalentPartial ? ["PARTIAL API EQUIVALENT (pricing or model attribution incomplete)"] : []),
 		...(summary.todayApiEquivalentPartial
-			? [`TODAY API EQUIVALENT PARTIAL (${summary.todayModelUnknownTokens ?? 0} tokens without model attribution)`]
+			? ["TODAY API EQUIVALENT PARTIAL (pricing or model attribution incomplete)"]
 			: []),
 		`CURRENT ${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${summary.costEstimate ? " (base-rate estimate)" : ""}`,
 		`ROOT ${summary.costEstimate ? "~" : ""}${formatCost(summary.ownCost, precision)}`,

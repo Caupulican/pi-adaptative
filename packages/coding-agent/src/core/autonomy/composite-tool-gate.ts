@@ -69,7 +69,7 @@ export function wrapToolWithCapabilityEnvelopeGate<TParameters extends TSchema, 
 				});
 				signal?.throwIfAborted();
 				if (outcome.outcome === "block" || outcome.outcome === "ask-user") {
-					throw new Error(
+					throw new AgentToolPolicyDeniedError(
 						`Tool '${tool.name}' execution blocked by autonomy gate [${outcome.gate}]: ${outcome.message ?? "denied"} (${outcome.reasonCode})`,
 					);
 				}

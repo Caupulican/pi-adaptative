@@ -18,7 +18,6 @@ import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_DESCRIPTION_LENGTH,
 	MAX_ORCHESTRATION_DIRECT_CHILDREN,
-	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
@@ -37,6 +36,7 @@ import {
 	type PolicyCompilationResult,
 } from "./policy-compiler.ts";
 import { parseRiskBudget, validateRiskBudget } from "./risk-budget.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "./worker-brief-attachment.ts";
 
 export interface ModelHealthView {
 	isHealthy(binding: OrchestrationModelBinding): boolean;
@@ -84,7 +84,7 @@ export function parseOrchestrationDispatchRequest(value: unknown): Orchestration
 		!value.profileId ||
 		value.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH ||
 		typeof value.instructions !== "string" ||
-		value.instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH ||
+		value.instructions.length > MAX_WORKER_BRIEF_CHARS ||
 		!value.instructions.trim() ||
 		!Array.isArray(value.resourcePointerIds) ||
 		value.resourcePointerIds.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||

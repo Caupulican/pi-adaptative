@@ -10,9 +10,17 @@ import {
 	narrowRequestMaxTokens,
 } from "../kernel/provider-request-planner.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../kernel/types.ts";
+import { isPlainRecord } from "../kernel/utils/value-guards.ts";
 import type { CompactionController } from "./compaction-controller.ts";
+import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
+import type { OrdinaryWorkController, OrdinaryWorkRecord } from "./ordinary-work-controller.ts";
+import { assertOrdinaryDispatch, ORDINARY_WORK_CONTINUATION_TYPE } from "./ordinary-work-policy.ts";
 import { projectParentInputs } from "./parent-input-projection.ts";
-import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
+import {
+	composeProviderHistory,
+	type ProviderRequestContextController,
+} from "./provider-request-context-controller.ts";
 
 interface RequestEnvelopeSnapshot {
 	modelKey: string;
@@ -26,13 +34,14 @@ interface UsageEnvelopeAnchor extends RequestEnvelopeSnapshot {
 export interface ProviderRequestRuntimeControllerDeps {
 	agent: Agent;
 	compaction: Pick<CompactionController, "admitProviderRequest" | "measureLiveContextTokens">;
-	context: ProviderRequestContextController;
+	context: Pick<ProviderRequestContextController, "plan">;
 	parentInputs: Pick<
 		SessionManager,
-		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds" | "getSkippedParentInputIds"
+		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputWake" | "getSkippedParentInputIds"
 	>;
 	getSubmissionEpoch(): number | undefined;
 	admitGoalRequest(): number | undefined;
+	ordinaryWork?: Pick<OrdinaryWorkController, "enrollCurrentOwner" | "reportingRevision">;
 	/** Session-wide per-response output cap; see SettingsManager.getMaxOutputTokens. */
 	maxOutputTokens(): number;
 	/**
@@ -53,10 +62,12 @@ export class ProviderRequestRuntimeController {
 	private previousTransformContext: Agent["transformContext"];
 	private previousPlanContext: Agent["planContext"];
 	private previousAdmission: Agent["admitProviderRequest"];
+	private previousResponseMode: Agent["resolveResponseMode"];
 	private previousShouldStopAfterTurn: Agent["shouldStopAfterTurn"];
 	private installedTransformContext: Agent["transformContext"];
 	private installedPlanContext: Agent["planContext"];
 	private installedAdmission: Agent["admitProviderRequest"];
+	private installedResponseMode: Agent["resolveResponseMode"];
 	private installedShouldStopAfterTurn: Agent["shouldStopAfterTurn"];
 	private pendingSentEnvelope: RequestEnvelopeSnapshot | undefined;
 	private usageEnvelopeAnchor: UsageEnvelopeAnchor | undefined;
@@ -152,10 +163,34 @@ export class ProviderRequestRuntimeController {
 		this.previousTransformContext = agent.transformContext;
 		this.previousPlanContext = agent.planContext;
 		this.previousAdmission = agent.admitProviderRequest;
+		this.previousResponseMode = agent.resolveResponseMode;
 		this.previousShouldStopAfterTurn = agent.shouldStopAfterTurn;
 		const previousTransformContext = this.previousTransformContext?.bind(agent);
 		const previousPlanContext = this.previousPlanContext?.bind(agent);
 		const previousAdmission = this.previousAdmission?.bind(agent);
+		const previousResponseMode = this.previousResponseMode?.bind(agent);
+		const reportingRevision = (opening: AgentMessage | undefined, record: OrdinaryWorkRecord | undefined) => {
+			let text: string | undefined;
+			assertOrdinaryDispatch(opening, record, () => {
+				text = this.deps.ordinaryWork?.reportingRevision(record);
+				return Boolean(text);
+			});
+			return text;
+		};
+		this.installedResponseMode = (context) => {
+			const continuation = context.requestOpening;
+			if (continuation?.role === "custom" && continuation.customType === ORDINARY_WORK_CONTINUATION_TYPE) {
+				reportingRevision(continuation, this.deps.ordinaryWork?.enrollCurrentOwner());
+				if (
+					continuation.role === "custom" &&
+					isPlainRecord(continuation.details) &&
+					continuation.details.responseMode === "answer_only"
+				)
+					return "answer_only";
+				return previousResponseMode?.(context) ?? "default";
+			}
+			return previousResponseMode?.(context);
+		};
 		const previousShouldStopAfterTurn = this.previousShouldStopAfterTurn?.bind(agent);
 
 		// Forward the whole request object to `previousPlanContext` instead of rebuilding a
@@ -184,22 +219,30 @@ export class ProviderRequestRuntimeController {
 				request.sentPrefixCount,
 				signal,
 				request.wire,
+				request.model && cacheLaneKey(request.model.api, request.model.provider, request.model.id),
 			);
+			const opening = request.requestOpening;
+			const reservation =
+				opening?.role === "custom" && opening.customType === ORDINARY_WORK_CONTINUATION_TYPE
+					? this.deps.ordinaryWork?.enrollCurrentOwner()
+					: undefined;
+			const revision = reportingRevision(opening, reservation);
+			const revisionCurrent = () => !revision || this.deps.ordinaryWork?.reportingRevision(reservation) === revision;
+			const isCurrent = () =>
+				revisionCurrent() && basePlan.isCurrent?.() !== false && sessionPlan.isCurrent?.() !== false;
 			return {
-				messages: sessionPlan.messages,
-				verifyPathAliases: sessionPlan.verifyPathAliases,
-				// The carried head (ICM frame layout) is the session plan's own: the continuous-chat wrapper reads it here.
-				...(sessionPlan.carriedRecords ? { carriedRecords: sessionPlan.carriedRecords } : {}),
+				...sessionPlan,
+				...composeProviderHistory(basePlan, sessionPlan),
 				transientMessages: [...(basePlan.transientMessages ?? []), ...(sessionPlan.transientMessages ?? [])],
 				transientSystemPrompt: composeRequestSystemPrompt(
-					basePlan.transientSystemPrompt,
-					sessionPlan.transientSystemPrompt,
+					composeRequestSystemPrompt(basePlan.transientSystemPrompt, sessionPlan.transientSystemPrompt),
+					revision,
 				),
-				isCurrent: () => basePlan.isCurrent?.() !== false && sessionPlan.isCurrent?.() !== false,
+				isCurrent,
 				isDispatchCurrent: () =>
-					isContextPlanDispatchCurrent(basePlan) && isContextPlanDispatchCurrent(sessionPlan),
+					revisionCurrent() && isContextPlanDispatchCurrent(basePlan) && isContextPlanDispatchCurrent(sessionPlan),
 				prepareCommit: () => {
-					if (basePlan.isCurrent?.() === false || sessionPlan.isCurrent?.() === false) return false;
+					if (!isCurrent()) return false;
 					return basePlan.prepareCommit?.() !== false && sessionPlan.prepareCommit?.() !== false;
 				},
 				commit: () => {
@@ -276,6 +319,7 @@ export class ProviderRequestRuntimeController {
 			}
 			const previous = (await previousAdmission?.(request, signal)) ?? { action: "send" as const };
 			if (previous.action === "replan") return previous;
+			reportingRevision(request.sourceContext.requestOpening, this.deps.ordinaryWork?.enrollCurrentOwner());
 			const goalMaxTokens = this.deps.admitGoalRequest();
 			// Every request carries an output cap: the session-wide per-response cap, narrowed further
 			// by the goal's remaining budget when one applies. Validated narrowing (shared with the
@@ -301,6 +345,7 @@ export class ProviderRequestRuntimeController {
 		agent.planContext = this.installedPlanContext;
 		agent.transformContext = this.installedTransformContext;
 		agent.admitProviderRequest = this.installedAdmission;
+		agent.resolveResponseMode = this.installedResponseMode;
 		agent.shouldStopAfterTurn = this.installedShouldStopAfterTurn;
 	}
 
@@ -321,6 +366,8 @@ export class ProviderRequestRuntimeController {
 		if (agent.admitProviderRequest === this.installedAdmission) {
 			agent.admitProviderRequest = this.previousAdmission;
 		}
+		if (agent.resolveResponseMode === this.installedResponseMode)
+			agent.resolveResponseMode = this.previousResponseMode;
 		if (agent.shouldStopAfterTurn === this.installedShouldStopAfterTurn) {
 			agent.shouldStopAfterTurn = this.previousShouldStopAfterTurn;
 		}
@@ -328,6 +375,7 @@ export class ProviderRequestRuntimeController {
 		this.installedTransformContext = undefined;
 		this.installedPlanContext = undefined;
 		this.installedAdmission = undefined;
+		this.installedResponseMode = undefined;
 		this.installedShouldStopAfterTurn = undefined;
 		this.pendingSentEnvelope = undefined;
 		this.usageEnvelopeAnchor = undefined;

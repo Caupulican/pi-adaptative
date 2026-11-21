@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { OAuthCredentials, OAuthProviderInterface } from "@caupulican/pi-ai/oauth";
 import type { Api, Model } from "@caupulican/pi-ai/types";
 
@@ -19,6 +20,47 @@ export class RequestModelSnapshots {
 
 	publishRegistry(models: readonly Model<Api>[]): void {
 		for (const model of models) this.origins.set(model, { kind: "registry" });
+	}
+
+	bindAccountListing(
+		selected: Model<Api>,
+		effective: Model<Api>,
+		catalog: readonly Model<Api>[],
+		modifiesCaller: boolean,
+		headersFor: (id: string) => Record<string, string> | undefined,
+	): (target: Model<Api>) => boolean {
+		let routes: Map<string, Model<Api> | undefined> | undefined;
+		const registeredRoute = (id: string) => {
+			if (id === selected.id && this.origins.get(selected)?.kind === "registry") return effective;
+			if (!routes) {
+				routes = new Map();
+				for (const model of catalog) {
+					if (model.provider === effective.provider)
+						routes.set(model.id, routes.has(model.id) ? undefined : model);
+				}
+			}
+			return routes.get(id);
+		};
+		const checkedHeaders = structuredClone(headersFor(effective.id));
+		return (target) => {
+			if (target.provider !== effective.provider || !isDeepStrictEqual(headersFor(target.id), checkedHeaders))
+				return false;
+			const origin = this.origins.get(target);
+			const route =
+				origin?.kind === "registry"
+					? registeredRoute(target.id)
+					: target === selected || target === effective
+						? effective
+						: modifiesCaller
+							? undefined
+							: (origin?.baseline ?? target);
+			return (
+				route !== undefined &&
+				route.api === effective.api &&
+				route.baseUrl === effective.baseUrl &&
+				isDeepStrictEqual(route.headers, effective.headers)
+			);
+		};
 	}
 
 	resolve(

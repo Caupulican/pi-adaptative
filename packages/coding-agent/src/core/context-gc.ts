@@ -573,6 +573,7 @@ interface PackedMemo {
 const packedMemos = new WeakMap<AgentMessage, PackedMemo>();
 
 interface AcceptedGcProjection {
+	readonly messages: readonly AgentMessage[];
 	readonly policy: string;
 	readonly version: MessageHistoryVersion;
 	readonly projectedVersion?: MessageHistoryVersion;
@@ -599,7 +600,7 @@ function emitMemoizedPack(pass: PackingPass, messageIndex: number, memo: PackedM
 	// An active session lease owns retained originals. `commit()` updates the memo's record after the
 	// one first write, so re-emitting it must not add a filesystem stat per packed item per request.
 	const record: ContextGcPackedRecord = { ...memo.record, messageIndex };
-	writePacked(pass, messageIndex, memo.packed, memo);
+	writePacked(pass, messageIndex, memo);
 	recordPack(pass.report, record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
@@ -712,7 +713,7 @@ interface PackingPass {
 	readonly report: ContextGcReport;
 	readonly messages: AgentMessage[];
 	nextMessages?: AgentMessage[];
-	uncertifiedReplacement: boolean;
+	prefix?: { readonly messages: readonly AgentMessage[]; readonly count: number };
 	readonly retained: Array<readonly [index: number, memo: PackedMemo]>;
 	readonly policy: string;
 	readonly published: Map<AgentMessage, PackedMemo>;
@@ -725,68 +726,57 @@ interface PackingPass {
 	}>;
 }
 
-function writePacked(pass: PackingPass, index: number, message: AgentMessage, memo?: PackedMemo): void {
+function writePacked(pass: PackingPass, index: number, memo: PackedMemo): void {
 	if (!pass.nextMessages) {
-		pass.nextMessages = pass.messages.slice();
-		countHistoryWork(pass.messages, "copiedRows", pass.messages.length);
+		const prefix = pass.prefix;
+		pass.nextMessages = prefix ? prefix.messages.slice(0, prefix.count) : pass.messages.slice();
+		countHistoryWork(pass.messages, "copiedRows", prefix?.count ?? pass.messages.length);
+		if (prefix)
+			for (let index = prefix.count; index < pass.messages.length; index++)
+				pass.nextMessages.push(pass.messages[index]!);
 	}
-	pass.nextMessages[index] = message;
-	if (memo) pass.retained.push([index, memo]);
-	else pass.uncertifiedReplacement = true;
+	if (pass.nextMessages[index] !== memo.packed) pass.nextMessages[index] = memo.packed;
+	pass.retained.push([index, memo]);
 }
 
-function commitPackedMessage<TMessage extends AgentMessage>(
-	pass: PackingPass,
-	messageIndex: number,
-	message: TMessage,
-	memo: PackedMemo | undefined,
-	originalText: string,
-	key: string,
-	record: ContextGcPackedRecord,
-	makePacked: (message: TMessage, record: ContextGcPackedRecord) => AgentMessage,
-): void {
+function commitPackedMessage(pass: PackingPass, decision: PackDecision & { source: AgentMessage }): void {
+	const { index: messageIndex, message, source, memo, originalText, key, record, makePacked } = decision;
 	record.digest = pass.options.curation?.resolveDigest?.(key);
 	pass.resolvedDigests.set(key, record.digest);
 	// Fires before the replacement is measured, as it always has: the hook sees the record with its
 	// digest resolved and `packedTokens` still zero.
 	pass.options.curation?.onPacked?.(record, originalText);
 	const shape = packedShape(record);
-	let packed: AgentMessage;
-	let accepted: PackedMemo | undefined;
+	let accepted: PackedMemo;
 	if (memo && memo.key === key && memo.shape === shape) {
 		accepted = memo;
-		packed = memo.packed;
 		record.packedTokens = memo.packedTokens;
 	} else {
-		const rawPacked = makePacked(message, record);
-		const stableSource = immutableHistoryMessage(message);
-		const stable = stableSource && immutableHistoryMessage(withMessageSource(message, rawPacked));
-		packed = stable ?? rawPacked;
+		const packed = immutableHistoryMessage(withMessageSource(message, makePacked(source, record)));
+		if (!packed) return;
 		record.packedTokens = estimateTokens(packed);
-		if (stable && stableSource) {
-			accepted = {
-				source: stableSource,
-				policy: pass.policy,
-				originalText,
-				originalTokens: record.originalTokens,
-				key,
-				keyIndex: record.reason === "stale-semantic-memory" ? messageIndex : undefined,
-				shape,
-				packed,
-				packedTokens: record.packedTokens,
-				record,
-			};
-			pass.published.set(message, accepted);
-		}
+		accepted = {
+			source,
+			policy: pass.policy,
+			originalText,
+			originalTokens: record.originalTokens,
+			key,
+			keyIndex: record.reason === "stale-semantic-memory" ? messageIndex : undefined,
+			shape,
+			packed,
+			packedTokens: record.packedTokens,
+			record,
+		};
+		pass.published.set(message, accepted);
 	}
-	writePacked(pass, messageIndex, packed, accepted);
+	writePacked(pass, messageIndex, accepted);
 	recordPack(pass.report, record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
 	pass.pending.push({
 		record,
 		originalText,
-		availabilityOwner: accepted?.record ?? record,
+		availabilityOwner: accepted.record,
 	});
 }
 
@@ -867,7 +857,6 @@ export function applyContextGc(
 		report: baseReport,
 		messages,
 		policy: compressionPolicy,
-		uncertifiedReplacement: false,
 		retained: [],
 		published: new Map(),
 		resolvedDigests: new Map(),
@@ -880,13 +869,20 @@ export function applyContextGc(
 			? Math.min(options.frozenBelow, unchangedMessagePrefix(previous.version, version))
 			: 0;
 	if (previous && unchangedFrozen > 0) {
+		pass.prefix = { messages: previous.messages, count: unchangedFrozen };
 		for (const [index, memo] of previous.packed) {
 			if (index >= unchangedFrozen) break;
 			emitMemoizedPack(pass, index, memo);
 		}
 	}
 	countHistoryWork(messages, "oldRowsRead", options.frozenBelow - unchangedFrozen);
-	const decisions: PackDecision[] = [];
+	const decisions: Array<PackDecision & { source: AgentMessage }> = [];
+	const consider = (decision: PackDecision) => {
+		// Only offer replacements we can reproduce on a frozen follow-up. Disk-backed accessors
+		// stay in their original form and keep their payload under the session store's ownership.
+		const source = decision.memo?.source ?? immutableHistoryMessage(decision.message);
+		if (source) decisions.push({ ...decision, source });
+	};
 
 	for (let index = unchangedFrozen; index < messages.length; index++) {
 		const message = messages[index];
@@ -940,7 +936,7 @@ export function applyContextGc(
 					retrievalAvailable: contextOriginalAvailable(storagePath),
 					key,
 				};
-				decisions.push({ index, message, memo, originalText, key, record, makePacked: makePackedTransientRecord });
+				consider({ index, message, memo, originalText, key, record, makePacked: makePackedTransientRecord });
 				continue;
 			}
 		}
@@ -971,7 +967,7 @@ export function applyContextGc(
 					retrievalAvailable: contextOriginalAvailable(storagePath),
 					key,
 				};
-				decisions.push({
+				consider({
 					index,
 					message,
 					memo,
@@ -1030,7 +1026,7 @@ export function applyContextGc(
 			key,
 			...(retrievedKey ? { retrieved: true } : {}),
 		};
-		decisions.push({
+		consider({
 			index,
 			message,
 			memo,
@@ -1077,27 +1073,16 @@ export function applyContextGc(
 		if (decision.index < options.frozenBelow && !decision.memo) {
 			countHistoryWork(messages, "oldBytesRecompressed", () => Buffer.byteLength(decision.originalText));
 		}
-		commitPackedMessage(
-			pass,
-			decision.index,
-			decision.message,
-			decision.memo,
-			decision.originalText,
-			decision.key,
-			decision.record,
-			decision.makePacked,
-		);
+		commitPackedMessage(pass, decision);
 	}
 
 	const projectedVersion =
 		version && pass.nextMessages
-			? !pass.uncertifiedReplacement
-				? registerProjectedMessageHistory(
-						pass.nextMessages,
-						previous?.projectedVersion,
-						previous?.projectedVersion ? unchangedFrozen : 0,
-					)
-				: undefined
+			? registerProjectedMessageHistory(
+					pass.nextMessages,
+					previous?.projectedVersion,
+					previous?.projectedVersion ? unchangedFrozen : 0,
+				)
 			: version;
 	baseReport.packedCount = baseReport.records.length;
 	baseReport.savedTokens = Math.max(0, baseReport.originalTokens - baseReport.packedTokens);
@@ -1111,6 +1096,7 @@ export function applyContextGc(
 		if (version) {
 			if (crossing) pass.retained.sort(([left], [right]) => left - right);
 			acceptedGcProjections.set(messages, {
+				messages: pass.nextMessages ?? messages,
 				version,
 				projectedVersion,
 				policy: compressionPolicy,

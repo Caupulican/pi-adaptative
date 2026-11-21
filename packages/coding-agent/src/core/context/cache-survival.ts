@@ -6,8 +6,7 @@
  * R(gap) is measured, never assumed. Gaps fall into log-spaced bins (measurement resolution only);
  * each bin holds a decay-weighted mean of the observed retained share and its effective sample
  * count. A sparse lane borrows from the same model on other APIs, then from its provider, then from
- * the provider's documented cache TTL where one exists (Anthropic: 5 minutes, or 1 hour with long
- * retention); the borrowed weight is fixed, so it fades as the lane's own evidence grows. The final
+ * the expiry captured from this account and lane's actual wire policy when known; the borrowed weight is fixed, so it fades as the lane's own evidence grows. The final
  * curve is made non-increasing by pool-adjacent-violators: an older cache never holds more.
  *
  * Only observations whose prefix was intact measure the provider. A request whose own prefix
@@ -16,8 +15,52 @@
  * Gaps are wall time: a provider's cache keeps aging while the host is suspended.
  */
 
+export interface CacheExpiryPolicy {
+	readonly lane: string;
+	readonly accountScope: string;
+	readonly kind: "fixed" | "automatic" | "disabled" | "unknown";
+	readonly wirePolicy: string;
+	readonly capturedAt: number;
+	readonly cacheTouched: boolean;
+	readonly ttlMs?: number;
+}
+
+export function cacheExpiryPolicyKey(policy: CacheExpiryPolicy | undefined): string {
+	return JSON.stringify(
+		policy ? [policy.lane, policy.accountScope, policy.kind, policy.wirePolicy, policy.ttlMs ?? null] : null,
+	);
+}
+
+export function cacheExpiryBounds(
+	previous: CacheResponsePolicy | undefined,
+): { warmUntilMs: number; coldAfterMs: number } | undefined {
+	const policy = previous?.cachePolicy;
+	if (
+		!policy ||
+		!previous ||
+		policy.kind !== "fixed" ||
+		!policy.cacheTouched ||
+		policy.ttlMs === undefined ||
+		!Number.isSafeInteger(policy.capturedAt) ||
+		policy.capturedAt < 0 ||
+		!Number.isSafeInteger(previous.observedAt) ||
+		previous.observedAt < policy.capturedAt
+	)
+		return;
+	return {
+		warmUntilMs: Math.max(0, policy.ttlMs - (previous.observedAt - policy.capturedAt)),
+		coldAfterMs: policy.ttlMs,
+	};
+}
+
 /** One provider response on a lane, as the decision ledger (or a session-log replay) records it. */
+export interface CacheResponsePolicy {
+	readonly observedAt: number;
+	readonly cachePolicy?: CacheExpiryPolicy;
+}
+
 export interface SurvivalObservation {
+	readonly measuredCachePolicy?: CacheExpiryPolicy;
 	/** `cacheLaneKey(api, provider, modelId)`. */
 	readonly lane: string;
 	readonly observedAt: number;
@@ -66,6 +109,7 @@ export interface SurvivalCurve {
 	readonly laneObservations: number;
 	/** The provider's documented cache lifetime the curve fell back to, where it has one. */
 	readonly priorTtlMs: number | undefined;
+	readonly priorWarmUntilMs: number | undefined;
 }
 
 /** Gap resolution floor: the first bin holds every gap under one second. */
@@ -89,12 +133,6 @@ export function cacheHost(lane: string): { key: string; vendor: string } {
 	return { key: `${provider}/${vendor}`, vendor };
 }
 
-/** The documented cache lifetime of a provider, where the provider publishes one. */
-export function providerCacheTtlMs(provider: string, retention?: "short" | "long"): number | undefined {
-	if (provider !== "anthropic") return undefined;
-	return retention === "long" ? 60 * 60_000 : 5 * 60_000;
-}
-
 export function gapBinIndex(gapMs: number, binsPerDecade: number): number {
 	if (!(gapMs >= FIRST_BIN_UPPER_MS)) return 0;
 	return 1 + Math.floor(Math.log10(gapMs / FIRST_BIN_UPPER_MS) * binsPerDecade);
@@ -109,11 +147,10 @@ function binBounds(index: number, binsPerDecade: number): { fromMs: number; toMs
 }
 
 /** Share of a bin that lies below a TTL, measured on the log scale the bins are spaced on. */
-function priorRetained(ttlMs: number, fromMs: number, toMs: number): number {
-	if (toMs <= ttlMs) return 1;
-	if (fromMs >= ttlMs) return 0;
-	if (fromMs <= 0) return ttlMs / toMs;
-	return Math.log(ttlMs / fromMs) / Math.log(toMs / fromMs);
+function priorRetained(warmUntilMs: number, coldAfterMs: number, fromMs: number, toMs: number): number | undefined {
+	if (toMs <= warmUntilMs) return 1;
+	if (fromMs >= coldAfterMs) return 0;
+	return undefined;
 }
 
 export function decayWeight(ageMs: number, halfLifeMs: number): number {
@@ -215,20 +252,34 @@ export function survivalCurve(
 	lane: string,
 	settings: SurvivalSettings,
 	now: number,
-	retention?: "short" | "long",
+	previous?: CacheResponsePolicy,
 ): SurvivalCurve {
 	const { provider, modelId } = laneParts(lane);
-	const laneObservations = observations.filter((o) => o.lane === lane);
-	const modelObservations = observations.filter((o) => {
+	const policy = previous?.cachePolicy;
+	const eligible =
+		policy?.lane === lane && policy.kind !== "unknown"
+			? observations.filter(
+					(row) =>
+						row.measuredCachePolicy?.lane === row.lane &&
+						row.measuredCachePolicy.accountScope === policy.accountScope &&
+						row.measuredCachePolicy.kind === policy.kind &&
+						row.measuredCachePolicy.wirePolicy === policy.wirePolicy &&
+						row.measuredCachePolicy.ttlMs === policy.ttlMs,
+				)
+			: [];
+	const laneObservations = eligible.filter((row) => row.lane === lane);
+	const modelObservations = eligible.filter((o) => {
 		const parts = laneParts(o.lane);
 		return parts.provider === provider && parts.modelId === modelId;
 	});
 	const host = cacheHost(lane);
-	const providerObservations = observations.filter((o) => cacheHost(o.lane).key === host.key);
+	const providerObservations = eligible.filter((o) => cacheHost(o.lane).key === host.key);
 	const laneBins = accumulate(laneObservations, settings, now).bins;
 	const modelBins = accumulate(modelObservations, settings, now).bins;
 	const providerBins = accumulate(providerObservations, settings, now).bins;
-	const ttlMs = providerCacheTtlMs(host.vendor, retention);
+	const bounds = policy?.lane === lane ? cacheExpiryBounds(previous) : undefined;
+	const ttlMs = bounds?.coldAfterMs;
+	const warmUntilMs = bounds?.warmUntilMs;
 
 	let lastIndex = Math.max(-1, ...laneBins.keys(), ...modelBins.keys(), ...providerBins.keys());
 	if (ttlMs !== undefined) lastIndex = Math.max(lastIndex, gapBinIndex(ttlMs, settings.binsPerDecade) + 1);
@@ -238,7 +289,7 @@ export function survivalCurve(
 	const sources: SurvivalBin["source"][] = [];
 	for (let index = 0; index <= lastIndex; index++) {
 		const { fromMs, toMs } = binBounds(index, settings.binsPerDecade);
-		const prior = ttlMs !== undefined ? priorRetained(ttlMs, fromMs, toMs) : undefined;
+		const prior = ttlMs !== undefined ? priorRetained(warmUntilMs ?? 0, ttlMs, fromMs, toMs) : undefined;
 		const fromProvider = shrink(providerBins.get(index), prior, settings.poolingWeight);
 		const fromModel = shrink(modelBins.get(index), fromProvider, settings.poolingWeight);
 		const value = shrink(laneBins.get(index), fromModel, settings.poolingWeight);
@@ -282,6 +333,7 @@ export function survivalCurve(
 		minCacheableTokens,
 		laneObservations: laneObservations.length,
 		priorTtlMs: ttlMs,
+		priorWarmUntilMs: warmUntilMs,
 	};
 }
 

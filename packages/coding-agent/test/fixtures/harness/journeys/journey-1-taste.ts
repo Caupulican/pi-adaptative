@@ -17,6 +17,7 @@ import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmWaitForChatIdle, knowle
 const JUDGED_STATED = [
 	{ id: "grounded", value: true, confidence: 0.98 },
 	{ id: "basis", selected: "explicit", confidence: 0.98 },
+	{ id: "reporting_requirement", value: false, confidence: 0.98 },
 	{ id: "requested", value: false, confidence: 0.98 },
 ] as const;
 /** Two turns, each logging the owner's words and the reply. */
@@ -209,6 +210,7 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 			grounded: { kind: "noul", probability: 0.98 },
 			basis: { kind: "choice", choice: "explicit", confidence: 0.98 },
 			requested: { kind: "noul", probability: 0.02 },
+			reporting_requirement: { kind: "noul", probability: 0.02 },
 		});
 		world.provider.enqueue(
 			"root",
@@ -308,10 +310,20 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 
 		await runProposalLeg(root.session, store, agentDir);
 
-		world.systemOne.enterPhase("taste-projection-owner", {
-			...ICM_INTAKE_JUDGMENTS,
-			carries_0: { kind: "noul", probability: 0.02 },
-		});
+		world.systemOne.enterPhase(
+			"taste-projection-owner",
+			{
+				...ICM_INTAKE_JUDGMENTS,
+				carries_0: { kind: "noul", probability: 0.02 },
+				reporting_requirement: { kind: "noul", probability: 0.02 },
+			},
+			{
+				expect: (request) => {
+					if (request.questions.reporting_requirement)
+						expect(request.state).toEqual({ preference: PROPOSAL_REVISED });
+				},
+			},
+		);
 		world.provider.enqueue("root", {
 			...text("taste-projection-reply", "Understood."),
 			check: (request) => {

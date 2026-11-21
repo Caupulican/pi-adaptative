@@ -36,6 +36,8 @@ A reader who searches for a name, a phrase or an error message lands on the one 
 
 ### Say it where the search lands
 
+In paths enrolled in a source-comment ratchet, put the searchable phrase in a precise identifier, the public API reference or the relevant ADR. The following doc-comment guidance applies where the project permits source comments.
+
 - **One line of doc comment on every export,** stating the sharpest constraint the code cannot show: units, time zone, "source time, not insert time", ownership.
 - **Write the plain-words phrase in the doc comment.** Searches arrive as ordinary words ("rate limit", "session expired"); camelCase identifiers do not match a phrase grep. `SessionExpiryChecker` should say "Checks whether the user session has expired."
 - **A module should read with its imports unread.** If the reader has to open the source of an import to understand it, the import's name is failing.

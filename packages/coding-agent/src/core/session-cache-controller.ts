@@ -193,17 +193,18 @@ export class SessionCacheController {
 	/** The learned cache facts an early compaction of the session's own lane on `model` is priced with, at `now`. */
 	compactionEconomics(model: Model<Api>, now: number): CompactionCacheFacts {
 		const lane = cacheLaneKey(model.api, model.provider, model.id);
-		const lastResponseAt = this.knowledge.lastResponseAt(this.deps.getSessionId(), lane);
+		const previous = this.knowledge.lastResponse(this.deps.getSessionId(), lane);
+		const lastResponseAt = previous?.observedAt;
 		const retained =
 			lastResponseAt === undefined
 				? undefined
-				: this.knowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now);
+				: this.knowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now, previous);
 		const lineage = this.knowledge.lineage(this.deps.getSessionId(), this.deps.getForegroundLineage(), now);
 		const outcome = this.knowledge.compactionOutcome(lane, now);
 		return {
-			retainedAt: (gapMs) => this.knowledge.retainedAfter(lane, gapMs, now),
+			retainedAt: (gapMs) => this.knowledge.retainedAfter(lane, gapMs, now, previous),
 			returnGapsMs: (holder) => this.knowledge.returnGaps(holder, now),
-			gapResolutionMs: this.knowledge.gapResolution(lane, now),
+			gapResolutionMs: this.knowledge.gapResolution(lane, now, previous),
 			...(retained ? { retained } : {}),
 			// Without a lineage that long on record, the lineage's own elapsed requests stand in.
 			...(lineage ? { remainingRequests: lineage.remaining ?? lineage.elapsed } : {}),
@@ -215,9 +216,10 @@ export class SessionCacheController {
 	laneCacheGone(model: Model<Api>, conversation?: string): boolean {
 		const lane = cacheLaneKey(model.api, model.provider, model.id);
 		const now = Date.now();
-		const last = this.knowledge.lastResponseAt(conversation ?? this.deps.getSessionId(), lane);
+		const previous = this.knowledge.lastResponse(conversation ?? this.deps.getSessionId(), lane);
+		const last = previous?.observedAt;
 		if (last === undefined) return false;
-		const estimate = this.knowledge.retainedAfter(lane, Math.max(0, now - last), now);
+		const estimate = this.knowledge.retainedAfter(lane, Math.max(0, now - last), now, previous);
 		return estimate !== undefined && estimate.retained + estimate.standardError <= 0;
 	}
 

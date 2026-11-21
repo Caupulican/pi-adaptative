@@ -3,7 +3,7 @@
  */
 
 import { registerApiProvider, unregisterApiProviders } from "@caupulican/pi-ai/api-registry";
-import { getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
+import { getEnvApiKey, getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
 import { getModels, getProviders } from "@caupulican/pi-ai/models";
 import {
 	getOAuthProvider,
@@ -45,7 +45,7 @@ import {
 } from "./models-config-schema.ts";
 import { fenceRecoveredProviderApiKey, resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
-import { hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
+import { bindRegistryRequestHeaders, hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
 import { applyOAuthModelModifier, RequestModelSnapshots } from "./request-model-snapshots.ts";
 import {
 	clearConfigValueCache,
@@ -57,7 +57,6 @@ import {
 	resolveConfigValue,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
-	resolveHeadersOrThrow,
 } from "./resolve-config-value.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
 
@@ -847,7 +846,7 @@ export class ModelRegistry implements ModelRegistryContract {
 	/**
 	 * Get API key and request headers for a model.
 	 */
-	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
+	async getApiKeyAndHeaders(model: Model<Api>, options?: { accountListing?: boolean }): Promise<ResolvedRequestAuth> {
 		try {
 			const previousCredential = structuredClone(this.authStorage.get(model.provider));
 			const previousRuntimeApiKey = this.authStorage.getRuntimeApiKey(model.provider);
@@ -885,53 +884,52 @@ export class ModelRegistry implements ModelRegistryContract {
 			}
 			const requestModel = this.requestModels.resolve(model, catalog, oauthProvider, oauthCredential);
 
-			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
-			const modelHeaders = resolveHeadersOrThrow(
-				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
-				`model "${model.provider}/${model.id}"`,
+			const headersFor = (id: string) => this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, id));
+			const configuredHeaders = headersFor(model.id);
+			const requestHeaders = bindRegistryRequestHeaders(
+				requestModel,
+				providerConfig,
+				configuredHeaders,
+				apiKey,
+				credential?.type === "api_key" ? credential.key : undefined,
 			);
-
-			const envAuthHeaders = getEnvAuthHeaders(model.provider);
-			const effectiveModelHeaders = requestModel.headers;
-			let headers =
-				envAuthHeaders || effectiveModelHeaders || providerHeaders || modelHeaders
-					? { ...envAuthHeaders, ...effectiveModelHeaders, ...providerHeaders, ...modelHeaders }
-					: undefined;
-
-			if (providerConfig?.authHeader) {
-				if (!apiKey) {
-					return { ok: false, error: `No API key found for "${model.provider}"` };
-				}
-				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
-			}
-
 			const credentialHeaders = apiKeyFromAuthStorage
 				? this.authStorage.getOAuthRequestHeaders(model.provider, apiKeyFromAuthStorage)
 				: undefined;
 			const generation = this.providerCatalogGenerations.get(model.provider);
 			const capturedCredential = structuredClone(credential);
 			const capturedProviderConfig = structuredClone(providerConfig);
-			const capturedModelHeaders = structuredClone(
-				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
-			);
+			const capturedModelHeaders = structuredClone(configuredHeaders);
 			return {
 				ok: true,
 				model: requestModel,
 				apiKey,
-				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
+				headers: requestHeaders.headers,
+				...(options?.accountListing && requestHeaders.configInputs.reusable
+					? {
+							accountListingIncludes: this.requestModels.bindAccountListing(
+								model,
+								requestModel,
+								catalog,
+								Boolean(oauthCredential && oauthProvider?.modifyModels),
+								headersFor,
+							),
+						}
+					: {}),
+				...(!requestHeaders.configInputs.reusable ? { canCacheAccountIdentity: false } : {}),
 				...(credentialHeaders ? { credentialHeaders } : {}),
 				providerAccountKey: resolveProviderAccountKey(this.authStorage, model.provider, apiKey),
 				requestGuard: (_model, signal) => {
 					signal?.throwIfAborted();
 					if (
 						generation !== this.providerCatalogGenerations.get(model.provider) ||
+						!requestHeaders.configInputs.current() ||
+						(!runtimeApiKey && !credential && getEnvApiKey(model.provider) !== apiKeyFromAuthStorage) ||
+						!isDeepStrictEqual(requestHeaders.environment, getEnvAuthHeaders(model.provider)) ||
 						!isDeepStrictEqual(capturedCredential, this.authStorage.get(model.provider)) ||
 						runtimeApiKey !== this.authStorage.getRuntimeApiKey(model.provider) ||
 						!isDeepStrictEqual(capturedProviderConfig, this.providerRequestConfigs.get(model.provider)) ||
-						!isDeepStrictEqual(
-							capturedModelHeaders,
-							this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
-						) ||
+						!isDeepStrictEqual(capturedModelHeaders, headersFor(model.id)) ||
 						(oauthCredential !== undefined && Date.now() >= oauthCredential.expires)
 					) {
 						throw new Error(

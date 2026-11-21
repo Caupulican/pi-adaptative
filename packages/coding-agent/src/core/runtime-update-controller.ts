@@ -39,7 +39,14 @@ const toolSchema = Type.Object({
 		Type.Literal("stop"),
 		Type.Literal("status"),
 	]),
-	verificationTool: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+	verificationTool: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: 128,
+			description:
+				"Required for a new reload or restart. Name the tool you will run after the update. A repair can reuse the current verification tool.",
+		}),
+	),
 	extensionPath: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
 });
 
@@ -180,8 +187,8 @@ export class RuntimeUpdateController {
 			name: "runtime_update",
 			label: "Runtime update",
 			description:
-				"Reload extensions or restart the core after this tool batch. Name verificationTool and run it in the new runtime, then complete to resume the original task. Repair a failed update before anything else, or stop if unsafe.",
-			promptSnippet: "Reload extensions or restart core",
+				"Reload extensions or restart the core after this tool batch. A new reload or restart requires verificationTool. Run that tool in the new runtime, then complete to resume the original task. Repair a failed update before anything else, or stop if unsafe.",
+			promptSnippet: "Reload extensions or restart core. For a new reload or restart, supply verificationTool.",
 			parameters: toolSchema,
 			execute: async (toolCallId, input, signal) => {
 				if (!this.deps.ownsProcessSingletons()) throw new Error("Only the root session may update its runtime.");

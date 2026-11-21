@@ -24,13 +24,13 @@ const step = Type.Object(
 		do: Type.String({
 			minLength: 1,
 			maxLength: PLAN_LIMITS.intentChars,
-			description: "What this step must do, in plain words, with the file paths it needs.",
+			description: `What this step must do, including the paths it needs. Keep each step within ${PLAN_LIMITS.intentChars} characters.`,
 		}),
 		files: Type.Optional(
 			Type.Array(Type.String({ minLength: 1 }), {
 				maxItems: PLAN_LIMITS.writeScopeEntries,
 				description:
-					"Files or folders this step may change: paths under the working directory, or absolute directories outside it. Leave out for read-only work.",
+					"Files or folders this step may change inside the worker's execution root. A work step with files needs proof or a requirement in req. Leave files out for read-only work.",
 			}),
 		),
 		uses: stepIds("Steps whose results this step needs; it starts after them and receives their results."),
@@ -139,7 +139,27 @@ const schema = Type.Object(
 			}),
 		),
 	},
-	{ additionalProperties: false },
+	{
+		additionalProperties: false,
+		// Every step of a start is new. Only the executor can tell which steps a revision actually changes.
+		anyOf: [
+			{ properties: { action: { enum: ["revise", "cancel"] } } },
+			{
+				properties: {
+					steps: {
+						items: {
+							anyOf: [
+								{ properties: { files: { maxItems: 0 } } },
+								{ required: ["join"] },
+								{ required: ["proof"] },
+								{ required: ["req"], properties: { req: { minItems: 1 } } },
+							],
+						},
+					},
+				},
+			},
+		],
+	},
 );
 
 function failed(text: string): AgentToolResult<{ readonly ok: false }> {
@@ -158,8 +178,9 @@ export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undef
 		label: "Plan",
 		// The root director role names this tool for multi-part work, so its schema is in every request.
 		neverDefer: true,
-		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, need?, question?, criteria?, by?, doneWhen?, outOfScope?, proof?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
-		promptSnippet: "Run a multi-step plan on workers (steps, files, uses, joins)",
+		description: `Schedule work across workers with dependencies or combined results: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, need?, question?, criteria?, by?, doneWhen?, outOfScope?, proof?}], final?}. Work steps that name files under the execution root must include proof or a nonempty req. The harness checks the plan, schedules eligible steps on available workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use one assignment for a bounded job, including its audit, repairs and checks.`,
+		promptSnippet:
+			"Run a multi-step plan on workers. Work steps naming files under the execution root require proof or nonempty req.",
 		parameters: schema,
 		// As for assign: a refusal lists every fix, and that view reaches the model as the failure record's evidence.
 		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },
@@ -180,6 +201,7 @@ export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undef
 					ok: true,
 					planId: result.planId,
 					version: result.version,
+					counts: result.counts,
 					started: result.started,
 					waiting: result.waiting,
 				},

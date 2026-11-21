@@ -300,6 +300,7 @@ export const LOCAL_MODELS = {
 	},
 	/** One line per provider account the router checked. */
 	routerAccounts: {
+		requestIdentityUnknown: "current request identity is unverified",
 		noModels: "no models offered",
 		keyValid: (provider: string) => `${provider}: key valid`,
 		rejected: (provider: string, reason: string) => `${provider}: rejected (${reason})`,

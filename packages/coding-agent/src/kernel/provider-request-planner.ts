@@ -9,11 +9,12 @@ import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import {
 	dispatchGuardedProviderRequest,
 	materializeProviderRequest,
+	ProviderResponseAccountScope,
 	startMaterializedProviderStream,
 	streamSimple,
 } from "@caupulican/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Message, Model } from "@caupulican/pi-ai/types";
-import { closingProviderHistory, preservesClosingInstruction } from "./closing-request.ts";
+import { closingProviderHistory, preservesClosingInstruction, toolFreeRequestContext } from "./closing-request.ts";
 import { harnessLog } from "./harness-log.ts";
 import type {
 	AgentContext,
@@ -328,10 +329,12 @@ export async function resolveProviderRequestAuthOptions(
 }
 
 export interface StartedAgentProviderRequest {
+	responseAccountScope: ProviderResponseAccountScope;
 	activeFailureRecords: readonly ToolFailureMemoryRecord[];
 	requestId: AgentRequestId;
 	stream: Awaited<ReturnType<StreamFn>>;
 	usesTextToolProtocol: boolean;
+	responseMode?: "answer_only";
 	observeAssistant?: (provider: AssistantMessage, final: AssistantMessage) => void;
 }
 
@@ -365,6 +368,7 @@ export async function resolveProviderRequestOptions(
 
 async function buildContextPlan(
 	messages: AgentMessage[],
+	requestOpening: AgentMessage | undefined,
 	attempt: number,
 	sentPrefixCount: number,
 	config: AgentLoopConfig,
@@ -377,6 +381,7 @@ async function buildContextPlan(
 			{
 				messages,
 				sourceMessage: messageSourceOf,
+				requestOpening,
 				attempt,
 				sentPrefixCount,
 				model: config.model,
@@ -620,8 +625,11 @@ async function materializeContextPlan(
 	// position on every tool-loop append. A real correction or withholding still replaces it now.
 	history?.trackDependencies?.(newTransientWireMessages);
 	const compactableWireCount = compactableMessages.length;
-	const llmMessages: Message[] = projected ? compactableMessages : compactableMessages.slice();
-	countHistoryWork(work, "copiedRows", projected === undefined ? compactableWireCount : 0);
+	const copyBorrowed =
+		projected?.borrowed &&
+		(sourceContext.instructionTail || requestOnlyWireMessages.length > 0 || newTransientWireMessages.length > 0);
+	const llmMessages: Message[] = !projected || copyBorrowed ? compactableMessages.slice() : compactableMessages;
+	countHistoryWork(work, "copiedRows", !projected || copyBorrowed ? compactableWireCount : 0);
 	const instruction = sourceContext.instructionTail ? llmMessages.pop() : undefined;
 	if (sourceContext.instructionTail && !preservesClosingInstruction(providerHistory.messages.at(-1)!, instruction)) {
 		throw new Error("Provider message conversion did not preserve the closing instruction.");
@@ -792,14 +800,14 @@ export async function startPlannedAgentProviderRequestWithId(
 	// The prompt this request sends, projected now: the loop has taken in every message the request carries. The copy shares
 	// the caller's messages array, so `adoptReplannedMessages` below still sees whether the accepted history moved.
 	const projectSystemPrompt = baseConfig.projectSystemPrompt;
-	let sourceContext = projectSystemPrompt
+	let requestContext = projectSystemPrompt
 		? { ...initialContext, systemPrompt: projectSystemPrompt(initialContext.systemPrompt) }
 		: initialContext;
-	if (sourceContext.instructionTail === true) {
-		const instruction = sourceContext.messages.at(-1);
+	if (requestContext.instructionTail === true) {
+		const instruction = requestContext.messages.at(-1);
 		if (instruction?.role !== "user")
 			throw new Error("A closing provider request needs its durable user instruction.");
-		sourceContext = { ...sourceContext, instructionTail: instruction };
+		requestContext = { ...requestContext, instructionTail: instruction };
 	}
 	let admissionAttempt = 0;
 	let stalePlanCount = 0;
@@ -808,6 +816,11 @@ export async function startPlannedAgentProviderRequestWithId(
 	if (!baseConfig.providerRequestPrefixState) sentPrefixFallback.set(baseConfig, prefixState);
 	while (true) {
 		signal?.throwIfAborted();
+		const responseMode = baseConfig.resolveResponseMode?.(requestContext);
+		let sourceContext =
+			responseMode === "answer_only"
+				? toolFreeRequestContext(requestContext, "the admitted continuation requests an answer with tools withheld")
+				: requestContext;
 		const requestAuth = await resolveProviderRequestOptions(baseConfig, signal);
 		signal?.throwIfAborted();
 		const config = { ...baseConfig, ...requestAuth, providerRequestPrefixState: prefixState };
@@ -848,6 +861,7 @@ export async function startPlannedAgentProviderRequestWithId(
 		const planningSource = sourceContext;
 		const plan = await buildContextPlan(
 			sanitized.messages,
+			sourceContext.requestOpening,
 			admissionAttempt,
 			sentPrefixCount,
 			config,
@@ -951,7 +965,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					throw new Error(`Provider request admission exceeded ${MAX_PROVIDER_REQUEST_REPLANS} replans`);
 				}
 				lowerPrefixMarksToSharedPrefix(config, sourceContext.messages, admission.context.messages);
-				sourceContext = { ...sourceContext, messages: admission.context.messages };
+				requestContext = { ...requestContext, messages: admission.context.messages };
 				admissionAttempt++;
 				stalePlanCount = 0;
 				continue;
@@ -1077,16 +1091,19 @@ export async function startPlannedAgentProviderRequestWithId(
 			);
 			signal?.throwIfAborted();
 			requestAuth.requestGuard?.(config.model, signal);
+			const responseAccountScope = new ProviderResponseAccountScope();
 			const stream = (await startMaterializedProviderStream(
 				config.model,
 				materialized,
 				{
 					...config,
-					...requestAuth,
-					...(plan.isDispatchCurrent !== undefined
+					...responseAccountScope.bind(requestAuth),
+					...(plan.isDispatchCurrent !== undefined || config.resolveResponseMode !== undefined
 						? {
 								requestGuard: (model: Model<Api>, dispatchSignal: AbortSignal | undefined): undefined => {
 									requestAuth.requestGuard?.(model, dispatchSignal);
+									if (config.resolveResponseMode?.(sourceContext) !== responseMode)
+										throw new Error("Provider response policy changed before dispatch; retry the request.");
 									if (!isContextPlanDispatchCurrent(plan))
 										throw new Error("Provider request context changed before dispatch; retry the request.");
 									return undefined;
@@ -1098,13 +1115,14 @@ export async function startPlannedAgentProviderRequestWithId(
 					signal,
 				},
 				(providerContext, providerOptions) =>
-					plan.isDispatchCurrent !== undefined
+					plan.isDispatchCurrent !== undefined || config.resolveResponseMode !== undefined
 						? dispatchGuardedProviderRequest(
 								config.model,
 								{ ...providerOptions, providerResponseObserver: undefined },
 								// Later wrappers may await admission or redaction. They must retain the original guard
 								// and observer to recheck freshness and begin accounting at their physical handoff.
 								() => streamFunction(config.model, providerContext, providerOptions),
+								"middleware",
 							)
 						: streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
@@ -1123,9 +1141,11 @@ export async function startPlannedAgentProviderRequestWithId(
 			}
 			return {
 				requestId,
+				responseAccountScope,
 				activeFailureRecords,
 				stream,
 				usesTextToolProtocol: materialized.usesTextToolProtocol,
+				...(responseMode === "answer_only" ? { responseMode } : {}),
 				observeAssistant: plan.providerHistory?.observeAssistant,
 			};
 		} finally {

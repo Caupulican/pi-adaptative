@@ -10,6 +10,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, Message, Model, Tool } from "@caupulican/pi-ai";
+import { getProviderResponseAccount, type ProviderResponseAccount } from "@caupulican/pi-ai/stream";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
@@ -17,7 +18,11 @@ import { classifyFailure } from "../../kernel/reliability/classifier.ts";
 import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../kernel/reliability/retry.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
-import { CompletionAccountingAdmissionError, CompletionResponseUsage } from "../cost/completion-response-usage.ts";
+import {
+	CompletionAccountingAdmissionError,
+	CompletionResponseUsage,
+	CompletionUsagePending,
+} from "../cost/completion-response-usage.ts";
 import { countsAgainstDollars } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { SemanticUsageLedgerIdentity } from "../cost/session-ledger-port.ts";
@@ -125,7 +130,11 @@ export interface ContinuousChatCompactionAdapterDeps {
 	 */
 	billing?: ModelBilling;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
-	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
+	onModelFailure?(
+		model: Model<Api>,
+		errorMessage: string | undefined,
+		account?: ProviderResponseAccount,
+	): void | Promise<void>;
 }
 
 export class ContinuousChatCompactionAdapter implements ContinuousChatCompactionAdapterPort {
@@ -257,9 +266,12 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 	dispatchHold(): ContinuousChatDispatchHold | undefined {
 		const meter = this.deps.spend;
 		const summary = this.deps.summary();
+		if (!summary.ok) {
+			return { message: summary.reason, reasons: ["configuration"], retryInMs: DEFAULT_RETRY_POLICY.maxDelayMs };
+		}
 		let spend: string | undefined;
 		try {
-			spend = meter.hold(this.metered(summary.ok ? summary.model : undefined));
+			spend = meter.hold(this.metered(summary.model));
 		} catch {
 			return {
 				message: "Memory summaries wait for accounting storage.",
@@ -268,9 +280,9 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 			};
 		}
 		const providerWaitMs = this.providerHoldUntil - this.timers.now();
-		const accountingWaitMs = summary.ok
-			? this.accountingHold(this.accountingKey(summary.model, this.deps.usage().captureOrigin().sessionId))
-			: 0;
+		const accountingWaitMs = this.accountingHold(
+			this.accountingKey(summary.model, this.deps.usage().captureOrigin().sessionId),
+		);
 		if (spend === undefined && providerWaitMs <= 0 && accountingWaitMs <= 0) return undefined;
 		// The hold lifts when its earliest reason may have: the next UTC day for the limit, the reset for the provider.
 		const wakes: number[] = [];
@@ -431,7 +443,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
 						const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
 						let guardRejected = false;
-						let accountingRejection: ContinuousChatAccountingHold | undefined;
+						let accountingRejection: ContinuousChatAccountingHold | CompletionUsagePending | undefined;
 						const requestGuard = (
 							requestModel: Model<Api>,
 							requestSignal: AbortSignal | undefined,
@@ -452,7 +464,8 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 								}
 								return undefined;
 							} catch (error) {
-								if (error instanceof ContinuousChatAccountingHold) accountingRejection = error;
+								if (error instanceof ContinuousChatAccountingHold || error instanceof CompletionUsagePending)
+									accountingRejection = error;
 								guardRejected = true;
 								throw error;
 							}
@@ -543,7 +556,14 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						signal?.throwIfAborted();
 						if (guardRejected) break;
 						const failed = result.stopReason === "error";
-						if (failed) this.deps.onModelFailure?.(summaryModel, result.errorMessage);
+						if (failed && this.deps.onModelFailure) {
+							const account =
+								assistant && assistant.errorMessage === result.errorMessage
+									? getProviderResponseAccount(assistant)
+									: undefined;
+							await this.deps.onModelFailure(summaryModel, result.errorMessage, account);
+							signal?.throwIfAborted();
+						}
 						if (attempt >= DEFAULT_RETRY_POLICY.maxAttempts) break;
 						if (failed) {
 							const nextSummary = this.deps.summary();
@@ -592,6 +612,11 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						throw new Error("Continuous-chat compaction called a tool; compactions are tool-free.");
 					}
 					return result.text;
+				} catch (error) {
+					// A watchdog can return a logical result ahead of the provider ticket. Release the node for
+					// replay once the existing physical response settles, without consuming a model failure.
+					if (error instanceof CompletionUsagePending) throw new ContinuousChatAccountingHold(error);
+					throw error;
 				} finally {
 					if (reservedToken !== undefined) this.settleAccounting(accountingKey, reservedToken, false);
 					usage.release();

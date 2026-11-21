@@ -14,6 +14,7 @@
  * its session reopened) is the same reply, which the asker's session does not take twice (`branchHoldsTurnRef`).
  */
 
+import { isAssistantCommentary } from "../../kernel/assistant-answer.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -57,6 +58,7 @@ interface BotMailAnswer {
 function assistantText(message: AgentMessage): string {
 	if (message.role !== "assistant") return "";
 	return message.content
+		.filter((part) => part.type !== "text" || !isAssistantCommentary(part))
 		.map((part) => (part.type === "text" ? part.text : ""))
 		.join("\n")
 		.trim();

@@ -14,7 +14,6 @@ import {
 	icmLatestResult,
 	icmReadContinuousNodes,
 	icmReadContinuousRecords,
-	icmReadScheduler,
 	latestBatchResults,
 } from "./shared.ts";
 
@@ -23,11 +22,9 @@ export async function verifyRangeJourney(
 	world: HarnessWorld,
 	root: Awaited<ReturnType<HarnessWorld["createRootSession"]>>,
 	agentDir: string,
-	summaryWarning: string,
 ): Promise<void> {
 	const trace = world.trace;
 	const store = icmContinuousStore(agentDir);
-	const warningMark = world.warnings.length;
 	const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lX8AAAAASUVORK5CYII=";
 	for (let i = 0; i < 5; i++) {
 		world.provider.enqueue("root", text(`range-seed-${i}`, `Seed reply ${i}.`));
@@ -233,30 +230,19 @@ export async function verifyRangeJourney(
 	);
 	await withDeadline(
 		trace,
-		"range summary queue settles",
+		"range local publications settle while model work remains deferred",
 		world.io.waitForMutation(() => {
-			const state = icmReadScheduler(world, store);
-			return state !== undefined && state.running === 0 && state.readyLeaves === 0 && state.readyParents === 0;
+			const meta = world.guard.peekSqlite(store.queueDatabase, "SELECT body FROM meta WHERE id=1");
+			const work = world.guard.peekSqlite(store.queueDatabase, "SELECT status, lane, attempts, reason FROM work");
+			if (meta?.length !== 1 || work === undefined) return false;
+			const state = JSON.parse(String(meta[0]!.body)) as { nextLeaf: number; totalMessages: number };
+			return (
+				state.nextLeaf === state.totalMessages &&
+				work.every((row) => row.status === "ready" && row.lane === 1 && row.attempts === 0 && row.reason === null)
+			);
 		}),
 	);
-	const blocked = world.guard.peekSqlite(store.queueDatabase, "SELECT level, ordinal, status, reason FROM work") ?? [];
-	for (let index = world.warnings.length - 1; index >= warningMark; index--) {
-		const match = /^Continuous-chat compaction (\d+)\+(\d+) failed: (.+)$/.exec(world.warnings[index]!);
-		if (!match || match[3] !== summaryWarning) continue;
-		const first = Number(match[1]);
-		const count = Number(match[2]);
-		const level = Math.log2(count);
-		expect(
-			blocked.some(
-				(row) =>
-					row.status === "blocked" &&
-					row.reason === summaryWarning &&
-					row.level === level &&
-					row.ordinal === first / count,
-			),
-		).toBe(true);
-		world.warnings.splice(index, 1);
-	}
+
 	releaseContinuation.release();
 	await withDeadline(trace, "range worker continuation", workerDone.promise);
 	await withDeadline(trace, "range worker handoff", wake.promise, 60_000);

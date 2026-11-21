@@ -1,23 +1,27 @@
 ---
 name: fan-out-and-review
-description: "How to run parallel workers and independent review with the delegate and peer tools: partition work into slices with a coverage table, race the same brief and pick by a rule declared first, run an arena of competing candidates with a rubric, pick a base and graft, give each worker its own output, verify artifacts instead of summaries, and sort review findings into act on, consider, noted and dismissed. Use for 'arena', 'swarm', 'fan out', 'in parallel', 'compare approaches', 'adversarial review', 'second opinion', 'interrogate', or a design with no precedent."
+description: "Choose how to delegate a bounded task, partition independent work, race competing approaches or obtain independent review. Use for 'give this to one worker', 'audit and fix this in one worker', 'fan out', 'arena', 'swarm', 'in parallel', 'compare approaches', 'adversarial review', 'interrogate' or 'second opinion'. Covers worker briefs, plan joins and checking the delivered artifacts."
 ---
 
 # Fan Out And Review
 
 ## How to use the skill
 
-Load this skill when independent work or an independent opinion is worth its coordination cost. Keep trivial, dependent and interactive work local. Only the root starts workers. Workers report back and never start workers.
+Load this skill when independent work or an independent opinion is worth its coordination cost. The root or a bot with delegation tools can assign work. Workers complete their assignments and report back to their director.
 
 Freedom Dial: Low Freedom for the shapes. High Freedom for briefs.
 
 ## North Star
 
-Parallel work and review give more evidence than one pass. Aggregate the evidence, check the artifacts, and settle every finding.
+Choose the fewest workers that can deliver the requested outcome and evidence. Check the artifacts and account for every material finding.
 
 ## Core Sections
 
 ### Pick the shape
+
+Handle a quick inspection directly when it is within the session's role. In director mode, give a bounded project edit to one worker. An audit and its repairs belong together when they touch the same files. Name the skill, the paths the worker may edit, and what evidence to return. Use `assign` with the task and its writable files when available. A director with only `delegate` can use its start action.
+
+When several workers can contribute independently, choose a shape.
 
 1. Partition: each worker takes a different slice. Use it for coverage, such as one worker per package.
 2. Race: several workers take the same brief. Use it when attempts differ in quality. Declare the selection rule first: first pass, rank all, or best of.
@@ -26,7 +30,7 @@ Parallel work and review give more evidence than one pass. Aggregate the evidenc
 
 ### Dispatch
 
-1. Write a stand-alone brief for each worker: goal, scope, the exact slice or arm, how to verify, what to report, and the owner's test rule verbatim: no tests, no test files, no test runs unless the owner asked (state the owner's current mode, for example builds and checks allowed).
+1. Give each worker a stand-alone brief with the goal, its write scope, the expected evidence and the owner's verification limits. Carry permissions to maintain tests and permissions to execute them separately, exactly as given.
 2. Start each worker with the delegate tool. The tool refuses a second compatible worker unless you pass `parallelWork` with `independentOf` and a justification. Name the running workers in `independentOf`.
    For a partition or a race, use the built-in primitive: `delegate start` with `slices` (2 to 24 entries of `id` and `instructions`; an `id` is 1 to 24 letters, digits, `.`, `_` or `-`, unique in the group) dispatches one worker per slice under one group, and `race` (2 to 8) dispatches that many attempts of the same brief, named `c1` to `cN`. One call takes `slices` or `race`, not both, and a declaration the host refuses starts no worker. Each member is a fresh worker, budgeted and charged separately. `delegate status` lists each group. A slice with no accepted result shows as a `COVERAGE GAP`. In a race the winner is the accepted candidate that finished first; a result still waiting for independent verification counts as running, not accepted. The win cancels the other attempts that are still running or queued, and a later accepted result is attributed, not cancelled. A loser that cannot be cancelled is retried once on the next terminal event, then stays on the group as `CANCEL FAILED` until it ends.
 3. Give each worker its own output: its own path, directory or lane. Remove the sharing before you add a lock.
@@ -41,11 +45,11 @@ Parallel work and review give more evidence than one pass. Aggregate the evidenc
 
 ### Combine steps with plan joins
 
-For work with several dependent parts, the `plan` tool runs a graph of steps on workers. A step with `join` combines the steps named in its `uses`: 2 to 24 steps, or 1 to 24 for `verify`. Code decides every join from the members' recorded outcomes, never from worker prose. The offered joins are `collect`, `reduce`, `vote`, `race`, `verify` and `merge` (a merge lands each member's worktree onto the default branch in order, and holds until `worktreeSync.gateCommand` is set while the gate is on). The plan tool has no quorum field, so a `collect` waits for every member.
+For work with several dependent parts, the `plan` tool runs a graph of steps on workers. A step with `join` combines the steps named in its `uses`: 2 to 24 steps, or 1 to 24 for `verify`. The host settles joins from recorded outcomes and uses candidate evidence when judging a vote. The offered joins are `collect`, `reduce`, `vote`, `race`, `verify` and `merge` (a merge lands each member's worktree onto the default branch in order, and holds until `worktreeSync.gateCommand` is set while the gate is on). A `collect` waits for every member by default. Set `need` when a specified number of successful members is sufficient and remaining work can be stopped.
 
 - `reduce`: when every member has settled, one worker combines their results into one answer to the step's `question` and names each disagreement. The join's result is that worker's outcome.
 - `race`: settles on the first member the host sees accepted; if several are accepted by the same pass, the one listed first in `uses` wins. Members still running are cancelled. If no member is accepted, the race settles once all members have settled, with one gap per member that failed. This differs from a `delegate` race, whose winner is the accepted candidate that finished first.
-- `vote`: no worker votes. The join waits for every member to settle, and `question` (what the winner must meet) is required. No accepted member settles with gaps and no winner. One accepted member wins. Two or more: System One answers one Choice, which accepted candidate best meets the question, over code-built outcome lines (worker words stay in the report files). Code takes the winner only at probability 0.90 or more with a lead of at least 0.15 over the runner-up. Any other reading, a System One outage or timeout included, names no winner: the join settles as partial over every accepted candidate, and you read them all.
+- A `vote` compares candidates against the question and its criteria. The host considers reported changes and checks, and uses the verdicts of verification steps already attached to the vote. If the comparison is inconclusive, read the candidate reports and the reasons in the partial result before commissioning more work.
 - `verify`: when every member has settled, a read-only worker (no write scope, told to change no file) checks each member's claims against the files and commands. Verify steps are released ahead of other ready steps. The join's outcome needs every subject and the verifier to succeed, so a failed verdict fails the join. The host also adds a verify step on its own: when a work step's outcome asks for independent verification, the plan is revised with a step `<id>-check` that takes over that step's dependents (and its place as the final step). If the plan has no room for the step, the work step is held for you to revise the plan.
 
 Each settled join other than the final one wakes you with one plan update. Read the join's result; a result that is accepted, meets every cited requirement and has no gap reads as a report.
@@ -69,7 +73,7 @@ Each settled join other than the final one wakes you with one plan update. Read 
 
 ### Check the work you receive
 
-Read the diff and the files of delegated work. Run the check yourself. A worker report is a claim, and the artifact is the proof.
+Inspect the changed artifacts against the brief. Check that any cited verification covers this revision and the claimed outcome. If a material claim still lacks evidence, use the smallest permitted check that can settle it. Honor any independent review the owner or host requires.
 
 ## Anti-Patterns
 
@@ -81,19 +85,19 @@ Read the diff and the files of delegated work. Run the check yourself. A worker 
 
 ## Examples
 
+- “Have one worker audit and fix comments in the loader.” Assign the loader, its relevant ADR and lint baseline to one worker with the `delete-comment` skill. Ask for the diff, retained comments and issue drafts. The parent handles authorized tracker filing.
 - Partition: check every package against its own check script. One worker per package. One table of results.
 - Arena: three workers each draft the interface of a new module. Score by the rubric. Take the best as base. Graft the error type from the second.
 
 ## Self-Check
 
-- Did I declare the shape and the selection rule before the first dispatch?
+- For multiple workers, did I identify independent contributions or declare how competing results will be selected?
 - Does each worker have its own output?
 - Did I read the artifacts, not only the summaries?
 - Is every finding acted on, rejected with evidence, or open?
 
 ## Known Gaps
 
-- A group is root-only and needs the async worker wiring. You still apply the selection rule you declared and check the artifacts: the host reports coverage and cancels race losers, it does not judge quality.
-- A plan `vote` is the one join where the host judges quality, and only through a decisive System One reading; its thresholds are not yet measured against a question set. Without a decisive reading you read every accepted candidate yourself.
-- The plan tool offers no quorum.
+- Fan-out needs a directing session with the group actions available. You still apply the selection rule you declared and check the artifacts: the host reports coverage and cancels race losers, it does not judge quality.
+- The host grades a vote from the evidence available to it. A claim that the candidate report cannot establish may still require inspecting the artifact.
 - Review quality depends on the models that are available.

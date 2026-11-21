@@ -7,7 +7,6 @@
  * applies each step's result to the plan.
  */
 
-import { harnessLog } from "../../kernel/harness-log.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
 import {
 	MAX_TASK_GOAL_CHARS,
@@ -215,6 +214,7 @@ function goneWords(member: string): LaneTry {
 }
 
 export interface LandNextMemberInput {
+	readonly assertCurrent: () => void;
 	readonly isolation: WorkerLaneIsolation;
 	readonly gate: { readonly mode: "on" | "off"; readonly command?: string };
 	readonly members: readonly MergeLane[];
@@ -239,9 +239,11 @@ async function landOne(input: LandNextMemberInput, lane: MergeLane, cwd: string)
 		if (carried === undefined) return goneWords(lane.member);
 		if (!carried) return { kind: "block", laneKey, item: { kind: "not_carried" } };
 	}
+	input.assertCurrent();
 	let landing: LaneLanding | undefined = await isolation.land(cwd, gate);
 	if (landing?.kind === "worklist" && landing.item.kind === "sync_lane") {
 		if ((await isolation.tipContained(cwd)) === true) return { kind: "landed" };
+		input.assertCurrent();
 		const synced = await isolation.sync(cwd);
 		if (synced === undefined) return goneWords(lane.member);
 		if (synced.code === "sync_conflicts") {
@@ -253,6 +255,7 @@ async function landOne(input: LandNextMemberInput, lane: MergeLane, cwd: string)
 			return { kind: "block", laneKey, item: { kind: "sync_conflict", paths } };
 		}
 		if (synced.code !== "sync_clean") return refusedAttempt(laneKey, lane.member, synced.code, synced.message);
+		input.assertCurrent();
 		landing = await isolation.land(cwd, gate);
 	}
 	if (landing === undefined) return goneWords(lane.member);
@@ -274,6 +277,7 @@ async function landOne(input: LandNextMemberInput, lane: MergeLane, cwd: string)
 export async function landNextMember(input: LandNextMemberInput): Promise<MergeStep> {
 	const passed: MergeLane[] = [];
 	for (const lane of input.members) {
+		input.assertCurrent();
 		if (input.landed.has(lane.nodeId)) {
 			passed.push(lane);
 			continue;
@@ -469,6 +473,7 @@ export interface MergeHost {
 }
 
 interface JoinLanding {
+	readonly version: number;
 	/** The lanes this join landed. In memory: a run after a restart lands them again, and git answers for each. */
 	readonly landed: Set<string>;
 	retries: number;
@@ -497,33 +502,37 @@ export class MergeLandings {
 		this.wake = wake;
 	}
 
-	/**
-	 * Starts the join's landing unless one runs or a retry waits. The step it reaches goes to `act`; the executor drains again
-	 * when the landing ends, whether it landed or failed.
-	 */
-	start(planId: string, nodeId: string, lanes: MergeLanes, act: (step: MergeStep) => void): void {
+	start(
+		planId: string,
+		nodeId: string,
+		version: number,
+		lanes: MergeLanes,
+		assertCurrent: () => void,
+	): Promise<MergeStep> | undefined {
 		const key = joinKey(planId, nodeId);
-		if (this.running.has(key) || this.joins.get(key)?.timer !== undefined) return;
-		void this.land(planId, nodeId, lanes)
-			.then(act)
-			.catch((error: unknown) =>
-				harnessLog.warn("plan", "a merge join failed", { planId, nodeId, error: String(error) }),
-			)
-			.finally(() => this.wake());
+		if (this.running.has(key)) return;
+		const previous = this.joins.get(key);
+		if (previous && previous.version !== version) this.clear(key);
+		else if (previous?.timer !== undefined) return;
+		const state = this.joins.get(key) ?? { version, landed: new Set<string>(), retries: 0 };
+		this.joins.set(key, state);
+		return this.land(key, state, lanes, assertCurrent);
 	}
 
 	/**
 	 * Lands the lanes in order (`landNextMember`). Blocked lanes are a hold, and so is a host without worktree landing. A
 	 * member whose land step exists already had its merge worker, so its failure holds the join.
 	 */
-	private async land(planId: string, nodeId: string, lanes: MergeLanes): Promise<MergeStep> {
+	private async land(
+		key: string,
+		state: JoinLanding,
+		lanes: MergeLanes,
+		assertCurrent: () => void,
+	): Promise<MergeStep> {
 		if (lanes.blocked !== undefined) return { kind: "hold", detail: lanes.blocked };
 		const worktrees = this.host.lanes?.();
 		const gate = this.host.landGate?.();
 		if (!worktrees || !gate) return { kind: "hold", detail: "this plan host cannot land worktrees" };
-		const key = joinKey(planId, nodeId);
-		const state = this.joins.get(key) ?? { landed: new Set<string>(), retries: 0 };
-		this.joins.set(key, state);
 		this.isolation ??= new WorkerLaneIsolation(worktrees);
 		const mergeWorkerFailed = new Set(
 			lanes.members.filter((lane) => lane.nodeId !== lane.member).map((lane) => lane.member),
@@ -531,6 +540,7 @@ export class MergeLandings {
 		this.running.add(key);
 		try {
 			return await landNextMember({
+				assertCurrent,
 				isolation: this.isolation,
 				gate: { mode: gate.gate, ...(gate.gateCommand ? { command: gate.gateCommand } : {}) },
 				members: lanes.members,
@@ -545,10 +555,12 @@ export class MergeLandings {
 
 	/** Counts a retry and arms the timer that wakes the executor when it is due; no landing starts before then. */
 	retry(planId: string, nodeId: string, afterMs: number): void {
-		const state = this.joins.get(joinKey(planId, nodeId));
+		const key = joinKey(planId, nodeId);
+		const state = this.joins.get(key);
 		if (!state) return;
 		state.retries += 1;
 		state.timer = this.timers().setTimeout(() => {
+			if (this.joins.get(key) !== state) return;
 			state.timer = undefined;
 			this.wake();
 		}, afterMs);

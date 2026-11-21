@@ -41,18 +41,12 @@ export interface RuleHookCall extends RuleHookContext {
 	readonly cwd: string;
 }
 
-/**
- * What delivers a rule. `tool-call`: a successful call of one of `tools` (narrowed by `matches` over the call
- * arguments; absent means any call) gets the rule appended to its result. `preflight`: a host check that is about
- * to accept an action asks for the rule first (see `RuleHookDelivery.refusalFor`), so the rule precedes the action.
- */
-export type RuleHookTrigger =
-	| {
-			readonly kind: "tool-call";
-			readonly tools: readonly string[];
-			readonly matches?: (call: RuleHookCall) => boolean;
-	  }
-	| { readonly kind: "preflight" };
+/** Which successful tool results carry a rule, and whether a host preflight can require it in context. */
+export interface RuleHookTrigger {
+	readonly tools: readonly string[];
+	readonly matches?: (call: RuleHookCall) => boolean;
+	readonly preflight?: true;
+}
 
 /** The capabilities a rule can be for: the work lifecycle's, or directing workers. */
 export type RuleHookStanding = keyof Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers">;
@@ -100,14 +94,12 @@ function normalizeBody(topic: string, text: string): string {
 export function buildRuleHook(source: RuleHookSource, facts: RuleHookFacts): RuleHook {
 	const { topic, trigger, standing, requiresTool } = source;
 	if (!TOPIC_PATTERN.test(topic)) throw new Error(`Rule hook topic ${topic} must be kebab-case.`);
-	if (trigger.kind === "tool-call") {
-		const { tools } = trigger;
-		if (tools.length === 0 || tools.some((tool) => !TOOL_PATTERN.test(tool))) {
-			throw new Error(`Rule hook ${topic} needs at least one valid trigger tool name.`);
-		}
-		if (new Set(tools).size !== tools.length) {
-			throw new Error(`Rule hook ${topic} lists a trigger tool more than once.`);
-		}
+	const { tools } = trigger;
+	if (tools.length === 0 || tools.some((tool) => !TOOL_PATTERN.test(tool))) {
+		throw new Error(`Rule hook ${topic} has no valid tool trigger.`);
+	}
+	if (new Set(tools).size !== tools.length) {
+		throw new Error(`Rule hook ${topic} lists a trigger tool more than once.`);
 	}
 	if (requiresTool !== undefined && !TOOL_PATTERN.test(requiresTool)) {
 		throw new Error(`Rule hook ${topic} requires an invalid tool name.`);

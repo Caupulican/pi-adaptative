@@ -40,6 +40,8 @@ Every arm gets its own Git repository, session, and agent directory. Its worktre
 - Elapsed time starts before fixture preparation and ends after SDK teardown or process termination. Elapsed time per accepted task includes time spent on failures. Pair deltas subtract the direct value from the automatic value. A timeout measures time to the cutoff. `--timeout-ms` sets the per-session deadline after fixture setup, five minutes by default.
 - Rejections, errors, timeouts, and interruptions remain visible. The command exits nonzero if any completed trial failed acceptance or the run stopped early. Persistent report coverage distinguishes an interrupted study from a completed one.
 
+The plan and report carry a SHA-256 fingerprint of the checkout’s package sources, package manifests and lockfile, vendored files, evaluator and grading helpers. This includes new source files visible to Git. The driver compares that fingerprint again at the end of a study and marks a changed checkout with a nonzero exit. Account state, installed dependencies and provider behavior have separate lifetimes.
+
 Four small cases establish a reproducible starting point for comparing coding workflows. They do not establish a whole-product reliability score, a human correction rate, or a stable cross-provider ranking. Interpret differences alongside case mix, repetitions, and observed worker use.
 
 ## Hosted baseline on 2026-11-19
@@ -68,3 +70,24 @@ A CPU profile caught the native finder calling Node's synchronous diagnostic rep
 In the timed-out repetition, both worker branches landed and passed their configured gates. The root reported completion at 249 seconds. The final-answer verifier then challenged its file-change claim because it had missed the landing receipts. An independent regrade of the checkout after timeout found no issues. The timed result remains a failure. The verifier now reads the paths recorded by a successful landing, the outcome of a typed lane commit, and the configured gate result. A generic gate supplies non-test evidence.
 
 With landing receipts enabled, the final two matched repetitions both passed on first submission. Direct took 57.1 and 55.3 seconds ($0.158 and $0.122 API-equivalent). Automatic took 262.9 and 208.1 seconds ($0.703 and $0.875). Both automatic trials used subscription Flash Low. All five fresh worker requests returned worker output, with a median 1.22 seconds to acknowledgment and 3.76 seconds to the first completed worker response. The root first requested delegation after three and four prior root responses. There was one recorded worker error before first output across the twelve attempt boundaries, including follow-ups. A first-request launch is distinct from a retry within a worker. The repaired path completed this task reliably in these two observations, at higher latency and cost than direct work.
+
+### November 20 working-tree calibration
+
+Two private studies used the same OpenRouter GPT-6 Luna model, low thinking, live Jev and no correction prompts. Each study ran one matched pair per case. The independent grader accepted all eight submissions on the first attempt. Elapsed seconds include preparation and teardown. Costs are API-equivalent USD.
+
+| Task and study | Direct seconds | Automatic seconds | Direct USD | Automatic USD | Worker attempts in automatic arm |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Slugify, before repair | 15.57 | 58.14 | 0.000789 | 0.004666 | 2 |
+| Slugify, after repair | 21.74 | 15.73 | 0.001165 | 0.001147 | 0 |
+| Event adapters, before repair | 19.29 | 69.55 | 0.001323 | 0.007147 | 2 |
+| Event adapters, after repair | 36.01 | 21.79 | 0.001963 | 0.001623 | 0 |
+
+Before repair the default director prompt told the root to give task execution to a worker even with strict delegation switched off. In the first Slugify trial a worker tried to read an absolute path in the parent checkout and reported a blocker. The root started a second attempt using the relative path. The repaired director prompt follows the configured delegation gate. A refused worker read now suggests the corresponding file in its own worktree when that file exists and passes the worker's read grant and private-path checks. The nine focused path regressions exercised the hint. In the second live study both automatic trials chose direct execution, so that study measures the routing change. It provides no estimate of time saved by the path hint. Each study retained a stable measured-source SHA-256, respectively `a5cd2f7714d10d6cb429b8d314e37f4d985f3a45c6e7e7efd2fa9af7ff446150` and `dc5e7ac8e27021a0e0d7cc9632950fd405ca425f1b2b28c754b7c36966f5d71e`.
+
+The initial Gemini Flash Lite control on OpenRouter had three trial errors and a rejected direct event-adapters submission. A separate Slugify diagnostic produced one direct error and one rejected automatic submission. Provider traces included HTTP 429 and 502 errors. Pricing was incomplete on errored trials. Each case and arm above had one observation per study. A benefit from delegation on a larger task and post-repair steering frequency in ordinary use remain unmeasured.
+
+A second repaired snapshot added one matched pair on each remaining corpus case using the same model, low effort and zero correction prompts. Retry migration took 20.10 seconds direct ($0.001453) and 17.59 seconds automatic ($0.001423). Tracing the override took 12.12 seconds direct ($0.000695) and 10.69 seconds automatic ($0.001068). All four submissions passed on the first attempt. Neither automatic run used a worker. The measured source hash stayed `c242d7e7308bbe714734b11a19f298359a5acd935c60823f180b00881db52708` throughout this study.
+
+### November 21 local coding check with thinking off
+
+A CPU-only LFM3 1.7B model attempted Slugify once per arm in direct and automatic mode before and after the file-refusal repair. Jev was disabled. Each arm received the same 210-second limit and zero owner corrections. The independent grader rejected all four worktrees because `util.ts` still contained the seed implementation. On the repaired build the direct arm read the correct file. The automatic arm received the new refusal, continued using an outside path and sent malformed edit arguments. The original request already contained the checkout and listed `util.ts`. The result covers this model, task and time limit. [Measured runs and receipts](../../../docs/SYSTEM_INTERACTIONS.md#refused-file-operations-in-a-local-coding-task-november-21)

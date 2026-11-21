@@ -181,7 +181,7 @@ function projectPlanState(plans: readonly PlanView[] | undefined): ActivityLaneP
 				id: `plan:${plan.planId}`,
 				kind: "task",
 				label: boundedLabel(
-					`${needsOwner ? interfaceText().frame.activity.needsYou : interfaceText().frame.activity.plan} ${plan.counts.settled}/${plan.counts.total} · ${plan.title}`,
+					`${needsOwner ? interfaceText().frame.activity.needsYou : interfaceText().frame.activity.plan} ${plan.counts.accepted}/${plan.counts.total} · ${plan.title}`,
 				),
 				status: needsOwner ? "waiting" : "active",
 			},

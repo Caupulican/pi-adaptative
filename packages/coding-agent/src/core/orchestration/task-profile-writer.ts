@@ -81,7 +81,7 @@ export interface TaskProfileWriterOptions {
 }
 
 const MAX_INSPECTED_MODELS = 64;
-const MAX_TASK_DESCRIPTION_LENGTH = 3_500;
+export const MAX_TASK_DESCRIPTION_LENGTH = 3_500;
 const INHERITED_BASE_PROFILE_ID = "inherited-foreground";
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

@@ -353,6 +353,12 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			name: "queued-input-reply",
 			check: (request) => {
 				const serialized = JSON.stringify(request.context);
+				expect(
+					request.context.messages.some(
+						(message) => message.role === "user" && JSON.stringify(message.content).includes(TASK_REQUEST),
+					),
+					"the retained owner request reaches the post-compaction wire",
+				).toBe(true);
 				if (!serialized.includes("tabs over spaces"))
 					throw new Error("Memory preference missing from projected context");
 			},
@@ -411,6 +417,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	world.systemOne.enterPhase(
 		"task",
 		{
+			reporting_requirement: { kind: "noul", probability: 0.02 },
 			capabilities_authorized: { kind: "noul", probability: 0.02 },
 			changes_model_pools: { kind: "noul", probability: 0.02 },
 			local_commits_only: { kind: "noul", probability: 0.02 },
@@ -420,7 +427,13 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 			carries_0: { kind: "noul", probability: 0.97 },
 			optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
 		},
-		{ expect: taskOracle },
+		{
+			expect: (request) => {
+				if (request.questions.reporting_requirement)
+					expect(request.state).toEqual({ preference: "The owner prefers tabs over spaces." });
+				taskOracle(request);
+			},
+		},
 	);
 	trace.mark("root", "task.submit");
 	await withDeadline(trace, "task turn", session.prompt(TASK_REQUEST));
@@ -767,6 +780,20 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	expect(compactionEntry?.type === "compaction" ? compactionEntry.firstKeptEntryId : undefined).toBe(
 		compactionResult.firstKeptEntryId,
 	);
+	const entries = created.sessionManager.getEntries();
+	const retainedStart = entries.findIndex((entry) => entry.id === compactionResult.firstKeptEntryId);
+	expect(retainedStart).toBeGreaterThanOrEqual(0);
+	expect(
+		entries
+			.slice(retainedStart)
+			.some(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					JSON.stringify(entry.message.content).includes(TASK_REQUEST),
+			),
+		"the task remains in the raw retained tail",
+	).toBe(true);
 	expect(world.provider.reached).toContain("root:queued-input-reply");
 
 	await withDeadline(trace, "continuation turn", session.prompt("Continue."));

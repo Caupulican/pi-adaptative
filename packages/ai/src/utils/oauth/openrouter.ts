@@ -102,6 +102,7 @@ async function startCallbackServer(
 		resolveCredential = resolve;
 		rejectCredential = reject;
 	});
+	void credential.catch(() => {});
 
 	let claimed = false;
 	let settled = false;
@@ -196,9 +197,9 @@ export async function loginOpenRouter(callbacks: OAuthLoginCallbacks): Promise<O
 		code_challenge: challenge,
 		code_challenge_method: "S256",
 	}).toString();
-	callbacks.onProgress?.(`Listening for OpenRouter OAuth callback on ${callback.callbackUrl}`);
-	callbacks.onAuth({ url: authorizeUrl.toString(), instructions: "Complete sign-in in your browser." });
 	try {
+		callbacks.onProgress?.(`Listening for OpenRouter OAuth callback on ${callback.callbackUrl}`);
+		callbacks.onAuth({ url: authorizeUrl.toString(), instructions: "Complete sign-in in your browser." });
 		return await callback.credential;
 	} finally {
 		callback.close();

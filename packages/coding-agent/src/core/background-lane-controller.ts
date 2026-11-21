@@ -1619,9 +1619,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		foregroundRun: AutonomyStatusSources["foregroundRun"],
 		harnessNotices: AutonomyStatusSources["harnessNotices"],
 		memory: AutonomyStatusSources["memory"],
+		ordinaryWork?: AutonomyStatusSources["ordinaryWork"],
 	): Promise<SessionAutonomyStatus> {
 		const getEdgeGrants = this.deps.getEdgeGrants;
 		return readSessionAutonomyStatus({
+			ordinaryWork,
 			nowMs: this.deps.getTimers().port("routines").now(),
 			sessionId: this.deps.getSessionId(),
 			holdsRoutines: this.deps.routineScope() !== undefined,

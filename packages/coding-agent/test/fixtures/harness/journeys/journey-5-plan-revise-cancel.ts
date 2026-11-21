@@ -1,6 +1,8 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { planInspectionText } from "../../../../src/core/plan/plan-panel.ts";
+import { planProgressText, planView } from "../../../../src/core/plan/plan-view.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
@@ -84,6 +86,16 @@ export async function runJourney5PlanReviseCancelPhase(world: HarnessWorld, sess
 		),
 	);
 	const released = taskIds();
+	const live = session.backgroundLanes.getTaskRuntimeSnapshot()!;
+	const planId = planTitled(session, TITLE).record.planId;
+	expect(planView(live, planId)?.counts).toMatchObject({ accepted: 0, running: 3, waiting: 1 });
+	for (const status of ["queued", "leased", "suspended", "failed", "completed"] as const) {
+		const attempts = Object.fromEntries(
+			Object.entries(live.attempts).map(([id, attempt]) => [id, { ...attempt, status }]),
+		);
+		const view = planView({ ...live, attempts }, planId)!;
+		expect(planProgressText(view.counts), status).toBe("0 running, 4 waiting, 0 held, 0 of 4 done.");
+	}
 
 	// The owner drops the third reading: the root removes the step and restates the join over the two that stay.
 	enqueueRoot(
@@ -153,6 +165,10 @@ export async function runJourney5PlanReviseCancelPhase(world: HarnessWorld, sess
 	await withDeadline(trace, "J5 revise: the plan was cancelled", cancelled.promise);
 	await withDeadline(trace, "J5 revise: root idle after the cancel", session.waitForForegroundIdle());
 	const afterCancel = planTitled(session, TITLE);
+	const closedView = planView(session.backgroundLanes.getTaskRuntimeSnapshot()!, planId)!;
+	expect(closedView.counts).toMatchObject({ settled: 3, accepted: 0, running: 0 });
+	expect(planInspectionText([closedView])).toContain("0 of 3 done");
+	expect(cancelText).toContain("0 running, 0 waiting, 0 held, 0 of 3 done.");
 	expect(
 		{
 			told: cancelText.includes("The plan is cancelled; its running steps are stopped."),

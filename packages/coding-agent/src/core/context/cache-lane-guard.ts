@@ -25,6 +25,7 @@ import {
 	cacheLaneKey,
 	historyLineage,
 	idleHolder,
+	messageCachePolicy,
 } from "./cache-observation-recorder.ts";
 
 /** The messages a reply's request carried since the previous reply (see `idleHolder`). */
@@ -62,7 +63,13 @@ export class CacheLaneGuard {
 		this.knowledge = new CacheKnowledge(() => this.deps.getDecisionLedger());
 		this.observations = new CacheObservationRecorder((sessionId, lane) => {
 			const last = this.deps.getDecisionLedger()?.latestCacheObservation(sessionId, lane);
-			return last ? { respondedAt: last.observedAt, promptTokens: last.promptTokens } : undefined;
+			return last
+				? {
+						respondedAt: last.observedAt,
+						promptTokens: last.promptTokens,
+						...(last.cachePolicy ? { cachePolicy: last.cachePolicy } : {}),
+					}
+				: undefined;
 		});
 	}
 
@@ -83,6 +90,7 @@ export class CacheLaneGuard {
 				lane,
 				respondedAt: Date.now(),
 				usage: message.usage,
+				cachePolicy: messageCachePolicy(message),
 				...(requestOpenedAt !== undefined ? { requestOpenedAt } : {}),
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
@@ -184,9 +192,10 @@ export class CacheLaneGuard {
 				detail: "no compaction on record to learn a compaction's size and cost from",
 			};
 		} else {
-			const last = this.knowledge.lastResponseAt(conversation, lane);
+			const previous = this.knowledge.lastResponse(conversation, lane);
+			const last = previous?.observedAt;
 			const retained =
-				last === undefined ? undefined : this.knowledge.retainedAfter(lane, Math.max(0, now - last), now);
+				last === undefined ? undefined : this.knowledge.retainedAfter(lane, Math.max(0, now - last), now, previous);
 			const lineage = this.knowledge.lineage(conversation, historyLineage(messages), now);
 			remainingRequests = Math.max(1, lineage ? (lineage.remaining ?? lineage.elapsed) : 1);
 			verdict = priceCompaction({

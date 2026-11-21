@@ -289,6 +289,7 @@ export const LOCAL_MODELS = {
 	},
 	/** Uma linha por conta de provedor que o roteador verificou. */
 	routerAccounts: {
+		requestIdentityUnknown: "a identidade da requisição atual não foi verificada",
 		noModels: "nenhum modelo oferecido",
 		keyValid: (provider: string) => `${provider}: chave válida`,
 		rejected: (provider: string, reason: string) => `${provider}: recusada (${reason})`,

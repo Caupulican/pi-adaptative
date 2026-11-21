@@ -103,5 +103,5 @@ export function stopSessionTurn(
 		holdFailed(error);
 	}
 	session.selfCompactionHandoff.stop(stop.reason);
-	return session.abort(stop.reason);
+	return session.abort(stop.reason, { ordinaryWork: "hold" });
 }

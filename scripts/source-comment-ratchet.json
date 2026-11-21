@@ -1,0 +1,16 @@
+{
+	"scopes": [
+		"packages/coding-agent/src/core/skill-discovery.ts",
+		"packages/coding-agent/src/core/skill-mutation.ts",
+		"packages/coding-agent/src/core/skill-repair.ts",
+		"packages/coding-agent/src/core/skill-work-paths.ts",
+		"packages/coding-agent/src/core/skills.ts"
+	],
+	"retained": {
+		"packages/coding-agent/src/core/skills.ts": [
+			"/** Declared effects beyond the working tree; absent or empty means none. */",
+			"/**\n\t * Working-tree globs the skill is for (frontmatter `paths`). Search ranks the skill higher and marks it\n\t * when the session's recent file work matches one; it is never loaded or applied because of a match.\n\t */",
+			"/** Profile UAC gate: when provided, files it denies are never read from disk. */"
+		]
+	}
+}

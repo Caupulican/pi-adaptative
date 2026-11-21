@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import type { ExecutionPathAuthority } from "../../kernel/index.ts";
+import { AgentToolPolicyDeniedError } from "../../kernel/types.ts";
 import {
 	type ExecutionPathFlavor,
 	executionPathApi,
@@ -18,12 +19,7 @@ import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScopeWithDialect, safeRealpathSync } from "./path-scope.ts";
 
 /**
- * Tool-level envelope enforcement (G2 prerequisite for code-writing workers): the capability
- * envelope's `allowedPaths`/`deniedPaths` were previously VALIDATION-ONLY — recorded on the
- * envelope but never checked when a tool actually ran. This module wraps tools so path-bearing
- * arguments are checked AT EXECUTION TIME, structurally refusing out-of-scope paths the same way
- * a failed script can never look like success: the refusal is an isError result with a stable
- * outcome code, never a silent no-op.
+ * Enforce the capability envelope's path grants and exclusions at dispatch, including tools with a bound path authority.
  */
 
 const PATH_ARGUMENT_KEYS = ["path", "file_path", "filePath", "cwd", "directory", "dir", "target"] as const;
@@ -505,26 +501,17 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 	tool: T,
 	envelope: CapabilityEnvelope,
 	cwd: string,
-	/** Appended to the denial text: what the denied agent does next (the grant it lacks, who to report to). */
+	/** The correction sent with a policy refusal. */
 	denialGuidance?: string,
 ): T {
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => {
 		type Execute = T["execute"];
-		const denialBlock = (rawPath: string) => ({
-			content: [
-				{
-					type: "text",
-					text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.${denialGuidance ? ` ${denialGuidance}` : ""}`,
-				},
-			],
-			details: {
-				outcome: "envelope_path_denied",
-				tool: tool.name,
-				path: rawPath,
-				envelopeId: envelope.id,
-			},
-			isError: true,
-		});
+		const pathDenial = (rawPath: string) =>
+			new AgentToolPolicyDeniedError(
+				`envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+				undefined,
+				denialGuidance,
+			);
 
 		const execute = (...args: Parameters<Execute>): ReturnType<Execute> => {
 			const params = args[1];
@@ -545,7 +532,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 								pathAccess,
 							});
 							if (!assessment.allowed) {
-								return denialBlock(rawPath);
+								throw pathDenial(rawPath);
 							}
 						}
 						signal?.throwIfAborted();
@@ -560,7 +547,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 						pathAccess,
 					});
 					if (!assessment.allowed) {
-						return denialBlock(rawPath) as ReturnType<Execute>;
+						throw pathDenial(rawPath);
 					}
 				}
 			}

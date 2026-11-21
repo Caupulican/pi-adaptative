@@ -15,6 +15,7 @@ import {
 	modelTransferByCommand,
 	modelTransferFromValue,
 	modelTransferIsPending,
+	modelTransferSuccessorPayload,
 	pendingModelTransferForTask,
 } from "./model-transfer.ts";
 import { assertTaskAttemptBudgetForState } from "./risk-budget.ts";
@@ -107,11 +108,7 @@ export function applyModelTransferEvent(
 			assertSuccessorHeadroom(state, transfer.taskId);
 			applyAttemptQueued(
 				state,
-				{
-					attemptId: transfer.successorAttemptId,
-					taskId: transfer.taskId,
-					dispatch: event.payload.dispatch ?? null,
-				},
+				modelTransferSuccessorPayload(transfer, event.payload.dispatch),
 				event.occurredAt,
 				transfer,
 			);

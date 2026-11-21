@@ -22,8 +22,19 @@ const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
 	/https?:\/\/[^\s/:@]+:[^\s/@]+@/i,
 ];
 
+// Ordinary command output can quote a password in prose. Consume escapes, spaces and a partial
+// final value as a unit so that a streamed preview never exposes the unfinished suffix.
+const QUOTED_PASSWORD =
+	/\b(?:password|passwd|passphrase)\b(?:[ \t]*[:=][ \t]*|[ \t]+(?:is[ \t]+)?)(?:"(?:\\[^\r\n]?|[^"\\\r\n])*"?|'(?:\\[^\r\n]?|[^'\\\r\n])*'?)/i;
+
+/** Old tool results can reach the provider again after a session is reopened. */
+export function redactQuotedPasswords(text: string): string {
+	return replaceAllMatches(text, [QUOTED_PASSWORD], "[REDACTED]");
+}
+
 /** Shapes that need surrounding words to be a credential; fine for diagnostics, too noisy for source text. */
 const CONTEXTUAL_SECRET_PATTERNS: readonly RegExp[] = [
+	QUOTED_PASSWORD,
 	/[?&](?:x-amz-signature|x-goog-signature|signature|sig|access_token|api[_-]?key|key|token|secret|password)=[^&\s]+/i,
 	/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|account[_-]?key|private[_-]?key|sharedaccesssignature|authorization|credential|secret|password)\b\s*[:=]\s*\S+/i,
 ];

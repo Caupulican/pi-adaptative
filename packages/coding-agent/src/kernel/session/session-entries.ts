@@ -154,6 +154,7 @@ export interface SessionInfoEntry extends SessionEntryBase {
  */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
+	origin?: AgentMessageOrigin;
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
@@ -176,6 +177,7 @@ export type SessionEntry =
 export interface RequestSnapshotEntry extends SessionEntryBase {
 	type: "request_snapshot";
 	requestId: string;
+	retryOfAssistantEntryId?: string;
 	reason: "initial" | "resume" | "change";
 	api: string;
 	provider: string;

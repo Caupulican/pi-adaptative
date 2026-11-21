@@ -19,9 +19,8 @@ import {
 	stepWriteAuthority,
 } from "./journey-5-shared.ts";
 import {
-	assertCompletionRuleRefusal,
+	assertCompletionRuleVisible,
 	FILES_CHANGED_CLAIMS,
-	goalCompletionFacts,
 	LIMITS_PATH,
 	latestBatchResults,
 	requirementIdOf,
@@ -67,7 +66,6 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 	// What the goal's continuation decided while the plan's verifier ran, with the goal's requirement still open.
 	let goalDuringPlan: { action: string; reasonCode: string; open: readonly string[] } | undefined;
 	let verificationEvidence: { id: string; kind: string; summary: string }[] = [];
-	let factsBeforeCompletion: string | undefined;
 	const mark = world.provider.reached.length;
 	world.shell.enqueue({
 		name: "j5-verify-check",
@@ -285,22 +283,11 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 			check: (request) => {
 				const result = latestBatchResults(request).find((entry) => entry.toolName === "goal");
 				if (result?.isError) throw new Error(`the requirement was not satisfied: ${result.text}`);
-				factsBeforeCompletion = goalCompletionFacts(session);
+				assertCompletionRuleVisible(request);
 			},
 			reply: {
 				content: [
 					{ type: "toolCall", id: "j5-verify-complete-1", name: "goal", arguments: { action: "complete" } },
-				],
-				stopReason: "toolUse",
-			},
-		},
-		{
-			name: "j5-verify-complete-rule",
-			check: (request) =>
-				assertCompletionRuleRefusal(request, "J5 verify completion", session, factsBeforeCompletion),
-			reply: {
-				content: [
-					{ type: "toolCall", id: "j5-verify-complete-2", name: "goal", arguments: { action: "complete" } },
 				],
 				stopReason: "toolUse",
 			},
@@ -433,7 +420,6 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 			`${ROOT_TRACK}:j5-verify-result`,
 			`${ROOT_TRACK}:j5-verify-wake`,
 			`${ROOT_TRACK}:j5-verify-satisfied`,
-			`${ROOT_TRACK}:j5-verify-complete-rule`,
 			`${ROOT_TRACK}:j5-verify-completed`,
 		],
 		workers: [2, 3],

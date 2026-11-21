@@ -18,7 +18,7 @@ import {
 	readSummarySpendReceipt,
 	requestSummarySpendRecovery,
 } from "../cost/semantic-usage-journal.ts";
-import type { SemanticUsageLedgerIdentity } from "../cost/session-ledger-port.ts";
+import { type SemanticUsageLedgerIdentity, sameIdentity } from "../cost/session-ledger-port.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
@@ -372,7 +372,7 @@ export class ContinuousChatSpendMeter {
 					current?.status !== "reserved" ||
 					current.token !== circuit.token ||
 					this.owners.judge(current.owner) !== "dead" ||
-					JSON.stringify(current.identity) !== JSON.stringify(circuit.identity)
+					!sameIdentity(current.identity, circuit.identity)
 				)
 					return;
 				state.circuits[key] = {
@@ -416,7 +416,7 @@ export class ContinuousChatSpendMeter {
 							!current ||
 							current.token !== circuit.token ||
 							(current.status !== "flight" && current.status !== "unknown") ||
-							JSON.stringify(current.identity) !== JSON.stringify(circuit.identity)
+							!sameIdentity(current.identity, circuit.identity)
 						)
 							return;
 						this.addMeasured(state, receipt.costUsd, receipt.observedAtMs, this.recoveredMetered(receipt));
@@ -472,7 +472,7 @@ export class ContinuousChatSpendMeter {
 						!current.pendingAck?.ackStarted ||
 						current.pendingAck.costUsd !== pending.costUsd ||
 						current.pendingAck.observedAtMs !== pending.observedAtMs ||
-						JSON.stringify(current.pendingAck.identity) !== JSON.stringify(pending.identity)
+						!sameIdentity(current.pendingAck.identity, pending.identity)
 					)
 						return;
 					delete current.pendingAck;

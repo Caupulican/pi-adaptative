@@ -33,35 +33,50 @@ export async function awaitAuthorizationInput<T>(input: () => Promise<T>, signal
 	}
 }
 
-export function parseAuthorizationInput(input: string): AuthorizationInput {
+export function parseAuthorizationInput(input: string, expectedCallback?: string): AuthorizationInput {
 	const value = input
 		.trim()
 		.replace(/^['"]+|['"]+$/g, "")
 		.trim();
 	if (!value) return {};
 
+	function fromQuery(params: URLSearchParams): AuthorizationInput {
+		if (
+			expectedCallback &&
+			(params.has("error") ||
+				params.getAll("code").length !== 1 ||
+				params.getAll("state").length !== 1 ||
+				!params.get("state"))
+		)
+			return {};
+		return { code: params.get("code") ?? undefined, state: params.get("state") ?? undefined };
+	}
+
 	try {
 		const url = new URL(value);
-		return {
-			code: url.searchParams.get("code") ?? undefined,
-			state: url.searchParams.get("state") ?? undefined,
-		};
+		if (
+			expectedCallback &&
+			(url.origin + url.pathname !== expectedCallback || url.username || url.password || url.hash)
+		)
+			return {};
+		return fromQuery(url.searchParams);
 	} catch {
 		// Manual input may be a compact code/state pair or query-string fragment.
 	}
 
+	if (expectedCallback && (value.startsWith("?") || /^(?:error|code|state)=/.test(value))) {
+		return value.includes("#") ? {} : fromQuery(new URLSearchParams(value));
+	}
+	// A relative or malformed callback must not fall through to manual code parsing.
+	if (expectedCallback && (value.startsWith("//") || /[?&\s]/.test(value))) return {};
+
 	if (value.includes("#")) {
-		const [code, state] = value.split("#", 2);
+		const [code, state, extra] = value.split("#", 3);
+		if (expectedCallback && (!state || extra !== undefined)) return {};
 		return { code, state };
 	}
 
-	if (value.includes("code=")) {
-		const params = new URLSearchParams(value);
-		return {
-			code: params.get("code") ?? undefined,
-			state: params.get("state") ?? undefined,
-		};
-	}
+	if (!expectedCallback && value.includes("code=")) return fromQuery(new URLSearchParams(value));
 
 	return { code: value };
 }

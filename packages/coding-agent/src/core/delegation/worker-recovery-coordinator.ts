@@ -1,5 +1,6 @@
 import type { Message } from "@caupulican/pi-ai";
 import { Value } from "typebox/value";
+import { assistantResultText } from "../../kernel/assistant-answer.ts";
 import { sessionLifecycleToolIdentityKey } from "../../kernel/session/lifecycle-ledger.ts";
 import { executionContextScope } from "../../kernel/tool-invocation-binding.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
@@ -778,16 +779,10 @@ export class WorkerRecoveryCoordinator {
 			}
 		}
 		if ([...calls.keys()].some((id) => !results.has(id))) return undefined;
-		const text = last.content
-			.filter(
-				(content): content is Extract<(typeof last.content)[number], { type: "text" }> => content.type === "text",
-			)
-			.map((content) => content.text)
-			.join("");
 		return {
 			attemptId,
 			messages: transcript.messages.map(({ message }) => message),
-			text,
+			text: assistantResultText(last),
 			usage: last.usage,
 			stopReason: last.stopReason,
 			commandReceipts,

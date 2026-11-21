@@ -1,20 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { type OrchestrationHome, sessionRootMailboxFile } from "../agent-paths.ts";
 import {
 	type SessionBundleDeletionReservation,
 	withSessionBundleAdmission,
 	withSessionBundleRetention,
 } from "../orchestration/session-bundle-lifecycle.ts";
+import {
+	decodeWorkerBrief,
+	encodeWorkerBrief,
+	MAX_WORKER_BRIEF_ATTACHMENT_BYTES,
+} from "../orchestration/worker-brief-attachment.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { KeyedSignal } from "../util/keyed-signal.ts";
 import { type SteerDecision, type WaitStatusEvent, type WaitSteer, type WakeSource, waitFor } from "../util/wait.ts";
-import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
+import {
+	attachedReplyDigest,
+	createReplaySafeMailboxBounder,
+	type MailboxBodyEncoder,
+	mailboxStorageCharge,
+} from "./replay-safe-mailbox-bounds.ts";
+
+import {
+	INLINE_WORKER_MESSAGE_CHARS,
+	MAX_WORKER_MESSAGE_CHARS,
+	normalizeWorkerMessageContent,
+} from "./worker-agent-message-options.ts";
 
 const MAX_MANDATORY_REPLIES = 64;
 const MAX_RETAINED_REPLIES = 128;
 const MAX_REPLAY_RECEIPTS = MAX_RETAINED_REPLIES * 4;
-const MAX_REPLY_CONTENT_CHARS = 4_096;
 const MAX_REPLY_ENCODED_BYTES = 15 * 1024;
 const MAX_IDENTITY_CHARS = 512;
 const MAX_MESSAGE_ID_CHARS = 512;
@@ -111,6 +127,7 @@ export interface SessionRootReplyInput {
 }
 
 export interface SessionRootReplyQuery {
+	messageId?: string;
 	sourceAgentId?: string;
 	requestMessageId?: string;
 	maxMessages?: number;
@@ -153,10 +170,10 @@ function optionalIdentity(value: unknown, label: string): string | undefined {
 
 function requiredContent(value: unknown): string {
 	if (typeof value !== "string") throw new TypeError("Session root reply content is invalid.");
-	const normalized = value.trim();
-	if (!normalized || normalized.length > MAX_REPLY_CONTENT_CHARS) {
+	const normalized = normalizeWorkerMessageContent(value);
+	if (!normalized.trim() || normalized.length > MAX_WORKER_MESSAGE_CHARS) {
 		throw new TypeError(
-			`Session root reply content must contain from 1 through ${MAX_REPLY_CONTENT_CHARS.toLocaleString("en-US")} characters.`,
+			`Session root reply content must contain from 1 through ${MAX_WORKER_MESSAGE_CHARS.toLocaleString("en-US")} characters.`,
 		);
 	}
 	return normalized;
@@ -246,7 +263,7 @@ export function sessionRootReplyMessageId(
 }
 
 function replyContentDigest(content: string): string {
-	return identityDigest("pi-session-root-reply-content-v1", [content]);
+	return attachedReplyDigest(content) ?? identityDigest("pi-session-root-reply-content-v1", [content]);
 }
 
 function replayReceipt(reply: SessionRootReply, sourceOwned = false): SessionRootReplyReplayReceipt {
@@ -297,12 +314,15 @@ function pruneRetainedReplies(replies: readonly SessionRootReply[]): SessionRoot
 	return replies.filter((reply) => isMandatory(reply) || retainedCompletedIds.has(reply.messageId));
 }
 
-function encodedStateBytes(state: SessionRootMailboxState): number {
-	return Buffer.byteLength(`${JSON.stringify(state)}\n`, "utf-8");
+function projectMailbox(state: SessionRootMailboxState, body: MailboxBodyEncoder) {
+	return {
+		...state,
+		replies: state.replies.map((reply) => ({ ...reply, content: body(reply.content, INLINE_WORKER_MESSAGE_CHARS) })),
+	};
 }
 
-function lifecycleProjectedEncodedBytes(state: SessionRootMailboxState): number {
-	return encodedStateBytes({
+function lifecycleProjectedEncodedBytes(state: SessionRootMailboxState, defaultAdmission = false): number {
+	const transitioned = {
 		...state,
 		// An expired reply is final: no later transition adds a lifecycle field to it.
 		replies: state.replies.map((reply) =>
@@ -314,12 +334,12 @@ function lifecycleProjectedEncodedBytes(state: SessionRootMailboxState): number 
 					}
 				: reply,
 		),
-	});
+	};
+	return mailboxStorageCharge((body) => projectMailbox(transitioned, body), defaultAdmission ? 1 : 2);
 }
 
 function assertReplyEncodedByteBound(reply: SessionRootReply): void {
-	// Reserve both lifecycle fields before accepting content so every durable reply can still fit as
-	// one whole entry in the delegate inbox's 16 KiB result envelope after later transitions.
+	// Reserve lifecycle fields before admission. Long replies have their own body allowance and inbox pages.
 	const transitioned =
 		reply.expiredAt === undefined
 			? {
@@ -328,7 +348,13 @@ function assertReplyEncodedByteBound(reply: SessionRootReply): void {
 					acknowledgedAt: reply.acknowledgedAt ?? reply.createdAt,
 				}
 			: reply;
-	if (Buffer.byteLength(JSON.stringify(transitioned), "utf-8") > MAX_REPLY_ENCODED_BYTES) {
+	if (
+		mailboxStorageCharge(
+			(body) => ({ ...transitioned, content: body(reply.content, INLINE_WORKER_MESSAGE_CHARS) }),
+			1,
+			0,
+		) > MAX_REPLY_ENCODED_BYTES
+	) {
 		throw new Error(`Session root reply exceeds its ${MAX_REPLY_ENCODED_BYTES}-byte encoded byte bound.`);
 	}
 }
@@ -367,7 +393,11 @@ function parseReply(value: unknown, parentSessionId: string): SessionRootReply {
 		candidate.threadId === undefined
 			? undefined
 			: requiredBoundedString(candidate.threadId, MAX_IDENTITY_CHARS, "thread id");
-	const content = requiredBoundedString(candidate.content, MAX_REPLY_CONTENT_CHARS, "content");
+	const content = requiredBoundedString(
+		decodeWorkerBrief(candidate.content, INLINE_WORKER_MESSAGE_CHARS),
+		MAX_WORKER_MESSAGE_CHARS,
+		"content",
+	);
 	const createdAt = requiredTimestamp(candidate.createdAt, "creation timestamp");
 	const ackToken = requiredAckToken(candidate.ackToken);
 	const sourceReconciledAt = optionalTimestamp(candidate.sourceReconciledAt, "source reconciliation timestamp");
@@ -394,7 +424,8 @@ function parseReply(value: unknown, parentSessionId: string): SessionRootReply {
 		requestMessageId.trim() !== requestMessageId ||
 		messageId !== sessionRootReplyMessageId(parentSessionId, sourceAgentId, requestMessageId) ||
 		(threadId !== undefined && threadId.trim() !== threadId) ||
-		content.trim() !== content
+		!content.trim() ||
+		normalizeWorkerMessageContent(content) !== content
 	) {
 		throw new Error("Session root mailbox contains an invalid reply.");
 	}
@@ -505,10 +536,12 @@ function normalizeQuery(
 	if (!Number.isSafeInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_MANDATORY_REPLIES) {
 		throw new TypeError(`Session root reply page size must be from 1 through ${MAX_MANDATORY_REPLIES}.`);
 	}
+	const messageId = optionalIdentity(query.messageId, "message id");
 	const sourceAgentId = optionalIdentity(query.sourceAgentId, "source agent id");
 	const requestMessageId = optionalIdentity(query.requestMessageId, "request message id");
 	return {
 		maxMessages,
+		...(messageId ? { messageId } : {}),
 		...(sourceAgentId ? { sourceAgentId } : {}),
 		...(requestMessageId ? { requestMessageId } : {}),
 	};
@@ -627,6 +660,7 @@ export class SessionRootMailbox {
 				(reply) =>
 					reply.acknowledgedAt === undefined &&
 					reply.expiredAt === undefined &&
+					(normalized.messageId === undefined || reply.messageId === normalized.messageId) &&
 					(normalized.sourceAgentId === undefined || reply.sourceAgentId === normalized.sourceAgentId) &&
 					(normalized.requestMessageId === undefined || reply.requestMessageId === normalized.requestMessageId),
 			)
@@ -793,7 +827,7 @@ export class SessionRootMailbox {
 	private read(): SessionRootMailboxState {
 		const text = readOptionalBoundedTextFileSync(
 			this.file,
-			MAX_MAILBOX_BYTES,
+			MAX_MAILBOX_BYTES + 2 * MAX_WORKER_BRIEF_ATTACHMENT_BYTES,
 			"Session root mailbox durable size bound",
 		);
 		if (text === undefined) {
@@ -802,6 +836,10 @@ export class SessionRootMailbox {
 		}
 		if (this.parsed?.text === text) return this.parsed.state;
 		const state = parseState(text, this.parentSessionId);
+		if (
+			mailboxStorageCharge((body) => projectMailbox(state, body), 2, 1, Buffer.byteLength(text)) > MAX_MAILBOX_BYTES
+		)
+			throw new Error("Session root mailbox durable size bound exceeded.");
 		this.parsed = { text, state };
 		return state;
 	}
@@ -817,8 +855,8 @@ export class SessionRootMailbox {
 				const state = this.read();
 				// Every full-state encode below is a pass over up to MAX_MAILBOX_BYTES, and one durable
 				// transaction used to make seven of them. Each projection is now computed once, only on the
-				// path that reads it, and the encoding written to disk is the one the change check compared.
-				const previousDefaultBytes = defaultAdmission ? lifecycleProjectedEncodedBytes(state) : undefined;
+				// path that reads it. Actual attachment hashing and encoding occur once, on a changed write.
+				const previousDefaultBytes = defaultAdmission ? lifecycleProjectedEncodedBytes(state, true) : undefined;
 				const mutated = mutator(state);
 				let next = {
 					...mutated,
@@ -826,12 +864,12 @@ export class SessionRootMailbox {
 					replayReceipts: [...mutated.replayReceipts],
 				};
 				const admissionCapBytes = defaultAdmission ? MAX_DEFAULT_MAILBOX_BYTES : MAX_MAILBOX_BYTES;
-				let nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
+				let nextDefaultBytes = lifecycleProjectedEncodedBytes(next, defaultAdmission);
 				while (nextDefaultBytes > admissionCapBytes) {
 					const oldestCompletedIndex = next.replies.findIndex((reply) => !isMandatory(reply));
 					if (oldestCompletedIndex < 0) break;
 					next = { ...next, replies: next.replies.filter((_, index) => index !== oldestCompletedIndex) };
-					nextDefaultBytes = lifecycleProjectedEncodedBytes(next);
+					nextDefaultBytes = lifecycleProjectedEncodedBytes(next, defaultAdmission);
 				}
 				for (const reply of next.replies) assertReplyEncodedByteBound(reply);
 				const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
@@ -849,12 +887,11 @@ export class SessionRootMailbox {
 					next.replies.length,
 					next.replayReceipts.length,
 					state.replayReceipts.length,
-					nextDefaultBytes,
+					defaultAdmission ? lifecycleProjectedEncodedBytes(next) : nextDefaultBytes,
 					bytesWithoutAddedReceipt,
 				);
-				const encodedNext = JSON.stringify(next);
-				if (encodedNext !== JSON.stringify(state)) {
-					const text = `${encodedNext}\n`;
+				if (!isDeepStrictEqual(next, state)) {
+					const text = `${JSON.stringify(projectMailbox(next, encodeWorkerBrief))}\n`;
 					beforeWrite?.();
 					writeFileAtomicSync(this.file, text, { mode: 0o600 });
 					// What was just written is what the next read will find, unless someone else writes first.

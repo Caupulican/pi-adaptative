@@ -315,6 +315,7 @@ export const NOTICES = {
 			`O canal ${name} recusa mensagens novas: ${max} esperam sem entrega. O provedor é chamado a entregá-las de novo mais tarde.`,
 		unanswered: (name: string, reason: UnansweredReason) =>
 			`Canal ${name}: uma conversa entregue ficou sem resposta (${UNANSWERED_REASONS[reason]}).`,
+		partialReply: "Resposta parcial. O modelo atingiu o limite de saída.",
 		ownerUnanswered: (name: string, reason: UnansweredReason) =>
 			`Canal ${name}: uma mensagem do dono ficou sem resposta (${UNANSWERED_REASONS[reason]}).`,
 		draftWaits: (name: string, draftId: string, reason: string) =>
@@ -371,7 +372,10 @@ export const NOTICES = {
 				`as mensagens do dono esperam: o remetente delas não está verificado ou não está mais em channels.${name}.ownerSenders`,
 			turnsOffCause: (name: string) => `os turnos do dono estão desligados (channels.${name}.ownerMaxUsdPerDay é 0)`,
 			statusSpend: (usedUsd: number, dayUsd: number, turnUsd: number, refusal: string | undefined) =>
-				`Gasto do dono: $${usedUsd.toFixed(2)} de $${dayUsd.toFixed(2)} em 24 horas, $${turnUsd.toFixed(2)} por turno${refusal ? `; nenhum turno novo: ${refusal}` : ""}.`,
+				`Os turnos do dono em primeiro plano e os comandos de tarefa usaram ou reservaram $${usedUsd.toFixed(2)} de $${dayUsd.toFixed(2)} em 24 horas ($${turnUsd.toFixed(2)} por turno).${refusal ? ` Novos turnos estão suspensos (${refusal}).` : ""}`,
+			savedReplyDraft:
+				"Uma resposta a este chat está salva como rascunho. O envio completo ainda não foi confirmado. Você pode consultá-la no terminal.",
+			savedTaskState: "Estado da tarefa registrado nesta sessão",
 			statusTurns: (running: boolean, waiting: number) =>
 				`${running ? "Um turno está rodando." : "Nenhum turno está rodando."} ${waiting} mensagem(ns) esperam.`,
 			statusHeld: (listed: readonly string[], more: number) =>

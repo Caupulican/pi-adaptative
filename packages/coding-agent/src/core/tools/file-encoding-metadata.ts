@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { escapeRegExp } from "@caupulican/pi-ai";
 import { stripBom } from "../../utils/text.ts";
+import { isPathProbeMiss } from "../util/filesystem-errors.ts";
 
 /**
  * A source charset the project declares for itself. `.editorconfig` is the standard, authoritative
@@ -269,7 +270,7 @@ async function loadEditorConfig(
 	} catch (error) {
 		// A directory without an .editorconfig is the normal case, not a failure; anything else is.
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR" || code === "ENAMETOOLONG" || code === "EISDIR") return undefined;
+		if (isPathProbeMiss(error) || code === "EISDIR") return undefined;
 		throw error;
 	}
 	const cached = parsedFiles.get(path);

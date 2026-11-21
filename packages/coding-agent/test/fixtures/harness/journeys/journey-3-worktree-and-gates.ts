@@ -24,7 +24,7 @@ import {
 } from "../../../../src/core/util/win32-transient-fs.ts";
 import { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
-import { calls, createBarrier, text } from "../scripted-provider.ts";
+import { calls, createBarrier, phasedReply, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, harnessPath, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -36,7 +36,7 @@ import { HARNESS_PROJECT_CWD, type HarnessWorld, harnessPath, projectPath, withD
 import {
 	agentIdForTrack,
 	assertBatchOk,
-	assertCompletionRuleRefusal,
+	assertCompletionRuleVisible,
 	assertRefused,
 	assertWorkRulesDelivered,
 	bindE0Completion,
@@ -55,7 +55,6 @@ import {
 	evidenceKeyOf,
 	expectOwnerWords,
 	FILES_CHANGED_CLAIMS,
-	goalCompletionFacts,
 	isGateCommandRefusal,
 	isStaleRefusal,
 	LIMITS_PATH,
@@ -183,6 +182,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		{
 			name: "status-admitted",
 			check: (request) => {
+				expect(request.context.systemPrompt).toContain("Choose whether to work directly or assign a worker");
 				assertBatchOk(request, "start-worker");
 				if (!latestBatchResults(request).some((result) => result.text.includes("delegate started (running)"))) {
 					throw new Error("the worker was not admitted");
@@ -761,7 +761,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 					throw new Error("the third request is not the repeated report request for the recorded change");
 				}
 			},
-			reply: { content: [{ type: "text", text: "LATE-PLAINTEXT-ROUND-3: no report follows." }] },
+			reply: phasedReply("Preparing the handoff.", "LATE-PLAINTEXT-ROUND-3: no report follows."),
 		},
 	);
 	world.provider.enqueue(
@@ -946,6 +946,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		expectedLogicalAgentId: adverseBinding.contextOrigin?.logicalAgentId ?? adverseBinding.agentId,
 	});
 	const recovered = readerCoordinator.recoveredTerminalCompletion(adverseConversation, adverseAttempt.attemptId);
+	expect(recovered?.text).toBe("LATE-PLAINTEXT-ROUND-3: no report follows.");
 	expect(recovered?.attemptId, "the recovered completion names the exact adverse attempt").toBe(
 		adverseAttempt.attemptId,
 	);
@@ -2610,7 +2611,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			},
 		},
 	);
-	let completeGoalFactsBefore: string | undefined;
 	const completeGoalCall = (request: ScriptedRequest, callId: string) => {
 		const ids = evidenceIdsOf(request);
 		const requirement = requirementIdOf(request);
@@ -2764,16 +2764,10 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 			],
 			(request) => assertBatchOk(request, "vitest-integration"),
 		),
-		// The root's context holds no noticed-items rule, so the first completion that passes every deterministic check is refused with
-		// the rule and the goal untouched; the identical call, under its own id, is accepted.
-		dynamicCalls("complete-goal-rule", (request) => {
-			completeGoalFactsBefore = goalCompletionFacts(session);
-			return completeGoalCall(request, "complete-goal-rule-1");
-		}),
 		dynamicCalls(
 			"complete-goal",
 			(request) => completeGoalCall(request, "complete-goal-1"),
-			(request) => assertCompletionRuleRefusal(request, "complete-goal-rule", session, completeGoalFactsBefore),
+			assertCompletionRuleVisible,
 		),
 		{
 			name: "goal-completed",

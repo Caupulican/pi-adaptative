@@ -22,7 +22,6 @@ import {
 import type {
 	AnthropicMessagesCompat,
 	AssistantMessage,
-	CacheRetention,
 	Context,
 	ImageContent,
 	Message,
@@ -59,27 +58,13 @@ import {
 	createProviderRetryOptions,
 	createRetryFreeRequestOptions,
 	executeWithAuthRecovery,
+	getAnthropicCacheControl,
 	mapStandardThinkingEffort,
 	resolveCacheRetention,
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
-
-function getCacheControl(
-	model: Model<"anthropic-messages">,
-	cacheRetention?: CacheRetention,
-): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-	const retention = resolveCacheRetention(cacheRetention);
-	if (retention === "none") {
-		return { retention };
-	}
-	const ttl = retention === "long" && getAnthropicCompat(model).supportsLongCacheRetention ? "1h" : undefined;
-	return {
-		retention,
-		cacheControl: { type: "ephemeral", ...(ttl && { ttl }) },
-	};
-}
 
 const claudeCodeTools = [
 	"Read",
@@ -604,7 +589,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 			);
 			let built = buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options);
-			let params = await applyProviderPayloadHook(built.params, model, options?.onPayload);
+			let params = await applyProviderPayloadHook(built.params, model, options?.onPayload, {
+				message: output,
+				accountScope: options?.providerAccountKey,
+				cacheControlFormat: "anthropic",
+				supportsLongCacheRetention: getAnthropicCompat(model).supportsLongCacheRetention,
+			});
 			const requestOptions = createRetryFreeRequestOptions(options);
 			const retryOptions = createProviderRetryOptions(options);
 
@@ -632,7 +622,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					cacheWriteReservation?.release();
 					cacheWriteReservation = undefined;
 					built = buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options);
-					params = await applyProviderPayloadHook(built.params, model, options?.onPayload);
+					params = await applyProviderPayloadHook(built.params, model, options?.onPayload, {
+						message: output,
+						accountScope: options?.providerAccountKey,
+						cacheControlFormat: "anthropic",
+						supportsLongCacheRetention: getAnthropicCompat(model).supportsLongCacheRetention,
+					});
 					cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options);
 					if (cachePrefixKey !== undefined) {
 						cacheWriteReservation = await acquirePromptCacheWrite(cachePrefixKey, options?.signal);
@@ -1034,7 +1029,10 @@ function buildParams(
 	toolDisclosure: ToolSchemaDisclosurePlan,
 	options?: AnthropicOptions,
 ): AnthropicParamsBuild {
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const cacheControl = getAnthropicCacheControl(options?.cacheRetention, {
+		cacheControlFormat: "anthropic",
+		supportsLongCacheRetention: getAnthropicCompat(model).supportsLongCacheRetention,
+	});
 	const cacheBoundaries = new Set<TextBlockParam>();
 	const compat = getAnthropicCompat(model);
 	const sendsSearch = providerSendsToolSchemaSearch(toolDisclosure);

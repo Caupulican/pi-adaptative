@@ -18,6 +18,7 @@ export type LaneSessionChannelsDeps = Pick<
 	| "getSettingsManager"
 	| "getModelRegistry"
 	| "subscribeForegroundActivity"
+	| "isForegroundBusy"
 	| "sendUserMessage"
 	| "ownerChannel"
 	| "observeHarnessNotice"
@@ -41,6 +42,7 @@ export function createLaneSessionChannels(
 		getChannelPolicies: () => withLinkPolicy(deps.getSettingsManager().getChannelPolicies(), deps.getAgentDir()),
 		subscribeSettings: (listener) => deps.getSettingsManager().subscribeChanges(listener),
 		subscribeForegroundActivity: (listener) => deps.subscribeForegroundActivity(listener),
+		isForegroundBusy: () => deps.isForegroundBusy(),
 		sendUserMessage: (text, options) => deps.sendUserMessage(text, options),
 		...(deps.ownerChannel ? { ownerDelivery: deps.ownerChannel } : {}),
 		ownerControl: () => deps.ownerChannel?.control(),

@@ -135,6 +135,7 @@ export interface AutonomyAuthorityLine {
 /** The title of every block the report can hold, keyed by the block: the empty word is chosen by the same key. */
 const BLOCKS = {
 	goal: "Goal",
+	ordinaryWork: "Current request",
 	plans: "Plans",
 	ownerDecisions: "Owner decisions",
 	review: "Review",
@@ -175,6 +176,54 @@ export const AUTONOMY_STATUS = {
 	idle: "idle",
 	more: (count: number) => `(${count} more)`,
 
+	ordinaryWork: {
+		states: {
+			disabled: "This session does not own ordinary request recovery.",
+			ephemeral: "This session is not saved; automatic recovery is unavailable.",
+			none: "No ordinary request is recorded on this branch.",
+			unavailable: "Ordinary request recovery state is unavailable.",
+			active: "Request in progress.",
+			waiting: "Request waiting for a result.",
+			owner_needed: "Request needs owner input.",
+			unverified: "Request remains open; automatic continuation is held.",
+			fulfilled: "Request fulfilled.",
+			cancelled: "Request cancelled.",
+		},
+		reasons: {
+			storage_not_loaded: "The recovery database has not been opened by the session.",
+			reporting_unverified:
+				"A final answer was recorded. Its compliance with an owner-confirmed reporting requirement could not be verified.",
+			reporting_changed: "The reporting requirement changed during review. The earlier review no longer applies.",
+			reporting_override_unverified:
+				"Pi kept the recorded answer because the current request may limit which saved reporting requirements apply.",
+			reporting_review_invalid:
+				"The answer is recorded. Pi could not validate the reviewer's decision about its reporting format.",
+			storage_unavailable: "The recovery database could not be read.",
+			fulfilled: "The requested deliverable is present.",
+			waiting: "An operation or worker already started owes the next result.",
+			owner_needed: "Progress requires an owner decision, information or authority.",
+			unverified: "The available evidence did not settle the request.",
+			answer_recorded_unverified:
+				"An answer is recorded; the available evidence has not verified that it fulfills the request.",
+			held: "The independent reviewer held further attempts.",
+			limited: "The automatic continuation limit was reached.",
+			judge_unavailable: "The stop judge is unavailable.",
+			evidence_exceeds_review_limit: "The evidence exceeds the bounded review size.",
+			reviewer_no_eligible_model: "The configured model pool has no eligible independent reviewer.",
+			reviewer_unavailable: "The independent reviewer is unavailable.",
+			reviewer_invalid_response: "The independent reviewer returned an invalid decision.",
+			review_timed_out: "The stop review timed out.",
+			owner_evidence_unavailable: "The original owner evidence is unavailable for review.",
+			kernel_runaway_stop: "The execution safety bound stopped the run.",
+			ambiguous_execution_receipt: "An execution outcome is ambiguous; reconcile its receipt before continuing.",
+			review_superseded: "A newer session context superseded the review.",
+			stop_review_in_progress: "A stop review was started; its outcome is not yet recorded.",
+			process_interrupted: "The process was interrupted; recorded receipts need reconciliation.",
+			explicit_goal_owns_request: "An explicit goal now owns this work.",
+			system_bound: "A host execution or supervision bound stopped the run.",
+		},
+		budget: (used: number, limit: number) => `Automatic continuations: ${used}/${limit} spent.`,
+	},
 	goal: {
 		line: (text: string, met: number, total: number, status: string) =>
 			`Goal "${text}": ${met} of ${total} requirements met, ${status}.`,

@@ -152,6 +152,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		await rebindSession();
 		await session.waitForSelfCompactionHandoff();
+		if (!initialMessage && messages.length === 0) {
+			session.restoreOrdinaryWorkAfterResume();
+			await session.waitForForegroundIdle();
+		}
 
 		if (initialMessage) {
 			await session.prompt(initialMessage, { images: initialImages });

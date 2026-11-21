@@ -21,6 +21,9 @@ export const DIALOGS = {
 		titleLogin: "Selecione o provedor para configurar:",
 		titleLogout: "Selecione o provedor para desconectar:",
 		configured: " ✓ configurado",
+		sessionSubscription: " • assinatura só nesta sessão",
+		sessionApiKey: " • chave de API só nesta sessão",
+		removalPending: " • remoção da credencial salva pendente",
 		subscriptionConfigured: "assinatura configurada",
 		apiKeyConfigured: "chave de API configurada",
 		environmentKey: (label: string) => ` ✓ env: ${label}`,
@@ -85,8 +88,12 @@ export const DIALOGS = {
 		regionEmpty: "A região da AWS não pode ficar vazia.",
 		profileEmpty: "O nome do perfil da AWS não pode ficar vazio.",
 		apiKeyEmpty: "A chave de API não pode ficar vazia.",
-		apiKeyNotSaved:
-			"A chave de API não foi salva; ela vale só nesta sessão. Verifique as permissões de armazenamento de credenciais e tente de novo.",
+		credentialNotSaved: (provider: string) =>
+			`A credencial de ${provider} está ativa apenas nesta sessão. Verifique as permissões do armazenamento de credenciais antes de entrar novamente.`,
+		credentialRemovalNotSaved: (provider: string) =>
+			`A credencial de ${provider} foi removida desta sessão. A cópia salva pode voltar após reiniciar. Tente /logout de novo quando o armazenamento permitir gravação.`,
+		sessionUpdateFailed: (detail: string) =>
+			`A alteração da credencial terminou. Falha ao atualizar esta sessão. ${detail}`,
 		verifyingAws: "Verificando a identidade na AWS, os perfis do Bedrock e o acesso aos modelos...",
 		waitingForSso: "Aguardando a autenticação SSO da AWS...",
 		usingProfile: (profile: string) => `Usando o perfil da AWS: ${profile}`,

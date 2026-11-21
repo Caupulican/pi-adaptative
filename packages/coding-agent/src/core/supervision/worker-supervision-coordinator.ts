@@ -13,6 +13,8 @@
 
 import { MAX_ORCHESTRATION_ATTEMPTS } from "../orchestration/contracts.ts";
 import { classifyCommandFamily } from "../tools/command-family.ts";
+import { shellWord } from "../tools/shell-command-parser.ts";
+import { isRepeatedWorkerToolInvocation } from "./progress-observation-window.ts";
 import type { LiveWorkerAttempt, WorkerSupervisionAction, WorkerSupervisionSignal } from "./types.ts";
 import type { WorkerSemanticSupervisor } from "./worker-semantic-supervisor.ts";
 
@@ -91,31 +93,36 @@ function towardMission(directive: string, mission: string | undefined): string {
 const OFF_TRACK_DIRECTIVE =
 	"System One: the current work is off the mission. Stop the current line of work, return to the mission's open requirements, and say what you are doing next.";
 
-const VALIDATION_CHURN_THRESHOLD = 3;
-
 function commandFromToolCall(call: { name: string; args: unknown }): string | undefined {
 	if (!call.args || typeof call.args !== "object" || Array.isArray(call.args)) return undefined;
 	const args = call.args as Record<string, unknown>;
-	if (typeof args.command === "string") return args.command;
-	if (typeof args.code === "string") return args.code;
+	if (typeof args.cwd === "string" && args.cwd !== ".") return undefined;
+	if (call.name === "bash" && typeof args.command === "string") return args.command;
+	if (call.name !== "run_process") return undefined;
 	if (typeof args.executable !== "string") return undefined;
 	return [
 		args.executable,
 		...(Array.isArray(args.args) ? args.args.filter((arg): arg is string => typeof arg === "string") : []),
 	]
-		.join(" ")
-		.trim();
+		.map(shellWord)
+		.join(" ");
 }
 
 function isBroadValidationCall(call: { name: string; args: unknown }): boolean {
-	if (call.name !== "bash" && call.name !== "run_process" && call.name !== "python") return false;
 	const command = commandFromToolCall(call);
 	if (!command) return false;
-	const classification = classifyCommandFamily(command);
-	if (classification.family === "test" || classification.family === "diagnostics") return true;
-	return (
-		classification.family === "package-manager" &&
-		/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|check|lint|test)(?:\s|$)/u.test(command.trim())
+	const { family, argv, cwdPrefix, trailingStages } = classifyCommandFamily(command);
+	if (cwdPrefix || trailingStages.length > 0) return false;
+	if (family !== "test" && family !== "diagnostics" && family !== "package-manager") return false;
+	// A scoped compiler, a file check, a fix, or an unfamiliar invocation needs a semantic assessment.
+	// The deterministic intervention is reserved for recognized whole-project checks.
+	const args = argv.slice(1);
+	if (family === "package-manager" && !args.some((arg) => /^(?:check(?::static)?|lint|test|build)$/u.test(arg)))
+		return false;
+	return args.every((arg) =>
+		/^(?:run|check(?::static)?|lint|test|build|clippy|vet|\.|\.\/|\.\/\.\.\.|--all|--workspace|--noEmit|--error-on-warnings)$/u.test(
+			arg,
+		),
 	);
 }
 
@@ -135,13 +142,8 @@ export function isValidationChurn(observation: {
 	const changedNow = observation.changedFileCount ?? 0;
 	const changedAtStart = observation.changedFileCountAtWindowStart ?? 0;
 	if (changedNow > changedAtStart) return false;
-	const recentCalls = (observation.recentToolCalls ?? []).slice(-VALIDATION_CHURN_THRESHOLD);
-	if (recentCalls.length >= VALIDATION_CHURN_THRESHOLD) return recentCalls.every(isBroadValidationCall);
-	const recent = (observation.recentToolNames ?? []).slice(-VALIDATION_CHURN_THRESHOLD);
-	return (
-		recent.length >= VALIDATION_CHURN_THRESHOLD &&
-		recent.every((name) => name === "bash" || name === "run_process" || name === "python")
-	);
+	const calls = observation.recentToolCalls ?? [];
+	return isRepeatedWorkerToolInvocation(calls) && isBroadValidationCall(calls[calls.length - 1]!);
 }
 
 export class WorkerSupervisionCoordinator {
@@ -309,10 +311,7 @@ export class WorkerSupervisionCoordinator {
 				"now",
 			);
 		} else if (action === "stop_and_reroute") {
-			await this.deps.control.cancelWorker(
-				observation.agentId,
-				verdict.summaryEvent ?? "supervisor requested reroute",
-			);
+			await this.deps.control.cancelWorker(observation.agentId, "worker_supervision_rerouted");
 		}
 	}
 

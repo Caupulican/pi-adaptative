@@ -17,8 +17,9 @@ import {
 	shouldCompact,
 } from "../kernel/compaction/compaction.ts";
 import { NothingToCompactError, runCompactionLoop } from "../kernel/compaction/loop.ts";
+import type { CompactionOwnerHistoryPort } from "../kernel/compaction/owner-history.ts";
 import { harnessLog } from "../kernel/harness-log.ts";
-import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
+import type { ResolvedProviderRequestAuth } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import {
@@ -69,7 +70,12 @@ import {
 	type RetentionPinContext,
 	resolvePreserveRecentPairs,
 } from "./compaction/evidence-retention-projection.ts";
-import { type LastSentRequest, sameCacheLane, sessionLaneSummarizerRequest } from "./compaction-support.ts";
+import {
+	compactionAuthStream,
+	type LastSentRequest,
+	sameCacheLane,
+	sessionLaneSummarizerRequest,
+} from "./compaction-support.ts";
 import { IdlePreparationTimer } from "./context/idle-preparation-timer.ts";
 import { estimateRequestEnvelopeTokens } from "./context/prompt-headroom.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
@@ -308,6 +314,7 @@ export interface CompactionControllerDeps {
 	decorateCompactionDetails?(details: unknown): unknown;
 	/** The objective of an active goal, so an answered aside never becomes the checkpoint's Active Task. */
 	getActiveTask?(): string | undefined;
+	projectOwnerHistory?: CompactionOwnerHistoryPort;
 	refreshAfterCompaction(): void;
 	getFailureCorpus(): FailureCorpusRecorder;
 	measureLiveContextTokens(): number;
@@ -459,6 +466,7 @@ export async function runCompactionWithRetry<T>(options: {
 
 /** Owns compaction detection, execution, retry, persistence, notification, and cancellation. */
 export class CompactionController {
+	private readonly streamWithFrozenAuth = compactionAuthStream(() => this.deps.agent.streamFn);
 	private manualAbortController: AbortController | undefined;
 	private autoAbortController: AbortController | undefined;
 	private autoRunPromise: Promise<boolean> | undefined;
@@ -826,21 +834,6 @@ export class CompactionController {
 		};
 	}
 
-	private streamWithFrozenAuth(
-		credentialHeaders: Record<string, string> | undefined,
-		providerAccountKey: string | undefined,
-		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
-	): StreamFn {
-		const streamFn = this.deps.agent.streamFn;
-		return (model, context, options) =>
-			streamFn(model, context, {
-				...options,
-				...(requestGuard ? { requestGuard } : {}),
-				...(credentialHeaders !== undefined ? { credentialHeaders } : {}),
-				...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
-			});
-	}
-
 	/**
 	 * Open the durable compaction transaction only after deterministic preparation has produced its cut.
 	 * The caller must invoke this before extension or provider work begins. A failed append deliberately
@@ -858,6 +851,7 @@ export class CompactionController {
 		const scope = this.compactionScope();
 		const preparation = prepareCompaction(sourceBranch, settings, {
 			...options,
+			projectOwnerHistory: this.deps.projectOwnerHistory,
 			...(scope.kind === "turn" ? { retainedEntryId: scope.startEntryId } : {}),
 			...(activeTask ? { activeTask } : {}),
 			packHostRecords: (messages) =>

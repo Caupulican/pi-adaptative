@@ -678,23 +678,23 @@ export class AwayChannelHosts {
 					error: safeErrorMessage(error),
 				}),
 		});
-		const unsubscribeActivity = session.subscribe((event) => {
-			if (event.type === "agent_end") for (const listener of activity) listener();
-		});
+		const notifyActivity = () => {
+			for (const listener of activity) listener();
+		};
+		const unsubscribeActivity = session.subscribeForegroundActivity(notifyActivity);
 		const unsubscribe = () => {
 			unsubscribeWarnings();
 			unsubscribeSpend();
 			unsubscribeActivity();
 		};
 		// An owner turn's end in the phone session wakes the channels core like a child turn's.
-		const unsubscribeOwner = owner?.session.subscribe((event) => {
-			if (event.type === "agent_end") for (const listener of activity) listener();
-		});
+		const unsubscribeOwner = owner?.session.subscribeForegroundActivity(notifyActivity);
 		// The reason each notice was last reported in; a cleared notice is reported again when it returns.
 		const notices = new Map<string, string>();
 		const channelsHost = new SessionChannels({
 			getAgentDir: () => agentDir,
 			getSessionManager: () => sessionManager,
+			isForegroundBusy: () => session.getForegroundActivity().busy,
 			// A third party's turn runs in the child session, on its model.
 			turnAllowance: (maxUsedPercent) => session.ownerChannel.quotaAllowance(maxUsedPercent),
 			// The owner's words run in the phone session; a third party's in the child session, as before.
@@ -787,8 +787,8 @@ export class AwayChannelHosts {
 	 */
 	private async closeHost(host: AwayChannelHost): Promise<void> {
 		try {
-			await host.session.abort("channel host closing");
-			await host.owner?.session.abort("channel host closing");
+			await host.session.abort("channel host closing", { ordinaryWork: "preserve" });
+			await host.owner?.session.abort("channel host closing", { ordinaryWork: "preserve" });
 			await host.channels.stop();
 		} finally {
 			host.unsubscribe();

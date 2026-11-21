@@ -1,7 +1,11 @@
 import { resolveCatalogPricing } from "../models.ts";
 import { requestBoundedAccountJson } from "../providers/account-request.ts";
 import { ANTIGRAVITY_CLIENT_CONFIG } from "../providers/antigravity-client-config.generated.ts";
-import { gemini4ArgonThinkingMetadata, isGemini4ArgonModel } from "../providers/google-model-family.ts";
+import {
+	antigravityNamedVariant,
+	gemini4ArgonThinkingMetadata,
+	isGemini4ArgonModel,
+} from "../providers/google-model-family.ts";
 import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
 import { isRecord } from "./value-guards.ts";
 
@@ -50,6 +54,10 @@ export const REVIEWED_ANTIGRAVITY_INSTALLATIONS = Object.freeze([
 	Object.freeze({
 		version: "1.5.9",
 		sha256: "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43",
+	}),
+	Object.freeze({
+		version: "1.5.12",
+		sha256: "94104f028e6962fa2f71d393a7ae27d835ceba1c4898422a103e22c6a5fd6828",
 	}),
 ]);
 
@@ -116,15 +124,6 @@ function antigravityCatalogLevelName(value: AntigravityCatalogLevel): "low" | "m
 		case 100:
 			return "xhigh";
 	}
-}
-
-/** Match the longest variant suffix. `-xhigh` also ends in `-high`. */
-function antigravityNamedVariant(id: string): "low" | "medium" | "high" | "xhigh" | undefined {
-	if (id.endsWith("-xhigh")) return "xhigh";
-	if (id.endsWith("-low")) return "low";
-	if (id.endsWith("-medium")) return "medium";
-	if (id.endsWith("-high")) return "high";
-	return undefined;
 }
 
 function antigravityThinkingPreset(

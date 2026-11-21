@@ -4,7 +4,6 @@
  * stronger-model ladder) are the session's `SettlementJudges`.
  */
 
-import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
@@ -68,7 +67,6 @@ export interface SessionUnsettledLadderControllerDeps {
 	isHandoff(): boolean;
 	getLastUserRequest(): string;
 	getMessages(): readonly AgentMessage[];
-	findLastAssistantMessage(): AssistantMessage | undefined;
 	getSystemOneController(): SystemOneController | undefined;
 	resolveExpensiveModel(): ReturnType<ModelRouterController["resolveExpensiveModel"]>;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
@@ -131,12 +129,13 @@ export class SessionUnsettledLadderController {
 		if (turnMessages === undefined) return undefined;
 		const window = this.claimWindow(turnOpening, turnMessages);
 		const corrections = await this.rejudgeReleasedClaims();
-		const current = await this.checkAnswerClaims(
-			assistantAnswerText(this.deps.findLastAssistantMessage()),
-			window,
-			corrections,
+		const reply = turnMessages.findLast(
+			(message) => message.role === "assistant" || message.role === "user" || message.role === "toolResult",
 		);
-		if (current) corrections.push(current);
+		if (reply?.role === "assistant" && reply.stopReason === "stop") {
+			const current = await this.checkAnswerClaims(assistantAnswerText(reply), window, corrections);
+			if (current) corrections.push(current);
+		}
 		return corrections.length > 0 ? corrections.join("\n\n") : undefined;
 	}
 
@@ -327,7 +326,7 @@ export class SessionUnsettledLadderController {
 			laneKind: "owner-question-consult",
 			...(input.signal ? { signal: input.signal } : {}),
 		});
-		const consult = reply ? parseConsultReply(reply.text, reply.ref) : undefined;
+		const consult = typeof reply === "object" ? parseConsultReply(reply.text, reply.ref) : undefined;
 		if (consult?.kind !== "answered") return consult;
 		return groundConsultAnswer(this.deps.getSystemOneController(), { consult, ...input });
 	}

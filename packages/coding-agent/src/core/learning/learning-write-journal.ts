@@ -49,6 +49,7 @@ interface JournalDeps {
 	getContextGeneration?(): number;
 	isDisposed(): boolean;
 	warn?(message: string): void;
+	observeLearningReceipt?(receipt: LearningAuditRecord): void;
 }
 
 const INTENT_TYPE = "learning_write_intent";
@@ -366,7 +367,7 @@ export class LearningWriteJournal {
 						: false;
 				if (!current && !published && this.names().length >= MAX_PENDING)
 					throw new Error("Learning publication capacity reached");
-				this.receipts.put(settled);
+				this.retainReceipt(settled);
 				// The sole reconstruction exception restores a settled receipt obligation, never an intent.
 				if (!published && !current) this.write(settled, true);
 				else if (current?.phase === "intent") this.write(settled);
@@ -380,6 +381,11 @@ export class LearningWriteJournal {
 		}
 	}
 
+	private retainReceipt(record: JournalRecord): void {
+		this.receipts.put(record);
+		if (record.receipt) this.deps.observeLearningReceipt?.(record.receipt);
+	}
+
 	private persistOutcome(pending: PendingWrite): void {
 		this.locked(() => {
 			const terminal = this.receipts.get(pending.record.id);
@@ -391,7 +397,7 @@ export class LearningWriteJournal {
 				return;
 			}
 			this.write(pending.record);
-			this.receipts.put(pending.record);
+			this.retainReceipt(pending.record);
 		});
 	}
 
@@ -467,7 +473,7 @@ export class LearningWriteJournal {
 						return false;
 				}
 				// Memory-only publication is process-local. Transfer to durable terminal history first.
-				this.receipts.put(current);
+				this.retainReceipt(current);
 				unlinkSync(this.file(record.id));
 				this.pending.delete(record.id);
 				return true;

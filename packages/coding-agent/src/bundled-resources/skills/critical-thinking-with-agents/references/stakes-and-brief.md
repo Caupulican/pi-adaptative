@@ -20,8 +20,8 @@ Low: no fact present. Elevated: one elevated fact. High: any high fact, or two e
 | Stakes | Hand off | Keep at the root |
 |---|---|---|
 | Low | the whole task, including the decision | reading the proof sheet |
-| Elevated | execution and the first check | the plan, the final check, the report |
-| High | execution only, in narrow slices | the plan, every decision, the final check, the fresh-context review, the quiz offer |
+| Elevated | bounded investigation, repair and verification | cross-task decisions, integration and the report |
+| High | implementation choices within explicit limits | decisions affecting authority, exposure or acceptance, and the required review |
 
 Being wrong is cheap when the change is local, reversible and only the agent's own scope pays for it. It is expensive when the owner or someone else pays: keep that reasoning.
 
@@ -35,9 +35,7 @@ Being wrong is cheap when the change is local, reversible and only the agent's o
 | Out of scope | what must not be touched or decided | `outOfScope` |
 | Sources | where the original ask and evidence live | `refs` |
 
-Ask once with `ask_question` when the done line or the out-of-scope list is missing and the task is non-trivial (more than one file, any stakes fact, or more than one reasonable reading). A one-file, low-stakes edit with an obvious done line does not need the question.
-
-Interview mode: when the first answer still leaves two readings, ask one short question at a time, each with the options you can see, until the done line is a check someone else could run.
+For “audit and fix comments in the loader,” derive the write scope from the loader and its supporting files. The diff, retained comments and reasons give the worker a finish line. If a comment supplies public API documentation, preserve it and continue the other edits. An owner choice becomes relevant if the requested outcome depends on removing that documentation and no existing contract settles what replaces it.
 
 ## Rewrite, do not tweak
 

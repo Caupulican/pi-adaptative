@@ -17,15 +17,7 @@ import {
 
 const TITLE = "Draft the retry limit note twice and keep the better draft";
 const CANDIDATES = ["note-short", "note-long"] as const;
-/** The checks the host adds for a vote it could not judge: one verify step per candidate, named after the vote and it. */
-const CHECKS = CANDIDATES.map((candidate) => `pick-check-${candidate}`);
-
-/**
- * Vote: two steps draft the same note and a vote step keeps one. With System One on, each draft is judged on the vote's
- * criteria; both meet them, so System One names the better one and the vote settles on it. With System One off nothing
- * judges the drafts: the host adds an independent check of each, one check accepts and the other rejects, and the vote
- * settles on the accepted draft. A rejected check of a vote is the vote's answer, so nothing is held for re-planning.
- */
+/** Both drafts are delivered to the root when the comparison is unavailable. Neither path dispatches a verifier. */
 export async function runJourney5PlanVotePhase(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const trace = world.trace;
 	const judged = world.systemOne.enabled;
@@ -36,7 +28,7 @@ export async function runJourney5PlanVotePhase(world: HarnessWorld, session: Age
 	enqueueStepWorker(
 		world,
 		"note-short",
-		reportStep("j5-vote-short-report", { status: "completed", summary: "The retry limit is 3." }),
+		reportStep("j5-vote-short-report", { status: "completed", summary: "The retry limit is 3 (src/limits.ts)." }),
 	);
 	enqueueStepWorker(
 		world,
@@ -46,28 +38,6 @@ export async function runJourney5PlanVotePhase(world: HarnessWorld, session: Age
 			summary: "The retry limit is 3; src/limits.ts sets it as MAX_RETRIES.",
 		}),
 	);
-	if (!judged) {
-		enqueueStepWorker(
-			world,
-			"pick-check-note-short",
-			reportStep("j5-vote-check-short", {
-				status: "completed",
-				summary: "The draft states the limit and does not name the file.",
-				verdict: "rejected",
-				reasonCodes: ["file_not_named"],
-			}),
-		);
-		enqueueStepWorker(
-			world,
-			"pick-check-note-long",
-			reportStep("j5-vote-check-long", {
-				status: "completed",
-				summary: "The draft states the limit and names the file.",
-				verdict: "accepted",
-				reasonCodes: ["limit_and_file_named"],
-			}),
-		);
-	}
 	enqueueRoot(
 		world,
 		...planCallSteps(
@@ -130,51 +100,64 @@ export async function runJourney5PlanVotePhase(world: HarnessWorld, session: Age
 		winner?: string;
 		members: { nodeId: string; status: string }[];
 	};
-	const checkStatus = (id: string) => {
-		const check = plan.nodes[id]?.join;
-		return check && "status" in check.outcome ? check.outcome.status : undefined;
-	};
 	expect(
 		{
 			version: record?.version,
 			checks: record?.nodes.filter((node) => node.kind === "verify").map((node) => node.id),
-			checkResults: CHECKS.map(checkStatus),
 			held: Object.entries(plan.nodes).flatMap(([id, node]) => (node.held ? [id] : [])),
 			vote: joined && { status: joined.status, blocker: joined.blocker },
 			winner: result.winner,
 			members: result.members.map((member) => [member.nodeId, member.status]),
 			closed: plan.closed?.status,
 		},
-		"the vote settled on one draft: named by System One, or by the one accepted check when nothing judged the drafts",
+		"the vote settled in the original version and returned either the chosen draft or the evidence for the root",
 	).toEqual({
-		version: judged ? 1 : 2,
-		checks: judged ? [] : CHECKS,
-		checkResults: judged ? [undefined, undefined] : ["failed", "succeeded"],
+		version: 1,
+		checks: [],
 		held: [],
-		vote: { status: "succeeded", blocker: "none" },
-		winner: "note-long",
-		members: [["note-long", "succeeded"]],
+		vote: { status: judged ? "succeeded" : "partial", blocker: judged ? "none" : "needs_root_answer" },
+		winner: judged ? "note-long" : undefined,
+		members: (judged ? ["note-long"] : CANDIDATES).map((id) => [id, "succeeded"]),
 		closed: "settled",
 	});
 	const reached = world.provider.reached.slice(mark);
 	const seen = updates.flat();
 	expect(
 		{
-			workers: [...CANDIDATES, ...CHECKS].map(
-				(nodeId) => reached.filter((key) => key.startsWith(`${stepTrack(nodeId)}:`)).length,
-			),
+			workers: CANDIDATES.map((nodeId) => reached.filter((key) => key.startsWith(`${stepTrack(nodeId)}:`)).length),
 			checkResults: seen.filter((line) => line.includes("h PLAN_UPDATE,JOIN_DONE")).length,
 			replans: seen.filter((line) => line.includes("h PLAN_UPDATE,REPLAN")).length,
 			done: seen.filter((line) => line.includes("h PLAN_UPDATE,PLAN_DONE")),
-			result: seen.filter((line) => line.startsWith("Result: ") && line.includes("winner")),
+			result: seen.filter((line) => line.startsWith("Result: ") && line.includes("steps combined")),
 		},
-		"each draft and each check ran once, the root was told each check's result and the winner, and was never asked to re-plan",
+		"each draft ran once and the root received the result directly",
 	).toEqual({
-		workers: judged ? [1, 1, 0, 0] : [1, 1, 1, 1],
-		checkResults: judged ? 0 : 2,
+		workers: [1, 1],
+		checkResults: 0,
 		replans: 0,
-		done: ["h PLAN_UPDATE,PLAN_DONE,READ_REPORT"],
-		result: ["Result: succeeded; winner note-long; 1 steps combined."],
+		done: [judged ? "h PLAN_UPDATE,PLAN_DONE,READ_REPORT" : "h PLAN_UPDATE,PLAN_DONE,READ_ALL"],
+		result: [
+			judged ? "Result: succeeded; winner note-long; 1 steps combined." : "Result: partial; 2 steps combined.",
+		],
 	});
+	if (judged) {
+		const comparison = world.systemOne.decoded.find(
+			(request) => request.phase === "j5-vote" && request.questions.best_candidate,
+		);
+		expect(comparison?.state).toMatchObject({
+			criteria: ["States the retry limit", "Names the file that sets it"],
+			candidates: [
+				{ nodeId: "note-short", evidence: expect.stringContaining("The retry limit is 3 (src/limits.ts).") },
+				{ nodeId: "note-long", evidence: expect.stringContaining("MAX_RETRIES") },
+			],
+		});
+	} else {
+		expect(joined).toMatchObject({
+			assurance: "unverified",
+			nextAction: { kind: "ask_root", question: "Read the candidate reports and resolve the inconclusive vote." },
+		});
+		expect(seen).toContain("Gap: The vote received no rubric judgment.");
+		for (const id of CANDIDATES) expect(seen.some((line) => line.startsWith(`Candidate ${id}: `))).toBe(true);
+	}
 	trace.mark("root", "j5.plan-vote");
 }

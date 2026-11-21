@@ -109,7 +109,6 @@ export class RuleHookDelivery {
 	collect(call: RuleHookDeliveryCall): RuleHookBlock[] {
 		const triggered = this.hooks().filter(
 			(hook) =>
-				hook.trigger.kind === "tool-call" &&
 				hook.trigger.tools.includes(call.toolName) &&
 				this.deliversTo(hook) &&
 				(hook.trigger.matches?.({ ...call, packageRoot: this.packageRoot }) ?? true),
@@ -137,18 +136,16 @@ export class RuleHookDelivery {
 	 * pointer to it instead of repeating the rule, and lists no id.
 	 */
 	refusalFor(topic: string, toolCallId: string): RuleHookRefusal | undefined {
-		const hook = this.hooks().find(
-			(candidate) => candidate.topic === topic && candidate.trigger.kind === "preflight",
-		);
+		const hook = this.hooks().find((candidate) => candidate.topic === topic && candidate.trigger.preflight);
 		if (!hook) throw new Error(`Rule hook ${topic} is not a preflight rule.`);
 		if (!this.deliversTo(hook)) return undefined;
 		const messages = this.deps.getMessages();
 		this.forgetEndedBatches(messages);
-		if (deliveredRuleIds(messages).has(hook.id)) return undefined;
 		// The model issued this call before it could read the rule an earlier call of the batch carries.
 		if (this.pending.has(hook.id)) {
 			return { text: `Rule ${hook.id} is delivered with an earlier call of this batch.`, ruleIds: [] };
 		}
+		if (deliveredRuleIds(messages).has(hook.id)) return undefined;
 		// The batch is the last assistant message's. A call it did not request cannot be tracked; the message
 		// scan alone then dedupes, since the refusal result lands before any repeated call can run.
 		const last = messages.findLast((message) => message.role === "assistant");

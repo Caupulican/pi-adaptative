@@ -116,6 +116,13 @@ export function getSpawnedUsageComponents(
  * provider/model identity permits reconstructing their API-equivalent estimate. Cumulative worker
  * reports can contain several models, so their aggregate tokens must never be repriced as one model.
  */
+export interface EffectiveEntryCost {
+	total: number;
+	reportedTotal: number;
+	estimated: boolean;
+	pricingComplete: boolean;
+}
+
 export function resolveEffectiveEntryCost(
 	usage: Usage | undefined,
 	options?: {
@@ -124,8 +131,9 @@ export function resolveEffectiveEntryCost(
 		kind?: "own" | "spawned" | "semantic";
 		perResponse?: boolean;
 		costStatus?: "catalog_priced" | "unpriced";
+		priceKnown?: true;
 	},
-): { total: number; reportedTotal: number; estimated: boolean } | undefined {
+): EffectiveEntryCost | undefined {
 	const rawTotal = usage?.cost?.total;
 	if (typeof rawTotal !== "number" || !Number.isFinite(rawTotal) || rawTotal < 0 || !usage) return undefined;
 	if (
@@ -134,19 +142,32 @@ export function resolveEffectiveEntryCost(
 		)
 	)
 		return undefined;
-	const mayEstimate = options?.provider === "google-antigravity" || options?.costStatus === "unpriced";
-	if (rawTotal !== 0 || !usage || !mayEstimate || (options?.kind === "spawned" && !options.perResponse))
-		return {
-			total: rawTotal,
-			reportedTotal: rawTotal,
-			estimated: usage?.cost?.estimate === "base-rates" || options?.provider === "google-antigravity",
-		};
-	const model =
-		options?.model && options.provider ? resolveCatalogPricing(options.provider, options.model) : undefined;
-	if (!model) return { total: rawTotal, reportedTotal: rawTotal, estimated: usage.cost.estimate === "base-rates" };
-	const priced = { ...usage, cost: { ...usage.cost } };
-	const total = calculateCost(model, priced).total;
-	return { total, reportedTotal: rawTotal, estimated: total > 0 || usage.cost.estimate === "base-rates" };
+	const singleModel = options?.kind !== "spawned" || options.perResponse === true;
+	const catalog =
+		rawTotal === 0 && singleModel && options?.model && options.provider
+			? resolveCatalogPricing(options.provider, options.model)
+			: undefined;
+	const billedTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	const allTokensCovered = usage.totalTokens <= billedTokens;
+	const noTokens = billedTokens === 0 && usage.totalTokens === 0;
+	const catalogTotal = catalog ? calculateCost(catalog, { ...usage, cost: { ...usage.cost } }).total : undefined;
+	const canReconstruct = options?.provider === "google-antigravity" || options?.costStatus === "unpriced";
+	const total = canReconstruct && catalogTotal !== undefined ? catalogTotal : rawTotal;
+	const supportedEstimate = catalog !== undefined && !catalog.costDefaulted && allTokensCovered;
+	return {
+		total,
+		reportedTotal: rawTotal,
+		estimated:
+			total !== rawTotal ||
+			usage.cost.estimate === "base-rates" ||
+			(options?.provider === "google-antigravity" && (rawTotal > 0 || !singleModel)),
+		pricingComplete:
+			rawTotal > 0 ||
+			noTokens ||
+			options?.priceKnown === true ||
+			options?.costStatus === "catalog_priced" ||
+			(supportedEstimate && (canReconstruct || catalogTotal === 0)),
+	};
 }
 
 /** One shared pricing rule for cumulative receipts and their conserved per-response components. */
@@ -155,7 +176,7 @@ export function resolveSpawnedUsageComponents(
 	timestamp: string,
 ): {
 	part: SessionEntryUsageComponent;
-	cost: { total: number; reportedTotal: number; estimated: boolean };
+	cost: EffectiveEntryCost;
 }[] {
 	return getSpawnedUsageComponents(report, timestamp).flatMap((part) => {
 		const cost = resolveEffectiveEntryCost(part.usage, {
@@ -197,7 +218,7 @@ export type SemanticAccountingReport = SemanticUsageReport | RecoveredDirectUsag
 export function resolveSemanticUsageEntry(entry: SessionEntry):
 	| {
 			report: SemanticAccountingReport;
-			cost: { total: number; reportedTotal: number; estimated: boolean };
+			cost: EffectiveEntryCost;
 	  }
 	| undefined {
 	if (entry.type !== "custom" || entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) return undefined;
@@ -208,6 +229,7 @@ export function resolveSemanticUsageEntry(entry: SessionEntry):
 		provider: report.provider,
 		kind: "semantic",
 		costStatus: report.costStatus,
+		priceKnown: report.priceKnown,
 	});
 	return cost ? { report, cost } : undefined;
 }

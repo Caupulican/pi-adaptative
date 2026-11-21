@@ -6,14 +6,21 @@
  */
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import type { OrdinaryWorkStatusSnapshot } from "../autonomy-status/ordinary-work.ts";
 import type { ChannelChoice, ChannelProvider } from "../gateways/channel-provider.ts";
 import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
-import { digest } from "./channel-journal.ts";
+import { type ChannelBatchRecord, type ChannelDraftRecord, digest, isDraftOpen } from "./channel-journal.ts";
 import type { InboundChannelEvent } from "./channel-message.ts";
-import type { OwnerChannelControl, OwnerControl, OwnerDecisionBy, OwnerDraftView } from "./owner-channel-types.ts";
+import type {
+	OwnerChannelControl,
+	OwnerControl,
+	OwnerDecisionBy,
+	OwnerDraftView,
+	OwnerWaitingView,
+} from "./owner-channel-types.ts";
 
 const DRAFT_ID = /^draft-[0-9a-f]{16}$/;
 /** Drafts one `status` reply lists; the rest are counted. */
@@ -47,6 +54,68 @@ export function draftInScope(
 		ref !== undefined &&
 		openerOf(ref) === senderDigest
 	);
+}
+
+export function ownerBatchesByRef(batches: readonly ChannelBatchRecord[], onlyRef?: string) {
+	const index = new Map<string, ChannelBatchRecord | undefined>();
+	for (const batch of batches) {
+		const ref = batch.id;
+		if (onlyRef !== undefined && onlyRef !== ref) continue;
+		index.set(ref, batch.owner === true && !index.has(ref) ? batch : undefined);
+	}
+	return index;
+}
+
+type OwnerStatusControl = Pick<OwnerChannelControl, "drafts" | "waiting" | "ordinaryWork">;
+
+export function readOwnerControlStatus(
+	session: { ownerControl?(): OwnerStatusControl | undefined },
+	channel: string,
+	journal: { readonly batches: readonly ChannelBatchRecord[]; readonly drafts: readonly ChannelDraftRecord[] },
+	event: Pick<InboundChannelEvent, "address" | "conversationKey">,
+	senderDigest: string,
+) {
+	let drafts: readonly OwnerDraftView[] = [];
+	let calls: OwnerWaitingView | undefined;
+	let ordinaryWork: OrdinaryWorkStatusSnapshot | undefined;
+	let control: OwnerStatusControl | undefined;
+	const batches = ownerBatchesByRef(journal.batches);
+	const scopedBatch = (sessionId: string, ref: string): ChannelBatchRecord | undefined => {
+		const batch = batches.get(ref);
+		return batch?.allowlisted === true &&
+			(batch.ownerSessionId ?? batch.sessionId) === sessionId &&
+			batch.conversationKey === event.conversationKey &&
+			batch.address === event.address &&
+			batch.senderDigest === senderDigest
+			? batch
+			: undefined;
+	};
+	try {
+		control = session.ownerControl?.();
+		const openerOf = (ref: string) => batches.get(ref)?.senderDigest;
+		drafts = (control?.drafts() ?? []).filter(
+			(view) => view.state === "pending" && draftInScope(view, channel, senderDigest, openerOf),
+		);
+		calls = control?.waiting();
+	} catch {
+		// A failed session read may still leave individual status facts available.
+	}
+	try {
+		ordinaryWork = control?.ordinaryWork?.(channel, (sessionId, ref) => scopedBatch(sessionId, ref) !== undefined);
+	} catch {
+		// The recovery ledger can be unavailable independently of draft and waiting-call status.
+	}
+	const sessionId = calls?.sessionId;
+	const hasUnconfirmedReply =
+		sessionId !== undefined &&
+		journal.drafts.some(
+			(draft) =>
+				isDraftOpen(draft) &&
+				draft.conversationKey === event.conversationKey &&
+				draft.address === event.address &&
+				scopedBatch(sessionId, draft.batchId)?.state === "drafted",
+		);
+	return { drafts, calls, ordinaryWork, hasUnconfirmedReply };
 }
 
 function headLine(view: OwnerDraftView): string {

@@ -73,6 +73,7 @@ import { isNestedCallPurpose, type NestedCallPurpose } from "../tools/nested-too
 import type { TurnAuthority, TurnOriginKind } from "../turn-origin.ts";
 import type { SessionWatchSource, SessionWatchStatus } from "../watches/session-watch-ledger.ts";
 import type { SessionWatchView } from "../watches/session-watch-service.ts";
+import type { OrdinaryWorkStatusSnapshot } from "./ordinary-work.ts";
 import type { RunToolManifest } from "./tool-manifest.ts";
 
 /** Items each list keeps; the rest are counted in its `omitted`. */
@@ -384,6 +385,7 @@ export interface SessionAutonomyStatus {
 	readonly at: string;
 	readonly sessionId: string;
 	readonly goalContinuation: StatusSection<GoalContinuationStatus>;
+	readonly ordinaryWork?: StatusSection<OrdinaryWorkStatusSnapshot>;
 	readonly plans: StatusSection<PlansStatus>;
 	readonly review: StatusSection<ReviewStatus>;
 	readonly sessionSave: StatusSection<SessionSaveStatus>;
@@ -423,6 +425,7 @@ type UsageWindow = Pick<
 export interface AutonomyStatusSources {
 	readonly nowMs: number;
 	readonly sessionId: string;
+	readonly ordinaryWork?: { readStatus(): OrdinaryWorkStatusSnapshot };
 	/** Whether the session holds routines at all (`routineScope`: a root's own, a bot's own watches). */
 	readonly holdsRoutines: boolean;
 	readonly sessionManager: Pick<
@@ -922,6 +925,9 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		at: new Date(nowMs).toISOString(),
 		sessionId: sources.sessionId,
 		goalContinuation,
+		...(sources.ordinaryWork
+			? { ordinaryWork: await section(() => ({ status: "available", value: sources.ordinaryWork!.readStatus() })) }
+			: {}),
 		plans,
 		review,
 		sessionSave,

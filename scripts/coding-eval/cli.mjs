@@ -1,7 +1,7 @@
 // Offline plan by default. Paid execution requires an explicit run and a fresh private output directory.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -31,6 +31,25 @@ function integer(value, min, max, name) {
 	if (!/^\d+$/.test(value) || !Number.isSafeInteger(n) || n < min || n > max)
 		throw new Error(`Invalid --${name} (expected ${min}–${max})`);
 	return n;
+}
+
+function measuredSourceDigest() {
+	const paths = execFileSync("git", [
+		"ls-files", "-z", "--cached", "--others", "--deduplicate", "--exclude-standard", "--",
+		":(glob)packages/*/src/**", ":(glob)packages/*/package.json", "vendor", "package.json", "package-lock.json",
+		"scripts/coding-eval", "scripts/lib/fixture-module.mjs", "scripts/lib/live-native-driver.mjs", "scripts/lib/live-session-observer.mjs",
+	], {cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024}).split("\0").filter(Boolean).sort();
+	const digest = createHash("sha256");
+	for (const path of paths) {
+		const name = join(root, path);
+		const stat = lstatSync(name, {throwIfNoEntry: false});
+		if (!stat) continue;
+		if (!stat.isSymbolicLink() && !stat.isFile()) throw new Error(`Cannot fingerprint evaluation source ${path}`);
+		const bytes = stat.isSymbolicLink() ? readlinkSync(name, {encoding: "buffer"}) : readFileSync(name);
+		const kind = stat.isSymbolicLink() ? "link" : "file";
+		digest.update(JSON.stringify([path, kind, createHash("sha256").update(bytes).digest("hex")])).update("\n");
+	}
+	return digest.digest("hex");
 }
 
 async function main() {
@@ -83,7 +102,9 @@ async function main() {
 	for (const name of ["corpus.mjs", "../lib/live-native-driver.mjs", "../lib/fixture-module.mjs"])
 		digest.update(readFileSync(new URL(name, import.meta.url)));
 	const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+	const sourceSha256 = measuredSourceDigest();
 	const manifest = {
+		sourceSha256,
 		schemaVersion: 1,
 		corpusVersion,
 		corpusSha256: digest.digest("hex"),
@@ -111,7 +132,10 @@ async function main() {
 	const abort = () => controller.abort();
 	process.once("SIGINT", abort);
 	process.once("SIGTERM", abort);
-	const report = (active = null) => saveJson(join(out, "report.json"), { ...summarize(trials, rows), active });
+	let finalSourceSha256 = null;
+	const report = (active = null) => saveJson(join(out, "report.json"), {
+		...summarize(trials, rows), active, sourceSha256, finalSourceSha256,
+	});
 	try {
 		report();
 		for (const trial of trials) {
@@ -130,6 +154,9 @@ async function main() {
 				`${trial.id}  ${row.status}  ${row.elapsedMs} ms  ${row.costUsd === null ? "unpriced" : row.costUsd + " USD"}`,
 			);
 		}
+		finalSourceSha256 = measuredSourceDigest();
+		report();
+		if (finalSourceSha256 !== sourceSha256) throw new Error("Evaluation source changed during the study. Run results span different source trees.");
 		console.log(JSON.stringify(summarize(trials, rows).arms, null, 2));
 		console.log(join(out, "report.json"));
 		process.exitCode = controller.signal.aborted ? 130 : rows.some((r) => r.status !== "accepted") ? 1 : 0;

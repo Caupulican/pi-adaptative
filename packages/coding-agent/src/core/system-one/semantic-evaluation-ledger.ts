@@ -347,6 +347,8 @@ const SYSTEM_ONE_STAGE_LABELS: Readonly<Record<ValidationStage, string>> = {
 	completion: "completion",
 	completion_challenge: "completion challenge",
 	claim_delivery: "answer claims",
+	ordinary_work_stop: "ordinary work stop",
+	reporting_requirement: "confirmed reporting requirement",
 	code_duplicate: "duplicate code",
 	unsettled_item: "unsettled findings",
 	route_choice: "model routing",

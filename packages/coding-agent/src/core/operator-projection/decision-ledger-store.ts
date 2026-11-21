@@ -10,7 +10,14 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { readCacheExpiryPolicy } from "../context/cache-observation-recorder.ts";
+import type { CacheExpiryPolicy } from "../context/cache-survival.ts";
 import { constructSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
+import {
+	initializeOwnerPreferenceAttestations,
+	OwnerPreferenceAttestationStore,
+} from "../memory/owner-preference-attestations.ts";
+import { initializeOrdinaryWorkSchema, OrdinaryWorkStore } from "../ordinary-work-store.ts";
 import { getParentPid } from "../process-identity.ts";
 import { getSessionRole, type SessionRole } from "../session-role.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
@@ -22,6 +29,7 @@ import type {
 	SemanticUsageReference,
 } from "../system-one/semantic-evaluation-ledger.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
+import { cacheObservationRows } from "./cache-observation-row.ts";
 import type {
 	DecisionStage,
 	DecisionStageSink,
@@ -72,6 +80,8 @@ export interface DecisionLedgerSessionRow {
  * intact. The substrate the cache-survival estimator learns each provider's cache lifetime from.
  */
 export interface CacheObservationRow {
+	readonly cachePolicy?: CacheExpiryPolicy;
+	readonly measuredCachePolicy?: CacheExpiryPolicy;
 	readonly sessionId: string;
 	readonly cwd: string;
 	readonly lane: string;
@@ -216,6 +226,8 @@ const STAGE_SET: ReadonlySet<string> = new Set([
 
 export class DecisionLedgerStore {
 	private readonly database: SqliteDatabase;
+	private ordinaryWorkStore?: OrdinaryWorkStore;
+	private ownerPreferenceStore?: OwnerPreferenceAttestationStore;
 	private readonly attribution: DecisionLedgerAttribution;
 	private readonly attributedSessions = new Set<string>();
 
@@ -403,6 +415,8 @@ export class DecisionLedgerStore {
 		`);
 				database.exec("BEGIN IMMEDIATE");
 				try {
+					initializeOrdinaryWorkSchema(database);
+					initializeOwnerPreferenceAttestations(database);
 					// Serialize the schema check and alteration across every process sharing this ledger.
 					// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
 					const columns = new Set(
@@ -411,11 +425,14 @@ export class DecisionLedgerStore {
 							.all()
 							.map((column) => column.name),
 					);
-					for (const column of ["lineage", "holder"]) {
+					for (const column of ["lineage", "holder", "cache_policy", "measured_cache_policy"]) {
 						if (!columns.has(column)) database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
 					}
 					database.exec(
 						"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
+					);
+					database.exec(
+						"CREATE INDEX IF NOT EXISTS cache_observations_measured_at ON cache_observations (observed_at) WHERE measured_cache_policy IS NOT NULL",
 					);
 					const evaluationColumns = new Set(
 						database
@@ -464,6 +481,16 @@ export class DecisionLedgerStore {
 				return database;
 			},
 		);
+	}
+
+	get ownerPreferences(): OwnerPreferenceAttestationStore {
+		this.ownerPreferenceStore ??= new OwnerPreferenceAttestationStore(this.database);
+		return this.ownerPreferenceStore;
+	}
+
+	get ordinaryWork(): OrdinaryWorkStore {
+		this.ordinaryWorkStore ??= new OrdinaryWorkStore(this.database);
+		return this.ordinaryWorkStore;
 	}
 
 	/**
@@ -727,8 +754,8 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare(
 				`INSERT INTO cache_observations
-				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind, lineage, holder)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind, lineage, holder, cache_policy, measured_cache_policy)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				row.sessionId,
@@ -743,6 +770,8 @@ export class DecisionLedgerStore {
 				row.divergenceKind ?? null,
 				row.lineage ?? null,
 				row.holder ?? null,
+				row.cachePolicy ? JSON.stringify(row.cachePolicy) : null,
+				row.measuredCachePolicy ? JSON.stringify(row.measuredCachePolicy) : null,
 			);
 	}
 
@@ -992,16 +1021,16 @@ export class DecisionLedgerStore {
 		return out;
 	}
 
-	/**
-	 * Every cache observation on a provider's lanes since `sinceMs`, oldest first: a lane's survival
-	 * curve pools from its model and provider peers, so it reads the whole provider.
-	 */
-	cacheObservationsForProvider(provider: string, sinceMs: number): CacheObservationRow[] {
+	measuredCacheObservationsForProvider(provider: string, sinceMs: number): CacheObservationRow[] {
+		const providerField = Buffer.from(`\u0000${provider}\u0000`);
 		const rows = this.database
-			.prepare("SELECT * FROM cache_observations WHERE observed_at >= ? ORDER BY observed_at, id")
-			.all(Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER);
-		// Lane keys join api, provider and model with NUL, which SQL string matching does not handle reliably.
-		return this.cacheObservationRows(rows).filter((row) => row.lane.split("\u0000")[1] === provider);
+			.prepare(
+				`SELECT * FROM cache_observations WHERE measured_cache_policy IS NOT NULL AND observed_at >= ?
+				 AND substr(CAST(lane AS BLOB), instr(CAST(lane AS BLOB), x'00'), ?) = ?
+				 ORDER BY observed_at, id`,
+			)
+			.all(Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER, providerField.length, providerField);
+		return cacheObservationRows(rows).filter((row) => row.measuredCachePolicy !== undefined);
 	}
 
 	/**
@@ -1033,15 +1062,21 @@ export class DecisionLedgerStore {
 	}
 
 	/** A session lane's most recent observation: where a resumed session's next gap is measured from. */
-	latestCacheObservation(sessionId: string, lane: string): { observedAt: number; promptTokens: number } | undefined {
+	latestCacheObservation(
+		sessionId: string,
+		lane: string,
+	): { observedAt: number; promptTokens: number; cachePolicy?: CacheExpiryPolicy } | undefined {
 		const row = this.database
 			.prepare(
-				"SELECT observed_at, prompt_tokens FROM cache_observations WHERE session_id = ? AND lane = ? ORDER BY observed_at DESC LIMIT 1",
+				"SELECT observed_at, prompt_tokens, cache_policy FROM cache_observations WHERE session_id = ? AND lane = ? ORDER BY observed_at DESC, id DESC LIMIT 1",
 			)
 			.get(sessionId, lane);
 		const observedAt = asInteger(row?.observed_at);
 		const promptTokens = asInteger(row?.prompt_tokens);
-		return observedAt !== undefined && promptTokens !== undefined ? { observedAt, promptTokens } : undefined;
+		const cachePolicy = readCacheExpiryPolicy(row?.cache_policy, lane);
+		return observedAt !== undefined && promptTokens !== undefined
+			? { observedAt, promptTokens, ...(cachePolicy ? { cachePolicy } : {}) }
+			: undefined;
 	}
 
 	/**
@@ -1074,50 +1109,7 @@ export class DecisionLedgerStore {
 		const rows = this.database
 			.prepare("SELECT * FROM cache_observations WHERE lane = ? ORDER BY observed_at DESC LIMIT ?")
 			.all(lane, Math.max(1, Math.floor(limit)));
-		return this.cacheObservationRows(rows);
-	}
-
-	private cacheObservationRows(rows: readonly Record<string, unknown>[]): CacheObservationRow[] {
-		const out: CacheObservationRow[] = [];
-		for (const row of rows) {
-			const sessionId = asText(row.session_id);
-			const cwd = asText(row.cwd);
-			const observedAt = asInteger(row.observed_at);
-			const promptTokens = asInteger(row.prompt_tokens);
-			const cacheReadTokens = asInteger(row.cache_read_tokens);
-			const lane = asText(row.lane);
-			const prefixIntact = asText(row.prefix_intact);
-			if (
-				lane === undefined ||
-				sessionId === undefined ||
-				cwd === undefined ||
-				observedAt === undefined ||
-				promptTokens === undefined ||
-				cacheReadTokens === undefined ||
-				(prefixIntact !== "true" && prefixIntact !== "false" && prefixIntact !== "unknown")
-			)
-				continue;
-			const gapMs = asInteger(row.gap_ms);
-			const retained = typeof row.retained === "number" ? row.retained : undefined;
-			const divergenceKind = asText(row.divergence_kind);
-			const lineage = asText(row.lineage);
-			const holder = asText(row.holder);
-			out.push({
-				sessionId,
-				cwd,
-				lane,
-				observedAt,
-				promptTokens,
-				cacheReadTokens,
-				prefixIntact,
-				...(gapMs !== undefined ? { gapMs } : {}),
-				...(retained !== undefined ? { retained } : {}),
-				...(divergenceKind !== undefined ? { divergenceKind } : {}),
-				...(lineage !== undefined ? { lineage } : {}),
-				...(holder === "owner" || holder === "tool" || holder === "host" ? { holder } : {}),
-			});
-		}
-		return out;
+		return cacheObservationRows(rows);
 	}
 
 	/** Records a route System One decided; the executor is noted once the route ran. */

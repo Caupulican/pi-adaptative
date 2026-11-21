@@ -97,13 +97,13 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			// Summaries start once the foreground has been quiet for its window, which the journey lets pass.
 			await icmEndForegroundQuiet(world);
 			// Settled: both messages are logged and the scheduler has seen them, and the one model-generated leaf (the user message,
-			// id 0) is blocked by the refusal and not yet due a retry. The other message is an exact leaf and needs no model.
+			// id 0) remains deferred without consuming an attempt. The other message is an exact leaf and needs no model.
 			const settled = (): boolean => {
 				const rootRaw = world.io.peekFile(caseStore.rootFile);
 				const meta = world.guard.peekSqlite(caseStore.queueDatabase, "SELECT body FROM meta WHERE id = 1");
 				const work = world.guard.peekSqlite(
 					caseStore.queueDatabase,
-					"SELECT level, ordinal, status, retry_after, reason FROM work",
+					"SELECT level, ordinal, status, lane, attempts, reason FROM work",
 				);
 				if (rootRaw === undefined || meta?.length !== 1 || work === undefined) return false;
 				const state = JSON.parse(String(meta[0]!.body)) as {
@@ -119,9 +119,10 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					work.length === 1 &&
 					row?.level === 0 &&
 					row.ordinal === 0 &&
-					row.status === "blocked" &&
-					Number(row.retry_after) >= state.generation &&
-					row.reason === warning
+					row.status === "ready" &&
+					row.lane === 1 &&
+					row.attempts === 0 &&
+					row.reason === null
 				);
 			};
 			await withDeadline(trace, `${label} refused node settled`, world.io.waitForMutation(settled), 60_000);
@@ -146,7 +147,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				world.warnings.slice(warningMark).filter((message) => message === warning),
 				`${label}: the refusal is reported once`,
 			).toEqual([warning]);
-			if (label === "icm-missing-summary-model") await verifyRangeJourney(world, created, caseAgentDir, warning);
+			if (label === "icm-missing-summary-model") await verifyRangeJourney(world, created, caseAgentDir);
 			expect(await world.disposeSessionInBody(created.session)).toBeUndefined();
 		};
 		await refusedSummaryCase(

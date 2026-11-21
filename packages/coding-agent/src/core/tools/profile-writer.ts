@@ -6,6 +6,7 @@ import type {
 	TaskProfileInspection,
 	TaskProfileWriterPort,
 } from "../orchestration/task-profile-writer.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
 import type { OrchestrationPanelModel } from "./orchestration-panel.ts";
 
@@ -42,7 +43,7 @@ export function bindTaskProfileWriter(
 
 export function createDelegateProfileParameterSchemas() {
 	return {
-		task: Type.Optional(Type.String({ minLength: 1, maxLength: 3_500 })),
+		task: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_WORKER_BRIEF_CHARS })),
 		baseProfileId: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH })),
 	};
 }

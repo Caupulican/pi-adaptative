@@ -125,7 +125,7 @@ export function planCallSteps(
 				}
 				onAccepted(result.text);
 			},
-			reply: { content: [{ type: "text", text: "The plan is running." }] },
+			reply: { content: [{ type: "text", text: "The plan call was accepted." }] },
 		},
 	];
 }

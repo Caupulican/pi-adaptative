@@ -3,19 +3,20 @@ import path from "node:path";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
+	agentMemoryDir,
 	botsDir,
 	channelsDir,
 	configFile,
 	getWorkRoot,
+	knowledgeDatabaseFile,
 	okfMemoryDir,
-	projectMemoryRoot,
 	remoteDir,
 	sessionsDir,
 	stateDir,
 } from "../agent-paths.ts";
 import { getMachineCredentialBootstrapFiles } from "../secrets/credential-machine-session.ts";
 import type { ProtectedWritePaths } from "./edge-policy.ts";
-import { findRepositoryGitPaths } from "./path-scope.ts";
+import { findRepositoryGitPaths, isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 
 /** The project's own harness settings file: denied to a lane's file tools, but a file of the project, not harness storage. */
 export function projectLaneSettingsPath(cwd: string): string {
@@ -51,6 +52,15 @@ export function machineCredentialStorePaths(home: string = homedir()): string[] 
 	];
 }
 
+/** The private memory tree and SQLite's physical database and journal files if the owner relocated it with a link. */
+export function privateMemoryPaths(agentDir: string): string[] {
+	const directory = agentMemoryDir(agentDir);
+	const database = safeRealpathSync(knowledgeDatabaseFile(agentDir));
+	return isPathWithinScope(database, safeRealpathSync(directory))
+		? [directory]
+		: [directory, database, `${database}-journal`, `${database}-wal`, `${database}-shm`];
+}
+
 /**
  * Everything a lane (worker, research, managed or proactivity read authority) must never read: the harness's own
  * private storage, the owner's secret-manager bootstrap files and the machine's credential stores.
@@ -62,7 +72,7 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		configFile(agentDir, "auth.json"),
 		configFile(agentDir, "MEMORY.md"),
 		configFile(agentDir, "USER.md"),
-		projectMemoryRoot(agentDir),
+		...privateMemoryPaths(agentDir),
 		okfMemoryDir(agentDir),
 		configFile(agentDir, "settings.json"),
 		configFile(agentDir, "models.json"),

@@ -4,9 +4,11 @@
  */
 
 import type { ChannelCapabilities, ChannelMessageKind } from "../gateways/channel-provider.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { type ChannelPendingMessage, digest } from "./channel-journal.ts";
+import { type BatchBranchSource, type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
+import { type ChannelBatchRecord, type ChannelPendingMessage, digest } from "./channel-journal.ts";
 
 const MAX_ID_CHARS = 256;
 const MAX_ADDRESS_CHARS = 1024;
@@ -18,6 +20,17 @@ const MAX_LABEL_CHARS = 120;
 export const MAX_REPLY_CHARS = 8000;
 const DEFAULT_MAX_MESSAGE_CHARS = 4000;
 const MAX_REPLY_PARTS = 10;
+
+export function readChannelReply(
+	source: BatchBranchSource,
+	name: string,
+	batch: ChannelBatchRecord,
+	now: number,
+): BatchOutcome {
+	const outcome = readBatchOutcome(source, name, batch, now);
+	if (outcome.kind !== "answered" || !outcome.truncated) return outcome;
+	return { ...outcome, text: `${interfaceText().notices.channels.partialReply}\n\n${outcome.text}` };
+}
 
 /** A validated inbound event, before admission decides whether it may wake. */
 export interface InboundChannelEvent {

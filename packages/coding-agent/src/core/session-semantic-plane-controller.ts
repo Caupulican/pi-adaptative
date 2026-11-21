@@ -183,6 +183,10 @@ export class SessionSemanticPlaneController {
 		return engine ? createRetentionDecisionEngine(engine, this.health) : undefined;
 	}
 
+	peekDecisionLedger(): DecisionLedgerStore | undefined {
+		return this.deps.isDisposed() ? undefined : this.decisionLedger;
+	}
+
 	/**
 	 * The decision ledger, opened lazily. A ledger that cannot open (read-only state dir, driver
 	 * missing) is reported once and the session runs with process-local records rather than failing.

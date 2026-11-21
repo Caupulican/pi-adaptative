@@ -3,6 +3,7 @@ import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import { runAgentLoop } from "../src/kernel/agent-loop.ts";
 import { convertToLlm } from "../src/kernel/messages.ts";
+import { createToolFailureMemoryTracker } from "../src/kernel/tool-failure-memory.ts";
 import { calls, ScriptedProvider, text } from "./fixtures/harness/scripted-provider.ts";
 
 it("teaches the first rejected spawn on the wire and keeps the same advertised start shape on retry", async () => {
@@ -45,6 +46,49 @@ it("teaches the first rejected spawn on the wire and keeps the same advertised s
 			]),
 		);
 		expect(runWorkerDelegation).not.toHaveBeenCalled();
+	} finally {
+		await provider.dispose();
+	}
+});
+
+it.each(["worker-1", "worker-2"])("closes a refused review only for the corrected lane (%s)", async (laneId) => {
+	const tool = wrapToolDefinition(
+		createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			runWorkerDelegation: async () => ({ started: false }),
+			status: {
+				getLaneRecords: () => [],
+				getWorkerClaimSnapshot: () => undefined,
+				acknowledgeWorkerReview: (requestId) => ({ ok: true, requestId, reviewedAt: "2026-11-19T17:28:00Z" }),
+			},
+		}),
+	);
+	const provider = new ScriptedProvider();
+	const model = provider.model("root");
+	provider.enqueue(
+		model.id,
+		calls("invalid-review", [
+			{ id: "bad", name: "delegate", arguments: { action: "review", laneId: "worker-1", note: "checked" } },
+		]),
+		calls("review", [{ id: "ok", name: "delegate", arguments: { action: "review", laneId } }]),
+		text("done", "Done."),
+	);
+	provider.register();
+	try {
+		const messages = await runAgentLoop(
+			[{ role: "user", content: "Review this worker.", timestamp: 1 }],
+			{ systemPrompt: "Coordinate the task.", messages: [], tools: [tool] },
+			{ model, convertToLlm, maxProviderTurns: 3 },
+			() => {},
+		);
+		await provider.waitForProducers();
+		provider.assertDrained();
+		const results = messages.filter((message) => message.role === "toolResult");
+		expect(results.map((result) => Boolean(result.isError))).toEqual([true, false]);
+		expect(createToolFailureMemoryTracker(messages).size).toBe(laneId === "worker-1" ? 0 : 1);
+		expect(
+			createToolFailureMemoryTracker([...messages, { role: "user", content: "New task.", timestamp: 2 }]).size,
+		).toBe(0);
 	} finally {
 		await provider.dispose();
 	}

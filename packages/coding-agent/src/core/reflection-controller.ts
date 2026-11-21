@@ -1,30 +1,15 @@
-/**
- * Root-session reflection cue + explicit learning-write controller.
- *
- * Automatic reflection is a hidden cue in the root orchestrator's ordinary provider turn. This
- * controller supplies the isolated runner and original evidence to memory-owned automatic knowledge
- * collection. Legacy reflection scheduling remains separate. The structured reflection pass remains
- * an explicit compatibility/application seam for owner-invoked callers. Every
- * durable effect goes through the bundled memory tool, the session log (via deps), or the skills dir.
- */
+/** Root reflection cues and explicit durable learning; memory owns collection, and admitted effects use canonical storage. */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { streamSimple } from "@caupulican/pi-ai/stream";
-import type {
-	Api,
-	AssistantMessage,
-	Message,
-	Model,
-	SimpleStreamOptions,
-	TextContent,
-	Usage,
-} from "@caupulican/pi-ai/types";
+import { ProviderResponseAccountScope, streamSimple } from "@caupulican/pi-ai/stream";
+import type { Api, AssistantMessage, Message, Model, SimpleStreamOptions, Usage } from "@caupulican/pi-ai/types";
 import type { Agent } from "../kernel/agent.ts";
 import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
+import { assistantResultText, isAssistantCommentary } from "../kernel/assistant-answer.ts";
 import type { AgentContext, AgentLoopConfig, AgentStreamOptions } from "../kernel/index.ts";
 import { resolveProviderRequestOptions, resolveRequestPreflightMaxTokens } from "../kernel/provider-request-planner.ts";
 import { sealSystemPrompt } from "../kernel/sealed-directives.ts";
@@ -87,6 +72,8 @@ import {
 import { SessionKnowledgeJudge } from "./memory/knowledge-judgment-runner.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { MemoryMutationOutcomeError } from "./memory/memory-mutation-outcome.ts";
+import { createOwnerPreferenceProofMigration } from "./memory/owner-preference-proof-migration.ts";
+import { prepareOwnerPreferenceAttestation } from "./memory/owner-reporting-admission.ts";
 import type {
 	StructuredReflectionApplyResult,
 	StructuredReflectionRollback,
@@ -123,6 +110,7 @@ import type {
 import { withSkillDefinitionLock } from "./skill-mutation.ts";
 import { computeSkillDigest } from "./skill-repair.ts";
 import { MAX_SKILL_NAME_LENGTH, type Skill } from "./skills.ts";
+import type { ReportingRequirementClassifier } from "./system-one/reporting-requirement-admission.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS, runSkillAudit } from "./tools/skill-audit.ts";
 import { withFileLockSync } from "./util/atomic-file.ts";
@@ -161,6 +149,11 @@ export interface ReflectionControllerDeps {
 	getSettingsManager(): ReflectionControllerSettingsSource;
 	/** Session log — audit snapshots and learning-audit reads go through this. */
 	getSessionManager(): SessionManager;
+	observeLearningReceipt?(receipt: LearningAuditRecord): void;
+	getReportingRequirementClassifier?(): ReportingRequirementClassifier | undefined;
+	getOwnerPreferenceAttestations?():
+		| import("./memory/owner-preference-attestations.ts").OwnerPreferenceAttestationStore
+		| undefined;
 	/** Monotone branch generation fences forward writes and inverses across navigation away and back. */
 	getContextGeneration?(): number;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
@@ -1145,24 +1138,9 @@ export class ReflectionController {
 	}
 
 	/**
-	 * Admission for one USER.md preference write, at the existing observation, gate and audit
-	 * owners. Host-checked and deterministic:
-	 * - Only a citation whose quote is found in the owner's own words, outside shown text, counts;
-	 *   an unknown source, a missing quote, an absent quote or a shown span contributes nothing.
-	 * - An explicit basis needs at least one counted quote whose sentence carries explicit or
-	 *   corrective wording; otherwise the write is inferred.
-	 * - Evidence not newer than the accepted line's own `evidenceAt` (written on commit) is a
-	 *   replay of a superseded instruction and contributes nothing; a fresh owner instruction can
-	 *   change a preference back, and a correction whose commit failed can be retried.
-	 * - Counted receipts are stored at once, per scope and value, in the observation store; the
-	 *   decision uses the store's distinct sources, so candidates accumulate across sessions while
-	 *   a replayed source stays one. Supporting evidence belongs to the current value only: a
-	 *   correction starts from its own receipts, never from the superseded value's.
-	 * - An inferred write never overrides an explicit or legacy line; an explicit supported write
-	 *   applies without a second confirmation, also when automatic learning is off.
-	 * The decision is audited here only as a candidate; an admitted write is audited by the
-	 * storage owner's commit report (`commit`), after the bytes actually landed. What a quoted
-	 * sentence means is model work and is not judged here.
+	 * Admit cited, stated owner preferences through the existing learning gate and durable receipt owner.
+	 * Current-value evidence timestamps fence superseded replays; inferred values cannot replace explicit/legacy ones.
+	 * Only the successful storage receipt establishes an apply; failed commits preserve the previous evidence fence.
 	 */
 	async admitUserPreference(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult> {
 		const guard = this.applicationContext.getStore()?.guard ?? this.captureLearningContext();
@@ -1316,6 +1294,27 @@ export class ReflectionController {
 			.map((receipt) => receipt.at)
 			.sort()
 			.at(-1);
+		const metadata: UserPreferenceMetadata = {
+			id,
+			scope: request.scope,
+			basis,
+			observations,
+			revision,
+			sources,
+			...(evidenceAt ? { evidenceAt } : {}),
+		};
+		const ownerPreference = await prepareOwnerPreferenceAttestation({
+			text: request.text,
+			metadata,
+			removed: request.action === "remove",
+			store: this.deps.getOwnerPreferenceAttestations?.(),
+			classify: applied ? this.deps.getReportingRequirementClassifier?.() : undefined,
+			guard,
+			signal: this.deps.getReflectionSignal(),
+		});
+		const changed = guard();
+		if (changed)
+			return { outcome: "candidate", reasonCode: changed, message: "The originating learning context changed." };
 		const auditSummary = `${summary} [${basis}; ${observations} source${observations === 1 ? "" : "s"}${
 			notes.length > 0 ? `; ${notes.join("; ")}` : ""
 		}`.slice(0, 600);
@@ -1326,6 +1325,7 @@ export class ReflectionController {
 			withRollback: boolean,
 		): LearningAuditRecord => ({
 			id: auditId,
+			ownerPreference,
 			proposalId,
 			layer: "memory",
 			action,
@@ -1386,15 +1386,7 @@ export class ReflectionController {
 				reasonCode: guard() ?? "learning_journal_unavailable",
 				message: "The preference was not admitted because its audit obligation could not be retained.",
 			};
-		const metadata: UserPreferenceMetadata = {
-			id,
-			scope: request.scope,
-			basis,
-			observations,
-			revision,
-			sources,
-			...(evidenceAt ? { evidenceAt } : {}),
-		};
+
 		// Publication happens once, with the storage owner's actual result; nothing claims an apply
 		// (or a rollback-eligible change) before the bytes landed.
 		const reference = { id: ticket.id, data: this.writes.reference(ticket) };
@@ -1541,8 +1533,6 @@ export class ReflectionController {
 			const agent = this.deps.getAgent();
 			const foregroundModel = agent.state.model;
 			const usesForegroundModel = foregroundModel?.provider === model.provider && foregroundModel.id === model.id;
-			const maxTurns = opts.maxTurns;
-			let completedTurns = 0;
 			const loopConfig: AgentLoopConfig = {
 				model,
 				interactionMode: "background",
@@ -1607,14 +1597,6 @@ export class ReflectionController {
 				maxRetries: opts.maxRetries,
 				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
 				borrowProviderSnapshotSource: opts.borrowProviderSnapshotSource,
-				...(maxTurns === undefined
-					? {}
-					: {
-							shouldStopAfterTurn: () => {
-								completedTurns += 1;
-								return completedTurns >= maxTurns;
-							},
-						}),
 				convertToLlm: agent.convertToLlm,
 			};
 
@@ -1622,6 +1604,19 @@ export class ReflectionController {
 			// hallucinate an unavailable tool and must receive the bounded unknown-tool result so it can
 			// repair. Only an omitted tools option selects the one-shot completion path.
 			if (opts.tools !== undefined) {
+				const continuationState = createAgentLoopContinuationState();
+				if (opts.prefixState) continuationState.providerRequestPrefixState = opts.prefixState;
+				const maxTurns = opts.maxTurns;
+				let hitTurnLimit = false;
+				if (maxTurns !== undefined) {
+					loopConfig.maxProviderTurns = maxTurns;
+					loopConfig.shouldStopAfterTurn = () => continuationState.providerTurns >= maxTurns;
+					const reportRunaway = loopConfig.onRunawayStop;
+					loopConfig.onRunawayStop = (event) => {
+						if (event.reason === "provider_turn_limit") hitTurnLimit = true;
+						else reportRunaway?.(event);
+					};
+				}
 				const childContext: AgentContext = {
 					systemPrompt: opts.systemPrompt,
 					messages: history,
@@ -1649,9 +1644,7 @@ export class ReflectionController {
 					opts.signal,
 					agent.streamFn,
 					// The caller's conversation carries its sent-prefix marks across runs; the loop writes through them.
-					opts.prefixState
-						? { ...createAgentLoopContinuationState(), providerRequestPrefixState: opts.prefixState }
-						: undefined,
+					continuationState,
 				);
 				const assistantMessages = messages.filter(
 					(message): message is AssistantMessage => message.role === "assistant",
@@ -1662,10 +1655,11 @@ export class ReflectionController {
 				}
 
 				const hasFinalText = finalAssistant.content.some(
-					(content) => content.type === "text" && content.text.trim().length > 0,
+					(content) =>
+						content.type === "text" && !isAssistantCommentary(content) && content.text.trim().length > 0,
 				);
 				const endedOnToolCall = finalAssistant.content.some((content) => content.type === "toolCall");
-				if (opts.finalTextPrompt && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
+				if (opts.finalTextPrompt && !hitTurnLimit && !hasFinalText && endedOnToolCall && !opts.signal?.aborted) {
 					// A hard turn bound may stop immediately after successful tool execution. Preserve that bound,
 					// then allow exactly one tool-free synthesis call so the gathered work is not thrown away.
 					const finalizationPrompt: Message = {
@@ -1692,14 +1686,10 @@ export class ReflectionController {
 				}
 
 				const usage = combineUsage(...assistantMessages.map((message) => message.usage));
-				const text = finalAssistant.content
-					.filter((content): content is TextContent => content.type === "text")
-					.map((content) => content.text)
-					.join("");
 				// A worker's result suffix may contain a kernel transient record. The worker transcript
 				// verifier accepts that wider runtime shape while the isolated API retains its Message type.
 				return {
-					text,
+					text: assistantResultText(finalAssistant),
 					usage,
 					stopReason: finalAssistant.stopReason,
 					...(finalAssistant.errorMessage ? { errorMessage: finalAssistant.errorMessage } : {}),
@@ -1728,18 +1718,20 @@ export class ReflectionController {
 				});
 				requestAuth.requestGuard?.(requestAuth.model, opts.signal);
 				const streamFunction = agent.streamFn ?? streamSimple;
-				const rawStream = await streamFunction(requestAuth.model, requestContext, {
-					...options,
-					...requestAuth,
-					...(maxTokens !== undefined ? { maxTokens } : {}),
-				});
-				const response = await rawStream.result();
+				const responseAccountScope = new ProviderResponseAccountScope();
+				const rawStream = await streamFunction(
+					requestAuth.model,
+					requestContext,
+					responseAccountScope.bind({
+						...options,
+						...requestAuth,
+						...(maxTokens !== undefined ? { maxTokens } : {}),
+					}),
+				);
+				const response = responseAccountScope.project(await rawStream.result());
 				await opts.onMessage?.(response);
 				return {
-					text: response.content
-						.filter((c): c is TextContent => c.type === "text")
-						.map((c) => c.text)
-						.join(""),
+					text: assistantResultText(response),
 					usage: response.usage,
 					stopReason: response.stopReason,
 					...(response.errorMessage ? { errorMessage: response.errorMessage } : {}),
@@ -1750,10 +1742,6 @@ export class ReflectionController {
 			const stream = await startAgentProviderRequest(context, loopConfig, opts.signal, agent.streamFn);
 			const result = await stream.result();
 			await opts.onMessage?.(result);
-			const text = result.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map((c) => c.text)
-				.join("");
 			const usage: Usage = result.usage ?? {
 				input: 0,
 				output: 0,
@@ -1763,7 +1751,7 @@ export class ReflectionController {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
 			return {
-				text,
+				text: assistantResultText(result),
 				usage,
 				stopReason: result.stopReason,
 				...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
@@ -2173,6 +2161,10 @@ export class ReflectionController {
 		return { applied: true, entries };
 	}
 
+	readonly migrateOwnerPreferenceProofs = createOwnerPreferenceProofMigration({
+		audits: () => getLearningAuditSnapshots(this.deps.getSessionManager().getBranch()),
+		originals: () => this.ownerEvidence.listOwnerEvidence(),
+	});
 	getLearningAuditRecords(): LearningAuditRecord[] {
 		this.writes.recover();
 		return getLearningAuditSnapshots(this.deps.getSessionManager().getEntries());

@@ -225,6 +225,7 @@ export interface LaneToolSurfaceOptions {
 	 * scope and only the grant's and the denied paths apply.
 	 */
 	readScopeRoots?: readonly string[];
+	laneReadCounterpart?(absolutePath: string): string | undefined;
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
@@ -728,6 +729,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		grantBound: options.yoloGrantBound,
 		readOnlyShell,
 		readScope,
+		laneReadCounterpart: options.laneReadCounterpart,
+		readGrant: options.grant && {
+			cwd: options.cwd,
+			readRoots: options.grant.readPaths,
+			deniedPaths: options.grant.deniedPaths,
+		},
 		denyCommands: options.denyCommands,
 		readEnvelope,
 		writeEnvelope,
@@ -793,7 +800,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			signal?.throwIfAborted();
 			toolUsage.assertOpen();
 			admission.assertHealthy();
-			if (refused?.block) return { kind: "refused", reason: refused.reason ?? "refused by this lane's tool policy" };
+			if (refused?.block)
+				return {
+					kind: "refused",
+					reason: refused.reason ?? "refused by this lane's tool policy",
+					correction: refused.correction,
+				};
 			return {
 				kind: "admitted",
 				start() {

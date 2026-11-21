@@ -21,7 +21,7 @@ import {
 	createVersionedMessageHistory,
 	immutableHistoryMessage,
 } from "../src/kernel/message-revision.ts";
-import { convertToLlm, createCustomMessage } from "../src/kernel/messages.ts";
+import { convertToLlm, createCustomMessage, createProviderMessageConverter } from "../src/kernel/messages.ts";
 import { estimateProviderRequestTokens } from "../src/kernel/provider-request-estimator.ts";
 import {
 	applyProviderRequestImageBudget,
@@ -563,6 +563,100 @@ it("extends an accepted packed tool result without replaying the old tool body",
 		providerRowsConverted: 1,
 	});
 });
+
+it.each(["native", "custom", "filtered image"] as const)(
+	"keeps framed packed %s history pristine across replan and warm acceptance",
+	async (form) => {
+		const fixture = providerProjectionFixture(3);
+		fixture.messages.splice(0, 3, ...[0, 1, 2].map((index) => fixture.userRow(`Native row ${index}.`)));
+		if (form === "custom")
+			fixture.messages[0] = immutableHistoryMessage(
+				createCustomMessage("converted-row", "Converted custom row.", false, undefined, new Date(0).toISOString()),
+			)!;
+		if (form === "filtered image") {
+			fixture.config.convertToLlm = createProviderMessageConverter(() => true);
+			fixture.messages[0] = immutableHistoryMessage({
+				role: "user",
+				timestamp: 0,
+				content: [{ type: "image", data: "AA==", mimeType: "image/png" }],
+			})!;
+		}
+		fixture.messages[1] = immutableHistoryMessage({
+			role: "toolResult",
+			toolCallId: "packed-frame",
+			toolName: "bash",
+			isError: false,
+			content: [{ type: "text", text: "Tool result line.\n".repeat(2048) }],
+			timestamp: 1,
+		})!;
+		let note = "Cold request note.";
+		const frames: { rows: AgentContext["messages"]; snapshot: string }[] = [];
+		fixture.config.planContext = async ({ messages, sentPrefixCount }) => {
+			const gc = applyContextGc(messages, {
+				enabled: true,
+				preserveRecentMessages: 1,
+				packStrideMessages: 1,
+				minToolResultChars: 100,
+				tools: ["bash"],
+				writePayloads: false,
+				deferProviderAcceptance: true,
+				frozenBelow: sentPrefixCount,
+			});
+			frames.push({ rows: gc.messages, snapshot: JSON.stringify(gc.messages) });
+			return {
+				messages: gc.messages,
+				compressionPolicy: gc.compressionPolicy,
+				prepareCommit: gc.isCurrent,
+				commit: gc.commit,
+				acceptProviderHistory: gc.acceptProviderHistory,
+				nonCompactableHead: 0,
+				transientMessages: [
+					createCustomMessage("request-note", note, false, HOST_REQUEST_ONLY_DETAILS, new Date(0).toISOString()),
+				],
+			};
+		};
+		const cold = await fixture.send();
+		const coldSnapshot = JSON.stringify(cold.dispatched);
+		expect(cold.dispatched!.messages).toHaveLength(4);
+		const packed = cold.dispatched!.messages[2];
+		expect(JSON.stringify(packed)).toContain("Never treat summary as original.");
+		if (form === "custom") expect(JSON.stringify(cold.dispatched!.messages[1])).toContain("Converted custom row.");
+		if (form === "filtered image") expect(JSON.stringify(cold.dispatched!.messages[1])).not.toContain("AA==");
+		fixture.messages.push(fixture.userRow("Warm owner request."));
+		note = "Rejected request note.";
+		const attempts: number[] = [];
+		fixture.config.admitProviderRequest = ({ attempt, sourceContext }) => {
+			attempts.push(attempt);
+			if (attempt === 0) {
+				note = "Accepted request note.";
+				return { action: "replan", context: { ...sourceContext } };
+			}
+			return { action: "send" };
+		};
+		const warm = await fixture.send();
+		expect(attempts).toEqual([0, 1]);
+		expect(warm.dispatched!.messages).toHaveLength(5);
+		expect(warm.dispatched!.messages[2]).toBe(packed);
+		expect(JSON.stringify(warm.dispatched)).toContain("Accepted request note.");
+		expect(JSON.stringify(warm.dispatched)).not.toMatch(/Cold request note|Rejected request note/);
+		fixture.config.admitProviderRequest = () => ({ action: "send" });
+		fixture.messages.push(fixture.userRow("Next owner request."));
+		note = "Final request note.";
+		const next = await fixture.send();
+		expect(next.dispatched!.messages).toHaveLength(6);
+		expect(next.dispatched!.messages.every(Boolean)).toBe(true);
+		expect(next.dispatched!.messages[2]).toBe(packed);
+		expect(JSON.stringify(next.dispatched)).not.toMatch(
+			/Cold request note|Rejected request note|Accepted request note/,
+		);
+		expect(next.work.providerRowsConverted).toBe(1);
+		expect(JSON.stringify(cold.dispatched)).toBe(coldSnapshot);
+		for (const frame of frames) {
+			expect(Object.isFrozen(frame.rows)).toBe(true);
+			expect(JSON.stringify(frame.rows)).toBe(frame.snapshot);
+		}
+	},
+);
 
 function deferredHaltFixture(text: boolean) {
 	const fixture = providerProjectionFixture(3);

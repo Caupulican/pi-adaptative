@@ -18,6 +18,7 @@ import type {
 	OwnerChannelControl,
 	OwnerChannelDelivery,
 	OwnerChannelOrigin,
+	OwnerChannelStop,
 	OwnerDraftView,
 	OwnerQuotaAllowance,
 	OwnerSessionWork,
@@ -25,6 +26,7 @@ import type {
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
 import { isMeteredSpend, type ModelBilling } from "./orchestration/risk-budget.ts";
+import type { OrdinaryWorkController } from "./ordinary-work-controller.ts";
 import type { OwnerDecisionItem } from "./owner-decisions/owner-decision-queue.ts";
 import { isRemoteOwnerOrigin } from "./turn-origin.ts";
 
@@ -39,6 +41,7 @@ const MAX_DRAFT_LISTENERS = 8;
 /** What the owner channel uses of the session: its submission path, its agent's events and abort, and its warnings. */
 export interface OwnerChannelSessionHost {
 	prompt(text: string, options?: PromptOptions): Promise<void>;
+	readonly ordinaryWork: Pick<OrdinaryWorkController, "onAbort" | "readStatus">;
 	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void; abort(reason: string): void };
 	/** The session's canonical work state: whether it works now, and why it rests when it does not. */
 	getSessionWorkState(): OwnerSessionWork;
@@ -122,6 +125,14 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 					throw new Error(`At most ${MAX_DRAFT_LISTENERS} owner-channel draft listeners are kept.`);
 				return this.draftListeners.subscribe(listener);
 			},
+			ordinaryWork: (channel, ownsBatch) =>
+				this.host.ordinaryWork.readStatus(
+					(sessionId, origin) =>
+						origin?.k === "owner-channel" &&
+						origin.channel === channel &&
+						origin.ref !== undefined &&
+						ownsBatch(sessionId, origin.ref),
+				),
 			waiting: () => {
 				const shown = new Set(
 					decisions.drafts().flatMap((draft) => (isRemoteOwnerOrigin(draft.origin) ? [draft.id] : [])),
@@ -207,27 +218,29 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	 * retry, the agent run), as the session's interrupt does for those; queued input awaiting admission, the owner's
 	 * typed-word judgments, a pending human-input resume and runtime updates are left as they are.
 	 */
-	abortRun(ref: string): void {
+	abortRun(ref: string, stop: OwnerChannelStop): void {
 		if (!this.isRunning(ref)) return;
-		this.abortForeground();
+		this.abortForeground(stop);
 	}
 
 	/** Interrupt only a foreground delivery whose exact origin a task stop captured. */
-	abortTask(refs: ReadonlySet<string>): boolean {
+	abortTask(refs: ReadonlySet<string>, stop: OwnerChannelStop): boolean {
 		const source = this.getForeground().turnOrigin;
 		const ref = source.deliveryRef();
 		if (!source.isActive() || !ref || !refs.has(ref)) return false;
-		this.abortForeground();
+		this.abortForeground(stop);
 		return true;
 	}
 
-	private abortForeground(): void {
-		const reason = "owner channel stop";
-		this.abortPromptSubmission(reason);
+	private abortForeground(stop: OwnerChannelStop): void {
+		const { reason, ordinaryWork } = stop;
 		const foreground = this.getForeground();
+		const ownsOrdinary = isRemoteOwnerOrigin(foreground.turnOrigin.origin());
+		this.abortPromptSubmission(reason);
 		foreground.abortSubmission(reason);
 		foreground.abortRetry();
 		this.host.agent.abort(reason);
+		if (ownsOrdinary) this.host.ordinaryWork.onAbort(reason, ordinaryWork);
 	}
 
 	/** Whether the run `origin` decided still holds the owner's authority: the channels core's kept answer, false without one. */
@@ -368,6 +381,16 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	/** Whether the turn `ref` opened holds the foreground: its run is in progress, or it is being prepared as its own turn. */
 	holdsForeground(ref: string): boolean {
 		return this.isRunning(ref) || this.runs.get(ref)?.preparing === true;
+	}
+
+	isAnsweringBatch(channel: string, ref: string): boolean {
+		const turn = this.getForeground().turnOrigin.live();
+		return (
+			turn?.decidedInRun === true &&
+			turn.origin.k === "owner-channel" &&
+			turn.origin.channel === channel &&
+			turn.origin.ref === ref
+		);
 	}
 
 	/** Whether the foreground run in progress is the one the batch `ref` decided. */

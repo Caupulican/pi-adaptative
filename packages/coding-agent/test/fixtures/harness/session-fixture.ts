@@ -80,6 +80,7 @@ import {
 } from "../../../src/utils/work-directory.ts";
 import { type FaultMatrixJourney, FaultMatrixMarks } from "./fault-matrix.ts";
 import { answerManagedToolVersionProbe } from "./managed-tool-version-probe.ts";
+import { unrelatedOrdinaryStopDefaults } from "./ordinary-work-stop-script.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
 import {
 	type Barrier,
@@ -470,6 +471,7 @@ export class ScriptedSystemOneTransport {
 	readonly decoded: SystemOneDecodedRequest[] = [];
 	/** The requests answered by {@link OWNER_GOAL_INTENT_DEFAULTS}, apart from `decoded` so a phase's own request counts stay exact. */
 	readonly ownerGoalIntent: SystemOneDecodedRequest[] = [];
+	readonly unrelatedOrdinaryStops: SystemOneDecodedRequest[] = [];
 	private phase = "unentered";
 	private expected = new Map<string, ScriptedJudgment>();
 	private families = new Map<string, ScriptedJudgment>();
@@ -616,6 +618,11 @@ export class ScriptedSystemOneTransport {
 		});
 	}
 
+	private outageResponse(phase: string, method: string, url: string): Response {
+		this.intendedOutages.push(`${phase}: ${method} ${url}`);
+		return Response.json({ error: "evaluator unavailable" }, { status: 503 });
+	}
+
 	private readonly answer = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 		const method = init?.method ?? "GET";
@@ -642,21 +649,28 @@ export class ScriptedSystemOneTransport {
 		const ignoresAbort = this.ignoresAbort;
 		const decoded: SystemOneDecodedRequest = { phase, state: body.state, questions: body.questions };
 		const questionIds = Object.keys(body.questions);
-		if (questionIds.every((id) => OWNER_GOAL_INTENT_DEFAULTS[id] !== undefined && !expected.has(id))) {
-			// Answered at once, outside the phase's gate, outage and request checks: the phase did not ask it.
+		const ordinaryDefaults = unrelatedOrdinaryStopDefaults(decoded, expected, families);
+		const fallback =
+			ordinaryDefaults ??
+			(questionIds.every((id) => OWNER_GOAL_INTENT_DEFAULTS[id] !== undefined && !expected.has(id))
+				? OWNER_GOAL_INTENT_DEFAULTS
+				: undefined);
+		if (fallback) {
+			// Background stop checks still observe an evaluator outage during this phase.
 			try {
 				const defaults: Record<string, unknown> = {};
 				for (const [id, question] of Object.entries(body.questions)) {
-					defaults[id] = judgmentAnswer(OWNER_GOAL_INTENT_DEFAULTS[id]!, question);
+					defaults[id] = judgmentAnswer(fallback[id]!, question);
 				}
-				this.ownerGoalIntent.push(decoded);
+				(ordinaryDefaults ? this.unrelatedOrdinaryStops : this.ownerGoalIntent).push(decoded);
+				if (ordinaryDefaults && outage) return this.outageResponse(phase, method, url);
 				return Response.json({
 					model: body.model,
 					answers: defaults,
 					usage: { input_tokens: 10, output_tokens: 5 },
 				});
 			} catch (error) {
-				const detail = `${phase}: owner goal intent: ${error instanceof Error ? error.message : String(error)}`;
+				const detail = `${phase}: ${ordinaryDefaults ? "unrelated ordinary stop" : "owner goal intent"}: ${error instanceof Error ? error.message : String(error)}`;
 				this.unscripted.push(detail);
 				throw new Error(detail);
 			}
@@ -709,8 +723,7 @@ export class ScriptedSystemOneTransport {
 		if (gate !== undefined) await this.holdAtGate(gate, ignoresAbort ? undefined : init?.signal);
 		if (outage) {
 			// The configured outage cause: the validated questions are answered by a 503, recorded apart from unscripted requests.
-			this.intendedOutages.push(`${phase}: ${method} ${url}`);
-			return Response.json({ error: "evaluator unavailable" }, { status: 503 });
+			return this.outageResponse(phase, method, url);
 		}
 		if (invalidAnswer) {
 			// The configured invalid answer: a paid response (usage included) that answers none of the asked questions.
@@ -4039,7 +4052,10 @@ export class HarnessWorld {
 		return completion;
 	}
 
-	async disposeSessionInBody(session: AgentSession): Promise<{ readonly error: unknown } | undefined> {
+	async disposeSessionInBody(
+		session: AgentSession,
+		abortOptions?: Parameters<AgentSession["abort"]>[1],
+	): Promise<{ readonly error: unknown } | undefined> {
 		if (!this.sessions.includes(session)) throw new Error("Session is not owned by this world");
 		// Each disposal step is its own attempt: a failed abort or wait never skips the disposal. Ownership leaves the world only
 		// after every step has been attempted, so a failure can never drop a session that is still running.
@@ -4052,7 +4068,7 @@ export class HarnessWorld {
 			}
 		};
 		try {
-			await attempt(() => session.abort("session disposed in the scenario body"));
+			await attempt(() => session.abort("session disposed in the scenario body", abortOptions));
 			await attempt(() => session.waitForForegroundIdle());
 			await attempt(() => session.disposeAndWait());
 		} finally {
@@ -4790,7 +4806,7 @@ function paidRowsOnDisk(manager: SessionManager): number {
 /**
  * A session file of this world with three appended paid usage rows, read by the discard count as a replacement's file whose copied rows end
  * at byte 0. The seed turn gives the file its first reply, so the rows that follow are written to disk rather than buffered. With System One
- * on, the owner goal intent judges the seed's delivered words and that paid judgment writes a row of its own: the witness waits for it on
+ * on, both the owner-goal and ordinary-stop reviews write paid rows. The witness waits for both on
  * disk before it disposes, because dispose aborts a judgment still in flight and a request that never went out pays nothing.
  */
 export async function runDiscardScanBounds(world: HarnessWorld): Promise<DiscardScanBoundsWitness> {
@@ -4809,8 +4825,8 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 	if (world.systemOne.enabled) {
 		await withDeadline(
 			trace,
-			"discard scan: the seed's owner goal judgment wrote its paid row",
-			world.io.waitForMutation(() => paidRowsOnDisk(owner.sessionManager) === 1),
+			"discard scan: both seed reviews recorded their paid rows",
+			world.io.waitForMutation(() => paidRowsOnDisk(owner.sessionManager) === 2),
 		);
 	}
 	const reports = [1, 2, 3].map((index) => ({ reportId: `discard-scan-row-${index}` }));
@@ -4838,14 +4854,14 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 
 /**
  * The exhaustion causes of a discard's count, each bound alone, and the defaults' count of every paid row the file holds: the three
- * appended rows, plus the seed's owner goal judgment's row when System One is on.
+ * appended rows plus each paid review of the seed.
  */
 export function discardScanBoundsExpected(systemOneEnabled: boolean): DiscardScanBoundsWitness {
 	return {
 		entriesBound: { unknown: "more than 1 entries" },
 		paidRowsBound: { unknown: "more than 1 paid usage rows" },
 		scanBytesBound: { unknown: "more than 1 bytes appended after the copy" },
-		defaults: { rows: systemOneEnabled ? 4 : 3 },
+		defaults: { rows: systemOneEnabled ? 5 : 3 },
 		disposal: undefined,
 	};
 }
@@ -4917,13 +4933,13 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 		runtime.session.prompt("Seed the runtime discard."),
 	);
 	const manager = runtime.sessionManager;
-	// With System One on, the seed's owner goal judgment writes a paid row of its own; the fork switches sessions, which
+	// With System One on, the owner-goal and ordinary-stop reviews write paid rows. The fork switches sessions, which
 	// aborts a judgment still in flight, so the witness waits for that row on disk before it forks.
 	if (world.systemOne.enabled) {
 		await withDeadline(
 			trace,
-			"runtime discard: the seed's owner goal judgment wrote its paid row",
-			world.io.waitForMutation(() => paidRowsOnDisk(manager) === 1),
+			"runtime discard: both seed reviews recorded their paid rows",
+			world.io.waitForMutation(() => paidRowsOnDisk(manager) === 2),
 		);
 	}
 	const originalFile = manager.getSessionFile();

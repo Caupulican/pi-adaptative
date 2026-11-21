@@ -13,9 +13,26 @@ export interface SemanticUsageLedgerIdentity {
 	readonly persisted: boolean;
 }
 
+/** The session file, header and persistence mode together bind a usage reservation. */
+export function sameIdentity(
+	left: SemanticUsageLedgerIdentity | undefined,
+	right: SemanticUsageLedgerIdentity | undefined,
+): boolean {
+	return (
+		left !== undefined &&
+		right !== undefined &&
+		left.sessionId === right.sessionId &&
+		left.sessionFile === right.sessionFile &&
+		left.headerTimestamp === right.headerTimestamp &&
+		left.persisted === right.persisted
+	);
+}
+
 export interface SemanticUsageCanonicalRow {
 	readonly entryId: string;
 	readonly data: unknown;
+	/** Another entry carries the same report ID with a different payload. */
+	readonly conflictingDuplicate?: true;
 }
 
 /** The session ledger the usage owner writes through: identity, the canonical append and its physical evidence. */
@@ -74,9 +91,11 @@ export function createSessionManagerLedgerPort(manager: SessionManager): Semanti
 		for (const entry of manager.getEntriesSince(indexedCount)) {
 			if (entry.type !== "custom" || entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE) continue;
 			const reportId = isPlainRecord(entry.data) ? entry.data.reportId : undefined;
-			if (typeof reportId === "string" && !canonical.has(reportId)) {
-				canonical.set(reportId, { entryId: entry.id, data: entry.data });
-			}
+			if (typeof reportId !== "string") continue;
+			const first = canonical.get(reportId);
+			if (!first) canonical.set(reportId, { entryId: entry.id, data: entry.data });
+			else if (!first.conflictingDuplicate && !isDeepStrictEqual(first.data, entry.data))
+				canonical.set(reportId, { ...first, conflictingDuplicate: true });
 		}
 		indexedCount = count;
 	};

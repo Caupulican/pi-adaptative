@@ -18,7 +18,8 @@ export type RouteWorkClass =
 	| "verify"
 	| "review"
 	| "none"
-	| "insufficient_evidence";
+	| "insufficient_evidence"
+	| "continue_current_work";
 
 export interface SemanticRouteJudgments {
 	workRemaining?: boolean;

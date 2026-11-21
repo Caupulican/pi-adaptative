@@ -23,6 +23,7 @@ import type {
 	SessionAutonomyStatus,
 	StatusSection,
 } from "./autonomy-status.ts";
+import { ordinaryWorkStatusLines } from "./ordinary-work.ts";
 import type { ToolDecision } from "./tool-manifest.ts";
 
 /** What the owner is told while the session file refuses new writes: why, what is safe, and the way out. */
@@ -100,6 +101,9 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				: []),
 			...(value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)]),
 		]),
+		...(status.ordinaryWork
+			? block("ordinaryWork", status.ordinaryWork, (value) => ordinaryWorkStatusLines(value, words.ordinaryWork))
+			: []),
 		...block("plans", status.plans, (value) => list(value.plans, planStatusLine)),
 		...(status.ownerDecisions === undefined
 			? []

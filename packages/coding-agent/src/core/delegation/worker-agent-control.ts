@@ -3,12 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Message } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { parseWorkerHostEventRecord } from "../../kernel/host-event-stamp.ts";
-import {
-	MAX_TURN_ORIGIN_CHANNEL_CHARS,
-	MAX_TURN_ORIGIN_REF_CHARS,
-	parseTurnOriginRecord,
-	type TurnOriginRecord,
-} from "../../kernel/turn-origin-stamp.ts";
+import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
 	type HostEventDeliveryBinding,
@@ -21,19 +16,13 @@ import type { HostEventControlPort } from "../events/host-event-control.ts";
 import type { HostEventRuntime } from "../events/host-event-runtime.ts";
 import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import {
-	type KnowledgeGrantReference,
-	MAX_KNOWLEDGE_GRANT_REFERENCES,
-	parseKnowledgeGrantReferences,
-} from "../memory/knowledge-grant.ts";
+import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type AgentBindingStatus,
 	type AttemptStatus,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
-	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
@@ -45,6 +34,7 @@ import {
 	withSessionBundleRetention,
 } from "../orchestration/session-bundle-lifecycle.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
+import { decodeWorkerBrief, MAX_WORKER_BRIEF_ATTACHMENT_BYTES } from "../orchestration/worker-brief-attachment.ts";
 import {
 	assertWorkerReceiptAdmission,
 	type WorkerReceiptOrigin,
@@ -52,7 +42,7 @@ import {
 } from "../orchestration/worker-receipt-origin.ts";
 import { currentSynchronousFileLockScope, withFileLockSync } from "../util/atomic-file.ts";
 import type { SteerDecision } from "../util/wait.ts";
-import { createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
+import { attachedReplyDigest, createReplaySafeMailboxBounder } from "./replay-safe-mailbox-bounds.ts";
 import type {
 	SessionRootReply,
 	SessionRootReplyQuery,
@@ -64,6 +54,11 @@ import type {
 	WorkerAgentBroadcastOptions,
 	WorkerAgentMessageOptions,
 } from "./worker-agent-message-options.ts";
+import {
+	INLINE_WORKER_MESSAGE_CHARS,
+	MAX_WORKER_MESSAGE_CHARS,
+	normalizeWorkerMessageContent,
+} from "./worker-agent-message-options.ts";
 import { type WorkerConversationRoots, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
@@ -72,6 +67,16 @@ import type {
 	WorkerAgentRetireResult,
 	WorkerModelHandoffPort,
 } from "./worker-lifecycle-controls.ts";
+import {
+	encodeWorkerMailbox,
+	MAX_MAILBOX_BYTES,
+	MAX_MAILBOX_IDENTITY_CHARS,
+	MAX_MAILBOX_MESSAGE_ID_CHARS,
+	MAX_MAILBOX_TRANSITION_TIMESTAMP,
+	MAX_ORDINARY_MAILBOX_BYTES,
+	workerMailboxInlineLimit,
+	workerMailboxStorageCharge,
+} from "./worker-mailbox-byte-bounds.ts";
 import { isPendingTaskBearingMessage, workerMailboxHasOpenObligation } from "./worker-mailbox-obligations.ts";
 import {
 	readWorkerMailboxRecord,
@@ -88,17 +93,7 @@ export type {
 } from "./worker-agent-message-options.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
-const MAX_MAILBOX_MESSAGE_CHARS = 4_096;
-/**
- * A task-bearing control message carries a worker's task brief, so its bound is the durable dispatch
- * instruction bound -- the authoritative owner of how long a brief may be. Ordinary peer messages
- * keep the smaller coordination bound; nothing is truncated to fit either one.
- */
-const MAX_TASK_BEARING_MESSAGE_CHARS = MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH;
-const MAX_ORDINARY_MAILBOX_BYTES = 128 * 1024;
-const MAX_MAILBOX_MESSAGE_ID_CHARS = 512;
 const MAX_MAILBOX_TIMESTAMP_CHARS = 128;
-const MAX_MAILBOX_IDENTITY_CHARS = 512;
 /**
  * Requirement/criterion ids one new-task correlation may carry. The durable dispatch collection bound
  * owns this number: a correlation the dispatch contract accepts must survive the mailbox unchanged.
@@ -110,64 +105,6 @@ const MAX_MANDATORY_RETAINED_MESSAGES = MAX_MAILBOX_MESSAGES;
 const MAX_MAILBOX_RETAINED_MESSAGES = MAX_ORDINARY_RETAINED_MESSAGES + MAX_MANDATORY_RETAINED_MESSAGES;
 const MAX_REPLAY_EVIDENCE_SLOTS = MAX_ORDINARY_RETAINED_MESSAGES * 4;
 const MAX_MAILBOX_REPLAY_RECEIPTS = MAX_REPLAY_EVIDENCE_SLOTS + MAX_ORDINARY_RETAINED_MESSAGES;
-const MAX_MAILBOX_TRANSITION_TIMESTAMP = "9999-12-31T23:59:59.999Z";
-const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
-	Buffer.byteLength(
-		JSON.stringify({
-			messageId: `worker-message-${"f".repeat(64)}`,
-			kind: "follow_up",
-			env: { v: 1, k: "follow_up" },
-			content: `c${"\0".repeat(MAX_TASK_BEARING_MESSAGE_CHARS - 1)}`,
-			senderAgentId: `s${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-			threadId: `t${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-			replyToMessageId: `r${"\0".repeat(MAX_MAILBOX_MESSAGE_ID_CHARS - 1)}`,
-			expectReply: true,
-			task: {
-				kind: "terminal_handoff",
-				sourceAttemptId: `a${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-				newTask: {
-					knowledgeReferences: Array.from({ length: MAX_KNOWLEDGE_GRANT_REFERENCES }, (_, index) => ({
-						id: index.toString(16).padStart(64, "0"),
-						revision: Number.MAX_SAFE_INTEGER,
-					})),
-					goalId: `g${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-					requirementIds: Array.from(
-						{ length: MAX_MAILBOX_CORRELATION_IDS },
-						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-					),
-					acceptanceCriterionIds: Array.from(
-						{ length: MAX_MAILBOX_CORRELATION_IDS },
-						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-					),
-					resourcePointerIds: Array.from(
-						{ length: MAX_MAILBOX_CORRELATION_IDS },
-						(_, index) => `${index}${"\0".repeat(MAX_MAILBOX_IDENTITY_CHARS - 1)}`,
-					),
-				},
-			},
-			receiptOrigin: {
-				sessionId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
-				leafId: "\0".repeat(MAX_ORCHESTRATION_IDENTIFIER_LENGTH),
-				sessionFile: "\0".repeat(MAX_WORKER_AUTHORITY_PATH_LENGTH),
-			},
-			turnOrigin: {
-				v: 1,
-				k: "goal-continuation",
-				channel: "\0".repeat(MAX_TURN_ORIGIN_CHANNEL_CHARS),
-				verified: true,
-				thirdParty: true,
-				ref: "\0".repeat(MAX_TURN_ORIGIN_REF_CHARS),
-			},
-			delegationObjectiveId: "\0".repeat(MAX_MAILBOX_IDENTITY_CHARS),
-			createdAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
-			deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
-		}),
-		"utf-8",
-	) + 1;
-// The additive reserve keeps every previously valid 128 KiB ordinary mailbox migration-safe and
-// covers one maximum accepted source acknowledgement transaction (locked by the saturation tests).
-const MAX_MANDATORY_TRANSITION_RESERVE_BYTES = Math.max(48 * 1024, MAX_ENCODED_MANDATORY_MESSAGE_BYTES + 1_024);
-const MAX_MAILBOX_BYTES = MAX_ORDINARY_MAILBOX_BYTES + MAX_MANDATORY_TRANSITION_RESERVE_BYTES;
 const CONTENT_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const assertWorkerAgentMailboxBounds = createReplaySafeMailboxBounder(
 	"Worker agent mailbox",
@@ -300,7 +237,7 @@ export interface WorkerReplyReceipt {
 	contentDigest: string;
 }
 
-interface WorkerAgentMailboxState {
+export interface WorkerAgentMailboxState {
 	version: 1;
 	parentSessionId: string;
 	agentId: string;
@@ -745,7 +682,7 @@ function receiptRecordsIntent(receipt: WorkerControlReplayReceipt, messageId: st
 }
 
 function replyIntentDigest(content: string): string {
-	return contentDigest("pi-worker-reply-content-v1", content);
+	return attachedReplyDigest(content) ?? contentDigest("pi-worker-reply-content-v1", content);
 }
 
 function controlReplayReceipt(
@@ -836,13 +773,7 @@ function parseReplyReceiptFields(receipt: Record<string, unknown>, label: string
 	};
 }
 
-function parseState(raw: string, parentSessionId: string, agentId: string): WorkerAgentMailboxState {
-	let candidate: unknown;
-	try {
-		candidate = JSON.parse(raw);
-	} catch {
-		throw new Error("Worker agent mailbox is invalid JSON.");
-	}
+function parseState(candidate: unknown, parentSessionId: string, agentId: string): WorkerAgentMailboxState {
 	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
 		throw new Error("Worker agent mailbox is invalid.");
 	}
@@ -855,7 +786,11 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 	) {
 		throw new Error("Worker agent mailbox identity conflicts with the requested logical worker.");
 	}
-	const messages = state.messages.map((message): WorkerAgentMessage => {
+	const messages = state.messages.map((stored): WorkerAgentMessage => {
+		const message = {
+			...stored,
+			content: decodeWorkerBrief(stored?.content, workerMailboxInlineLimit(stored?.task)),
+		};
 		let task: WorkerAgentTaskMetadata | undefined;
 		let replyReceipt: WorkerReplyReceipt | undefined;
 		if (message?.task !== undefined) {
@@ -930,7 +865,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 			(message.kind !== "steer" && message.kind !== "follow_up") ||
 			typeof message.content !== "string" ||
 			message.content.length === 0 ||
-			message.content.length > maxContentChars(task) ||
+			message.content.length > MAX_WORKER_MESSAGE_CHARS ||
 			(message.senderAgentId !== undefined &&
 				(typeof message.senderAgentId !== "string" ||
 					message.senderAgentId.length === 0 ||
@@ -1062,47 +997,50 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 	const messagesById = new Map(messages.map((message) => [message.messageId, message]));
 	const acknowledgedMessageIds = new Set<string>();
 	const acknowledgementIds = new Set<string>();
-	const replyAcknowledgements = (state.replyAcknowledgements ?? []).map(
-		(acknowledgement): WorkerReplyAcknowledgement => {
-			if (
-				!acknowledgement ||
-				typeof acknowledgement !== "object" ||
-				Array.isArray(acknowledgement) ||
-				typeof acknowledgement.messageId !== "string" ||
-				acknowledgement.messageId.length === 0 ||
-				acknowledgement.messageId.length > MAX_MAILBOX_MESSAGE_ID_CHARS ||
-				typeof acknowledgement.acknowledgementId !== "string" ||
-				acknowledgement.acknowledgementId.length === 0 ||
-				acknowledgement.acknowledgementId.length > MAX_MAILBOX_MESSAGE_ID_CHARS ||
-				typeof acknowledgement.replyContent !== "string" ||
-				acknowledgement.replyContent.length === 0 ||
-				acknowledgement.replyContent.length > MAX_MAILBOX_MESSAGE_CHARS ||
-				acknowledgement.replyContent.trim() !== acknowledgement.replyContent ||
-				acknowledgedMessageIds.has(acknowledgement.messageId) ||
-				acknowledgementIds.has(acknowledgement.acknowledgementId)
-			) {
-				throw new Error("Worker agent mailbox contains invalid reply acknowledgement state.");
-			}
-			const message = messagesById.get(acknowledgement.messageId);
-			if (
-				!message ||
-				message.deliveredAt === undefined ||
-				message.expectReply !== true ||
-				message.repliedAt === undefined ||
-				message.replyReceipt?.replyMessageId !== acknowledgement.acknowledgementId ||
-				message.replyReceipt.contentDigest !== replyIntentDigest(acknowledgement.replyContent)
-			) {
-				throw new Error("Worker agent mailbox reply acknowledgement does not reference a retained request.");
-			}
-			acknowledgedMessageIds.add(acknowledgement.messageId);
-			acknowledgementIds.add(acknowledgement.acknowledgementId);
-			return {
-				messageId: acknowledgement.messageId,
-				acknowledgementId: acknowledgement.acknowledgementId,
-				replyContent: acknowledgement.replyContent,
-			};
-		},
-	);
+	const replyAcknowledgements = (state.replyAcknowledgements ?? []).map((stored): WorkerReplyAcknowledgement => {
+		const acknowledgement = {
+			...stored,
+			replyContent: decodeWorkerBrief(stored?.replyContent, INLINE_WORKER_MESSAGE_CHARS),
+		};
+		if (
+			!acknowledgement ||
+			typeof acknowledgement !== "object" ||
+			Array.isArray(acknowledgement) ||
+			typeof acknowledgement.messageId !== "string" ||
+			acknowledgement.messageId.length === 0 ||
+			acknowledgement.messageId.length > MAX_MAILBOX_MESSAGE_ID_CHARS ||
+			typeof acknowledgement.acknowledgementId !== "string" ||
+			acknowledgement.acknowledgementId.length === 0 ||
+			acknowledgement.acknowledgementId.length > MAX_MAILBOX_MESSAGE_ID_CHARS ||
+			typeof acknowledgement.replyContent !== "string" ||
+			acknowledgement.replyContent.length === 0 ||
+			acknowledgement.replyContent.length > MAX_WORKER_MESSAGE_CHARS ||
+			!acknowledgement.replyContent.trim() ||
+			normalizeWorkerMessageContent(acknowledgement.replyContent) !== acknowledgement.replyContent ||
+			acknowledgedMessageIds.has(acknowledgement.messageId) ||
+			acknowledgementIds.has(acknowledgement.acknowledgementId)
+		) {
+			throw new Error("Worker agent mailbox contains invalid reply acknowledgement state.");
+		}
+		const message = messagesById.get(acknowledgement.messageId);
+		if (
+			!message ||
+			message.deliveredAt === undefined ||
+			message.expectReply !== true ||
+			message.repliedAt === undefined ||
+			message.replyReceipt?.replyMessageId !== acknowledgement.acknowledgementId ||
+			message.replyReceipt.contentDigest !== replyIntentDigest(acknowledgement.replyContent)
+		) {
+			throw new Error("Worker agent mailbox reply acknowledgement does not reference a retained request.");
+		}
+		acknowledgedMessageIds.add(acknowledgement.messageId);
+		acknowledgementIds.add(acknowledgement.acknowledgementId);
+		return {
+			messageId: acknowledgement.messageId,
+			acknowledgementId: acknowledgement.acknowledgementId,
+			replyContent: acknowledgement.replyContent,
+		};
+	});
 	if (state.replayReceipts !== undefined && !Array.isArray(state.replayReceipts)) {
 		throw new Error("Worker agent mailbox contains invalid replay receipt state.");
 	}
@@ -1192,8 +1130,12 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 	}
 	for (const message of messages) {
 		const controlReceipt = controlReplayReceiptFor(replayReceipts, message.messageId);
-		if (controlReceipt && controlReceipt.deliveredAt !== message.deliveredAt) {
-			throw new Error("Worker agent mailbox control delivery conflicts with its durable replay receipt.");
+		if (
+			controlReceipt &&
+			(controlReceipt.deliveredAt !== message.deliveredAt ||
+				!receiptRecordsIntent(controlReceipt, message.messageId, message))
+		) {
+			throw new Error("Worker agent mailbox control message conflicts with its durable replay receipt.");
 		}
 		if (message.replyReceipt) {
 			const replyReceipt = replyReplayReceiptFor(replayReceipts, message.messageId);
@@ -1260,11 +1202,6 @@ function parsedNewTaskCorrelation(value: unknown): WorkerAgentNewTaskCorrelation
 			? {}
 			: { resourcePointerIds: correlation.resourcePointerIds as readonly string[] }),
 	});
-}
-
-/** How long this message's content may be: a task brief is bounded by the dispatch contract. */
-function maxContentChars(task: WorkerAgentTaskMetadata | undefined): number {
-	return task === undefined ? MAX_MAILBOX_MESSAGE_CHARS : MAX_TASK_BEARING_MESSAGE_CHARS;
 }
 
 function normalizeOptionalIdentity(value: string | undefined, label: string): string | undefined {
@@ -1419,10 +1356,10 @@ function normalizeReplyAcknowledgement(
 }
 
 function normalizeReplyContent(replyContent: string): string {
-	const normalized = replyContent.trim();
-	if (!normalized || normalized.length > MAX_MAILBOX_MESSAGE_CHARS) {
+	const normalized = normalizeWorkerMessageContent(replyContent);
+	if (!normalized.trim() || normalized.length > MAX_WORKER_MESSAGE_CHARS) {
 		throw new TypeError(
-			`Worker reply content must contain from 1 through ${MAX_MAILBOX_MESSAGE_CHARS.toLocaleString("en-US")} characters.`,
+			`Worker reply content must contain from 1 through ${MAX_WORKER_MESSAGE_CHARS.toLocaleString("en-US")} characters.`,
 		);
 	}
 	return normalized;
@@ -1468,7 +1405,7 @@ function pruneDeliveredHistory(
 			replyAcknowledgements: [...replyAcknowledgements],
 			replayReceipts: retainedReplayReceipts,
 		} satisfies WorkerAgentMailboxState;
-		const encodedBytes = ordinaryAdmission ? ordinaryAdmissionEncodedBytes(state) : encodedStateBytes(state);
+		const encodedBytes = ordinaryAdmission ? ordinaryAdmissionEncodedBytes(state) : workerMailboxStorageCharge(state);
 		const encodedLimit = ordinaryAdmission ? MAX_ORDINARY_MAILBOX_BYTES : MAX_MAILBOX_BYTES;
 		if (encodedBytes <= encodedLimit) break;
 		const oldestCompletedIndex = retained.findIndex((message) => !retainedIds.has(message.messageId));
@@ -1542,10 +1479,6 @@ function expireObligationsInState(
 	};
 }
 
-function encodedStateBytes(state: WorkerAgentMailboxState): number {
-	return Buffer.byteLength(`${JSON.stringify(state)}\n`, "utf-8");
-}
-
 function ordinaryAdmissionEncodedBytes(state: WorkerAgentMailboxState): number {
 	const projectedDeliveryIds = new Set(
 		state.messages
@@ -1557,19 +1490,24 @@ function ordinaryAdmissionEncodedBytes(state: WorkerAgentMailboxState): number {
 			)
 			.map((message) => message.messageId),
 	);
-	return encodedStateBytes({
-		...state,
-		messages: state.messages.map((message) =>
-			projectedDeliveryIds.has(message.messageId)
-				? { ...message, deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP }
-				: message,
-		),
-		replayReceipts: state.replayReceipts.map((receipt) =>
-			receipt.kind === "control" && receipt.deliveredAt === undefined && projectedDeliveryIds.has(receipt.messageId)
-				? { ...receipt, deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP }
-				: receipt,
-		),
-	});
+	return workerMailboxStorageCharge(
+		{
+			...state,
+			messages: state.messages.map((message) =>
+				projectedDeliveryIds.has(message.messageId)
+					? { ...message, deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP }
+					: message,
+			),
+			replayReceipts: state.replayReceipts.map((receipt) =>
+				receipt.kind === "control" &&
+				receipt.deliveredAt === undefined &&
+				projectedDeliveryIds.has(receipt.messageId)
+					? { ...receipt, deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP }
+					: receipt,
+			),
+		},
+		true,
+	);
 }
 
 function isPendingOrdinaryTask(message: WorkerAgentMessage): boolean {
@@ -1705,9 +1643,9 @@ export class WorkerAgentMailbox {
 		const task = normalizeTaskMetadata(input.task);
 		// A task-bearing message carries the worker's brief and is retained verbatim; ordinary peer
 		// coordination keeps its normalizing trim.
-		const content = task === undefined ? input.content.trim() : input.content;
+		const content = task === undefined ? normalizeWorkerMessageContent(input.content) : input.content;
 		if (!content.trim()) throw new TypeError("A worker control message is required.");
-		const contentLimit = maxContentChars(task);
+		const contentLimit = MAX_WORKER_MESSAGE_CHARS;
 		if (content.length > contentLimit) {
 			throw new TypeError(
 				`Worker control messages may not exceed ${contentLimit.toLocaleString("en-US")} characters.`,
@@ -2017,7 +1955,7 @@ export class WorkerAgentMailbox {
 		if (!normalized) throw new TypeError("A worker control message id is required.");
 		const state = this.read();
 		const candidate = {
-			content: intent.task === undefined ? intent.content.trim() : intent.content,
+			content: intent.task === undefined ? normalizeWorkerMessageContent(intent.content) : intent.content,
 			...(intent.senderAgentId ? { senderAgentId: intent.senderAgentId } : {}),
 			...(intent.threadId ? { threadId: intent.threadId } : {}),
 			...(intent.replyToMessageId ? { replyToMessageId: intent.replyToMessageId } : {}),
@@ -2444,8 +2382,7 @@ export class WorkerAgentMailbox {
 		return record;
 	}
 
-	private read(): WorkerAgentMailboxState {
-		const record = this.readRecord();
+	private read(record = this.readRecord()): WorkerAgentMailboxState {
 		if (record.mailbox === undefined) {
 			return {
 				version: 1,
@@ -2456,10 +2393,13 @@ export class WorkerAgentMailbox {
 				replayReceipts: [],
 			};
 		}
-		const body = JSON.stringify(record.mailbox);
-		if (Buffer.byteLength(body) > MAX_MAILBOX_BYTES)
+		const wireBytes = Buffer.byteLength(JSON.stringify(record.mailbox)) + 1;
+		if (wireBytes > MAX_MAILBOX_BYTES + 2 * MAX_WORKER_BRIEF_ATTACHMENT_BYTES)
 			throw new Error("Worker agent mailbox durable size bound exceeded.");
-		return parseState(body, this.parentSessionId, this.agentId);
+		const state = parseState(record.mailbox, this.parentSessionId, this.agentId);
+		if (workerMailboxStorageCharge(state, false, wireBytes) > MAX_MAILBOX_BYTES)
+			throw new Error("Worker agent mailbox durable size bound exceeded.");
+		return state;
 	}
 
 	private update(
@@ -2476,7 +2416,7 @@ export class WorkerAgentMailbox {
 				() => {
 					const record = this.readRecord();
 					const update = () => {
-						const state = this.read();
+						const state = this.read(record);
 						const previousOrdinaryBytes = ordinaryAdmissionEncodedBytes(state);
 						const previousReplayEvidenceSlots = projectedReplayEvidenceSlots(state);
 						const mutated = mutator(state);
@@ -2495,9 +2435,9 @@ export class WorkerAgentMailbox {
 						};
 						const addedReplayReceipt = mutated.replayReceipts.length > state.replayReceipts.length;
 						const bytesWithoutAddedReceipt = addedReplayReceipt
-							? encodedStateBytes({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
+							? workerMailboxStorageCharge({ ...next, replayReceipts: next.replayReceipts.slice(0, -1) })
 							: undefined;
-						const changed = JSON.stringify(next) !== JSON.stringify(state);
+						const changed = !isDeepStrictEqual(next, state);
 						const nextOrdinaryBytes = ordinaryAdmissionEncodedBytes(next);
 						if (
 							ordinaryAdmission &&
@@ -2528,13 +2468,13 @@ export class WorkerAgentMailbox {
 							next.messages.length,
 							next.replayReceipts.length,
 							state.replayReceipts.length,
-							encodedStateBytes(next),
+							workerMailboxStorageCharge(next),
 							bytesWithoutAddedReceipt,
 						);
 						const write = () => {
 							if (changed) {
 								beforeWrite?.();
-								writeWorkerMailboxRecord(this.file, next, record.reference);
+								writeWorkerMailboxRecord(this.file, encodeWorkerMailbox(next), record.reference);
 							}
 						};
 						if (guardWrite) guardWrite(write);

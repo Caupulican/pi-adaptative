@@ -54,8 +54,10 @@ but do not create empty documentation merely to satisfy a layout convention.
 
 ## Validation layers
 
-Layer 1 (the validator) is always allowed. Layers 2 to 4 are tests: write and run them
-only when the owner explicitly asked for tests.
+The validator checks files statically. Review routing examples against the
+description by inspection. Blank-profile discovery, script execution, live
+routing trials and package smoke runs need execution permission under the
+owner’s policy. Follow that policy separately when maintaining tests and fixtures.
 
 1. `validate-skill.mjs`: package shape, safe name, quoted frontmatter, line
    bound, required header order, provider neutrality, and linked-resource paths.

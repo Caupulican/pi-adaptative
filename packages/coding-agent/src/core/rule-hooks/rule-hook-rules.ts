@@ -28,7 +28,6 @@ function callTouchesPackageRoot(call: RuleHookCall): boolean {
  * hashes its topic and body (`ruleHookId`), not its trigger.
  */
 const ROOT_WORK_TRIGGER: RuleHookTrigger = {
-	kind: "tool-call",
 	tools: ["create_goal", "goal", "task_steps", "delegate", ASSIGN_TOOL_NAME, PLAN_TOOL_NAME],
 	matches: (call) => {
 		if (call.toolName === "goal") return callAction(call.args) === "start";
@@ -71,11 +70,11 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 		body: (
 			_context,
 			facts,
-		) => `- Delegate when the work is independent, bounded and parallelizable, a read- or context-heavy exploration, a disjoint write scope, or a separate review. The benefit must exceed coordination plus context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Also local: interactive work, a couple of tool calls.
+		) => `- Delegate when the work is independent, bounded and parallelizable, a read- or context-heavy exploration, a disjoint write scope, or a separate review. The benefit must exceed coordination plus context-transfer cost, at any provider or reasoning level; long work alone never mandates a team. Keep interactive work and quick inspections with the director.
 - Split by independence and write ownership: no two workers write the same files (overlapping write scopes wait for each other); slice so each result verifies alone; fan out only as wide as the work is independent. Workers cannot delegate: never chain.
 - Reuse: one specialist per role; retire a worker when its line of work is done.
 - Right-size each worker: readOnly unless it must write; only the tools and paths it needs; the cheapest model and thinkingLevel that can do the task (exploration cheap, design and review strong). Token, cost and wall-clock ceilings come only from host settings or an owner-authored profileId.
-- Brief once, completely, in start fields: goal (objective), refs (paths, ids; never pasted content), note (constraints, stop condition), out (find, edit, ans, rev), evid (cite, cmd, diff, none), requirementIds; instructions is the free-text alternative to goal. No drip of clarifications.
+- Give each worker the outcome, relevant context it cannot read, permitted files and expected evidence in the first assignment.
 - Start independent workers in the same turn; the fleet runs as many as it has room for (account allowance, machine memory) and queues the rest.
 - Review in proportion: spot-check cheap claims against files, diffs and check commands; verify risky ones with an independent verifier (a fresh readOnly worker). Send back the specific delta; never redo the work yourself.
 - Steer early: follow_up with a targeted message at the first drift, interrupt when off track, cancel when obsolete. A blocked report is your decision: decide, follow up once, never re-dispatch the identical task.
@@ -88,15 +87,19 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 		standing: "directsWorkers",
 		// The director role says that plan exists; this says when a plan beats single assignments and how to shape one.
 		requiresTool: PLAN_TOOL_NAME,
-		body: `- Use plan when the goal has three or more parts or any part can run beside another; use assign for one task.
+		body: `- Use plan to schedule dependencies between assignments or combine their results. Use a single assignment when one worker can deliver the outcome in its write scope.
 - A step that changes files names them; steps that change the same files wait for each other, unless a merge combines them (it lands each step's worktree in order). End with a join (${PLAN_OFFERED_JOIN_KINDS.join(", ")}) so you read one result, not each worker's.`,
 	},
 	{
 		topic: "noticed-items",
-		// Delivered by the goal tool's completion preflight, before a completion is accepted (core/tools/goal.ts):
-		// goal `complete`, goal `increment` with nothing left to satisfy and update_goal `complete` all reach that one
-		// place, so no tool predicate exists.
-		trigger: { kind: "preflight" },
+		trigger: {
+			tools: ["goal"],
+			matches: (call) => {
+				const action = callAction(call.args);
+				return action === "add_evidence" || action === "satisfy_requirement";
+			},
+			preflight: true,
+		},
 		body: `Noticed items are defects, risks, or odd or noisy output beyond the ask.
 - An item is relevant when it affects the delivery, surfaced in your own proof runs, or sits in what you touched. When in doubt, it is relevant.
 - Fix the root cause of each relevant item unasked and prove the fix. Disclose only unrelated items, with the reason.
@@ -107,7 +110,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 		topic: "harness-docs",
 		// read, edit and write take the file in `path` (core/tools/read.ts, edit.ts, write.ts); the first one that
 		// lands inside the harness package tells the model where the harness documentation lives.
-		trigger: { kind: "tool-call", tools: ["read", "edit", "write"], matches: callTouchesPackageRoot },
+		trigger: { tools: ["read", "edit", "write"], matches: callTouchesPackageRoot },
 		body: ({ packageRoot }) =>
 			`- Harness docs: README.md, \`docs/\` and \`examples/\` under ${packageRoot}.\n- For work on this harness, read the ones the task needs fully; follow links.`,
 	},

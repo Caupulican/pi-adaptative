@@ -23,6 +23,14 @@ export class CompletionAccountingAdmissionError extends Error {
 	}
 }
 
+/** A logical call ended while its physical response still owns the usage reservation. */
+export class CompletionUsagePending extends RequestSpendRefusal {
+	constructor() {
+		super("A provider response still has unsettled usage.");
+		this.name = "CompletionUsagePending";
+	}
+}
+
 /** Facts from one physical response, independent of its logical caller's lifetime. */
 export interface CompletionAccountingSettlement {
 	readonly error?: CompletionAccountingError;
@@ -210,7 +218,7 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 	assertHealthy(): void {
 		if (this.failure !== undefined) throw this.failure;
 		this.spending?.assertHealthy();
-		if (this.pending.size > 0) throw new RequestSpendRefusal("A provider response still has unsettled usage.");
+		if (this.pending.size > 0) throw new CompletionUsagePending();
 	}
 
 	/** Logical cancellation leaves physical tickets alive until they settle with their original owner. */

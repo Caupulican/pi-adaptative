@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
+import { assistantResultText } from "../../kernel/assistant-answer.ts";
 import type { RequestPreflightContext, RequestPreflightResult } from "../../kernel/loop-config.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionResult } from "../agent-session-contracts.ts";
@@ -334,7 +335,7 @@ export function callbackEvidencedCompletion(
 	}
 	const usage = createEmptyUsage();
 	for (const assistant of assistants) addUsage(usage, assistant.usage);
-	const text = finalMessage.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
+	const text = assistantResultText(finalMessage);
 	if (
 		result.text !== text ||
 		result.stopReason !== finalMessage.stopReason ||

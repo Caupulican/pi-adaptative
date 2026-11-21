@@ -7,6 +7,7 @@ import type { ResourceProfileKind } from "./settings/settings-schema.ts";
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ExtensionImportAuthoritySettingsSource {
 	getActiveResourceProfileNames(): string[];
+	hasExplicitActiveResourceProfileSelection?(): boolean;
 	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
 	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
 }
@@ -72,4 +73,26 @@ export function isExtensionPathAllowedForImport(
 	}
 	if (authority === "profile" && !hasProfileExtensionImportAuthority(settingsManager)) return false;
 	return settingsManager.isResourceAllowedByProfile("extensions", extensionPath, baseDir);
+}
+
+export function isExtensionAllowedAtRuntime(
+	settings: ExtensionImportAuthoritySettingsSource,
+	extension: {
+		readonly path: string;
+		readonly resolvedPath: string;
+		readonly sourceInfo: { readonly source: string; readonly baseDir?: string };
+	},
+	explicitLivePaths?: ReadonlySet<string>,
+): boolean {
+	const { path, resolvedPath, sourceInfo } = extension;
+	const profileActive = hasProfileExtensionImportAuthority(settings);
+	if (!profileActive && settings.hasExplicitActiveResourceProfileSelection?.()) return false;
+	if (!profileActive && sourceInfo.source === "inline") return true;
+	const authority: ExtensionImportAuthority = isDefaultOnBundledExtension(path, sourceInfo.source)
+		? "default-on"
+		: !profileActive &&
+				(sourceInfo.source === "cli" || explicitLivePaths?.has(path) || explicitLivePaths?.has(resolvedPath))
+			? "explicit"
+			: "profile";
+	return isExtensionPathAllowedForImport(settings, path, authority, sourceInfo.baseDir);
 }

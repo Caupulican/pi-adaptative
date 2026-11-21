@@ -1,6 +1,4 @@
-import type { Api, Model } from "@caupulican/pi-ai";
-
-export const ANTIGRAVITY_EFFORT_ORDER = ["low", "medium", "high", "xhigh"] as const;
+import { ANTIGRAVITY_EFFORT_ORDER, type Api, type Model } from "@caupulican/pi-ai";
 
 const familyLabel = new RegExp(`^(Gemini .+) \\((${ANTIGRAVITY_EFFORT_ORDER.join("|")})\\)$`, "i");
 

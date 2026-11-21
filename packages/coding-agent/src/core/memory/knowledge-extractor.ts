@@ -6,7 +6,7 @@ import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../age
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
-import type { OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
+import { isCompleteOwnerSource, type OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import type { OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { runBoundedSubmissionCompletion } from "./bounded-submission-completion.ts";
@@ -95,13 +95,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 	const { source } = input;
 	input.signal.throwIfAborted();
 	input.assertCurrent();
-	if (
-		!source.sessionId ||
-		source.sourceId !== `${source.sessionId}/${source.entryId}` ||
-		source.chars !== source.text.length ||
-		!source.text.trim() ||
-		!isKnowledgeTimestamp(source.createdAt)
-	)
+	if (!isCompleteOwnerSource(source) || !source.text.trim() || !isKnowledgeTimestamp(source.createdAt))
 		throw new KnowledgeExtractionRefusal(
 			"incomplete_source",
 			"Extraction requires complete original owner evidence.",

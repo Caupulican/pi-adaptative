@@ -4,6 +4,7 @@ import { mergeTextRanges } from "@caupulican/pi-tui";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { isCompatibleOwnerSourceEntry } from "../owner-input-ledger.ts";
 import {
 	appendSessionSnapshot,
 	decodeSessionSnapshotPayload,
@@ -160,6 +161,16 @@ function ownerSourceIdOf(sessionId: string, entryId: string): string {
 	return `${sessionId}/${entryId}`;
 }
 
+export function isCompleteOwnerSource(
+	record: OwnerEvidenceRecord | undefined,
+): record is OwnerEvidenceRecord & { sessionId: string } {
+	return Boolean(
+		record?.sessionId &&
+			record.sourceId === ownerSourceIdOf(record.sessionId, record.entryId) &&
+			record.chars === record.text.length,
+	);
+}
+
 function evidenceTextDigest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
@@ -201,7 +212,11 @@ const OWNER_EVIDENCE_CODEC: SessionSnapshotCodec<OwnerEvidenceRecord, "evidence"
 };
 
 export function getOwnerEvidenceSnapshots(entries: readonly SessionEntry[]): OwnerEvidenceRecord[] {
-	return getSessionSnapshots(entries, OWNER_EVIDENCE_CODEC);
+	const records = getSessionSnapshots(entries, OWNER_EVIDENCE_CODEC);
+	if (!records.length) return records;
+	const ids = new Set(records.map((record) => record.entryId));
+	for (const entry of entries) if (ids.has(entry.id) && !isCompatibleOwnerSourceEntry(entry)) ids.delete(entry.id);
+	return records.filter((record) => ids.has(record.entryId));
 }
 
 /**
@@ -506,6 +521,16 @@ export function isShownSpan(owner: OwnerWords, start: number, end: number): bool
 	return spanIsShown(owner.text, shownMasks(owner), start, end);
 }
 
+/** Exact source attribution for verifier output, including punctuation and repeated quotations. */
+export function containsStatedOwnerQuote(owner: OwnerWords, quote: string): boolean {
+	if (!quote.trim()) return false;
+	const masks = shownMasks(owner);
+	for (let start = owner.text.indexOf(quote); start >= 0; start = owner.text.indexOf(quote, start + 1)) {
+		if (!spanIsShown(owner.text, masks, start, start + quote.length)) return true;
+	}
+	return false;
+}
+
 /**
  * Where a cited quote sits in the owner's words. Every occurrence is tried; an occurrence that is not shown (see
  * {@link isShownSpan}) wins, the one with the most stated letters first, so a quote that appears inside shown text
@@ -791,7 +816,12 @@ export class OwnerEvidenceLedger {
 			if (entry.type !== "custom" || entry.customType !== OWNER_EVIDENCE_CUSTOM_TYPE) continue;
 			// The codec verifies shape and the stored digest; a tampered or legacy record is skipped.
 			const record = decodeSessionSnapshotPayload(entry.data, OWNER_EVIDENCE_CODEC);
-			if (!record || sourceEntries.has(record.entryId)) continue;
+			if (
+				!record ||
+				sourceEntries.has(record.entryId) ||
+				!isCompatibleOwnerSourceEntry(this.deps.getSessionManager().getEntry(record.entryId))
+			)
+				continue;
 			sourceEntries.add(record.entryId);
 			this.indexRecord(entry.id, record);
 			records.push(evidenceEntry(record));

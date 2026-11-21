@@ -11,14 +11,20 @@
  */
 
 import { isDeepStrictEqual } from "node:util";
-import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
+import type { AssistantMessage, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
+import { assistantAnswerTextParts } from "../../kernel/assistant-answer.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import { settledAnswer } from "../decision/noul.ts";
 import { choiceAct } from "../decision/thresholds.ts";
-import { commandReceiptFor, workerCommandOutcome, workerCommandReceiptId } from "../delegation/worker-receipts.ts";
+import {
+	commandReceiptFor,
+	isWorkerStaticCheck,
+	workerCommandOutcome,
+	workerCommandReceiptId,
+} from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
 import type { WorkUnitRecord } from "../work-units.ts";
@@ -199,7 +205,7 @@ export function collectClaimReceiptEvents(
 			counts = record.evidence === "tests" ? tests : nonTestChecks;
 			checkPassed =
 				ok && (record.evidence === "tests" ? isPassingTestVerification(record) : record.status === "passed");
-		} else if (invocation && checks.size > 0) {
+		} else if (invocation && checks.size > 0 && !Object.hasOwn(result.details as object, "piVerification")) {
 			const proof = checks.get(workerCommandReceiptId(invocation.requestId, result.toolCallId));
 			const observed = proof
 				? commandReceiptFor({
@@ -211,7 +217,14 @@ export function collectClaimReceiptEvents(
 						result,
 					})
 				: undefined;
-			if (proof?.commandDigest && observed?.commandDigest === proof.commandDigest && observed.tool === proof.tool) {
+			if (
+				proof?.commandDigest &&
+				observed?.commandDigest === proof.commandDigest &&
+				observed.tool === proof.tool &&
+				observed.exitCode !== undefined &&
+				observed.exitCode === proof.exitCode &&
+				isWorkerStaticCheck(observed.tool, call.arguments)
+			) {
 				const outcome = workerCommandOutcome(observed);
 				if (outcome !== undefined && outcome === workerCommandOutcome(proof)) checkPassed = outcome === "passed";
 			}
@@ -590,9 +603,5 @@ export class AnswerClaimChecker {
 
 /** The visible text of an assistant message: its text blocks joined, thinking and tool calls excluded. */
 export function assistantAnswerText(message: AssistantMessage | undefined): string {
-	if (!message) return "";
-	return message.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text)
-		.join(" ");
+	return assistantAnswerTextParts(message).join(" ");
 }

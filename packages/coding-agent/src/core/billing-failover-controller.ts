@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import type { Agent } from "../kernel/agent.ts";
 import { type ClassifiedError, classifyFailure } from "../kernel/reliability/index.ts";
 import { decideBillingFailover } from "./billing-failover.ts";
@@ -216,13 +217,25 @@ export class BillingFailoverController {
 		if (message.stopReason !== "error") return { handled: false };
 		classified ??= classifyFailure({ message: message.errorMessage ?? "", provider: message.provider });
 		if (classified.reason !== "billing_or_quota") return { handled: false };
-		const failedModel = this.deps.modelRegistry.find(message.provider, message.model) ?? this.deps.agent.state.model;
-		const failedRef = `${failedModel.provider}/${failedModel.id}`;
+		const identity = { provider: message.provider, id: message.model };
+		const failedRef = `${identity.provider}/${identity.id}`;
 		this.deps.exhausted.markExhausted(
 			failedRef,
 			expiryFromRetryAfter(classified.retryAfterMs, this.deps.exhausted.now()),
 		);
 
+		const current = this.deps.agent.state.model;
+		const { notice, continuedOn } = modelsAreEqual(current, identity)
+			? this.resolveFailover(current, failedRef)
+			: { notice: interfaceText().notices.billingFailover.halted(failedRef) };
+		this.lastNotice = notice;
+		this.deps.emit({ type: "warning", message: notice });
+		return continuedOn
+			? { handled: true, continuedOn: `${continuedOn.provider}/${continuedOn.id}` }
+			: { handled: true };
+	}
+
+	private resolveFailover(failedModel: Model<Api>, failedRef: string): { notice: string; continuedOn?: Model<Api> } {
 		const pinned = this.deps.isModelPinned?.() === true;
 		const defaultModelId = DEFAULT_MODEL_PER_PROVIDER[failedModel.provider];
 		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
@@ -251,11 +264,7 @@ export class BillingFailoverController {
 			: action.action === "failover"
 				? notices.halted(failedRef)
 				: action.notice;
-		this.lastNotice = notice;
-		this.deps.emit({ type: "warning", message: notice });
-		return continuedOn
-			? { handled: true, continuedOn: `${continuedOn.provider}/${continuedOn.id}` }
-			: { handled: true };
+		return { notice, continuedOn };
 	}
 }
 

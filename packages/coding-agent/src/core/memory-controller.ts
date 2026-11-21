@@ -1,23 +1,4 @@
-/**
- * Memory controller: the session's plug-and-play memory subsystem — the read-only OKF retrieval
- * provider, the bounded prompt-evidence surfacing pilot, cross-session recall effectiveness, and the
- * live {@link MemoryManager} (bundled file-store + transcript-recall providers plus any extension
- * contributions).
- *
- * Extracted verbatim from agent-session.ts (god-file decomposition). Owns the lazily-built OKF
- * provider, the latest retrieval/prompt-inclusion reports, the recreated-on-reload MemoryManager, the
- * recall {@link EffectivenessTracker}, and the extension-contributed pending providers. Everything
- * else it needs — settings, the current turn index, agent/workspace dirs, the session id, the
- * child-session flag, and the tool-registry refresh — is reached through narrow deps accessors rather
- * than the whole AgentSession.
- *
- * Request-planning boundary (deliberate): {@link runMemoryRetrieval} and {@link appendPromptMemory} are
- * invoked by the provider-request context controller (`ProviderRequestContextController.plan`) as
- * one-line delegations through the session's deps. This controller deliberately imports no
- * compaction/context-pipeline internals — it only ever reads settings and builds the retrieval report
- * + the bounded evidence block, and the plan it returns publishes nothing until the request plan is
- * accepted, so the request controller stays the single owner of the pass ordering and of commit.
- */
+/** Owns memory and knowledge projections; provider-request context admits and commits each versioned plan. */
 
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -165,6 +146,13 @@ import {
 } from "./memory/memory-read-context.ts";
 import { MemoryReadFlights } from "./memory/memory-read-flight.ts";
 import { createMemoryReadReceipt } from "./memory/memory-read-receipt.ts";
+import type { OwnerPreferenceAttestationStore } from "./memory/owner-preference-attestations.ts";
+import {
+	OwnerReportingAdmission,
+	prepareReportingMemoryRequest,
+	reportingAdmissionForKnowledge,
+	reportingKnowledgeDigest,
+} from "./memory/owner-reporting-admission.ts";
 import { MEMORY_EVIDENCE_CUSTOM_TYPE, ProviderContextVisibility } from "./memory/provider-context-visibility.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
@@ -175,11 +163,15 @@ import {
 	type StructuredReflectionApplyResult,
 	type StructuredReflectionRollback,
 	type StructuredReflectionWrite,
-	USER_PERSONA_CUSTOM_TYPE,
 } from "./memory/providers/file-store.ts";
 import { IcmProvider } from "./memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "./memory/providers/transcript-recall.ts";
 import { TRANSCRIPT_RECALL_MAX_ERROR_CHARS } from "./memory/providers/transcript-recall-worker-protocol.ts";
+import {
+	ReportingRequirementExposure,
+	safelyProjectReportingRequirements,
+	userReportingRequirements,
+} from "./memory/reporting-requirement-exposure.ts";
 import {
 	type FrontierBranchFence,
 	type TranscriptFrontierState,
@@ -207,6 +199,7 @@ import {
 	type TranscriptSummaryLookup,
 } from "./memory/transcript-source-tools.ts";
 import { TranscriptSummaryStore } from "./memory/transcript-summary-store.ts";
+import { userPersonaRecords } from "./memory/user-persona-context.ts";
 import type {
 	UserPreferenceAdmissionRequest,
 	UserPreferenceAdmissionResult,
@@ -218,6 +211,7 @@ import type {
 	WorkerMemoryReadOptions,
 	WorkerMemorySourceAnswer,
 } from "./memory/worker-memory-tools.ts";
+import type { OrdinaryReportingRequirements } from "./ordinary-work-policy.ts";
 import type { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { hasMaskableSecretText } from "./security/secret-text.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -228,6 +222,7 @@ import type {
 	SettingsError,
 	SettingsScope,
 } from "./settings/settings-schema.ts";
+import type { ReportingRequirementClassifier } from "./system-one/reporting-requirement-admission.ts";
 import { boundedTextPreview } from "./text-preview.ts";
 import { runAsyncReleaseSteps } from "./util/resource-release.ts";
 
@@ -479,6 +474,11 @@ export interface MemoryControllerDeps {
 	 */
 	admitUserPreference?(request: UserPreferenceAdmissionRequest): Promise<UserPreferenceAdmissionResult>;
 	getUserPreferenceLearning?(): UserPreferenceLearningPort;
+	getOwnerPreferenceAttestations?(): OwnerPreferenceAttestationStore | undefined;
+	migrateOwnerPreferenceProofs?(
+		preferences: readonly import("./memory/user-preference-metadata.ts").ParsedUserPreferenceLine[],
+	): void;
+	getReportingRequirementClassifier?(): ReportingRequirementClassifier | undefined;
 	/** Resolved after construction because the reflection owner is created after memory. */
 	knowledge?: () => KnowledgeCollectionHost;
 	/**
@@ -600,6 +600,8 @@ export class MemoryController {
 	private _knowledgeCollector: KnowledgeCollector | undefined;
 	private _knowledgeStop: Promise<void> | undefined;
 	private _knowledgeReadFailure: string | undefined;
+	private readonly _reportingAdmission = new OwnerReportingAdmission();
+	private readonly _reportingExposure = new ReportingRequirementExposure();
 	/** Summary hierarchy host, attached to the root history backend in either memory system; absent in narrow hosts. */
 	private readonly _hierarchy: TranscriptHierarchyHost | undefined;
 	private readonly _activeBranch: ActiveBranchView | undefined;
@@ -1068,18 +1070,23 @@ export class MemoryController {
 		return true;
 	}
 
-	/**
-	 * Observe-only local memory retrieval (see context/memory-retrieval.ts and
-	 * context/okf-memory-provider.ts): default-on, but settings-gated. When disabled,
-	 * never constructs built-in context-memory providers (no directory access under
-	 * `_memoryOkfDir()` at all) and returns an empty report -- fully fail-closed. When enabled,
-	 * queries local, read-only providers with the latest user message text (empty if there is
-	 * none, e.g. a goal-continuation turn) under `DEFAULT_LOCAL_MEMORY_EGRESS_POLICY`.
-	 * Retrieved items are only ever stored in the report; nothing here touches `messages`,
-	 * the transcript, or the provider-visible prompt. Never throws into a live turn: any
-	 * failure (including a provider search error) degrades to an empty report.
-	 */
+	/** Bounded local retrieval and one-time confirmed-preference subtype admission; failures leave the owner request usable. */
 	async runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport> {
+		const context = this._captureKnowledgeReadContext();
+		await prepareReportingMemoryRequest({
+			admission: this._reportingAdmission,
+			context,
+			classify: this.deps.standing.readsOwnerMemory ? this.deps.getReportingRequirementClassifier?.() : undefined,
+			store: this.deps.getOwnerPreferenceAttestations?.(),
+			knowledge: this._knowledgeStore,
+			user: () =>
+				this.getFileStoreWriter()?.userPreferenceExposure(
+					this._userPreferenceBudget(this.deps.getPromptHeadroom?.(messages)),
+				),
+			budget: () => this._memoryBudget(context.settings.maxResults, this.deps.getPromptHeadroom?.(messages)),
+			withheld: () => this.deps.isThirdPartyRun?.() === true,
+			migrate: this.deps.migrateOwnerPreferenceProofs,
+		});
 		if (!this._legacyMemoryEnabled()) return emptyMemoryRetrievalReport(0);
 		// The frontier composed synchronously after this call stands only if its mirror still reflects the store: confirmed
 		// here, at the planner's awaited boundary, once per request, and consumed by {@link _composeHistoryFrontier}.
@@ -1404,13 +1411,7 @@ export class MemoryController {
 		return this._latestMemoryPromptInclusionReport ?? defaultMemoryPromptInclusionReport();
 	}
 
-	/**
-	 * The plan's memory records in pass order: the evidence block (or its cleared form), then the persona
-	 * record. Nothing is published while planning. The returned plan is current only while the memory
-	 * generation, the content revision and the records composed from the same report under the same
-	 * headroom are unchanged, so a request planned against a different memory state is planned again;
-	 * `commit` publishes the inclusion report and the admitted-recall record once the plan is accepted.
-	 */
+	/** Versioned pass-order composition; only accepted-plan commit publishes diagnostics and current owner exposure. */
 	appendPromptMemory(
 		messages: AgentMessage[],
 		report: MemoryRetrievalReport,
@@ -1420,13 +1421,30 @@ export class MemoryController {
 		const usesKnowledge = () =>
 			this.deps.standing.readsOwnerMemory && this.deps.getSettingsManager().getMemorySystem() === "icm";
 		if (usesKnowledge()) return this._appendKnowledgePrompt(messages, wireMessages);
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		const withheld = this.deps.isThirdPartyRun?.() === true;
+		const exposed = this.deps.standing.readsOwnerMemory && settings.enabled && settings.includeInPrompt && !withheld;
+		const policyCurrent = () =>
+			generation === this._memoryGeneration &&
+			isDeepStrictEqual(settings, this.deps.getSettingsManager().getMemoryRetrievalSettings()) &&
+			(this.deps.isThirdPartyRun?.() === true) === withheld;
+		const userReporting = (headroom?: PromptHeadroom) =>
+			safelyProjectReportingRequirements(exposed, () => {
+				const view = this.getFileStoreWriter()?.userPreferenceExposure(this._userPreferenceBudget(headroom));
+				return userReportingRequirements(
+					view,
+					this.deps.getOwnerPreferenceAttestations?.(),
+					view?.projectKey ?? this._projectId(),
+				);
+			});
 		if (!this._legacyMemoryEnabled()) {
-			// A temporarily unavailable OKF generation is not an ICM generation.
-			return {
+			const reporting = userReporting();
+			const isCurrent = () => policyCurrent() && !usesKnowledge() && !this._legacyMemoryEnabled();
+			return dispatchCurrentMemoryPlan({
 				messages,
-				isCurrent: () => generation === this._memoryGeneration && !usesKnowledge() && !this._legacyMemoryEnabled(),
-				commit: () => {},
-			};
+				isCurrent,
+				commit: () => this._reportingExposure.publish(reporting, isCurrent),
+			});
 		}
 		const revision = this._memoryContentRevision;
 		const headroom = this.deps.getPromptHeadroom?.(messages);
@@ -1446,16 +1464,19 @@ export class MemoryController {
 			};
 		};
 		const composed = compose();
+		const reporting = userReporting(headroom);
+		const requestCurrent = () =>
+			policyCurrent() &&
+			revision === this._memoryContentRevision &&
+			this._legacyMemoryEnabled() &&
+			this._activeBranch?.snapshot().retentionRevision === branch?.retentionRevision;
 		const records = [...composed.frontier.records, ...composed.evidence.records, ...composed.persona];
-		return {
+		return dispatchCurrentMemoryPlan({
 			messages: [...messages, ...records],
 			isCurrent: () => {
-				if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return false;
-				if (revision !== this._memoryContentRevision) return false;
+				if (!requestCurrent()) return false;
 				// A report retrieved under another policy (egress, result cap, contributed providers) is stale.
 				if (reportPolicy !== undefined && reportPolicy !== this._retrievalPolicyKey()) return false;
-				// A view prepared under another branch epoch or retention (a new compaction) is replanned.
-				if (this._activeBranch?.snapshot().retentionRevision !== branch?.retentionRevision) return false;
 				const current = compose();
 				return sameHostRecords(
 					[...current.frontier.records, ...current.evidence.records, ...current.persona],
@@ -1463,13 +1484,13 @@ export class MemoryController {
 				);
 			},
 			commit: () => {
+				this._reportingExposure.publish(reporting, requestCurrent);
 				this._publishMemoryEvidence(composed.evidence);
 				this._hierarchy?.noteFrontierState(composed.frontier.state);
 			},
-		};
+		});
 	}
 
-	/** Current facts ride the existing versioned memory plan in ordinary requests and continuous chat alike. */
 	private _appendKnowledgePrompt(messages: AgentMessage[], wireMessages: readonly AgentMessage[]): MemoryPromptPlan {
 		const context = this._captureKnowledgeReadContext();
 		const { reader, scope, settings } = context;
@@ -1478,7 +1499,8 @@ export class MemoryController {
 		let projection: KnowledgeProjection | undefined;
 		// A run that carries a third party's words never holds the owner's records; its request reads the cleared form.
 		const withheld = this.deps.isThirdPartyRun?.() === true;
-		if (reader && settings.enabled && settings.includeInPrompt && !withheld) {
+		const exposed = settings.enabled && settings.includeInPrompt && !withheld;
+		if (reader && exposed) {
 			try {
 				projection = reader.preview(scope, budget);
 				this._knowledgeReadFailure = undefined;
@@ -1490,6 +1512,10 @@ export class MemoryController {
 			}
 		}
 		const content = projection?.text || KNOWLEDGE_CONTEXT_CLEARED;
+		const reporting = this._reportingExposure.projectKnowledge(exposed, projection, this._knowledgeStore, scope, () =>
+			this.deps.getOwnerPreferenceAttestations?.(),
+		);
+
 		return dispatchCurrentMemoryPlan({
 			messages: [
 				...messages,
@@ -1513,6 +1539,10 @@ export class MemoryController {
 				) &&
 				(projection?.isCurrent() ?? true),
 			commit: () => {
+				this._reportingExposure.publish(
+					reporting,
+					() => context.isCurrent() && (this.deps.isThirdPartyRun?.() === true) === withheld,
+				);
 				this._latestMemoryPromptInclusionReport = {
 					enabled: settings.enabled,
 					includeInPrompt: settings.includeInPrompt,
@@ -1607,6 +1637,12 @@ export class MemoryController {
 			request,
 			store,
 			evidence: host.evidence(),
+			classifyReportingRequirement: reportingAdmissionForKnowledge(
+				() => this.deps.getOwnerPreferenceAttestations?.(),
+				() => this.deps.getReportingRequirementClassifier?.(),
+			),
+			recordReportingClassification: (record, reporting) =>
+				this.deps.getOwnerPreferenceAttestations?.()?.classify(reportingKnowledgeDigest(record), reporting),
 			scope: this._knowledgeScope(),
 			engine,
 			learningPolicy,
@@ -1702,6 +1738,7 @@ export class MemoryController {
 
 	/** Keep a failed close owned so a later activation or shutdown can retry it. */
 	private async _releaseKnowledge(): Promise<void> {
+		this._reportingExposure.clear();
 		await this._stopKnowledgeCollector();
 		this._knowledgeStore?.close();
 		this._knowledgeStore = undefined;
@@ -1859,62 +1896,26 @@ export class MemoryController {
 		return this._hierarchy.summaryLookup();
 	}
 
-	/**
-	 * Fresh USER.md guidance for the NEXT provider request, as one `custom`/"user_persona" host
-	 * transient. The static memory block is frozen for the whole session (prompt-cache stability),
-	 * so a preference the owner adds, replaces or removes mid-session used to reach the model only
-	 * at the next session. The file-store provider measures its current committed USER.md against
-	 * what the installed block renders: when they differ, the record carries the current lines
-	 * bounded to the memory prompt budget (or says the file is empty, so a removed preference cannot
-	 * be resurrected by the static block). When they agree again, or memory is disabled or excluded
-	 * from the prompt, the message is a cleared marker (`HOST_TRANSIENT_CLEARED_DETAILS`): the
-	 * planner records its text once, only over an earlier persona record, through the same
-	 * append-on-change index as the kernel's own kinds; nothing here scans history or reads disk.
-	 * Content is deterministic per revision, so an unchanged snapshot is never re-sent. Child
-	 * sessions, whose static block is empty as well, contribute nothing.
-	 */
+	/** Last admitted provider exposure, never a new read of editable notes or a write made for display. */
+	reportingRequirements(): OrdinaryReportingRequirements {
+		return this._reportingExposure.current();
+	}
+
+	private _userPreferenceBudget(headroom: PromptHeadroom | undefined): MemoryPromptBudget | undefined {
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		const budget = this._memoryBudget(settings.maxResults, headroom);
+		return budget.enabled || budget.reason !== "missing_context_window" ? budget : undefined;
+	}
+
 	private _userPersonaRecords(headroom: PromptHeadroom | undefined): AgentMessage[] {
-		try {
-			const writer = this.getFileStoreWriter();
-			if (writer === undefined) return [];
-			const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
-			if (this.deps.isThirdPartyRun?.() === true)
-				return [
-					this._hostTransient(
-						USER_PERSONA_CUSTOM_TYPE,
-						"USER PERSONA: withheld from this run, which carries a third party's words; earlier persona records are stale.",
-						true,
-					),
-				];
-			if (!settings.enabled || !settings.includeInPrompt) {
-				return [
-					this._hostTransient(
-						USER_PERSONA_CUSTOM_TYPE,
-						"USER PERSONA: memory is disabled or excluded from the prompt in this session; earlier persona records are stale.",
-						true,
-					),
-				];
-			}
-			const budget = this._memoryBudget(settings.maxResults, headroom);
-			const projection = writer.userPersonaProjection(
-				budget.enabled || budget.reason !== "missing_context_window" ? budget : undefined,
-			);
-			if (projection === undefined) return [];
-			if (!projection.changed) {
-				return projection.content === undefined
-					? []
-					: [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, projection.content, true)];
-			}
-			if (projection.content !== undefined) {
-				return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, projection.content, false)];
-			}
-			const overBudget = projection.unavailable
-				? "USER PERSONA: some preference sources are unavailable or outside this snapshot. Current guidance is incomplete; do not infer removals from missing lines."
-				: `USER PERSONA: USER.md changed (revision ${projection.revision}) beyond this model's memory budget; earlier persona records are stale. Read USER.md when preferences matter.`;
-			return [this._hostTransient(USER_PERSONA_CUSTOM_TYPE, overBudget, false)];
-		} catch {
-			return [];
-		}
+		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
+		return userPersonaRecords({
+			writer: this.getFileStoreWriter(),
+			withheld: this.deps.isThirdPartyRun?.() === true,
+			enabled: settings.enabled && settings.includeInPrompt,
+			budget: this._userPreferenceBudget(headroom),
+			record: (type, text, cleared) => this._hostTransient(type, text, cleared),
+		});
 	}
 
 	/** A host transient (content) or its cleared marker, with a content-derived timestamp so retries are byte-identical. */
@@ -2705,7 +2706,10 @@ export class MemoryController {
 				sessionFile: this.deps.getSessionFile?.(),
 				legacy: this._continuousChatLegacySource(),
 				subscribeEntriesPersisted: subscribe,
-				warn: (message) => this.deps.emitWarning(message),
+				warn: (message, hold) => {
+					if (hold?.reasons.includes("configuration")) this._reportSummaryRefusal(message);
+					else this.deps.emitWarning(message);
+				},
 			},
 			signal,
 		);

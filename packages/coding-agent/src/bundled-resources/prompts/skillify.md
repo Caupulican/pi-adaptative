@@ -10,12 +10,12 @@ $ARGUMENTS
 
 Steps:
 
-1. Use the bundled `skill-architect` skill to design the instructions and `skill-creator` to scaffold and validate the provider-neutral package. Verify `pi-harness-learning` is available for the store-vs-implement decision.
-2. Identify the repeatable goal, inputs, outputs, success criteria, and user corrections from the session.
-3. Draft a `SKILL.md` with valid frontmatter: `name` (kebab-case, ≤64 chars) and `description` (≤1024 chars).
+1. Identify the repeatable goal, inputs, outputs and user corrections. Use `pi-harness-learning` if the lesson could belong in memory, a skill or code.
+2. Search the requested scope for the skill that already owns this job. Use `skill-architect` to refine its instructions or design a new skill when there is a gap.
+3. Follow `skill-creator` for package layout, worker eligibility and validation. Scaffold only a new package.
 4. Call the `skillify` tool with your draft to validate and audit it. The tool returns validity, errors, near-duplicate audit (prefer refining an existing skill), and proposedPath. If the tool is unavailable, use the installed skill audit/validator or bounded structural checks and disclose the missing optional check rather than blocking.
 5. Fix verified errors and overlap problems, then re-run the available audit. Stop after five failed repairs of the same defect or two cycles with no changed draft or improved result; report the precise blocker instead of looping indefinitely.
-6. Treat this explicit `/skillify` request as authorization to write the resulting safe user-level skill or refine the matching user-level skill. Do not ask for duplicate confirmation. Ask only if the change would alter settings, expand executable authority, require credentials, delete data, or publish/push/release.
-7. Write the validated skill to the audited path, then report the final path, audit evidence, and invocation (`/skill:<name>`). Suggest `/reload` only when the current runtime requires it; do not make reloading a completion gate.
+6. Use the destination the user requested. For Pi harness skills, edit the bundled source identified by `skill-creator`. For an ordinary personal skill, use the proposed user-level path unless an existing skill in scope owns the job. Treat the request as authorization to create or refine the skill in that scope. Do not ask for duplicate confirmation. Ask only if the change would alter settings, expand executable authority, require credentials, delete data, or publish/push/release.
+7. Write the validated skill there. Report the path, validation evidence and an ordinary request that should find it. Include `/skill:<name>` for explicit invocation. Suggest `/reload` only when the current runtime requires it; do not make reloading a completion gate.
 
 This runs in the main session. Follow the session's `delegation` ledger rule for independent work; the parent owns integration and activation.

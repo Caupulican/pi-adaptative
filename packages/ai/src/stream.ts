@@ -33,7 +33,15 @@ import {
 import { TextProtocolLiveFilter } from "./utils/tool-repair/text-protocol-live-filter.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
-export { dispatchGuardedProviderRequest } from "./provider-request-guard.ts";
+export {
+	dispatchGuardedProviderRequest,
+	getProviderResponseAccount,
+	isScopedProviderAccountKey,
+	type ProviderResponseAccount,
+	ProviderResponseAccountScope,
+	providerResponseAccountFor,
+	sameProviderResponseRoute,
+} from "./provider-request-guard.ts";
 
 let textToolProtocolBatchSequence = 0;
 

@@ -136,23 +136,20 @@ export class SystemOneSteeringPlane {
 		}
 	}
 
-	/**
-	 * Derives a SteeringDirective from the evaluated question pack and answers.
-	 * Checks checkpoint pass predicates and rejects missing answers.
-	 */
+	/** Derives the checkpoint's directive from its answers and the doubts about those answers. */
 	private composeDirective(
 		checkpointId: string,
 		answers: Record<string, unknown>,
-		_program: DecisionProgram,
+		unsettledPredicates: readonly string[] | undefined,
 	): SteeringDirective {
 		const reasonCodes: string[] = [];
 
 		if (checkpointId === "JEV-004") {
 			const completionPlausible = noulProbability(answers.completion_plausible);
 			const gapSuspected = noulProbability(answers.capability_gap_suspected);
-			const workClass = readObjectiveWorkClass(answers.missing_work_class);
+			const missingWork = readObjectiveWorkClass(answers, unsettledPredicates);
 
-			if (completionPlausible === undefined || gapSuspected === undefined || !workClass?.chosen) {
+			if (completionPlausible === undefined || gapSuspected === undefined || !missingWork) {
 				throw new SteeringProtocolError(
 					`Checkpoint ${checkpointId} missing required answers for directive composition`,
 					checkpointId,
@@ -166,11 +163,11 @@ export class SystemOneSteeringPlane {
 			if (gapSuspected >= STEERING_CUTS.routeCapabilityGap) {
 				return { action: "resolve_capability", reasonCodes: ["capability_gap_suspected"] };
 			}
-			// The work class is acted on only at its risk's floor; an unsure one gathers evidence, as the route does.
-			if (workClass.reading !== "act") {
+			if (missingWork === "continue_current_work")
+				return { action: "continue_current_work", reasonCodes: ["work_method_unsettled"] };
+			if (missingWork === "insufficient_evidence") {
 				return { action: "retrieve_more", reasonCodes: ["insufficient_evidence"] };
 			}
-			const missingWork = workClass.workClass;
 			if (missingWork === "resolve_capability") {
 				return { action: "resolve_capability", reasonCodes: ["capability_gap_suspected"] };
 			}
@@ -886,7 +883,11 @@ export class SystemOneSteeringPlane {
 		if (!existing) return undefined;
 		return {
 			certificate: existing,
-			directive: this.composeDirective(bound.request.checkpointId, existing.answers, bound.program),
+			directive: this.composeDirective(
+				bound.request.checkpointId,
+				existing.answers,
+				existing.unsure_semantic_predicates,
+			),
 		};
 	}
 
@@ -1078,7 +1079,7 @@ export class SystemOneSteeringPlane {
 		// throws: an exception here used to end the whole objective run.
 		const actionConfidence = confidences.length > 0 ? Math.min(...confidences) : 1;
 
-		const directive = this.composeDirective(request.checkpointId, answers, program);
+		const directive = this.composeDirective(request.checkpointId, answers, lowConfidence);
 		const judged = this.evaluateSemanticOutcome(request.checkpointId, answers, directive);
 		const failed_semantic_predicates = judged.failed_semantic_predicates;
 		const unsure_semantic_predicates = [
@@ -1245,10 +1246,18 @@ export class SystemOneSteeringPlane {
 		options: RequireCertificateOptions,
 	): SteeringCertificate {
 		const authority = authorityForCheckpoint(checkpointId);
-		// An ambiguous judgment asks for evidence at most GATHER_MORE_LIMIT times on the same evidence
-		// revision. After that, reversible work proceeds with the doubt on the certificate; an objective
-		// transition keeps failing closed (it never closes on a doubt).
+		// Reversible checkpoints bound evidence requests per revision. Objective closure requires a pass.
 		if (result.certificate.semantic_outcome === "gather_more") {
+			// The route may carry uncertainty about the method back to the agent on the first pass.
+			// Keep the certificate's actual verdict and every other checkpoint's evidence requirements.
+			if (
+				checkpointId === "JEV-004" &&
+				result.directive.action === "continue_current_work" &&
+				result.certificate.unsure_semantic_predicates?.length === 1 &&
+				result.certificate.unsure_semantic_predicates[0] === "missing_work_class" &&
+				!result.certificate.failed_semantic_predicates?.length
+			)
+				return result.certificate;
 			const objectiveId = options.objectiveId ?? "obj_default";
 			const evidenceRevision = options.evidenceRevision ?? 1;
 			const key = `${objectiveId}\u0000${options.taskId ?? ""}\u0000${checkpointId}\u0000${evidenceRevision}`;

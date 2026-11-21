@@ -121,6 +121,7 @@ import {
 	type VerificationRecord,
 } from "./task-runtime-state.ts";
 import { assertVerificationRecord, verificationSubjectAttempt } from "./verification-identity.ts";
+import { decodeWorkerBrief } from "./worker-brief-attachment.ts";
 import { budgetRefusalFromValue } from "./worker-budget-refusal-codec.ts";
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
@@ -168,7 +169,6 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 		snapshotRecords.checkpoints,
 		label,
 	);
-	projectionSerializedBytes(candidate as unknown as TaskRuntimeProjection);
 	const normalized: TaskRuntimeProjection = {
 		...parseHostEventProjection(
 			Object.fromEntries(HOST_EVENT_RECORD_FIELDS.map((field) => [field, candidate[field]])),
@@ -258,11 +258,11 @@ function optionalDispatchIdentifier(
 }
 
 function dispatchInstructions(value: unknown, label: string): string {
-	const instructions = string(value, label);
-	if (instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) {
-		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
+	try {
+		return string(decodeWorkerBrief(value, MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH), label);
+	} catch (error) {
+		throw new DurableTaskRuntimeError(`${label}: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	return instructions;
 }
 
 function retainedDescription(value: unknown, label: string): string {

@@ -9,7 +9,10 @@ import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/type
 import { harnessLog } from "./harness-log.ts";
 import { withMessageSource } from "./message-revision.ts";
 import { PrefixFold } from "./prefix-fold.ts";
-import { boundedFailureCode } from "./tool-failure-code.ts";
+import { boundedFailureCode, classifyToolFailure, processExitFailureCode } from "./tool-failure-code.ts";
+
+export { classifyToolFailure } from "./tool-failure-code.ts";
+
 import {
 	TOOL_FAILURE_LEDGER_RECORD_VERSION,
 	type ToolFailureLedgerDirective,
@@ -27,6 +30,7 @@ import {
 } from "./tool-invocation-receipt.ts";
 import type { AgentMessage, AgentToolCall, AgentToolResult } from "./types.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
+import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
 /** Stable kind identity for the durable, append-on-change ledger record (see transient-records.ts).
  * Never changes across the life of a conversation - it is the join key `reconcileTransientRecords`
@@ -82,6 +86,8 @@ export type ToolFailureState = "failed" | "rejected";
 export interface ToolFailureMemoryRecord {
 	version: typeof TOOL_FAILURE_MEMORY_VERSION;
 	failureKey: string;
+	/** Scoped execution digest of the exact retry proposed by the tool, when its repair is mechanical. */
+	correctedExecutionKey?: string;
 	/** Exact identity is process-internal and omitted from serialized failure memory. */
 	readonly [TOOL_FAILURE_EXECUTION_KEY]?: string;
 	/** Envelope-retaining identity; process-internal and omitted from serialized failure memory. */
@@ -190,6 +196,7 @@ interface ActiveFailure {
 	sequence: number;
 	/** Later calls of the same tool that executed without being this operation; see resolveToolFailures. */
 	laterCalls: number;
+	laterSuccess?: boolean;
 }
 
 interface FailureContextAnalysis {
@@ -740,17 +747,6 @@ export function forEachPairedToolResult(
 }
 
 /**
- * bash.ts's own trailer (`appendStatus`) always ends the message with a line like "Command
- * exited with code 1"; a structured result (e.g. run_process) instead puts "exitCode: 1" on its
- * own line near the top. Both are anchored to the START of their own line, with at most one
- * leading tool-name token ("Command"/"Python"/...) — ordinary stdout/stderr prose is never
- * anchored that way, so a captured line like "container will exit 0 on SIGTERM" can never be
- * read as the process exit status. Scan from the end of the message so the tool's own trailer —
- * always the last line it appends — outranks any earlier, non-authoritative line that matches.
- */
-const EXIT_STATUS_LINE_PATTERN = /^(?:\S+\s+)?(?:exit(?:ed)?(?:\s+with)?(?:\s+code)?|exitcode)\s*[:=]?\s*(-?\d+)\b/i;
-
-/**
  * bash.ts appends `cwd: <dir>` after its exit trailer on failures. The line is harness status, not
  * a cause: it must never displace a real diagnostic (a path may contain words like "error"), and it
  * reaches the model through the process-exit evidence tail instead.
@@ -776,26 +772,6 @@ function isFailureStatusLine(line: string): boolean {
 		/^exitcode:\s*-?\d+\b/i.test(line) ||
 		/^(?:stdout|stderr):(?:\s*\(empty\))?$/i.test(line)
 	);
-}
-
-function processExitFailureCode(message: string): string | undefined {
-	// comms-legacy-decoder: a tool's failure output is foreign text; its exit status line has no typed field.
-	const lines = message.split(/\r\n|\n/);
-	for (let index = lines.length - 1; index >= 0; index--) {
-		const match = EXIT_STATUS_LINE_PATTERN.exec(lines[index].trim());
-		if (match) return boundedFailureCode(`exit_${match[1]}`);
-	}
-	return undefined;
-}
-
-export function classifyToolFailure(message: string, errorClass?: string): string {
-	// A tool-owned terminal status is authoritative; stdout may contain arbitrary all-caps identifiers.
-	const exitFailureCode = processExitFailureCode(message);
-	if (exitFailureCode) return exitFailureCode;
-	// comms-legacy-decoder: a tool's failure output is foreign text; an errno name in it has no typed field.
-	const errno = /\b(E[A-Z][A-Z0-9_]{2,})\b/.exec(message)?.[1];
-	if (errno) return boundedFailureCode(errno);
-	return boundedFailureCode(errorClass ?? "tool_error");
 }
 
 function isToolFailurePhase(value: unknown): value is ToolFailurePhase {
@@ -921,10 +897,11 @@ function extractFailureDiagnostic(
 	const diagnosticPattern = requireStrongSignal
 		? strongDiagnosticPattern
 		: /(?:^|\b)(?:error|fatal|fail(?:ed|ure)?|invalid|unknown|unsupported|not found|no such|cannot|can't|missing|denied|refused|usage)(?:\b|:)/i;
+	const errnoLine = allowUnclassifiedFallback ? lines.find((line) => /^E[A-Z0-9_]+: /u.test(line)) : undefined;
 	const classified = requireStrongSignal
 		? lines.find((line) => diagnosticPattern.test(line))
 		: [...lines].reverse().find((line) => diagnosticPattern.test(line));
-	const diagnostic = classified ?? (allowUnclassifiedFallback ? lines.at(-1) : undefined);
+	const diagnostic = errnoLine ?? classified ?? (allowUnclassifiedFallback ? lines.at(-1) : undefined);
 	return diagnostic ? truncateMiddle(diagnostic, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS) : undefined;
 }
 
@@ -1053,6 +1030,13 @@ function readFailureRecord(details: unknown): ToolFailureMemoryRecord | undefine
 	return {
 		version: TOOL_FAILURE_MEMORY_VERSION,
 		...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
+		...(typeof candidate.correctedExecutionKey === "string" &&
+		candidate.tool.length <= MAX_TOOL_NAME_CHARS &&
+		candidate.correctedExecutionKey.startsWith(`${candidate.tool}:`) &&
+		candidate.correctedExecutionKey.length === candidate.tool.length + 1 + TOOL_SIGNATURE_HEX_CHARS &&
+		/^[0-9a-f]+$/u.test(candidate.correctedExecutionKey.slice(-TOOL_SIGNATURE_HEX_CHARS))
+			? { correctedExecutionKey: candidate.correctedExecutionKey }
+			: {}),
 		failureKey: truncate(candidate.failureKey, MAX_TOOL_NAME_CHARS + 1 + TOOL_SIGNATURE_HEX_CHARS),
 		...(typeof candidateExecutionKey === "string"
 			? {
@@ -1340,6 +1324,11 @@ function foldToolFailureContext(
 
 	for (let index = from; index < to; index++) {
 		const message = messages[index];
+		if (message.role === "user" && !isExternalEvidenceMessage(message)) {
+			// The recovery gate readmits operations on a new prompt. A changed operation that
+			// already succeeded last turn no longer needs a trailing reminder to retry.
+			resolveToolFailures(fold);
+		}
 		if (message.role === "assistant") {
 			activeDirectives.clear();
 			fold.batchKeys.clear();
@@ -1374,7 +1363,12 @@ function foldToolFailureContext(
 		if (message.errorKind === "operation_outcome" || isSuccessfulOperationWithHookFailure(message.details)) {
 			// The tool executed and reported an outcome: a successful call of the tool as far as the
 			// ledger is concerned, whatever the outcome says about the operation itself.
-			if (call) resolveToolFailures(fold, memoizedOperationIdentity(call, executionScope));
+			if (call)
+				resolveToolFailures(
+					fold,
+					memoizedOperationIdentity(call, executionScope),
+					!message.isError || isSuccessfulOperationWithHookFailure(message.details),
+				);
 			continue;
 		}
 		// `isError` is the typed failure flag every engine result carries; the `[harness]` notices an engine result
@@ -1453,6 +1447,7 @@ function foldToolFailureContext(
 				version: TOOL_FAILURE_MEMORY_VERSION,
 				...(executionScope ? { [TOOL_FAILURE_EXECUTION_SCOPE]: executionScope } : {}),
 				failureKey,
+				...(retained?.correctedExecutionKey ? { correctedExecutionKey: retained.correctedExecutionKey } : {}),
 				...(executionKey ? { [TOOL_FAILURE_EXECUTION_KEY]: executionKey } : {}),
 				...(rawKey ? { [TOOL_FAILURE_RAW_KEY]: rawKey } : {}),
 				tool,
@@ -1493,7 +1488,7 @@ function foldToolFailureContext(
 			// Erasure needs the exact operation: the volatile-normalized failure key folds ids, hashes and
 			// timestamps together, so two reads of different `txn:<hex>` refs would supersede each other.
 			const opKey = identity.executionKey;
-			resolveToolFailures(fold, identity);
+			resolveToolFailures(fold, identity, true);
 			const previousOperation = latestSuccessfulByOpKey.get(opKey);
 			// A call erased on an earlier request stays erased whatever the mark says now; a new
 			// erasure is only allowed while the superseded call is still unsent.
@@ -1528,41 +1523,33 @@ const MAX_RESOLVED_OCCURRENCES = 64;
  */
 const LATER_CALLS_THAT_RESOLVE = 2;
 
-/**
- * Called for every call that executed (a plain success or an operation outcome). The exact operation
- * succeeding clears its record, as always. Any other call of the same tool counts toward
- * `LATER_CALLS_THAT_RESOLVE`; at the threshold the record is resolved whatever arguments those calls
- * used. The protocol had already readmitted it - any success readmits - so nothing remains for the
- * record to guard, and the transcript keeps the failed call and its bounded diagnostic as evidence.
- * Keeping the record active instead left the ledger, a trailing record, re-appended at the tail of
- * every later request for the rest of the session (measured live: 29 identical ledger records
- * after one corrected delegate call, because the corrected call never repeats the failed
- * arguments). The occurrence count is remembered so an identical repeat keeps escalating.
- */
-/**
- * A policy block names a restriction, not an argument or state the model can repair, so the model
- * "moving on" shows in any later executed call, not only calls of the blocked tool. Without this a
- * blocked tool the model rightly never retries kept its record in every later request (measured live:
- * 26 ledger re-appends for two blocked calls). `owner_authorization_required` stays prompt-scoped.
- */
+/** An inapplicable policy restriction can be left behind by work through a different tool. */
 function isUncorrectablePolicyBlock(record: ToolFailureMemoryRecord): boolean {
 	return record.phase === "policy" && record.failureCode !== "owner_authorization_required";
 }
 
-function resolveToolFailures(fold: FailureFoldState, identity: ToolOperationIdentity): void {
+function resolveToolFailures(fold: FailureFoldState, identity?: ToolOperationIdentity, succeeded = false): void {
 	for (const [failureKey, failure] of fold.active) {
-		if (failureKey === identity.failureKey) {
-			fold.active.delete(failureKey);
+		if (identity) {
+			const failedExecution = getToolFailureRecordExecutionKey(failure.record);
+			if (failureKey === identity.failureKey && (!failedExecution || failedExecution === identity.executionKey)) {
+				fold.active.delete(failureKey);
+				continue;
+			}
+			const sameTool =
+				failure.record.tool === identity.tool &&
+				getToolFailureRecordExecutionScope(failure.record) === identity.executionScope;
+			if (!sameTool && !isUncorrectablePolicyBlock(failure.record)) continue;
+			failure.laterCalls++;
+			if (sameTool && succeeded) failure.laterSuccess = true;
+			if (
+				failure.laterCalls < LATER_CALLS_THAT_RESOLVE &&
+				!(sameTool && succeeded && failure.record.correctedExecutionKey === identity.executionKey)
+			)
+				continue;
+		} else if (!failure.laterSuccess) {
 			continue;
 		}
-		if (
-			!isUncorrectablePolicyBlock(failure.record) &&
-			(failure.record.tool !== identity.tool ||
-				getToolFailureRecordExecutionScope(failure.record) !== identity.executionScope)
-		)
-			continue;
-		failure.laterCalls += 1;
-		if (failure.laterCalls < LATER_CALLS_THAT_RESOLVE) continue;
 		fold.active.delete(failureKey);
 		fold.resolvedOccurrences.delete(failureKey);
 		fold.resolvedOccurrences.set(failureKey, failure.record.occurrence);
@@ -1829,11 +1816,19 @@ export function clearToolFailure(
 	tool: string,
 	args: unknown,
 	executionScope?: string,
+	succeeded = false,
 ): void {
+	if (tracker.size === 0) return;
 	const failureKey = getToolFailureKey(tool, args, executionScope);
 	const record = tracker.get(failureKey);
-	const executionKey = record ? getToolFailureRecordExecutionKey(record) : undefined;
-	if (!executionKey || executionKey === getToolExecutionKey(tool, args, executionScope)) tracker.delete(failureKey);
+	const executionKey = record && getToolFailureRecordExecutionKey(record);
+	const currentKey = getToolExecutionKey(tool, args, executionScope);
+	if (!executionKey || executionKey === currentKey) tracker.delete(failureKey);
+	if (succeeded) {
+		for (const [key, failure] of tracker) {
+			if (failure.correctedExecutionKey === currentKey) tracker.delete(key);
+		}
+	}
 }
 
 function failureGuidance(record: ToolFailureMemoryRecord): { repair: string } | { next_action: string } {

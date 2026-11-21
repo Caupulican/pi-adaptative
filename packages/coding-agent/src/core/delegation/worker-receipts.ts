@@ -6,7 +6,7 @@
 
 import { createHash } from "node:crypto";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
-import { proofCommandEdge, pythonCodeFacts, scriptStakesFromDetail } from "../proof/proof-stakes.ts";
+import { isCheckCommand, proofCommandEdge, pythonCodeFacts, scriptStakesFromDetail } from "../proof/proof-stakes.ts";
 import { containsCredential } from "../system-one/projector.ts";
 import { shellWord } from "../tools/shell-command-parser.ts";
 import { boundedText } from "../util/bounded-line.ts";
@@ -124,6 +124,12 @@ function processLine(record: Record<string, unknown>): string | undefined {
 	if (typeof record.executable !== "string") return undefined;
 	const args = Array.isArray(record.args) ? record.args.filter((arg): arg is string => typeof arg === "string") : [];
 	return [record.executable, ...args].map(shellWord).join(" ");
+}
+
+/** Decide from the original invocation bytes; the receipt's bounded command is for display. */
+export function isWorkerStaticCheck(toolName: string, args: Record<string, unknown>): boolean {
+	const line = toolName === "bash" ? args.command : toolName === "run_process" ? processLine(args) : undefined;
+	return typeof line === "string" && isCheckCommand(line, "static");
 }
 
 /**

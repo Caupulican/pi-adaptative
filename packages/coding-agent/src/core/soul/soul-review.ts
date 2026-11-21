@@ -4,12 +4,8 @@ import { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { settledBoolean } from "../decision/evaluation.ts";
 import type { NoulDirection } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
-import {
-	SOUL_ADVERSE_CLAUSES,
-	SOUL_REVIEW_UNSETTLED_REASON,
-	type SoulReviewQuestionId,
-} from "./soul-review-clauses.ts";
+import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
+import type { SoulReviewQuestionId } from "./soul-review-clauses.ts";
 
 export type { SoulReviewQuestionId };
 
@@ -144,13 +140,13 @@ export async function reviewSoulText(
  * told it when its write is refused; the owner's notice of a rejected held write words it per catalogue
  * ({@link soulWriteRejected}).
  */
-export function soulReviewAdverseClauses(
-	outcome: SoulReviewOutcome,
-	words: Pick<InterfaceText["smallCommands"]["soul"], "adverseClauses" | "unsettledReason"> = {
-		adverseClauses: SOUL_ADVERSE_CLAUSES,
-		unsettledReason: SOUL_REVIEW_UNSETTLED_REASON,
-	},
-): string {
+export function soulReviewRefusalReason(outcome: SoulReviewOutcome, words = englishText().smallCommands.soul): string {
+	if (outcome.kind === "unsettled") {
+		const clauses = outcome.findings
+			.filter((finding) => finding.answer === "unsettled")
+			.map((finding) => words.labels[finding.id]);
+		return `${words.unsettledReason} (${clauses.join(", ")})`;
+	}
 	if (outcome.kind !== "adverse") return words.unsettledReason;
 	return outcome.findings
 		.filter((finding) => finding.answer === "adverse")
@@ -162,7 +158,7 @@ export function soulReviewAdverseClauses(
 export function soulWriteRejected(
 	outcome: SoulReviewOutcome,
 ): (words: InterfaceText["notices"]["soul"], text: InterfaceText) => string {
-	return (words, text) => words.writeRejected(soulReviewAdverseClauses(outcome, text.smallCommands.soul));
+	return (words, text) => words.writeRejected(soulReviewRefusalReason(outcome, text.smallCommands.soul));
 }
 
 /** One line per decision for the owner-facing review listing. */

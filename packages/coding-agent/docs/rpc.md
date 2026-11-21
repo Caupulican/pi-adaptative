@@ -159,8 +159,9 @@ run for them. To stop the agent AND discard everything queued, send `clear_queue
 
 #### abort
 
-Abort the current agent operation. Does not clear the queue -- see the clear-then-abort pattern
-under [clear_queue](#clear_queue) above.
+Abort the current agent operation in this RPC process. To stop work running in another process
+that has the same session open, send `abort` to the process running that work. The queue stays
+available. See the clear-then-abort pattern under [clear_queue](#clear_queue) above.
 
 ```json
 {"type": "abort"}

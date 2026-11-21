@@ -5,6 +5,8 @@ import { buildOpenAICodexHeaders, DEFAULT_OPENAI_CODEX_BASE_URL } from "./openai
 
 export { OPENAI_CODEX_FEDRAMP_HEADER } from "./openai-codex-auth.ts";
 
+const MAX_CODEX_MODEL_CATALOG_BYTES = 2 * 1024 * 1024;
+
 export type OpenAICodexRateLimitResetCredit = {
 	id: string;
 	resetType: string;
@@ -131,6 +133,7 @@ async function requestAccountJson(
 		init,
 		signal: options.signal,
 		fetch: options.fetch,
+		...(endpoint === "models" ? { maxResponseBytes: MAX_CODEX_MODEL_CATALOG_BYTES } : {}),
 		label: "OpenAI Codex account",
 		createError: (message, status, retryAfterMs) => new OpenAICodexAccountError(message, status, retryAfterMs),
 	});

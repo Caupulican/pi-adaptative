@@ -3,7 +3,6 @@
  * Implements deterministic route composition precedence per JEV_ROUTING_CONTRACT.md.
  */
 
-import { readObjectiveWorkClass } from "../steering/programs.ts";
 import { isSameLaneVerificationDirective } from "../system-one/control-directive.ts";
 import {
 	OBJECTIVE_ROUTE_SCHEMA_VERSION,
@@ -11,22 +10,10 @@ import {
 	type ObjectiveRouteName,
 	validateObjectiveRoute,
 } from "./objective-route.ts";
-import type { RouteWorkClass, SemanticRouteJudgments } from "./objective-route-projector.ts";
+import type { SemanticRouteJudgments } from "./objective-route-projector.ts";
 
 export const INDEPENDENT_VERIFICATION_REASON_CODE = "independent_verification_required";
 export const SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE = "same_lane_verification_repeated_without_new_evidence";
-
-/**
- * The work class the route acts on, read from the route checkpoint's `missing_work_class` Choice by
- * the probability of the chosen option at the class's risk (`readObjectiveWorkClass`). A choice it may
- * not act on is unsure and gathers evidence (`insufficient_evidence` routes to retrieve) instead of
- * implementing on a guess. A missing answer is undefined: no judgment, so deterministic facts route.
- */
-export function workClassFromRouteChoice(answer: unknown): RouteWorkClass | undefined {
-	const read = readObjectiveWorkClass(answer);
-	if (!read) return undefined;
-	return read.reading === "act" && read.workClass ? read.workClass : "insufficient_evidence";
-}
 
 export interface RouteCompositionInput {
 	readonly cycleId: string;
@@ -189,6 +176,9 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	// 6. Missing work class
 	const workClass = sem.missingWorkClass ?? "implement";
 	switch (workClass) {
+		case "continue_current_work":
+			return buildRoute(cycleId, objectiveId, "implement", ["work_method_unsettled"], input);
+
 		case "none":
 		case "completion_candidate":
 			return buildRoute(cycleId, objectiveId, "completion_candidate", ["missing_work_none"], input);

@@ -32,8 +32,9 @@ import {
 	planNodeOrigin,
 	planReleasedTaskIds,
 } from "./plan-graph.ts";
+import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";
 import { planTaskChain } from "./plan-reducer.ts";
-import type { PlanNodeView, PlanView } from "./plan-view.ts";
+import { type PlanNodeView, type PlanView, planProgressText } from "./plan-view.ts";
 
 /** The customType of a plan update; defined with the proof-sheet carriers, re-exported here for its producers. */
 export { PLAN_UPDATE_CUSTOM_TYPE };
@@ -80,17 +81,6 @@ const KIND_WORDS: Readonly<Record<PlanUpdateKind, string>> = {
 	failed: "a step failed and nothing left in the plan can act on it",
 };
 
-const STATE_WORDS: Readonly<Record<PlanNodeView["state"], string>> = {
-	planned: "waiting",
-	ready: "ready",
-	admitted: "starting",
-	running: "running",
-	settled: "done",
-	held: "held",
-	superseded: "replaced",
-	cancelled: "cancelled",
-};
-
 function clip(text: string, max = MAX_LINE_CHARS): string {
 	const line = text.replace(/\s+/g, " ").trim();
 	return line.length <= max ? line : `${line.slice(0, max - 3)}...`;
@@ -99,7 +89,7 @@ function clip(text: string, max = MAX_LINE_CHARS): string {
 function nodeLine(node: PlanNodeView): string {
 	const outcome = node.outcomeStatus ? ` (${node.outcomeStatus})` : "";
 	const held = node.held ? ` [${node.held.reason}: ${node.held.detail}]` : "";
-	return clip(`- ${node.id}: ${STATE_WORDS[node.state]}${outcome}${held}: ${node.intent}`);
+	return clip(`- ${node.id}: ${PLAN_NODE_MACHINE.plain(node.state)}${outcome}${held}: ${node.intent}`);
 }
 
 /** The nodes worth a line: the update's own step first, then held, failed and running steps, then the rest. */
@@ -231,10 +221,23 @@ export function planUpdateDelivery(
 	const lines = [
 		...(codes ? [codes] : []),
 		clip(`Plan "${view.title}" (version ${view.version}): ${KIND_WORDS[input.kind]}.`),
+		planProgressText(view.counts),
 		...(input.detail ? [clip(input.detail, 600)] : []),
 		...(result
 			? [
 					`Result: ${result.outcome.status}${result.winner ? `; winner ${result.winner}` : ""}; ${result.members.length} steps combined.`,
+					`Full result: ${result.artifact}`,
+					...result.gaps.slice(0, 6).map((gap) => clip(`Gap: ${gap}`)),
+					...(result.kind === "vote" &&
+					!result.winner &&
+					result.members.some((member) => member.status === "succeeded")
+						? [
+								"Use the candidate reports to choose a result that meets the criteria or address the remaining gaps.",
+								...result.members
+									.slice(0, MAX_NODE_LINES)
+									.map((member) => clip(`Candidate ${member.nodeId}: ${member.report ?? member.outcomeId}`)),
+							]
+						: []),
 					...(result.changedFiles.length > 0
 						? [clip(`Changed files: ${result.changedFiles.join(", ")}`, 600)]
 						: []),
@@ -246,13 +249,11 @@ export function planUpdateDelivery(
 								),
 							]
 						: []),
-					...result.gaps.slice(0, 6).map((gap) => clip(`Gap: ${gap}`)),
 					...result.conflicts
 						.slice(0, MAX_CONFLICT_LINES)
 						.map((conflict) =>
 							clip(`Conflict (${conflict.kind}) between ${conflict.between.join(" and ")}: ${conflict.detail}`),
 						),
-					`Full result: ${result.artifact}`,
 				]
 			: []),
 		...(step

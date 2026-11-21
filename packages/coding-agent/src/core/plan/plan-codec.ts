@@ -304,7 +304,7 @@ function nodeFromValue(value: unknown, label: string, version: number): PlanNode
 	return {
 		id: nodeId(input.id, `${label}.id`),
 		kind: oneOf(input.kind, PLAN_NODE_KINDS, `${label}.kind`),
-		intent: text(input.intent, PLAN_LIMITS.intentChars, `${label}.intent`),
+		intent: text(input.intent, version < 4 ? 2_000 : PLAN_LIMITS.intentChars, `${label}.intent`),
 		...(input.brief !== undefined ? { brief: briefFromValue(input.brief, `${label}.brief`) } : {}),
 		inputs: entries(input.inputs, PLAN_LIMITS.edgeEntries, `${label}.inputs`, nodeId),
 		after: entries(input.after, PLAN_LIMITS.edgeEntries, `${label}.after`, nodeId),

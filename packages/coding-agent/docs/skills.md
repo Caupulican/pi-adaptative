@@ -100,6 +100,8 @@ These blocks are JSON config, not instructions. Pi parses only matching profile 
 
 ## Skill Commands
 
+Ask Pi to “have one worker audit and fix the comments in this directory.” The root can give one worker the whole scope. The worker uses `delete-comment` to classify comments, repair confirmed workarounds, update ADRs and tighten the lint rule. Its report includes the issue text for each confirmed workaround. The root handles any authorized filing in the external tracker. The skill also works directly through `/delete-comment <path>` or `/skill:delete-comment <path>`.
+
 Skills register as `/skill:name` commands:
 
 ```bash

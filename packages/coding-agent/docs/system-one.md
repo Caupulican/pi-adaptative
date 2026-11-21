@@ -26,6 +26,8 @@ Mandatory findings require receiving-lane reproduction, repair when confirmed, a
   telemetry only.
 - `legacy_goal` (default without System One): the legacy continuation alone.
 
+When the route judge is unsure which reversible work method to use, Pi continues the current task if the evidence already supports the next step, work remains, and the judge rules out a need for independent review or capability escalation. A missing evidence judgment still takes the retrieval path when the method is uncertain.
+
 An explicit SDK `executionLoopMode` keeps its selected mode and required-binding checks when
 System One is disabled. In particular, `objective_primary` requires an explicitly supplied objective
 controller or construction fails; it never silently changes to `legacy_goal`. Supplied objective
@@ -334,7 +336,7 @@ candidates cleared the separate evidence-sufficiency requirement for choosing a 
 All eight agreement measures fell below the existing 90% calibration target. From the repo root,
 `npm run eval:plan-graph -- --dump <path>` retains the synthetic inputs, answers and score distributions.
 
-A second hosted calibration on the same cases supplied every vote criterion in the shared state. On the retained graph answers, using the existing advisory band for coverage notes and cycle-checked ordering gave 18/24 coverage decisions and 7/8 dependency decisions matching their labels. Brief agreement remained 4/8 under the orchestration band, which governs attaching more context. Eleven graph readings stayed open. On the live result questions, agreement was 9/16 for changes, 9/16 for evidence, 7/8 for contradictions and 1/8 for finding evidence. Vote criteria agreed on 8/16, and 0/16 candidates cleared vote sufficiency. Unanswered or ambiguous readings still count as misses. A fresh hosted run with the final questions gave 19/24 for coverage, 7/8 for dependencies, 4/8 for briefs, 9/16 for changes, 9/16 for result evidence, 6/8 for contradictions, 0/8 for finding evidence, and 9/16 for rubric criteria. No candidate cleared vote sufficiency. These are calibration results on known cases. Where the vote needs independent checks, settled advisory Score support breaks ties between candidates with the same number of strictly met criteria. It cannot declare a winner.
+A second hosted calibration on the same cases supplied every vote criterion in the shared state. On the retained graph answers, using the existing advisory band for coverage notes and cycle-checked ordering gave 18/24 coverage decisions and 7/8 dependency decisions matching their labels. Brief agreement remained 4/8 under the orchestration band, which governs attaching more context. Eleven graph readings stayed open. On the live result questions, agreement was 9/16 for changes, 9/16 for evidence, 7/8 for contradictions and 1/8 for finding evidence. Vote criteria agreed on 8/16, and 0/16 candidates cleared vote sufficiency. Unanswered or ambiguous readings still count as misses. A fresh hosted run with the final questions gave 19/24 for coverage, 7/8 for dependencies, 4/8 for briefs, 9/16 for changes, 9/16 for result evidence, 6/8 for contradictions, 0/8 for finding evidence, and 9/16 for rubric criteria. No candidate cleared vote sufficiency. These are calibration results on known cases. When several candidates meet the criteria, the final comparison reads their report evidence. An inconclusive vote returns the candidate reports and open criteria to the root in the same plan version. Independent checks in the plan still run.
 
 `operation_effect` and `plan_review` share one presence band and accept absence at or below 0.5, looser than
 the 0.10 the owner's rule sets for requiring absence. The written reason: an absence reading in either family
@@ -863,3 +865,71 @@ Candidates rank by IDF-weighted shared calls and normalized-token fingerprints; 
 naming the function to reuse; a provisional one is a warning. `npm run scan:semantic-duplicates`
 judges every production unit against its closest candidates, batched and concurrent (scaled to the
 machine's cores and free memory), and prints a report.
+
+## When an ordinary owner request stops
+
+Pi records the opening session entry and remaining work in the existing
+`<agentDir>/state/decision-ledger.sqlite`. The row points into the canonical session history,
+so restoring a session needs its transcript as well as the database. For a live SQLite database
+in WAL mode, use an online backup or close the writers before making a filesystem copy.
+
+On a normal stop, Jev reads the original request, subsequent owner steering, the answer and
+available receipts. For a proposed continuation, an isolated reviewer on the configured expensive
+tier must identify the missing deliverable and a feasible next step. A general continuation receives those findings as suggestions under its existing permissions. On an answer-only turn the foreground composes the reply from the original request and its receipts. A veto, insufficient evidence or a limit
+leaves the work unresolved. A recorded tool outcome that is uncertain prevents automatic replay.
+
+Earlier owner corrections remain available to the foreground as conversation context. An older
+statement may have been superseded or may refer to another task. The completion check uses the
+current opening and its attributable evidence. When that evidence is insufficient, Pi can deliver
+the answer and show that completion is unverified.
+
+Pi permits up to **three automatic continuations per opening**, subject to the existing foreground
+and kernel limits. The original request starts at zero. Before dispatch, the same SQLite update
+checks the current generation, revision, lease and remaining count, then increments the count.
+A crash after reservation can consume an unused slot. It cannot refund one. By induction the count
+is at most three for every sequence of successful reservations, including competing callers and
+session restarts. A review interrupted before it returned leaves a separate marker, so reopening
+the session cannot repeatedly invoke the same failed judge.
+
+For an interrupted request with no final answer, at least one fully represented settled foreground
+receipt and complete coverage of its recorded foreground receipts and background reports, that
+same Jev assessment also asks whether the requested answer can be written from the completed
+results alone. The host facts explicitly leave the inventory of pending background work unchecked.
+A decisive actionable disposition and a soft-pass or hard-pass `report_ready` answer select an
+answer-only review using the shared gating bands. If the actionable disposition is decisive, report
+readiness is ambiguous and overall evidence earns a soft pass, Pi records `report_review_needed`.
+In this case the independent model decides whether the answer can be delivered. Both reporting
+paths require a citable result after redaction before the reviewer is called. The independent reviewer must confirm that the
+retained results suffice without another operation, permission or owner decision and cite a whole
+nonempty result line or whole short result from one covered foreground call. The host verifies the
+verbatim citation against the exact redacted evidence shown to the reviewer. Receipt headings,
+IDs, partial or invented text, cross-receipt quotes and dropped or redacted results cannot support
+that continuation. Citation metadata stays out of the Jev assessment and the verified citation is
+discarded before dispatch. An absent or invalid citation ends that review. After approval, the reserved continuation carries
+`responseMode: "answer_only"` and shares the same three-continuation lifetime cap. A reviewer veto
+ends that review. If report readiness is low, ordinary implementation work can still proceed through
+the existing independent review when the general actionable and evidence gates both pass.
+
+Inspect `/status` or the `ordinaryWork` field of RPC `get_autonomy_status` to see whether the request is active, held, or settled and how many continuations it has used. A held request distinguishes an unavailable judge, an unavailable reviewer, a timeout and insufficient evidence. Reading status uses the selected branch and leaves its checkpoint untouched.
+
+Earlier owner corrections can guide the answer. To record fulfillment, Pi needs evidence attributable to the current request. If the only supporting text is an older statement with an uncertain connection to the request, Pi delivers the answer and records it as unverified.
+
+Recovery checks the opening and frontier against the selected branch. Workers carry the input served by their exact dispatch when available. A detached tool must match its original call, tool and task. A waiting request wakes only for new matching evidence, including a receipt delivered before a restart. Each matching report contributes its own evidence, even when several tasks shared one notification.
+
+On an ordinary owner reply, a substantive fulfillment judgment can also require a reporting check. A decisively selected fulfillment with provisionally sufficient evidence can authorize a presentation check on a normal answer when Pi has an attributed, fully represented tool result. Even a perfect presentation leaves that substantive judgment unverified. Pi takes confirmed reporting rules from the memory projection that the foreground request actually used. The independent reviewer can identify an applicable omission, cite how each component was met, or cite a current instruction that overrides it. Pi checks the cited text and source. After the owner steers an active request, the reviewer sees the earlier inputs as context and the latest input separately. A claim that the rule was overridden or falls outside the current subject needs an exact quotation from a complete, identified record of the latest input. If the owner only says “keep going” and the subject appears solely in earlier text, Pi delivers the answer and leaves that exemption unverified. This outcome spends no continuation. A subject cited only from pasted material or a quotation cannot exempt the reply from a saved rule. Pi keeps the answer unverified when the review cannot establish which components of a saved rule still apply. Missing or stale exposure also leaves completion unverified.
+
+When Jev returns a valid but uncertain classification for an exact owner-confirmed preference, Pi can consult its configured independent model once within the same ten-second classification budget. A positive decision must cite the reply requirement in the owner’s words. SQLite reserves the attempt by record digest before dispatch, so parallel requests or a restart cannot multiply the cost. An unavailable or inconclusive decision leaves that version of the preference as guidance. A changed record gets its own digest.
+
+When a confirmed rule and a written answer are present, the existing Jev stop evaluation also asks whether the current owner restricted additions to the answer. A decisive restriction blocks a proposed rewrite. An absent or invalid reading holds the review. Other valid readings leave the independent review and the existing retry limit in control. This question can veto a correction and has no authority to certify an answer.
+
+A reporting correction uses an answer-only turn and the same lifetime limit of three continuations. The SQLite record retains the reservation and the count. Only the live provider request receives the selected rules. Revoking the rule invalidates both the reviewer request and the correction before dispatch. If Pi restarts while the correction is outstanding, it holds the request as unverified. The ordinary status view reports that outcome. A reviewer can still misjudge whether a rule applies or whether the reply satisfies all of its components.
+
+The finite-state model covers the lifetime limit, reviewer veto, owner steering after approval, revocation after reservation, tool exclusion and bounded revision under responsive execution. Nine injected faults exercise those properties, including a proposed rewrite in the presence of a decisive restriction, a premature completion after a new rule arrives, and an attempt to certify substantive work solely because the presentation passed. Model exploration verifies host transitions within the declared state bounds. The live grading trials measure the judges separately.
+
+Ratio provided the example of a typed reviewer verdict checked against a host-owned cycle budget.
+A revision clears the previous verification, and staged publication checks the candidate against its recorded digest. Its default permits unlimited review cycles. Pi keeps a finite ceiling and rechecks the session generation before sending an approved continuation. [Ratio review transition](https://github.com/19h/ratio/blob/cde88fb889cb8c530a08aa4354385f84d8abb4ed/crates/ratio-engine/src/orchestrator.rs#L2518-L2544) · [Ratio publication](https://github.com/19h/ratio/blob/cde88fb889cb8c530a08aa4354385f84d8abb4ed/crates/ratio-engine/src/orchestrator.rs#L719-L731) · [Ratio defaults](https://github.com/19h/ratio/blob/cde88fb889cb8c530a08aa4354385f84d8abb4ed/crates/ratio-engine/src/config.rs#L403-L413)
+
+Pi Durable records tool intent before execution and requires both the recorded and current tool
+definition to allow replay. Its scheduler also counts repeated crashes. Here the existing tool
+lifecycle ledger supplies the receipts and the decision database owns review and continuation.
+[Pi Durable tool recovery](https://github.com/earendil-works/pi/blob/fe8a6f5dc741e9214a20f70f359c68c72b494d1e/packages/durable/src/harness/tool.ts#L200-L249) · [Pi Durable scheduler](https://github.com/earendil-works/pi/blob/fe8a6f5dc741e9214a20f70f359c68c72b494d1e/packages/durable/src/harness/scheduler.ts#L1975-L2028)

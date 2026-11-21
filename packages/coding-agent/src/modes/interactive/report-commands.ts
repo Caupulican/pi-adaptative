@@ -88,6 +88,8 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 	];
 	if (costs.reportedCost !== undefined) lines.push(`${theme.fg("dim", text.recorded)} $${usd(costs.reportedCost, 4)}`);
 	if (costs.accountingStatus) lines.push(theme.fg("warning", text.historicalAccounting(costs.accountingStatus)));
+	if (costs.unresolvedUsageRequests || costs.usageAccountingIncomplete)
+		lines.push(theme.fg("warning", text.unresolvedUsage(costs.unresolvedUsageRequests)));
 	if (costs.apiEquivalentPartial)
 		lines.push(
 			theme.fg(

@@ -5,6 +5,7 @@
  * (`wrapToolWithReadScope`), so the same read gets the same verdict wherever it runs, in every execution mode.
  */
 
+import { AgentToolPolicyDeniedError } from "../../kernel/types.ts";
 import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import type { HarnessCapability } from "../orchestration/contracts.ts";
 import {
@@ -61,19 +62,14 @@ export function wrapToolWithReadScope<T extends EnvelopeScopedTool>(tool: T, sco
 				undefined,
 				requiredEnvelopeCapabilities(tool.name, args[1]),
 				{ ...scope, cwd: executionContext?.cwd ?? scope.cwd },
-				"bot",
+				"session",
 			);
 			if (violation === undefined) return executor.execute(...args) as ReturnType<Execute>;
-			return Promise.resolve({
-				content: [
-					{
-						type: "text",
-						text: `Read scope: ${violation}. This bot reads only the directories it was given; tell the owner the path it needs instead of reading it. The tool was NOT run.`,
-					},
-				],
-				details: { outcome: "read_scope_refused", tool: tool.name },
-				isError: true,
-			}) as ReturnType<Execute>;
+			throw new AgentToolPolicyDeniedError(
+				`Read scope: ${violation}. The tool was NOT run.`,
+				undefined,
+				"If the owner named a project-relative file, pass that relative path exactly as given. If you need to locate it, search within a granted directory. If the task requires this exact refused path, report the missing access.",
+			);
 		};
 		return { ...executor, execute } as T;
 	});

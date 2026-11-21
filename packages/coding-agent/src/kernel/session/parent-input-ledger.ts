@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Message } from "@caupulican/pi-ai/types";
 import type { CustomMessage } from "../messages.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import type { SessionAppendReceipt } from "./session-append-receipt.ts";
@@ -446,21 +447,17 @@ export function parentNoteMarker(selectionId: string): string {
 
 /** Both wake modes bind only to a request that actually carries every selected canonical body. */
 export function assertParentInputVisible(
-	messages: readonly { content: unknown }[],
+	messages: readonly Message[],
 	marker: string,
 	contents: readonly string[],
 ): void {
-	const texts = messages.flatMap(({ content }) =>
-		typeof content === "string"
-			? [content]
-			: Array.isArray(content)
-				? content.flatMap((block) =>
-						block && typeof block === "object" && "text" in block && typeof block.text === "string"
-							? [block.text]
-							: [],
-					)
-				: [],
-	);
+	if (messages.at(-1)?.role === "assistant") throw new Error("Parent input request ends with an assistant answer.");
+	const texts = messages.flatMap((message) => {
+		if (message.role !== "user") return [];
+		return typeof message.content === "string"
+			? [message.content]
+			: message.content.flatMap((block) => (block.type === "text" ? [block.text] : []));
+	});
 	if (![marker, ...contents].every((text) => texts.some((part) => part.includes(text))))
 		throw new Error("The provider request does not carry every exact selected parent input.");
 }

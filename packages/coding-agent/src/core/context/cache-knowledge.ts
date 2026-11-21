@@ -7,6 +7,9 @@ import type {
 	DecisionLedgerStore,
 } from "../operator-projection/decision-ledger-store.ts";
 import {
+	type CacheResponsePolicy,
+	cacheExpiryBounds,
+	cacheExpiryPolicyKey,
 	decayWeight,
 	laneParts,
 	lineageRemainingRequests,
@@ -39,7 +42,7 @@ export class CacheKnowledge {
 	private readonly getLedger: () => DecisionLedgerStore | undefined;
 	private readonly settings: SurvivalSettings;
 	private readonly providerRows = new Map<string, CacheObservationRow[]>();
-	private readonly curves = new Map<string, SurvivalCurve>();
+	private readonly curves = new Map<string, Map<string, SurvivalCurve>>();
 
 	constructor(
 		getLedger: () => DecisionLedgerStore | undefined,
@@ -52,15 +55,20 @@ export class CacheKnowledge {
 	/** A cache observation the session just recorded in the ledger. */
 	noteObservation(row: CacheObservationRow): void {
 		const provider = laneParts(row.lane).provider;
-		this.providerRows.get(provider)?.push(row);
+		if (row.measuredCachePolicy) this.providerRows.get(provider)?.push(row);
 		for (const lane of [...this.curves.keys()]) {
 			if (laneParts(lane).provider === provider) this.curves.delete(lane);
 		}
 	}
 
 	/** The retained share, with its standard error, a request on `lane` can expect after `gapMs` idle. */
-	retainedAfter(lane: string, gapMs: number, now: number): { retained: number; standardError: number } | undefined {
-		const curve = this.curve(lane, now);
+	retainedAfter(
+		lane: string,
+		gapMs: number,
+		now: number,
+		previous?: CacheResponsePolicy,
+	): { retained: number; standardError: number } | undefined {
+		const curve = this.curve(lane, now, previous);
 		return curve ? predictRetainedWithError(curve, gapMs, this.settings.binsPerDecade) : undefined;
 	}
 
@@ -70,13 +78,17 @@ export class CacheKnowledge {
 	}
 
 	/** The curve's measurement resolution for `lane`: the moments a decision over idle time can act at. */
-	gapResolution(lane: string, now: number): number[] {
-		return this.curve(lane, now)?.bins.map((bin) => bin.fromMs) ?? [];
+	gapResolution(lane: string, now: number, previous?: CacheResponsePolicy): number[] {
+		return this.curve(lane, now, previous)?.bins.map((bin) => bin.fromMs) ?? [];
 	}
 
 	/** When `lane` last answered in this session, per the ledger. */
 	lastResponseAt(sessionId: string, lane: string): number | undefined {
-		return this.getLedger()?.latestCacheObservation(sessionId, lane)?.observedAt;
+		return this.lastResponse(sessionId, lane)?.observedAt;
+	}
+
+	lastResponse(sessionId: string, lane: string) {
+		return this.getLedger()?.latestCacheObservation(sessionId, lane);
 	}
 
 	/** The live lineage's requests so far and the learned median further requests. */
@@ -139,19 +151,24 @@ export class CacheKnowledge {
 		};
 	}
 
-	private curve(lane: string, now: number): SurvivalCurve | undefined {
-		const cached = this.curves.get(lane);
+	private curve(lane: string, now: number, previous?: CacheResponsePolicy): SurvivalCurve | undefined {
+		const policy = previous?.cachePolicy;
+		if (!policy || policy.lane !== lane || policy.kind === "unknown") return undefined;
+		const policyKey = JSON.stringify([cacheExpiryPolicyKey(policy), cacheExpiryBounds(previous) ?? null]);
+		const cached = this.curves.get(lane)?.get(policyKey);
 		if (cached) return cached;
 		const provider = laneParts(lane).provider;
 		let rows = this.providerRows.get(provider);
 		if (!rows) {
 			const ledger = this.getLedger();
 			if (!ledger) return undefined;
-			rows = ledger.cacheObservationsForProvider(provider, now - negligibleAgeMs(this.settings.halfLifeMs));
+			rows = ledger.measuredCacheObservationsForProvider(provider, now - negligibleAgeMs(this.settings.halfLifeMs));
 			this.providerRows.set(provider, rows);
 		}
-		const curve = survivalCurve(rows, lane, this.settings, now);
-		this.curves.set(lane, curve);
+		const curve = survivalCurve(rows, lane, this.settings, now, previous);
+		const variants = this.curves.get(lane) ?? new Map<string, SurvivalCurve>();
+		variants.set(policyKey, curve);
+		this.curves.set(lane, variants);
 		return curve;
 	}
 }

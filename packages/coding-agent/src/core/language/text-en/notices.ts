@@ -357,6 +357,7 @@ export const NOTICES = {
 			`Channel ${name} refuses new messages: ${max} wait undelivered. The provider is asked to deliver them again later.`,
 		unanswered: (name: string, reason: UnansweredReason) =>
 			`Channel ${name}: a delivered conversation got no reply (${reason.replaceAll("_", " ")}).`,
+		partialReply: "Partial reply. The model reached its output limit.",
 		ownerUnanswered: (name: string, reason: UnansweredReason) =>
 			`Channel ${name}: an owner message got no reply (${reason.replaceAll("_", " ")}).`,
 		draftWaits: (name: string, draftId: string, reason: string) =>
@@ -432,7 +433,10 @@ export const NOTICES = {
 			turnsOffCause: (name: string) => `owner turns are off (channels.${name}.ownerMaxUsdPerDay is 0)`,
 			/** The `status` reply's spend line; `refusal` why no new turn starts, if none may. */
 			statusSpend: (usedUsd: number, dayUsd: number, turnUsd: number, refusal: string | undefined) =>
-				`Owner spend: $${usedUsd.toFixed(2)} of $${dayUsd.toFixed(2)} in 24 hours, $${turnUsd.toFixed(2)} per turn${refusal ? `; no new turn: ${refusal}` : ""}.`,
+				`Foreground owner turns and task commands have spent or reserved $${usedUsd.toFixed(2)} of $${dayUsd.toFixed(2)} in 24 hours ($${turnUsd.toFixed(2)} per turn).${refusal ? ` New turns are on hold (${refusal}).` : ""}`,
+			savedReplyDraft:
+				"A reply to this chat is saved as a draft. Full delivery is unconfirmed. You can review it at the terminal.",
+			savedTaskState: "Task state recorded in this session",
 			statusTurns: (running: boolean, waiting: number) =>
 				`${running ? "A turn is running." : "No turn is running."} ${waiting} message(s) wait.`,
 			/** The held drafts the `status` reply lists (`heldDraft` each), with how many more are held. */

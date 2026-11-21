@@ -59,6 +59,7 @@ import {
 	toJsonObject,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { dispatchForStorage } from "./dispatch-storage.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
 import { ModelTransferRuntime } from "./model-transfer-runtime.ts";
 import { assertNotificationCapacity } from "./notification-eviction.ts";
@@ -544,7 +545,7 @@ export class DurableTaskRuntime {
 		this.refresh();
 		const { task, objectiveState } = this.buildTask(input);
 		const taskState: TaskRuntimeState = { task, attemptIds: [] };
-		const normalizedDispatch = this.normalizeDispatchForTask(taskState, dispatch);
+		const normalizedDispatch = this.storedDispatchForTask(taskState, dispatch);
 		this.assertTaskAttemptBudget(taskState, objectiveState.objective);
 		assertRecordHasCapacity(this.state.tasks, MAX_ORCHESTRATION_TASKS, "task");
 		assertIdentifierListHasCapacity(objectiveState.taskIds, MAX_ORCHESTRATION_TASKS, "objective task list");
@@ -585,7 +586,7 @@ export class DurableTaskRuntime {
 				`Task '${taskId}' is awaiting approval '${pendingApproval.request.approvalId}'.`,
 			);
 		}
-		const normalizedDispatch = this.normalizeDispatchForTask(task, dispatch);
+		const normalizedDispatch = this.storedDispatchForTask(task, dispatch);
 		this.assertTaskAttemptBudget(task, this.state.objectives[task.task.objectiveId]!.objective);
 		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt", () =>
 			describeAttemptLimit(this.state),
@@ -1433,11 +1434,9 @@ export class DurableTaskRuntime {
 		return { task, objectiveState };
 	}
 
-	private normalizeDispatchForTask(
-		task: TaskRuntimeState,
-		dispatch: OrchestrationDispatchRequest,
-	): OrchestrationDispatchRequest {
-		const normalizedDispatch = dispatchFromValue(dispatch, "dispatch");
+	private storedDispatchForTask(task: TaskRuntimeState, dispatch: OrchestrationDispatchRequest) {
+		const stored = dispatchForStorage(dispatch);
+		const normalizedDispatch = dispatchFromValue(stored, "dispatch");
 		if (normalizedDispatch.taskId !== task.task.taskId) {
 			throw new DurableTaskRuntimeError("Dispatch taskId does not match the queued task.");
 		}
@@ -1448,7 +1447,7 @@ export class DurableTaskRuntime {
 		) {
 			throw new DurableTaskRuntimeError("Execution contract does not match the dispatch profile and task role.");
 		}
-		return normalizedDispatch;
+		return { ...normalizedDispatch, instructions: stored.instructions };
 	}
 
 	private assertTaskAttemptBudget(task: TaskRuntimeState, objective: ObjectiveContract): void {

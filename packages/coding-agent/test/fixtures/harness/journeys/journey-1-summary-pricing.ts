@@ -79,13 +79,17 @@ export async function runSummaryPricingJourney(world: HarnessWorld, finishQuiet:
 		const store = icmContinuousStore(agentDir);
 		await withDeadline(
 			world.trace,
-			"H12 unpriced summary blocked",
+			"H12 unpriced summary deferred without an attempt",
 			world.io.waitForMutation(() => {
 				const rows = world.guard.peekSqlite(
 					store.queueDatabase,
-					"SELECT level, ordinal, status, reason FROM work WHERE level=0 AND ordinal=0",
+					"SELECT status, attempts, lane, reason FROM work WHERE level=0 AND ordinal=0",
 				);
-				return rows?.some((row) => row.status === "blocked" && row.reason === warning) === true;
+				return (
+					rows?.some(
+						(row) => row.status === "ready" && row.lane === 1 && row.attempts === 0 && row.reason === null,
+					) === true
+				);
 			}),
 			60_000,
 		);
@@ -94,17 +98,13 @@ export async function runSummaryPricingJourney(world: HarnessWorld, finishQuiet:
 			"no physical request goes to an unpriced summary model",
 		).toEqual([]);
 		expect(owner.session.messages.at(-1)?.role).toBe("assistant");
-		const exact = [warning, `Continuous-chat compaction 0+1 failed: ${warning}`];
 		await withDeadline(
 			world.trace,
-			"H12 warnings delivered",
-			world.whenWarnings(warningMark, (seen) => exact.every((message) => seen.includes(message))),
+			"H12 summary configuration warning delivered",
+			world.whenWarnings(warningMark, (seen) => seen.includes(warning)),
 		);
-		for (const message of exact) {
-			const matches = world.warnings.slice(warningMark).filter((entry) => entry === message);
-			expect(matches).toHaveLength(1);
-			world.warnings.splice(world.warnings.indexOf(message, warningMark), 1);
-		}
+		expect(world.warnings.slice(warningMark)).toEqual([warning]);
+		world.warnings.splice(world.warnings.indexOf(warning, warningMark), 1);
 		world.trace.mark("root", "icm.summary-unpriced");
 	} finally {
 		if (owner) expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();

@@ -158,14 +158,15 @@ const LEADING_LAUNCHER = /^(?:(?:npx|bunx|pnpx)(?:\s+(?:-y|--yes))*|(?:pnpm|yarn
  * looked at the files it names. The classification reads the shape of the command, not the directory it runs in. A
  * launcher is stripped from the head of the line, and from every segment of it (`cd pkg && npx vitest`).
  */
-export function isCheckCommand(command: string): boolean {
+export function isCheckCommand(command: string, scope: "all" | "static" = "all"): boolean {
 	const line = command.trim();
 	const head = line.replace(LEADING_LAUNCHER, "");
-	if (classifyShellVerificationCommand(head, CHECK_CONTEXT) !== undefined) return true;
+	const context = { ...CHECK_CONTEXT, staticOnly: scope === "static" };
+	if (classifyShellVerificationCommand(head, context) !== undefined) return true;
 	const sequence = parseShellCommandSequence(line);
 	if (!sequence) return false;
 	const stripped = withoutSegmentLaunchers(sequence);
-	return stripped !== undefined && classifyShellVerificationCommand(stripped, CHECK_CONTEXT) !== undefined;
+	return stripped !== undefined && classifyShellVerificationCommand(stripped, context) !== undefined;
 }
 
 /**

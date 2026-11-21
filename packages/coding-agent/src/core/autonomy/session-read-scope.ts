@@ -51,11 +51,19 @@ export function readScopeRefusal(
 	path: string,
 	subtree = false,
 ): "outside" | "denied" | undefined {
+	return checkReadPath(scope, path, subtree, scope.readRoots);
+}
+
+export function isPrivateReadPath(scope: SessionReadScope, path: string): boolean {
+	return checkReadPath(scope, path, false, undefined) !== undefined;
+}
+
+function checkReadPath(scope: SessionReadScope, path: string, subtree: boolean, roots: readonly string[] | undefined) {
 	// Every spelling a tool may open for this argument is judged (the same policy the tools resolve with); an argument
 	// that resolves to nothing is outside.
 	const spellings = toolPathSpellings(path, scope.cwd);
 	if (spellings === undefined) return "outside";
-	const allowed = scope.readRoots.flatMap((root) => [resolve(scope.cwd, root), safeRealpathSync(root)]);
+	const allowed = roots?.flatMap((root) => [resolve(scope.cwd, root), safeRealpathSync(root)]);
 	const exemptEntries = subtree
 		? []
 		: (scope.exemptReadPaths ?? []).map((entry) => {
@@ -74,7 +82,7 @@ export function readScopeRefusal(
 								isPathWithinScope(canonicalTarget, entry.canonical)),
 					);
 		for (const target of [spelled, canonicalTarget]) {
-			if (!allowed.some((root) => isPathWithinScope(target, root))) return "outside";
+			if (allowed && !allowed.some((root) => isPathWithinScope(target, root))) return "outside";
 			for (const denied of scope.deniedPaths) {
 				for (const root of [resolve(scope.cwd, denied), safeRealpathSync(denied)]) {
 					if (subtree ? pathScopesOverlap(target, root) : isPathWithinScope(target, root)) {

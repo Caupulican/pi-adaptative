@@ -106,7 +106,7 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 					if (!carries(request, recognized))
 						throw new Error("The selected bot never received the authenticated steering.");
 				},
-				reply: { content: [{ type: "text", text: "Checked the open blocker." }] },
+				reply: { content: [{ type: "text", text: "Checked the open blocker." }], stopReason: "length" },
 			},
 		);
 		const steering = ownerLegUpdate(7, OWNER_ID, `steer ${recognized}`);
@@ -135,6 +135,7 @@ export async function runJourney4PhoneTaskControls(world: HarnessWorld): Promise
 		expect(transcript).toContain('"routineRef":"routine:');
 		await send(8, OWNER_ID, "status");
 		expect(api.texts().at(-1)).toContain("Checked the open blocker.");
+		expect(api.texts().at(-1)).toContain(interfaceText().notices.channels.partialReply);
 		// Model a backlog left by an earlier host with every steering slot and its daily allowance in use.
 		const retained = journal.read().result.ownerTaskCommands!.find((c) => c.action === "steer")!;
 		expect(retained).toMatchObject({

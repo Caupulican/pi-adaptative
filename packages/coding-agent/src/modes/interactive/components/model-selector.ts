@@ -1,4 +1,4 @@
-import { type Model, modelsAreEqual } from "@caupulican/pi-ai";
+import { ANTIGRAVITY_EFFORT_ORDER, type Model, modelsAreEqual } from "@caupulican/pi-ai";
 import type { Api } from "@caupulican/pi-ai/types";
 import {
 	Container,
@@ -12,7 +12,7 @@ import {
 } from "@caupulican/pi-tui";
 import type { AuthStatus } from "../../../core/auth-storage.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
-import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
+import { antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
 import type { ModelFavorite } from "../../../core/settings/settings-schema.ts";
 import { harnessLog } from "../../../kernel/harness-log.ts";
 import { formatSelectorActionHints, keyHint, keyText } from "../../../presentation/keybinding-hints.ts";

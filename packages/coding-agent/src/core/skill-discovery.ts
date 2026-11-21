@@ -3,7 +3,6 @@ import { type ResourceTraversalOptions, readResourceDirectory } from "./resource
 
 export type SkillDiscoveryMode = "pi" | "agents";
 
-/** Discover skill files once for both package resolution and prompt loading. */
 export function discoverSkillFiles(
 	dir: string,
 	mode: SkillDiscoveryMode,

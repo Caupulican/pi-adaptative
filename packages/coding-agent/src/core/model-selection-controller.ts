@@ -10,7 +10,7 @@
  */
 
 import { totalmem } from "node:os";
-import type { Api, Model } from "@caupulican/pi-ai";
+import { ANTIGRAVITY_EFFORT_ORDER, type Api, type Model } from "@caupulican/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/models";
 import type { Agent, ThinkingLevel } from "../kernel/index.ts";
 import type { SessionManager } from "../kernel/node.ts";
@@ -20,7 +20,7 @@ import type { ExtensionRunner } from "./extensions/index.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
-import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "./models/antigravity-effort.ts";
+import { antigravityGeminiEffortFamily } from "./models/antigravity-effort.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { OllamaRuntime } from "./models/local-runtime.ts";

@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
 import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
@@ -9,7 +11,7 @@ import { classifyYoloBoundary } from "./edge-policy.ts";
 import { evaluateToolGate } from "./gates.ts";
 import { readOnlyShellRefusal, WORKER_READ_ONLY_SHELL_VOICE } from "./read-only-shell-admission.ts";
 import { readScopeViolation } from "./read-scope-admission.ts";
-import type { SessionReadScope } from "./session-read-scope.ts";
+import { isPrivateReadPath, readScopeRefusal, type SessionReadScope } from "./session-read-scope.ts";
 
 /** The same scope guidance accompanies every lane write refusal. */
 export const WORKER_WRITE_SCOPE_GUIDANCE =
@@ -50,6 +52,8 @@ interface LaneToolAdmissionOptions {
 	 * it, in every mode. The gateway checks the same paths only outside YOLO, so this is the check YOLO keeps.
 	 */
 	readonly readScope?: SessionReadScope;
+	readonly readGrant?: SessionReadScope;
+	laneReadCounterpart?(absolutePath: string): string | undefined;
 	readonly denyCommands?: readonly string[];
 	readonly readEnvelope: CapabilityEnvelope;
 	readonly writeEnvelope: CapabilityEnvelope;
@@ -91,6 +95,29 @@ export class LaneToolAdmission {
 		};
 	}
 
+	private readCorrection(toolName: string, args: unknown): string | undefined {
+		const { cwd, readScope, readGrant, laneReadCounterpart } = this.options;
+		if (toolName !== "read" || !laneReadCounterpart || !readGrant || !args || typeof args !== "object") return;
+		const target = Reflect.get(args, "path");
+		if (typeof target !== "string" || !isAbsolute(target)) return;
+		try {
+			if (isPrivateReadPath(readGrant, target) || (readScope && isPrivateReadPath(readScope, target))) return;
+			const candidate = laneReadCounterpart(target);
+			if (
+				!candidate ||
+				candidate === target ||
+				readScopeRefusal(readGrant, candidate) ||
+				(readScope && readScopeRefusal(readScope, candidate))
+			)
+				return;
+			if (!statSync(candidate, { throwIfNoEntry: false })?.isFile()) return;
+			const local = relative(cwd, candidate);
+			return `The requested path names the parent checkout. To read this worker's copy, retry read with path ${JSON.stringify(local || candidate)}.`;
+		} catch {
+			return;
+		}
+	}
+
 	/** Pure policy diagnostics, shared by preparation and the mandatory execution boundary. */
 	check(
 		toolName: string,
@@ -116,11 +143,14 @@ export class LaneToolAdmission {
 				options.readScope,
 				"worker",
 			);
-			if (violation)
+			if (violation) {
+				const correction = this.readCorrection(toolName, args);
+				if (correction) return { block: true, reason: `Read scope: ${violation}.`, correction };
 				return {
 					block: true,
 					reason: `Read scope: ${violation}. This worker reads only the directories it was given; report the path to the parent instead of reading it.`,
 				};
+			}
 		}
 		if (options.writeProtectionEnvelope && WRITE_TOOLS.has(toolName)) {
 			const protection = evaluateToolGate({
@@ -225,7 +255,7 @@ export class LaneToolAdmission {
 			observer?.(event);
 			return undefined;
 		} catch (error) {
-			return this.projectFailure(error, signal);
+			return this.projectFailure(error, signal, event.toolName, event.args);
 		}
 	}
 
@@ -242,16 +272,24 @@ export class LaneToolAdmission {
 		try {
 			return await this.authorize(toolName, args, signal, purpose);
 		} catch (error) {
-			return this.projectFailure(error, signal);
+			return this.projectFailure(error, signal, toolName, args);
 		}
 	}
 
-	private projectFailure(error: unknown, signal?: AbortSignal): BeforeToolCallResult {
-		if (error instanceof CapabilityGatewayDeniedError && error.status !== "budget_exhausted")
+	private projectFailure(
+		error: unknown,
+		signal: AbortSignal | undefined,
+		toolName: string,
+		args: unknown,
+	): BeforeToolCallResult {
+		if (error instanceof CapabilityGatewayDeniedError && error.status !== "budget_exhausted") {
+			const correction = error.reasonCode === "path_outside_scope" ? this.readCorrection(toolName, args) : undefined;
 			return {
+				...(correction ? { correction } : {}),
 				block: true,
 				reason: `Lane tool blocked (${error.reasonCode}): ${error.message}${error.reasonCode === "scope_denied" ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
 			};
+		}
 		// The kernel projects thrown tool errors. Retain fatal admission failures independently
 		// so a later report cannot turn exhausted authority or failed accounting into success.
 		if (!signal?.aborted) this.failure ??= { error };

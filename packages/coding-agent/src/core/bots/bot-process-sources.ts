@@ -273,7 +273,10 @@ export function botProcessSources(input: BotProcessSourcesInput): BotProcessSour
 	return {
 		ports,
 		refresh: async (credentials) => {
-			if (credentials) await accounts.refresh();
+			if (credentials) {
+				await accounts.refresh();
+				await accounts.ready();
+			}
 			systemOneEnabled = await systemOneOn(settings, authStorage);
 			await Promise.all([...botSettings].map((own) => own.reload()));
 		},

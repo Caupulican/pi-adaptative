@@ -1114,11 +1114,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const enabledSkills = enabledSkillResources.map(mapSkillPath);
 
 			// Add CLI paths metadata
-			for (const r of cliExtensionPaths.extensions) {
-				if (!metadataByPath.has(r.path)) {
-					metadataByPath.set(r.path, { source: "cli", scope: "temporary", origin: "top-level" });
-				}
-			}
 			for (const r of cliExtensionPaths.skills) {
 				if (!metadataByPath.has(r.path)) {
 					metadataByPath.set(r.path, { source: "cli", scope: "temporary", origin: "top-level" });
@@ -1152,6 +1147,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const externalExtensions = this.discoverExternalExtensionPaths();
 			for (const entryPath of externalExtensions) {
 				metadataByPath.set(entryPath, { source: "external", scope: "user", origin: "top-level" });
+			}
+			for (const resource of cliExtensionPaths.extensions) {
+				metadataByPath.set(resource.path, { ...resource.metadata, source: "cli", origin: "top-level" });
 			}
 			const hasProfileExtensionAuthority = hasProfileExtensionImportAuthority(this.settingsManager);
 			const extensionProfileFilter = this.settingsManager.getResourceProfileFilter("extensions");

@@ -50,7 +50,7 @@ function holdClaimRead(world: HarnessWorld, agentDir: string) {
 function row(world: HarnessWorld, agentDir: string) {
 	return world.guard.peekSqlite(
 		icmContinuousStore(agentDir).queueDatabase,
-		"SELECT status, attempts, retry_after FROM work WHERE level=0 AND ordinal=0",
+		"SELECT status, attempts, retry_after, lane, reason FROM work WHERE level=0 AND ordinal=0",
 	)?.[0];
 }
 function held(world: HarnessWorld, agentDir: string) {
@@ -100,8 +100,8 @@ export async function runSummaryRecoveryJourney(world: HarnessWorld): Promise<vo
 	world.setModelReasoning("worker-b", true, { xhigh: "xhigh" });
 	try {
 		await cancelledClaim(world);
-		await emptyReply(world, false);
-		await emptyReply(world, true);
+		await repairedConfiguration(world);
+		await emptyReply(world);
 	} finally {
 		world.setModelReasoning("worker-c", false);
 		world.setModelReasoning("worker-b", false);
@@ -162,15 +162,51 @@ async function cancelledClaim(world: HarnessWorld): Promise<void> {
 	}
 }
 
-async function emptyReply(world: HarnessWorld, matching: boolean): Promise<void> {
-	const name = matching ? "h2-matching" : "h2-missing";
+async function repairedConfiguration(world: HarnessWorld): Promise<void> {
+	const agentDir = `${world.agentDir}-h2-unsupported`;
+	const warningMark = world.warnings.length;
+	const requestMark = world.provider.requests.length;
+	const owner = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: icmContinuousSettings("h2-unsupported"),
+	});
+	try {
+		world.provider.enqueue("root", text("h2-unsupported-root", "Recorded."));
+		world.systemOne.enterPhase("h2-unsupported", {});
+		await withDeadline(world.trace, "H2 unsupported seed", owner.session.prompt(`Remember ${"r".repeat(600)}`));
+		quiet(world);
+		await until(world, "H2 configuration deferred without dispatch", () => row(world, agentDir)?.lane === 1);
+		expect(row(world, agentDir)).toMatchObject({ status: "ready", attempts: 0, reason: null });
+		expect(world.provider.requests.slice(requestMark).map((request) => request.model.id)).toEqual(["root"]);
+		const unavailable = `The ICM chat's summary model ${HARNESS_PROVIDER}/h2-unsupported does not support medium thinking, which its compactions request: set contextPolicy.memory.history.compactionThinkingLevel to a level it supports, or contextPolicy.memory.history.summaryModel to another model, for example "<provider>/<model>".`;
+		expect(world.warnings.slice(warningMark)).toEqual([unavailable]);
+		world.warnings.splice(warningMark, 1);
+		world.provider.enqueue("worker-c", {
+			name: "h2-repaired-summary",
+			reply: { content: [{ type: "text", text: "owner: recovery resumed." }], usage: measured },
+		});
+		owner.settingsManager.setMemoryHistorySettings({
+			...owner.settingsManager.getMemoryHistorySettings(),
+			summaryModel: `${HARNESS_PROVIDER}/worker-c`,
+		});
+		await published(world, agentDir, "H2 configuration change releases pending work");
+		expect(world.provider.reached).toContain("worker-c:h2-repaired-summary");
+		expect(held(world, agentDir)).toEqual([]);
+	} finally {
+		expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
+	}
+}
+
+async function emptyReply(world: HarnessWorld): Promise<void> {
+	const name = "h2-matching";
 	const agentDir = `${world.agentDir}-${name}`;
 	const manager = world.createSessionManager(agentDir);
-	const settings = icmContinuousSettings(matching ? "worker-c" : "h2-unsupported", {
+	const settings = icmContinuousSettings("worker-c", {
 		contextPolicy: {
 			memory: {
 				history: {
-					summaryModel: `${HARNESS_PROVIDER}/${matching ? "worker-c" : "h2-unsupported"}`,
+					summaryModel: `${HARNESS_PROVIDER}/worker-c`,
 					allowExternalSummaryEgress: true,
 					maxConcurrentSummaries: 1,
 				},
@@ -179,8 +215,7 @@ async function emptyReply(world: HarnessWorld, matching: boolean): Promise<void>
 	});
 	const warningMark = world.warnings.length;
 	const owner = await world.createRootSession("root", { agentDir, sessionManager: manager, settings });
-	const gate = matching ? undefined : holdClaimRead(world, agentDir);
-	let previous = `Remember ${"r".repeat(600)}`;
+	const previous = `Remember ${"r".repeat(600)}`;
 	try {
 		world.provider.enqueue("root", text(`${name}-root`, "Recorded."));
 		world.provider.enqueue("worker-c", {
@@ -190,19 +225,10 @@ async function emptyReply(world: HarnessWorld, matching: boolean): Promise<void>
 		world.systemOne.enterPhase(name, {});
 		await withDeadline(world.trace, `${name} seed`, owner.session.prompt(previous));
 		quiet(world);
-		if (gate) {
-			await withDeadline(world.trace, "H2 missing key sampled", gate.entered);
-			expect(row(world, agentDir)).toMatchObject({ status: "running", attempts: 1 });
-			owner.settingsManager.setMemoryHistorySettings({
-				...owner.settingsManager.getMemoryHistorySettings(),
-				summaryModel: `${HARNESS_PROVIDER}/worker-c`,
-			});
-			gate.release();
-		}
 		await until(world, `${name} empty blocked`, () => row(world, agentDir)?.status === "blocked");
 		expect(row(world, agentDir)).toMatchObject({ status: "blocked", attempts: 1 });
-		expect(Number(row(world, agentDir)?.retry_after))[matching ? "toBe" : "toBeLessThan"](Number.MAX_SAFE_INTEGER);
-		expect(held(world, agentDir)).toHaveLength(matching ? 1 : 0);
+		expect(Number(row(world, agentDir)?.retry_after)).toBe(Number.MAX_SAFE_INTEGER);
+		expect(held(world, agentDir)).toHaveLength(1);
 		await withDeadline(
 			world.trace,
 			`${name} warning`,
@@ -210,49 +236,34 @@ async function emptyReply(world: HarnessWorld, matching: boolean): Promise<void>
 		);
 		expect(world.warnings.slice(warningMark).filter((entry) => entry === emptyWarning)).toHaveLength(1);
 		world.warnings.splice(world.warnings.indexOf(emptyWarning, warningMark), 1);
-		if (!matching) {
-			const unavailable = `The ICM chat's summary model ${HARNESS_PROVIDER}/h2-unsupported does not support medium thinking, which its compactions request: set contextPolicy.memory.history.compactionThinkingLevel to a level it supports, or contextPolicy.memory.history.summaryModel to another model, for example "<provider>/<model>".`;
-			const messages = world.warnings.slice(warningMark).filter((entry) => entry === unavailable);
-			expect(messages).toHaveLength(1);
-			world.warnings.splice(world.warnings.indexOf(unavailable, warningMark), 1);
-		}
-		gate?.restore();
-		if (matching) {
-			const requestMark = world.provider.requests.length;
-			const prompt = "Continue with the same summary settings.";
-			world.provider.enqueue("root", text(`${name}-same-root`, "Continuing."));
-			ownerPhase(world, manager, previous, `${name}-same`);
-			await withDeadline(world.trace, `${name} unchanged arrival`, owner.session.prompt(prompt));
-			previous = prompt;
-			quiet(world);
-			expect(row(world, agentDir)).toMatchObject({ status: "blocked", attempts: 1 });
-			expect(held(world, agentDir)).toHaveLength(1);
-			expect(
-				world.provider.requests.slice(requestMark).filter((request) => request.model.id === "worker-c"),
-			).toEqual([]);
-			owner.settingsManager.setMemoryHistorySettings({
-				...owner.settingsManager.getMemoryHistorySettings(),
-				summaryModel: `${HARNESS_PROVIDER}/worker-b`,
-			});
-		}
-		const track = matching ? "worker-b" : "worker-c";
+		const requestMark = world.provider.requests.length;
+		const prompt = "Continue with the same summary settings.";
+		world.provider.enqueue("root", text(`${name}-same-root`, "Continuing."));
+		ownerPhase(world, manager, previous, `${name}-same`);
+		await withDeadline(world.trace, `${name} unchanged arrival`, owner.session.prompt(prompt));
+		quiet(world);
+		expect(row(world, agentDir)).toMatchObject({ status: "blocked", attempts: 1 });
+		expect(held(world, agentDir)).toHaveLength(1);
+		expect(world.provider.requests.slice(requestMark).filter((request) => request.model.id === "worker-c")).toEqual(
+			[],
+		);
+		const track = "worker-b";
 		world.provider.enqueue(track, {
 			name: `${name}-healthy`,
 			reply: { content: [{ type: "text", text: "owner: recovery resumed." }], usage: measured },
 		});
-		for (let i = 0; i < (matching ? 1 : 4); i++) {
-			const prompt = `Continue recovery ${i}.`;
-			world.provider.enqueue("root", text(`${name}-follow-${i}`, "Continuing."));
-			ownerPhase(world, manager, previous, `${name}-follow-${i}`);
-			await withDeadline(world.trace, `${name} arrival ${i}`, owner.session.prompt(prompt));
-			previous = prompt;
-			quiet(world);
-		}
+		owner.settingsManager.setMemoryHistorySettings({
+			...owner.settingsManager.getMemoryHistorySettings(),
+			summaryModel: `${HARNESS_PROVIDER}/worker-b`,
+		});
+		world.provider.enqueue("root", text(`${name}-follow`, "Continuing."));
+		ownerPhase(world, manager, prompt, `${name}-follow`);
+		await withDeadline(world.trace, `${name} arrival`, owner.session.prompt("Continue recovery."));
+		quiet(world);
 		await published(world, agentDir, `${name} recovered physical summary`);
 		expect(world.provider.reached).toContain(`${track}:${name}-healthy`);
 		expect(held(world, agentDir)).toEqual([]);
 	} finally {
-		gate?.restore();
 		expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
 	}
 }

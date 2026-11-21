@@ -15,6 +15,7 @@ ready --> planned : planned
 ready --> admitted : admitted
 ready --> running : running
 ready --> settled : settled
+ready --> held : held
 ready --> superseded : superseded
 ready --> cancelled : cancelled
 admitted --> planned : planned

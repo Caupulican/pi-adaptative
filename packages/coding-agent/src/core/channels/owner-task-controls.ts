@@ -61,11 +61,12 @@ function admitTaskControl(
 				cmd.selection.incarnation === selection.incarnation &&
 				cmd.selection.bot === selection.bot,
 		);
+		const progress = latest?.state === "running" ? latest.state : (latest?.reply ?? latest?.state);
 		return {
 			conversation,
 			reply: [
 				taskStatus(port, selection),
-				latest && `Phone ${latest.action}: ${latest.reply ?? latest.state}`,
+				latest && `Phone ${latest.action}: ${progress}`,
 				latest?.terminalDraft && `Held action ${latest.terminalDraft} requires the bot’s terminal.`,
 			]
 				.filter(Boolean)

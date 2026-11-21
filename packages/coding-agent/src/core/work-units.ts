@@ -62,6 +62,18 @@ export function openWorkUnit(
 	return manager.appendCustomEntry(WORK_UNIT_CUSTOM_TYPE, full);
 }
 
+export function noteMutatingWorkUnit(
+	manager: WorkUnitSessionView,
+	activeGoalId: string | undefined,
+	toolName: string,
+	assistantEntryId: () => string | undefined,
+): void {
+	if (currentWorkUnit(manager, activeGoalId)) return;
+	const entryId = assistantEntryId();
+	if (!entryId) throw new Error("Cannot open a work unit before its mutating assistant message is persisted.");
+	openWorkUnit(manager, { kind: "enforced", reason: `first mutating call: ${toolName}` }, entryId);
+}
+
 /** Session custom entry recording a worker's receipts once its report was accepted (see claim-delivery.ts). */
 export const WORKER_RECEIPTS_CUSTOM_TYPE = "worker_receipts";
 

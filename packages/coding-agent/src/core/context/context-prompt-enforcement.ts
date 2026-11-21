@@ -31,7 +31,8 @@
 
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
-import { isImmutableHistoryMessage } from "../../kernel/message-revision.ts";
+import { immutableHistoryMessage, isImmutableHistoryMessage } from "../../kernel/message-revision.ts";
+import { type AcceptedPromptPreviews, acceptedPreview } from "./accepted-prompt-previews.ts";
 import {
 	type ContextRelevanceScope,
 	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
@@ -95,9 +96,15 @@ export type PromptEnforcementSkipReason =
 	| "missing_artifact_id"
 	| "below_min_chars"
 	| "frozen_prefix_preserved"
+	| "unretained_source"
 	| "gc_retrieval_unavailable";
 
-export type PromptProjectionPlacement = "in_place" | "tail_overlay" | "frozen_original" | "gc_stub";
+export type PromptProjectionPlacement =
+	| "in_place"
+	| "tail_overlay"
+	| "frozen_original"
+	| "accepted_preview"
+	| "gc_stub";
 
 export interface PromptEnforcementItemReport {
 	itemId: string;
@@ -111,6 +118,8 @@ export interface PromptEnforcementItemReport {
 	skipReason?: PromptEnforcementSkipReason;
 	selectedVisibility?: ContextVisibility;
 	deliveredVisibility?: ContextVisibility;
+	/** The accepted preview still present in the prefix, including when more evidence travels at the tail. */
+	retainedVisibility?: Exclude<ContextVisibility, "full">;
 	projectionPlacement?: PromptProjectionPlacement;
 	visibilityReason?: ContextVisibilityReason;
 	candidateVisibilities?: readonly ContextVisibility[];
@@ -124,6 +133,9 @@ export interface PromptEnforcementReport {
 }
 
 export interface EnforcePromptPolicyResult {
+	compressionPolicy?: string;
+	acceptProviderHistory?(): void;
+	isDispatchCurrent?(): boolean;
 	messages: AgentMessage[];
 	/** Query-specific tail overlays. Array content keeps them request-only in transient reconciliation. */
 	transientMessages: AgentMessage[];
@@ -133,6 +145,10 @@ export interface EnforcePromptPolicyResult {
 }
 
 export interface PromptEnforcementContext {
+	modelScope?: string;
+	previews?: ReturnType<AcceptedPromptPreviews["begin"]>;
+	artifactAvailable?(id: string): boolean;
+	canRetrieve?(): boolean;
 	/** Raw pre-GC evidence aligned by index with the provider-visible projection. */
 	sourceMessages: AgentMessage[];
 	/** Already-sent prefix. Query policy must never rewrite it in place. */
@@ -236,10 +252,27 @@ export function enforcePromptPolicy(
 	const frozenBelow = Math.min(Math.max(0, Math.floor(context?.frozenBelow ?? 0)), messages.length);
 	const gcReport = context?.gcReport;
 	const relevanceReads: Array<{ scope: ContextRelevanceScope; verdict: ContextRelevanceVerdict | undefined }> = [];
+	const previews = context?.previews;
+	const requiredArtifacts = new Set<string>();
+	const dispatchCurrent = () => {
+		if (previews?.isCurrent() === false) return false;
+		if (!requiredArtifacts.size) return true;
+		if (context?.canRetrieve?.() === false) return false;
+		for (const id of requiredArtifacts) if (context?.artifactAvailable?.(id) === false) return false;
+		return true;
+	};
 	const isCurrent = () =>
+		dispatchCurrent() &&
 		relevanceReads.every(({ scope, verdict }) => sameVerdict(settings.brainRelevance?.(scope), verdict));
 	if (!settings.enabled) {
-		return { messages, transientMessages: [], report: { turnIndex: shadowReport.turnIndex, items: [] }, isCurrent };
+		return {
+			messages,
+			transientMessages: [],
+			report: { turnIndex: shadowReport.turnIndex, items: [] },
+			isCurrent,
+			acceptProviderHistory: previews?.accept,
+			isDispatchCurrent: previews?.isCurrent,
+		};
 	}
 
 	// Quantized like context GC's packing boundary: stubbing rewrites history in place, so a
@@ -270,10 +303,15 @@ export function enforcePromptPolicy(
 	const items: PromptEnforcementItemReport[] = [];
 
 	const queryAware = Boolean(settings.brainRelevance);
-	function preliminarySkip(item: Parameters<typeof skip>[0], isError: boolean, alreadyEnforced: boolean) {
+	function preliminarySkip(
+		item: Parameters<typeof skip>[0],
+		isError: boolean,
+		alreadyEnforced: boolean,
+		retained = false,
+	) {
 		const recent = item.messageIndex >= recentCutoffIndex;
 		const floor = recent && item.messageIndex >= absoluteFloorIndex;
-		if (floor || (recent && !queryAware))
+		if (!retained && (floor || (recent && !queryAware)))
 			return skip(item, "within_recent_window", {
 				selectedVisibility: "full",
 				visibilityReason: floor ? "absolute_floor" : "recent_window",
@@ -297,10 +335,15 @@ export function enforcePromptPolicy(
 		}
 		const insideRecentWindow = planItem.messageIndex >= recentCutoffIndex;
 		const insideAbsoluteFloor = insideRecentWindow && planItem.messageIndex >= absoluteFloorIndex;
+		const retained =
+			planItem.messageIndex < frozenBelow
+				? previews?.get(planItem.messageIndex, sourceMessage, projectedMessage)
+				: undefined;
 		const skipped = preliminarySkip(
 			planItem,
 			sourceMessage.isError,
 			isPromptPolicyEnforced(projectedMessage.details) || (!context && isContextGcPacked(projectedMessage.details)),
+			!!retained,
 		);
 		if (skipped) {
 			items.push(skipped);
@@ -354,26 +397,38 @@ export function enforcePromptPolicy(
 		});
 		const relevanceKey = relevanceScope ? contextRelevanceKey(relevanceScope) : undefined;
 		const basePacked = isContextGcPacked(projectedMessage.details);
-		if (basePacked) {
-			getPackedRecord ??= packedRecordLookup(gcReport?.records ?? []);
-			const gcRecord = getPackedRecord(planItem.messageIndex, planItem.toolCallId);
-			const gcRetrievalId =
-				gcRecord?.retrievalAvailable && gcRecord.storagePath && gcRecord.key
-					? `context:${gcRecord.key}`
-					: undefined;
-			if (decision.selected === "hidden" && gcRetrievalId) {
+		if (basePacked || retained) {
+			let retrievalId: string | undefined;
+			if (basePacked) {
+				getPackedRecord ??= packedRecordLookup(gcReport?.records ?? []);
+				const record = getPackedRecord(planItem.messageIndex, planItem.toolCallId);
+				if (record?.retrievalAvailable && record.storagePath && record.key) retrievalId = `context:${record.key}`;
+			} else if (retained) {
+				nextMessages ??= messages.slice();
+				nextMessages[planItem.messageIndex] = retained.row;
+				previews!.keep(planItem.messageIndex, sourceMessage, projectedMessage, retained);
+				requiredArtifacts.add(artifactId);
+				retrievalId = artifactId;
+			}
+			const visible = basePacked ? "hidden" : retained!.visibility;
+			const needsOverlay =
+				decision.selected === "full" ||
+				(decision.selected === "long" && visible !== "long") ||
+				(decision.selected === "short" && visible === "hidden");
+			if (!needsOverlay && retrievalId) {
 				items.push({
 					itemId: planItem.itemId,
 					toolCallId: planItem.toolCallId,
 					messageIndex: planItem.messageIndex,
 					enforced: true,
-					action: "artifact_stub",
+					action: visible === "hidden" ? "artifact_stub" : "artifact_preview",
 					artifactId,
-					retrievalId: gcRetrievalId,
+					retrievalId,
 					originalChars,
 					selectedVisibility: decision.selected,
-					deliveredVisibility: "hidden",
-					projectionPlacement: "gc_stub",
+					deliveredVisibility: visible,
+					projectionPlacement: basePacked ? "gc_stub" : "accepted_preview",
+					...(!basePacked && retained ? { retainedVisibility: retained.visibility } : {}),
 					visibilityReason: decision.reason,
 					candidateVisibilities: decision.candidates,
 					relevanceKey,
@@ -381,16 +436,16 @@ export function enforcePromptPolicy(
 				});
 				continue;
 			}
-			const deliveredVisibility = gcRetrievalId ? decision.selected : "full";
+			const deliveredVisibility = retrievalId ? decision.selected : "full";
 			const originalText = mutableText ?? getToolResultText(sourceMessage);
 			const overlayText =
 				deliveredVisibility === "short" || deliveredVisibility === "long"
-					? buildPreviewText(deliveredVisibility, sourceMessage.toolName, originalText, gcRetrievalId as string)
-					: buildFullProjectionText(sourceMessage.toolName, originalText, gcRetrievalId);
+					? buildPreviewText(deliveredVisibility, sourceMessage.toolName, originalText, retrievalId as string)
+					: buildFullProjectionText(sourceMessage.toolName, originalText, retrievalId);
 			transientMessages.push(
 				projectionMessage(sourceMessage, overlayText, {
 					selectedVisibility: deliveredVisibility,
-					retrievalId: gcRetrievalId,
+					retrievalId,
 					relevanceKey,
 					messageIndex: planItem.messageIndex,
 				}),
@@ -407,16 +462,17 @@ export function enforcePromptPolicy(
 							? "artifact_stub"
 							: "artifact_preview",
 				artifactId,
-				retrievalId: gcRetrievalId,
+				retrievalId,
 				originalChars,
 				selectedVisibility: decision.selected,
 				deliveredVisibility,
 				projectionPlacement: "tail_overlay",
+				...(!basePacked && retained ? { retainedVisibility: retained.visibility } : {}),
 				visibilityReason: decision.reason,
 				candidateVisibilities: decision.candidates,
 				relevanceKey,
 				advisory: decision.advisory,
-				...(!gcRetrievalId ? { skipReason: "gc_retrieval_unavailable" as const } : {}),
+				...(!retrievalId ? { skipReason: "gc_retrieval_unavailable" as const } : {}),
 			});
 			continue;
 		}
@@ -465,8 +521,11 @@ export function enforcePromptPolicy(
 				? projectedMessage.details
 				: {};
 		const action = decision.selected === "hidden" ? "artifact_stub" : "artifact_preview";
-		nextMessages ??= messages.slice();
-		nextMessages[planItem.messageIndex] = {
+		if (previews && (!isImmutableHistoryMessage(sourceMessage) || !isImmutableHistoryMessage(projectedMessage))) {
+			items.push(skip(planItem, "unretained_source"));
+			continue;
+		}
+		const replacement: typeof projectedMessage = {
 			...projectedMessage,
 			content: [
 				{
@@ -496,6 +555,15 @@ export function enforcePromptPolicy(
 				},
 			},
 		};
+		const row = previews ? immutableHistoryMessage(replacement) : replacement;
+		if (row?.role !== "toolResult") {
+			items.push(skip(planItem, "unretained_source"));
+			continue;
+		}
+		nextMessages ??= messages.slice();
+		nextMessages[planItem.messageIndex] = row;
+		previews?.keep(planItem.messageIndex, sourceMessage, projectedMessage, acceptedPreview(row, decision.selected));
+		requiredArtifacts.add(artifactId);
 		items.push({
 			itemId: planItem.itemId,
 			toolCallId: planItem.toolCallId,
@@ -549,5 +617,8 @@ export function enforcePromptPolicy(
 		transientMessages,
 		report,
 		isCurrent,
+		compressionPolicy: previews?.policy(),
+		acceptProviderHistory: previews?.accept,
+		isDispatchCurrent: dispatchCurrent,
 	};
 }

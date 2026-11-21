@@ -21,6 +21,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ordinaryWorkStopModel } from "../packages/coding-agent/src/core/ordinary-work-model.ts";
 import {
 	DELIVERY_CASCADES,
 	remoteJobDeliveryModel,
@@ -29,9 +30,9 @@ import { exploreGraph, summarizeModel } from "../packages/coding-agent/src/kerne
 import { checkLiveness, livenessShapeFailures } from "../packages/coding-agent/src/kernel/machine-model-liveness.ts";
 import { crashLabel, modelShapeFailures, projectMachine } from "../packages/coding-agent/src/kernel/machine-model.ts";
 
-const mode = process.argv[2];
-if (mode !== "--static" && mode !== "--explore") {
-	console.error("usage: node --conditions=pi-source scripts/check-machine-models.mjs --static | --explore");
+const [mode, modelName, ...extra] = process.argv.slice(2);
+if ((mode !== "--static" && mode !== "--explore") || extra.length) {
+	console.error("usage: node --conditions=pi-source scripts/check-machine-models.mjs --static|--explore [model name]");
 	process.exit(2);
 }
 
@@ -39,7 +40,12 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const sourceRoot = join(root, "packages/coding-agent/src");
 
 /** Every model this script checks, with the properties a variant may break beyond its own. */
-const MODELS = [{ spec: remoteJobDeliveryModel, cascades: DELIVERY_CASCADES }];
+const MODELS = [
+	{ spec: remoteJobDeliveryModel, cascades: DELIVERY_CASCADES },
+	{ spec: ordinaryWorkStopModel, cascades: {} },
+];
+const selected = modelName === undefined ? MODELS : MODELS.filter(({ spec }) => spec.name === modelName);
+if (!selected.length) throw new Error(`Unknown model ${modelName}. Available: ${MODELS.map(({ spec }) => spec.name).join(", ")}`);
 
 /** The budgets `--static` searches under. A breach found under them is a breach of the model; a clean run proves nothing more. */
 const STATIC_BOUNDS = { maxStates: 20000, maxCrashes: 1, maxDrops: 1 };
@@ -135,7 +141,7 @@ function variantFailures(key, spec, cascades, outcome) {
 }
 
 const problems = [];
-for (const { spec, cascades } of MODELS) {
+for (const { spec, cascades } of selected) {
 	if (mode === "--static") {
 		for (const failure of shapeFailures(spec)) problems.push(`${spec.name}: ${failure}`);
 		const bounded = explore(spec, { ...spec.bounds, ...STATIC_BOUNDS });
@@ -162,6 +168,6 @@ if (problems.length > 0) {
 }
 console.log(
 	mode === "--static"
-		? `machine models: static checks and bounded search passed for ${MODELS.length} model(s)`
-		: `machine models: exhaustive checks passed for ${MODELS.length} model(s)`,
+		? `machine models: static checks and bounded search passed for ${selected.map(({ spec }) => spec.name).join(", ")}`
+		: `machine models: exhaustive checks passed for ${selected.map(({ spec }) => spec.name).join(", ")}`,
 );

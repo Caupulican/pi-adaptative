@@ -15,7 +15,7 @@ import { parentInputOriginalDetails } from "../../../../src/kernel/session/paren
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type Barrier, calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { flushedSessionManager, icmLatestResult, refusalDiagnostic } from "./shared.ts";
+import { flushedSessionManager, icmLatestResult } from "./shared.ts";
 
 /**
  * A deployment's transport as the core sees it: it is started with the core's inbound handler, hands events over and
@@ -652,10 +652,9 @@ export async function runJourney4AwayChannelsPhase(world: HarnessWorld): Promise
 					// The model's context shortens a long path to its `p/<name>` alias, so the refusal names the path as the
 					// tool received it: the file name is what identifies it, the scope and the "not run" verdict are exact.
 					const named = basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-					expect(
-						refusalDiagnostic(refused.text),
-						`${id} is refused by the private path scope before it runs`,
-					).toMatch(
+					const receipt = JSON.parse(refused.text.slice("[harness] ".length));
+					expect(receipt).toMatchObject({ failure_code: "blocked", phase: "policy" });
+					expect(receipt.diagnostic, `${id} is refused by the private path scope before it runs`).toMatch(
 						new RegExp(
 							`^envelope_path_denied: ".*${named}" is outside envelope worker-session-private-paths's path scope\\. The tool was NOT run\\.`,
 						),

@@ -182,7 +182,7 @@ export async function runJourney5PlanInMemoryPhase(world: HarnessWorld): Promise
 						throw new Error(`the valid in-memory plan did not start: ${result?.text ?? "no result"}`);
 					}
 				},
-				reply: { content: [{ type: "text", text: "The in-memory plan is running." }] },
+				reply: { content: [{ type: "text", text: "The in-memory plan was recorded." }] },
 			},
 			planUpdateStep("j5-mem-collect-done", "PLAN_DONE", (request) => {
 				settledDoneHeadline = deliveredLine(request, "h PLAN_UPDATE,");
@@ -354,7 +354,7 @@ export async function runJourney5PlanInMemoryPhase(world: HarnessWorld): Promise
 						throw new Error(`the second in-memory plan did not start: ${result?.text ?? "no result"}`);
 					}
 				},
-				reply: { content: [{ type: "text", text: "The second plan is running alongside the standalone worker." }] },
+				reply: { content: [{ type: "text", text: "The second plan was recorded." }] },
 			},
 		);
 

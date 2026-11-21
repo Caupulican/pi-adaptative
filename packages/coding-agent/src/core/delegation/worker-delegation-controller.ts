@@ -237,6 +237,7 @@ import {
 	type WorkerExecutionPlan,
 	withoutOwnerMemory,
 	workerExecutionAuthorityFromPlan,
+	workerMemoryScopeRefusal,
 	workerPlanReadsKnowledge,
 } from "./worker-execution-policy.ts";
 import {
@@ -2204,6 +2205,11 @@ export class WorkerDelegationController {
 			(pinnedContract || this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo")
 				? narrowWorkerExecutionPlan(inheritedVerifierAuthority, verifierExecutionPlan)
 				: verifierExecutionPlan;
+		for (const plan of [executionPlan, boundedVerifierExecutionPlan]) {
+			if (!plan) continue;
+			const refusal = workerMemoryScopeRefusal(this.deps.getAgentDir(), plan);
+			if (refusal) return { ok: false, skipReason: refusal };
+		}
 		const executionContract =
 			pinnedContract ??
 			createWorkerExecutionContract({
@@ -5058,6 +5064,7 @@ export class WorkerDelegationController {
 			grant = prepared.attempt.grant;
 		} else {
 			const compiled = compileWorkerExecutionGrant({
+				agentDir: this.deps.getAgentDir(),
 				yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 				target: {
 					objectiveId: durableTask.task.objectiveId,
@@ -5343,6 +5350,10 @@ export class WorkerDelegationController {
 			readOnly: executionPlan.readOnly,
 			shellReadOnly: executionPlan.shellReadOnly,
 			...(executionPlan.readConfined ? { readScopeRoots: executionPlan.readPaths } : {}),
+			laneReadCounterpart: (target) => {
+				const translate = this.laneIsolation?.laneOf(executionPlan.cwd, this.deps.getCwd());
+				return typeof translate === "function" ? translate(target) : undefined;
+			},
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),

@@ -445,7 +445,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				{
 					provider: "pi",
 					name: "builder",
-					task: "Implement the scoped task; write or run no tests unless the owner explicitly asked. Own implementation edits; request independent review and validation from peers.",
+					task: "Implement the scoped task. Own implementation edits and request review and validation from peers.",
 				},
 				{
 					provider: "agy",

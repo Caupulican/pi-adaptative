@@ -38,3 +38,17 @@ function parseJsonObject(candidate: string): Record<string, unknown> | null | un
 		return undefined;
 	}
 }
+
+/** A single complete JSON object, optionally inside one whole fence; narration or trailing content is not a decision. */
+export function parseSingleModelOutputJsonObject(text: string): Record<string, unknown> | undefined {
+	let payload = text.trim();
+	if (payload.startsWith("```")) {
+		const newline = payload.indexOf("\n");
+		const end = payload.indexOf("```", 3);
+		if (newline < 0 || end !== payload.length - 3) return undefined;
+		const language = payload.slice(3, newline).trim();
+		if (language !== "" && language !== "json") return undefined;
+		payload = payload.slice(newline + 1, end).trim();
+	}
+	return parseJsonObject(payload) ?? undefined;
+}

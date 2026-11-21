@@ -98,6 +98,23 @@ export function text(name: string, value: string): ScriptStep {
 	return { name, reply: { content: [{ type: "text", text: value }] } };
 }
 
+export function phasedReply(commentary: string, answer: string): ScriptedReply {
+	return {
+		content: [
+			{
+				type: "text",
+				text: commentary,
+				textSignature: JSON.stringify({ v: 1, id: "msg_progress", phase: "commentary" }),
+			},
+			{
+				type: "text",
+				text: answer,
+				textSignature: JSON.stringify({ v: 1, id: "msg_answer", phase: "final_answer" }),
+			},
+		],
+	};
+}
+
 export function calls(
 	name: string,
 	toolCalls: readonly { id: string; name: string; arguments: Record<string, unknown> }[],
@@ -498,10 +515,14 @@ export class ScriptedProvider {
 					track.steps.length > 0 &&
 					(!track.matches || track.matches(request)),
 			);
-			if (matches.length !== 1)
+			if (matches.length !== 1) {
+				const last = request.context.messages.at(-1);
+				const tools = request.context.tools?.map((tool) => tool.name).slice(0, 5);
+				const recent = this.reached.slice(-4);
 				throw new Error(
-					`Provider request ${request.sequence} matches ${matches.length} script tracks for ${request.model.id}`,
+					`Provider request ${request.sequence} matches ${matches.length} script tracks for ${request.model.id}; last role=${last?.role}, message count=${request.context.messages.length}, tools=${JSON.stringify(tools)}, prior steps=${JSON.stringify(recent)}`,
 				);
+			}
 			const [trackId, track] = matches[0]!;
 			const steps = track.steps;
 			step = steps?.[0];

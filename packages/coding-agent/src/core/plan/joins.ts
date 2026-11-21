@@ -6,7 +6,7 @@
  *   member settled.
  * - race: settles on the first succeeded member (`any`); the other members still running are cancelled.
  * - vote: every member settled; no eligible (succeeded) candidate settles the vote as partial. Otherwise the executor judges
- *   the candidates on the vote's rubric and acts on the exit it reads (`plan-vote-decision.ts`). A vote whose automatic
+ *   the candidates on the vote's rubric and acts on the exit it reads (`plan-vote-decision.ts`). A vote whose planned
  *   checks settled is decided by their verdicts here, in code.
  * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier reviews the
  *   results the members ran). A reduce join's outcome is the reducer's alone; a verify join settles through its verifier
@@ -25,11 +25,12 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.
 import { highestStakesLevel, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { ConflictReading } from "../system-one/plan-result-review.ts";
 import { boundedLine } from "../util/bounded-line.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import type { FindingPair } from "./plan-evidence.ts";
 import type { PlanNodeKind, PlanNodeSpec, PlanRecord, PlanRuntimeState } from "./plan-graph.ts";
 import { voteChecksOf } from "./plan-revision.ts";
 import { planNodeOutcome } from "./plan-view.ts";
-import { verifiedVote } from "./plan-vote-decision.ts";
+import { type VoteStep, verifiedVote } from "./plan-vote-decision.ts";
 
 export const JOIN_RESULT_MAX_BYTES = 256 * 1024;
 /** The most file conflicts one join names, in record order. */
@@ -41,6 +42,8 @@ export interface JoinMember {
 	readonly nodeId: string;
 	readonly status: OutcomeStatus;
 	readonly outcomeId: string;
+	/** The candidate report for a vote returned to the root. Older artifacts omit it. */
+	readonly report?: string;
 }
 
 export interface JoinResult {
@@ -62,6 +65,48 @@ export interface JoinResult {
 	readonly stakes?: ProofStakesLevel;
 }
 
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** Every field the combined update and its proof sheet read: a record missing one of them is not a join result. */
+export function isJoinResult(value: unknown): value is JoinResult {
+	if (!isPlainRecord(value) || value.v !== 1) return false;
+	if (typeof value.kind !== "string" || typeof value.artifact !== "string") return false;
+	if (value.winner !== undefined && typeof value.winner !== "string") return false;
+	const outcome = value.outcome;
+	if (!isPlainRecord(outcome) || typeof outcome.status !== "string") return false;
+	if (!isPlainRecord(outcome.cost) || typeof outcome.cost.usd !== "number") return false;
+	const members = value.members;
+	if (
+		!Array.isArray(members) ||
+		!members.every(
+			(member: unknown) =>
+				isPlainRecord(member) &&
+				typeof member.nodeId === "string" &&
+				typeof member.status === "string" &&
+				typeof member.outcomeId === "string" &&
+				(member.report === undefined || typeof member.report === "string"),
+		)
+	)
+		return false;
+	const coverage = value.coverage;
+	if (!isPlainRecord(coverage) || !Object.values(coverage).every((met) => typeof met === "boolean")) return false;
+	const conflicts = value.conflicts;
+	if (
+		!Array.isArray(conflicts) ||
+		!conflicts.every(
+			(conflict: unknown) =>
+				isPlainRecord(conflict) &&
+				(conflict.kind === "finding" || conflict.kind === "file") &&
+				isStringArray(conflict.between) &&
+				typeof conflict.detail === "string",
+		)
+	)
+		return false;
+	return isStringArray(value.changedFiles) && isStringArray(value.gaps);
+}
+
 export interface JoinIdentity {
 	readonly outcomeId: string;
 	readonly generation: number;
@@ -74,7 +119,7 @@ export type JoinDecision =
 	| { readonly kind: "settle"; readonly result: JoinResult; readonly cancel: readonly string[] }
 	/** merge with every member settled: the executor lands the members' lanes, then settles with `mergeResult`. */
 	| { readonly kind: "merge" }
-	/** vote with eligible candidates and no automatic check yet: the executor judges them on the rubric (S6). */
+	/** Vote with eligible candidates and no recorded checks. The executor applies the rubric. */
 	| {
 			readonly kind: "rubric";
 			readonly candidates: readonly { readonly nodeId: string; readonly outcome: Outcome }[];
@@ -253,8 +298,11 @@ export function decideCodeJoin(
 						accepted: planNodeOutcome(projection, plan, check.id)?.status === "succeeded",
 					})),
 				);
-				const winner = verdict.kind === "V7_verified" ? verdict.memberId : undefined;
-				return { kind: "settle", result: settleVote(projection, plan, record, node, identity, winner), cancel: [] };
+				return {
+					kind: "settle",
+					result: settleVote(projection, plan, record, node, identity, verdict),
+					cancel: [],
+				};
 			}
 			return { kind: "rubric", candidates: succeeded };
 		}
@@ -264,8 +312,8 @@ export function decideCodeJoin(
 }
 
 /**
- * Settles a vote with its winner: a winner settles on that candidate; without one (`undefined`) the join settles on every
- * eligible candidate as partial, so the root reads them all (READ_ALL).
+ * Settles a supported winner on its candidate. An unresolved comparison preserves the candidate reports and reasons
+ * in the partial result that returns to the root.
  */
 export function settleVote(
 	projection: JoinProjection,
@@ -273,10 +321,13 @@ export function settleVote(
 	record: PlanRecord,
 	node: PlanNodeSpec,
 	identity: JoinIdentity,
-	winner: string | undefined,
+	step: VoteStep,
 ): JoinResult {
 	const { settled } = memberOutcomes(projection, plan, node);
-	const chosen = winner ? settled.find((member) => member.nodeId === winner) : undefined;
+	const chosen =
+		step.kind === "winner"
+			? settled.find((member) => member.nodeId === step.memberId && member.outcome.status === "succeeded")
+			: undefined;
 	if (chosen)
 		return buildResult(
 			node,
@@ -293,7 +344,30 @@ export function settleVote(
 		"all",
 		identity,
 	);
-	return buildResult(node, eligible, { ...outcome, status: "partial" }, identity);
+	const result = buildResult(
+		node,
+		eligible,
+		{
+			...outcome,
+			status: "partial",
+			blocker: "needs_root_answer",
+			attribution: BLOCKER_ATTRIBUTION.needs_root_answer,
+			assurance: "unverified",
+			nextAction: { kind: "ask_root", question: "Read the candidate reports and resolve the inconclusive vote." },
+		},
+		identity,
+	);
+	return {
+		...result,
+		members: result.members.map((member, index) => {
+			const report = eligible[index]?.outcome.digestRef ?? plan.nodes[member.nodeId]?.join?.artifact;
+			return report ? { ...member, report } : member;
+		}),
+		gaps: [
+			...(step.kind === "read_all" ? step.gaps : ["The selected candidate is no longer available."]),
+			...result.gaps,
+		],
+	};
 }
 
 /**

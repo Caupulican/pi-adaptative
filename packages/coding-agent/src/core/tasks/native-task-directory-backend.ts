@@ -8,7 +8,7 @@ import { executionPathApi } from "../../kernel/utils/paths.ts";
 import { getWorkTenantDir } from "../agent-paths.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { awaitPreflight } from "../preflight.ts";
-import { isMissingPathError } from "../util/filesystem-errors.ts";
+import { isPathProbeMiss } from "../util/filesystem-errors.ts";
 import type { TaskDirectoryBackend } from "./task-directory-validation.ts";
 
 function directoryIdentity(info: BigIntStats): string {
@@ -117,7 +117,7 @@ export function createNativeTaskDirectoryBackend(agentDir?: string): NativeTaskD
 				return await canonicalizeNativePath(path, flavor, signal);
 			} catch (error) {
 				if (signal?.aborted) throw error;
-				if (isMissingPathError(error)) return undefined;
+				if (isPathProbeMiss(error)) return undefined;
 				throw error;
 			}
 		},
@@ -128,7 +128,7 @@ export function createNativeTaskDirectoryBackend(agentDir?: string): NativeTaskD
 				return info.isFile();
 			} catch (error) {
 				if (signal?.aborted) throw error;
-				if (isMissingPathError(error)) return undefined;
+				if (isPathProbeMiss(error)) return undefined;
 				throw error;
 			}
 		},

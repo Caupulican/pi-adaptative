@@ -572,7 +572,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 				const attributionHeaders = getAttributionHeaders(model, options?.sessionId);
 				if (model.provider === "openai-codex") {
-					await accountModels.ready(options?.signal);
+					await accountModels.ready(options?.signal, model.provider);
 					if (options?.signal?.aborted) throw new Error("Request was aborted");
 				}
 				const serviceTiers = accountModels.serviceTiers(model);
@@ -687,7 +687,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// The session's one usage owner, recovered before any paid work. It exists whether or not System One is bound,
 		// so pending usage from an earlier run is never left unreplayed.
 		// Which models the owner's accounts offer, read by the provider path below; constructing it starts no work.
-		const accountModels = accountModelCatalogOf(modelRegistry);
+		const accountModels = accountModelCatalogOf(
+			modelRegistry,
+			() => sessionRef.current?.canReuseAccountIdentity() ?? true,
+		);
 		const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
 		const semanticUsage = sessionSemanticUsageOf(sessionManager, timers.port("semantic-usage"));
 		let constructed: AgentSession | undefined;

@@ -13,12 +13,11 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerReportChange } from "../autonomy/contracts.ts";
 import { readNoul } from "../decision/noul.ts";
-import { RUBRIC_FAIL_MASS, RUBRIC_MEET_MASS, scoreBoundaryMass, scoreSettled } from "../decision/thresholds.ts";
+import { RUBRIC_FAIL_MASS, RUBRIC_MEET_MASS, scoreBoundaryMass } from "../decision/thresholds.ts";
 import { OUTCOME_LIMITS, type Outcome } from "../delegation/worker-outcome-contract.ts";
-import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
-import { type PacketReport, type ResultPacket, resultPacket } from "../plan/plan-evidence.ts";
+import { clipBytes, type PacketReport, type ResultPacket, resultPacket } from "../plan/plan-evidence.ts";
 import type { PlanNodeSpec, PlanRecord, PlanRuntimeState } from "../plan/plan-graph.ts";
 import {
 	type CandidateReading,
@@ -40,8 +39,6 @@ import { noteDecisionTrace, type SemanticTraceReading } from "./semantic-evaluat
 const SUFFICIENT_ID = "candidate_evidence_sufficient";
 const MAX_CHANGES = 8;
 const LINE_CHARS = OUTCOME_LIMITS.maxStringChars;
-/** A vote's Choice names each candidate by its outcome line, bounded. */
-const VOTE_SUMMARY_CHARS = 600;
 
 const RUBRIC_LEVELS = [
 	{ value: 0, description: "does not meet it" },
@@ -178,13 +175,22 @@ export async function judgeCandidates(
 				memberId: candidate.memberId,
 				sufficient: readNoul(evaluation?.answers?.[SUFFICIENT_ID], "required_true", "orchestration"),
 				criteria: answers.map(criterionReading),
-				verificationSupport: answers.filter((answer) => scoreSettled(answer, meetsRequirement) === "on_side")
-					.length,
 			},
 			...(evaluation ? { evaluation } : {}),
 		};
 	});
 	return judgments.some((judgment) => judgment.evaluation !== undefined) ? judgments : undefined;
+}
+
+/** The comparative Choice needs identifiable results. Keep room for both the summary and supporting details per candidate. */
+function comparisonCandidate({ memberId, packet, changes }: VoteCandidateEvidence) {
+	const details = [
+		...changes.slice(0, MAX_CHANGES).map((change) => `${change.file}: ${change.what}`),
+		...packet.findings.map((finding) => finding.summary),
+		...packet.receipts.map((receipt) => `${receipt.command} (exit ${receipt.exitCode ?? "unknown"})`),
+	];
+	const text = [packet.excerpt, clipBytes(details.join("\n"), 600)].filter(Boolean).join("\n");
+	return { nodeId: memberId, evidence: text ? wrapUntrustedText(text, `plan-vote:${memberId}`) : undefined };
 }
 
 /** A vote's whole judgment: the readings, the exit the code read from them, and the step that exit takes. */
@@ -213,33 +219,25 @@ export async function judgeVoteStep(
 	input.signal.throwIfAborted();
 	const facts = voteFacts(input.record, input.vote, input.candidates);
 	const pre = decideVote(facts, undefined);
-	const judgments =
-		pre.kind === "too_many" || pre.kind === "V1_divergent"
-			? undefined
-			: await judgeCandidates(
-					engine,
-					facts.criteria,
-					input.candidates.map((candidate) => voteEvidence(input.snapshot, input.plan, candidate, input.reportOf)),
-					{ signal: input.signal },
-				);
+	const candidates =
+		engine && pre.kind === "V0_unjudged"
+			? input.candidates.map((candidate) => voteEvidence(input.snapshot, input.plan, candidate, input.reportOf))
+			: [];
+	const judgments = await judgeCandidates(engine, facts.criteria, candidates, { signal: input.signal });
 	const readings = judgments?.map((judgment) => judgment.reading);
 	const exit = readings ? decideVote(facts, readings) : pre;
 	const choice =
 		exit.kind === "V5_choose"
 			? await chooseVoteWinner(engine, {
-					criterion: input.vote.join?.criterion ?? input.vote.intent,
-					candidates: input.candidates.map((candidate) => ({
-						nodeId: candidate.nodeId,
-						summary:
-							`${describeOutcomeForHandoff(candidate.outcome)}${candidate.outcome.digestRef ? ` Report: ${candidate.outcome.digestRef}` : ""}`.slice(
-								0,
-								VOTE_SUMMARY_CHARS,
-							),
-					})),
-					eligible: exit.eligible,
+					question: input.vote.join?.criterion ?? input.vote.intent,
+					criteria: facts.criteria,
+					candidates: candidates
+						.filter((candidate) => exit.eligible.includes(candidate.memberId))
+						.map(comparisonCandidate),
 					signal: input.signal,
 				})
 			: undefined;
+	input.signal.throwIfAborted();
 	if (!judgments?.length) {
 		harnessLog.info("plan", "a plan vote took a judgment-free exit", {
 			planId: input.record.planId,
@@ -249,7 +247,7 @@ export async function judgeVoteStep(
 	} else {
 		noteVoteTrace(engine, judgments, exit.kind);
 	}
-	const step = voteStep({ record: input.record, vote: input.vote, facts, readings, exit, choice });
+	const step = voteStep(exit, choice);
 	return { judgments, exit, step };
 }
 

@@ -166,7 +166,6 @@
     "packages/coding-agent/src/core/delegation/obligation-ledger.ts",
     "packages/coding-agent/src/core/delegation/persistent-bot-team-store.ts",
     "packages/coding-agent/src/core/delegation/receipt-delivery-loop.ts",
-    "packages/coding-agent/src/core/delegation/replay-safe-mailbox-bounds.ts",
     "packages/coding-agent/src/core/delegation/requirement-rollup.ts",
     "packages/coding-agent/src/core/delegation/sanitized-context-fork.ts",
     "packages/coding-agent/src/core/delegation/session-root-mailbox.ts",

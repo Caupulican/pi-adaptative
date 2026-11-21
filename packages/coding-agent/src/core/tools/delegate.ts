@@ -24,7 +24,6 @@ import {
 	taskBriefProblem,
 	taskBriefVersionFor,
 } from "../comms/comms-records.ts";
-import { prepareDelegateArguments } from "../delegation/delegate-brief-spill.ts";
 import { reuseAcceptedMessage, reuseRefusal, startCompatibleFallback } from "../delegation/delegate-reuse-start.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
@@ -36,6 +35,11 @@ import {
 	WorkerControlIdentityConflictError,
 	type WorkerGrantSummary,
 } from "../delegation/worker-agent-control.ts";
+import {
+	INLINE_WORKER_MESSAGE_CHARS,
+	MAX_WORKER_MESSAGE_CHARS,
+	normalizeWorkerMessageContent,
+} from "../delegation/worker-agent-message-options.ts";
 import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
 import { describeWorkerModelMoves, type WorkerModelMove } from "../delegation/worker-credential-health.ts";
@@ -59,7 +63,6 @@ import type { GoalState } from "../goals/goal-state.ts";
 import { knowledgeGrantReferencesSchema, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import {
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
-	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
@@ -67,7 +70,8 @@ import {
 } from "../orchestration/contracts.ts";
 import { WORKER_ORCHESTRATION_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import type { ModelTransferRecord } from "../orchestration/model-transfer.ts";
-import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
+import { MAX_TASK_DESCRIPTION_LENGTH, type TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import { hasRolePins, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
@@ -78,6 +82,7 @@ import {
 	type DelegateEventToolDetails,
 	executeDelegateEventAction,
 } from "./delegate-events.ts";
+import { inboxReplyPageJson } from "./delegate-inbox-page.ts";
 import {
 	type DelegateModelResolver,
 	delegateModelReferenceSchema,
@@ -89,6 +94,7 @@ import {
 	type DelegateErrRecord,
 	delegateCallGuidance,
 	delegateFieldExample,
+	delegateInlineLimitGuidance,
 	delegateInputRemedies,
 	delegateRejection,
 	delegateStartRejection,
@@ -153,7 +159,9 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			? "tasks lists durable tasks, list worker metadata and activity, transcript pages messages"
 			: undefined,
 		actions.includes("status") ? "status reads bounded claims" : undefined,
-		actions.includes("review") ? "review acknowledges a worker's mutations" : undefined,
+		actions.includes("review")
+			? "review acknowledges a worker's mutations and takes only a laneId or agentId"
+			: undefined,
 		actions.includes("events")
 			? "events recalls exact CI evidence and discovers source subjects; subscriptions reads or replaces task-bound event subscriptions"
 			: undefined,
@@ -198,7 +206,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			profileId: Type.Optional(
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-					description: "Loaded profile preset; omit to inherit the foreground base.",
+					description: "start only: loaded profile preset. Omit to inherit the foreground base.",
 				}),
 			),
 			model: delegateModelReferenceSchema,
@@ -236,7 +244,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			),
 			instructions: Type.Optional(
 				Type.String({
-					maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+					maxLength: MAX_WORKER_BRIEF_CHARS,
 					description: `Free-text leaf-worker task, the alternative to goal (send exactly one). ${WORKER_BRIEF_GUIDANCE} Workers run no tests unless the task says the owner asked.`,
 				}),
 			),
@@ -247,7 +255,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			),
 			note: Type.Optional(
 				Type.String({
-					description: `With goal: constraints and the stop condition no other field expresses (at most ${MAX_TASK_NOTE_CHARS} characters).`,
+					description: `start only: constraints and the stop condition accompanying the task (at most ${MAX_TASK_NOTE_CHARS} characters).`,
 				}),
 			),
 			refs: Type.Optional(
@@ -311,7 +319,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 							}),
 							instructions: Type.String({
 								minLength: 1,
-								maxLength: MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+								maxLength: MAX_WORKER_BRIEF_CHARS,
 							}),
 						},
 						{ additionalProperties: false },
@@ -375,7 +383,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			),
 			message: Type.Optional(
 				Type.String({
-					maxLength: 4_096,
+					maxLength: MAX_WORKER_MESSAGE_CHARS,
 					description:
 						"Text for send, broadcast, follow_up and reply; for interrupt, the reason. send/broadcast never control or complete workers.",
 				}),
@@ -401,7 +409,7 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			messageId: Type.Optional(
 				Type.String({
 					maxLength: MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-					description: "Inbox reply id that inbox_ack consumes.",
+					description: "Inbox reply id to read a continued content page or acknowledge the reply.",
 				}),
 			),
 			ackToken: Type.Optional(
@@ -416,7 +424,8 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 			cursor: Type.Optional(
 				Type.Integer({
 					minimum: 0,
-					description: "Continue a list or transcript page with nextCursor, even after an empty page.",
+					description:
+						"Continue a list or transcript with nextCursor, or a pending inbox reply with the messageId and cursor returned in next.",
 				}),
 			),
 			maxMessages: Type.Optional(
@@ -480,14 +489,28 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 		events: [],
 		subscriptions: ["taskId"],
 	} satisfies Record<DelegateAction, readonly (keyof typeof schema.properties)[]>;
+	const aliases: Partial<Record<DelegateAction, string[][]>> = {
+		start: [["task"], ["goal"]],
+		wait: [["agentIds"]],
+		review: [["agentId"]],
+		send: [["agentId", "task"]],
+		follow_up: [["agentId", "task"]],
+	};
 	return {
 		...schema,
 		anyOf: actions.flatMap((action) => {
-			// Preserve the executor's intentional plural wait and task-only start spellings.
-			const alternates = action === "wait" ? [["agentIds"]] : action === "start" ? [["task"], ["goal"]] : [];
+			const alternates = aliases[action] ?? [];
 			const alternatives = [requiredFields[action], ...alternates];
 			return alternatives.map((fields) => ({
-				properties: { action: { const: action } },
+				properties: {
+					action: { const: action },
+					...(action === "interrupt"
+						? { message: { type: "string", maxLength: INLINE_WORKER_MESSAGE_CHARS } }
+						: {}),
+					...(action === "profile_create"
+						? { task: { type: "string", maxLength: MAX_TASK_DESCRIPTION_LENGTH } }
+						: {}),
+				},
 				required: [...(action === "start" ? [] : ["action"]), ...fields],
 			}));
 		}),
@@ -499,7 +522,6 @@ const MAX_DELEGATE_RESULT_CHARS = 16 * 1024;
 const MAX_DELEGATE_CONTROL_RESULT_BYTES = 16 * 1024;
 const MAX_DELEGATE_TRANSCRIPT_MESSAGE_BYTES = 12 * 1024;
 const MAX_DELEGATE_ERROR_CHARS = 1_900;
-const MAX_DELEGATE_MESSAGE_CHARS = 4_096;
 const MAX_DELEGATE_ACK_TOKEN_CHARS = 128;
 const MAX_VISIBLE_ORCHESTRATION_PROFILES = 1;
 const MAX_PROFILE_GUIDELINE_FIELD_CHARS = 36;
@@ -550,7 +572,7 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 	send: ["action", "agentId", "message", "threadId", "expectReply"],
 	broadcast: ["action", "agentIds", "message", "threadId", "expectReply"],
 	follow_up: ["action", "agentId", "message", "threadId", "expectReply"],
-	inbox: ["action", "agentId", "requestMessageId", "maxMessages"],
+	inbox: ["action", "agentId", "requestMessageId", "messageId", "cursor", "maxMessages"],
 	inbox_wait: ["action", "agentId", "requestMessageId", "maxMessages", "timeoutMs"],
 	inbox_ack: ["action", "messageId", "ackToken"],
 	reply: ["action", "message", "replyToMessageId"],
@@ -692,7 +714,7 @@ function foldedBriefInput(input: DelegateToolInput): DelegateToolInput {
 	};
 	const parts = [
 		goal?.trim(),
-		instructions?.trim(),
+		instructions?.trim() ? instructions : undefined,
 		note?.trim() ? `Note: ${note.trim()}` : undefined,
 		refs && refs.length > 0 ? `References:\n${refs.map((ref) => `- ${ref}`).join("\n")}` : undefined,
 		doneWhen?.trim() ? `Done when: ${doneWhen.trim()}` : undefined,
@@ -799,11 +821,11 @@ function sanitizeExactActionInput(
 	for (const field of Object.keys(exactInput)) {
 		if (Reflect.get(exactInput, field) === undefined || allowed.includes(field)) continue;
 		if ((action === "follow_up" || action === "send") && field === "task") {
-			const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
+			const taskText = typeof exactInput.task === "string" ? exactInput.task : "";
 			const messageText = typeof exactInput.message === "string" ? exactInput.message.trim() : "";
 			// `task` is the start/profile_create brief on the shared schema; on a message action
 			// it can only be the message. Both fields together is a conflict; drop neither.
-			if (taskText && !messageText) {
+			if (taskText.trim() && !messageText) {
 				exactInput.message = exactInput.task;
 				delete exactInput.task;
 				normalized.push("task->message");
@@ -841,13 +863,13 @@ function sanitizeExactActionInput(
 			};
 		}
 		if (action === "start" && field === "task") {
-			const taskText = typeof exactInput.task === "string" ? exactInput.task.trim() : "";
-			const instructionsText = typeof exactInput.instructions === "string" ? exactInput.instructions.trim() : "";
+			const taskText = typeof exactInput.task === "string" ? exactInput.task : "";
+			const instructionsText = exactInput.instructions;
 			// `task` is a profile_create field on the shared schema. A start that only
 			// populated it still has the worker brief — use it. Both fields together is a
 			// conflict; do not drop either.
-			if (taskText) {
-				exactInput.instructions = instructionsText ? `${taskText}\n\n${instructionsText}` : taskText;
+			if (taskText.trim()) {
+				exactInput.instructions = instructionsText?.trim() ? `${taskText}\n\n${instructionsText}` : taskText;
 				delete exactInput.task;
 				normalized.push("task->instructions");
 				continue;
@@ -1073,15 +1095,12 @@ function screenDelegateInput(
 	if (input.mode !== undefined && input.mode !== "any" && input.mode !== "all") {
 		return refuse("delegate wait mode is invalid", { started: false, action, skipReason: "wait_mode_invalid" });
 	}
-	if (input.instructions !== undefined && input.instructions.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) {
-		return refuse(
-			`delegate instructions may not exceed ${MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH} characters`,
-			{
-				started: false,
-				action,
-				skipReason: "instructions_too_long",
-			},
-		);
+	if (input.instructions !== undefined && input.instructions.length > MAX_WORKER_BRIEF_CHARS) {
+		return refuse(delegateInlineLimitGuidance("instructions"), {
+			started: false,
+			action,
+			skipReason: "instructions_too_long",
+		});
 	}
 	if (input.profileId !== undefined && input.profileId.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
 		return refuse(`delegate profileId may not exceed ${MAX_ORCHESTRATION_IDENTIFIER_LENGTH} characters`, {
@@ -1097,12 +1116,18 @@ function screenDelegateInput(
 			skipReason: "agent_id_too_long",
 		});
 	}
-	if (input.message !== undefined && input.message.length > MAX_DELEGATE_MESSAGE_CHARS) {
-		return refuse(`delegate message may not exceed ${MAX_DELEGATE_MESSAGE_CHARS} characters`, {
-			started: false,
-			action,
-			skipReason: "message_too_long",
-		});
+	const messageLimit = action === "interrupt" ? INLINE_WORKER_MESSAGE_CHARS : MAX_WORKER_MESSAGE_CHARS;
+	if (input.message !== undefined && input.message.length > messageLimit) {
+		return refuse(
+			action === "interrupt"
+				? `Shorten the interrupt reason to ${messageLimit} characters.`
+				: delegateInlineLimitGuidance("message"),
+			{
+				started: false,
+				action,
+				skipReason: "message_too_long",
+			},
+		);
 	}
 	for (const [label, value] of [
 		["threadId", input.threadId],
@@ -1124,6 +1149,13 @@ function screenDelegateInput(
 			input.ackToken.length > MAX_DELEGATE_ACK_TOKEN_CHARS)
 	) {
 		return refuse("delegate ackToken is invalid", { started: false, action, skipReason: "ack_token_invalid" });
+	}
+	if (action === "inbox" && input.cursor !== undefined && !input.messageId?.trim()) {
+		return refuse("A cursor selects a page of one inbox reply. Include its messageId.", {
+			started: false,
+			action,
+			skipReason: "cursor_invalid",
+		});
 	}
 	if (input.cursor !== undefined && (!Number.isSafeInteger(input.cursor) || input.cursor < 0)) {
 		return refuse("delegate cursor is invalid", { started: false, action, skipReason: "cursor_invalid" });
@@ -1345,10 +1377,12 @@ function screenedExecution(
 				).occurrence
 			: 1;
 		const record = screenedRefusalRecord(refusal, originalInput, occurrence);
-		return refusalResult(
+		const result = refusalResult(
 			record,
 			occurrence >= BLOCK_AT_OCCURRENCE ? { ...refusal.details, skipReason: "request_repeated" } : refusal.details,
 		);
+		const remedy = record.r?.[0];
+		return remedy?.kind === "drop_field" ? { ...result, repairOmittingField: remedy.field } : result;
 	});
 }
 
@@ -1658,8 +1692,13 @@ function boundedWaitManyDetails(statuses: readonly { agentId: string }[], timedO
 	return buildDetails(selected);
 }
 
-function sessionRootReplyJson(replies: readonly SessionRootReply[], timedOut?: boolean, steered = false): string {
-	return boundedDelegateControlCollectionJson(replies, (selected, omittedCount) => ({
+function sessionRootReplyJson(
+	replies: readonly SessionRootReply[],
+	timedOut?: boolean,
+	steered = false,
+	cursor = 0,
+): string {
+	return inboxReplyPageJson(replies, cursor, MAX_DELEGATE_CONTROL_RESULT_BYTES, (selected, omittedCount) => ({
 		...(timedOut === undefined ? {} : { timedOut }),
 		...(timedOut
 			? boundedWaitTimeoutProjection(
@@ -2021,6 +2060,11 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		label: "delegate",
 		description: [
 			DELEGATE_DESCRIPTION_CORE,
+			...(availableActions.includes("review")
+				? [
+						"Review a worker with review and one laneId or agentId. profileId and brief fields such as note belong to start.",
+					]
+				: []),
 			authorityClause,
 			...(profileDescription ? [profileDescription] : []),
 			...(isAsyncWiring ? [ASYNC_DELEGATE_DESCRIPTION_SUFFIX] : []),
@@ -2028,9 +2072,6 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		promptSnippet: `Persistent leaf workers. ${delegateCallGuidance(availableActions)}`.trim(),
 		neverDefer: true,
 		parameters: createDelegateSchema(availableActions),
-		// Folding `task` onto its action's own field runs before schema validation, and a brief still over
-		// its cap is spilled to a file the worker is told to read, so length alone never refuses a brief.
-		prepareArguments: (args: unknown) => prepareDelegateArguments(args) as DelegateToolInput,
 		renderShell: "self",
 		foregroundWait: (input: { action?: unknown }) =>
 			input.action === "wait" || input.action === "wait_many" || input.action === "inbox_wait",
@@ -2336,13 +2377,16 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 					const requestMessageId = input.requestMessageId?.trim();
 					const query = {
 						...(sourceAgentId ? { sourceAgentId } : {}),
+						...(input.messageId ? { messageId: input.messageId } : {}),
 						...(requestMessageId ? { requestMessageId } : {}),
 						maxMessages: input.maxMessages ?? MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 					};
 					if (action === "inbox") {
 						const replies = deps.workerAgentControl.listSessionRootReplies(query);
 						return {
-							content: [{ type: "text" as const, text: sessionRootReplyJson(replies) }],
+							content: [
+								{ type: "text" as const, text: sessionRootReplyJson(replies, undefined, false, input.cursor) },
+							],
 							details: { started: true, action },
 						};
 					}
@@ -2374,7 +2418,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							skipReason: "worker_only_action",
 						});
 					}
-					const message = input.message?.trim();
+					const message = normalizeWorkerMessageContent(input.message ?? "");
 					const replyToMessageId = input.replyToMessageId?.trim();
 					if (!message || !replyToMessageId) {
 						return invalid("delegate reply requires message and replyToMessageId", {
@@ -2490,7 +2534,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							},
 						};
 					}
-					const message = input.message?.trim();
+					const message = normalizeWorkerMessageContent(input.message ?? "");
 					if (!message) {
 						return invalid("delegate broadcast requires message", {
 							started: false,
@@ -2604,7 +2648,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						};
 					}
 					if (action === "send" || action === "follow_up") {
-						const message = input.message?.trim();
+						const message = normalizeWorkerMessageContent(input.message ?? "");
 						if (!message)
 							return invalid(`delegate ${action} requires message`, {
 								started: false,

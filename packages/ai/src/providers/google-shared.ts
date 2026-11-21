@@ -194,13 +194,6 @@ function isValidThoughtSignature(signature: string | undefined): boolean {
 }
 
 /**
- * Only keep signatures from the same provider/model and with valid base64.
- */
-function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
-	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
-}
-
-/**
  * Models via Google APIs that require explicit tool call IDs in function calls/responses.
  */
 export function requiresToolCallId(modelId: string): boolean {
@@ -230,6 +223,9 @@ export function convertMessages<T extends GoogleApiType>(
 	toolNameMap: ToolNameMap = createToolNameMap(context.tools ?? []),
 ): Content[] {
 	const contents: Content[] = [];
+	// AGY sends JSON directly. SDK transports own the encoding of their bytes fields.
+	const agyRequiresFirstCallSignature =
+		model.api === "google-antigravity" && (getGeminiMajorVersion(model.id) ?? 0) >= 3;
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
@@ -275,37 +271,30 @@ export function convertMessages<T extends GoogleApiType>(
 			}
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
-			// Check if message is from same provider and model - only then keep thinking blocks
-			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
+			// transformMessages already removed signatures and converted thinking from incompatible models.
+			let firstFunctionCall = true;
 
 			for (const block of msg.content) {
-				if (block.type === "text") {
-					// Skip empty text blocks
-					if (!block.text || block.text.trim() === "") continue;
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
+				if (block.type === "text" || block.type === "thinking") {
+					const thought = block.type === "thinking";
+					const text = (thought ? block.thinking : block.text) ?? "";
+					const signature = thought ? block.thinkingSignature : block.textSignature;
+					const thoughtSignature = isValidThoughtSignature(signature) ? signature : undefined;
+					if (!text.trim() && !thoughtSignature) continue;
 					parts.push({
-						text: sanitizeSurrogates(block.text),
-						...(thoughtSignature && { thoughtSignature }),
+						text: sanitizeSurrogates(text),
+						...(thought ? { thought: true } : {}),
+						...(thoughtSignature ? { thoughtSignature } : {}),
 					});
-				} else if (block.type === "thinking") {
-					// Skip empty thinking blocks
-					if (!block.thinking || block.thinking.trim() === "") continue;
-					// Only keep as thinking block if same provider AND same model
-					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
-						parts.push({
-							thought: true,
-							text: sanitizeSurrogates(block.thinking),
-							...(thoughtSignature && { thoughtSignature }),
-						});
-					} else {
-						parts.push({
-							text: sanitizeSurrogates(block.thinking),
-						});
-					}
 				} else if (block.type === "toolCall") {
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
+					// Gemini validates the first function call in each parallel batch. Imported history
+					// may have no usable signature; the wire protocol defines a marker for that case.
+					const thoughtSignature = isValidThoughtSignature(block.thoughtSignature)
+						? block.thoughtSignature
+						: firstFunctionCall && agyRequiresFirstCallSignature
+							? "skip_thought_signature_validator"
+							: undefined;
+					firstFunctionCall = false;
 					const part: Part = {
 						functionCall: {
 							name: toolNameMap.toProviderName(block.name),

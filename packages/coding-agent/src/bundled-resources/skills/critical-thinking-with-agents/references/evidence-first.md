@@ -37,7 +37,7 @@ A finding the reviewer cannot ground in a quoted line of the evidence is a quest
 
 ## The final pass
 
-Before the result goes out, read the brief line by line and mark each line proven, not proven or out of scope. Every "not proven" line goes in "Not covered" or "Not verified".
+Use the delivered review to account for the requirements it covers. Inspect any remaining material claim and identify its evidence or verification gap in the report.
 
 ## Examples
 

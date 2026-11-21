@@ -1,9 +1,10 @@
-/** Builds the last request of a halted or runaway run and deduplicates a retried halt instruction. */
+/** Selects the input that owns a request, builds tool-free contexts, and deduplicates closing instructions. */
 import { countHistoryWork } from "@caupulican/pi-ai/history-work";
-import type { AgentContext, AgentHaltRequest } from "./loop-config.ts";
+import type { AgentContext, AgentHaltRequest, AgentLoopConfig } from "./loop-config.ts";
 import { serializedMessagesEqual } from "./message-revision.ts";
 import type { AgentMessage } from "./types.ts";
 import type { VerificationObligationTracker } from "./verification-obligations.ts";
+import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
 const RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT = [
 	"RUNAWAY STOP CLOSING TURN",
@@ -27,13 +28,15 @@ export function closingRequestContext(
 	if (halt && halt.systemDirective === undefined) return { ...context, instructionTail: halt.instruction };
 	const directive = halt?.systemDirective ?? RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT;
 	return {
-		...context,
+		...toolFreeRequestContext(context, "the tool-free closing request withholds every tool"),
 		systemPrompt: context.systemPrompt ? `${context.systemPrompt}\n\n${directive}` : directive,
-		tools: [],
-		surfaceChange: "the tool-free closing request withholds every tool",
 		trailingInstruction: obligations?.requestInstruction(),
 		...(halt ? { instructionTail: halt.instruction } : {}),
 	};
+}
+
+export function toolFreeRequestContext(context: AgentContext, surfaceChange: string): AgentContext {
+	return { ...context, tools: [], surfaceChange };
 }
 
 /** A plain halt instruction may be persisted or converted as one text block. */
@@ -89,4 +92,40 @@ export function preservesClosingInstruction(source: AgentMessage, converted: Age
 	return original !== undefined
 		? closingInstructionText(converted.content) === original
 		: serializedMessagesEqual(source, converted);
+}
+
+export function selectRequestOpening(
+	messages: readonly AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	previous?: AgentMessage,
+): AgentMessage | undefined {
+	let fallback: AgentMessage | undefined;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]!;
+		if (message.role === "user" && !isExternalEvidenceMessage(message)) return message;
+		if (message.role !== "custom") continue;
+		fallback ??= message;
+		if (config.resolveResponseMode?.({ ...context, requestOpening: message }) !== undefined) return message;
+	}
+	return previous ?? fallback;
+}
+
+export function requestContextForOpening(
+	context: AgentContext,
+	messages: readonly AgentMessage[],
+	config: AgentLoopConfig,
+	state: Pick<AgentContext, "requestOpening">,
+): AgentContext {
+	state.requestOpening = selectRequestOpening(
+		messages.length ? messages : context.messages.slice(-1),
+		context,
+		config,
+		state.requestOpening,
+	);
+	return {
+		...context,
+		requestOpening: state.requestOpening,
+		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
+	};
 }

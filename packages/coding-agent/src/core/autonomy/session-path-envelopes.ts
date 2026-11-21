@@ -20,7 +20,7 @@ import {
 
 /** What a confined session that answers the owner directly does after a write outside its working directory is refused. */
 const OWNER_SESSION_WRITE_SCOPE_GUIDANCE =
-	"This session writes only inside its working directory. Do not route around this: finish what is in scope and tell the owner the absolute path you need to write and why.";
+	"If the owner named a project-relative file, use its given path from the working directory and verify the target before editing. If the task requires this exact refused path, report the path and the access needed.";
 
 /** What a confined session that answers the owner directly does after a write to a harness resource is refused. */
 const OWNER_SESSION_HARNESS_WRITE_GUIDANCE =

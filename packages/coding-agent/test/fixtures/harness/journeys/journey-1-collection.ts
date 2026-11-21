@@ -27,11 +27,13 @@ import {
 const JUDGED_STATED = [
 	{ id: "grounded", value: true, confidence: 0.98 },
 	{ id: "basis", selected: "explicit", confidence: 0.98 },
+	{ id: "reporting_requirement", value: false, confidence: 0.98 },
 	{ id: "requested", value: false, confidence: 0.98 },
 ] as const;
 const JUDGED_INFERRED = [
 	{ id: "grounded", value: true, confidence: 0.98 },
 	{ id: "basis", selected: "inferred", confidence: 0.98 },
+	{ id: "reporting_requirement", value: false, confidence: 0.98 },
 	{ id: "requested", value: false, confidence: 0.98 },
 ] as const;
 /** A new attribute of the owner is not the live home-city fact. */
@@ -118,6 +120,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			grounded: { kind: "noul", probability: 0.98 },
 			basis: { kind: "choice", choice: "explicit", confidence: 0.98 },
 			requested: { kind: "noul", probability: 0.02 },
+			reporting_requirement: { kind: "noul", probability: 0.02 },
 		});
 		const reached = createBarrier();
 		world.provider.enqueue(
@@ -455,6 +458,7 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			grounded: { kind: "noul", probability: 0.98 },
 			basis: { kind: "choice", choice: "explicit", confidence: 0.98 },
 			requested: { kind: "noul", probability: 0.02 },
+			reporting_requirement: { kind: "noul", probability: 0.02 },
 			same_0: { kind: "noul", probability: 0.02 },
 		});
 		world.provider.enqueue(

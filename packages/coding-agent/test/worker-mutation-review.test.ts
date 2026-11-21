@@ -456,8 +456,15 @@ describe("worker mutation review", () => {
 		expect(resolvedCheckReceipt(check, receipts)?.receipt).toBe(receipt);
 		expect(judge().verdict).toBe("accepted");
 
-		await tool.execute("report", { ...base, checks: [{ ...citation, command: "printf 'proof'" }] });
+		await tool.execute("report", { ...base, checks: [{ ...citation, command: "summarized command" }] });
+		expect(capture.submitted!.report.checks[0]).toMatchObject({
+			command: receipt.command,
+			commandDigest: receipt.commandDigest,
+		});
+		expect(judge().verdict).toBe("accepted");
+		receipts[0] = { ...receipt, commandDigest: "0".repeat(64) };
 		expect(judge().reasonCodes).toContain("check_command_mismatch");
+		receipts[0] = receipt;
 		await tool.execute("report", { ...base, checks: [{ ...citation, receiptId: "c-unknown" }] });
 		expect(judge().reasonCodes).toContain("check_unknown_receipt");
 		await tool.execute("report", { ...base, checks: [{ ...citation, result: "failed" }] });

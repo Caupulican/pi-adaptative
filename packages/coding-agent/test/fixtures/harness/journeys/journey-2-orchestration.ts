@@ -40,7 +40,7 @@ import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } fro
 import {
 	agentIdForTrack,
 	assertBatchOk,
-	assertCompletionRuleRefusal,
+	assertCompletionRuleVisible,
 	backgroundTaskIdOf,
 	CAPTURED_ACCESS,
 	CHECKPOINT_SUMMARY,
@@ -48,7 +48,6 @@ import {
 	dynamicCalls,
 	expectOwnerWords,
 	FILES_CHANGED_CLAIMS,
-	goalCompletionFacts,
 	handoffFor,
 	LIMITS_PATH,
 	lanesOf,
@@ -57,6 +56,7 @@ import {
 	latestBatchResults,
 	mailboxMessagesOf,
 	matchedSubmitReceiptIn,
+	NO_DELIVERY_CLAIMS,
 	persistedGenerationText,
 	receiptsOf,
 	rejectionOf,
@@ -1522,7 +1522,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	// Scripted before the reopen, in the order the root reaches them: the explicit refusal turn, then the goal's own idle
 	// continuation, which repairs the limit, rechecks it, and completes the goal (the natural stop of the loop).
-	let completeFinalFactsBefore: string | undefined;
 	const completeFinalCall = (callId: string) => {
 		const requirement = goalRequirementId();
 		const goal = session.getGoalStateSnapshot();
@@ -1631,21 +1630,13 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 			],
 			(request) => assertBatchOk(request, "get-rechecked-goal"),
 		),
-		// The reopened root's context holds no noticed-items rule (the checkpoint compacted the session, and the earlier refusals were for
-		// other reasons, before the rule's preflight), so the first completion that passes every deterministic check is refused with the
-		// rule and the goal untouched; the identical call, under a new id, is accepted.
-		dynamicCalls(
-			"complete-final-rule",
-			() => {
-				completeFinalFactsBefore = goalCompletionFacts(session);
-				return completeFinalCall("complete-2-rule");
-			},
-			(request) => assertBatchOk(request, "record-recheck-evidence"),
-		),
 		dynamicCalls(
 			"complete-final",
 			() => completeFinalCall("complete-2"),
-			(request) => assertCompletionRuleRefusal(request, "complete-final-rule", session, completeFinalFactsBefore),
+			(request) => {
+				assertBatchOk(request, "record-recheck-evidence");
+				assertCompletionRuleVisible(request);
+			},
 		),
 		{
 			name: "completed",
@@ -1733,9 +1724,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-		...FILES_CHANGED_CLAIMS,
-		shows_true_0: { kind: "noul", probability: 0.97 },
-		shows_false_0: { kind: "noul", probability: 0.02 },
 	} as const;
 	world.shell.enqueue(
 		{ name: "e-fail-stale", command: VITEST_COMMAND, output: vitestFailed, exitCode: 1 },
@@ -1829,10 +1817,25 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	world.systemOne.enterPhase("e-fail", eJudgments);
 	await withDeadline(trace, "E aux failure reported", eSession.prompt("Run the stale check."));
+	expect(eSession.messages.at(-1)).toMatchObject({
+		role: "assistant",
+		stopReason: "error",
+		errorMessage: "verification_handoff_required",
+	});
+	expect(
+		world.systemOne.decoded.some((request) => request.phase === "e-fail" && "states_tests_pass" in request.questions),
+	).toBe(false);
 	const eFailIds = eSession.getVerificationObligations().map((obligation) => obligation.id);
 	expect(eFailIds.length, "the stale failure opens exactly one obligation").toBe(1);
-	world.systemOne.enterPhase("e-bg", eJudgments);
+	world.systemOne.enterPhase("e-bg", { ...eJudgments, ...NO_DELIVERY_CLAIMS });
 	await withDeadline(trace, "E aux background pass started", eSession.prompt("Start the background check."));
+	expect(eSession.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	if (world.systemOne.enabled)
+		expect(
+			world.systemOne.decoded.some(
+				(request) => request.phase === "e-bg" && "states_tests_pass" in request.questions,
+			),
+		).toBe(true);
 	expect(
 		eSession.getVerificationObligations().map((obligation) => obligation.id),
 		"the held background pass leaves the failure's obligation open",

@@ -660,6 +660,7 @@ export class ManagedLaneController {
 		dispatch: ManagedLaneDispatch,
 	): ExecutionGrant {
 		const compiled = compileManagedProcessExecutionGrant({
+			agentDir: this.deps.getAgentDir(),
 			target,
 			laneId,
 			authorizationId: dispatch.authorizationId,

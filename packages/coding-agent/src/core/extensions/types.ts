@@ -1910,7 +1910,7 @@ export interface BuildSystemPromptOptions {
 	 * writes reach the project's config directory) or a read-only one's. Set by the prompt builder only for the full class
 	 * of a directing session with `delegate` active and worker delegation on; a session that works alone directs no team.
 	 */
-	directorRole?: { readonly root: boolean; readonly writes: boolean; readonly writesConfigDir: boolean };
+	directorRole?: import("../provider-prompt-contracts.ts").DirectorRole;
 	/** The agent's name, read from the agent directory's soul.md; the full prompt opens by stating it. */
 	agentName?: string;
 	/** Extra principle bullets the session adds to PRINCIPLES (for example self-modification when it applies). */

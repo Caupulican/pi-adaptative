@@ -547,18 +547,6 @@ export function showSessionSelector(host: SessionFlowHost): void {
 	});
 }
 
-async function switchSession(
-	host: SessionFlowHost,
-	sessionPath: string,
-	options: Parameters<ExtensionCommandContext["switchSession"]>[1] | undefined,
-	cwdOverride?: string,
-): Promise<{ cancelled: boolean }> {
-	return host.runtimeHost.switchSession(sessionPath, {
-		cwdOverride,
-		withSession: options?.withSession,
-	});
-}
-
 async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> {
 	const state = host.session.getGoalStateSnapshot();
 	if (state && (isSystemBlockedGoal(state) || state.status === "usage_limited")) {
@@ -572,6 +560,7 @@ async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> 
 	}
 	if (!state || (state.status !== "paused" && state.status !== "blocked" && state.status !== "usage_limited")) {
 		host.session.restoreGoalRuntimeAfterResume();
+		host.session.restoreOrdinaryWorkAfterResume();
 		return false;
 	}
 	const words = interfaceText().sessions.resume;
@@ -607,7 +596,7 @@ export async function handleResumeSession(
 	}
 	host.statusContainer.clear();
 	try {
-		const result = await switchSession(host, sessionPath, options);
+		const result = await host.runtimeHost.switchSession(sessionPath, { withSession: options?.withSession });
 		if (result.cancelled) {
 			return result;
 		}
@@ -625,7 +614,10 @@ export async function handleResumeSession(
 				return { cancelled: true };
 			}
 			try {
-				const result = await switchSession(host, sessionPath, options, selectedCwd);
+				const result = await host.runtimeHost.switchSession(sessionPath, {
+					cwdOverride: selectedCwd,
+					withSession: options?.withSession,
+				});
 				if (result.cancelled) {
 					return result;
 				}

@@ -20,6 +20,9 @@ export const DIALOGS = {
 		titleLogin: "Select provider to configure:",
 		titleLogout: "Select provider to logout:",
 		configured: " ✓ configured",
+		sessionSubscription: " • session-only subscription",
+		sessionApiKey: " • session-only API key",
+		removalPending: " • saved credential removal pending",
 		subscriptionConfigured: "subscription configured",
 		apiKeyConfigured: "API key configured",
 		environmentKey: (label: string) => ` ✓ env: ${label}`,
@@ -83,8 +86,12 @@ export const DIALOGS = {
 		regionEmpty: "AWS region cannot be empty.",
 		profileEmpty: "AWS profile name cannot be empty.",
 		apiKeyEmpty: "API key cannot be empty.",
-		apiKeyNotSaved:
-			"API key was not saved; it is available only in this session. Check credential storage permissions and retry.",
+		credentialNotSaved: (provider: string) =>
+			`The ${provider} credential is active only in this session. Check credential storage permissions before signing in again.`,
+		credentialRemovalNotSaved: (provider: string) =>
+			`Removed the ${provider} credential from this session. Its saved copy may return after restart. Retry /logout when credential storage is writable.`,
+		sessionUpdateFailed: (detail: string) =>
+			`The credential change finished. Updating this session failed. ${detail}`,
 		verifyingAws: "Verifying AWS identity, Bedrock profiles, and model access...",
 		waitingForSso: "Waiting for AWS SSO authentication...",
 		usingProfile: (profile: string) => `Using AWS profile: ${profile}`,

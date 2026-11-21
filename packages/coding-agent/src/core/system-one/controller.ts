@@ -69,6 +69,7 @@ import {
 import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
 import { ModelEvaluationBudgetError, planEvaluationBatches, planModelEvaluations } from "./model-evaluation-batches.ts";
+import { OrdinaryWorkStopJudge } from "./ordinary-work-stop.ts";
 import {
 	type CompletionRejectionDetail,
 	decideFinalCompletion,
@@ -95,7 +96,6 @@ import {
 } from "./verification-coordinator.ts";
 import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
-/** The four questions that only mean something when written rules were supplied. */
 /** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
 const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
 	"rules_differ",
@@ -103,10 +103,7 @@ const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
 	"request_holds",
 ]);
 
-/**
- * Hard ceiling on the rule text one classification carries. The caller decides which rules fit;
- * this only stops a pathological instruction file from crowding out the request itself.
- */
+/** Leaves room for the owner request when supplied instructions are large. */
 export const USER_REQUEST_RULE_BUDGET = 8_000;
 
 /** The longest owner message the owner-words screen reads (`screenOwnerWords`). */
@@ -131,12 +128,7 @@ export interface UserRequestClassification {
 	readonly requestHolds: boolean;
 }
 
-/**
- * `skipped` means no semantic evaluation ran, so there is no judgment either way: the request was empty,
- * no question could change anything, or no System One controller was bound (the normal-off path). It never
- * means a classified "nothing changed". `unavailable` means the question was asked and System One did not
- * answer -- which is not the same as a clean "no".
- */
+/** A skipped evaluation has no judgment. An unavailable evaluation was attempted and received no answer. */
 export type UserRequestClassificationOutcome =
 	| { readonly status: "classified"; readonly classification: UserRequestClassification }
 	| { readonly status: "skipped" }
@@ -849,6 +841,24 @@ export class SystemOneController {
 		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;
 	}
+
+	private readonly ordinaryJudge = new OrdinaryWorkStopJudge({
+		redact: (text) => this.projector.redactText(text),
+		evaluate: async (stage, state, omit, signal) => {
+			const { decision, evaluationId, answers } = await this.runStageValidation(
+				stage,
+				state,
+				"read_only",
+				omit,
+				undefined,
+				signal,
+			);
+			return { answers, seal: (result) => this.sealDecision(decision, result, evaluationId, [result]) };
+		},
+	});
+
+	readonly assessReportingRequirement = this.ordinaryJudge.assessReportingRequirement.bind(this.ordinaryJudge);
+	readonly evaluateOrdinaryWorkStop = this.ordinaryJudge.assess.bind(this.ordinaryJudge);
 
 	/**
 	 * Every (new unit, candidate) pair in ONE request: System One evaluates the questions in parallel, so a

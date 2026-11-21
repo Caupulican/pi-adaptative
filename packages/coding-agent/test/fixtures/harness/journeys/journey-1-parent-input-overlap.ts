@@ -64,7 +64,11 @@ export async function verifyParentInputOverlap(
 	expect(owner.entry.parentId).toBe(owner.value.terminalEntryId);
 	const settlement = entries.find((entry) => entry.id === wake.entry.parentId);
 	if (!settlement || !parentWakeSettlementOf(settlement)) throw new Error("H25 wake has no native settlement.");
-	expect(settlement.parentId).toBe(owner.entry.id);
+	expect(manager.getBranch(settlement.id, owner.entry.id)[0]?.id).toBe(owner.entry.id);
+	expect(parentWakeSettlementOf(settlement)).toMatchObject({
+		requestId: wake.value.requestId,
+		assistantMessageEntryId: wake.value.assistantMessageEntryId,
+	});
 	expect(wake.entry.parentId).toBe(settlement.id);
 	expect(owner.entry).toMatchObject({ type: "custom", customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE });
 	expect(settlement).toMatchObject({ type: "custom", customType: PARENT_INPUT_SETTLED_CUSTOM_TYPE });

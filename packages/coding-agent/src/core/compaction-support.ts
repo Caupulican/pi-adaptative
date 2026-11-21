@@ -17,7 +17,7 @@ import {
 	summarizerCanIngest,
 } from "../kernel/compaction/compaction.ts";
 import type { AgentLoopConfig, ResolvedProviderRequestAuth } from "../kernel/index.ts";
-import type { ProviderRequestSnapshotContext } from "../kernel/loop-config.ts";
+import type { ProviderRequestSnapshotContext, StreamFn } from "../kernel/loop-config.ts";
 import { messageContentRevision, sameMessageContents } from "../kernel/message-revision.ts";
 import { convertToLlm } from "../kernel/messages.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
@@ -496,4 +496,21 @@ export class CompactionSupport {
 
 		return this.modelsAreEqual(compactionModel, sessionModel) ? "low" : sessionThinkingLevel;
 	}
+}
+
+export function compactionAuthStream(readStream: () => StreamFn) {
+	return (
+		credentialHeaders: Record<string, string> | undefined,
+		providerAccountKey: string | undefined,
+		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
+	): StreamFn => {
+		const streamFn = readStream();
+		return (model, context, options) =>
+			streamFn(model, context, {
+				...options,
+				...(requestGuard ? { requestGuard } : {}),
+				...(credentialHeaders !== undefined ? { credentialHeaders } : {}),
+				...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
+			});
+	};
 }

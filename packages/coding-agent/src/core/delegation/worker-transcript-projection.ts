@@ -1,5 +1,8 @@
 import type { Message } from "@caupulican/pi-ai";
 import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { parseWorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
+import { INLINE_WORKER_MESSAGE_CHARS } from "./worker-agent-message-options.ts";
 
 /** Inspection excludes provider replay signatures, never similarly named user/tool arguments. */
 export function projectWorkerTranscriptForInspection(message: Message): Message {
@@ -87,4 +90,29 @@ export function boundedTranscriptJsonBytes(value: unknown, limit: number): numbe
 		}
 	}
 	return bytes;
+}
+
+/** Preserve the bounded terminal recovery window when a host-stamped user entry carries a long task or follow-up. */
+export function workerRecoveryEntryCharge(
+	entry: Readonly<SessionEntry>,
+	persistedBytes: number | undefined,
+	remainingBytes: number,
+	remainingBodyChars: number,
+): { bytes: number; bodyChars: number } {
+	const control =
+		entry.type === "message" && entry.message.role === "user"
+			? parseWorkerControlRecord(entry.workerControl)
+			: undefined;
+	const body = control?.k === "host_event" ? undefined : control?.body;
+	const chars = body === undefined ? 0 : body.to - body.from;
+	const eligible = chars > INLINE_WORKER_MESSAGE_CHARS && chars <= remainingBodyChars;
+	const limit = remainingBytes + (eligible ? 6 * chars : 0);
+	const size = persistedBytes ?? boundedTranscriptJsonBytes(entry, limit);
+	if (size > limit || !eligible || !body || entry.type !== "message" || entry.message.role !== "user")
+		return { bytes: size, bodyChars: 0 };
+	const content = entry.message.content;
+	if (typeof content !== "string" || body.to > content.length) return { bytes: size, bodyChars: 0 };
+	// The range excludes both the prompt framing and file grants that follow the request.
+	const encodedBodyBytes = measureJsonStringUtf8Bytes(content.slice(body.from, body.to)) - 2;
+	return { bytes: size - encodedBodyBytes, bodyChars: chars };
 }

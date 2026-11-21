@@ -12,8 +12,8 @@
  * and findings: they never block other work or hold a lane.
  */
 
-import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import {
 	type FanoutKind,
 	type FanoutMembership,
@@ -80,7 +80,7 @@ export function planFanout(input: {
 				`delegate slices must declare from 2 through ${MAX_FANOUT_PARTITION_SLICES} slices; a single task is an ordinary start`,
 			);
 		}
-		memberInputs = slices.map((slice) => ({ memberId: slice.id.trim(), brief: slice.instructions.trim() }));
+		memberInputs = slices.map((slice) => ({ memberId: slice.id.trim(), brief: slice.instructions }));
 		for (const member of memberInputs) {
 			if (!isFanoutMemberId(member.memberId)) {
 				throw new WorkerFanoutError(
@@ -88,7 +88,7 @@ export function planFanout(input: {
 					`delegate slice id '${member.memberId}' must be 1-24 letters, digits, '.', '_' or '-'`,
 				);
 			}
-			if (!member.brief) {
+			if (!member.brief?.trim()) {
 				throw new WorkerFanoutError(
 					"fanout_slice_instructions_missing",
 					`delegate slice '${member.memberId}' needs instructions`,
@@ -116,10 +116,10 @@ export function planFanout(input: {
 				? `${instructions}\n\nYour slice (${member.memberId}): ${member.brief}\n\nYou are one of ${declared.length} workers on this task. The other slices (${others}) belong to separate workers: cover only your slice and report on it.`
 				: `${instructions}\n\nYou are candidate ${member.memberId} of ${declared.length} attempting this same task independently (others: ${others}). The first accepted result wins and the host cancels the rest: work on your own and do not coordinate.`;
 		const full = `${formatFanoutHeader(membership)}${body}`;
-		if (full.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) {
+		if (full.length > MAX_WORKER_BRIEF_CHARS) {
 			throw new WorkerFanoutError(
 				"fanout_instructions_too_long",
-				`delegate fan-out member '${member.memberId}' would exceed ${MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH} characters of instructions; shorten the shared instructions or the slice`,
+				`delegate fan-out member '${member.memberId}' would exceed ${MAX_WORKER_BRIEF_CHARS} characters of instructions; shorten the shared instructions or the slice`,
 			);
 		}
 		return { memberId: member.memberId, instructions: full };

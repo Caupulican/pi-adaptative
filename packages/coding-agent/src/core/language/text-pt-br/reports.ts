@@ -23,9 +23,14 @@ export const REPORTS = {
 		reports: (count: number) => ` (${count} ${count === 1 ? "relatório" : "relatórios"})`,
 		recorded: "REGISTRADO (totais de uso sem modificação):",
 		historicalAccounting: (status: string) => `Contabilidade histórica ${status}`,
+		unresolvedUsage: (count?: number) =>
+			count
+				? `O uso continua sem resolução em ${count} ${count === 1 ? "solicitação" : "solicitações"}. O total pode estar incompleto.`
+				: "A contabilidade de uso está incompleta. O total pode estar incompleto.",
 		partialCatalogTotal: (tokens: number, operations: number) =>
-			`O total equivalente de catálogo está parcial: ${tokens} tokens / ${operations} operações sem modelo registrado.`,
-		partialTodayPricing: (tokens: number) => `O preço de hoje está parcial: ${tokens} tokens sem modelo registrado.`,
+			`O total equivalente de catálogo está parcial: parte do uso está sem preço ou modelo identificado.${tokens || operations ? ` ${tokens} tokens / ${operations} operações sem modelo registrado.` : ""}`,
+		partialTodayPricing: (tokens: number) =>
+			`O preço de hoje está parcial: parte do uso está sem preço ou modelo identificado.${tokens ? ` ${tokens} tokens sem modelo registrado.` : ""}`,
 		icmSummaries: "Resumos de histórico do ICM (incluídos no ATUAL):",
 		icmCalls: (count: number) => ` (${count} ${count === 1 ? "chamada" : "chamadas"})`,
 		today: "HOJE (dia local da máquina):",

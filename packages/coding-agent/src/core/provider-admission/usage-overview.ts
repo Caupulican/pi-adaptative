@@ -69,6 +69,8 @@ export interface AccountOverview extends AuthenticatedAccount {
 export interface UsageOverview {
 	at: number;
 	session: {
+		unresolvedUsageRequests?: number;
+		usageAccountingIncomplete?: true;
 		modelUnknownTokens?: number;
 		modelUnknownOperations?: number;
 		apiEquivalentPartial?: boolean;
@@ -702,6 +704,8 @@ export interface UsageOverviewInput {
 				| "reportedCost"
 				| "todayReportedCost"
 				| "accountingStatus"
+				| "unresolvedUsageRequests"
+				| "usageAccountingIncomplete"
 				| "modelUnknownTokens"
 				| "modelUnknownOperations"
 				| "apiEquivalentPartial"
@@ -732,6 +736,8 @@ export function buildUsageOverview(input: UsageOverviewInput): UsageOverview {
 	return {
 		at: input.now,
 		session: {
+			unresolvedUsageRequests: input.cost.unresolvedUsageRequests,
+			usageAccountingIncomplete: input.cost.usageAccountingIncomplete,
 			modelUnknownTokens: input.cost.modelUnknownTokens,
 			modelUnknownOperations: input.cost.modelUnknownOperations,
 			apiEquivalentPartial: input.cost.apiEquivalentPartial,

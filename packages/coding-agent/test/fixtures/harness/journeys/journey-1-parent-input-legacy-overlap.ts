@@ -32,11 +32,9 @@ export async function verifyParentInputLegacyOverlap(
 	if (!source) throw new Error("H25 legacy import needs the real persisted source.");
 	const header = utf8Text(world.io.readFileSync(source, "utf8")).split("\n")[0];
 	if (!header) throw new Error("H25 legacy import needs the original session header.");
-	const end = manager.getEntries().findIndex((entry) => entry.id === wake.entry.id);
-	if (end < 0) throw new Error("H25 wake receipt was not captured.");
-	const legacy = structuredClone(manager.getEntries().slice(0, end + 1)).filter(
-		(entry) => entry.id !== owner.entry.id,
-	);
+	const terminalBranch = manager.getBranch(owner.value.terminalEntryId);
+	if (terminalBranch.at(-1)?.id !== owner.value.terminalEntryId) throw new Error("H25 shared terminal is missing.");
+	const legacy = structuredClone([...terminalBranch, settlement, wake.entry]);
 	const oldSettlement = legacy.find((entry) => entry.id === settlement.id);
 	const oldReceipt = legacy.find((entry) => entry.id === wake.entry.id);
 	if (oldSettlement?.type !== "custom" || oldReceipt?.type !== "custom")

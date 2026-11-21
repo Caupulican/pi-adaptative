@@ -8,6 +8,8 @@
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { MeteredMoveGate } from "../agent-session-model-access.ts";
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import type { OrdinaryWorkStatusSnapshot } from "../autonomy-status/ordinary-work.ts";
+import type { OrdinaryWorkAbortIntent } from "../ordinary-work-controller.ts";
 import type { SubscriptionAllowance } from "../provider-admission/subscription-allowance.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 
@@ -32,6 +34,11 @@ export interface OwnerChannelOrigin {
  * How the channels core hands an owner's words, or an approval it recorded, to the session that hosts the phone
  * conversation. Only the channels core holds one; an extension cannot mint an owner-channel turn.
  */
+export interface OwnerChannelStop {
+	readonly reason: string;
+	readonly ordinaryWork: Exclude<OrdinaryWorkAbortIntent, "transfer">;
+}
+
 export interface OwnerChannelDelivery {
 	/**
 	 * Follow-up delivery: no slash processing, stamped as an owner-channel turn, recorded under the `channel` input
@@ -66,6 +73,7 @@ export interface OwnerChannelDelivery {
 	 * foreground as its own turn and is preparing it, before or after it is accepted (one queued behind another run has not).
 	 */
 	holdsForeground(ref: string): boolean;
+	isAnsweringBatch?(channel: string, ref: string): boolean;
 	/**
 	 * Whether the subscription the session's model runs on has allowance: room while every usage window the account reports
 	 * is below `maxUsedPercent`. Unknown with `subscription: false` (also when this member is absent or throws) is a metered
@@ -78,7 +86,7 @@ export interface OwnerChannelDelivery {
 	 */
 	holdMeteredMoves(gate: MeteredMoveGate): () => void;
 	/** Aborts the run that `ref` opened. */
-	abortRun(ref: string): void;
+	abortRun(ref: string, stop: OwnerChannelStop): void;
 }
 
 /**
@@ -168,6 +176,7 @@ export interface OwnerWaitingView {
  * the session that hosts the owner's work.
  */
 export interface OwnerChannelControl extends OwnerDraftDecisions {
+	ordinaryWork?(channel: string, ownsBatch: (sessionId: string, ref: string) => boolean): OrdinaryWorkStatusSnapshot;
 	/** Hears each draft the hosting session holds on a remote-owner run (to show it to the phone); returns the unsubscribe. */
 	onDraftHeld(listener: (view: OwnerDraftView) => void): () => void;
 	/**

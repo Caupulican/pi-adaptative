@@ -463,8 +463,12 @@ function customTypesWritten(writer: string, args: readonly unknown[]): string[] 
 		return typeof first === "string" ? [first] : [];
 	if (writer === "appendMessageBatch") {
 		if (!Array.isArray(first)) return [];
-		return first.flatMap((item: { kind?: unknown; message?: { customType?: unknown } } | undefined) =>
-			item?.kind === "custom" && typeof item.message?.customType === "string" ? [item.message.customType] : [],
+		return first.flatMap(
+			(item: { kind?: unknown; message?: { role?: unknown; customType?: unknown } } | undefined) =>
+				(item?.kind === "custom" || item?.message?.role === "custom") &&
+				typeof item.message?.customType === "string"
+					? [item.message.customType]
+					: [],
 		);
 	}
 	const message = first as { role?: unknown; customType?: unknown } | undefined;

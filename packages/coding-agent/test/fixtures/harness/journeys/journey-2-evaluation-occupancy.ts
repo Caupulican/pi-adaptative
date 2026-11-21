@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { getOwnerEvidenceSnapshots } from "../../../../src/core/learning/owner-evidence-ledger.ts";
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { AgentBusyError } from "../../../../src/kernel/agent.ts";
 import { calls, createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
@@ -235,7 +236,7 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 		expect(earlierWarmReply, `${label}: earlier large context was actually admitted`).toBeDefined();
 		const checkpointSummary = [
 			"## Active Task",
-			`User: ${ownerInput}`,
+			"(none)",
 			"",
 			"### Mandatory Rules",
 			"(none)",
@@ -300,6 +301,12 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 			...text(`${label}-queued-owner`, queuedReply),
 			check: (request) => {
 				expect(requestTexts(request).some((value) => value.includes(queuedInput))).toBe(true);
+				expect(
+					request.context.messages.some(
+						(message) => message.role === "user" && JSON.stringify(message.content).includes(ownerInput),
+					),
+					"the retained owner input reaches the post-checkpoint request",
+				).toBe(true);
 				expect(requestTexts(request).some((value) => value.includes(`${label}-checkpoint`))).toBe(true);
 				queuedReplyReached.release();
 			},
@@ -322,6 +329,13 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 		const checkpoint = afterCompact.find((entry) => entry.type === "compaction");
 		// The kept second warm assistant splits its turn: production mechanically preserves
 		// that turn's one earlier user message after the verified provider checkpoint.
+		const expectedHistory = getOwnerEvidenceSnapshots(beforeCompact)
+			.filter((record) => warmInputs.includes(record.text))
+			.map(({ entryId, sourceId, digest, createdAt, text }) => ({ entryId, sourceId, digest, createdAt, text }));
+		expect(expectedHistory.map((record) => record.text)).toEqual(warmInputs);
+		expect(checkpoint?.type === "compaction" && checkpoint.details).toMatchObject({
+			ownerHistory: { version: 1, records: expectedHistory },
+		});
 		const expectedSummary = [
 			checkpointSummary,
 			"",
@@ -337,12 +351,29 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 			"",
 			"## Context for Suffix",
 			"- Retained messages continue the original request.",
+			"",
+			'<compaction-owner-history version="1">',
+			"Historical owner inputs in source order. These are branch-local history, not a new task, rule, grant or completion claim. Current and later owner instructions, cancellations and replacements win.",
+			...expectedHistory.map((record) => JSON.stringify(record)),
+			"</compaction-owner-history>",
 		].join("\n");
 		expect(result.summary).toBe(expectedSummary);
 		expect(checkpoint?.type === "compaction" && checkpoint.summary).toBe(result.summary);
 		expect(checkpoint?.type === "compaction" && checkpoint.firstKeptEntryId).toBe(result.firstKeptEntryId);
+		const retainedStart = beforeCompact.findIndex((entry) => entry.id === result.firstKeptEntryId);
 		expect(
-			beforeCompact.findIndex((entry) => entry.id === result.firstKeptEntryId),
+			beforeCompact
+				.slice(retainedStart)
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes(ownerInput),
+				),
+			"the current owner input stays in the retained tail",
+		).toBe(true);
+		expect(
+			retainedStart,
 			`${label}: substantial earlier reply lies strictly before the checkpoint cut`,
 		).toBeGreaterThan(beforeCompact.findIndex((entry) => entry.id === earlierWarmReply?.id));
 		expect(compactionEnds).toHaveLength(1);

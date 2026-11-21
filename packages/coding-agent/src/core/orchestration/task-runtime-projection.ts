@@ -17,12 +17,14 @@ import {
 	MAX_ORCHESTRATION_RETAINED_RECORD_BYTES,
 	MAX_ORCHESTRATION_TASKS,
 } from "./contracts.ts";
+import { projectionRecordForStorage } from "./dispatch-storage.ts";
 import {
 	DurableTaskRuntimeError,
 	type ObjectiveRuntimeState,
 	type OrchestrationProjectionCapacity,
 	type TaskRuntimeProjection,
 } from "./task-runtime-state.ts";
+import { measureWorkerBriefFields } from "./worker-brief-attachment.ts";
 
 export function emptyProjection(): TaskRuntimeProjection {
 	return {
@@ -69,13 +71,16 @@ function serializedJsonBytes(value: unknown, label: string): number {
 	return Buffer.byteLength(serialized, "utf8");
 }
 
-function retainedRecordSerializedBytes(value: unknown, label: string): number {
+function retainedRecordSerializedBytes(field: ProjectionRecordField, value: unknown, label: string): number {
 	if (!value || typeof value !== "object") {
 		throw new DurableTaskRuntimeError(`${label} retained record is invalid.`);
 	}
 	const cached = retainedRecordSerializedByteCache.get(value);
 	if (cached !== undefined) return cached;
-	const bytes = serializedJsonBytes(value, label);
+	const { skeleton, attachmentDeltaBytes } = measureWorkerBriefFields((encode) =>
+		projectionRecordForStorage(field, value, encode),
+	);
+	const bytes = serializedJsonBytes(skeleton, label) + attachmentDeltaBytes;
 	if (bytes > MAX_ORCHESTRATION_RETAINED_RECORD_BYTES) {
 		throw new DurableTaskRuntimeError(
 			`${label} retained record exceeds its ${MAX_ORCHESTRATION_RETAINED_RECORD_BYTES}-byte limit.`,
@@ -122,7 +127,7 @@ export function projectionSerializedBytes(projection: TaskRuntimeProjection): nu
 				(entryCount > 0 ? 1 : 0) +
 				retainedRecordKeyBytes(key, `Orchestration projection.${field}.${key}`) +
 				1 +
-				retainedRecordSerializedBytes(value, `Orchestration projection.${field}.${key}`);
+				retainedRecordSerializedBytes(field, value, `Orchestration projection.${field}.${key}`);
 			entryCount += 1;
 			if (bytes > MAX_ORCHESTRATION_PROJECTION_BYTES) {
 				throw new DurableTaskRuntimeError(
@@ -143,8 +148,8 @@ export function assertProjectionRecordReplacementWithinLimits(
 ): void {
 	const label = `Orchestration projection.${field}.${key}`;
 	const current = projection[field][key];
-	const nextRecordBytes = retainedRecordSerializedBytes(value, label);
-	const currentRecordBytes = current ? retainedRecordSerializedBytes(current, label) : 0;
+	const nextRecordBytes = retainedRecordSerializedBytes(field, value, label);
+	const currentRecordBytes = current ? retainedRecordSerializedBytes(field, current, label) : 0;
 	const insertionBytes = current
 		? 0
 		: retainedRecordKeyBytes(key, label) + 1 + (countRecordEntries(projection[field]) > 0 ? 1 : 0);
@@ -178,7 +183,7 @@ export class ProjectionByteTracker {
 				this.bytes -=
 					retainedRecordKeyBytes(property, field) +
 					1 +
-					retainedRecordSerializedBytes(record[property], field) +
+					retainedRecordSerializedBytes(field, record[property], field) +
 					(count > 1 ? 1 : 0);
 				this.entryCounts.set(field, count - 1);
 				return Reflect.deleteProperty(record, property);
@@ -189,8 +194,8 @@ export class ProjectionByteTracker {
 				}
 				const label = `Orchestration projection.${field}.${property}`;
 				const exists = Object.hasOwn(record, property);
-				const nextRecordBytes = retainedRecordSerializedBytes(value, label);
-				const previousRecordBytes = exists ? retainedRecordSerializedBytes(record[property], label) : 0;
+				const nextRecordBytes = retainedRecordSerializedBytes(field, value, label);
+				const previousRecordBytes = exists ? retainedRecordSerializedBytes(field, record[property], label) : 0;
 				const keyAndSeparatorBytes = exists
 					? 0
 					: retainedRecordKeyBytes(property, label) + 1 + ((this.entryCounts.get(field) ?? 0) > 0 ? 1 : 0);

@@ -1,5 +1,7 @@
 import { type OwnerInputId, ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
 import type { SessionAppendIdentity, SessionAppendWriteIdentity } from "../kernel/session/session-append-receipt.ts";
+import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import { isOwnerTurnOrigin, parseTurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { uuidv7 } from "../kernel/uuid.ts";
 import { releaseFailureCause } from "./util/resource-release.ts";
@@ -134,6 +136,17 @@ export function hostInputSource(kind: "steer" | "followUp"): OwnerInputSource {
  */
 export function isOwnerChannelInputId(id: string): boolean {
 	return id.startsWith("channel:");
+}
+
+/** Archive custody predates stamps; explicit source metadata may contradict it, never enlarge it. */
+export function isCompatibleOwnerSourceEntry(entry: SessionEntry | undefined): boolean {
+	if (entry?.type !== "message" || entry.message.role !== "user") return false;
+	if (entry.turnOrigin !== undefined) return isOwnerTurnOrigin(parseTurnOriginRecord(entry.turnOrigin));
+	if (entry.workerControl !== undefined) return false;
+	return (
+		entry.ownerInputId === undefined ||
+		(isOwnerSpokenInputId(entry.ownerInputId) && !isOwnerChannelInputId(entry.ownerInputId))
+	);
 }
 
 export class OwnerInputLedger {

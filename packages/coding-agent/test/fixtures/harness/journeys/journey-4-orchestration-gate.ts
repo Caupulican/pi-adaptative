@@ -87,6 +87,7 @@ export async function runJourney4OrchestrationGatePhase(world: HarnessWorld): Pr
 		{
 			name: "j4-edit-refused",
 			check: (request) => {
+				expect(request.context.systemPrompt).toContain("You orchestrate; you do not execute");
 				const edit = latestBatchResults(request).find((result) => result.toolName === "edit");
 				if (!edit?.isError || !edit.text.includes(REFUSAL)) {
 					throw new Error(

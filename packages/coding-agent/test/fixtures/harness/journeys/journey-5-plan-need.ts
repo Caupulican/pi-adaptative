@@ -153,7 +153,7 @@ export async function runJourney5PlanNeedPhase(world: HarnessWorld, session: Age
 				}
 				started.release();
 			},
-			reply: { content: [{ type: "text", text: "The plan is running." }] },
+			reply: { content: [{ type: "text", text: "The plan call was accepted." }] },
 		},
 		planUpdateStep("j5-need-wake", "PLAN_DONE", (request) => {
 			updates = planUpdatesIn(request);

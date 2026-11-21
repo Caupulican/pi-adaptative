@@ -711,7 +711,18 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		}
 	};
 	// The save, on the first branch: a memory add cited to the owner's own words.
-	world.systemOne.enterPhase("e4-save", e4Judgments);
+	world.systemOne.enterPhase(
+		"e4-save",
+		{
+			...e4Judgments,
+			reporting_requirement: { kind: "noul", probability: 0.02 },
+		},
+		{
+			expect: (request) => {
+				if (request.questions.reporting_requirement) expect(request.state).toEqual({ preference: E4_PREFERENCE });
+			},
+		},
+	);
 	world.provider.enqueue(
 		"root",
 		{

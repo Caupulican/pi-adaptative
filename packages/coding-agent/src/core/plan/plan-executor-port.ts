@@ -4,6 +4,7 @@
  */
 
 import type { PlanJoinKind } from "./plan-graph.ts";
+import type { PlanCounts } from "./plan-view.ts";
 
 /** One step as the model writes it (`plan` tool schema, design PG 5.1). */
 export interface PlanToolStep {
@@ -50,6 +51,8 @@ export type PlanToolResult =
 			readonly text: string;
 			readonly planId: string;
 			readonly version: number;
+			readonly counts: PlanCounts;
+			/** Compatibility field for active worker attempts. */
 			readonly started: number;
 			readonly waiting: number;
 	  }

@@ -6,7 +6,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { bindSavedBedrockScope } from "./bedrock-scope.ts";
-import { isDefaultOnBundledExtension, isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
+import { isExtensionAllowedAtRuntime } from "./extension-import-authority.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { describeToolOnlyIgnored } from "./extensions/tool-only-api.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -164,24 +164,9 @@ export async function createAgentSessionServices(
 
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const extensionsResult = resourceLoader.getExtensions();
-		const activeProfileNames = settingsManager.getActiveResourceProfileNames();
 		const runtimeExtensionPaths = new Set(
 			extensionsResult.extensions
-				.filter((extension) => {
-					if (extension.sourceInfo.source === "inline") return true;
-					if (isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source)) {
-						return isExtensionPathAllowedForImport(
-							settingsManager,
-							extension.path,
-							"default-on",
-							extension.sourceInfo.baseDir,
-						);
-					}
-					return (
-						activeProfileNames.length > 0 &&
-						settingsManager.isResourceAllowedByProfile("extensions", extension.path, extension.sourceInfo.baseDir)
-					);
-				})
+				.filter((extension) => isExtensionAllowedAtRuntime(settingsManager, extension))
 				.map((extension) => extension.path),
 		);
 		for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {

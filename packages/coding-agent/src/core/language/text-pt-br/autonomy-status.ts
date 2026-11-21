@@ -208,6 +208,7 @@ export const AUTONOMY_STATUS = {
 	head: (at: string) => `Situação da autonomia em ${at}`,
 	blocks: {
 		goal: "Objetivo",
+		ordinaryWork: "Pedido atual",
 		plans: "Planos",
 		ownerDecisions: "Decisões do dono",
 		review: "Revisão",
@@ -236,6 +237,56 @@ export const AUTONOMY_STATUS = {
 	idle: "ocioso",
 	more: (count: number) => `(mais ${count})`,
 
+	ordinaryWork: {
+		states: {
+			disabled: "Esta sessão não é responsável pela recuperação de pedidos comuns.",
+			ephemeral: "Esta sessão não é salva; a recuperação automática está indisponível.",
+			none: "Nenhum pedido comum está registrado neste ramo.",
+			unavailable: "O estado de recuperação do pedido está indisponível.",
+			active: "Pedido em andamento.",
+			waiting: "Pedido aguardando um resultado.",
+			owner_needed: "O pedido precisa de uma resposta do dono.",
+			unverified: "O pedido continua aberto; a continuação automática está retida.",
+			fulfilled: "Pedido atendido.",
+			cancelled: "Pedido cancelado.",
+		},
+		reasons: {
+			storage_not_loaded: "A sessão ainda não abriu o banco de recuperação.",
+			reporting_unverified:
+				"Uma resposta final foi registrada. Não foi possível verificar se ela atende ao requisito de apresentação confirmado pelo dono.",
+			reporting_changed:
+				"O requisito de apresentação mudou durante a revisão. A revisão anterior perdeu a validade.",
+			reporting_override_unverified:
+				"O Pi manteve a resposta registrada porque o pedido atual pode limitar quais requisitos de apresentação salvos se aplicam.",
+			reporting_review_invalid:
+				"A resposta foi registrada. O Pi não conseguiu validar a decisão do revisor sobre a apresentação da resposta.",
+			storage_unavailable: "O banco de recuperação não pôde ser lido.",
+			fulfilled: "A entrega solicitada está presente.",
+			waiting: "Uma operação ou worker já iniciado deve fornecer o próximo resultado.",
+			owner_needed: "O progresso depende de uma decisão, informação ou autorização do dono.",
+			unverified: "As evidências disponíveis não resolveram o pedido.",
+			answer_recorded_unverified:
+				"Uma resposta foi registrada; as evidências disponíveis ainda não confirmaram que ela atende ao pedido.",
+			held: "O revisor independente reteve novas tentativas.",
+			limited: "O limite de continuações automáticas foi atingido.",
+			judge_unavailable: "O avaliador da parada está indisponível.",
+			evidence_exceeds_review_limit: "As evidências excedem o limite de tamanho da revisão.",
+			reviewer_no_eligible_model: "O conjunto de modelos configurado não tem um revisor independente elegível.",
+			reviewer_unavailable: "O revisor independente está indisponível.",
+			reviewer_invalid_response: "O revisor independente retornou uma decisão inválida.",
+			review_timed_out: "A revisão da parada excedeu seu tempo limite.",
+			owner_evidence_unavailable: "As evidências originais do dono não estão disponíveis para revisão.",
+			kernel_runaway_stop: "O limite de segurança da execução interrompeu a rodada.",
+			ambiguous_execution_receipt:
+				"O resultado de uma execução é ambíguo; reconcilie seu recibo antes de continuar.",
+			review_superseded: "Um contexto mais recente da sessão substituiu a revisão.",
+			stop_review_in_progress: "Uma revisão da parada foi iniciada; seu resultado ainda não foi registrado.",
+			process_interrupted: "O processo foi interrompido; os recibos registrados precisam ser reconciliados.",
+			explicit_goal_owns_request: "Um objetivo explícito agora é responsável por este trabalho.",
+			system_bound: "Um limite de execução ou supervisão do host interrompeu a rodada.",
+		},
+		budget: (used: number, limit: number) => `Continuações automáticas: ${used}/${limit} utilizadas.`,
+	},
 	goal: {
 		line: (text: string, met: number, total: number, status: string) =>
 			`Objetivo "${text}": ${met} de ${total} requisitos atendidos, ${status}.`,

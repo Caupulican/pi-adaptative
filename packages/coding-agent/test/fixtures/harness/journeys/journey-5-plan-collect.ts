@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { planView } from "../../../../src/core/plan/plan-view.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
@@ -93,6 +94,12 @@ export async function runJourney5PlanCollectPhase(world: HarnessWorld, session: 
 	await withDeadline(trace, "J5 the plan's result woke the root", done.promise, 60_000);
 	await withDeadline(trace, "J5 root idle", session.waitForForegroundIdle());
 	const plan = planTitled(session, TITLE);
+	expect(planView(session.backgroundLanes.getTaskRuntimeSnapshot()!, plan.record.planId)?.counts).toMatchObject({
+		total: 3,
+		settled: 3,
+		accepted: 3,
+		running: 0,
+	});
 	const join = plan.nodes.combined?.join;
 	// An outcome written by a newer build is opaque; this build wrote this one.
 	const joined = join && "status" in join.outcome ? join.outcome : undefined;

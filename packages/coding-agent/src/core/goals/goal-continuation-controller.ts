@@ -122,7 +122,7 @@ function namedWatches(watches: readonly GoalBoundWatch[]): string {
 function planWaitTimeoutMessage(steps: number, maxWaitMs: number, stepIds?: readonly string[]): string {
 	const hours = Math.round((maxWaitMs / 3_600_000) * 10) / 10;
 	const named = stepIds && stepIds.length > 0 ? ` (${stepIds.join(", ")})` : "";
-	return `The plan's ${steps} running step(s)${named} have shown no progress for ${hours} h; continue the goal with what is known and re-plan what is stuck.`;
+	return `The plan has shown no progress for ${hours} h on ${steps} pending step(s)${named}. Continue the goal with what is known and re-plan what is stuck.`;
 }
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
@@ -227,7 +227,7 @@ function planContinuation(args: {
 		...args.baseDecision,
 		action: "waiting",
 		reasonCode: "plan_in_flight",
-		message: `${steps} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
+		message: `The plan is handling ${steps} step(s). It wakes you with each combined result and when a step needs you.`,
 		...(timing.resumeAt ? { resumeAt: timing.resumeAt } : {}),
 	};
 }

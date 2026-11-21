@@ -5,7 +5,11 @@ import type { DecisionOptions, SemanticDecisionEngine } from "../decision/engine
 import type { DecisionResult } from "../decision/evaluation.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { choiceProbability, KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
-import type { OwnerEvidenceLedger, OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
+import {
+	isCompleteOwnerSource,
+	type OwnerEvidenceLedger,
+	type OwnerEvidenceRecord,
+} from "../learning/owner-evidence-ledger.ts";
 import { nextOwnerEvidenceWindow, type OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
@@ -162,7 +166,7 @@ export class KnowledgeGrounding {
 		const cited: CitedOwnerWords[] = [];
 		for (const citation of change.evidence) {
 			const source = this.deps.evidence.findSource(citation.source);
-			if (!source?.sessionId || source.chars !== source.text.length || hasMaskableSecretText(source.text))
+			if (!isCompleteOwnerSource(source) || hasMaskableSecretText(source.text))
 				throw new KnowledgeGroundingEvidenceRefusal("Grounding requires complete safe original owner evidence");
 			cited.push({ source, quote: citation.quote });
 			sources.set(source.sourceId, source);

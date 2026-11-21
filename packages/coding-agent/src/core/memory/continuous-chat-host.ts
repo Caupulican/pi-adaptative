@@ -36,6 +36,7 @@ import { type ContinuousChatProjectionSource, renderContinuousChatTurnState } fr
 import {
 	type ContinuousChatCompactionPrefixHead,
 	ContinuousChatRuntime,
+	type ContinuousChatRuntimeOptions,
 	type ContinuousChatTurnBoundary,
 } from "./continuous-chat-runtime.ts";
 import { ContinuousChatStore } from "./continuous-chat-store.ts";
@@ -81,7 +82,7 @@ export interface ContinuousChatHostOptions extends ContinuousChatHostPorts {
 	legacy: ContinuousChatLegacySource;
 	/** The session's durable-write announcements. The host subscribes only in `start`, after the lease is held. */
 	subscribeEntriesPersisted(listener: (event: SessionEntriesPersistedEvent) => void): () => void;
-	warn(message: string): void;
+	warn: ContinuousChatRuntimeOptions["warn"];
 }
 
 /** A promise its owner settles once. Its rejection is observed here, so an unawaited failure is never unhandled. */

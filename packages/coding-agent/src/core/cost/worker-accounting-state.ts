@@ -13,6 +13,11 @@ import {
 } from "../orchestration/attempt-usage-generations.ts";
 import type { AttemptUsageSnapshot, OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import {
+	type ModelTransferRecord,
+	modelTransferFromValue,
+	modelTransferSuccessorPayload,
+} from "../orchestration/model-transfer.ts";
 import { archiveIsCommitted, readRetentionArchives, retentionArchiveDir } from "../orchestration/retention-archive.ts";
 import { retentionArchiveIdsField } from "../orchestration/retention-event.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
@@ -31,6 +36,7 @@ export interface HistoricalWorkerAttempt {
 	taskId: string;
 	agentId?: string;
 	dispatch: { receiptOrigin?: WorkerReceiptOrigin };
+	modelTransfer?: ModelTransferRecord;
 	usage?: AttemptUsageSnapshot;
 	accounting?: AttemptUsageAccounting;
 	usageReceipts: Map<string, HistoricalWorkerReceipt>;
@@ -116,6 +122,9 @@ function readAttempt(value: unknown): HistoricalWorkerAttempt {
 		},
 		...(accounting ? { accounting, usage: accounting.total } : {}),
 		usageReceipts: receipts,
+		...(source.modelTransfer === undefined
+			? {}
+			: { modelTransfer: modelTransferFromValue(source.modelTransfer, "archived model transfer") }),
 	};
 }
 
@@ -219,6 +228,34 @@ function applyAccountingEvent(
 	if (event.type === "attempt.queued" || event.type === "task.attempt_prepared") {
 		const attempt = readAttempt({ ...payload, usageReceipts: {} });
 		state.attempts.set(attempt.attemptId, attempt);
+		return;
+	}
+	if (event.type === "model_transfer.requested") {
+		const transfer = modelTransferFromValue(payload, "archived model transfer");
+		const source = state.attempts.get(transfer.sourceAttemptId);
+		if (!source || source.taskId !== transfer.taskId || transfer.status !== "requested")
+			throw new Error("Archived model transfer names an unknown source attempt.");
+		source.modelTransfer = transfer;
+		return;
+	}
+	if (event.type === "model_transfer.successor_admitted") {
+		const source = state.attempts.get(identity(payload.sourceAttemptId, "model transfer source attempt"));
+		const transfer = source?.modelTransfer;
+		if (
+			!source ||
+			!transfer ||
+			transfer.status !== "requested" ||
+			transfer.commandId !== identity(payload.commandId, "model transfer command")
+		)
+			throw new Error("Archived model transfer successor was not requested.");
+		const attempt = readAttempt({
+			...modelTransferSuccessorPayload(transfer, payload.dispatch),
+			checkpointIds: [],
+			usageReceipts: {},
+		});
+		if (state.attempts.has(attempt.attemptId)) throw new Error("Archived model transfer successor already exists.");
+		state.attempts.set(attempt.attemptId, attempt);
+		source.modelTransfer = { ...transfer, status: "successor_admitted" };
 		return;
 	}
 	if (event.type === "attempt.leased") {

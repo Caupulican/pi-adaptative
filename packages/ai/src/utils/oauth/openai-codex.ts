@@ -24,11 +24,12 @@ import {
 	getOpenAICodexTokenExpiry,
 	OPENAI_CODEX_FEDRAMP_HEADER,
 } from "../../providers/openai-codex-auth.ts";
-import { parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
+import { awaitAuthorizationInput, parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
 import { OAuthRefreshRejectedError, type OAuthRefreshRejection } from "./refresh-rejected-error.ts";
+import { createOAuthRequestSignal } from "./request-signal.ts";
 import type {
 	OAuthCredentials,
 	OAuthDeviceCodeInfo,
@@ -78,12 +79,14 @@ function createState(): string {
 }
 
 async function fetchWithLoginCancellation(input: string, init: RequestInit, what: string): Promise<Response> {
+	const signal = createOAuthRequestSignal(init.signal ?? undefined);
 	try {
-		return await fetch(input, init);
+		const response = await fetch(input, { ...init, signal });
+		signal.throwIfAborted();
+		return response;
 	} catch {
-		if (init.signal?.aborted) {
-			throw new Error("Login cancelled");
-		}
+		if (init.signal?.aborted) throw new Error("Login cancelled");
+		if (signal.aborted) throw signal.reason;
 		throw new Error(`OpenAI Codex ${what} request failed (network error)`);
 	}
 }
@@ -498,7 +501,9 @@ async function exchangeAuthorizationCodeForCredentials(
 	redirectUri: string,
 	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
-	return credentialsFromToken(await exchangeAuthorizationCode(code, verifier, redirectUri, signal));
+	const token = await exchangeAuthorizationCode(code, verifier, redirectUri, signal);
+	signal?.throwIfAborted();
+	return credentialsFromToken(token);
 }
 
 /**
@@ -541,31 +546,40 @@ export async function loginOpenAICodex(options: {
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
 	originator?: string;
+	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
+	options.signal?.throwIfAborted();
 	const { verifier, state, url } = await createAuthorizationFlow(options.originator);
+	options.signal?.throwIfAborted();
 	const server = await startLocalOAuthServer(state);
-
-	options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
-
+	const inputLifetime = new AbortController();
+	const signal = options.signal ? AbortSignal.any([options.signal, inputLifetime.signal]) : inputLifetime.signal;
 	let code: string | undefined;
 	try {
-		if (options.onManualCodeInput) {
-			const authorization = await raceAuthorizationInput({
-				manualInput: options.onManualCodeInput,
-				waitForCallback: async () => {
-					const outcome = await server.waitForCode();
-					if (outcome && "error" in outcome) throw new Error(outcome.error);
-					return outcome;
-				},
-				cancelWait: server.cancelWait,
-				expectedState: state,
-				stateMismatchMessage: "State mismatch",
-				normalizeState: (received) => callbackState(received, state),
-			});
+		signal.throwIfAborted();
+		options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
+		const manualInput = options.onManualCodeInput;
+		if (manualInput) {
+			const authorization = await awaitAuthorizationInput(
+				() =>
+					raceAuthorizationInput({
+						manualInput: () => awaitAuthorizationInput(manualInput, signal),
+						waitForCallback: async () => {
+							const outcome = await server.waitForCode();
+							if (outcome && "error" in outcome) throw new Error(outcome.error);
+							return outcome;
+						},
+						cancelWait: server.cancelWait,
+						expectedState: state,
+						stateMismatchMessage: "State mismatch",
+						normalizeState: (received) => callbackState(received, state),
+					}),
+				signal,
+			);
 			code = authorization?.code;
 		} else {
 			// Original flow: wait for callback, then prompt if needed
-			const result = await server.waitForCode();
+			const result = await awaitAuthorizationInput(server.waitForCode, signal);
 			if (result && "error" in result) throw new Error(result.error);
 			if (result?.code) {
 				code = result.code;
@@ -574,9 +588,13 @@ export async function loginOpenAICodex(options: {
 
 		// Fallback to onPrompt if still no code
 		if (!code) {
-			const input = await options.onPrompt({
-				message: "Paste the authorization code (or full redirect URL):",
-			});
+			const input = await awaitAuthorizationInput(
+				() =>
+					options.onPrompt({
+						message: "Paste the authorization code (or full redirect URL):",
+					}),
+				signal,
+			);
 			const parsed = parseAuthorizationInput(input);
 			if (parsed.state && callbackState(parsed.state, state) !== state) {
 				throw new Error("State mismatch");
@@ -588,8 +606,10 @@ export async function loginOpenAICodex(options: {
 			throw new Error("Missing authorization code");
 		}
 
-		return exchangeAuthorizationCodeForCredentials(code, verifier, REDIRECT_URI);
+		return await exchangeAuthorizationCodeForCredentials(code, verifier, REDIRECT_URI, signal);
 	} finally {
+		inputLifetime.abort();
+		server.cancelWait();
 		server.close();
 	}
 }
@@ -611,13 +631,17 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 	usesCallbackServer: true,
 
 	async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		const loginMethod = await callbacks.onSelect({
-			message: "Select OpenAI Codex login method:",
-			options: [
-				{ id: OPENAI_CODEX_BROWSER_LOGIN_METHOD, label: "Browser login (default)" },
-				{ id: OPENAI_CODEX_DEVICE_CODE_LOGIN_METHOD, label: "Device code login (headless)" },
-			],
-		});
+		const loginMethod = await awaitAuthorizationInput(
+			() =>
+				callbacks.onSelect({
+					message: "Select OpenAI Codex login method:",
+					options: [
+						{ id: OPENAI_CODEX_BROWSER_LOGIN_METHOD, label: "Browser login (default)" },
+						{ id: OPENAI_CODEX_DEVICE_CODE_LOGIN_METHOD, label: "Device code login (headless)" },
+					],
+				}),
+			callbacks.signal,
+		);
 		if (!loginMethod) {
 			throw new Error("Login cancelled");
 		}
@@ -638,6 +662,7 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			signal: callbacks.signal,
 		});
 	},
 

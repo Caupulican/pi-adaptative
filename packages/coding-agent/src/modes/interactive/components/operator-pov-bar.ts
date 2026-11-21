@@ -59,7 +59,7 @@ export interface OperatorPovSource {
 	getPeerFindingCount?(): number;
 	/** Output tokens per second of the latest run that generated any; undefined before the first. */
 	getTokensPerSecond?(): number | undefined;
-	/** Milliseconds until the provider's prompt cache for the last request expires (0 once it has); undefined where no lifetime is known. */
+	/** Conservative warm-bound countdown; 0 after the cold bound, undefined between bounds or without captured timing. */
 	getCacheRemainingMs?(): number | undefined;
 }
 

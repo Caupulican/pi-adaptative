@@ -4,7 +4,7 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { BOT_TOOL_NAME } from "../../../../src/core/delegation/bot-creation.ts";
 import { BOT_MAIL_TOOL_NAME } from "../../../../src/core/tools/bot-mail-tool-name.ts";
 import type { TurnOriginRecord } from "../../../../src/kernel/turn-origin-stamp.ts";
-import { createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
+import { createBarrier, phasedReply, type ScriptedRequest } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
 import {
@@ -133,7 +133,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			seen.mailCarried = carries(request, MAIL_QUESTION);
 			seen.mailNotOwner = carries(request, `Mail from bot ${ASKER}`) && !carries(request, OWNER_REQUEST);
 		},
-		reply: { content: [{ type: "text", text: MAIL_ANSWER }] },
+		reply: phasedReply("I am checking the configured delay.", MAIL_ANSWER),
 	});
 
 	// The owner's message starts the asker's turn that calls a tool: its words are judged as an owner request that calls a

@@ -4,8 +4,14 @@ import {
 	AssistantMessageEventStream,
 	createEmptyUsage,
 	dispatchGuardedProviderRequest,
+	getProviderResponseAccount,
 	type Model,
+	ProviderResponseAccountScope,
 	type ProviderResponseObserver,
+	providerResponseAccountFor,
+	registerBuiltInApiProviders,
+	sameProviderResponseRoute,
+	streamSimple,
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -106,6 +112,227 @@ async function collect(stream: AssistantMessageEventStream) {
 	for await (const event of stream) events.push(event);
 	return { events, message: await stream.result() };
 }
+
+it("keeps the dispatched account on its matching terminal error and drops it at persistence and local refusal boundaries", async () => {
+	const message: AssistantMessage = {
+		...(await success().result()),
+		stopReason: "error",
+		errorMessage: "model_not_supported",
+	};
+	const physical = new AssistantMessageEventStream();
+	const complete = vi.fn();
+	const begin = vi.fn(() => ({ complete, failed: vi.fn() }));
+	const options = {
+		apiKey: "synthetic-credential",
+		providerAccountKey: "fixture#account-a",
+		providerResponseObserver: { begin },
+	};
+	const scope = new ProviderResponseAccountScope();
+	const bound = scope.bind(options);
+	const request = dispatchGuardedProviderRequest(model, bound, (providerOptions) => {
+		expect(Object.getOwnPropertySymbols(providerOptions!)).toHaveLength(0);
+		return physical;
+	});
+	options.providerAccountKey = "fixture#account-b";
+	bound.providerAccountKey = options.providerAccountKey;
+	physical.push({ type: "error", reason: "error", error: message });
+	expect(await request.result()).toBe(message);
+	const account = { provider: model.provider, model: model.id, accountKey: "fixture#account-a" };
+	expect(getProviderResponseAccount(message)).toBeUndefined();
+	expect(begin).toHaveBeenCalledTimes(1);
+	expect(complete).toHaveBeenCalledExactlyOnceWith(message);
+	const final = scope.project(message, { ...message, streamEndAt: Date.now() });
+	expect(getProviderResponseAccount(final)).toEqual(account);
+	const serialized = JSON.stringify(final);
+	expect(serialized).not.toContain("account-a");
+	expect(serialized).not.toContain(options.apiKey);
+	expect(getProviderResponseAccount(JSON.parse(serialized))).toBeUndefined();
+	const transformed = { ...final, errorMessage: "Different local diagnostic" };
+	expect(getProviderResponseAccount(scope.project(message, transformed))).toBeUndefined();
+	const replayScope = new ProviderResponseAccountScope();
+	expect(getProviderResponseAccount(replayScope.project(final))).toBeUndefined();
+	expect(getProviderResponseAccount(final)).toEqual(account);
+	final.errorMessage = "Edited after delivery";
+	expect(getProviderResponseAccount(final)).toBeUndefined();
+
+	const dispatch = vi.fn(() => physical);
+	const refused = dispatchGuardedProviderRequest(
+		model,
+		{
+			...options,
+			requestGuard: () => {
+				throw new Error("model_not_supported");
+			},
+		},
+		dispatch,
+	);
+	expect(getProviderResponseAccount(await refused.result())).toBeUndefined();
+	expect(dispatch).not.toHaveBeenCalled();
+	expect(begin).toHaveBeenCalledTimes(1);
+});
+
+it("withholds evidence for a middleware error, an account-free request and an ambiguous result reused by two accounts", async () => {
+	const source = await success().result();
+	const error = { ...source, stopReason: "error" as const, errorMessage: "model_not_supported" };
+	const port = () => {
+		const stream = new AssistantMessageEventStream();
+		stream.push({ type: "error", reason: "error", error });
+		return stream;
+	};
+	for (const scope of ["fixture", "foreign#account", "fixture#synthetic-token"]) {
+		const response = dispatchGuardedProviderRequest(
+			model,
+			{ apiKey: "synthetic-token", providerAccountKey: scope },
+			port,
+		);
+		expect(getProviderResponseAccount(await response.result())).toBeUndefined();
+	}
+	const accountA = { providerAccountKey: "fixture#account-a" };
+	const middleware = dispatchGuardedProviderRequest(model, accountA, port, "middleware");
+	expect(getProviderResponseAccount(await middleware.result())).toBeUndefined();
+	await dispatchGuardedProviderRequest(model, accountA, port).result();
+	expect(getProviderResponseAccount(error)?.accountKey).toBe(accountA.providerAccountKey);
+	await dispatchGuardedProviderRequest(model, { providerAccountKey: "fixture#account-b" }, port).result();
+	expect(getProviderResponseAccount(error)).toBeUndefined();
+});
+
+it("compares only genuine routes and discards an error reused on a different endpoint", async () => {
+	const options = { apiKey: "fixture-credential", providerAccountKey: "fixture#account-a" };
+	const source = { ...model, baseUrl: "https://fixture.invalid/one/private?token=fixture-secret" };
+	const original = providerResponseAccountFor(source, options)!;
+	const same = providerResponseAccountFor({ ...source }, options)!;
+	const otherApi = providerResponseAccountFor({ ...source, api: "openai-responses" }, options)!;
+	expect(sameProviderResponseRoute(original, same)).toBe(true);
+	expect(sameProviderResponseRoute(original, otherApi)).toBe(false);
+	expect(sameProviderResponseRoute({ ...original }, original)).toBe(false);
+	expect(providerResponseAccountFor({ ...source, baseUrl: " " }, options)).toBeUndefined();
+	expect(Object.keys(original).sort()).toEqual(["accountKey", "model", "provider"]);
+	expect(JSON.stringify(original)).not.toContain(source.baseUrl);
+
+	const error = { ...(await success().result()), stopReason: "error" as const, errorMessage: "model_not_supported" };
+	const transport = () => {
+		const stream = new AssistantMessageEventStream();
+		stream.push({ type: "error", reason: "error", error });
+		return stream;
+	};
+	await dispatchGuardedProviderRequest(source, options, transport).result();
+	expect(sameProviderResponseRoute(getProviderResponseAccount(error)!, original)).toBe(true);
+	source.baseUrl = "https://fixture.invalid/two/private?token=fixture-secret";
+	expect(sameProviderResponseRoute(providerResponseAccountFor(source, options)!, original)).toBe(false);
+	await dispatchGuardedProviderRequest(source, options, transport).result();
+	expect(getProviderResponseAccount(error)).toBeUndefined();
+	await dispatchGuardedProviderRequest(source, options, transport).result();
+	expect(getProviderResponseAccount(error)).toBeUndefined();
+	expect(JSON.stringify(error)).not.toContain("fixture-secret");
+});
+
+it.each(["unchanged", "model header", "caller header", "SDK environment header", "payload hook"] as const)(
+	"matches account evidence to the intercepted OpenRouter request with %s",
+	async (variant) => {
+		registerBuiltInApiProviders();
+		const apiKey = "fixture-account-A";
+		const otherKey = "fixture-account-B";
+		for (const name of ["OPENAI_CUSTOM_HEADERS", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"]) vi.stubEnv(name, "");
+		if (variant === "SDK environment header")
+			vi.stubEnv("OPENAI_CUSTOM_HEADERS", `Authorization: Bearer ${otherKey}`);
+		const sent: { key: string | null; model: string }[] = [];
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = new Request(input, init);
+			expect(request.url).toBe("https://unused.invalid/chat/completions");
+			sent.push({ key: request.headers.get("authorization"), model: (await request.json()).model });
+			return Response.json(
+				{ error: { message: "model_not_supported", code: "model_not_supported" } },
+				{ status: 400 },
+			);
+		});
+		try {
+			const target = {
+				...model,
+				provider: "openrouter",
+				...(variant === "model header" ? { headers: { Authorization: `Bearer ${otherKey}` } } : {}),
+			};
+			const scope = new ProviderResponseAccountScope();
+			const stream = streamSimple(
+				target,
+				{ messages: [{ role: "user", content: "fixture", timestamp: 1 }] },
+				scope.bind({
+					apiKey,
+					providerAccountKey: "openrouter#account-a",
+					maxRetries: 0,
+					...(variant === "caller header" ? { headers: { authorization: `Bearer ${otherKey}` } } : {}),
+					onPayload: (payload: unknown) => {
+						if (variant === "payload hook") (payload as { model: string }).model = "other-model";
+					},
+				}),
+			);
+			const message = scope.project(await stream.result());
+			expect(sent).toEqual([
+				{
+					key: `Bearer ${variant === "unchanged" || variant === "payload hook" ? apiKey : otherKey}`,
+					model: variant === "payload hook" ? "other-model" : model.id,
+				},
+			]);
+			expect(message.errorMessage).toContain("model_not_supported");
+			expect(getProviderResponseAccount(message)?.accountKey).toBe(
+				variant === "unchanged" ? "openrouter#account-a" : undefined,
+			);
+		} finally {
+			vi.unstubAllGlobals();
+			vi.unstubAllEnvs();
+		}
+	},
+);
+
+it.each(["same account", "changed account", "mismatched stored account", "conflicting caller headers"] as const)(
+	"checks the Codex transport after 401 recovery with %s",
+	async (variant) => {
+		registerBuiltInApiProviders();
+		const token = (account: string, generation: number) => {
+			const body = { "https://api.openai.com/auth": { chatgpt_account_id: account }, generation };
+			return `e30.${Buffer.from(JSON.stringify(body)).toString("base64url")}.fixture`;
+		};
+		const first = token("account-a", 1);
+		const nextAccount = variant === "changed account" ? "account-b" : "account-a";
+		const recovered = token(nextAccount, 2);
+		const recover = vi.fn(() => recovered);
+		const sent: string[] = [];
+		vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+			expect(url).toBe("https://unused.invalid/codex/responses");
+			const headers = new Headers(init.headers);
+			expect(headers.get("authorization")).toBe(`Bearer ${sent.length === 0 ? first : recovered}`);
+			sent.push(headers.get("chatgpt-account-id")!);
+			return Response.json({ error: { message: "model_not_supported" } }, { status: sent.length === 1 ? 401 : 400 });
+		});
+		try {
+			const source: Model<Api> = { ...model, provider: "openai-codex", api: "openai-codex-responses" };
+			const scope = new ProviderResponseAccountScope();
+			const stream = streamSimple(
+				source,
+				{ messages: [{ role: "user", content: "fixture", timestamp: 1 }] },
+				scope.bind({
+					apiKey: first,
+					providerAccountKey:
+						variant === "mismatched stored account" ? "openai-codex#other" : "openai-codex#account-a",
+					transport: "sse",
+					maxRetries: 0,
+					onAuthRejection: recover,
+					...(variant === "conflicting caller headers"
+						? { headers: { authorization: "Bearer ignored", "chatgpt-account-id": "ignored" } }
+						: {}),
+				}),
+			);
+			const message = scope.project(await stream.result());
+			expect(sent).toEqual(["account-a", nextAccount]);
+			expect(recover).toHaveBeenCalledExactlyOnceWith({ providerId: source.provider, status: 401, attempt: 1 });
+			expect(message.errorMessage).toContain("model_not_supported");
+			expect(getProviderResponseAccount(message)?.accountKey).toBe(
+				variant === "same account" ? "openai-codex#account-a" : undefined,
+			);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	},
+);
 
 describe.each([false, true])("dispatch currency with text protocol %s", (textProtocol) => {
 	it("accepts an omitted dispatch-currency predicate", async () => {

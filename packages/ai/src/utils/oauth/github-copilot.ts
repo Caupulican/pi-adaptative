@@ -4,7 +4,9 @@
 
 import { getModels } from "../../models.ts";
 import type { Api, Model } from "../../types.ts";
+import { awaitAuthorizationInput } from "./authorization-input.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
+import { createOAuthRequestSignal } from "./request-signal.ts";
 import type { OAuthCredentials, OAuthDeviceCodeInfo, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.ts";
 
 type CopilotCredentials = OAuthCredentials & {
@@ -89,15 +91,19 @@ export function getGitHubCopilotBaseUrl(token?: string, enterpriseDomain?: strin
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
+	init.signal?.throwIfAborted();
 	const response = await fetch(url, init);
 	if (!response.ok) {
 		const text = await response.text();
+		init.signal?.throwIfAborted();
 		throw new Error(`${response.status} ${response.statusText}: ${text}`);
 	}
-	return response.json();
+	const value: unknown = await response.json();
+	init.signal?.throwIfAborted();
+	return value;
 }
 
-async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
+async function startDeviceFlow(domain: string, signal?: AbortSignal): Promise<DeviceCodeResponse> {
 	const urls = getUrls(domain);
 	const data = await fetchJson(urls.deviceCodeUrl, {
 		method: "POST",
@@ -110,6 +116,7 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 			client_id: CLIENT_ID,
 			scope: "read:user",
 		}),
+		signal: createOAuthRequestSignal(signal),
 	});
 
 	if (!data || typeof data !== "object") {
@@ -176,6 +183,7 @@ async function pollForGitHubAccessToken(
 					device_code: device.device_code,
 					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
 				}),
+				signal: createOAuthRequestSignal(signal),
 			});
 
 			if (raw && typeof raw === "object" && typeof (raw as DeviceTokenSuccessResponse).access_token === "string") {
@@ -207,11 +215,13 @@ async function pollForGitHubAccessToken(
 export async function refreshGitHubCopilotToken(
 	refreshToken: string,
 	enterpriseDomain?: string,
+	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
 	const domain = enterpriseDomain || "github.com";
 	const urls = getUrls(domain);
 
 	const raw = await fetchJson(urls.copilotTokenUrl, {
+		...(signal ? { signal: createOAuthRequestSignal(signal) } : {}),
 		headers: {
 			Accept: "application/json",
 			Authorization: `Bearer ${refreshToken}`,
@@ -242,12 +252,18 @@ export async function refreshGitHubCopilotToken(
  * Enable a model for the user's GitHub Copilot account.
  * This is required for some models (like Claude, Grok) before they can be used.
  */
-async function enableGitHubCopilotModel(token: string, modelId: string, enterpriseDomain?: string): Promise<boolean> {
+async function enableGitHubCopilotModel(
+	token: string,
+	modelId: string,
+	enterpriseDomain?: string,
+	signal?: AbortSignal,
+): Promise<boolean> {
 	const baseUrl = getGitHubCopilotBaseUrl(token, enterpriseDomain);
 	const url = `${baseUrl}/models/${modelId}/policy`;
 
 	try {
 		const response = await fetch(url, {
+			signal: createOAuthRequestSignal(signal),
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -258,8 +274,11 @@ async function enableGitHubCopilotModel(token: string, modelId: string, enterpri
 			},
 			body: JSON.stringify({ state: "enabled" }),
 		});
+		await response.body?.cancel().catch(() => {});
+		signal?.throwIfAborted();
 		return response.ok;
 	} catch {
+		signal?.throwIfAborted();
 		return false;
 	}
 }
@@ -272,11 +291,13 @@ async function enableAllGitHubCopilotModels(
 	token: string,
 	enterpriseDomain?: string,
 	onProgress?: (model: string, success: boolean) => void,
+	signal?: AbortSignal,
 ): Promise<void> {
+	signal?.throwIfAborted();
 	const models = getModels("github-copilot");
 	await Promise.all(
 		models.map(async (model) => {
-			const success = await enableGitHubCopilotModel(token, model.id, enterpriseDomain);
+			const success = await enableGitHubCopilotModel(token, model.id, enterpriseDomain, signal);
 			onProgress?.(model.id, success);
 		}),
 	);
@@ -296,38 +317,49 @@ export async function loginGitHubCopilot(options: {
 	onProgress?: (message: string) => void;
 	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
-	const input = await options.onPrompt({
-		message: "GitHub Enterprise URL/domain (blank for github.com)",
-		placeholder: "company.ghe.com",
-		allowEmpty: true,
-	});
+	const lifetime = new AbortController();
+	const signal = options.signal ? AbortSignal.any([options.signal, lifetime.signal]) : lifetime.signal;
+	try {
+		const input = await awaitAuthorizationInput(
+			() =>
+				options.onPrompt({
+					message: "GitHub Enterprise URL/domain (blank for github.com)",
+					placeholder: "company.ghe.com",
+					allowEmpty: true,
+				}),
+			signal,
+		);
 
-	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+		if (options.signal?.aborted) {
+			throw new Error("Login cancelled");
+		}
+
+		const trimmed = input.trim();
+		const enterpriseDomain = normalizeDomain(input);
+		if (trimmed && !enterpriseDomain) {
+			throw new Error("Invalid GitHub Enterprise URL/domain");
+		}
+		const domain = enterpriseDomain || "github.com";
+
+		const device = await startDeviceFlow(domain, signal);
+		options.onDeviceCode({
+			userCode: device.user_code,
+			verificationUri: device.verification_uri,
+			intervalSeconds: device.interval,
+			expiresInSeconds: device.expires_in,
+		});
+
+		const githubAccessToken = await pollForGitHubAccessToken(domain, device, signal);
+		const credentials = await refreshGitHubCopilotToken(githubAccessToken, enterpriseDomain ?? undefined, signal);
+
+		// Enable all models after successful login
+		options.onProgress?.("Enabling models...");
+		await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined, undefined, signal);
+		signal.throwIfAborted();
+		return credentials;
+	} finally {
+		lifetime.abort();
 	}
-
-	const trimmed = input.trim();
-	const enterpriseDomain = normalizeDomain(input);
-	if (trimmed && !enterpriseDomain) {
-		throw new Error("Invalid GitHub Enterprise URL/domain");
-	}
-	const domain = enterpriseDomain || "github.com";
-
-	const device = await startDeviceFlow(domain);
-	options.onDeviceCode({
-		userCode: device.user_code,
-		verificationUri: device.verification_uri,
-		intervalSeconds: device.interval,
-		expiresInSeconds: device.expires_in,
-	});
-
-	const githubAccessToken = await pollForGitHubAccessToken(domain, device, options.signal);
-	const credentials = await refreshGitHubCopilotToken(githubAccessToken, enterpriseDomain ?? undefined);
-
-	// Enable all models after successful login
-	options.onProgress?.("Enabling models...");
-	await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
-	return credentials;
 }
 
 export const githubCopilotOAuthProvider: OAuthProviderInterface = {

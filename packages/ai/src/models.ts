@@ -43,8 +43,8 @@ export function resolveCatalogPricing(provider: string, modelId: string): Model<
  * Returns false if either model is null or undefined.
  */
 export function modelsAreEqual<TApi extends Api>(
-	a: Model<TApi> | null | undefined,
-	b: Model<TApi> | null | undefined,
+	a: Pick<Model<TApi>, "provider" | "id"> | null | undefined,
+	b: Pick<Model<TApi>, "provider" | "id"> | null | undefined,
 ): boolean {
 	if (!a || !b) return false;
 	return a.id === b.id && a.provider === b.provider;

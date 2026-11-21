@@ -334,7 +334,7 @@ export function submittedReportFromArguments(
 	if (reasonCodeRefusal) throw new Error(reasonCodeRefusal);
 	if ((args.checks?.length ?? 0) > MAX_WORKER_REPORT_ENTRIES)
 		throw new Error(`submit_report.checks accepts at most ${MAX_WORKER_REPORT_ENTRIES} entries.`);
-	const indexedReceipts = args.checks?.some(({ command }) => command === undefined)
+	const indexedReceipts = args.checks?.some(({ receiptId }) => receiptId !== undefined)
 		? receiptIndex(receipts)
 		: undefined;
 	const text = (value: string | undefined): string | undefined => {
@@ -392,18 +392,19 @@ export function submittedReportFromArguments(
 				if (
 					(check.receiptId !== undefined &&
 						(!receiptId || receiptId.length > MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS)) ||
-					(check.command !== undefined && !check.command.trim()) ||
+					(!receiptId && check.command !== undefined && !check.command.trim()) ||
 					(check.command === undefined && !receiptId)
 				)
 					throw new Error("Each submit_report check needs a host receiptId or exact command.");
 				const cited = receiptId ? indexedReceipts?.get(receiptId) : undefined;
-				const command =
-					check.command !== undefined
-						? workerCommandEvidence(check.command)
-						: {
-								command: cited?.command ?? "Command unavailable for cited receipt",
-								...(cited?.commandDigest ? { commandDigest: cited.commandDigest } : {}),
-							};
+				// With an ID, only this attempt's recorded command may appear as proof. A worker's
+				// redundant display text cannot change the command the parent reads or judges.
+				const command = receiptId
+					? {
+							command: cited?.command ?? "Command unavailable for cited receipt",
+							...(cited?.commandDigest ? { commandDigest: cited.commandDigest } : {}),
+						}
+					: workerCommandEvidence(check.command!);
 				const note = text(check.note);
 				return {
 					...command,

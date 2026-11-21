@@ -10,30 +10,17 @@ import { isResourcePathWithin } from "./resource-traversal.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { discoverSkillFiles } from "./skill-discovery.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { isValidThinkingLevel } from "./thinking-level.ts";
 import { sameFileVersion } from "./util/bounded-file.ts";
 
-/** Discovery retains only this bounded metadata prefix, never the whole skill body. */
 export const MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024;
 export const MAX_ACTIVE_SKILL_BODY_BYTES = 64 * 1024;
 const SKILL_FRONTMATTER_READ_CHUNK_BYTES = 1024;
 
 export const MAX_SKILL_NAME_LENGTH = 64;
 
-/** Max description length per spec */
 export const MAX_SKILL_DESCRIPTION_LENGTH = 1024;
 
-// Kept local rather than imported from settings-manager.ts's ThinkingLevel validation: that module
-// already imports validateSkillName FROM this file, so importing back would cycle. The literal set
-// is small and stable (mirrors settings-manager.ts's own VALID_THINKING_LEVELS).
-const VALID_SKILL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
-function isSkillThinkingLevel(value: unknown): value is ThinkingLevel {
-	return typeof value === "string" && (VALID_SKILL_THINKING_LEVELS as readonly string[]).includes(value);
-}
-
-/**
- * What a skill's instructions make the agent do beyond reading and editing inside its own working tree.
- * A worker holds no effect grant: the host never offers it a skill that declares one.
- */
 export const SKILL_EFFECTS = ["external-write", "network", "external-binary", "secret"] as const;
 export type SkillEffect = (typeof SKILL_EFFECTS)[number];
 
@@ -41,7 +28,6 @@ function isSkillEffect(value: unknown): value is SkillEffect {
 	return typeof value === "string" && (SKILL_EFFECTS as readonly string[]).includes(value);
 }
 
-/** Frontmatter `effects`: a YAML list or a comma-separated string. Unknown names are reported, never kept. */
 function parseSkillEffects(value: unknown): { effects: SkillEffect[]; unknown: string[] } {
 	const names = Array.isArray(value)
 		? value.map((entry) => String(entry).trim())
@@ -55,11 +41,9 @@ function parseSkillEffects(value: unknown): { effects: SkillEffect[]; unknown: s
 	};
 }
 
-/** Bounds for frontmatter `paths`: a skill names a handful of short working-tree globs, never a catalog. */
 export const MAX_SKILL_PATH_PATTERNS = 16;
 export const MAX_SKILL_PATH_PATTERN_LENGTH = 200;
 
-/** Why a `paths` entry cannot be a working-tree glob, or undefined when it can. */
 function skillPathPatternProblem(pattern: string): string | undefined {
 	if (pattern.length > MAX_SKILL_PATH_PATTERN_LENGTH) {
 		return `longer than ${MAX_SKILL_PATH_PATTERN_LENGTH} characters`;
@@ -72,11 +56,6 @@ function skillPathPatternProblem(pattern: string): string | undefined {
 	return undefined;
 }
 
-/**
- * Frontmatter `paths`: working-tree globs (`src/**\/*.ts`, `*.rs`, `docs/**`) naming the work a skill is for.
- * A YAML list or a comma-separated string (commas inside `{a,b}` braces stay part of the glob). A pattern
- * that cannot match a working-tree path, and every pattern past the cap, is reported and never kept.
- */
 function parseSkillPaths(value: unknown): { paths: string[]; rejected: Array<{ pattern: string; reason: string }> } {
 	const names: string[] = [];
 	if (Array.isArray(value)) {
@@ -109,14 +88,10 @@ function parseSkillPaths(value: unknown): { paths: string[]; rejected: Array<{ p
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
-	/** Declared effects beyond the working tree (see {@link SKILL_EFFECTS}). */
 	effects?: unknown;
-	/** Working-tree globs the skill is for (see {@link parseSkillPaths}). */
 	paths?: unknown;
 	"disable-model-invocation"?: boolean;
-	/** Optional thinking-level hint (R1 follow-up); see Skill.thinking. */
 	thinking?: string;
-	/** Reflection-generated skill marker used by the curator. */
 	promoted?: boolean;
 	[key: string]: unknown;
 }
@@ -136,25 +111,13 @@ export interface Skill {
 	 * when the session's recent file work matches one; it is never loaded or applied because of a match.
 	 */
 	paths?: readonly string[];
-	/**
-	 * Optional thinking-level hint parsed from frontmatter (R1 follow-up: skill-surfaced thinking
-	 * governance, alongside resource-profile thinking). Core only parses and surfaces this value —
-	 * nothing in pi-adaptative core applies it to a session's thinking level yet. Unlike an active
-	 * resource profile (a persistent "situation", see settings-manager.ts's activeResourceProfile)
-	 * or a routed turn (bracketed by a try/finally swap/restore, see agent-session.ts's
-	 * _runAgentPromptWithModelRouter), a skill has no session-lifecycle hook marking when it starts
-	 * or stops governing a turn, so applying this is left to the consumer (e.g. a skill-router
-	 * extension) via the existing ctx.setThinkingLevel() extension API.
-	 */
 	thinking?: ThinkingLevel;
 }
 
-/** Skills a worker may be offered: those that declare no effect (a worker holds no effect grant). */
 export function workerEligibleSkills<T extends { effects?: readonly SkillEffect[] }>(skills: readonly T[]): T[] {
 	return skills.filter((skill) => (skill.effects?.length ?? 0) === 0);
 }
 
-/** The skills visible to the current process: a worker-role process sees only worker-eligible ones. */
 export function skillsForSessionRole<T extends { effects?: readonly SkillEffect[] }>(
 	skills: readonly T[],
 ): readonly T[] {
@@ -166,10 +129,6 @@ export interface LoadSkillsResult {
 	diagnostics: ResourceDiagnostic[];
 }
 
-/**
- * Validate skill name per Agent Skills spec.
- * Returns array of validation error messages (empty if valid).
- */
 export function validateSkillName(name: string): string[] {
 	const errors: string[] = [];
 
@@ -192,9 +151,6 @@ export function validateSkillName(name: string): string[] {
 	return errors;
 }
 
-/**
- * Validate description per Agent Skills spec.
- */
 function validateDescription(description: string | undefined): string[] {
 	const errors: string[] = [];
 
@@ -208,9 +164,7 @@ function validateDescription(description: string | undefined): string[] {
 }
 
 export interface LoadSkillsFromDirOptions {
-	/** Directory to scan for skills */
 	dir: string;
-	/** Source identifier for these skills */
 	source: string;
 	/** Profile UAC gate: when provided, files it denies are never read from disk. */
 	isPathAllowed?: (path: string) => boolean;
@@ -240,10 +194,6 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
 	}
 }
 
-/**
- * Read one stable, bounded frontmatter prefix. The closing delimiter ends the read, so discovery
- * cost depends on metadata size, never body size. Unterminated metadata fails at the explicit cap.
- */
 export function readSkillFrontmatterFile(filePath: string): string {
 	const fileDescriptor = openSync(filePath, "r");
 	try {
@@ -276,14 +226,6 @@ export function readSkillFrontmatterFile(filePath: string): string {
 	}
 }
 
-/**
- * Load skills from a directory.
- *
- * Discovery rules:
- * - if a directory contains SKILL.md, treat it as a skill root and do not recurse further
- * - otherwise, load direct .md children in the root
- * - recurse into subdirectories to find SKILL.md
- */
 export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkillsResult {
 	const { dir, source } = options;
 	return loadSkillsFromDirInternal(dir, source, options.isPathAllowed);
@@ -297,7 +239,6 @@ function loadSkillsFromDirInternal(
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
 	for (const filePath of discoverSkillFiles(dir, "pi")) {
-		// Profile UAC: denied skill contents are never read from disk.
 		if (isPathAllowed && !isPathAllowed(filePath)) continue;
 		const result = loadSkillFromFile(filePath, source);
 		if (result.skill) skills.push(result.skill);
@@ -319,22 +260,18 @@ function loadSkillFromFile(
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
 
-		// If not a declared skill (e.g. bare markdown file) and has no description, ignore silently
 		if (!isDeclaredSkill && (!frontmatter.description || frontmatter.description.trim() === "")) {
 			return { skill: null, diagnostics: [] };
 		}
 
-		// Validate description
 		const descErrors = validateDescription(frontmatter.description);
 		for (const error of descErrors) {
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
-		// Use name from frontmatter, or fall back to parent directory name (or file basename for bare md)
 		const fallbackName = isDeclaredSkill ? parentDirName : basename(filePath, ".md");
 		const name = frontmatter.name || fallbackName;
 
-		// Validate name
 		const nameErrors = validateSkillName(name);
 		for (const error of nameErrors) {
 			diagnostics.push({ type: "warning", message: error, path: filePath });
@@ -354,7 +291,6 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: `ignored paths entry "${pattern}": ${reason}`, path: filePath });
 		}
 
-		// Still load the skill even with warnings (unless description is completely missing)
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
 		}
@@ -370,7 +306,7 @@ function loadSkillFromFile(
 				promoted: frontmatter.promoted === true,
 				...(effects.length > 0 ? { effects } : {}),
 				...(paths.length > 0 ? { paths } : {}),
-				thinking: isSkillThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
+				thinking: isValidThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
 			},
 			diagnostics,
 		};
@@ -384,28 +320,17 @@ function loadSkillFromFile(
 }
 
 export interface LoadSkillsOptions {
-	/** Working directory for project-local skills. */
 	cwd: string;
-	/** Agent config directory for global skills. */
 	agentDir: string;
-	/** Explicit skill paths (files or directories) */
 	skillPaths: string[];
-	/** Include default global skills directories. */
 	includeDefaults: boolean;
-	/** Include the default cwd .pi/skills directory. Defaults to includeDefaults for compatibility. */
 	includeProjectDefaults?: boolean;
-	/** Profile UAC gate: when provided, files it denies are never read from disk. */
 	isPathAllowed?: (path: string) => boolean;
 }
 
-/**
- * Load skills from all configured locations.
- * Returns skills and any validation diagnostics.
- */
 export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const { agentDir, skillPaths, includeDefaults } = options;
 
-	// Resolve agentDir - if not provided, use default from config
 	const resolvedCwd = resolvePath(options.cwd);
 	const resolvedAgentDir = resolvePath(agentDir ?? getAgentDir());
 
@@ -417,10 +342,8 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	function addSkills(result: LoadSkillsResult) {
 		allDiagnostics.push(...result.diagnostics);
 		for (const skill of result.skills) {
-			// Resolve symlinks to detect duplicate files
 			const realPath = canonicalizePath(skill.filePath);
 
-			// Skip silently if we've already loaded this exact file (via symlink)
 			if (realPathSet.has(realPath)) {
 				continue;
 			}
@@ -478,7 +401,6 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			if (stats.isDirectory()) {
 				addSkills(loadSkillsFromDirInternal(resolvedPath, source, options.isPathAllowed));
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
-				// Profile UAC: a denied skill file is never read from disk.
 				if (options.isPathAllowed && !options.isPathAllowed(resolvedPath)) {
 					continue;
 				}

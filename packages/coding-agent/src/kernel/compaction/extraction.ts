@@ -369,7 +369,16 @@ function hasOneTurnFailureDirective(message: AgentMessage): boolean {
 	);
 }
 
-export function extractCompactionFacts(entries: SessionEntry[], start: number, end: number): CompactionFacts {
+export function isCompactionReversal(text: string): boolean {
+	return REVERSAL_PATTERN.test(text);
+}
+
+export function extractCompactionFacts(
+	entries: SessionEntry[],
+	start: number,
+	end: number,
+	factEnd = end,
+): CompactionFacts {
 	const rangeStart = Math.max(0, start);
 	const rangeEnd = Math.min(entries.length, Math.max(rangeStart, end));
 
@@ -386,7 +395,7 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 			delegatedWorkerFacts: [],
 		};
 	}
-	const delegatedWorkerFacts = extractDelegatedWorkerFacts(entries, rangeStart, rangeEnd);
+	const delegatedWorkerFacts = extractDelegatedWorkerFacts(entries, rangeStart, Math.min(rangeEnd, factEnd));
 
 	const filesByPath = new Map<string, CompactionFileFact & { lastTouch: number }>();
 	const filesNotes = new Map<string, string>();
@@ -411,12 +420,12 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 
 		if (message.role === "user") {
 			const userText = messageToText(message);
-			if (REVERSAL_PATTERN.test(userText)) {
+			if (isCompactionReversal(userText)) {
 				cancelledParts.push(...sinceLastUser);
 			}
 			sinceLastUser.length = 0;
 
-			if (userText) {
+			if (userText && i < factEnd) {
 				activeTaskSource = clampText(userText, ACTIVE_TASK_SOURCE_MAX_CHARS);
 				// Mandatory Rules exist for SPOKEN durable prohibitions ("do not touch X"), not for
 				// documents. A long pasted text (plan, instruction file) can contain dozens of
@@ -447,6 +456,8 @@ export function extractCompactionFacts(entries: SessionEntry[], start: number, e
 				sinceLastUser.push(messageText);
 			}
 		}
+
+		if (i >= factEnd) continue;
 
 		if (message.role === "assistant" && Array.isArray(message.content)) {
 			for (const block of message.content) {
@@ -710,4 +721,51 @@ export function renderFactsBlock(facts: CompactionFacts): string {
 		lines.push(facts.cancelledText);
 	}
 	return lines.join("\n");
+}
+
+export function readPersistedCompactionUserFacts(
+	details: unknown,
+): Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined {
+	if (!isPlainRecord(details)) return undefined;
+	if (typeof details.activeTaskSource !== "string") return undefined;
+	if (!Array.isArray(details.prohibitions) || !details.prohibitions.every((rule) => typeof rule === "string")) {
+		return undefined;
+	}
+	return {
+		activeTaskSource: details.activeTaskSource.slice(0, ACTIVE_TASK_SOURCE_MAX_CHARS),
+		prohibitions: [...details.prohibitions],
+	};
+}
+
+/**
+ * Facts for the span to summarize, merged with the persisted user facts of the previous checkpoint
+ * and carrying that checkpoint's Mandatory Rules bullets (vetted when they entered it) so the
+ * deterministic gap-fill can tell a copied-forward rule from one the summarizer just invented.
+ */
+export function extractCheckpointFacts(
+	pathEntries: SessionEntry[],
+	start: number,
+	boundaryEnd: number,
+	prevCompactionIndex: number,
+	previousUserFacts: Pick<CompactionFacts, "activeTaskSource" | "prohibitions"> | undefined,
+	carriedRules: string[],
+	activeTask: string | undefined,
+	factEnd = boundaryEnd,
+): CompactionFacts {
+	let facts = extractCompactionFacts(pathEntries, start, boundaryEnd, factEnd);
+	if (prevCompactionIndex >= 0) {
+		// Older checkpoints did not persist these exact facts. Pay one linear migration scan, then
+		// persist the result below so later compactions stay incremental instead of becoming quadratic.
+		const persistedUserFacts = previousUserFacts ?? extractCompactionFacts(pathEntries, 0, boundaryEnd, factEnd);
+		facts = mergePersistentCompactionUserFacts(facts, persistedUserFacts);
+	}
+	return {
+		...facts,
+		...(activeTask?.trim() ? { activeTaskSource: clampText(activeTask.trim(), ACTIVE_TASK_SOURCE_MAX_CHARS) } : {}),
+		...(!activeTask?.trim() &&
+		pathEntries.slice(factEnd, boundaryEnd).some((entry) => entry.type === "message" && entry.message.role === "user")
+			? { activeTaskSource: "" }
+			: {}),
+		carriedRules,
+	};
 }

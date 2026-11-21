@@ -19,7 +19,8 @@
  */
 
 import { englishText, type InterfaceText } from "../language/interface-text.ts";
-import { type OrchestrationEvent, toJsonObject } from "./contracts.ts";
+import type { OrchestrationEvent } from "./contracts.ts";
+import { projectionForStorage } from "./dispatch-storage.ts";
 import {
 	assertRetentionPruneWellFormed,
 	closedObjectiveHolds,
@@ -272,12 +273,10 @@ export function applyRetentionEvent(state: TaskRuntimeProjection, event: Orchest
 	state.retentionArchiveIds = [...(state.retentionArchiveIds ?? []), payload.archiveId];
 	// Each tracked map is a byte-accounting proxy, which structuredClone refuses; a spread copy is plain.
 	projectionFromSnapshot(
-		toJsonObject({
+		projectionForStorage({
 			...state,
-			agents: { ...state.agents },
 			objectives: { ...state.objectives },
 			tasks: { ...state.tasks },
-			attempts: { ...state.attempts },
 			checkpoints: { ...state.checkpoints },
 			approvals: { ...state.approvals },
 			notifications: { ...state.notifications },

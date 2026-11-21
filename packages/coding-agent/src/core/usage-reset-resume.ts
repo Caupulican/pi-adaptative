@@ -23,12 +23,22 @@
  * threw is tried again after a delay that grows with each failure in a row, up to a bound, never given up.
  */
 
-import { type Api, type AssistantMessage, listOpenAICodexRateLimitResetCredits, type Model } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	listOpenAICodexRateLimitResetCredits,
+	type Model,
+	modelsAreEqual,
+} from "@caupulican/pi-ai";
 import { type ClassifiedError, classifyFailure } from "../kernel/reliability/index.ts";
 import type { AgentMessage } from "../kernel/types.ts";
+import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState, GoalStopModel } from "./goals/goal-state.ts";
 import { interfaceText } from "./language/interface-text.ts";
+import type { ModelRegistryContract } from "./model-registry-contract.ts";
+import { awaitPreflight } from "./preflight.ts";
 import { usageResetWaitMs } from "./provider-admission/usage-reset.ts";
+import { bindAccountRead } from "./request-auth.ts";
 import {
 	latestUsageWake,
 	recordUsageWake,
@@ -42,7 +52,9 @@ import { alarmAt, type TimerPort, type WallAlarm } from "./util/timer-port.ts";
 
 /** The session's transcript: its messages, and the entries the wait's records are read from and written to. */
 export interface UsageTranscript {
-	readonly agent: { readonly state: { readonly messages: readonly AgentMessage[] } };
+	readonly agent: {
+		readonly state: { readonly model: Model<Api> | undefined; readonly messages: readonly AgentMessage[] };
+	};
 	readonly sessionManager: UsageWakeLog & UsageWakeWriter;
 }
 
@@ -51,14 +63,7 @@ export interface UsageResetResumeDeps {
 	readonly enabled: boolean;
 	/** The provider admission clock: the clock the recorded exhaustions are kept on. */
 	readonly clock: TimerPort;
-	readonly modelRegistry: {
-		find(provider: string, modelId: string): Model<Api> | undefined;
-		isUsingSubscription(model: Model<Api>): boolean;
-		getApiKeyForProvider(provider: string): Promise<string | undefined>;
-		readonly authStorage: {
-			getOAuthRequestHeaders(provider: string, accessToken: string): Record<string, string> | undefined;
-		};
-	};
+	readonly modelRegistry: Pick<ModelRegistryContract, "find" | "isUsingSubscription" | "getApiKeyAndHeaders">;
 	/** The longest stated delay the turn's own retry waits out (`retry.provider.maxRetryDelayMs`). */
 	inRunRetryMaxMs(): number;
 	/** The quota exhaustion recorded for a model ref and its reset, when one holds. */
@@ -66,10 +71,9 @@ export interface UsageResetResumeDeps {
 	readonly transcript: UsageTranscript;
 	waitForIdle(): Promise<void>;
 	isDisposed(): boolean;
-	/** Resume the session's goal when a usage or rate limit stopped it; whether one was resumed (its continuation follows). */
-	resumeUsageLimitedGoal(): boolean;
+	goals(): Pick<GoalSessionController, "getState" | "resumeUsageLimitedGoal">;
 	/** Continue the stopped turn from its transcript, its trailing refusal dropped. */
-	continueTurn(): Promise<void>;
+	continueTurn(isCurrent: () => boolean): Promise<boolean>;
 	/** Tell the owner now, or hold the notice until the session has a listener. */
 	warn(message: string): void;
 }
@@ -95,9 +99,9 @@ export class UsageResetResume {
 	private pending: PendingResume | undefined;
 	/** Counts the stops seen, so a stop settling after a newer one arms nothing. */
 	private stops = 0;
-	/** Providers whose redeemable usage resets the owner was told of; told again only after a redemption. */
 	private readonly resetOffered = new Set<string>();
-	private readonly resetChecking = new Set<string>();
+	private resetLookup?: AbortController;
+	private resetCheck?: { account: string; controller: AbortController; verify(): void };
 	private readonly deps: UsageResetResumeDeps;
 
 	constructor(deps: UsageResetResumeDeps) {
@@ -106,9 +110,9 @@ export class UsageResetResume {
 
 	/** A run ended on a classified provider failure no retry took. */
 	runStopped(message: AssistantMessage, classified: ClassifiedError): void {
-		if (classified.reason === "billing_or_quota") void this.offerCodexReset(message);
 		const stop = ++this.stops;
-		const model = this.deps.modelRegistry.find(message.provider, message.model);
+		const model = findRefusingModel(this.deps.modelRegistry, message.provider, message.model);
+		if (model && classified.reason === "billing_or_quota") void this.offerCodexReset(model);
 		const resetMs = model === undefined ? undefined : this.resetWaitMs(classified, model);
 		if (resetMs !== undefined) void this.settle(stop, message, this.deps.clock.now() + resetMs);
 	}
@@ -123,9 +127,14 @@ export class UsageResetResume {
 	 */
 	restoreWait(goal: GoalState | undefined): RestoredUsageWait | undefined {
 		const goalStopped = goal !== undefined && goalUsageStop(goal) !== undefined;
-		if (this.pending) return { until: this.pending.at, goal: goalStopped };
-		const restored = this.restoredStop(goal);
+		const restored = this.pending ? { resume: this.pending, at: this.pending.at } : this.restoredStop(goal);
 		if (!restored) return undefined;
+		if (restored.resume.refusal && !goalStopped && !this.modelStillSelected(restored.resume.refusal)) {
+			this.pending?.alarm.stop();
+			this.pending = undefined;
+			return undefined;
+		}
+		if (this.pending) return { until: this.pending.at, goal: goalStopped };
 		this.arm(restored.resume, restored.at);
 		const words = interfaceText().notices.usageReset;
 		this.deps.warn(
@@ -151,9 +160,22 @@ export class UsageResetResume {
 		return this.deps.transcript.agent.state.messages.at(-1);
 	}
 
+	private modelStillSelected(refusal: AssistantMessage): boolean {
+		return modelsAreEqual(this.deps.transcript.agent.state.model, { provider: refusal.provider, id: refusal.model });
+	}
+
+	private waitStillApplies(refusal: AssistantMessage | undefined): boolean {
+		if (!refusal || this.modelStillSelected(refusal)) return true;
+		const goal = this.deps.goals().getState();
+		return goal !== undefined && goalUsageStop(goal) !== undefined;
+	}
+
 	/** The owner redeemed a usage reset for `provider`: a wait on it ends now, and a later limit is offered again. */
 	noteUsageReset(provider: string): void {
-		this.resetOffered.delete(provider);
+		if (provider === "openai-codex") {
+			this.cancelCreditRead();
+			this.resetOffered.clear();
+		}
 		const pending = this.pending;
 		if (pending?.provider === provider) this.arm(pending, this.deps.clock.now());
 	}
@@ -161,6 +183,14 @@ export class UsageResetResume {
 	dispose(): void {
 		this.pending?.alarm.stop();
 		this.pending = undefined;
+		this.cancelCreditRead();
+	}
+
+	private cancelCreditRead(): void {
+		this.resetLookup?.abort();
+		this.resetCheck?.controller.abort();
+		this.resetLookup = undefined;
+		this.resetCheck = undefined;
 	}
 
 	/** The usage reset a refusal on `model` is waited out for here ({@link usageResetWait}); none in a worker process's session. */
@@ -172,7 +202,7 @@ export class UsageResetResume {
 	private async settle(stop: number, refusal: AssistantMessage, at: number): Promise<void> {
 		await this.deps.waitForIdle();
 		if (stop !== this.stops || this.deps.isDisposed()) return;
-		if (!isSameRefusal(this.lastMessage(), refusal)) return;
+		if (!isSameRefusal(this.lastMessage(), refusal) || !this.waitStillApplies(refusal)) return;
 		const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
 		this.arm({ ...resume, stopAt: refusal.timestamp }, at);
 		this.deps.warn(interfaceText().notices.usageReset.sessionWaits(new Date(at).toISOString()));
@@ -196,10 +226,11 @@ export class UsageResetResume {
 
 	private async wake(): Promise<void> {
 		const pending = this.pending;
+		const stop = this.stops;
 		this.pending = undefined;
 		if (!pending || this.deps.isDisposed()) return;
 		const until = this.deps.modelExhaustion(pending.ref)?.until;
-		if (until !== undefined && until > this.deps.clock.now()) {
+		if (until !== undefined && until > this.deps.clock.now() && this.waitStillApplies(pending.refusal)) {
 			this.arm(pending, until);
 			return;
 		}
@@ -214,10 +245,23 @@ export class UsageResetResume {
 		// does not wake for the stop again. Either continuation that throws is tried again after the backoff.
 		let outcome: "resumed" | "lapsed";
 		try {
-			if (this.deps.resumeUsageLimitedGoal()) outcome = "resumed";
-			else if (pending.refusal && isSameRefusal(this.lastMessage(), pending.refusal)) {
-				await this.deps.continueTurn();
-				outcome = "resumed";
+			if (this.deps.goals().resumeUsageLimitedGoal()) outcome = "resumed";
+			else if (
+				pending.refusal &&
+				this.modelStillSelected(pending.refusal) &&
+				isSameRefusal(this.lastMessage(), pending.refusal)
+			) {
+				const refusal = pending.refusal;
+				const continued = await this.deps.continueTurn(
+					() =>
+						!this.deps.isDisposed() &&
+						stop === this.stops &&
+						!this.pending &&
+						this.modelStillSelected(refusal) &&
+						isSameRefusal(this.lastMessage(), refusal) &&
+						usageStopContinuesAt(pending.stopAt, pending.at, latestUsageWake(transcript)) !== undefined,
+				);
+				outcome = continued ? "resumed" : "lapsed";
 			} else outcome = "lapsed";
 		} catch (error) {
 			this.retryAfterFailure(pending, prior, error);
@@ -242,31 +286,51 @@ export class UsageResetResume {
 	 * redeem (`/usage`); once told, not again this session until a reset is redeemed. Only a notice the owner received
 	 * uses up the episode; a check that found no reset or could not complete is made again on the next limit answer.
 	 */
-	private async offerCodexReset(message: AssistantMessage): Promise<void> {
-		const provider = message.provider;
-		if (provider !== "openai-codex" || this.resetOffered.has(provider) || this.resetChecking.has(provider)) return;
-		this.resetChecking.add(provider);
-		const codex = this.deps.modelRegistry.find(message.provider, message.model);
+	private async offerCodexReset(model: Model<Api>): Promise<void> {
+		const { provider } = model;
+		if (provider !== "openai-codex" || this.deps.isDisposed()) return;
+		this.resetLookup?.abort();
+		const check = new AbortController();
+		this.resetLookup = check;
+		const signal = AbortSignal.any([check.signal, AbortSignal.timeout(15_000)]);
 		try {
-			const accessToken = await this.deps.modelRegistry.getApiKeyForProvider(message.provider);
-			if (!accessToken) return;
-			const summary = await listOpenAICodexRateLimitResetCredits({
-				accessToken,
-				credentialHeaders: this.deps.modelRegistry.authStorage.getOAuthRequestHeaders(
-					message.provider,
-					accessToken,
-				),
-				baseUrl: codex?.baseUrl,
-				signal: AbortSignal.timeout(15_000),
-			});
+			const auth = await awaitPreflight(() => this.deps.modelRegistry.getApiKeyAndHeaders(model), signal);
+			if (!auth.ok) return;
+			const request = bindAccountRead(model, auth, signal);
+			if (!request) return;
+			this.resetLookup = undefined;
+			const account = auth.providerAccountKey;
+			if (this.resetCheck?.account === account) {
+				try {
+					this.resetCheck.verify();
+					return;
+				} catch {}
+			}
+			this.resetCheck?.controller.abort();
+			if (this.resetOffered.has(account)) return;
+			this.resetCheck = { account, controller: check, verify: request.verify };
+			const summary = await awaitPreflight(
+				() =>
+					listOpenAICodexRateLimitResetCredits({
+						accessToken: request.apiKey,
+						credentialHeaders: request.credentialHeaders,
+						baseUrl: request.model.baseUrl,
+						fetch: request.fetch,
+						signal,
+					}),
+				signal,
+			);
+			request.verify();
 			if (summary.availableCount === 0) return;
-			this.resetOffered.add(provider);
+			this.resetOffered.add(account);
 			this.deps.warn(interfaceText().notices.usageReset.codexResetsAvailable(summary.availableCount));
 		} catch (error) {
+			if (check.signal.aborted || this.deps.isDisposed()) return;
 			const detail = error instanceof Error ? error.message : String(error);
 			this.deps.warn(interfaceText().notices.usageReset.codexResetCheckFailed(detail));
 		} finally {
-			this.resetChecking.delete(provider);
+			if (this.resetLookup === check) this.resetLookup = undefined;
+			if (this.resetCheck?.controller === check) this.resetCheck = undefined;
 		}
 	}
 }
@@ -276,6 +340,15 @@ export interface RestoredUsageRules {
 	readonly modelRegistry: Pick<UsageResetResumeDeps["modelRegistry"], "find" | "isUsingSubscription">;
 	/** The longest stated delay the turn's own retry waits out (`retry.provider.maxRetryDelayMs`). */
 	inRunRetryMaxMs(): number;
+}
+
+function findRefusingModel(
+	registry: RestoredUsageRules["modelRegistry"],
+	provider: string,
+	id: string,
+): Model<Api> | undefined {
+	const found = registry.find(provider, id);
+	return modelsAreEqual(found, { provider, id }) ? found : undefined;
 }
 
 /**
@@ -318,8 +391,8 @@ function keptUsageStop(
 	rules: RestoredUsageRules,
 ): RestoredUsageStop | undefined {
 	const stop = goal ? goalUsageStop(goal) : undefined;
-	const model = stop?.refusedBy && rules.modelRegistry.find(stop.refusedBy.provider, stop.refusedBy.id);
-	if (stop && model) {
+	const model = stop?.refusedBy && findRefusingModel(rules.modelRegistry, stop.refusedBy.provider, stop.refusedBy.id);
+	if (stop?.refusedBy && model) {
 		const resetMs = usageResetWait(
 			classifyFailure({ message: stop.refusal, provider: model.provider }),
 			model,
@@ -327,13 +400,17 @@ function keptUsageStop(
 		);
 		if (resetMs !== undefined)
 			return {
-				resume: { ref: `${model.provider}/${model.id}`, provider: model.provider, stopAt: stop.at },
+				resume: {
+					ref: `${stop.refusedBy.provider}/${stop.refusedBy.id}`,
+					provider: stop.refusedBy.provider,
+					stopAt: stop.at,
+				},
 				at: stop.at + resetMs,
 			};
 	}
 	const refusal = lastMessage;
 	if (refusal?.role !== "assistant" || refusal.stopReason !== "error" || !refusal.errorMessage) return undefined;
-	const refusalModel = rules.modelRegistry.find(refusal.provider, refusal.model);
+	const refusalModel = findRefusingModel(rules.modelRegistry, refusal.provider, refusal.model);
 	if (!refusalModel) return undefined;
 	const resetMs = usageResetWait(
 		classifyFailure({ message: refusal.errorMessage, provider: refusal.provider }),
@@ -362,6 +439,8 @@ function isSameRefusal(last: AgentMessage | undefined, refusal: AssistantMessage
 	if (last === refusal) return true;
 	return (
 		last?.role === "assistant" &&
+		last.provider === refusal.provider &&
+		last.model === refusal.model &&
 		last.stopReason === refusal.stopReason &&
 		last.timestamp === refusal.timestamp &&
 		last.errorMessage === refusal.errorMessage

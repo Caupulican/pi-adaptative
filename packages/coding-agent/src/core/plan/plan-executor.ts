@@ -3,11 +3,8 @@
  *
  * Event-driven, never polling: it reconciles (`plan-reconcile.ts`) after each orchestration store commit (worker
  * outcomes, lane terminals, its own plan events), each fleet room change, each goal synchronization and each tool
- * call. One drain runs at a time; a commit during a drain marks it dirty and the drain runs again. Work that awaits
- * (preparing a release, the vote judgment, a plan-update delivery) runs beside the drain and asks for a new drain when
- * it ends. A release or action the fleet refused, or that failed, is parked until the room, the goal or the plan
- * changes, so the executor never loops on its own refusals. A read-only step the fleet refused on a linked machine is
- * not parked: the machine is skipped for that release and the step runs here on the next drain.
+ * call. One drain runs at a time. Asynchronous releases, judgments and deliveries ask for a drain on completion.
+ * A capacity refusal parks until room changes. A permanent local admission refusal holds the step for replanning.
  *
  * Restart recovery is the same reconcile: every fact it reads is durable (plan events, task outcomes, the parent-input
  * receipts of plan-updates), a release replays through the fleet's idempotency key, and a plan-update's delivery id is
@@ -25,7 +22,7 @@ import { renderCommsStateLine } from "../comms/comms-records.ts";
 import type { WorkerLaneIsolationDeps } from "../delegation/worker-lane-isolation.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import { PLAN_VERIFIER_UNAVAILABLE } from "../delegation/worker-profile-resolver.ts";
-import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
+import type { FleetDispatch, FleetRefusal, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
 import { weightOf } from "../fleet/local-admit.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { HarnessNoticeObservation } from "../harness-notice.ts";
@@ -41,9 +38,9 @@ import { workerResultStakes } from "../proof/worker-proof-sheet.ts";
 import type { OperationEffectEngine } from "../system-one/operation-classifier.ts";
 import { judgeVoteStep } from "../system-one/plan-vote-rubric.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	decideCodeJoin,
+	isJoinResult,
 	JOIN_RESULT_MAX_BYTES,
 	type JoinIdentity,
 	type JoinResult,
@@ -85,9 +82,16 @@ import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
 import { PlanResultGates } from "./plan-result-gates.ts";
-import { placeHereNodes, resolveSince, verifyWrapNodes, voteCheckNodes } from "./plan-revision.ts";
+import { placeHereNodes, resolveSince, verifyWrapNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
-import { activeRootPlan, type PlanView, planNodeBrief, planNodeOutcome, planView } from "./plan-view.ts";
+import {
+	activeRootPlan,
+	type PlanView,
+	planNodeBrief,
+	planNodeOutcome,
+	planProgressText,
+	planView,
+} from "./plan-view.ts";
 import type { WorkerWriteReach } from "./plan-write-facts.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
@@ -175,60 +179,8 @@ function readJoinResult(path: string): JoinResult | undefined {
 	}
 }
 
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-/** Every field the combined update and its proof sheet read: a record missing one of them is not a join result. */
-function isJoinResult(value: unknown): value is JoinResult {
-	if (!isPlainRecord(value) || value.v !== 1) return false;
-	if (typeof value.kind !== "string" || typeof value.artifact !== "string") return false;
-	if (value.winner !== undefined && typeof value.winner !== "string") return false;
-	const outcome = value.outcome;
-	if (!isPlainRecord(outcome) || typeof outcome.status !== "string") return false;
-	if (!isPlainRecord(outcome.cost) || typeof outcome.cost.usd !== "number") return false;
-	const members = value.members;
-	if (
-		!Array.isArray(members) ||
-		!members.every(
-			(member: unknown) =>
-				isPlainRecord(member) &&
-				typeof member.nodeId === "string" &&
-				typeof member.status === "string" &&
-				typeof member.outcomeId === "string",
-		)
-	)
-		return false;
-	const coverage = value.coverage;
-	if (!isPlainRecord(coverage) || !Object.values(coverage).every((met) => typeof met === "boolean")) return false;
-	const conflicts = value.conflicts;
-	if (
-		!Array.isArray(conflicts) ||
-		!conflicts.every(
-			(conflict: unknown) =>
-				isPlainRecord(conflict) &&
-				(conflict.kind === "finding" || conflict.kind === "file") &&
-				isStringArray(conflict.between) &&
-				typeof conflict.detail === "string",
-		)
-	)
-		return false;
-	return isStringArray(value.changedFiles) && isStringArray(value.gaps);
-}
-
 /** The skip-reason prefix of a worker start that threw while it was being made (`worker-start-phases.ts`). */
 const WORKER_START_ERROR = "worker_start_error:";
-
-const STATE_WORDS: Readonly<Record<PlanNodeState, string>> = {
-	planned: "waits for earlier steps",
-	ready: "ready",
-	admitted: "started (queued)",
-	running: "running",
-	settled: "done",
-	held: "held",
-	superseded: "replaced",
-	cancelled: "stopped",
-};
 
 export class PlanExecutor implements PlanExecutorPort {
 	private readonly deps: PlanExecutorDeps;
@@ -236,7 +188,7 @@ export class PlanExecutor implements PlanExecutorPort {
 	/** Refused or failed release and action keys, with the room query a release waits on. */
 	private readonly parked = new Map<string, string | undefined>();
 	private readonly releasing = new Map<string, { readonly run: Promise<void>; readonly query: string }>();
-	private readonly choosing = new Set<string>();
+	private readonly pendingJoins = new Map<string, string>();
 	private readonly delivering = new Set<string>();
 	private readonly roomQueries = new Map<string, RoomQuery>();
 	private readonly roomSubscriptions = new Map<string, () => void>();
@@ -332,7 +284,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		const active = activeRootPlan(snapshot);
 		const nowIso = new Date(this.now()).toISOString();
 		if (input.action === "cancel") {
-			if (!active) return { ok: false, text: "No plan is running." };
+			if (!active) return { ok: false, text: "No plan is active." };
 			this.closePlan(
 				active.planId,
 				"cancelled",
@@ -346,10 +298,10 @@ export class PlanExecutor implements PlanExecutorPort {
 		if (input.action === "start" && active) {
 			return {
 				ok: false,
-				text: `A plan is already running ("${active.title}", ${active.planId}). Revise it or cancel it first.`,
+				text: `A plan is already active ("${active.title}", ${active.planId}). Revise it or cancel it first.`,
 			};
 		}
-		if (input.action === "revise" && !active) return { ok: false, text: "No plan is running; start one." };
+		if (input.action === "revise" && !active) return { ok: false, text: "No plan is active; start one." };
 		const planId =
 			active && input.action === "revise" ? active.planId : derivePlanId(this.deps.sessionId(), context.toolCallId);
 		if (input.action === "start" && snapshot.plans[planId]) {
@@ -407,6 +359,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.deps.runtime().closePlan({ planId, status, reason });
 		this.resultGates.forgetPlan(planId);
 		this.merges.forgetPlan(planId);
+		for (const key of this.pendingJoins.keys()) if (key.startsWith(`${planId}:`)) this.pendingJoins.delete(key);
 		this.deps.fleet().cancel({ kind: "plan", planId }, laneReasonCode);
 	}
 
@@ -417,8 +370,23 @@ export class PlanExecutor implements PlanExecutorPort {
 	private holdStep(planId: string, nodeId: string, since: number, detail: string): void {
 		const plan = this.deps.runtime().getSnapshot().plans[planId];
 		const runtime = plan?.nodes[nodeId];
-		if (!plan || plan.closed || !runtime || runtime.since !== since || runtime.release || runtime.held) return;
-		this.deps.runtime().holdPlanNode({ planId, nodeId, reason: "replan", detail, generation: since });
+		if (
+			!plan ||
+			plan.closed ||
+			!runtime ||
+			runtime.since !== since ||
+			runtime.release ||
+			runtime.held ||
+			runtime.join
+		)
+			return;
+		this.deps.runtime().holdPlanNode({
+			planId,
+			nodeId,
+			reason: "replan",
+			detail: detail.slice(0, PLAN_LIMITS.detailChars),
+			generation: since,
+		});
 		harnessLog.info("plan", "a plan step waits for re-planning", { planId, nodeId });
 	}
 
@@ -437,21 +405,27 @@ export class PlanExecutor implements PlanExecutorPort {
 	): PlanToolResult {
 		const view = planView(this.deps.runtime().getSnapshot(), planId);
 		if (!view) return { ok: false, text: "The plan is no longer retained." };
-		const started = view.nodes.filter((node) => node.state === "admitted" || node.state === "running").length;
-		const waiting = view.nodes.filter((node) => node.state === "planned" || node.state === "ready").length;
 		const codeLine = renderCommsStateLine(codes);
 		const lines = [
 			...(codeLine ? [codeLine] : []),
-			`Plan ${view.planId} "${view.title}" version ${view.version}: ${started} started, ${waiting} waiting.`,
+			`Plan ${view.planId} "${view.title}" version ${view.version}: ${planProgressText(view.counts)}`,
 			...view.nodes.map(
 				(node) =>
-					`- ${node.id} (${node.kind}): ${STATE_WORDS[node.state]}: ${node.intent.replace(/\s+/g, " ").slice(0, 160)}`,
+					`- ${node.id} (${node.kind}): ${PLAN_NODE_MACHINE.plain(node.state)}: ${(node.held?.detail ?? node.intent).replace(/\s+/g, " ").slice(0, 160)}`,
 			),
 			...(view.rootOwned.length > 0 ? [`Requirements no step proves (yours): ${view.rootOwned.join(", ")}.`] : []),
 			...notes,
 			"You are woken once per combined result and when a step needs you; keep working meanwhile.",
 		];
-		return { ok: true, text: lines.join("\n"), planId, version: view.version, started, waiting };
+		return {
+			ok: true,
+			text: lines.join("\n"),
+			planId,
+			version: view.version,
+			counts: view.counts,
+			started: view.counts.running,
+			waiting: view.counts.waiting,
+		};
 	}
 
 	// ---- the drain ----
@@ -751,10 +725,6 @@ export class PlanExecutor implements PlanExecutorPort {
 		const identity = this.joinIdentity(plan, planId, nodeId);
 		const decision = decideCodeJoin(snapshot, plan, record, node, identity);
 		if (decision.kind === "wait") return;
-		if (decision.kind === "merge") {
-			this.landMerge(planId, nodeId, node.since);
-			return;
-		}
 		if (decision.kind === "settle") {
 			this.settleJoin(planId, nodeId, decision.result);
 			for (const member of decision.cancel) {
@@ -764,18 +734,45 @@ export class PlanExecutor implements PlanExecutorPort {
 			}
 			return;
 		}
-		const key = `${planId}:${nodeId}:${node.since}`;
-		if (this.choosing.has(key)) return;
-		this.choosing.add(key);
-		void this.judgeVote(planId, nodeId, node.since, decision.candidates)
-			.catch((error: unknown) => {
-				if (!this.abort.signal.aborted)
-					harnessLog.warn("plan", "a vote could not settle", { planId, nodeId, error: errorText(error) });
-			})
-			.finally(() => {
-				this.choosing.delete(key);
+		const key = `${planId}:${nodeId}`;
+		const version = `${record.version}:${node.since}`;
+		if (this.pendingJoins.get(key) === version) return;
+		const work =
+			decision.kind === "merge"
+				? this.merges
+						.start(planId, nodeId, record.version, mergeLanes(snapshot, plan, record, node), () => {
+							if (!this.mergeIsCurrent(planId, nodeId, record.version, node.since))
+								throw new Error("The merge plan changed.");
+						})
+						?.then((step) => {
+							if (this.mergeIsCurrent(planId, nodeId, record.version, node.since))
+								this.actOnMerge(planId, nodeId, node.since, step);
+						})
+				: this.judgeVote(planId, nodeId, node.since, decision.candidates);
+		if (!work) return;
+		this.pendingJoins.set(key, version);
+		void work.then(
+			() => {
+				if (this.pendingJoins.get(key) === version) this.pendingJoins.delete(key);
 				this.requestDrain();
-			});
+			},
+			(error: unknown) => {
+				if (this.disposed || this.pendingJoins.get(key) !== version) return;
+				try {
+					if (this.planOf(planId).record.version === record.version)
+						this.holdStep(planId, nodeId, node.since, `The join could not finish: ${errorText(error)}`);
+					this.pendingJoins.delete(key);
+				} catch (holdError) {
+					harnessLog.warn("plan", "a failed join could not record its hold", {
+						planId,
+						nodeId,
+						error: errorText(error),
+						holdError: errorText(holdError),
+					});
+				}
+				this.requestDrain();
+			},
+		);
 	}
 
 	/**
@@ -800,40 +797,47 @@ export class PlanExecutor implements PlanExecutorPort {
 		});
 		const current = this.planOf(planId);
 		const runtime = current.plan.nodes[nodeId];
-		if (!runtime || runtime.join || runtime.since !== since || current.plan.closed) return;
-		if (step.kind === "hold") {
-			this.apply({ kind: "hold", planId, nodeId, reason: "replan", detail: step.detail, generation: since });
+		if (
+			this.abort.signal.aborted ||
+			!runtime ||
+			runtime.held ||
+			runtime.join ||
+			runtime.since !== since ||
+			current.record.version !== record.version ||
+			current.plan.closed
+		)
 			return;
-		}
-		if (step.kind === "auto_verify") {
-			const { top } = step;
-			this.hostRevision(planId, nodeId, since, "an independent check", (fresh, version) => {
-				const built = voteCheckNodes(fresh, nodeId, top, version);
-				return built && { nodes: built.nodes, final: fresh.final };
-			});
-			return;
-		}
-		const winner = step.kind === "winner" ? step.memberId : undefined;
 		const identity = this.joinIdentity(current.plan, planId, nodeId);
 		const node = this.nodeOf(current.record, nodeId);
-		this.settleJoin(
-			planId,
-			nodeId,
-			settleVote(current.snapshot, current.plan, current.record, node, identity, winner),
-		);
+		const latest = decideCodeJoin(current.snapshot, current.plan, current.record, node, identity);
+		if (
+			latest.kind !== "rubric" ||
+			latest.candidates.length !== candidates.length ||
+			latest.candidates.some(({ nodeId: id, outcome }, index) => {
+				const before = candidates[index];
+				return (
+					before?.nodeId !== id ||
+					before.outcome.outcomeId !== outcome.outcomeId ||
+					before.outcome.generation !== outcome.generation
+				);
+			})
+		)
+			return;
+		this.settleJoin(planId, nodeId, settleVote(current.snapshot, current.plan, current.record, node, identity, step));
 	}
 
-	/** S7: lands a merge join's lanes in order, off the drain (`plan-merge.ts`). */
-	private landMerge(planId: string, nodeId: string, since: number): void {
-		const { snapshot, plan, record } = this.planOf(planId);
-		const lanes = mergeLanes(snapshot, plan, record, this.nodeOf(record, nodeId));
-		this.merges.start(planId, nodeId, lanes, (step) => this.actOnMerge(planId, nodeId, since, step));
+	private mergeIsCurrent(planId: string, nodeId: string, version: number, since: number): boolean {
+		if (this.disposed) return false;
+		const plan = this.deps.runtime().getSnapshot().plans[planId];
+		const node = plan?.nodes[nodeId];
+		return (
+			!!plan && !plan.closed && plan.record.version === version && node?.since === since && !node.held && !node.join
+		);
 	}
 
 	/** Applies a landing's step to its merge join: settle, wait for a retry, add the merge worker, or hold with its words. */
 	private actOnMerge(planId: string, nodeId: string, since: number, step: MergeStep): void {
 		const { snapshot, plan, record } = this.planOf(planId);
-		if (plan.closed || plan.nodes[nodeId]?.join) return;
 		if (step.kind === "hold") this.holdStep(planId, nodeId, since, step.detail);
 		else if (step.kind === "retry") this.merges.retry(planId, nodeId, step.afterMs);
 		else if (step.kind === "merge_worker")
@@ -999,11 +1003,8 @@ export class PlanExecutor implements PlanExecutorPort {
 			this.offerKeys.add(key);
 			harnessLog.info("plan", "a plan step release waits", { planId, nodeId, reason, detail });
 		};
-		// A temporary remote refusal (the machine's room or runtime is momentarily unavailable: the refusal carries a retry time)
-		// keeps its offer prepared and the step parked on that machine; a candidate change offers it again. A permanent one
-		// releases the offer, the machine is not offered again for this release, and the next drain releases the step here
-		// (or on another candidate).
-		const refused = (refusal: { readonly reason: string; readonly detail: string; readonly retryAt?: number }) => {
+		// A retry time parks a remote offer on its machine. A permanent refusal permits another placement.
+		const refused = (refusal: FleetRefusal) => {
 			if (refusal.detail.startsWith(`${PLAN_VERIFIER_UNAVAILABLE}:`))
 				return this.holdStep(planId, nodeId, version, `the verifier cannot run: ${refusal.detail}`);
 			if (refusal.detail.startsWith(WORKTREE_UNAVAILABLE))
@@ -1016,7 +1017,13 @@ export class PlanExecutor implements PlanExecutorPort {
 					version,
 					`this step could not be started: ${refusal.detail.slice(WORKER_START_ERROR.length)}`,
 				);
-			if (placement.kind !== "remote_machine") return park(refusal.reason, refusal.detail);
+			if (placement.kind !== "remote_machine") {
+				// A change in fleet room cannot repair this step's invalid instructions, scope or authority.
+				if (refusal.reason === "preflight" || refusal.reason === "authority_digest_mismatch") {
+					return this.holdStep(planId, nodeId, version, `this step could not be admitted: ${refusal.detail}`);
+				}
+				return park(refusal.reason, refusal.detail);
+			}
 			const machineId = placement.machineId;
 			// A must-pinned step can only be placed on its machine, so only a candidate change can help it: every refusal parks it.
 			if (exit === "pin_machine_must" || refusal.retryAt !== undefined) {

@@ -155,6 +155,15 @@ export function parseTurnOriginRecord(value: unknown): TurnOriginRecord | undefi
 	};
 }
 
+/** Positive owner kinds share one rule across live authority and archived source validation. */
+export function isOwnerTurnOrigin(
+	origin: TurnOriginRecord | undefined,
+): origin is TurnOriginRecord & { k: "owner-typed" | "owner-channel" } {
+	return (
+		origin !== undefined && origin.thirdParty !== true && (origin.k === "owner-typed" || origin.k === "owner-channel")
+	);
+}
+
 /**
  * Whether `record` is one a host records for words it delivers itself (an agent's mail, a routine's prompt to a bot): it
  * names their channel and is never the owner's words, so a record a file holds can never lend them the owner's authority.

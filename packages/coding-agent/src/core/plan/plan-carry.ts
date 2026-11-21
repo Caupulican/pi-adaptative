@@ -11,6 +11,7 @@
 
 import type { OrchestrationEvent } from "../orchestration/contracts.ts";
 import { toJsonObject } from "../orchestration/contracts.ts";
+import { projectionForStorage } from "../orchestration/dispatch-storage.ts";
 import type {
 	CarriedEntry,
 	CarriedWrite,
@@ -35,7 +36,7 @@ export function carriedPlansFold(state: TaskRuntimeProjection): (basis: Compacti
 }
 
 function foldWithCarriedPlans(state: TaskRuntimeProjection, basis: CompactionBasis): CompactionFold {
-	const projection = toJsonObject(state);
+	const projection = projectionForStorage(state);
 	// A snapshot written before plans existed has no plans map.
 	const prior = basis.prior?.projection.plans;
 	const priorPlans = prior === undefined ? {} : record(prior, "replaced snapshot plans");

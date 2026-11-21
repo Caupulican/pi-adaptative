@@ -31,6 +31,7 @@ export interface ModelCostBreakdownRow {
 	readonly tokens: number;
 	readonly costUsd: number;
 	readonly reportedCostUsd: number;
+	readonly unpricedCalls?: number;
 }
 
 export interface TaskExecutionMetrics {
@@ -107,6 +108,7 @@ export interface TaskMetricsPlanInput {
 const MAX_ACTIVE_TURN_GAP_MS = 10 * 60_000;
 
 interface MutableTaskWindow {
+	unpriced?: true;
 	modelUnknownTokens?: number;
 	modelUnknownOperations?: number;
 	id: string;
@@ -220,6 +222,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 			tokens: number;
 			costUsd: number;
 			reportedCostUsd: number;
+			unpricedCalls: number;
 		}
 	>();
 	const seenSpawned = new Set<string>();
@@ -251,8 +254,11 @@ export function computeSessionTaskAndModelMetrics(options: {
 		role: ModelCostBreakdownRow["role"],
 		tokens: number,
 		costUsd: number,
-		reportedCostUsd = costUsd,
+		reportedCostUsd: number,
+		pricingComplete: boolean,
+		owner: MutableTaskWindow | undefined,
 	): void => {
+		if (owner && !pricingComplete) owner.unpriced = true;
 		const key = `${role}:${model}`;
 		const existing = modelMap.get(key);
 		if (existing) {
@@ -260,8 +266,17 @@ export function computeSessionTaskAndModelMetrics(options: {
 			existing.tokens += tokens;
 			existing.costUsd += costUsd;
 			existing.reportedCostUsd += reportedCostUsd;
+			existing.unpricedCalls += Number(!pricingComplete);
 		} else {
-			modelMap.set(key, { model, role, calls: 1, tokens, costUsd, reportedCostUsd });
+			modelMap.set(key, {
+				model,
+				role,
+				calls: 1,
+				tokens,
+				costUsd,
+				reportedCostUsd,
+				unpricedCalls: Number(!pricingComplete),
+			});
 		}
 	};
 
@@ -432,7 +447,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 				owner.tokens += tokens;
 				owner.subagentCostUsd += cost;
 			} else unassignedCostUsd += cost;
-			recordModelUsage(receipt.label, "subagent", tokens, cost);
+			recordModelUsage(receipt.label, "subagent", tokens, cost, cost, receipt.costUsd !== undefined, owner);
 			continue;
 		}
 
@@ -465,6 +480,8 @@ export function computeSessionTaskAndModelMetrics(options: {
 					tok,
 					resolved.total,
 					resolved.reportedTotal,
+					resolved.pricingComplete,
+					owner,
 				);
 			}
 			continue;
@@ -476,6 +493,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 			if (seenSemantic.has(report.reportId)) continue;
 			seenSemantic.add(report.reportId);
 			const tok = report.usage.input + report.usage.output + report.usage.cacheRead + report.usage.cacheWrite;
+			const owner = receiptOwner(report.origin, undefined, Date.parse(report.responseTimestamp ?? entry.timestamp));
 			const role =
 				report.route === "history_summary" ? "icm" : isMaintenanceUsageRoute(report.route) ? "root" : "system_one";
 			recordModelUsage(
@@ -484,8 +502,9 @@ export function computeSessionTaskAndModelMetrics(options: {
 				tok,
 				resolved.total,
 				resolved.reportedTotal,
+				resolved.pricingComplete,
+				owner,
 			);
-			const owner = receiptOwner(report.origin, undefined, Date.parse(report.responseTimestamp ?? entry.timestamp));
 			recordUnknownModel(report.usage, report.provider, report.model, owner);
 			if (owner) {
 				owner.tokens += tok;
@@ -536,7 +555,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 				: entry.type === "message"
 					? "tool usage (model unreported)"
 					: `${entry.type === "compaction" ? "compaction" : "branch summary"} (model unrecorded)`;
-			recordModelUsage(model, "root", tokens, cost.total, cost.reportedTotal);
+			recordModelUsage(model, "root", tokens, cost.total, cost.reportedTotal, cost.pricingComplete, currentWindow);
 		}
 	}
 
@@ -612,7 +631,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 		return {
 			modelUnknownTokens: win.modelUnknownTokens,
 			modelUnknownOperations: win.modelUnknownOperations,
-			apiEquivalentPartial: (win.modelUnknownTokens ?? 0) > 0,
+			apiEquivalentPartial: win.unpriced === true || (win.modelUnknownTokens ?? 0) > 0,
 			id: win.id,
 			kind: win.kind,
 			title: win.title,
@@ -648,7 +667,7 @@ export function computeSessionTaskAndModelMetrics(options: {
 	return {
 		modelUnknownTokens,
 		modelUnknownOperations,
-		apiEquivalentPartial: modelUnknownTokens > 0,
+		apiEquivalentPartial: modelUnknownTokens > 0 || models.some((model) => model.unpricedCalls > 0),
 		...(currentTask ? { currentTask } : {}),
 		tasks,
 		models,

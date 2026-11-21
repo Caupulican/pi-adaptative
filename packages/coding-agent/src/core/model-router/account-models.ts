@@ -18,9 +18,15 @@ import {
 	OPENAI_CODEX_CLIENT_VERSION,
 	type OpenAICodexAccountModel,
 } from "@caupulican/pi-ai";
+import {
+	type ProviderResponseAccount,
+	providerResponseAccountFor,
+	sameProviderResponseRoute,
+} from "@caupulican/pi-ai/stream";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { RequestAuth } from "../request-auth.ts";
+import { awaitPreflight } from "../preflight.ts";
+import { bindAccountRead, type RequestAuth } from "../request-auth.ts";
 
 export type AccountModelAvailability = "available" | "unavailable" | "unknown";
 
@@ -66,12 +72,59 @@ export interface AccountModelCatalogDeps {
 	getModels(): readonly Model<Api>[];
 	hasConfiguredAuth(model: Model<Api>): boolean;
 	/** The request credential for a model (an OAuth access token or API key). */
-	getRequestAuth(model: Model<Api>): Promise<RequestAuth | undefined>;
+	getRequestAuth(model: Model<Api>, accountListing?: boolean): Promise<RequestAuth | undefined>;
 	fetch?: typeof fetch;
+	canReuseAccountIdentity?(): boolean;
 }
 
 const ACCOUNT_CHECK_TIMEOUT_MS = 10_000;
 const MAX_REASON_CHARS = 200;
+
+interface CurrentAccount {
+	readonly scope?: ProviderResponseAccount;
+	includes(target: Model<Api>): boolean;
+	current(): boolean;
+}
+interface RefusedRoute {
+	readonly receipt: ProviderResponseAccount;
+	reason: string;
+}
+interface ModelRefusals {
+	active?: CurrentAccount;
+	byAccount: Map<string, RefusedRoute[]>;
+}
+
+function bindCurrentAccount(selected: Model<Api>, auth: RequestAuth | undefined): CurrentAccount | undefined {
+	if (!auth || auth.canCacheAccountIdentity === false) return undefined;
+	const effective = auth.model ?? selected;
+	if (effective.provider !== selected.provider || effective.id !== selected.id) return undefined;
+	const scope = providerResponseAccountFor(effective, auth);
+	if (!scope && (auth.providerAccountKey !== undefined || effective.headers || auth.headers || auth.credentialHeaders))
+		return undefined;
+	return {
+		scope,
+		includes: auth.accountListingIncludes ?? ((target) => target === selected || target === effective),
+		current() {
+			try {
+				auth.requestGuard?.(effective, undefined);
+				if (!scope) return true;
+				const now = providerResponseAccountFor(effective, auth);
+				return !!now && now.accountKey === scope.accountKey && sameProviderResponseRoute(now, scope);
+			} catch {
+				return false;
+			}
+		},
+	};
+}
+
+function refusalOnRoute(
+	record: ModelRefusals | undefined,
+	scope: ProviderResponseAccount | undefined,
+): RefusedRoute | undefined {
+	return (
+		scope && record?.byAccount.get(scope.accountKey)?.find((row) => sameProviderResponseRoute(row.receipt, scope))
+	);
+}
 
 function bounded(text: string): string {
 	const flat = text.replace(/\s+/g, " ").trim();
@@ -91,24 +144,25 @@ const ACCOUNT_CHECKS: Readonly<
 			apiKey: string,
 			fetchImpl: typeof fetch,
 			credentialHeaders: Record<string, string> | undefined,
+			signal: AbortSignal,
 		) => Promise<ProviderAccountState>
 	>
 > = {
-	"openai-codex": async (model, apiKey, fetchImpl, credentialHeaders) => {
+	"openai-codex": async (model, apiKey, fetchImpl, credentialHeaders, signal) => {
 		const listed = await listOpenAICodexAccountModels({
 			accessToken: apiKey,
 			credentialHeaders,
 			baseUrl: model.baseUrl,
 			clientVersion: OPENAI_CODEX_CLIENT_VERSION,
 			fetch: fetchImpl,
-			signal: AbortSignal.timeout(ACCOUNT_CHECK_TIMEOUT_MS),
+			signal,
 		});
 		return { kind: "listed", models: new Map(listed.map((entry) => [entry.slug, entry])) };
 	},
-	openrouter: async (model, apiKey, fetchImpl) => {
+	openrouter: async (model, apiKey, fetchImpl, _headers, signal) => {
 		const response = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}/key`, {
 			headers: { Authorization: `Bearer ${apiKey}` },
-			signal: AbortSignal.timeout(ACCOUNT_CHECK_TIMEOUT_MS),
+			signal,
 		});
 		if (response.status === 401 || response.status === 403) {
 			return { kind: "rejected", reason: `OpenRouter rejected the key (${response.status})` };
@@ -122,28 +176,36 @@ const ACCOUNT_CHECKS: Readonly<
 export interface AccountModelRegistry {
 	getAll(): readonly Model<Api>[];
 	hasConfiguredAuth(model: Model<Api>): boolean;
-	getApiKeyAndHeaders(model: Model<Api>): Promise<({ ok: true } & RequestAuth) | { ok: false }>;
+	getApiKeyAndHeaders(
+		model: Model<Api>,
+		options?: { accountListing?: boolean },
+	): Promise<({ ok: true } & RequestAuth) | { ok: false }>;
 }
 
 /** The catalog of the accounts a model registry holds credentials for, asked with each model's own request credential. */
-export function accountModelCatalogOf(registry: AccountModelRegistry): AccountModelCatalog {
+export function accountModelCatalogOf(
+	registry: AccountModelRegistry,
+	canReuseAccountIdentity?: () => boolean,
+): AccountModelCatalog {
 	return new AccountModelCatalog({
+		canReuseAccountIdentity,
 		getModels: () => registry.getAll(),
 		hasConfiguredAuth: (model) => registry.hasConfiguredAuth(model),
-		getRequestAuth: async (model) => {
-			const auth = await registry.getApiKeyAndHeaders(model);
-			return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
+		getRequestAuth: async (model, accountListing) => {
+			const auth = await registry.getApiKeyAndHeaders(model, { accountListing });
+			return auth.ok ? auth : undefined;
 		},
 	});
 }
 
 export class AccountModelCatalog {
 	private readonly deps: AccountModelCatalogDeps;
-	private states = new Map<string, ProviderAccountState>();
-	/** Models a provider refused for this account at request time, with the provider's words. */
-	private readonly refused = new Map<string, string>();
-	private pending: Promise<void> | undefined;
-	private refreshGeneration = 0;
+	private readonly states = new Map<
+		string,
+		{ state: ProviderAccountState; applies?: (target?: Model<Api>) => boolean }
+	>();
+	private readonly refusals = new Map<string, Map<string, ModelRefusals>>();
+	private readonly checks = new Map<string, { controller: AbortController; done: PromiseWithResolvers<void> }>();
 
 	constructor(deps: AccountModelCatalogDeps) {
 		this.deps = deps;
@@ -151,80 +213,176 @@ export class AccountModelCatalog {
 
 	/** Ask every provider that can answer, for the accounts that have a credential. */
 	refresh(): Promise<void> {
-		const generation = ++this.refreshGeneration;
-		const run = this.checkAll().then((states) => {
-			if (generation === this.refreshGeneration) this.states = states;
-		});
-		this.pending = run;
-		return run;
+		return this.refreshProviders(Object.keys(ACCOUNT_CHECKS));
 	}
 
-	/** Refresh account-derived availability only when this catalog owns that provider. */
 	async refreshAfterAuthChange(provider: string): Promise<void> {
-		if (!(provider in ACCOUNT_CHECKS)) return;
-		await this.refresh();
+		const refusals = this.refusals.get(provider);
+		if (refusals) for (const record of refusals.values()) record.active = undefined;
+		if (!Object.hasOwn(ACCOUNT_CHECKS, provider) && !refusals?.size) return;
+		this.states.delete(provider);
+		await this.refreshProviders([provider]);
+		await this.ready(undefined, provider);
 	}
 
-	/** Resolves once the latest check has settled (immediately when none was started). */
-	/**
-	 * Settles when every account check has, or when `signal` aborts first: a submission the owner
-	 * interrupted does not keep waiting on an account check (a credential refresh can stall).
-	 */
-	async ready(signal?: AbortSignal): Promise<void> {
-		if (!signal) {
-			await this.pending;
-			return;
+	/** A caller may abandon its wait without ending any provider check. */
+	async ready(signal?: AbortSignal, provider?: string): Promise<void> {
+		while (!signal?.aborted) {
+			const pending: Promise<void>[] = [];
+			for (const [name, check] of this.checks) {
+				if (provider === undefined || provider === name) pending.push(check.done.promise);
+			}
+			if (pending.length === 0) return;
+			try {
+				await awaitPreflight(() => Promise.all(pending), signal);
+			} catch (error) {
+				if (!signal?.aborted) throw error;
+			}
 		}
-		if (signal.aborted) return;
-		let onAbort: (() => void) | undefined;
-		const aborted = new Promise<void>((resolve) => {
-			onAbort = () => resolve();
-			signal.addEventListener("abort", onAbort, { once: true });
-		});
+	}
+
+	private async refreshProviders(providers: readonly string[]): Promise<void> {
+		let models: readonly Model<Api>[] | undefined;
+		const getModels = () => (models ??= this.deps.getModels());
+		await Promise.all(providers.map((provider) => this.refreshProvider(provider, getModels)));
+	}
+
+	private async refreshProvider(
+		provider: string,
+		getModels: () => readonly Model<Api>[],
+		identityOnly = false,
+	): Promise<void> {
+		const previous = this.checks.get(provider);
+		const check = { controller: new AbortController(), done: Promise.withResolvers<void>() };
+		this.checks.set(provider, check);
+		previous?.controller.abort();
 		try {
-			await Promise.race([this.pending, aborted]);
-		} finally {
-			if (onAbort) signal.removeEventListener("abort", onAbort);
-		}
-	}
-
-	private async checkAll(): Promise<Map<string, ProviderAccountState>> {
-		const fetchImpl = this.deps.fetch ?? globalThis.fetch;
-		const representatives = new Map<string, Model<Api>>();
-		const states = new Map<string, ProviderAccountState>();
-		for (const model of this.deps.getModels()) {
-			if (!(model.provider in ACCOUNT_CHECKS) || representatives.has(model.provider)) continue;
-			if (this.deps.hasConfiguredAuth(model)) representatives.set(model.provider, model);
-		}
-		await Promise.all(
-			[...representatives].map(async ([provider, model]) => {
-				states.set(provider, await this.checkProvider(model, fetchImpl));
-			}),
-		);
-		return states;
-	}
-
-	private async checkProvider(model: Model<Api>, fetchImpl: typeof fetch): Promise<ProviderAccountState> {
-		try {
-			const auth = await this.deps.getRequestAuth(model);
-			if (!auth?.apiKey) return { kind: "unchecked", reason: "no credential resolved" };
-			return await ACCOUNT_CHECKS[model.provider]!(model, auth.apiKey, fetchImpl, auth.credentialHeaders);
+			const models = getModels();
+			const records = this.refusals.get(provider);
+			const listing = !identityOnly && Object.hasOwn(ACCOUNT_CHECKS, provider);
+			const listedModel = listing
+				? models.find((entry) => entry.provider === provider && this.deps.hasConfiguredAuth(entry))
+				: undefined;
+			if (listing && !listedModel) this.states.delete(provider);
+			if (!listedModel && !records?.size) return;
+			const signal = AbortSignal.any([check.controller.signal, AbortSignal.timeout(ACCOUNT_CHECK_TIMEOUT_MS)]);
+			const reads = new Map<string, Promise<RequestAuth | undefined>>();
+			const read = (model: Model<Api>) => {
+				let pending = reads.get(model.id);
+				if (!pending) {
+					pending = awaitPreflight(
+						() => this.deps.getRequestAuth(model, model === listedModel || records?.has(model.id)),
+						signal,
+					);
+					reads.set(model.id, pending);
+				}
+				return pending;
+			};
+			const bindings: Promise<void>[] = [];
+			if (records?.size) {
+				for (const record of records.values()) record.active = undefined;
+				if (this.deps.canReuseAccountIdentity?.() !== false) {
+					for (const model of models) {
+						if (model.provider !== provider) continue;
+						const record = records.get(model.id);
+						if (record && this.deps.hasConfiguredAuth(model)) {
+							bindings.push(this.bindRefusalAccount(model, record, read(model), signal));
+						}
+					}
+				}
+			}
+			if (listedModel) bindings.push(this.readListing(listedModel, read(listedModel), signal));
+			const settled = await Promise.allSettled(bindings);
+			for (const binding of settled) if (binding.status === "rejected") throw binding.reason;
 		} catch (error) {
+			if (this.checks.get(provider) !== check || identityOnly || !Object.hasOwn(ACCOUNT_CHECKS, provider)) return;
+			this.states.set(provider, { state: { kind: "unchecked", reason: errorText(error) } });
 			harnessLog.warn("router", "an account check failed; its models stay unchecked", () => ({
-				provider: model.provider,
+				provider,
 				error: error instanceof Error ? error.name : typeof error,
 			}));
-			return { kind: "unchecked", reason: errorText(error) };
+		} finally {
+			if (this.checks.get(provider) === check) this.checks.delete(provider);
+			check.done.resolve();
 		}
+	}
+
+	private async bindRefusalAccount(
+		model: Model<Api>,
+		record: ModelRefusals,
+		pending: Promise<RequestAuth | undefined>,
+		signal: AbortSignal,
+	): Promise<void> {
+		try {
+			const binding = bindCurrentAccount(model, await pending);
+			signal.throwIfAborted();
+			if (binding?.scope && binding.current()) record.active = binding;
+		} catch {
+			// An unresolved or superseded credential cannot make a refusal current.
+		}
+	}
+
+	private async readListing(
+		model: Model<Api>,
+		pending: Promise<RequestAuth | undefined>,
+		signal: AbortSignal,
+	): Promise<void> {
+		const auth = await pending;
+		const request = bindAccountRead(model, auth, signal, this.deps.fetch);
+		if (!request || !auth) {
+			this.states.set(model.provider, { state: { kind: "unchecked", reason: "no credential resolved" } });
+			return;
+		}
+		const state = await awaitPreflight(
+			() =>
+				ACCOUNT_CHECKS[model.provider](
+					request.model,
+					request.apiKey,
+					request.fetch,
+					request.credentialHeaders,
+					signal,
+				),
+			signal,
+		);
+		request.verify();
+		const witness = bindCurrentAccount(model, auth);
+		const applies = (target?: Model<Api>) => witness?.current() === true && (!target || witness.includes(target));
+		this.states.set(model.provider, { state, applies });
+	}
+
+	private catalogState(target: string | Model<Api>): ProviderAccountState | undefined {
+		const provider = typeof target === "string" ? target : target.provider;
+		const checked = this.states.get(provider);
+		if (!checked || checked.state.kind === "unchecked") return checked?.state;
+		if (
+			this.deps.canReuseAccountIdentity?.() === false ||
+			!checked.applies?.(typeof target === "string" ? undefined : target)
+		)
+			return undefined;
+		return checked.state;
+	}
+
+	private currentRefusalAccount(
+		record: ModelRefusals | undefined,
+		target?: Model<Api>,
+	): ProviderResponseAccount | undefined {
+		if (!record?.active || this.deps.canReuseAccountIdentity?.() === false) return undefined;
+		if (record.active.current()) return !target || record.active.includes(target) ? record.active.scope : undefined;
+		record.active = undefined;
+		return undefined;
 	}
 
 	/** The one classification of why the account cannot use a model: its cause, and the words status and skip text show. */
-	private unavailability(model: Model<Api>): { cause: AccountModelUnavailableCause; reason: string } | undefined {
-		const refusal = this.refused.get(`${model.provider}/${model.id}`);
+	private unavailability(
+		model: Model<Api>,
+		state: ProviderAccountState | undefined,
+	): { cause: AccountModelUnavailableCause; reason: string } | undefined {
+		const record = this.refusals.get(model.provider)?.get(model.id);
+		const current = this.currentRefusalAccount(record, model);
+		const refusal = refusalOnRoute(record, current)?.reason;
 		if (refusal !== undefined) {
 			return { cause: "model_account_refused", reason: `refused by ${model.provider}: ${refusal}` };
 		}
-		const state = this.states.get(model.provider);
 		if (state?.kind === "rejected") return { cause: "model_account_rejected", reason: state.reason };
 		if (state?.kind === "listed") {
 			const listed = state.models.get(model.id);
@@ -247,65 +405,100 @@ export class AccountModelCatalog {
 
 	/** Why the account cannot use this model; undefined when it can, or when the account has not been checked. */
 	unavailableCause(model: Model<Api>): AccountModelUnavailableCause | undefined {
-		return this.unavailability(model)?.cause;
+		return this.unavailability(model, this.catalogState(model))?.cause;
 	}
 
 	availability(model: Model<Api>): AccountModelAvailability {
-		if (this.unavailableCause(model)) return "unavailable";
-		const state = this.states.get(model.provider);
+		const state = this.catalogState(model);
+		if (this.unavailability(model, state)) return "unavailable";
 		return !state || state.kind === "unchecked" ? "unknown" : "available";
 	}
 
 	/** Account metadata overrides bundled tiers, including an explicit empty list. No request is made here. */
 	serviceTiers(model: Model<Api>): readonly ModelServiceTier[] | undefined {
-		if (this.availability(model) === "unavailable") return [];
-		const state = this.states.get(model.provider);
-		if (state?.kind === "listed") return state.models.get(model.id)?.serviceTiers ?? model.serviceTiers;
-		return model.serviceTiers;
+		return this.speedCatalog(model).tiers;
 	}
 
-	/** The model's speed tiers and the one the catalog applies when the user chose none. */
-	speedCatalog(model: Model<Api>) {
-		return { tiers: this.serviceTiers(model), defaultTier: this.defaultServiceTier(model) };
+	speedCatalog(model: Model<Api>): {
+		tiers: readonly ModelServiceTier[] | undefined;
+		defaultTier: string | undefined;
+	} {
+		const state = this.catalogState(model);
+		if (this.unavailability(model, state)) return { tiers: [], defaultTier: undefined };
+		const listed = state?.kind === "listed" ? state.models.get(model.id) : undefined;
+		return {
+			tiers: listed?.serviceTiers ?? model.serviceTiers,
+			defaultTier: listed ? listed.defaultServiceTier : model.defaultServiceTier,
+		};
 	}
 
-	/** The tier the account catalog applies when the user chose none, if the model still advertises it. */
 	defaultServiceTier(model: Model<Api>): string | undefined {
-		if (this.availability(model) === "unavailable") return undefined;
-		const state = this.states.get(model.provider);
-		// A listed model's absent/null default means standard, even if bundled metadata selected a tier.
-		if (state?.kind === "listed") return state.models.get(model.id)?.defaultServiceTier;
-		return model.defaultServiceTier;
+		return this.speedCatalog(model).defaultTier;
 	}
 
 	/** Why a model is unavailable on this account, for status and skip reasons. */
 	unavailableReason(model: Model<Api>): string | undefined {
-		return this.unavailability(model)?.reason;
+		return this.unavailability(model, this.catalogState(model))?.reason;
 	}
 
-	/** A provider refused this model for the account: never route to it again this session. */
-	markRefused(model: Model<Api>, providerMessage: string): void {
-		this.refused.set(`${model.provider}/${model.id}`, bounded(providerMessage));
-		harnessLog.warn(
-			"router",
-			"a provider refused a model for this account; the router skips it this session",
-			() => ({
-				model: `${model.provider}/${model.id}`,
-			}),
+	async markRefused(receipt: ProviderResponseAccount, providerMessage: string): Promise<boolean> {
+		if (!sameProviderResponseRoute(receipt, receipt)) return false;
+		let models = this.refusals.get(receipt.provider);
+		if (!models) {
+			models = new Map();
+			this.refusals.set(receipt.provider, models);
+		}
+		let record = models.get(receipt.model);
+		if (!record) {
+			record = { byAccount: new Map() };
+			models.set(receipt.model, record);
+		}
+		const reason = bounded(providerMessage);
+		const previous = refusalOnRoute(record, receipt);
+		if (previous) previous.reason = reason;
+		else {
+			const routes = record.byAccount.get(receipt.accountKey);
+			const refused = { receipt, reason };
+			if (routes) routes.push(refused);
+			else record.byAccount.set(receipt.accountKey, [refused]);
+		}
+		harnessLog.warn("router", "a provider refused a model for the account that sent the request", () => ({
+			model: `${receipt.provider}/${receipt.model}`,
+		}));
+		if (this.deps.canReuseAccountIdentity?.() === false) return false;
+		if (!this.currentRefusalAccount(record)) {
+			if (this.checks.has(receipt.provider)) await this.ready(undefined, receipt.provider);
+			if (!this.currentRefusalAccount(record) && !this.checks.has(receipt.provider)) {
+				await this.refreshProvider(receipt.provider, () => this.deps.getModels(), true);
+			}
+			await this.ready(undefined, receipt.provider);
+		}
+		return this.isCurrentRefusal(receipt);
+	}
+
+	isCurrentRefusal(receipt: ProviderResponseAccount, target?: Model<Api>): boolean {
+		const record = this.refusals.get(receipt.provider)?.get(receipt.model);
+		const current = this.currentRefusalAccount(record, target);
+		return (
+			!!current &&
+			current.accountKey === receipt.accountKey &&
+			sameProviderResponseRoute(current, receipt) &&
+			!!refusalOnRoute(record, receipt)
 		);
 	}
 
 	/** Whether this account's model listing for the provider was fetched, so an absent alternative is a fact about the listing. */
-	hasListing(provider: string): boolean {
-		return this.states.get(provider)?.kind === "listed";
+	hasListing(target: string | Model<Api>): boolean {
+		return this.catalogState(target)?.kind === "listed";
 	}
 
 	/**
 	 * The provider's own default for this account: its first offered model (by the provider's
 	 * priority) that pi knows, has a credential for, and that was not refused.
 	 */
-	accountDefault(provider: string): Model<Api> | undefined {
-		const state = this.states.get(provider);
+	accountDefault(target: string | Model<Api>): Model<Api> | undefined {
+		const provider = typeof target === "string" ? target : target.provider;
+		const state = this.catalogState(target);
 		if (state?.kind !== "listed") return undefined;
 		const known = new Map(
 			this.deps
@@ -319,7 +512,10 @@ export class AccountModelCatalog {
 			.map((entry) => known.get(entry.slug))
 			.find(
 				(model): model is Model<Api> =>
-					model !== undefined && this.deps.hasConfiguredAuth(model) && this.availability(model) !== "unavailable",
+					model !== undefined &&
+					this.deps.hasConfiguredAuth(model) &&
+					this.catalogState(model) === state &&
+					!this.unavailability(model, state),
 			);
 	}
 
@@ -327,7 +523,12 @@ export class AccountModelCatalog {
 	describe(): string[] {
 		const words = interfaceText().localModels.routerAccounts;
 		const lines: string[] = [];
-		for (const [provider, state] of [...this.states].sort(([a], [b]) => a.localeCompare(b))) {
+		for (const provider of [...this.states.keys()].sort()) {
+			const state = this.catalogState(provider);
+			if (!state) {
+				lines.push(words.notChecked(provider, words.requestIdentityUnknown));
+				continue;
+			}
 			if (state.kind === "listed") {
 				const offered = [...state.models.values()]
 					.filter((entry) => entry.visibility === "list")
@@ -338,7 +539,13 @@ export class AccountModelCatalog {
 			else if (state.kind === "rejected") lines.push(words.rejected(provider, state.reason));
 			else lines.push(words.notChecked(provider, state.reason));
 		}
-		for (const [ref, reason] of this.refused) lines.push(words.refused(ref, reason));
+		for (const [provider, records] of this.refusals) {
+			for (const [model, record] of records) {
+				const current = this.currentRefusalAccount(record);
+				const reason = refusalOnRoute(record, current)?.reason;
+				if (reason !== undefined) lines.push(words.refused(`${provider}/${model}`, reason));
+			}
+		}
 		return lines;
 	}
 }

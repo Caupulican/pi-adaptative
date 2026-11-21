@@ -2,8 +2,8 @@
  * pointer. Identity, target, words and spend reservation come from the channel's private journal. */
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
-import { readBatchOutcome } from "../channels/batch-outcome.ts";
 import { type ChannelBatchRecord, ChannelJournal, DAY_MS, digest } from "../channels/channel-journal.ts";
+import { readChannelReply } from "../channels/channel-message.ts";
 import {
 	listedOwnerDigests,
 	ownerDollarsApply,
@@ -147,7 +147,10 @@ async function givePhoneCommand(
 		}
 		if (command.action === "stop") {
 			const refs = new Set(command.refs);
-			const interrupted = delivery.abortTask(refs);
+			const interrupted = delivery.abortTask(refs, {
+				reason: "owner stopped selected task",
+				ordinaryWork: "cancel",
+			});
 			for (const item of readBotInbox(agentDir, entry.agentId, () => {})) {
 				const targetRef =
 					item.message.origin?.ref ??
@@ -175,7 +178,7 @@ async function givePhoneCommand(
 		}
 		const live = () => resolvePolicy() !== undefined;
 		const abortIfRevoked = () => {
-			if (!live()) delivery.abortRun(ref);
+			if (!live()) delivery.abortRun(ref, { reason: "owner task authority changed", ordinaryWork: "hold" });
 		};
 		releases.push(
 			store.subscribe(abortIfRevoked),
@@ -199,9 +202,9 @@ async function givePhoneCommand(
 		}
 		const anchor = command.anchor !== undefined ? command.anchor : entry.sessionManager.getLeafId();
 		const outcome = (suffix: SessionEntry[]) =>
-			readBatchOutcome(
+			readChannelReply(
 				{
-					getSessionManager: () => ({ getBranch: () => suffix }),
+					getSessionManager: () => ({ getBranch: () => suffix, getSessionId: () => entry.session.sessionId }),
 					getModelRegistry: () => entry.session.modelRegistry,
 				},
 				channel,
@@ -257,7 +260,8 @@ async function givePhoneCommand(
 					const item = find(state.ownerTaskCommands);
 					if (item?.spend) item.spend.usd = usd;
 				});
-				if (usd >= policy.ownerMaxUsdPerTurn || quota().kind === "exhausted" || !live()) delivery.abortRun(ref);
+				if (usd >= policy.ownerMaxUsdPerTurn || quota().kind === "exhausted" || !live())
+					delivery.abortRun(ref, { reason: "owner task spend or authority bound", ordinaryWork: "hold" });
 			},
 			() => {},
 		);

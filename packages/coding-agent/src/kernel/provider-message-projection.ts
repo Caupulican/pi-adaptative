@@ -44,6 +44,7 @@ export function providerMessageProjectionScope(options: {
 type Conversion = NonNullable<ReturnType<typeof captureProviderMessageConverter>>;
 
 interface ProjectedHistory {
+	readonly identityPrefix: number;
 	readonly scope: string;
 	readonly version: MessageHistoryVersion | undefined;
 	readonly sources: AgentMessage[];
@@ -98,11 +99,14 @@ export function projectProviderMessages(options: {
 		}
 	}
 	const reusedWire = previous?.offsets[shared] ?? 0;
-	const wire = previous ? previous.messages.slice(0, reusedWire) : [];
+	let identityPrefix = Math.min(shared, previous?.identityPrefix ?? 0);
+	const canBorrow =
+		owner !== undefined && scope !== undefined && Object.isFrozen(messages) && identityPrefix === shared;
+	let wire: Message[] | undefined = canBorrow ? undefined : previous ? previous.messages.slice(0, reusedWire) : [];
 	const offsets: number[] = [];
 	// Assembled plans lack an owner version. Keep evidence only for their immutable rows.
 	const sources: AgentMessage[] = [];
-	countHistoryWork(work, "copiedRows", reusedWire);
+	if (wire) countHistoryWork(work, "copiedRows", reusedWire);
 	let retain = owner !== undefined && scope !== undefined;
 	let stableWire = retain;
 	let retainedSourceCount = shared;
@@ -120,16 +124,25 @@ export function projectProviderMessages(options: {
 			retain = false;
 			historyWorkFallback(work, "unowned provider conversion");
 		}
+		const identity = converted === message && stable === message;
+		if (identityPrefix === index && identity) identityPrefix++;
+		if (!wire && !identity) {
+			wire = previous ? previous.messages.slice(0, reusedWire) : [];
+			countHistoryWork(work, "copiedRows", reusedWire);
+			for (let earlier = shared; earlier < index; earlier++) wire.push(messages[earlier] as Message);
+		}
 		if (converted) {
 			if (!stable) stableWire = false;
-			wire.push((stable as Message | undefined) ?? converted);
+			wire?.push((stable as Message | undefined) ?? converted);
 		}
-		offsets.push(wire.length);
+		offsets.push(wire?.length ?? index + 1);
 		if (retain) {
 			retainedSourceCount = index + 1;
 			if (!version) sources.push(message);
 		}
 	}
+	const borrowed = wire === undefined;
+	wire ??= messages as Message[];
 	const convertedRows = messages.length - shared;
 	countHistoryWork(work, "projectedRows", convertedRows);
 	countHistoryWork(work, "providerRowsConverted", convertedRows);
@@ -141,6 +154,7 @@ export function projectProviderMessages(options: {
 
 	return {
 		wire,
+		borrowed,
 		headWire,
 		stableWire,
 		previousFinal: previous?.final,
@@ -155,7 +169,8 @@ export function projectProviderMessages(options: {
 			let acceptedWire = final && final.compactablePrefix >= retainedWire ? final.messages : undefined;
 			if (!acceptedWire) {
 				const prefix = wire.slice(0, Math.min(headWire, retainedWire));
-				for (let index = headWire; index < retainedWire; index++) prefix.push(wire[index + insertedCount]!);
+				for (let index = headWire; index < retainedWire; index++)
+					prefix.push(wire[index + (borrowed ? 0 : insertedCount)]!);
 				countHistoryWork(work, "copiedRows", retainedWire);
 				acceptedWire = prefix;
 			}
@@ -175,6 +190,7 @@ export function projectProviderMessages(options: {
 					for (const source of sources) acceptedSources.push(source);
 				}
 				acceptedHistories.set(owner, {
+					identityPrefix: Math.min(identityPrefix, retainedSourceCount),
 					scope,
 					version: retainedVersion,
 					sources: acceptedSources,

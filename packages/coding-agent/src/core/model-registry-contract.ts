@@ -74,7 +74,7 @@ export interface ModelRegistryContract {
 		model: Model<Api>,
 		auth: ResolvedRequestAuth,
 	): auth is Extract<ResolvedRequestAuth, { ok: true }>;
-	getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth>;
+	getApiKeyAndHeaders(model: Model<Api>, options?: { accountListing?: boolean }): Promise<ResolvedRequestAuth>;
 	recoverRejectedOAuthApiKey(
 		model: Model<Api>,
 		rejectedApiKey: string,

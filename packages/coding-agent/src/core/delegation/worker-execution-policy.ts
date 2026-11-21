@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
+import { privateMemoryPaths } from "../autonomy/lane-private-paths.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { readScopeRefusal } from "../autonomy/session-read-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
@@ -43,6 +44,31 @@ import {
 export const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 export const REPO_READ_TOOL_NAME = "repo_read";
 export const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+
+/** A worker may receive selected knowledge through the broker. Raw storage is never a workspace or a write grant. */
+export function workerMemoryScopeRefusal(
+	agentDir: string,
+	plan: Pick<WorkerExecutionPlan, "cwd" | "writePaths" | "writeReservationPaths">,
+): "worker_private_memory_scope" | "worker_workspace_unresolvable" | undefined {
+	try {
+		const deniedPaths = privateMemoryPaths(agentDir);
+		const check = (target: string, subtree: boolean) =>
+			readScopeRefusal(
+				{ cwd: plan.cwd, deniedPaths, readRoots: [resolveWorkerWorkspacePath(plan.cwd, target)] },
+				target,
+				subtree,
+			);
+		const refused =
+			check(plan.cwd, false) ??
+			(plan.writeReservationPaths ?? plan.writePaths)
+				.map((root) => check(root, true))
+				.find((reason) => reason !== undefined);
+		if (refused) return refused === "denied" ? "worker_private_memory_scope" : "worker_workspace_unresolvable";
+	} catch {
+		return "worker_workspace_unresolvable";
+	}
+	return undefined;
+}
 /** Adapter tools that read the owner's stored content by name: skill texts, skill audits and packed tool outputs. */
 const READ_BY_NAME_ADAPTER_TOOLS: ReadonlySet<string> = new Set(["skill", "skill_audit", "artifact_retrieve"]);
 
@@ -434,12 +460,15 @@ function ceilingHoldsField(holds: readonly string[]): Pick<WorkerExecutionPlan, 
 }
 
 export function compileWorkerExecutionGrant(args: {
+	agentDir: string;
 	yolo?: boolean;
 	target: { objectiveId: string; taskId: string; attemptId: string };
 	profile: OrchestrationProfile;
 	plan: WorkerExecutionPlan;
 	resources: readonly ResourcePointer[];
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
+	const refusal = workerMemoryScopeRefusal(args.agentDir, args.plan);
+	if (refusal) return { ok: false, reasonCodes: [refusal] };
 	const compiled = new ExecutionPolicyCompiler().compile({
 		objectiveId: args.target.objectiveId,
 		taskId: args.target.taskId,
@@ -465,6 +494,7 @@ export function compileWorkerExecutionGrant(args: {
 
 /** Compile the host's durable authority record before an externally managed process is launched. */
 export function compileManagedProcessExecutionGrant(args: {
+	agentDir: string;
 	target: { objectiveId: string; taskId: string; attemptId: string };
 	laneId: string;
 	authorizationId: string;
@@ -475,6 +505,8 @@ export function compileManagedProcessExecutionGrant(args: {
 	deniedPaths: readonly string[];
 	budget: RiskBudget;
 }): { ok: true; grant: ExecutionGrant } | { ok: false; reasonCodes: readonly string[] } {
+	const refusal = workerMemoryScopeRefusal(args.agentDir, args);
+	if (refusal) return { ok: false, reasonCodes: [refusal] };
 	const manifests: ToolCapabilityManifest[] = [];
 	const unknownTools: string[] = [];
 	for (const toolName of [...new Set(args.allowedTools)]) {

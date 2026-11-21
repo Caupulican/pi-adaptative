@@ -594,6 +594,12 @@ export function reconcileTransientRecords(
 	return { records, decisions };
 }
 
+const committedPlannerRecords = new WeakSet<object>();
+
+export function isCommittedPlannerRecord(message: object): boolean {
+	return committedPlannerRecords.has(message);
+}
+
 /**
  * The ONLY way `pendingRecords` (a `reconcileTransientRecords` result) may be committed into durable
  * history: folds them into `sourceContext.messages` AND announces the commit via `onCommitted` in
@@ -619,6 +625,7 @@ export async function commitTransientRecords(
 ): Promise<AgentContext> {
 	if (pendingRecords.length === 0) return sourceContext;
 	const committed: AgentContext = { ...sourceContext, messages: [...sourceContext.messages, ...pendingRecords] };
+	for (const record of pendingRecords) committedPlannerRecords.add(record);
 	await onCommitted?.(pendingRecords);
 	return committed;
 }

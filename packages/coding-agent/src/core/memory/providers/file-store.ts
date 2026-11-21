@@ -44,6 +44,7 @@ import { MemoryMutationOutcomeError, memoryMutationFailureDetails } from "../mem
 import type { MemoryLifecycleContext } from "../memory-provider.ts";
 import { assertMemoryReadActive, type MemoryReadContext } from "../memory-read-context.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
+import { projectUserPreferenceExposure, type UserPreferenceExposure } from "../reporting-requirement-exposure.ts";
 import {
 	collectUserPreferenceEntries,
 	formatUserPreferenceLine,
@@ -892,12 +893,6 @@ export class FileStoreProvider implements MemoryProvider {
 		return this.managedNotices.splice(0);
 	}
 
-	/**
-	 * The memory manager is installing `renderedBlock` as the static system-prompt block. From here
-	 * on `userPersonaProjection` measures USER.md against what that block renders: everything, a
-	 * truncated head (a constrained budget kept only the top of the block), or nothing (a compact
-	 * budget omitted the block). Cached reads with another budget never call this.
-	 */
 	onSystemPromptBlockFrozen(renderedBlock: string): void {
 		if (this.ctx && !this.ctx.readsOwnerMemory) return;
 		const selection = this.selectApplicablePreferenceLines();
@@ -933,16 +928,7 @@ export class FileStoreProvider implements MemoryProvider {
 		return this.frozenPromptLines;
 	}
 
-	/**
-	 * USER.md as the next provider request should see it. `changed` compares the current committed
-	 * preference lines (kept in memory by every write, accept and restore; never re-read from disk
-	 * here) with the lines the installed static block renders: none when that block omitted or
-	 * truncated USER.md. The record text carries the projection rule and the current lines, bounded
-	 * to whole lines within the memory prompt budget (the planner's superseding note counts against
-	 * it), or says that USER.md is empty so a removed preference cannot be resurrected by the static
-	 * block. When nothing changed, `content` is the text that clears an earlier record. Child
-	 * sessions have no persona projection.
-	 */
+	/** Current USER.md supersedes its frozen static section; whole-line budget omissions and unavailable sources remain explicit. */
 	userPersonaProjection(budget?: MemoryPromptBudget): UserPersonaProjection | undefined {
 		if (!this.ctx?.readsOwnerMemory) return undefined;
 		const selection = this.selectApplicablePreferenceLines();
@@ -993,6 +979,21 @@ export class FileStoreProvider implements MemoryProvider {
 			...(notice ? { unavailable: true } : {}),
 			content: FileStoreProvider.boundPersonaRecord(header, currentLines, budget, selection.omitted),
 		};
+	}
+
+	userPreferenceExposure(budget?: MemoryPromptBudget): UserPreferenceExposure | undefined {
+		if (!this.ctx?.readsOwnerMemory) return undefined;
+		const snapshot = this.userSnapshot;
+		const frozen = this.frozenUser;
+		const projection = this.userPersonaProjection(budget)!;
+		const rendered = projection.changed ? (projection.content ?? "") : (frozen?.content ?? "");
+		return projectUserPreferenceExposure(
+			this.applicablePreferences(),
+			rendered,
+			this.userSnapshotNotice() === undefined,
+			() => this.userSnapshot === snapshot && this.frozenUser === frozen,
+			this.projectKey,
+		);
 	}
 
 	/** Non-empty, trimmed, threat-sanitized USER.md lines: the unit a preference is compared and delivered in. */
@@ -1153,7 +1154,6 @@ export class FileStoreProvider implements MemoryProvider {
 		});
 	}
 
-	/** The USER.md text of the static block: the selected whole lines plus the footer when lines were left out. */
 	private renderUserMemory(snapshot = this.userSnapshot): string {
 		return [this.selectApplicablePreferenceLines(snapshot).text, this.userSnapshotNotice(snapshot)]
 			.filter(Boolean)

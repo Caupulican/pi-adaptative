@@ -195,8 +195,11 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			return failedRedactionStream(model, new Error(reason, { cause: error }));
 		}
 		// Provider failures retain the transport owner's classification and retry behavior.
-		return dispatchGuardedProviderRequest(model, redactedOptions, (providerOptions) =>
-			baseStreamFn(model, redactedContext, providerOptions),
+		return dispatchGuardedProviderRequest(
+			model,
+			redactedOptions,
+			(providerOptions) => baseStreamFn(model, redactedContext, providerOptions),
+			"middleware",
 		);
 	};
 	const credentialed: StreamFn =

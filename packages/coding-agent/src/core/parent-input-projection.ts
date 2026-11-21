@@ -3,7 +3,12 @@ import type { AgentContextPlanFn, AgentMessage } from "../kernel/index.ts";
 import { messageHistoryVersion } from "../kernel/message-revision.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { VersionedMessageFilter } from "../kernel/prefix-fold.ts";
-import { parentInputMetadataOfMessage, parentNoteMarker } from "../kernel/session/parent-input-ledger.ts";
+import { isContextPlanDispatchCurrent } from "../kernel/provider-request-planner.ts";
+import {
+	parentInputMetadataOfMessage,
+	parentNoteMarker,
+	parentWakeContent,
+} from "../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 
 /**
@@ -28,7 +33,7 @@ export function projectParentInputs(
 	base: AgentContextPlanFn,
 	manager: Pick<
 		SessionManager,
-		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputIds" | "getSkippedParentInputIds"
+		"captureParentNotes" | "getPendingParentInputs" | "getActiveParentInputWake" | "getSkippedParentInputIds"
 	>,
 	getSubmissionEpoch: () => number | undefined,
 ): AgentContextPlanFn {
@@ -42,9 +47,9 @@ export function projectParentInputs(
 		const selection = manager.captureParentNotes(request.messages, epoch);
 		const pending = new Set(manager.getPendingParentInputs().map((input) => input.metadata.deliveryId));
 		const skipped = new Set(manager.getSkippedParentInputIds());
-		const active = new Set(manager.getActiveParentInputIds());
+		const wake = manager.getActiveParentInputWake();
 		const hiddenIds = new Set([...pending, ...skipped]);
-		for (const id of active) hiddenIds.delete(id);
+		for (const input of wake?.inputs ?? []) hiddenIds.delete(input.deliveryId);
 		if (!matchesIds(hidden, hiddenIds)) {
 			hidden = hiddenIds;
 			inputFilter = createFilter(hidden);
@@ -55,11 +60,11 @@ export function projectParentInputs(
 		const isCurrent = (): boolean => {
 			if (getSubmissionEpoch() !== epoch) return false;
 			const currentPending = manager.getPendingParentInputs();
-			const currentActive = manager.getActiveParentInputIds();
+
 			return (
 				currentPending.length === pending.size &&
 				currentPending.every((input) => pending.has(input.metadata.deliveryId)) &&
-				matchesIds(active, currentActive) &&
+				wake?.wakeId === manager.getActiveParentInputWake()?.wakeId &&
 				matchesIds(skipped, manager.getSkippedParentInputIds()) &&
 				(!selection || selection.isCurrent())
 			);
@@ -105,7 +110,11 @@ export function projectParentInputs(
 		const projected = filter(plan.messages, outputs);
 		const transientMessages = plan.transientMessages?.filter(keep);
 		const history = plan.providerHistory;
-		const messagesWithNotes = selection
+		// A failed wake can outlive an unrelated owner turn. Retry from the complete history with the
+		// same manifest as a request-local user turn, without re-appending the input or replaying a tool.
+		const tail = wake && projected.findLast((row) => row.role !== "bashExecution" || !row.excludeFromContext);
+		const resumeWake = wake && tail?.role === "assistant";
+		const requestMessages = selection
 			? [
 					...projected,
 					createCustomMessage(
@@ -118,13 +127,22 @@ export function projectParentInputs(
 					),
 					...selection.messages,
 				]
-			: projected;
-		inheritHistoryWork(projected, messagesWithNotes);
+			: resumeWake
+				? [
+						...projected,
+						{
+							role: "user" as const,
+							content: parentWakeContent(wake.wakeId, wake.inputs),
+							timestamp: tail.timestamp,
+						},
+					]
+				: projected;
+		inheritHistoryWork(projected, requestMessages);
 		return {
 			...plan,
 			...(transientMessages ? { transientMessages } : {}),
 			// A selection is request-local authority. Admitting this request starts a fresh history window.
-			...(selection && history
+			...((selection || resumeWake) && history
 				? {
 						providerHistory: {
 							...history,
@@ -133,8 +151,14 @@ export function projectParentInputs(
 						} satisfies typeof history,
 					}
 				: {}),
-			messages: messagesWithNotes,
+			messages: requestMessages,
 			isCurrent: () => isCurrent() && plan.isCurrent?.() !== false,
+			...(wake && {
+				isDispatchCurrent: () =>
+					getSubmissionEpoch() === epoch &&
+					manager.getActiveParentInputWake()?.wakeId === wake.wakeId &&
+					isContextPlanDispatchCurrent(plan),
+			}),
 			prepareCommit: () => isCurrent() && plan.prepareCommit?.() !== false,
 		};
 	};

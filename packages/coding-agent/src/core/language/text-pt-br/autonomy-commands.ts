@@ -227,10 +227,10 @@ export const AUTONOMY_COMMANDS = {
 	plan: {
 		state: {
 			planned: "aguardando",
-			ready: "iniciando",
-			admitted: "iniciando",
+			ready: "pronta",
+			admitted: "admitida, aguardando",
 			running: "em execução",
-			settled: "concluída",
+			settled: "encerrada",
 			superseded: "substituída",
 			cancelled: "cancelada",
 			held: "retida",
@@ -277,7 +277,7 @@ export const AUTONOMY_COMMANDS = {
 			remote_machine: "outra máquina",
 		},
 		status: {
-			active: "em execução",
+			active: "ativo",
 			paused: "pausado",
 			settled: "concluído",
 			cancelled: "cancelado",

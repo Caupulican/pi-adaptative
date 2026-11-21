@@ -6,10 +6,8 @@
  * such a message is refused. The binding owns the log state: each action and kind is logged once per session.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { TOOL_FAILURE_LEDGER_TRANSIENT_KIND } from "../../kernel/tool-failure-memory.ts";
 import { classifyTransientRecord } from "../../kernel/transient-records.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { VERIFICATION_OBLIGATION_TRANSIENT_KIND } from "../../kernel/verification-obligations.ts";
 import { isHostReservedCustomType, isUnchangedCustomMessage } from "../turn-origin.ts";
 import type { ExtensionRunner } from "./runner.ts";
 
@@ -33,11 +31,6 @@ function hostRecordKind(message: AgentMessage): string | undefined {
 		: undefined;
 }
 
-const PLANNER_TRANSIENT_KINDS: ReadonlySet<string> = new Set([
-	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
-	VERIFICATION_OBLIGATION_TRANSIENT_KIND,
-]);
-
 /**
  * The custom type of a message the harness owns, else undefined: a host record, a custom message under the type of one, a
  * type the host reserves (extension context output is not checked by the write-path refusal) or a planner transient kind.
@@ -47,8 +40,7 @@ function hostOwnedKind(message: AgentMessage, hostKinds: ReadonlySet<string>): s
 	const owned =
 		hostKinds.has(message.customType) ||
 		hostRecordKind(message) !== undefined ||
-		isHostReservedCustomType(message.customType) ||
-		PLANNER_TRANSIENT_KINDS.has(message.customType);
+		isHostReservedCustomType(message.customType);
 	return owned ? message.customType : undefined;
 }
 

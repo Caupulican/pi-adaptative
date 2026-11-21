@@ -24,7 +24,7 @@ import {
 import { SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE } from "./compaction/self-compaction.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { ContextProjection } from "./context/context-projection.ts";
-import type { EnforcePromptPolicyResult } from "./context/context-prompt-enforcement.ts";
+import type { EnforcePromptPolicyResult, PromptEnforcementContext } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
@@ -81,10 +81,7 @@ export interface ProviderRequestContextControllerDeps {
 	runPromptEnforcement?(
 		messages: AgentMessage[],
 		report: PromptPolicyShadowReport,
-		sourceMessages: AgentMessage[],
-		frozenBelow: number,
-		gcReport: ContextGcReport,
-		alignedPolicyHistory?: readonly AgentMessage[],
+		context: PromptEnforcementContext,
 	): EnforcePromptPolicyResult;
 	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration?(): void;
@@ -410,6 +407,26 @@ function frameTextsOf(frame: readonly AgentMessage[]): string[] {
 	return frame.filter((message) => !isCarriedRecordMessage(message)).flatMap(collectWireTexts);
 }
 
+/** Compose the cache identity and acceptance callbacks of successive projections in application order. */
+export function composeProviderHistory(
+	first: Pick<AgentContextPlan, "compressionPolicy" | "acceptProviderHistory">,
+	second: Pick<AgentContextPlan, "compressionPolicy" | "acceptProviderHistory">,
+) {
+	return {
+		compressionPolicy:
+			first.compressionPolicy !== undefined && second.compressionPolicy !== undefined
+				? JSON.stringify([first.compressionPolicy, second.compressionPolicy])
+				: (second.compressionPolicy ?? first.compressionPolicy),
+		acceptProviderHistory:
+			first.acceptProviderHistory && second.acceptProviderHistory
+				? () => {
+						first.acceptProviderHistory!();
+						second.acceptProviderHistory!();
+					}
+				: (second.acceptProviderHistory ?? first.acceptProviderHistory),
+	};
+}
+
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
 export class ProviderRequestContextController {
 	private readonly deps: ProviderRequestContextControllerDeps;
@@ -454,6 +471,7 @@ export class ProviderRequestContextController {
 		sentPrefixCount: number,
 		signal?: AbortSignal,
 		wire: AgentContextWire = {},
+		modelScope?: string,
 	): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
 		const extensionPlan = this.deps.transformExtensions
@@ -574,21 +592,20 @@ export class ProviderRequestContextController {
 		const pathAliasPlan = this.deps.applyPathAliases(previewGc.messages);
 		inheritHistoryWork(messages, pathAliasPlan.messages);
 		const previewProviderMessages = appendPlanningMessages(pathAliasPlan.messages, providerTransients);
-		const previewEnforcement =
-			shadowReport && this.deps.runPromptEnforcement
-				? this.deps.runPromptEnforcement(
-						previewProviderMessages,
-						shadowReport,
-						extensionMessages,
-						frozenBelow,
-						previewGc.report,
+		const previewEnforcement: Omit<EnforcePromptPolicyResult, "report"> = this.deps.runPromptEnforcement
+			? this.deps.runPromptEnforcement(previewProviderMessages, shadowReport ?? { turnIndex: 0, items: [] }, {
+					sourceMessages: extensionMessages,
+					frozenBelow,
+					gcReport: previewGc.report,
+					modelScope,
+					alignedPolicyHistory:
 						(previewGc.messages === durableMessages || previewGc.preservesToolPolicyIdentity) &&
-							(pathAliasPlan.messages === previewGc.messages || pathAliasPlan.preservesToolPolicyIdentity) &&
-							!providerTransients.some((message) => message.role === "toolResult")
+						(pathAliasPlan.messages === previewGc.messages || pathAliasPlan.preservesToolPolicyIdentity) &&
+						!providerTransients.some((message) => message.role === "toolResult")
 							? durableMessages
 							: undefined,
-					)
-				: { messages: previewProviderMessages, transientMessages: [], isCurrent: () => true };
+				})
+			: { messages: previewProviderMessages, transientMessages: [], isCurrent: () => true };
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
 		}
@@ -690,6 +707,8 @@ export class ProviderRequestContextController {
 			(skillVault === undefined || sameSkillSections(skillVault.previewSkillSections(), skillSections)) &&
 			skillVault?.previewExclusionReminder?.() === exclusionReminder;
 
+		const history = composeProviderHistory(previewGc, previewEnforcement);
+		let committed = false;
 		return {
 			messages:
 				compactableMessages !== previewGc.messages &&
@@ -698,13 +717,19 @@ export class ProviderRequestContextController {
 				compactableMessages.every((message, index) => message === messages[index])
 					? messages
 					: compactableMessages,
-			compressionPolicy: previewGc.compressionPolicy,
-			acceptProviderHistory: previewGc.acceptProviderHistory,
+			compressionPolicy: history.compressionPolicy,
+			acceptProviderHistory:
+				history.acceptProviderHistory &&
+				(() => {
+					if (committed) history.acceptProviderHistory!();
+				}),
 			transientMessages,
 			verifyPathAliases: pathAliasPlan.verifyPathAliases,
 			...(carriedRecords === undefined ? {} : { carriedRecords }),
 			isCurrent: dependenciesCurrent,
-			isDispatchCurrent: () => memoryPlan === undefined || isContextPlanDispatchCurrent(memoryPlan),
+			isDispatchCurrent: () =>
+				previewEnforcement.isDispatchCurrent?.() !== false &&
+				(memoryPlan === undefined || isContextPlanDispatchCurrent(memoryPlan)),
 			prepareCommit: () => planCurrent(),
 			commit: () => {
 				if (!planCurrent()) {
@@ -723,6 +748,7 @@ export class ProviderRequestContextController {
 				// The owner is shown the brief only by a request that is sent, so its items are marked seen here.
 				returnBriefPlan?.commit?.();
 				if (contextProjection) this.deps.commitContextProjection?.(contextProjection);
+				committed = true;
 			},
 		};
 	}

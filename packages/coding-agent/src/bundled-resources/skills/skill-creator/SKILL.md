@@ -111,31 +111,30 @@ scope, filesystem/process access, destructive actions, settings changes,
 publishing, or delegation. Preserve the host's user/session/worker capability
 intersection and repository instructions.
 
-### 5. Add evidence before implementation
+For a skill intended for workers, trace its steps and any helper scripts through
+the worker's available tools and write scope. Pi filters skills with declared
+`effects` out of worker discovery and reads. Declare every external effect the
+executor needs. If a checkout-local procedure produces a useful result on its
+own, let it end there. For example, a worker can repair a workaround and return
+tracker-ready issue text. The parent can file it when authorized. A skill that
+itself files the issue still needs its external effects.
 
-Verify by reading the skill against its contract and by running the validator. Add
-discovery, content or script tests only when the owner explicitly asked for tests; then
-write them after the skill, with valid input, malformed negative control,
-path/traversal, existing-destination, and cross-platform cases in proportion to
-risk. Do not test only keyword presence when runtime discovery or executable behavior
-is the invariant. Avoid executing external providers or paid APIs in skill tests.
+### 5. Check the package
 
-### 6. Validate and forward-test
-
-Run `scripts/validate-skill.mjs` on the completed directory (and the repository's
-focused discovery and script tests only when the owner asked for tests). Inspect output,
-not only exit status.
-
-Forward-test at least these prompts against the description:
-
-- one request that must load the skill;
-- one adjacent request that must not load it;
-- one ambiguous request whose safest behavior is explicit;
-- one request exercising each linked reference or script.
-
-Run the repository-required broader checks the owner's current mode allows. If the skill
-is bundled, verify it loads from a blank profile and that the packaged asset copy
+Run the structural validator on the completed skill directory and inspect its
+diagnostics. For a bundled skill, inspect the resource-copy path and confirm it
 includes every linked resource.
+
+### 6. Check discovery for the intended agent
+
+Read the description against an ordinary request that should find the skill, an
+adjacent request that belongs elsewhere and an ambiguous request. For a worker
+skill, check both visibility and access to its instructions. Structural
+validation alone cannot establish that the intended agent can use it.
+
+Use the validation layers in `references/pi-skill-contract.md` to distinguish
+source evidence from an observed session. Follow the owner's permissions for
+test maintenance and execution separately.
 
 ### 7. Hand off precisely
 
@@ -176,7 +175,7 @@ initializer. Choose `security-review`; never normalize traversal into a path.
 - No provider-specific metadata exists.
 - Required headers are present in order and `SKILL.md` is under 500 lines.
 - Every linked resource exists and has an explicit load/run trigger.
-- The validator and forward-routing checks pass; discovery and executable negative-control tests pass when the owner asked for tests.
+- The validator result, source review and any authorized runtime observations are reported separately.
 - Bundled versus installed/released status is reported accurately.
 
 ## Known Gaps

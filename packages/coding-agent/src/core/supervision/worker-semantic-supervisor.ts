@@ -402,14 +402,9 @@ export class WorkerSemanticSupervisor {
 					action = "continue";
 					summaryEvent = undefined;
 					reasonCodes.push("steer_grace_pending");
-				} else if (
-					!adverse("work_off_track") &&
-					!attempt.isStalled &&
-					!attempt.isRepeating &&
-					(attempt.recentFailures?.length ?? 0) === 0
-				) {
+				} else if (!adverse("work_off_track") && !attempt.isStalled && !attempt.isRepeating) {
 					// A semantic low-progress score alone cannot cancel a worker that is still making
-					// distinct successful calls. Require observed stall, repetition, or failure.
+					// distinct calls. The observation window owns the consecutive-failure stall signal.
 					action = "continue";
 					summaryEvent = undefined;
 					reasonCodes.push("reroute_without_observed_stall");
@@ -423,6 +418,18 @@ export class WorkerSemanticSupervisor {
 				// FR-068: CONTINUE is silent in UI
 				summaryEvent = undefined;
 				reasonCodes.push("worker_progressing_normally");
+				// A steer applies to the episode that prompted it. Distinct successful work and a
+				// favorable progress assessment after its grace window close that episode.
+				if (
+					priorSteeringCount > 0 &&
+					this.steerGraceElapsed(attempt.attemptId, attempt.toolCalls) &&
+					!attempt.isStalled &&
+					!attempt.isRepeating &&
+					answers.meaningful_progress.band !== "ambiguous"
+				) {
+					this.steeringInterventions.delete(attempt.attemptId);
+					this.steeredAtToolCalls.delete(attempt.attemptId);
+				}
 			}
 
 			const signalRecord: WorkerSupervisionSignal = {

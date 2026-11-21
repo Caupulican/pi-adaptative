@@ -1,6 +1,6 @@
 /** Mounts the human Workbench or the deliberately unattended transcript, and owns the Workbench state; owns no session lifecycle. */
 import path from "node:path";
-import { type AssistantMessage, resolveCacheRetention } from "@caupulican/pi-ai";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
@@ -136,9 +136,10 @@ export class InteractiveLayout {
 	private watchCount: SessionWatchCount | undefined;
 	/** Output tokens per second of the session's latest run; the POV bar shows it. */
 	private generationRate = new GenerationRate();
-	/** When the provider's prompt cache for the last request expires; the POV bar counts it down. */
-	private readonly cacheClock = new CacheClock(() => resolveCacheRetention());
+	/** Conservative retention bounds for the last cached request; uncertain intervals have no countdown. */
+	private readonly cacheClock = new CacheClock();
 	private cacheTicker: ReturnType<typeof setInterval> | undefined;
+	private cacheBoundaryTimer: ReturnType<typeof setTimeout> | undefined;
 	/** The objective the session listeners last saw; a change clears the flow trace and System One evidence. */
 	private lastObjectiveId: string | undefined;
 	/** The completed goal whose flow trace and evidence were already cleared, so the clear runs once per goal. */
@@ -437,24 +438,37 @@ export class InteractiveLayout {
 		};
 	}
 
-	/** One redraw a second while a cache clock is counting down, so the timer ticks; none once it has run out. */
+	/** Tick the warm countdown, then schedule one redraw at the conservative cold bound. */
 	private syncCacheTicker(): void {
 		const remaining = this.cacheClock.remainingMs();
 		if (remaining === undefined || remaining <= 0) {
 			this.stopCacheTicker();
+			const next = this.cacheClock.nextBoundaryMs();
+			if (next !== undefined) {
+				this.cacheBoundaryTimer = setTimeout(() => {
+					this.cacheBoundaryTimer = undefined;
+					this.port.ui.requestRender();
+					this.syncCacheTicker();
+				}, next);
+				this.cacheBoundaryTimer.unref();
+			}
 			return;
 		}
+		if (this.cacheBoundaryTimer) clearTimeout(this.cacheBoundaryTimer);
+		this.cacheBoundaryTimer = undefined;
 		if (this.cacheTicker) return;
 		this.cacheTicker = setInterval(() => {
 			this.port.ui.requestRender();
-			if ((this.cacheClock.remainingMs() ?? 0) <= 0) this.stopCacheTicker();
+			this.syncCacheTicker();
 		}, 1000);
 		this.cacheTicker.unref();
 	}
 
 	private stopCacheTicker(): void {
 		if (this.cacheTicker) clearInterval(this.cacheTicker);
+		if (this.cacheBoundaryTimer) clearTimeout(this.cacheBoundaryTimer);
 		this.cacheTicker = undefined;
+		this.cacheBoundaryTimer = undefined;
 	}
 
 	/** Rebinds the layout's session listeners to the host's current session; a layout that never mounted has none. */

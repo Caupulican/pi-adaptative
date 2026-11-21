@@ -12,7 +12,14 @@ import {
 	type ToolArgumentValidationTelemetryEvent,
 	validateToolArguments,
 } from "@caupulican/pi-ai/validation";
-import { closingRequestContext, type HaltReport, previousHaltMessage } from "./closing-request.ts";
+import { isAssistantCommentary } from "./assistant-answer.ts";
+import {
+	closingRequestContext,
+	type HaltReport,
+	previousHaltMessage,
+	requestContextForOpening,
+	selectRequestOpening,
+} from "./closing-request.ts";
 import {
 	assistantMessageText,
 	collapseDegenerateAssistantMessage,
@@ -105,6 +112,7 @@ import {
 } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
 import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
+import { isPlainRecord } from "./utils/value-guards.ts";
 import { retainedVerificationDetails, VerificationObligationTracker } from "./verification-obligations.ts";
 import { isExternalEvidenceMessage } from "./worker-control-stamp.ts";
 
@@ -123,6 +131,7 @@ const MAX_TOOL_CONCURRENCY = 16;
 
 /** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
 export interface AgentLoopContinuationState {
+	requestOpening?: AgentMessage;
 	providerTurns: number;
 	stallWindow: string[];
 	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
@@ -247,10 +256,7 @@ export async function runAgentLoop(
 	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
-	const currentContext: AgentContext = {
-		...context,
-		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
-	};
+	const currentContext = requestContextForOpening(context, prompts, config, continuationState);
 
 	for (const prompt of prompts) currentContext.messages.push(prompt);
 
@@ -284,10 +290,7 @@ export async function runAgentLoopContinue(
 	assertContinuableContext(context);
 
 	const newMessages: AgentMessage[] = [];
-	const currentContext: AgentContext = {
-		...context,
-		messages: config.workingHistory?.refresh(context.messages) ?? context.messages.slice(),
-	};
+	const currentContext = requestContextForOpening(context, [], config, continuationState);
 
 	await emit({ type: "agent_start" });
 	if (providerTurnLimitReached(config, continuationState)) {
@@ -498,6 +501,13 @@ async function runLoop(
 	const processPendingMessages = async (): Promise<void> => {
 		if (pendingMessages.length === 0) return;
 		lastSuccessfulTextProtocolBatch = undefined;
+		currentContext.requestOpening = selectRequestOpening(
+			pendingMessages,
+			currentContext,
+			config,
+			continuationState.requestOpening,
+		);
+		continuationState.requestOpening = currentContext.requestOpening;
 		// Only an owner/user turn can change authority or intent. Internal custom steering and
 		// follow-up messages must not re-admit a known-bad unchanged operation. Count every owner
 		// message so live admission stays byte-for-byte aligned with transcript restoration.
@@ -841,7 +851,9 @@ function endedOnEmptyReply(messages: readonly AgentMessage[]): boolean {
 	const last = messages.at(-1);
 	if (last?.role !== "assistant") return false;
 	return !last.content.some(
-		(block) => block.type === "toolCall" || (block.type === "text" && block.text.trim().length > 0),
+		(block) =>
+			block.type === "toolCall" ||
+			(block.type === "text" && !isAssistantCommentary(block) && block.text.trim().length > 0),
 	);
 }
 
@@ -1007,9 +1019,10 @@ async function streamAssistantResponse(
 
 		signal?.removeEventListener("abort", onOuterAbort);
 		const providerMessage = await response.stream.result();
-		let finalMessage = policy?.rejectToolCalls
-			? rejectToolCallsFromToolFreeResponse(providerMessage, policy.closingTools)
-			: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
+		let finalMessage =
+			policy?.rejectToolCalls || response.responseMode === "answer_only"
+				? rejectToolCallsFromToolFreeResponse(providerMessage, policy?.closingTools ?? context.tools)
+				: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
 		if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
 			finalMessage = { ...finalMessage, stopReason: "stop" };
 			delete finalMessage.errorMessage;
@@ -1035,6 +1048,7 @@ async function streamAssistantResponse(
 				errorMessage: abortedErrorMessage(finalMessage.errorMessage, true, signal?.reason),
 			};
 		}
+		finalMessage = response.responseAccountScope.project(providerMessage, finalMessage);
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {
@@ -2819,6 +2833,15 @@ async function finalizeExecutedToolCall(
 				{ output: failureOutput, outputSignature },
 				prepared.binding?.executionScope,
 			);
+			const omittedField = executed.result.repairOmittingField;
+			if (omittedField && isPlainRecord(prepared.args) && Object.hasOwn(prepared.args, omittedField)) {
+				const { [omittedField]: _omitted, ...corrected } = prepared.args;
+				record.correctedExecutionKey = getToolExecutionKey(
+					prepared.toolCall.name,
+					corrected,
+					prepared.binding?.executionScope,
+				);
+			}
 			executionGateEffect = {
 				kind: "unproductive",
 				tool: prepared.tool,
@@ -2829,7 +2852,13 @@ async function finalizeExecutedToolCall(
 			result = { ...createToolFailureResult(record, result.terminate), usage };
 		}
 	} else {
-		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
+		clearToolFailure(
+			toolFailureMemory,
+			prepared.toolCall.name,
+			prepared.args,
+			prepared.binding?.executionScope,
+			!executed.isError,
+		);
 		if (!executed.isError) {
 			executionGateEffect = {
 				kind: "success",

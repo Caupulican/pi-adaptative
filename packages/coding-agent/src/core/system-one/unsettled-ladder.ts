@@ -18,6 +18,7 @@
 
 import { isDecisivelyTrue } from "../decision/noul.ts";
 import { GATHER_MORE_LIMIT } from "./authority-line.ts";
+import { ModelEvaluationBudgetError } from "./model-evaluation-batches.ts";
 
 export type UnsettledVerdict = "confirmed" | "refuted";
 
@@ -166,7 +167,7 @@ export async function settleUnsettledItems(
 	deps: UnsettledLadderDeps,
 	input: {
 		readonly items: readonly string[];
-		readonly evidence: string;
+		readonly evidence: ToolResultEvidence;
 		readonly signal?: AbortSignal;
 		readonly interpretationContext?: string;
 	},
@@ -176,17 +177,18 @@ export async function settleUnsettledItems(
 	const judge = deps.getJudge();
 	if (!judge) return { settled: [], unsettled: items.map((item) => ({ item, missing: "System One is not bound" })) };
 	// No results to judge is not a question for System One: there is nothing it could read an answer from.
-	if (!input.evidence.trim())
+	if (!input.evidence.text.trim())
 		return { settled: [], unsettled: items.map((item) => ({ item, missing: "the agent recorded no tool results" })) };
 	let passes = 0;
 
 	const settled: SettledItem[] = [];
 	// Rung 1: the agent's own tool results, which it did not send to System One itself.
 	let open: { item: string; missing: string }[];
+	let requiresCompleteResult = false;
 	try {
 		passes += 1;
 		const answers = await judge.evaluateUnsettledItems(
-			items.map((item) => ({ statement: item, evidence: input.evidence })),
+			items.map((item) => ({ statement: item, evidence: input.evidence.text })),
 			input.signal,
 			input.interpretationContext,
 		);
@@ -197,11 +199,18 @@ export async function settleUnsettledItems(
 			else open.push({ item, missing: "the agent's own results do not settle it" });
 		});
 	} catch (error) {
-		// An outage is not a verdict: the items stay open, named, for the owner.
-		return {
-			settled,
-			unsettled: items.map((item) => ({ item, missing: `System One unavailable: ${errorText(error)}` })),
-		};
+		input.signal?.throwIfAborted();
+		if (!(error instanceof ModelEvaluationBudgetError))
+			return {
+				settled,
+				unsettled: items.map((item) => ({ item, missing: `System One unavailable: ${errorText(error)}` })),
+			};
+		// A verbatim citation can select one complete call and result for a narrower judgment.
+		requiresCompleteResult = true;
+		open = items.map((item) => ({
+			item,
+			missing: "the evidence exceeds the review budget and needs a narrower citation",
+		}));
 	}
 	if (open.length === 0 || !deps.consult || passes >= GATHER_MORE_LIMIT) return { settled, unsettled: open };
 
@@ -211,33 +220,54 @@ export async function settleUnsettledItems(
 			deps
 				.consult?.({
 					item: entry.item,
-					evidence: input.evidence,
+					evidence: input.evidence.text,
 					...(input.signal ? { signal: input.signal } : {}),
 					...(input.interpretationContext ? { interpretationContext: input.interpretationContext } : {}),
 				})
 				.catch(() => undefined),
 		),
 	);
-	const withFact = open.flatMap((entry, index) => {
+	const withFact: {
+		entry: UnsettledItem;
+		consult: Extract<ItemConsult, { kind: "fact" }>;
+		citedEvidence?: string;
+	}[] = [];
+	input.signal?.throwIfAborted();
+	const unsettled: UnsettledItem[] = [];
+	for (const [index, entry] of open.entries()) {
 		const consult = consults[index];
-		return consult?.kind === "fact" ? [{ entry, consult }] : [];
-	});
-	const unsettled: UnsettledItem[] = open.flatMap((entry, index) => {
-		const consult = consults[index];
-		if (consult?.kind === "fact") return [];
-		return [{ item: entry.item, missing: consult?.kind === "missing" ? consult.missing : entry.missing }];
-	});
+		if (consult?.kind === "fact" && consult.fact.trim()) {
+			if (!requiresCompleteResult) {
+				withFact.push({ entry, consult });
+				continue;
+			}
+			const results = input.evidence.results;
+			const index = results.findIndex((result) => result.text.includes(consult.fact));
+			if (index < 0 || results.slice(index + 1).some((result) => result.text.includes(consult.fact))) {
+				unsettled.push(entry);
+				continue;
+			}
+			// A later result may contradict an earlier success. Keep it in order even if the
+			// consult did not cite it. The same request budget applies to this whole suffix.
+			const suffix = results.slice(index);
+			if (suffix.every((result) => result.complete)) {
+				withFact.push({ entry, consult, citedEvidence: suffix.map((result) => result.text).join("\n") });
+				continue;
+			}
+		}
+		unsettled.push({ item: entry.item, missing: consult?.kind === "missing" ? consult.missing : entry.missing });
+	}
 	if (withFact.length === 0) return { settled, unsettled };
 	try {
 		// Exact quote containment is a deterministic code fact. Paraphrases still require System One
 		// to judge grounding; every fact then gets a separate judgment about what it settles.
 		const checks: { statement: string; evidence: string }[] = [];
-		const judgments = withFact.map(({ entry, consult }) => {
-			const quoted = quotedIn(consult.fact, input.evidence);
+		const judgments = withFact.map(({ entry, consult, citedEvidence }) => {
+			const quoted = citedEvidence !== undefined || quotedIn(consult.fact, input.evidence.text);
 			const groundingIndex = quoted
 				? undefined
-				: checks.push({ statement: consult.fact, evidence: input.evidence }) - 1;
-			const settlementIndex = checks.push({ statement: entry.item, evidence: consult.fact }) - 1;
+				: checks.push({ statement: consult.fact, evidence: input.evidence.text }) - 1;
+			const settlementIndex = checks.push({ statement: entry.item, evidence: citedEvidence ?? consult.fact }) - 1;
 			return { entry, consult, quoted, groundingIndex, settlementIndex };
 		});
 		const answers = await judge.evaluateUnsettledItems(checks, input.signal, input.interpretationContext);
@@ -255,10 +285,23 @@ export async function settleUnsettledItems(
 				});
 		});
 	} catch (error) {
-		for (const { entry } of withFact)
-			unsettled.push({ item: entry.item, missing: `System One unavailable: ${errorText(error)}` });
+		input.signal?.throwIfAborted();
+		const missing =
+			error instanceof ModelEvaluationBudgetError
+				? "the cited evidence and claim scope still exceed the review budget"
+				: `System One unavailable: ${errorText(error)}`;
+		for (const { entry } of withFact) unsettled.push({ item: entry.item, missing });
 	}
 	return { settled, unsettled };
+}
+
+interface ToolResultEvidence {
+	readonly text: string;
+	readonly results: readonly {
+		text: string;
+		complete: boolean;
+		source?: { readonly callId: string; readonly resultOffset: number };
+	}[];
 }
 
 /**
@@ -272,17 +315,21 @@ export function toolResultEvidence(
 		readonly content?: unknown;
 		readonly toolName?: unknown;
 		readonly toolCallId?: unknown;
+		readonly isError?: unknown;
 	}[],
 	maxChars = 12_000,
-): string {
+): ToolResultEvidence {
 	const calls = new Map<string, unknown>();
 	for (const message of messages) {
 		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (const block of message.content as { type?: unknown; id?: unknown; arguments?: unknown }[])
-			if (block?.type === "toolCall" && typeof block.id === "string") calls.set(block.id, block.arguments);
+			if (block?.type === "toolCall" && typeof block.id === "string")
+				calls.set(block.id, calls.has(block.id) ? undefined : block.arguments);
 	}
-	const parts: string[] = [];
-	for (const message of messages) {
+	const results: Array<ToolResultEvidence["results"][number]> = [];
+	let remaining = maxChars;
+	for (let index = messages.length - 1; index >= 0 && remaining > 0; index--) {
+		const message = messages[index]!;
 		if (message.role !== "toolResult" || !Array.isArray(message.content)) continue;
 		const text = message.content
 			.map((block: { type?: unknown; text?: unknown }) =>
@@ -291,11 +338,30 @@ export function toolResultEvidence(
 			.join("");
 		const name = typeof message.toolName === "string" ? message.toolName : "tool";
 		const args = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
-		const call = args === undefined ? "" : ` ${JSON.stringify(args).slice(0, 600)}`;
-		if (text.trim() || call) parts.push(`[${name}${call}] ${text.trim()}`);
+		const argText = args === undefined ? undefined : JSON.stringify(args);
+		const call = argText === undefined ? "" : ` ${argText.slice(0, 600)}`;
+		if (!text.trim() && !call) continue;
+		const header = `[${name}${call}${message.isError === true ? " (error)" : ""}] `;
+		const receipt = `${header}${text.trim()}`;
+		if (results.length) remaining--; // separator before the newer result
+		if (remaining <= 0) break;
+		const complete =
+			receipt.length <= remaining &&
+			argText !== undefined &&
+			argText.length <= 600 &&
+			typeof message.isError === "boolean" &&
+			message.content.every((block) => block?.type === "text" && typeof block.text === "string");
+		results.push({
+			text: receipt.slice(-remaining),
+			complete,
+			...(complete && typeof message.toolCallId === "string"
+				? { source: { callId: message.toolCallId, resultOffset: header.length } }
+				: {}),
+		});
+		remaining -= receipt.length;
 	}
-	const joined = parts.join("\n");
-	return joined.length > maxChars ? joined.slice(joined.length - maxChars) : joined;
+	results.reverse();
+	return { text: results.map((result) => result.text).join("\n"), results };
 }
 
 /** Case, punctuation and spacing folded away, so a quote matches the text it was copied from. */

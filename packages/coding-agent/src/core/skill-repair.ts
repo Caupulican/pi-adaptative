@@ -56,9 +56,6 @@ export function computeSkillDigest(raw: string): string {
 	return createHash("sha256").update(raw, "utf8").digest("hex");
 }
 
-/**
- * Bounded read and version extraction for inspection without activating or loading into slots.
- */
 export function inspectSkillFile(filePath: string, name: string): SkillInspectResult {
 	let stat: Stats;
 	try {
@@ -97,13 +94,6 @@ export function inspectSkillFile(filePath: string, name: string): SkillInspectRe
 	};
 }
 
-/**
- * Atomic repair write with frontmatter preservation and stale-source check.
- *
- * Reads current bytes and verifies the exact opaque source version before atomic write.
- * The resource-root lock is shared with promotion, archival and restore. Uncooperative external
- * filesystem edits remain outside that lock; atomic replacement prevents partial writes.
- */
 export function repairSkillFile(
 	filePath: string,
 	input: SkillRepairInput,

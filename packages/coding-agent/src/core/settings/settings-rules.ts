@@ -23,6 +23,7 @@ import {
 import { parseHttpIdleTimeoutMs } from "../http-dispatcher.ts";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.ts";
 import { normalizeResourceProfileFilter } from "../resource-profile-blocks.ts";
+import { isValidThinkingLevel as isThinkingLevel } from "../thinking-level.ts";
 import { matchesCompiledPattern } from "../util/minimatch-cache.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type {
@@ -40,7 +41,6 @@ import type {
 	ResourceProfileSettings,
 	Settings,
 	StreamStallBudgetSettings,
-	ThinkingLevel,
 	WorkbenchGraphView,
 	WorkbenchSettings,
 	WorkerAccountPolicy,
@@ -942,11 +942,8 @@ export function resolveMemorySystem(value: unknown): MemorySystem {
 	return isValidMemorySystem(value) ? value : "icm";
 }
 
-export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
-
-export function isThinkingLevel(value: unknown): value is ThinkingLevel {
-	return typeof value === "string" && VALID_THINKING_LEVELS.includes(value as ThinkingLevel);
-}
+export { VALID_THINKING_LEVELS } from "../thinking-level.ts";
+export { isThinkingLevel };
 
 export function normalizeProfileFilterResource(value: unknown): ResourceProfileFilterSettings {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {

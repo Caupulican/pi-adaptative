@@ -124,6 +124,26 @@ export function getConfigValueEnvVarNames(config: string): string[] {
 	return reference.type === "template" ? getTemplateEnvVarNames(reference.parts) : [];
 }
 
+/** Environment references can be checked synchronously. A command can select a new credential on its next execution. */
+export function bindConfigValueInputs(values: readonly (string | undefined)[]) {
+	const environment = new Map<string, string | undefined>();
+	let reusable = true;
+	for (const value of values) {
+		if (!value) continue;
+		const reference = parseConfigValueReference(value);
+		if (reference.type === "command") reusable = false;
+		else
+			for (const name of getTemplateEnvVarNames(reference.parts)) environment.set(name, resolveEnvConfigValue(name));
+	}
+	return {
+		reusable,
+		current(): boolean {
+			for (const [name, value] of environment) if (resolveEnvConfigValue(name) !== value) return false;
+			return true;
+		},
+	};
+}
+
 export function getMissingConfigValueEnvVarNames(config: string): string[] {
 	return getConfigValueEnvVarNames(config).filter((name) => resolveEnvConfigValue(name) === undefined);
 }

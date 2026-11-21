@@ -4,12 +4,6 @@ import { extractPathArguments } from "./autonomy/envelope-enforcement.ts";
 import { expandParams, type PathAliasTable } from "./context/path-alias-table.ts";
 import { toolUsesPathScope } from "./tool-capability-policy.ts";
 
-/**
- * The working-tree files one tool call names, as cwd-relative `/` paths for path-scoped skill ranking.
- * Only tools the capability policy scopes by path count, and only paths an argument spells out (a tool's
- * implicit `.` default is not a file). Path aliases are expanded first, since the call carries the model's
- * spelling. A path outside the working directory cannot match a project-relative glob and is dropped.
- */
 export function skillWorkPathsFromToolCall(
 	toolName: string,
 	args: unknown,

@@ -228,10 +228,9 @@ export class GoalSessionController {
 				}
 			});
 		}
-		if (lastAssistant?.stopReason === "error" && lastAssistant.errorMessage) {
-			// Only a provider failure blocks the goal. Harness-owned error stops (a verification
-			// handoff, protocol residue, an output runaway) carry their own handling and must keep
-			// the goal resumable exactly as before.
+		if (!lastAssistant) return { outcome: "interrupted" };
+		if (lastAssistant.stopReason === "error" && lastAssistant.errorMessage) {
+			// Only provider failures block the goal. Harness-owned stops have their own recovery paths.
 			const classified = classifyFailure({
 				message: lastAssistant.errorMessage,
 				provider: this.deps.getModel()?.provider,
@@ -240,7 +239,7 @@ export class GoalSessionController {
 				return { outcome: "errored", errorMessage: lastAssistant.errorMessage };
 			}
 		}
-		return { outcome: isInterruptedAssistantStopReason(lastAssistant?.stopReason) ? "interrupted" : "completed" };
+		return { outcome: isInterruptedAssistantStopReason(lastAssistant.stopReason) ? "interrupted" : "completed" };
 	}
 
 	saveState(state: GoalState, expected?: GoalStateRevision): string {

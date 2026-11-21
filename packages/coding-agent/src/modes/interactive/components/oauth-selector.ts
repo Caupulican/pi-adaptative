@@ -15,6 +15,7 @@ export type AuthSelectorProvider = {
 	id: string;
 	name: string;
 	authType: "oauth" | "api_key";
+	removalPending?: boolean;
 	/** Secondary line shown under the provider name, e.g. "Sign in with SuperGrok or X Premium". */
 	loginLabel?: string;
 };
@@ -148,6 +149,11 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private formatStatusIndicator(provider: AuthSelectorProvider): string {
 		const credential = this.authStorage.get(provider.id);
 		const words = interfaceText().dialogs.oauth;
+		if (!credential && provider.removalPending) return theme.fg("warning", words.removalPending);
+		if (credential && this.getAuthStatus(provider.id).source === "session") {
+			const label = credential.type === "oauth" ? words.sessionSubscription : words.sessionApiKey;
+			return theme.fg("warning", label);
+		}
 		if (credential?.type === provider.authType) return theme.fg("success", words.configured);
 		if (credential) {
 			const label = credential.type === "oauth" ? words.subscriptionConfigured : words.apiKeyConfigured;

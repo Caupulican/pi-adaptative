@@ -250,10 +250,12 @@ function addDailyUsageRecord(
 		kind: record.kind,
 		perResponse: record.perResponse,
 		costStatus: record.costStatus,
+		priceKnown: record.priceKnown,
 	});
 	if (!resolved) return false;
 	if (record.reportId) ids?.add(record.reportId);
-	if (hasUnknownUsageModel(usage, record.provider, record.model)) {
+	if (!(record.receiptPriceKnown ?? resolved.pricingComplete)) totals.apiEquivalentPartial = true;
+	if (record.receiptPriceKnown === undefined && hasUnknownUsageModel(usage, record.provider, record.model)) {
 		totals.modelUnknownTokens = (totals.modelUnknownTokens ?? 0) + usage.totalTokens;
 		totals.modelUnknownOperations = (totals.modelUnknownOperations ?? 0) + 1;
 		totals.apiEquivalentPartial = true;
@@ -328,6 +330,8 @@ function getSessionEntries(
 }
 
 interface DailyUsageSpendRecord {
+	priceKnown?: true;
+	receiptPriceKnown?: boolean;
 	costStatus?: SemanticUsageReport["costStatus"];
 	timestamp: string;
 	usage: Usage;
@@ -373,6 +377,7 @@ function semanticUsageRecord(report: SemanticAccountingReport, timestamp: string
 		usage: report.usage,
 		kind: "semantic",
 		costStatus: report.costStatus,
+		priceKnown: report.priceKnown,
 		...(typeof report.model === "string" ? { model: report.model } : {}),
 		...(typeof report.provider === "string" ? { provider: report.provider } : {}),
 		reportId: report.reportId,
@@ -421,6 +426,7 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			{
 				timestamp: entry.timestamp,
 				usage: usageOfReceipt(receipt),
+				receiptPriceKnown: receipt.costUsd !== undefined,
 				kind: "spawned",
 				reportId: receipt.reportId,
 				historySummary: false,
@@ -671,11 +677,7 @@ export function formatDailyUsageBreakdown(
 	formatLabel: (label: string) => string = (label) => label,
 ): string {
 	return [
-		...(totals.apiEquivalentPartial
-			? [
-					`API equivalent partial: ${totals.modelUnknownTokens ?? 0} tokens across ${totals.modelUnknownOperations ?? 0} operations lack model attribution`,
-				]
-			: []),
+		...(totals.apiEquivalentPartial ? ["API equivalent partial: some usage lacks pricing or model attribution"] : []),
 		`${formatLabel("Today:")} ${totals.costEstimate ? "~" : ""}$${totals.totalCost.toFixed(4)}${totals.costEstimate ? " (base-rate estimate)" : ""}${totals.pending ? " (partial; updating)" : ""}`,
 		`${formatLabel("Own/session messages:")} $${totals.ownCost.toFixed(4)}`,
 		`${formatLabel("Spawned/background reports:")} $${(totals.spawnedCost - totals.historySummaryCost).toFixed(4)}`,

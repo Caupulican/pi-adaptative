@@ -5,6 +5,7 @@
  * catalogue's (`notices.channels`): the model reads them in English, the owner in the interface language.
  */
 
+import { type OrdinaryWorkStatusSnapshot, ordinaryWorkStatusLines } from "../autonomy-status/ordinary-work.ts";
 import type { ChannelSenderIds } from "../gateways/channel-provider.ts";
 import { type HarnessNotice, type WordedNotice, wordedNotice } from "../harness-notice.ts";
 import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
@@ -185,6 +186,7 @@ export function channelCapWords(
 
 /** What the `status` reply reads of a channel's owner pool, its turns, its held drafts and the calls waiting on the owner. */
 export interface OwnerStatusFacts {
+	readonly ordinaryWork?: OrdinaryWorkStatusSnapshot;
 	readonly room: OwnerRoom;
 	readonly refusal: Worded | undefined;
 	readonly quota: OwnerQuotaAllowance;
@@ -196,6 +198,7 @@ export interface OwnerStatusFacts {
 	readonly calls: OwnerWaitingView | undefined;
 	/** Pushes held back under `ownerPushPerHour` since the last status. */
 	readonly suppressed: number;
+	readonly hasUnconfirmedReply: boolean;
 }
 
 /** The `status` reply in the interface language, one line each; the drafts past `maxDrafts` are counted. */
@@ -216,6 +219,10 @@ export function ownerStatusReply(
 		words.statusSpend(facts.room.usedUsd, policy.ownerMaxUsdPerDay, policy.ownerMaxUsdPerTurn, facts.refusal?.(text)),
 		...(quotaLine === undefined ? [] : [quotaLine]),
 		words.statusTurns(facts.running, facts.waiting),
+		...(facts.ordinaryWork && "continuationsUsed" in facts.ordinaryWork
+			? [words.savedTaskState, ...ordinaryWorkStatusLines(facts.ordinaryWork, text.autonomyStatus.ordinaryWork)]
+			: []),
+		...(facts.hasUnconfirmedReply ? [words.savedReplyDraft] : []),
 		words.statusHeld(listed, facts.drafts.length - listed.length),
 		...(waitingLine === undefined ? [] : [waitingLine]),
 		...(facts.suppressed > 0 ? [words.statusSuppressed(facts.suppressed, name)] : []),

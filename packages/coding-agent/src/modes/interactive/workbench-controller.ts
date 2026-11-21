@@ -868,7 +868,7 @@ export function buildWorkbenchSections(
 		// The running plan is the root's decomposition of the work; task steps are its own checklist beside it.
 		const openPlan = runningRootPlan(snapshot.plans ?? []);
 		const baseMeta = openPlan
-			? `${openPlan.counts.settled} / ${openPlan.counts.total}`
+			? `${openPlan.counts.accepted} / ${openPlan.counts.total}`
 			: task
 				? `${doneSteps} / ${totalSteps}`
 				: goal

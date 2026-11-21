@@ -8,6 +8,7 @@ import { type BashExecutionMessage, type CustomMessage, createCustomMessage } fr
 import { ownerInputIdOf } from "../owner-input-stamp.ts";
 import { isMissingFileError } from "../storage/atomic-file.ts";
 import { sameFileVersion } from "../storage/bounded-file.ts";
+import { isCommittedPlannerRecord } from "../transient-records.ts";
 import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
 import type { UsageComponent } from "../usage-components.ts";
@@ -25,6 +26,7 @@ import {
 	type SessionRequestSnapshotInput,
 	sessionLifecycleToolIdentityKey,
 	validateLoadedLifecycleEntries,
+	validateRequestSnapshotReferences,
 	validateSessionLifecycleEntry,
 } from "./lifecycle-ledger.ts";
 import { compactToolResultDetailsForRetention } from "./message-retention.ts";
@@ -1499,6 +1501,7 @@ export class SessionManager {
 				}
 				entry = {
 					type: "custom_message",
+					...(isCommittedPlannerRecord(message) ? { origin: "local" as const } : {}),
 					customType: message.customType,
 					content: message.content,
 					display: message.display,
@@ -1630,22 +1633,6 @@ export class SessionManager {
 			);
 		}
 		return reference;
-	}
-
-	private _validateRequestSnapshot(entry: RequestSnapshotEntry): void {
-		const cache = this._getLifecycleActiveCache();
-		if (cache.requestIds.has(entry.requestId)) {
-			throw new Error(`Duplicate request snapshot identity: ${entry.requestId}.`);
-		}
-		for (const messageEntryId of entry.messageEntryIds) {
-			const messageEntry = this.byId.get(messageEntryId);
-			if (messageEntry?.type !== "message") {
-				throw new Error(`Request snapshot references a non-message entry: ${messageEntryId}.`);
-			}
-			if (!cache.positions.has(messageEntryId)) {
-				throw new Error(`Request snapshot message is outside the active branch: ${messageEntryId}.`);
-			}
-		}
 	}
 
 	private _validateForegroundToolStartBatch(entries: readonly ForegroundToolStartEntry[]): void {
@@ -1789,7 +1776,7 @@ export class SessionManager {
 			messageEntryIds: [...snapshot.messageEntryIds],
 		};
 		validateSessionLifecycleEntry(entry);
-		this._validateRequestSnapshot(entry);
+		validateRequestSnapshotReferences(entry, this._getLifecycleActiveCache(), this.byId);
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -2177,7 +2164,7 @@ export class SessionManager {
 	recordParentNoteRequest(
 		requestId: string,
 		source: readonly AgentMessage[],
-		messages: readonly { content: unknown }[],
+		messages: readonly Message[],
 	): readonly string[] {
 		const selection = this.plannedParentNotes;
 		if (!selection) return [];
@@ -2222,13 +2209,17 @@ export class SessionManager {
 	}
 
 	/** Only the exact currently admitted detached manifest may expose its pending inputs. */
-	getActiveParentInputIds(): ReadonlySet<string> {
+	getActiveParentInputWake(): ParentInputWake | undefined {
 		const active = this.activeParentWake;
-		if (!active) return new Set();
+		if (!active) return undefined;
 		active.assertCurrent();
-		const wake = this._parentInputIndex().openWake();
+		const wake = this.getParentInputWake();
 		if (wake?.wakeId !== active.wakeId) throw new Error("Active parent wake no longer matches its manifest.");
-		return new Set(wake.inputs.map((input) => input.deliveryId));
+		return wake;
+	}
+
+	getActiveParentInputIds(): ReadonlySet<string> {
+		return new Set(this.getActiveParentInputWake()?.inputs.map((input) => input.deliveryId));
 	}
 
 	private _appendParentMessage(message: CustomMessage<unknown>): SessionAppendReceipt {
@@ -2320,21 +2311,17 @@ export class SessionManager {
 	}
 
 	/** Called at the actual provider boundary, after request_snapshot and before transport. */
-	recordParentInputWakeRequest(requestId: string, messages: readonly { content: unknown }[]): void {
-		const active = this.activeParentWake;
-		if (!active) return;
-		active.assertCurrent();
-		const wake = this._parentInputIndex().openWake();
-		if (wake?.wakeId !== active.wakeId)
-			throw new Error("Parent wake manifest is absent from the actual provider request.");
+	recordParentInputWakeRequest(requestId: string, messages: readonly Message[]): void {
+		const wake = this.getActiveParentInputWake();
+		if (!wake) return;
 		const contents = wake.inputs.map((input) => {
 			const entry = this.getEntry(input.entryId);
 			if (entry?.type !== "custom_message" || typeof entry.content !== "string")
 				throw new Error("An exact selected parent input is absent from the actual provider request.");
 			return entry.content;
 		});
-		assertParentInputVisible(messages, parentWakeMarker(active.wakeId), contents);
-		const data = { version: 1, wakeId: active.wakeId, requestId };
+		assertParentInputVisible(messages, parentWakeMarker(wake.wakeId), contents);
+		const data = { version: 1, wakeId: wake.wakeId, requestId };
 		const id = this.appendCustomEntry(PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE, data);
 		if (!this.isEntryDurableForSession(id)) throw new Error("Parent wake request binding was not persisted.");
 	}
@@ -2506,27 +2493,26 @@ export class SessionManager {
 	}
 
 	/**
-	 * Walk from entry to root, returning all entries in path order.
+	 * Walk to the root or the requested inclusive ancestor, returning entries in path order.
 	 * Includes all entry types (messages, compaction, model changes, etc.).
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
-	getBranch(fromId?: string): SessionEntry[] {
+	getBranch(fromId?: string, ancestorId?: string): SessionEntry[] {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
 		const start = startId ? this.byId.get(startId) : undefined;
 		visitSessionAncestry(start, this.byId, (entry) => {
 			path.push(entry);
+			if (entry.id === ancestorId) return false;
 		});
-		path.reverse();
-		return path;
+		return ancestorId !== undefined && path.at(-1)?.id !== ancestorId ? [] : path.reverse();
 	}
 
 	/**
-	 * Retrieve the complete history chain of events with full un-truncated message payload data.
-	 * Hydrates cold/disk-backed payload records eagerly and operates efficiently across Windows and Linux.
+	 * Hydrate message payloads on the requested branch segment. A missing ancestor yields an empty segment.
 	 */
-	getFullHistoryChainWithPayloads(fromId?: string): SessionEntry[] {
-		const branch = this.getBranch(fromId);
+	getFullHistoryChainWithPayloads(fromId?: string, ancestorId?: string): SessionEntry[] {
+		const branch = this.getBranch(fromId, ancestorId);
 		const coldIds = new Set<string>();
 		for (let i = 0; i < branch.length; i++) {
 			const entry = branch[i];

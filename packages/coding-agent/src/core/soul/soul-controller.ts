@@ -26,7 +26,7 @@ import {
 	soulSha256,
 } from "./soul-history.ts";
 import { clearSoulHold, readSoulHold, type SoulHold, type SoulHoldRead, writeSoulHold } from "./soul-hold.ts";
-import { reviewSoulText, type SoulReviewOutcome, soulReviewAdverseClauses, soulWriteRejected } from "./soul-review.ts";
+import { reviewSoulText, type SoulReviewOutcome, soulReviewRefusalReason, soulWriteRejected } from "./soul-review.ts";
 import { type SoulRevision, SoulWatch } from "./soul-watch.ts";
 
 /**
@@ -219,7 +219,7 @@ function resultingDocument(
 export class SoulController {
 	private readonly deps: SoulControllerDeps;
 	private readonly historyStore: SoulHistory;
-	private readonly evaluations = new Map<string, number>();
+	private readonly evaluations = new Map<string, { count: number; reason: string }>();
 	/** Allowed writes whose tool call has not finished, keyed by the call itself. */
 	private readonly pending = new WeakMap<AgentToolCall, GatedWrite>();
 
@@ -528,11 +528,10 @@ export class SoulController {
 		if (!engine) return this.refuseUnsupported(candidate.text, SYSTEM_ONE_NO_ENGINE_CAUSE);
 
 		const identity = soulSha256(candidate.text);
-		if ((this.evaluations.get(identity) ?? 0) >= UNSETTLED_EVALUATIONS_PER_CANDIDATE) {
+		const previous = this.evaluations.get(identity);
+		if (previous && previous.count >= UNSETTLED_EVALUATIONS_PER_CANDIDATE) {
 			this.record(candidate.text, "block");
-			return block(
-				"System One could not settle this soul.md text twice. Rewrite it materially, as a plain self-description.",
-			);
+			return block(`After two reviews, ${previous.reason}. Rewrite the affected self-description.`);
 		}
 		this.gateReviews += 1;
 		let outcome: SoulReviewOutcome;
@@ -561,12 +560,14 @@ export class SoulController {
 		this.retryHeld();
 		this.record(candidate.text, "block");
 		if (outcome.kind === "unsettled") {
+			const reason = soulReviewRefusalReason(outcome);
+			const count = (this.evaluations.get(identity)?.count ?? 0) + 1;
 			if (this.evaluations.size >= MAX_TRACKED_CANDIDATES) this.evaluations.clear();
-			this.evaluations.set(identity, (this.evaluations.get(identity) ?? 0) + 1);
-			return block("System One could not settle this soul.md text. Simplify the text and write it again.");
+			this.evaluations.set(identity, { count, reason });
+			return block(`System One: ${reason}. Simplify the text and write it again.`);
 		}
 		return block(
-			`System One blocked the soul.md write: ${soulReviewAdverseClauses(outcome)}. Rewrite it as a plain description of who you are and how you work.`,
+			`System One blocked the soul.md write: ${soulReviewRefusalReason(outcome)}. Rewrite it as a plain description of who you are and how you work.`,
 		);
 	}
 
@@ -1272,9 +1273,8 @@ export class SoulController {
 			case "allow":
 				return { kind: "accept", reviewer: "allow" };
 			case "adverse":
-				return { kind: "reject", reason: `System One: ${soulReviewAdverseClauses(outcome)}` };
 			case "unsettled":
-				return { kind: "reject", reason: "System One could not settle the text" };
+				return { kind: "reject", reason: `System One: ${soulReviewRefusalReason(outcome)}` };
 			case "failed":
 				return { kind: "unavailable", error: outcome.error };
 		}

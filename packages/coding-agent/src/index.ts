@@ -41,6 +41,7 @@ export {
 	type AuthStatus,
 	AuthStorage,
 	type AuthStorageBackend,
+	CredentialPersistenceError,
 	FileAuthStorageBackend,
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,

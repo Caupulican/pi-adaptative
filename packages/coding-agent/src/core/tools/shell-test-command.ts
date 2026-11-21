@@ -254,10 +254,15 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
  */
 export function classifyShellVerificationCommand(
 	command: string,
-	context: { cwd: string; workspaceRoot?: string; flavor: ExecutionPathFlavor },
+	context: { cwd: string; workspaceRoot?: string; flavor: ExecutionPathFlavor; staticOnly?: boolean },
 ): ShellVerificationCommand | undefined {
 	const sequence = parseShellCommandSequence(command);
-	if (!sequence || !hasOnlyVerificationStages(sequence)) return undefined;
+	if (
+		!sequence ||
+		!hasOnlyVerificationStages(sequence) ||
+		(context.staticOnly && sequence.invocations.some(isTestInvocation))
+	)
+		return undefined;
 	const { cwd: initialCwd, workspaceRoot, flavor } = context;
 	try {
 		assertExecutionAbsolutePath(initialCwd, flavor);

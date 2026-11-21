@@ -89,9 +89,8 @@ export class ProgressObservationWindow {
 			changedFileCount: changedFiles.size,
 			isRepeating,
 			isStalled:
-				changedFiles.size === 0 &&
 				this.executed >= 4 &&
-				(isRepeating || consecutiveToolFailures || issues.size > 0),
+				(consecutiveToolFailures || (changedFiles.size === 0 && (isRepeating || issues.size > 0))),
 		};
 		if (changedFiles.size > this.changedAtWindowStart) this.changedAtWindowStart = changedFiles.size;
 		return facts;

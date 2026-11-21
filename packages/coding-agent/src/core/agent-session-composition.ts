@@ -604,22 +604,34 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 	const memoryEvidenceTokens = promptInclusion.status === "included" ? Math.ceil(promptInclusion.blockChars / 4) : 0;
 	// Query projections are applied at send time. In-place short/hidden views save against the
 	// raw message shown here; tail overlays restore evidence after GC and therefore add tokens.
-	const projectionTokens = (item: (typeof enforcementItems)[number]) => {
+	const projectionTokens = (item: (typeof enforcementItems)[number], visibility = item.deliveredVisibility) => {
 		const originalChars = item.originalChars ?? 0;
-		if (item.deliveredVisibility === "hidden") return 50;
-		if (item.deliveredVisibility === "short") {
+		if (visibility === "hidden") return 50;
+		if (visibility === "short") {
 			return Math.ceil((Math.min(originalChars, CONTEXT_VISIBILITY_SHORT_CHARS) + 256) / 4);
 		}
-		if (item.deliveredVisibility === "long") {
+		if (visibility === "long") {
 			return Math.ceil((Math.min(originalChars, CONTEXT_VISIBILITY_LONG_CHARS) + 256) / 4);
 		}
 		return Math.ceil((originalChars + 256) / 4);
 	};
 	const enforcementSavedTokens = enforcementItems
 		.filter(
-			(item) => item.enforced && item.projectionPlacement === "in_place" && typeof item.originalChars === "number",
+			(item) =>
+				item.enforced &&
+				(item.projectionPlacement === "in_place" || item.retainedVisibility !== undefined) &&
+				typeof item.originalChars === "number",
 		)
-		.reduce((sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - projectionTokens(item)), 0);
+		.reduce(
+			(sum, item) =>
+				sum +
+				Math.max(
+					0,
+					Math.ceil((item.originalChars ?? 0) / 4) -
+						projectionTokens(item, item.retainedVisibility ?? item.deliveredVisibility),
+				),
+			0,
+		);
 	const enforcementAddedTokens = enforcementItems
 		.filter(
 			(item) =>
@@ -793,13 +805,8 @@ export function createSessionProviderRequestContext(
 			pipeline.applyContextGc(messages, writePayloads, frozenBelow),
 		correlatePromptPolicyWithContextGc: (report, shadow) =>
 			pipeline.correlatePromptPolicyWithContextGc(report, shadow),
-		runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport, alignedPolicyHistory) =>
-			pipeline.runPromptEnforcement(messages, report, undefined, {
-				sourceMessages,
-				frozenBelow,
-				gcReport,
-				alignedPolicyHistory,
-			}),
+		runPromptEnforcement: (messages, report, context) =>
+			pipeline.runPromptEnforcement(messages, report, undefined, context),
 		enqueueRelevanceCuration: (messages, report) => pipeline.enqueueRelevanceCuration(messages, report),
 		maybeDrainBrainCuration: () =>
 			pipeline.maybeDrainBrainCuration((type, data) => owners.sessionManager.appendCustomEntry(type, data)),

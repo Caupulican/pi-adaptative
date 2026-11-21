@@ -63,7 +63,7 @@ export const ESCALATION_AUTHORITY_MISMATCH = "escalation_authority_mismatch";
 
 /** Skip reasons that mean the fleet's own bounds held the start, not the worker's preparation. */
 const CEILING_SKIP_REASONS =
-	/^(worker_dispatch_queue_full|worker_delegation_already_running|worker_fleet_|worker_identity_|runtime_generation_)/;
+	/^(?:worker_dispatch_queue_full|worker_delegation_already_running|worker_specialist_busy|write_reservation_unavailable|delegation_paused|worker_agent_session_limit_reached|worker_fleet_|worker_identity_|runtime_generation_)/;
 
 export function refusalForSkip(skipReason: string): FleetRefusal {
 	if (skipReason === ESCALATION_AUTHORITY_MISMATCH)

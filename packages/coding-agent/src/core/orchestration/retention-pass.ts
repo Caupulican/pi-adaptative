@@ -7,7 +7,7 @@
  */
 
 import { type DelegationRecord, readDelegations } from "../delegation/leader-delegation-ledger.ts";
-import { toJsonObject } from "./contracts.ts";
+import { projectionForStorage } from "./dispatch-storage.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
 import type { ExternalKeep, ExternalKeepCounts } from "./retention.ts";
 import {
@@ -224,7 +224,7 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 			sessionId: deps.sessionId,
 			cutoff,
 			selection,
-			projection: toJsonObject(state),
+			projection: projectionForStorage(state),
 		});
 		writeRetentionArchive(archiveDir, file);
 		const payload: RetentionPrunedPayload = {

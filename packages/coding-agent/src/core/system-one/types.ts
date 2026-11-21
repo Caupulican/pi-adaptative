@@ -231,6 +231,8 @@ export type ValidationStage =
 	| "completion"
 	| "completion_challenge"
 	| "claim_delivery"
+	| "ordinary_work_stop"
+	| "reporting_requirement"
 	| "code_duplicate"
 	| "unsettled_item"
 	| "route_choice";

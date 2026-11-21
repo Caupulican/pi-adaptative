@@ -89,7 +89,7 @@ export interface ContinuousChatRuntimeOptions {
 	store: ContinuousChatStore;
 	port: ContinuousChatCompactionPort;
 	prefixHead: () => ContinuousChatCompactionPrefixHead;
-	warn: (message: string) => void;
+	warn: (message: string, hold?: ContinuousChatDispatchHold) => void;
 	/** Names this session in the project lease, so a refused session can see which session holds the chat. */
 	label?: string;
 	/** Retained work-claim releases' backoff; absent means `SYSTEM_TIMER_PORT`. */
@@ -115,7 +115,7 @@ export class ContinuousChatRuntime {
 	readonly store: ContinuousChatStore;
 	private readonly port: ContinuousChatCompactionPort;
 	private readonly prefixHead: () => ContinuousChatCompactionPrefixHead;
-	private readonly warn: (message: string) => void;
+	private readonly warn: ContinuousChatRuntimeOptions["warn"];
 	private readonly timers: TimerPort;
 	/** Set by `followForeground`. Absent: no turn is known, and dispatch is never held for one. */
 	private foreground: ContinuousChatForegroundPort | undefined;
@@ -584,14 +584,14 @@ export class ContinuousChatRuntime {
 				if (!this.holdAlarm) {
 					this.activeHold = hold;
 					this.armHoldAlarm(hold.retryInMs);
-					const noticed = hold.reasons.join(",");
+					const noticed = hold.reasons.includes("configuration") ? hold.message : hold.reasons.join(",");
 					if (this.holdNoticed !== noticed) {
 						this.holdNoticed = noticed;
 						harnessLog.warn("memory", "model-backed chat summaries are held", {
 							reasons: hold.reasons,
 							retryInMs: hold.retryInMs,
 						});
-						this.warn(hold.message);
+						this.warn(hold.message, hold);
 					}
 				}
 			} else {

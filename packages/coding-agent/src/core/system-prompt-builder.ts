@@ -56,6 +56,7 @@ export interface SystemPromptBuilderSettingsSource {
 	getProjectContextFiles(): "on-demand" | "off";
 	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] };
 	getSteStrictness(): number;
+	getOrchestratorSettings(): { delegationGate: boolean };
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
 }
 
@@ -459,6 +460,7 @@ export class SystemPromptBuilder {
 				? {
 						directorRole: {
 							root: this.deps.standing.lendsOwnerReach,
+							delegationGate: this.deps.getSettingsManager().getOrchestratorSettings().delegationGate,
 							writes: instructionPlaces.length > 0,
 							writesConfigDir: instructionPlaces.includes(configDir),
 						},

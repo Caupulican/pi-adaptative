@@ -12,7 +12,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import type { Agent, ThinkingLevel } from "../kernel/index.ts";
 import {
 	type ExtensionImportAuthority,
-	isDefaultOnBundledExtension,
+	isExtensionAllowedAtRuntime,
 	isExtensionPathAllowedForImport,
 } from "./extension-import-authority.ts";
 import type { Extension } from "./extensions/index.ts";
@@ -156,28 +156,13 @@ export class ProfileFilterController {
 			// No profile in play: inline/SDK extensions and exact owner-approved CLI/live loads are the
 			// only runtime authorities. Discovery alone must never promote an extension into executable code.
 			// This baseline is not a profile denial, so it is not counted as withheld.
-			return extensions.filter((extension) => {
-				if (extension.sourceInfo.source === "inline") return true;
-				if (isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source)) {
-					return this.isExtensionPathAllowed(extension.path, "default-on", extension.sourceInfo.baseDir);
-				}
-				const explicitlyApproved =
-					extension.sourceInfo.source === "cli" ||
-					explicitLiveExtensionPaths?.has(extension.path) === true ||
-					explicitLiveExtensionPaths?.has(extension.resolvedPath) === true;
-				return (
-					explicitlyApproved &&
-					this.isExtensionPathAllowed(extension.path, "explicit", extension.sourceInfo.baseDir)
-				);
-			});
+			return extensions.filter((extension) =>
+				isExtensionAllowedAtRuntime(settingsManager, extension, explicitLiveExtensionPaths),
+			);
 		}
 		const hasToolOrCommandGate = this._hasToolOrCommandProfileGate();
 		const allowedExtensions = extensions.filter((extension) =>
-			this.isExtensionPathAllowed(
-				extension.path,
-				isDefaultOnBundledExtension(extension.path, extension.sourceInfo.source) ? "default-on" : "profile",
-				extension.sourceInfo.baseDir,
-			),
+			isExtensionAllowedAtRuntime(settingsManager, extension, explicitLiveExtensionPaths),
 		);
 		this._profileDeniedExtensionCount = extensions.length - allowedExtensions.length;
 		return allowedExtensions.map((extension) => {

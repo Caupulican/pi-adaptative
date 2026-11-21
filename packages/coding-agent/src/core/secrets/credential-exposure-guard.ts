@@ -24,7 +24,7 @@ import {
 	tokenizeShellCommand,
 } from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
-import { isMissingPathError } from "../util/filesystem-errors.ts";
+import { isPathProbeMiss } from "../util/filesystem-errors.ts";
 import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import {
 	createCredentialBlockMask,
@@ -277,9 +277,9 @@ const ASYNC_PATH_ANSWERS: Record<
 	extension: (policy, path, signal) => policy.keepsExtensionAsync(path, signal),
 };
 
-/** A missing path is an unknown file type; every other failure stays the caller's. */
+/** An absent or overlong candidate is an unknown file type; every other failure stays the caller's. */
 function missingFileAnswer(query: PathQuery, error: unknown): PathAnswer {
-	if ((query.kind !== "file" && query.kind !== "extension") || !isMissingPathError(error)) throw error;
+	if ((query.kind !== "file" && query.kind !== "extension") || !isPathProbeMiss(error)) throw error;
 	return undefined;
 }
 

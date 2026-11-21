@@ -1,34 +1,27 @@
 ---
 name: harness-self-adaptation
-description: "ALWAYS use for work on the Pi/pi-adaptative harness when the task can reveal or benefit from a reusable improvement to agent effectiveness: debugging repeated friction, analyzing failures, optimizing tools/context/delegation/reliability, refining skills or prompts, or retaining a successful workflow. Runs an evidence-first observe, diagnose, choose-layer, intervene, compare, retain-or-rollback loop. Trigger phrases include \"self-adapt the harness\", \"make Pi more effective\", \"learn from this failure\", \"prevent this from recurring\", \"improve the agent workflow\", \"optimize harness effectiveness\", and \"skillify what we learned\"."
+description: "Audit and repair recurring friction in the Pi harness, including unnecessary owner steering, premature stops, repeated work and failures across memory, routing or delegation. Use when asked to improve harness effectiveness or retain a workflow supported by observed failures."
 ---
 
 # Harness Self-Adaptation
 
 ## How to use the skill
 
-Load this skill around any Pi harness task. The requested task remains primary;
-self-adaptation is a bounded second loop that may legitimately conclude that no
-durable adaptation is warranted.
-
-**Freedom Dial: High Freedom.** Diagnosis and intervention selection require
-judgment across many harness layers. Evidence thresholds, authority boundaries,
-validation, retention, and rollback are mandatory low-variance gates.
-
-Choose one mode before acting:
+Use the owner's requested outcome to choose the depth of the audit. A routine harness edit can proceed directly. An observed failure can justify a focused repair in the same task.
 
 - **Observe**: deliver the task and capture an adaptation candidate only when a
   reusable signal appears.
 - **Adapt**: include the smallest justified harness improvement when recurrence,
   deterministic evidence, material impact, or the user's request puts it in scope.
-- **Audit**: when effectiveness itself is the task, reproduce the workflow,
-  establish a baseline, and run a bounded before/after experiment.
+- **Audit**: when effectiveness itself is the task, establish a baseline from
+  available evidence. Compare outcomes when comparable observations exist or a
+  new experiment is authorized. Identify any effect that remains unmeasured.
 
 Load the narrow specialist when the candidate enters its domain. In particular,
 use `pi-harness-learning` for after-action classification and durable learning,
 `skill-architect` when designing instructions, `skill-creator` when packaging a
-Pi skill, `tool-call-repair` for model tool
-argument/protocol failures, and `source-grounded-docs` for codebase documentation.
+Pi skill, and `tool-call-repair` for model tool argument or protocol failures.
+For codebase documentation, cite the implementation or recorded run supporting each behavior claim.
 This skill owns the adaptation loop, not those domain procedures.
 
 ## North Star
@@ -47,10 +40,9 @@ Apply these principles on every pass:
   concurrent user work.
 - **Goal-driven execution**: validate against an observable end state, not a
   plausible implementation.
-- **Human on the edge**: never expand authority. Follow the active policy and
-  require the human at credentials, destructive or irreversible actions,
-  settings/authority expansion, dependency installation, push/tag/release/publish,
-  and material product or architecture decisions.
+- **Authority**: apply the active policy to the specific action, target, and
+  conditions. Reuse a matching current grant. Ask when a necessary grant or
+  decision is missing, or when the policy requires fresh confirmation.
 
 A faster run that produces a worse answer is a regression. A change that merely
 moves work or tokens elsewhere is not an improvement.
@@ -64,10 +56,9 @@ Before diagnosing the harness:
 1. Restate the requested outcome and scope.
 2. Define an **oracle** that can prove the outcome: a fixture, benchmark,
    transcript invariant, type check, rendered state, or explicit user acceptance
-   criterion. The repository's standing proof is `npm run check:static` and the
-   scripts it runs, the harness journeys CI runs on the pushed revision, and the
-   live gate `npm run accept:harness-live`, which only the owner runs, never an
-   agent. A test is an oracle only when the owner asked for tests.
+   criterion. Choose evidence for the claim under review. Keep regression
+   coverage with the change. Local test execution requires an explicit request
+   for the current task. CI and the maintainer’s live gate have separate scopes.
 3. Read the applicable `AGENTS.md`, relevant source in full before broad edits,
    existing tests, and the narrow Pi docs/examples required by the task.
 4. Search for an existing skill, prompt, setting, tool, extension, test helper,
@@ -83,8 +74,39 @@ validation failures, repeated reads/searches, elapsed time, time to first useful
 result, context/token volume, cost, peak memory, and recovery success. Prefer the
 metric closest to user outcome. Treat proxies as secondary.
 
+When the owner asks how often they have to steer, count follow-ups to visible
+agent replies. Check the original request, the reply and the correction. Count
+repeated instructions, avoidable handoffs and corrections of a demonstrated
+mistake. Record new scope, genuine decisions and ambiguous nudges separately.
+For several clients, report each client's reviewed numerator and denominator,
+dates and coverage. Exclude worker traffic, copied turns and fixtures. Input
+history alone can establish wording; a correction rate needs the exchange.
+For a repeatable sample, rank eligible follow-ups per client by a fixed hash of
+the client, session and turn index. Save the method, date range, source digest,
+rank and per-turn verdict in the existing audit database. Derive the totals from
+those rows. Keep backup cohorts separate and omit raw messages and session paths
+from shared reports.
+
+For a recovery audit, grade the answer the owner received and read the
+completion state for the same request. Record both when they disagree. Compare
+the evidence served to the foreground, the stop judge and the independent
+grader. Identify reconstructed inputs. When testing a change to judgment,
+include a correct answer, a superseded correction, an unrelated or incomplete
+result, and a revoked request. Label a replay of a recorded decision separately from a fully live run.
+
+When a remembered preference appears in a provider prompt but the answer ignores it,
+inspect the classification stored for that exact revision and the requirements exposed
+to the reviewer on that turn. Record whether the independent review actually ran,
+what action the host reserved and what the owner received. A successful classifier
+request can persist an uncertain result. Replaying the reviewer alone skips that failure.
+
 If no valid baseline can be captured, say `baseline unavailable`; prove the
 correctness invariant and avoid claiming a measured efficiency gain.
+
+Match verification to the active grant. A local-only audit can use historical
+exchanges and static checks. Record pending CI or live evidence for any claim
+that depends on it. Publishing a revision or launching trials requires its
+own authorization.
 
 ### 2. Observe reusable signals
 
@@ -133,6 +155,13 @@ test artifacts. Do not blame the model for malformed schemas, unavailable tools,
 stale context, transport failure, or impossible instructions owned by the
 harness.
 
+For a reported autonomy delay, trace the first handoff or repeated judgment.
+Record the decision, the evidence already available, and what the extra turn
+contributed. If the agent could choose either reversible method within its
+authority, check whether the handoff delayed the first useful edit. If a
+requirement, permission or material fact was missing, identify which step
+supplied it. Use the same completion criterion when comparing traces.
+
 Classify the mechanism before choosing a fix:
 
 - instruction/routing or missing procedure;
@@ -167,8 +196,8 @@ Mandatory selection rules:
 - Treat the repository's static checks, the CI-run journeys, the owner-run live
   gate, benchmarks, telemetry, and changelog entries as proof and durability
   support, not substitutes for the behavior fix.
-- Change one causal mechanism per experiment. Adjacent observability work may
-  travel with it; test work travels only on an explicit owner request.
+- Change one causal mechanism per experiment. Keep related observability and
+  regression coverage with the fix.
 
 ### 5. Design the intervention and rollback
 
@@ -181,10 +210,10 @@ should move <metric/invariant> from <baseline> to <target> while preserving
 ```
 
 Inspect external API types rather than guessing. Follow project conventions and
-use existing seams. Prove the new mechanism on the real system: the static checks
-(`npm run check:static`), the harness journeys CI runs on the pushed revision, and,
-for live behavior, the owner-run live gate (`npm run accept:harness-live`); add or
-update a test only when the owner asked for tests. Do not remove intentional behavior,
+use existing seams. Use the public path that exercises the mechanism. The
+repository’s static gate is `npm run check:static`. When reporting a release,
+use the CI result for that revision and the applicable maintainer gate
+(`npm run accept:harness-live`). Do not remove intentional behavior,
 weaken validation, suppress warnings, enlarge timeouts blindly, or lower quality
 thresholds merely to make the metric green.
 
@@ -196,15 +225,16 @@ use destructive workspace resets or cleanups.
 
 1. Capture the baseline or invariant failure.
 2. Apply the smallest intervention.
-3. Run the narrow oracle first.
-4. Run broader validation proportional to blast radius and the repository's
-   declared validation contract: `npm run check:static` locally, then read the
-   CI journey result for the pushed revision; the live gate is the owner's.
+3. Check the narrow oracle within the current grant.
+4. Check the interacting paths the change affects. For an unpublished
+   checkout, identify the source tested. Record any outstanding release gates
+   alongside claims that depend on them.
 5. Compare treatment with baseline under equivalent conditions. For stochastic
    behavior, use repeated trials and report the sample size and variance or
    failure count.
-6. Route nontrivial delegated or generated work through a clean-context,
-   read-only verifier when available, then verify its findings yourself.
+6. Check the artifacts against the oracle. Apply the independent review required
+   by the owner or host. If a material claim still needs a separate judgment,
+   give a read-only reviewer that question and inspect the evidence it returns.
 7. Repair only while evidence improves. Stop for human review after five failed
    attempts on one blocker or two consecutive cycles with no output, metric, or
    check improvement.
@@ -219,10 +249,8 @@ Retain the intervention only when all applicable conditions pass:
 
 - the active task oracle passes;
 - the causal reproduction is fixed or the primary metric improves materially;
-- `npm run check:static` passes and the harness journeys CI runs pass on the
-  pushed revision; the owner's live gate passes when the owner ran it for a
-  live-behavior change;
-- broader checks required by project policy pass;
+- evidence supports the claimed behavior on the identified source, and
+  applicable release gates pass before claiming release readiness;
 - safety, quality, compatibility, cost, and latency guardrails do not regress;
 - no authority or persistent setting changed outside the active grant;
 - the result is simpler than, or clearly worth the complexity of, the old path;
@@ -280,7 +308,7 @@ Harness adaptation:
 A model emits the same repairable argument shape in independent turns. Reproduce
 it with a provider fixture, locate the shared validation choke point, load
 `tool-call-repair`, add one guarded repair mode, prove it with the static checks
-and the CI journeys (a regression fixture only if the owner asked for tests), then
+and the CI journeys, then
 compare repaired execution and false-positive behavior. Do not add a tool-specific
 pre-coercion shim or teach every prompt the malformed shape.
 
@@ -317,12 +345,11 @@ Before reporting completion, verify:
 - The selected layer is the lowest one that can enforce the invariant.
 - One primary metric and non-regression guardrails were declared.
 - The intervention changes one causal mechanism and has a targeted rollback.
-- Active authority was preserved; every hard boundary stayed human-gated.
-- `npm run check:static` and all project-required broader checks passed, the CI
-  journeys passed on the pushed revision, and any live-gate claim comes from a
-  run the owner made.
+- Each action used its active grant or the confirmation required by policy.
+- Each verification claim names the checkout or released revision and the
+  checks that ran. Outstanding checks and their effect on the rating are visible.
 - Before/after conditions are comparable, or the baseline gap is disclosed.
-- Nontrivial generated/delegated work received independent verification.
+- The evidence covers the claimed outcome and any required independent review.
 - The retention gate produced `retained`, `rolled back`, `proposed`, or
   `no adaptation`—never an ambiguous partial success.
 - Only owned files changed, with operator docs/changelog updated when required.

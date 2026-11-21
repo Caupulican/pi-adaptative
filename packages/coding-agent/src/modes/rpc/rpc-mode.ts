@@ -480,6 +480,7 @@ export async function runRpcMode(
 			{ publishesMessageEdits: true },
 		);
 		session.announceRestoredQueuedInput();
+		session.restoreOrdinaryWorkAfterResume();
 	};
 
 	await rebindSession();

@@ -1324,7 +1324,6 @@ export async function main(args: string[], options?: MainOptions) {
 			});
 		}
 		if (runtimeRestart) {
-			await interactiveMode.init();
 			await session.runtimeUpdates.resumeRestart(
 				runtimeRestart.id,
 				runtimeRestart.disposition === "rollback"
@@ -1335,9 +1334,9 @@ export async function main(args: string[], options?: MainOptions) {
 			session.runtimeUpdates.getState() &&
 			!["complete", "stopped"].includes(session.runtimeUpdates.getState()!.status)
 		) {
-			await interactiveMode.init();
 			await session.runtimeUpdates.resumeInterrupted();
 		}
+		if (!initialMessage && parsed.messages.length === 0) session.restoreOrdinaryWorkAfterResume();
 		await interactiveMode.run();
 	} else {
 		printTimings();

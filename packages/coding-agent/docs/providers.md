@@ -13,6 +13,11 @@ Pi supports subscription-based providers via OAuth and API key providers via env
 
 ## Subscriptions
 
+If Pi cannot save a new credential, it remains available in the current session. The provider
+selector marks it as session-only. Fix the storage permissions and sign in again to keep it across
+restarts. If removing a saved credential fails, the current session stops using it and keeps the
+provider in `/logout` so you can retry. A fresh process reads the last successfully saved credentials.
+
 Use `/login` in interactive mode, then select a provider, or pass one directly (for example `/login chatgpt` or `/login claude`):
 
 - ChatGPT Plus/Pro (Codex)

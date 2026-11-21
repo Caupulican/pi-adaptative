@@ -18,6 +18,7 @@ export type { CommandCodeOptions } from "./providers/command-code.ts";
 export * from "./providers/command-code-account.ts";
 export * from "./providers/faux.ts";
 export type { GoogleOptions } from "./providers/google.ts";
+export { ANTIGRAVITY_EFFORT_ORDER } from "./providers/google-model-family.ts";
 export type { GoogleThinkingLevel } from "./providers/google-shared.ts";
 export type { GoogleVertexOptions } from "./providers/google-vertex.ts";
 export * from "./providers/images/openai-codex.ts";

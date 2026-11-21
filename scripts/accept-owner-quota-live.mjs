@@ -143,7 +143,7 @@ try {
 		const quotaStop = texts.some((text) => /subscription's usage reached its bound/i.test(text));
 		const dollarStop = texts.some((text) => /reached its bound \(channels\.telegram\.ownerMaxUsdPerTurn/i.test(text));
 		say("status");
-		const statusText = await waitFor("the status reply", () => sent.map((m) => m.text).find((t) => /Owner spend:/.test(t)), 60_000);
+		const statusText = await waitFor("the status reply", () => sent.map((m) => m.text).find((t) => t.startsWith("Foreground owner turns and task commands")), 60_000);
 		const problems = [];
 		if (expected === "room") {
 			if (quotaStop || dollarStop) problems.push(`the turn was stopped at a bound despite room: ${texts.join(" | ").slice(0, 200)}`);

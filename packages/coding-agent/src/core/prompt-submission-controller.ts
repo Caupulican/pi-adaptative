@@ -391,7 +391,7 @@ export class PromptSubmissionController {
 		if (originError) throw new TypeError(`A message's origin is invalid: ${originError}.`);
 		const ownerChannel = options?.ownerChannel;
 		if (
-			ownerChannel &&
+			options?.ownerChannel &&
 			(options.origin !== undefined ||
 				options.source !== undefined ||
 				options.internalContextType !== undefined ||
@@ -399,6 +399,7 @@ export class PromptSubmissionController {
 				options.pasted !== undefined)
 		)
 			throw new TypeError("An owner-channel submission names no other origin, source, kept input or pasted range.");
+		if (options?.origin && options.source !== "extension") options = { ...options, source: "extension" };
 		// Owner-channel words are the owner's but not typed: no submission order (owner policy, owner rules) unless the
 		// channel holds full authority (`OwnerChannelSubmission.full`). An approval turn takes the untrusted path.
 		const channelWords = ownerChannel !== undefined && !ownerChannel.approval;

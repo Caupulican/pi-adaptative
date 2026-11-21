@@ -9,13 +9,20 @@ import {
 	renderCommsErrView,
 } from "../comms/comms-records.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import { ASSIGN_TOOL_NAME, WORKER_BRIEF_GUIDANCE } from "./assign-tool-name.ts";
-import { type DelegateErrRecord, type DelegateRemedy, renderDelegateRemedyLines } from "./delegate-rejections.ts";
+import {
+	type DelegateErrRecord,
+	type DelegateRemedy,
+	delegateInlineLimitGuidance,
+	renderDelegateRemedyLines,
+} from "./delegate-rejections.ts";
 
 const schema = Type.Object(
 	{
 		task: Type.String({
 			minLength: 1,
+			maxLength: MAX_WORKER_BRIEF_CHARS,
 			description: WORKER_BRIEF_GUIDANCE,
 		}),
 		context: Type.Optional(
@@ -137,7 +144,15 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 		neverDefer: true,
 		parameters: schema,
 		// As for delegate: the refusal view reaches the model as the failure record's evidence.
-		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },
+		failureRecovery: {
+			getFailureEvidence: (_params, failure) => failure.message,
+			getValidationCorrection: (args) => {
+				const task = (args as { task?: unknown } | undefined)?.task;
+				return typeof task === "string" && task.length > MAX_WORKER_BRIEF_CHARS
+					? delegateInlineLimitGuidance("instructions")
+					: undefined;
+			},
+		},
 		async execute(toolCallId, input, signal, onUpdate, ctx) {
 			const files = input.files?.filter((file) => file.trim().length > 0);
 			const goal = goalLineOf(input.task);

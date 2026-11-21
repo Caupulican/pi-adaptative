@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { Api, AssistantMessage, ImageContent, Model, TextContent, Usage } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
+import { streamSimple } from "@caupulican/pi-ai/stream";
 import { VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import type { Agent } from "../kernel/agent.ts";
 import type { CompactionResult, CompactionSettings } from "../kernel/compaction/compaction.ts";
@@ -75,9 +76,9 @@ import type { BackgroundToolTaskController } from "./background-tool-task-contro
 import { BashExecutionController } from "./bash-execution-controller.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
-import { compactionEntryDetails } from "./compaction/compaction-entry-details.ts";
 import { recordedCompactionUsd } from "./compaction/compaction-spend.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
+import { compactionOwnerContext } from "./compaction/owner-context.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import {
 	createSelfCompactToolDefinition,
@@ -157,13 +158,12 @@ import type {
 import type { MemoryProvider } from "./extensions/types.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
-import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
+import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import type { ChannelProvider, JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
-import type { GoalCompletionOwnerDecisionInput } from "./goals/goal-completion-owner-decision.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { goalRuntimeFactsOf } from "./goals/goal-runtime-snapshot.ts";
@@ -209,7 +209,7 @@ import {
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveLaunchedChildModel } from "./model-resolver.ts";
-import { AccountModelCatalog } from "./model-router/account-models.ts";
+import { type AccountModelCatalog, accountModelCatalogOf } from "./model-router/account-models.ts";
 import {
 	type RouterCandidatePool,
 	type RouterPoolState,
@@ -247,6 +247,8 @@ import { resolveConfiguredOrchestrationModel } from "./orchestration/model-bindi
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import { isMeteredSpend } from "./orchestration/risk-budget.ts";
 import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
+import { type OrdinaryWorkAbortOptions, OrdinaryWorkController } from "./ordinary-work-controller.ts";
+import { hasPendingOrdinaryWorkResume, scheduleOrdinaryWorkResume } from "./ordinary-work-resume.ts";
 import { OwnerChannelSession } from "./owner-channel-session.ts";
 import type { ReturnBriefController } from "./owner-decisions/return-brief-controller.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
@@ -323,11 +325,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import type { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
-import {
-	appendOwnerFollowUp,
-	type OwnerQuestionConsult,
-	ownerFollowUpPath,
-} from "./system-one/owner-question-routing.ts";
+import { appendOwnerFollowUp, ownerFollowUpPath } from "./system-one/owner-question-routing.ts";
 import { changesPlan, reviewPlan } from "./system-one/plan-review.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import type { SemanticEvaluationRecord } from "./system-one/semantic-evaluation-ledger.ts";
@@ -361,7 +359,7 @@ import { checkedExtensionMessage, latestBranchOrigin } from "./turn-origin.ts";
 import { type RestoredUsageWait, UsageResetResume } from "./usage-reset-resume.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
-import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
+import { noteMutatingWorkUnit } from "./work-units.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 export * from "./agent-session-contracts.ts";
@@ -417,6 +415,7 @@ export class AgentSession {
 	/** Owner-input identities (minted at acceptance) and the one Delivered point: the input's user entry persisted. */
 	private readonly _ownerReturnBrief: ReturnBriefController;
 	private readonly _ownerInputs = new OwnerInputLedger((message) => this._foregroundLifecycle.warn(message));
+	readonly ordinaryWork: OrdinaryWorkController;
 	/** The owner's words from a verified owner channel: their delivery and the held drafts' control (the channels core's). */
 	readonly ownerChannel = new OwnerChannelSession(
 		this,
@@ -694,6 +693,9 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 	private readonly _accountModels: AccountModelCatalog;
+	canReuseAccountIdentity(): boolean {
+		return this._modelAccess.canReuseAccountIdentity();
+	}
 	/** A run its subscription's used-up usage stopped continues on its own at the usage reset. */
 	private readonly _usageReset: UsageResetResume;
 	private _executionLoopMode?: ExecutionLoopMode;
@@ -736,14 +738,10 @@ export class AgentSession {
 		this.capabilityEnvelope = config.capabilityEnvelope;
 		this._modelAccess.pinned = config.pinnedModel === true;
 		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
-		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
+		const stockRequest = this.agent.streamFn === streamSimple && !this.agent.onPayload;
 		this._accountModels =
 			config.accountModels ??
-			new AccountModelCatalog({
-				getModels: () => config.modelRegistry.getAll(),
-				hasConfiguredAuth: (model) => config.modelRegistry.hasConfiguredAuth(model),
-				getRequestAuth: async () => undefined,
-			});
+			accountModelCatalogOf(config.modelRegistry, () => stockRequest && this.canReuseAccountIdentity());
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
 		this._semanticPlane = new SessionSemanticPlaneController({
@@ -754,6 +752,21 @@ export class AgentSession {
 			source: config.systemOne,
 			controller: config.systemOneController,
 			steeringPlane: config.steeringPlane,
+		});
+		this.ordinaryWork = new OrdinaryWorkController({
+			getSessionManager: () => this.sessionManager,
+			getStore: () => this.getDecisionLedger()?.ordinaryWork,
+			peekStore: () => this._semanticPlane.peekDecisionLedger()?.ordinaryWork,
+			reportingRequirements: () => this._memory.reportingRequirements(),
+			isEnabled: () => !this._disposed && this._caps.ownsWorkLifecycle,
+			hasActiveGoal: () => this._goals.getOwnershipGoalId() !== undefined,
+			mayReview: () =>
+				!this._disposed &&
+				!this.runtimeUpdates.shouldStopAfterTurn() &&
+				!this.deliverablePendingMessageCount &&
+				!this._hasPendingIdleContinuation() &&
+				getResumableHumanInputSnapshot(this.sessionManager)?.status !== "pending",
+			warn: (message) => this._emit({ type: "warning", message }),
 		});
 		this._adaptiveReadiness = config.adaptiveReadiness;
 		this._ownerRules = new DurableOwnerRuleStore({ agentDir, projectKey: config.cwd });
@@ -827,7 +840,6 @@ export class AgentSession {
 			isHandoff: () => this._edgeIntent.handoff,
 			getLastUserRequest: () => this._promptSubmission?.lastUserRequest ?? "",
 			getMessages: () => this.agent.state.messages,
-			findLastAssistantMessage: () => this._findLastAssistantMessage(),
 			getSystemOneController: () => this._semanticPlane.controller,
 			resolveExpensiveModel: () => this._modelRouter.resolveExpensiveModel(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
@@ -946,6 +958,7 @@ export class AgentSession {
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
 			getStreamIdleOptionsOverride,
 		});
+		this._modelAccess.bindRequestIdentity();
 		this.sessionManager = config.sessionManager;
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		// Initial load: `config.agent` may be a reused Agent instance carrying a stale sanitizer mark
@@ -1115,8 +1128,9 @@ export class AgentSession {
 			transcript: { agent: this.agent, sessionManager: this.sessionManager },
 			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
 			isDisposed: () => this._disposed,
-			resumeUsageLimitedGoal: () => this._goals.resumeUsageLimitedGoal(),
-			continueTurn: () => this._continueAfterErrors(),
+			goals: () => this._goals,
+			continueTurn: (isCurrent) =>
+				this._durableCustomMessageTurns.continueAfterErrors(isCurrent, this._goals.getOwnershipGoalId()),
 			warn: (message) => this._foregroundLifecycle.warn(message),
 		});
 		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
@@ -1174,7 +1188,7 @@ export class AgentSession {
 			prompt: (text, options) => this.prompt(text, options),
 			getForegroundSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
-			resolveCompletionRejection: (input) => this._resolveGoalCompletionOwnerDecision(input),
+			resolveCompletionRejection: (input) => this._unsettledLadder.resolveGoalCompletionOwnerDecision(input),
 			getExecutionLoopMode: () => this._executionLoopMode,
 			getObjectiveExecutionController: () => this._objectiveExecutionController,
 		});
@@ -1210,6 +1224,7 @@ export class AgentSession {
 		this._ownerInputs.onDelivered((delivery) =>
 			this._goals.activateQueuedOwnerChatGoal(delivery, this.agent.state.messages),
 		);
+		this._ownerInputs.onDelivered((delivery) => this.ordinaryWork.noteOwnerInput(delivery));
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._harnessNotices = new HarnessNoticeController({
 			getSessionManager: () => this.sessionManager,
@@ -1393,6 +1408,11 @@ export class AgentSession {
 			emitWarning: (message) => this._foregroundLifecycle.warn(message),
 			onActivation: (event) => this._emit({ type: "memory_activation", ...event }),
 			getUserPreferenceLearning: () => this._reflection.userPreferenceLearning,
+			getOwnerPreferenceAttestations: () => this.getDecisionLedger()?.ownerPreferences,
+			migrateOwnerPreferenceProofs: (preferences) =>
+				this._reflection.migrateOwnerPreferenceProofs(preferences, this.getDecisionLedger()?.ownerPreferences),
+			getReportingRequirementClassifier: () =>
+				this._semanticPlane.controller ? this._unsettledLadder.judges.classifyReportingRequirement : undefined,
 			knowledge: () =>
 				this._reflection.createKnowledgeHost({
 					engine: () => this._semanticPlane.recordingSemanticEngine(),
@@ -1424,7 +1444,7 @@ export class AgentSession {
 					summary: () =>
 						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), historyModels),
 					billing: this._modelRegistry,
-					onModelFailure: (model, errorMessage) => {
+					onModelFailure: async (model, errorMessage, receipt) => {
 						const message = errorMessage ?? "";
 						const classified = classifyFailure({ message, provider: model.provider });
 						if (classified.reason === "billing_or_quota") {
@@ -1432,8 +1452,8 @@ export class AgentSession {
 								`${model.provider}/${model.id}`,
 								classified.retryAfterMs,
 							);
-						} else if (classified.reason === "model_unsupported") {
-							this._accountModels.markRefused(model, message || "model not supported");
+						} else if (classified.reason === "model_unsupported" && receipt) {
+							await this._accountModels.markRefused(receipt, message);
 						}
 					},
 				}),
@@ -1581,18 +1601,18 @@ export class AgentSession {
 			reconnectAgent: () => {
 				if (!this._disposed) this._reconnectToAgent();
 			},
-			abortForeground: () => this.abort("compaction"),
+			abortForeground: () => this.abort("compaction", { ordinaryWork: "preserve" }),
 			assertCanStartManualCompaction: () => this._foregroundRecovery.assertCanStartManualCompaction(),
 			emit: (event) => this._emit(event),
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),
 			getMemoryPreCompressInsight: () => this._memory.onPreCompress(),
-			decorateCompactionDetails: (details) =>
-				compactionEntryDetails(details, this.agent.state.messages, this._selfCompaction),
-			getActiveTask: () => {
-				const goal = this.getGoalStateSnapshot();
-				return goal && isGoalExecutionActive(goal.status) ? goal.userGoal : undefined;
-			},
+			...compactionOwnerContext(config.standing, {
+				goal: () => this.getGoalStateSnapshot(),
+				authority: () => this._foregroundRecovery.turnOrigin.authority(),
+				messages: () => this.agent.state.messages,
+				handoff: () => this._selfCompaction,
+			}),
 			refreshAfterCompaction: () => this._refreshAfterCompaction(),
 			getFailureCorpus: () => this._failureCorpus,
 			measureLiveContextTokens: () => this._compaction.measureLiveContextTokens(),
@@ -1683,6 +1703,7 @@ export class AgentSession {
 			parentInputs: this.sessionManager,
 			getSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
 			admitGoalRequest: () => this._goals.admitProviderRequest(),
+			ordinaryWork: this.ordinaryWork,
 			maxOutputTokens: () =>
 				Math.min(this.settingsManager.getMaxOutputTokens(), this.getCapabilityTierPolicy().maxOutputTokens),
 			shouldStopGoalExecutionAfterTurn: () => this._goals.hasExecutionLeaseCrossedBudgetLimit(),
@@ -1730,6 +1751,11 @@ export class AgentSession {
 			getContextWindow: () => this.model?.contextWindow ?? 0,
 			exhaustedStoreDir: join(providerAdmissionDir(this._agentDir), "exhausted"),
 			getInheritedOrigin: () => latestBranchOrigin(this.sessionManager),
+			ordinaryWork: {
+				work: this.ordinaryWork,
+				judges: this._unsettledLadder.judges,
+				mayReview: () => this.ordinaryWork.mayReview(),
+			},
 			emit: (event) => {
 				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
 				// recovered provider failure leaves a session record a census can count.
@@ -1739,7 +1765,7 @@ export class AgentSession {
 				this._emit(event);
 			},
 			checkCompaction: (message) => this._checkCompaction(message),
-			replaceUnsupportedModel: (message) => this._modelAccess.replaceUnsupportedModel(message),
+			replaceUnsupportedModel: (message, signal) => this._modelAccess.replaceUnsupportedModel(message, signal),
 			onRunStopped: (message, classified) => this._usageReset.runStopped(message, classified),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal, beginRuntimeHandoff) => this.runtimeUpdates.settle(signal, beginRuntimeHandoff),
@@ -1755,7 +1781,8 @@ export class AgentSession {
 				(this._semanticPlane.controller?.isEvaluating ?? false) ||
 				this._semanticPlane.health.hasForegroundEvaluations(),
 			hasPendingIdleContinuation: () =>
-				!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation(),
+				(!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation()) ||
+				hasPendingOrdinaryWorkResume(this.ordinaryWork),
 			prepareRun: async () => {
 				config.admitRun?.();
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
@@ -1822,7 +1849,7 @@ export class AgentSession {
 						throw new Error("Custom-message persistence requires its live foreground submission.");
 				}),
 			claimCorrection: (opening) => this._unsettledLadder.claimCorrection(opening),
-			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
+			flushOwnerItems: (lease) => this._unsettledLadder.flushOwnerItems(lease),
 		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
 			foreground: this._foregroundRecovery,
@@ -1845,7 +1872,7 @@ export class AgentSession {
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),
-			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
+			flushOwnerItems: (lease) => this._unsettledLadder.flushOwnerItems(lease),
 			sendCustomMessage: (message, options, lease) =>
 				this._messageDelivery.deliverCustomMessage(message, options, lease),
 			warn: (message) => this._emit({ type: "warning", message }),
@@ -1952,6 +1979,10 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
 			getContextGeneration: () => this._branchGeneration,
+			observeLearningReceipt: (receipt) => this.getDecisionLedger()?.ownerPreferences.observe(receipt),
+			getOwnerPreferenceAttestations: () => this.getDecisionLedger()?.ownerPreferences,
+			getReportingRequirementClassifier: () =>
+				this._semanticPlane.controller ? this._unsettledLadder.judges.classifyReportingRequirement : undefined,
 			getAgentDir: () => this._agentDir,
 			getDurableLearningState: () => this._durableLearningState,
 			getRuntimeVersion: () => (VERSION_SOURCE_AVAILABLE ? VERSION : undefined),
@@ -2121,7 +2152,7 @@ export class AgentSession {
 			askQuestionRouting: () => ({
 				isHandoff: () => this._edgeIntent.handoff,
 				getRequestText: () => this._promptSubmission?.lastUserRequest ?? "",
-				consultStrongerModel: (input) => this._consultStrongerModel(input),
+				consultStrongerModel: (input) => this._unsettledLadder.consultStrongerModel(input),
 				recordOwnerFollowUp: (entry) => {
 					const path = appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
 						...entry,
@@ -2374,19 +2405,10 @@ export class AgentSession {
 			getMutationScope: () => this.mutationScope,
 			getMutationAnnouncer: () => this._shellSessionKey,
 			noteMutatingCall: (toolName, assistantMessage) => {
-				// The enforced work boundary: the first call that may change the world with no work declared
-				// (a goal being worked declares its own unit) opens one unit until the owner speaks again.
 				const goal = this._goals.getState();
 				const activeGoalId = goal && isGoalExecutionActive(goal.status) ? goal.goalId : undefined;
-				if (currentWorkUnit(this.sessionManager, activeGoalId)) return;
-				const assistantMessageEntryId = this._foregroundLifecycle.getPersistedMessageEntryId(assistantMessage);
-				if (!assistantMessageEntryId) {
-					throw new Error("Cannot open a work unit before its mutating assistant message is persisted.");
-				}
-				openWorkUnit(
-					this.sessionManager,
-					{ kind: "enforced", reason: `first mutating call: ${toolName}` },
-					assistantMessageEntryId,
+				noteMutatingWorkUnit(this.sessionManager, activeGoalId, toolName, () =>
+					this._foregroundLifecycle.getPersistedMessageEntryId(assistantMessage),
 				);
 			},
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
@@ -2547,10 +2569,10 @@ export class AgentSession {
 			noteSystemOneTaskDirectoryUnavailable: (error) =>
 				this._agentEvents.noteSystemOneTaskDirectoryUnavailable(error),
 			getSystemOneController: () => this._semanticPlane.controller,
-			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
+			announceOwnerFollowUpsWhenPresent: () => this._unsettledLadder.announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
 			claimCorrection: (turnOpening) => this._unsettledLadder.claimCorrection(turnOpening),
-			flushOwnerItems: (lease) => this._flushOwnerItems(lease),
+			flushOwnerItems: (lease) => this._unsettledLadder.flushOwnerItems(lease),
 			scheduleIdleWork: (options, afterPrompt) => this._scheduleIdleWork(options, afterPrompt),
 			hasPendingIdleContinuation: () => this._backgroundLanes.hasPendingIdleContinuation(),
 			checkOrphanedObjectiveWatchdog: () => this.checkOrphanedObjectiveWatchdog(),
@@ -2630,25 +2652,19 @@ export class AgentSession {
 		return this._adaptiveReadiness;
 	}
 
-	/** The recorded engine in the retention planner's batched-question shape. */
 	private _semanticDecisionEngine(): ReturnType<typeof createRetentionDecisionEngine> | undefined {
 		return this._semanticPlane.semanticDecisionEngine();
 	}
 
-	/**
-	 * The decision ledger, opened lazily. A ledger that cannot open (read-only state dir, driver
-	 * missing) is reported once and the session runs with process-local records rather than failing.
-	 */
+	/** Lazy ledger access and unavailable fallback are owned by the semantic plane. */
 	getDecisionLedger(): DecisionLedgerStore | undefined {
 		return this._semanticPlane.getDecisionLedger();
 	}
 
-	/** Why the ledger is unavailable, when it is. */
 	getDecisionLedgerFailure(): string | undefined {
 		return this._semanticPlane.getDecisionLedgerFailure();
 	}
 
-	/** The stage-log sink bound to the current session id; rebound when the session changes. */
 	private _stageSinkForSession(): { readonly key: string; readonly sink: DecisionStageSink } | undefined {
 		return this._semanticPlane.stageSinkForSession();
 	}
@@ -2894,12 +2910,9 @@ export class AgentSession {
 
 	/** Continue the history from where it stopped, its trailing provider errors dropped, for the goal the session serves. */
 	private _continueAfterErrors(): Promise<void> {
-		return this._durableCustomMessageTurns.continue(async () => {
-			let messages = this.agent.state.messages;
-			while (messages.at(-1)?.role === "assistant" && (messages.at(-1) as AssistantMessage).stopReason === "error")
-				messages = messages.slice(0, -1);
-			if (messages !== this.agent.state.messages) this.agent.state.messages = messages;
-		}, this._goals.getOwnershipGoalId());
+		return this._durableCustomMessageTurns
+			.continueAfterErrors(undefined, this._goals.getOwnershipGoalId())
+			.then(() => {});
 	}
 
 	/**
@@ -2990,7 +3003,6 @@ export class AgentSession {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveIds();
 	}
 
-	/** Operator view of past-session history recall (coverage, latest retrieval, prompt admission). */
 	getTranscriptHistoryStatus(): TranscriptHistoryStatus {
 		return this._memory.getTranscriptHistoryStatus();
 	}
@@ -3000,10 +3012,7 @@ export class AgentSession {
 		return this._memory;
 	}
 
-	/**
-	 * The owner's confirmation on their own screen, the same bound UI a tool reaches through `ctx.ui.confirm`; undefined
-	 * exactly when no UI is bound (`ctx.hasUI` false), so an owner command that needs confirmation refuses.
-	 */
+	/** Owner-screen confirmation; absent when no host UI is bound. */
 	get ownerConfirm(): ExtensionUIContext["confirm"] | undefined {
 		const runner = this._extensionRunner;
 		if (!runner.hasUI()) return undefined;
@@ -3183,7 +3192,11 @@ export class AgentSession {
 	}
 
 	private _hasPendingIdleContinuation(): boolean {
-		return this._backgroundLanes.hasPendingIdleContinuation() || this._selfCompaction.hasPendingContinuation();
+		return (
+			this._backgroundLanes.hasPendingIdleContinuation() ||
+			this._selfCompaction.hasPendingContinuation() ||
+			hasPendingOrdinaryWorkResume(this.ordinaryWork)
+		);
 	}
 
 	private _isForegroundPhaseBusy(): boolean {
@@ -3525,6 +3538,7 @@ export class AgentSession {
 		const { completion, safely, trackRequired, finish } = createSessionShutdownTracker();
 		this._disposeCompletion = completion.then(() => this._runtimeAdmission.releaseBundle());
 		void this._disposeCompletion.catch(() => undefined);
+		safely(() => this.ordinaryWork.release());
 		this._disposed = true;
 		this._ownerReturnBrief.dispose();
 		trackRequired(() => this._analytics.dispose());
@@ -4160,7 +4174,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle. The reason is required and names the
 	 * abort in the persisted aborted message; use a short, stable, lower-case label.
 	 */
-	async abort(reason: string): Promise<void> {
+	async abort(reason: string, options?: OrdinaryWorkAbortOptions): Promise<void> {
 		this._humanInput.interrupt(reason);
 		this._edgeIntent.abortOptionalIntent();
 		// The interrupt cancels queued input whose admission is still undecided; admitted input stays queued.
@@ -4172,6 +4186,7 @@ export class AgentSession {
 		this.runtimeUpdates.cancel();
 		this.abortRetry();
 		this.agent.abort(reason);
+		this.ordinaryWork.onAbort(reason, options?.ordinaryWork);
 		await this.agent.waitForIdle();
 	}
 
@@ -4733,7 +4748,19 @@ export class AgentSession {
 		this._goals.recordContinuationTelemetry(pass);
 	}
 
-	/** Restore runtime intent: wait again for a usage limit's kept reset, else reopen goals stopped by bounded system guards. */
+	/** Restored run modes call this after extensions, subscriptions and any runtime-update recovery are ready. */
+	restoreOrdinaryWorkAfterResume(): void {
+		if (!this.ordinaryWork.mayReview()) return;
+		const recovered = this.ordinaryWork.recover();
+		if (recovered)
+			scheduleOrdinaryWorkResume(this.ordinaryWork, this._foregroundRecovery, this._unsettledLadder.judges, {
+				expected: recovered.record,
+				manager: this.sessionManager,
+				mayDispatch: () => this.ordinaryWork.mayReview(),
+				warn: (message) => this._emit({ type: "warning", message }),
+			});
+	}
+
 	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly usageWait?: RestoredUsageWait } {
 		const usageWait = this._usageReset.restoreWait(this.getGoalStateSnapshot());
 		// A goal waiting for its usage reset resumes at the reset, never now against the limit that stopped it.
@@ -4973,32 +5000,6 @@ export class AgentSession {
 		return this._reflection.runIsolatedCompletion(opts);
 	}
 
-	/**
-	 * A stronger model settles a handed-off owner question only on a basis the owner's request states,
-	 * and System One checks that basis before the agent may use the answer.
-	 */
-	private async _consultStrongerModel(input: {
-		question: string;
-		request: string;
-		signal?: AbortSignal;
-	}): Promise<OwnerQuestionConsult | undefined> {
-		return this._unsettledLadder.consultStrongerModel(input);
-	}
-
-	private _announceOwnerFollowUpsWhenPresent(): void {
-		this._unsettledLadder.announceOwnerFollowUpsWhenPresent();
-	}
-
-	/** One owner-completion boundary shared by the goal tool and objective-primary loop. */
-	private _resolveGoalCompletionOwnerDecision(input: GoalCompletionOwnerDecisionInput, signal?: AbortSignal) {
-		return this._unsettledLadder.resolveGoalCompletionOwnerDecision(input, signal);
-	}
-
-	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
-	private async _flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
-		return this._unsettledLadder.flushOwnerItems(lease);
-	}
-
 	/** Machine-wide provider load: in-flight requests, recorded limits, provider windows, the stop. */
 	getProviderLoadView(): ProviderLoadView {
 		return buildProviderLoadView({
@@ -5196,7 +5197,7 @@ export class AgentSession {
 	/** Read-only snapshot of the session's automatic work (`core/autonomy-status`): builds no owner, writes nothing. */
 	autonomyStatus() {
 		return this._backgroundLanes
-			.readAutonomyStatus(this._foregroundRecovery, this._harnessNotices, this._memory)
+			.readAutonomyStatus(this._foregroundRecovery, this._harnessNotices, this._memory, this.ordinaryWork)
 			.then((status) => this._ownerReturnBrief.withOwnerDecisions(status));
 	}
 	startPersistentBotDaemon() {

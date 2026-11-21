@@ -3,9 +3,10 @@
  * Implements typed Decision Kernel integration (PH-001..PH-005, PH-011, PH-066).
  */
 
+import { settledAnswer } from "../decision/noul.ts";
 import type { ChoiceOption, DecisionDefinition, ScoreLevel } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
-import { type ChoiceActReading, type ChoiceRisk, choiceAct } from "../decision/thresholds.ts";
+import { type ChoiceActReading, type ChoiceRisk, choiceAct, choiceProbability } from "../decision/thresholds.ts";
 import { getQuestionPack } from "../system-one/catalog.ts";
 import type { ValidationStage } from "../system-one/types.ts";
 
@@ -72,22 +73,32 @@ const OBJECTIVE_WORK_CLASS_RISK = {
 } as const satisfies Record<ObjectiveWorkClass, ChoiceRisk>;
 
 /**
- * The route checkpoint's `missing_work_class` Choice as code may act on it: the chosen class and its
- * act reading at the class's risk (P(chosen option), never confidence). A choice outside the options
- * reads `not_this`; a missing answer is undefined.
+ * Read the proposed next step from JEV-004. An uncertain choice of an ordinary work method leaves
+ * the next step to the executing agent when the same answers establish remaining work and enough
+ * evidence. A missing judgment, disputed need for independent verification or capability, and a
+ * consequential choice cannot take that shortcut.
  */
-export function readObjectiveWorkClass(answer: unknown):
-	| {
-			readonly chosen: string | undefined;
-			readonly workClass?: ObjectiveWorkClass;
-			readonly reading: ChoiceActReading;
-	  }
-	| undefined {
+export function readObjectiveWorkClass(
+	answers: Record<string, unknown>,
+	unsettledPredicates: readonly string[] = [],
+): ObjectiveWorkClass | "continue_current_work" | "insufficient_evidence" | undefined {
+	const answer = answers.missing_work_class;
 	if (!answer || typeof answer !== "object") return undefined;
 	const chosen = (answer as { choice?: unknown }).choice;
-	if (!isObjectiveWorkClass(chosen))
-		return { chosen: typeof chosen === "string" ? chosen : undefined, reading: "not_this" };
-	return { chosen, workClass: chosen, reading: choiceAct(answer, chosen, OBJECTIVE_WORK_CLASS_RISK[chosen]) };
+	if (typeof chosen !== "string" || !chosen) return undefined;
+	if (!isObjectiveWorkClass(chosen) || choiceProbability(answer, chosen) === undefined) return "insufficient_evidence";
+	const risk = OBJECTIVE_WORK_CLASS_RISK[chosen];
+	const reading = choiceAct(answer, chosen, risk);
+	if (reading === "act" && !unsettledPredicates.includes("missing_work_class")) return chosen;
+	if (
+		risk === "reversible" &&
+		settledAnswer(answers.work_remaining) === true &&
+		settledAnswer(answers.evidence_sufficient) === true &&
+		settledAnswer(answers.independent_worker_required) === false &&
+		settledAnswer(answers.capability_escalation_required) === false
+	)
+		return "continue_current_work";
+	return "insufficient_evidence";
 }
 
 /** JEV-040's adaptation tiers, cheapest first. */

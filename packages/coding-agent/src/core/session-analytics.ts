@@ -663,6 +663,7 @@ export class SessionAnalytics {
 		if (
 			cached?.entryCount === entryCount &&
 			cached.summary.accountingStatus === accountingStatus &&
+			cached.summary.usageAccountingIncomplete === pending.uncertain &&
 			cached.pendingRevision === pending.revision &&
 			cached.dailyTotals === dailyTotals &&
 			cached.summary.todayPending === dailyTotals.pending &&
@@ -680,6 +681,8 @@ export class SessionAnalytics {
 			dailyTotals,
 			todayWindow: window,
 		});
+		if (pending.unresolved) summary.unresolvedUsageRequests = pending.unresolved;
+		if (pending.uncertain) summary.usageAccountingIncomplete = true;
 		summary.accountingStatus = accountingStatus;
 		this._costSummaryCache = {
 			entryCount,

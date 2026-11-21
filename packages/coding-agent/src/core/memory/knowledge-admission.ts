@@ -9,10 +9,15 @@ import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
 import { choiceProbability, KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import { evaluateLearningDecision } from "../learning/learning-gate.ts";
-import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
+import { isCompleteOwnerSource, type OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import type { ResolvedLearningPolicySettings } from "../settings/settings-schema.ts";
 import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
+import { REPORTING_REQUIREMENT_CRITERIA, REPORTING_REQUIREMENT_INSTRUCTION } from "../system-one/ordinary-reporting.ts";
+import {
+	type ReportingRequirementClassification,
+	reportingRequirementClassification,
+} from "../system-one/reporting-requirement-admission.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { KnowledgeGrounding } from "./knowledge-grounding.ts";
@@ -20,6 +25,7 @@ import type { KnowledgeProposalJournal } from "./knowledge-proposal-journal.ts";
 import {
 	isKnowledgeCitation,
 	isKnowledgeTimestamp,
+	isReportingKnowledgeKind,
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
 	type KnowledgeKind,
@@ -195,6 +201,13 @@ export interface KnowledgeAdmissionDeps {
 	learningPolicy: ResolvedLearningPolicySettings;
 	/** Captures the original generation, policy and branch; never recaptures after asynchronous judgment. */
 	assertCurrent(): void;
+	classifyReportingRequirement?(
+		record: KnowledgeRecord,
+		assessment: ReportingRequirementClassification,
+		signal: AbortSignal | undefined,
+		assertCurrent: () => void,
+	): Promise<boolean | undefined>;
+	recordReportingClassification?(record: KnowledgeRecord, reporting: boolean | undefined): void;
 }
 
 const MAX_SLOT_SCAN = 2_000;
@@ -257,7 +270,7 @@ interface JudgedAnswer {
  * The retained judgment's shape, part of its work key: a judgment kept in an earlier shape (a Choice without its
  * probability) is asked again instead of being read as an answer it does not hold.
  */
-const KNOWLEDGE_JUDGMENT_FORMAT = 2;
+const KNOWLEDGE_JUDGMENT_FORMAT = 3;
 
 /** What one judgment answered, reduced to what admission reads. Content-free, so it is retained and reused. */
 export interface KnowledgeJudgment {
@@ -395,7 +408,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		const cited: CitedOwnerWords[] = [];
 		for (const citation of input.evidence) {
 			const source = evidence.findSource(citation.source);
-			if (!source?.sessionId || source.chars !== source.text.length)
+			if (!isCompleteOwnerSource(source))
 				return held(
 					"evidence_unavailable",
 					"evidence",
@@ -581,6 +594,12 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 							},
 							{
 								kind: "boolean",
+								id: "reporting_requirement",
+								instruction: REPORTING_REQUIREMENT_INSTRUCTION,
+								criteria: REPORTING_REQUIREMENT_CRITERIA,
+							},
+							{
+								kind: "boolean",
 								id: "requested",
 								instruction:
 									"Did the owner explicitly ask to remember, correct or forget this durable fact? Simply mentioning an otherwise explicit fact is not a request to retain it.",
@@ -754,7 +773,28 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			...(input.validUntil ? { validUntil: input.validUntil } : {}),
 			citations,
 		});
-		return { status: "applied", ...store.put(record, slot?.revision ?? 0, assertCurrent, signal, operation) };
+		let reporting: boolean | undefined;
+		if (
+			basis.selected === "explicit" &&
+			isReportingKnowledgeKind(record.kind) &&
+			judged?.calibrated &&
+			judged.answers.reporting_requirement
+		) {
+			const classification = reportingRequirementClassification({
+				noul: judged.answers.reporting_requirement.probabilityTrue,
+			});
+			reporting = await this.deps.classifyReportingRequirement?.(record, classification, signal, assertCurrent);
+			assertCurrent();
+		}
+		const receipt = store.put(record, slot?.revision ?? 0, assertCurrent, signal, operation);
+		if (reporting !== undefined)
+			try {
+				this.deps.recordReportingClassification?.(record, reporting);
+			} catch {
+				/* The knowledge commit already succeeded. */
+			}
+
+		return { status: "applied", ...receipt };
 	}
 
 	/**

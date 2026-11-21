@@ -35,12 +35,14 @@ module; `--check` fails when this file is stale. The words used here are defined
 |---|---|
 | `kernel/agent-loop.ts` | Agent loop that works with AgentMessage throughout. |
 | `kernel/agent.ts` | (no header comment) |
-| `kernel/closing-request.ts` | Builds the last request of a halted or runaway run and deduplicates a retried halt instruction. |
+| `kernel/assistant-answer.ts` | Assistant answer text for terminal results, including legacy responses without phase metadata. |
+| `kernel/closing-request.ts` | Selects the input that owns a request, builds tool-free contexts, and deduplicates closing instructions. |
 | `kernel/compaction/branch-summarization.ts` | Branch summarization for tree navigation. |
 | `kernel/compaction/compaction.ts` | Context compaction for long sessions. |
 | `kernel/compaction/extraction.ts` | (no header comment) |
 | `kernel/compaction/index.ts` | Compaction and summarization utilities. |
 | `kernel/compaction/loop.ts` | (no header comment) |
+| `kernel/compaction/owner-history.ts` | Bounded exact historical owner-input records and their host-rendered checkpoint suffix; never active tasks or grants. |
 | `kernel/compaction/token-budget.ts` | (no header comment) |
 | `kernel/compaction/utils.ts` | Shared utilities for compaction and branch summarization. |
 | `kernel/compaction/verification.ts` | (no header comment) |
@@ -160,7 +162,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-126 kernel modules, 68 with a header comment.
+128 kernel modules, 70 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 
@@ -196,16 +198,17 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `human-input-controller.ts` | no | (no header comment) |
 | `local-prefix-warm-controller.ts` | no | Best-effort, preemptible standing-prefix warmup for loopback OpenAI-compatible models. |
 | `local-runtime-controller.ts` | no | Local-runtime (Ollama) lifecycle controller. |
-| `memory-controller.ts` | no | Memory controller: the session's plug-and-play memory subsystem — the read-only OKF retrieval provider, the bounded prompt-evidence surfacing pilot, cross-session recall effectiveness, and the live {@link MemoryManager} (bundled file-store + transcript-recall providers plus any extension contributions). |
+| `memory-controller.ts` | no | Owns memory and knowledge projections; provider-request context admits and commits each versioned plan. |
 | `model-router-controller.ts` | no | Model-router turn routing: the session's model-selection subsystem — the owner-message route (every owner message is answered by the session model: `talker` once one is chosen, else `direct`; the `opening`, `side_trip` and `toolkit` kinds are no longer produced by {@link routeOwnerMessage}, see its note), the regex rou |
 | `model-selection-controller.ts` | no | User-facing model + thinking-level selection. |
+| `ordinary-work-controller.ts` | no | Branch-local ordinary owner work, anchored by its original user entry and recovered from canonical receipts. |
 | `pending-input-queue-controller.ts` | no | (no header comment) |
 | `profile-filter-controller.ts` | no | Resource-profile tool/extension gating + reload-time profile model re-application. |
 | `prompt-submission-controller.ts` | no | Foreground prompt submission, slash-command and template expansion, queued-submission serialization, routed-turn preflight/postflight, and post-turn recall scoring. |
 | `provider-request-context-controller.ts` | no | (no header comment) |
 | `provider-request-runtime-controller.ts` | no | (no header comment) |
 | `queued-input-persistence-controller.ts` | no | Queued owner-input admission, held-input warnings, durable session-entry persistence and image pinning for undelivered steering/follow-up messages, and resume-time restoration notices. |
-| `reflection-controller.ts` | no | Root-session reflection cue + explicit learning-write controller. |
+| `reflection-controller.ts` | no | Root reflection cues and explicit durable learning; memory owns collection, and admitted effects use canonical storage. |
 | `runtime-update-controller.ts` | no | (no header comment) |
 | `scout-controller.ts` | no | (no header comment) |
 | `session-cache-controller.ts` | no | A session's prompt-cache controller: the foreground's side of the lane guard (`CacheLaneGuard` holds custody, knowledge, observations and worker conversations' guard), cold-moment transitions, and cache-priced objective executor selection. |
@@ -217,5 +220,5 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-50 modules, 0 with a test file of the same name.
+51 modules, 0 with a test file of the same name.
 

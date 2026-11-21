@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -262,6 +262,66 @@ describe("semantic summary receipt outbox", () => {
 		}
 	});
 
+	it.each(["pending", "acknowledged", "conflict", "duplicate callback"] as const)(
+		"reconciles live canonical replay with a %s receipt",
+		async (state) => {
+			const h = fixture();
+			const lease = h.delivery.beginMaintenance("history_summary", 1, h.receipt.origin);
+			try {
+				const slot = journalSlotOf(h.identity)!;
+				const createdAt = new Date().toISOString();
+				lease.beginRequest({
+					requestId: h.receipt.receiptId,
+					route: "history_summary",
+					provider: h.receipt.provider,
+					model: h.receipt.model,
+					origin: h.receipt.origin!,
+					startedAt: createdAt,
+					summarySpendPending: true,
+				});
+				h.manager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(h.receipt));
+				if (state === "conflict") {
+					h.manager.appendCustomEntry(
+						SEMANTIC_USAGE_CUSTOM_TYPE,
+						semanticUsageReportOf({ ...h.receipt, attempt: 2 }),
+					);
+				}
+				h.manager.flushBufferedEntries();
+				if (state === "duplicate callback") {
+					// Physical settlement sees the persisted row before delivery's scheduled replay.
+					expect(lease.record(h.receipt).kind).toBe("physically_recorded");
+					expect(readSummarySpendReceipt(h.identity, h.receipt.receiptId).kind).toBe("known");
+				}
+				if (state === "acknowledged") {
+					// Another owner recovers and acknowledges this receipt before the live owner's queued reconcile.
+					updateJournal(
+						slot,
+						retainRecordChange(
+							slot,
+							{
+								reportId: h.receipt.receiptId,
+								payload: h.receipt,
+								createdAt,
+								summarySpendPending: true,
+								canonicalConfirmed: true,
+							},
+							{},
+						),
+					);
+					acknowledgeSummarySpend(h.identity, h.receipt.receiptId);
+				}
+				await Promise.resolve();
+				const kind = state === "conflict" ? "unresolved" : state === "acknowledged" ? "missing" : "known";
+				expect(readSummarySpendReceipt(h.identity, h.receipt.receiptId).kind).toBe(kind);
+				expect(h.delivery.snapshot().unresolved).toBe(state === "conflict" ? 1 : 0);
+			} finally {
+				lease.release();
+				h.delivery.dispose();
+				rmSync(h.directory, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("merges replayed canonical proof without restoring an acknowledged spend", () => {
 		const state = fixture();
 		try {
@@ -302,3 +362,99 @@ function fixtureReceipt() {
 		costStatus: "catalog_priced",
 	};
 }
+
+it("exposes unresolved dispatched usage across owner recovery and clears it on a measured free receipt", () => {
+	const state = fixture();
+	let delivery = state.delivery;
+	try {
+		const receipt = { ...state.receipt, route: "proactivity" as const, summaryAccounting: undefined };
+		const lease = delivery.beginMaintenance("proactivity", 1, receipt.origin);
+		const before = delivery.pendingProjection().revision;
+		lease.beginRequest({
+			requestId: receipt.receiptId,
+			provider: receipt.provider,
+			model: receipt.model,
+			route: "proactivity",
+			origin: receipt.origin!,
+			startedAt: new Date().toISOString(),
+		});
+		lease.release();
+		expect(delivery.pendingProjection()).toMatchObject({ unresolved: 1 });
+		expect(delivery.pendingProjection().revision).toBeGreaterThan(before);
+		delivery.dispose();
+		delivery = sessionSemanticUsageOf(state.manager);
+		expect(delivery.pendingProjection()).toMatchObject({ unresolved: 1 });
+		const free = { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+		const completion = delivery.beginMaintenance("proactivity", 1, receipt.origin);
+		expect(completion.record({ ...receipt, usage: free })).toMatchObject({ kind: "physically_recorded" });
+		completion.release();
+		expect(delivery.pendingProjection().unresolved).toBeUndefined();
+		expect(delivery.snapshot().unresolved).toBe(0);
+		const cancelled = delivery.beginMaintenance("proactivity", 1, receipt.origin);
+		cancelled.beginRequest({
+			requestId: "never-dispatched",
+			provider: receipt.provider,
+			model: receipt.model,
+			route: "proactivity",
+			origin: receipt.origin!,
+			startedAt: new Date().toISOString(),
+		});
+		cancelled.cancelUndispatchedRequest("never-dispatched");
+		cancelled.release();
+		expect(delivery.pendingProjection().unresolved).toBeUndefined();
+	} finally {
+		delivery.dispose();
+		rmSync(state.directory, { recursive: true, force: true });
+	}
+});
+
+it.each(["corrupt", "unreadable"])(
+	"projects incomplete accounting when the usage journal is %s without inventing a count",
+	(kind) => {
+		const state = fixture();
+		let delivery = state.delivery;
+		try {
+			const slot = journalSlotOf(state.identity)!;
+			delivery.dispose();
+			if (kind === "corrupt") writeFileSync(slot.path, "{invalid");
+			else mkdirSync(slot.path);
+			delivery = sessionSemanticUsageOf(state.manager);
+			expect(delivery.pendingProjection()).toMatchObject({ uncertain: true });
+			expect(delivery.pendingProjection().unresolved).toBeUndefined();
+		} finally {
+			delivery.dispose();
+			rmSync(state.directory, { recursive: true, force: true });
+		}
+	},
+);
+
+it("does not resolve a dispatched request from conflicting non-summary canonical receipts", () => {
+	const state = fixture();
+	let delivery = state.delivery;
+	try {
+		const receipt = { ...state.receipt, route: "proactivity" as const, summaryAccounting: undefined };
+		const lease = delivery.beginMaintenance("proactivity", 1, receipt.origin);
+		lease.beginRequest({
+			requestId: receipt.receiptId,
+			provider: receipt.provider,
+			model: receipt.model,
+			route: "proactivity",
+			origin: receipt.origin!,
+			startedAt: new Date().toISOString(),
+		});
+		lease.release();
+		delivery.dispose();
+		state.manager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf(receipt));
+		state.manager.appendCustomEntry(
+			SEMANTIC_USAGE_CUSTOM_TYPE,
+			semanticUsageReportOf({ ...receipt, usage: { ...usage, totalTokens: 30, input: 25 } }),
+		);
+		state.manager.flushBufferedEntries();
+		delivery = sessionSemanticUsageOf(state.manager);
+		expect(delivery.snapshot().unresolved).toBe(1);
+		expect(delivery.pendingProjection().unresolved).toBe(1);
+	} finally {
+		delivery.dispose();
+		rmSync(state.directory, { recursive: true, force: true });
+	}
+});

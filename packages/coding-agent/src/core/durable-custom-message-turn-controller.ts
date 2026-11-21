@@ -18,7 +18,7 @@ interface DurableCustomMessageTurnControllerDeps {
 	/** A turn's goal execution belongs to its submission and ends when that submission releases the foreground. */
 	goals: Pick<GoalSessionController, "beginExecution">;
 	/** The agent whose steering queue a running turn reads at each model step. */
-	steering(): Pick<Agent, "steer" | "withdrawQueuedMessage">;
+	steering(): Pick<Agent, "steer" | "withdrawQueuedMessage" | "state">;
 	/** Commit under the held foreground lease before provider preparation can wait. */
 	appendMessage(message: CustomMessage<unknown>, lease: ForegroundSubmissionLease): Promise<void>;
 	claimCorrection(turnOpening: CustomMessage<unknown>): Promise<string | undefined>;
@@ -172,13 +172,17 @@ export class DurableCustomMessageTurnController {
 	}
 
 	/** Resume canonical history after a host handoff; the goal execution ends when the submission is released. */
-	async continue(prepare: () => Promise<void>, goalId?: string): Promise<void> {
+	async continue(
+		prepare: (() => Promise<void>) | undefined,
+		goalId?: string,
+		beforeContinue?: () => boolean,
+	): Promise<void> {
 		const submission = await this.deps.foreground.acquireSubmission();
 		let continuationFailure: { readonly error: unknown } | undefined;
 		try {
 			this.deps.goals.beginExecution(goalId);
-			await prepare();
-			await this.deps.foreground.runAgentContinuation(submission);
+			if (prepare) await prepare();
+			await this.deps.foreground.runAgentContinuation(submission, undefined, beforeContinue);
 		} catch (error) {
 			continuationFailure = { error };
 			throw error;
@@ -190,6 +194,33 @@ export class DurableCustomMessageTurnController {
 				continuationFailure,
 			);
 		}
+	}
+
+	async continueAfterErrors(isCurrent: (() => boolean) | undefined, goalId?: string): Promise<boolean> {
+		let continued = false;
+		const prepare = () => {
+			if (isCurrent?.() === false) return false;
+			const agent = this.deps.steering();
+			let messages = agent.state.messages;
+			while (true) {
+				const last = messages.at(-1);
+				if (last?.role !== "assistant" || last.stopReason !== "error") break;
+				messages = messages.slice(0, -1);
+			}
+			if (messages !== agent.state.messages) agent.state.messages = messages;
+			continued = true;
+			return true;
+		};
+		await this.continue(
+			isCurrent
+				? undefined
+				: async () => {
+						prepare();
+					},
+			goalId,
+			isCurrent ? prepare : undefined,
+		);
+		return continued;
 	}
 
 	private prepare<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): {

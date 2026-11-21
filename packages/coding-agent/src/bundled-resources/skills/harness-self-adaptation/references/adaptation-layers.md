@@ -47,8 +47,8 @@ repository files, is:
    its verdict only when the owner ran it.
 
 Reading the changed source and its callers comes first and backs every step.
-Write or run a test only when the owner asked for tests in their own words;
-it is then extra evidence beside this chain, never a replacement for it.
+Maintain regression coverage within the assignment. Local test execution
+requires the owner's explicit request for the current task.
 
 ## Layer matrix
 

@@ -98,9 +98,25 @@ export class OAuthCredentialUnusableError extends Error {
 	}
 }
 
+export class CredentialPersistenceError extends Error {
+	readonly provider: string;
+	readonly operation: "save" | "remove";
+
+	constructor(provider: string, operation: "save" | "remove") {
+		super(
+			operation === "save"
+				? `The ${provider} credential is available only in this session. Saving it failed.`
+				: `The ${provider} credential was removed from this session. Removing the saved credential failed.`,
+		);
+		this.name = "CredentialPersistenceError";
+		this.provider = provider;
+		this.operation = operation;
+	}
+}
+
 export type AuthStatus = {
 	configured: boolean;
-	source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
+	source?: "stored" | "session" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
 	label?: string;
 };
 
@@ -271,6 +287,8 @@ export class AuthStorage {
 	private dataRevision = 0;
 	private reloadRevision = 0;
 	private providerRevisions = new Map<string, number>();
+	private readonly pendingLogins = new Map<string, AbortController>();
+	private readonly unpersistedChanges = new Map<string, AuthCredential["type"]>();
 	private runtimeOverrides: Map<string, string> = new Map();
 	/** Stale (unexpired, older-format) credential fingerprint this process already tried to refresh per provider. */
 	private readonly staleRefreshAttempted = new Map<string, string>();
@@ -336,7 +354,10 @@ export class AuthStorage {
 		if (!content) {
 			return {};
 		}
-		return JSON.parse(stripBom(content)) as AuthStorageData;
+		const data: unknown = JSON.parse(stripBom(content));
+		if (!data || typeof data !== "object" || Array.isArray(data))
+			throw new Error("Credential storage must contain a JSON object.");
+		return data as AuthStorageData;
 	}
 
 	/**
@@ -349,7 +370,12 @@ export class AuthStorage {
 				content = current;
 				return { result: undefined };
 			});
-			this.data = this.parseStorageData(content);
+			const loaded = this.parseStorageData(content);
+			for (const provider of this.pendingLogins.keys()) {
+				if (!isDeepStrictEqual(this.data[provider], loaded[provider])) this.supersedeLogin(provider);
+			}
+			this.data = loaded;
+			this.unpersistedChanges.clear();
 			this.staleRefreshAttempted.clear();
 			this.refusedRefreshTokens.clear();
 			for (const [providerId, cred] of Object.entries(this.data)) {
@@ -367,12 +393,8 @@ export class AuthStorage {
 	}
 
 	private persistProviderChange(provider: string, credential: AuthCredential | undefined): boolean {
-		if (this.loadError) {
-			return false;
-		}
-
 		try {
-			this.storage.withLock((current) => {
+			const committed = this.storage.withLock((current) => {
 				const currentData = this.parseStorageData(current);
 				const merged: AuthStorageData = { ...currentData };
 				if (credential) {
@@ -380,13 +402,52 @@ export class AuthStorage {
 				} else {
 					delete merged[provider];
 				}
-				return { result: undefined, next: JSON.stringify(merged, null, 2) };
+				return { result: merged, next: JSON.stringify(merged, null, 2) };
 			});
+			if (this.loadError) {
+				this.importDurableSnapshot(committed);
+				this.reloadRevision = ++this.dataRevision;
+				this.providerRevisions.clear();
+				this.loadError = null;
+			}
 			return true;
 		} catch (error) {
 			this.recordError(error);
 			return false;
 		}
+	}
+
+	private importDurableSnapshot(data: AuthStorageData): void {
+		for (const provider of this.unpersistedChanges.keys()) {
+			if (this.data[provider]) data[provider] = this.data[provider];
+			else delete data[provider];
+		}
+		this.data = data;
+	}
+
+	private supersedeLogin(provider: string): void {
+		const pending = this.pendingLogins.get(provider);
+		if (!pending) return;
+		this.pendingLogins.delete(provider);
+		pending.abort(new Error(`The sign-in for ${provider} was superseded by a newer credential change.`));
+	}
+
+	private changeCredential(provider: string, credential: AuthCredential | undefined): boolean {
+		this.supersedeLogin(provider);
+		const type = credential?.type ?? this.data[provider]?.type ?? this.unpersistedChanges.get(provider);
+		this.staleRefreshAttempted.delete(provider);
+		if (credential?.type === "oauth" && credential.refreshRefused && credential.refresh) {
+			this.refusedRefreshTokens.set(provider, credential.refresh);
+		} else {
+			this.refusedRefreshTokens.delete(provider);
+		}
+		if (credential) this.data[provider] = credential;
+		else delete this.data[provider];
+		this.providerRevisions.set(provider, ++this.dataRevision);
+		const persisted = this.persistProviderChange(provider, credential);
+		if (persisted) this.unpersistedChanges.delete(provider);
+		else if (type) this.unpersistedChanges.set(provider, type);
+		return persisted;
 	}
 
 	/**
@@ -401,27 +462,14 @@ export class AuthStorage {
 	 * retains the existing session-only behavior and records its error for the host.
 	 */
 	set(provider: string, credential: AuthCredential): boolean {
-		const storedCredential = structuredClone(credential);
-		this.staleRefreshAttempted.delete(provider);
-		if (storedCredential.type === "oauth" && storedCredential.refreshRefused && storedCredential.refresh) {
-			this.refusedRefreshTokens.set(provider, storedCredential.refresh);
-		} else {
-			this.refusedRefreshTokens.delete(provider);
-		}
-		this.data[provider] = storedCredential;
-		this.providerRevisions.set(provider, ++this.dataRevision);
-		return this.persistProviderChange(provider, storedCredential);
+		return this.changeCredential(provider, structuredClone(credential));
 	}
 
 	/**
 	 * Remove credential for a provider.
 	 */
-	remove(provider: string): void {
-		this.staleRefreshAttempted.delete(provider);
-		this.refusedRefreshTokens.delete(provider);
-		delete this.data[provider];
-		this.providerRevisions.set(provider, ++this.dataRevision);
-		this.persistProviderChange(provider, undefined);
+	remove(provider: string): boolean {
+		return this.changeCredential(provider, undefined);
 	}
 
 	/**
@@ -429,6 +477,18 @@ export class AuthStorage {
 	 */
 	list(): string[] {
 		return Object.keys(this.data);
+	}
+
+	listForRemoval(): { id: string; authType: AuthCredential["type"]; removalPending: boolean }[] {
+		const options = Object.entries(this.data).map(([id, credential]) => ({
+			id,
+			authType: credential.type,
+			removalPending: false,
+		}));
+		for (const [id, authType] of this.unpersistedChanges) {
+			if (!this.data[id]) options.push({ id, authType, removalPending: true });
+		}
+		return options;
 	}
 
 	/**
@@ -470,7 +530,7 @@ export class AuthStorage {
 	 */
 	getAuthStatus(provider: string): AuthStatus {
 		if (this.data[provider]) {
-			return { configured: true, source: "stored" };
+			return { configured: true, source: this.unpersistedChanges.has(provider) ? "session" : "stored" };
 		}
 
 		if (this.runtimeOverrides.has(provider)) {
@@ -541,20 +601,32 @@ export class AuthStorage {
 	 * Login to an OAuth provider.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+		callbacks.signal?.throwIfAborted();
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
 		}
 
-		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
+		this.supersedeLogin(providerId);
+		const attempt = new AbortController();
+		this.pendingLogins.set(providerId, attempt);
+		const signal = callbacks.signal ? AbortSignal.any([callbacks.signal, attempt.signal]) : attempt.signal;
+		try {
+			const credentials = await provider.login({ ...callbacks, signal });
+			signal.throwIfAborted();
+			this.pendingLogins.delete(providerId);
+			if (!this.set(providerId, { type: "oauth", ...credentials }))
+				throw new CredentialPersistenceError(providerId, "save");
+		} finally {
+			if (this.pendingLogins.get(providerId) === attempt) this.pendingLogins.delete(providerId);
+		}
 	}
 
 	/**
 	 * Logout from a provider.
 	 */
 	logout(provider: string): void {
-		this.remove(provider);
+		if (!this.remove(provider)) throw new CredentialPersistenceError(provider, "remove");
 	}
 
 	private captureOAuthStorageRevision(providerId: string): OAuthStorageRevision {
@@ -589,6 +661,8 @@ export class AuthStorage {
 					return { result: undefined };
 				const currentData = this.parseStorageData(current);
 				const update = await fn(currentData);
+				if (this.captureOAuthStorageRevision(providerId).provider !== revision.provider)
+					return { result: undefined };
 				return {
 					result: { result: update.result, data: update.nextData ?? currentData },
 					next: update.nextData === undefined ? undefined : JSON.stringify(update.nextData, null, 2),
@@ -599,7 +673,7 @@ export class AuthStorage {
 		// authorize a pending request after a local logout, replacement or reload.
 		if (!committed || this.captureOAuthStorageRevision(providerId).provider !== revision.provider) return undefined;
 		if (this.dataRevision === revision.data) {
-			this.data = committed.data;
+			this.importDurableSnapshot(committed.data);
 		} else {
 			// Other providers may change independently while this backend releases its lock.
 			const credential = committed.data[providerId];
@@ -623,6 +697,7 @@ export class AuthStorage {
 		providerId: string,
 		refresh: (credential: OAuthCredential) => Promise<OAuthCredentials | undefined>,
 	): Promise<OAuthCredentials | undefined> {
+		if (this.unpersistedChanges.has(providerId)) return undefined;
 		const revision = this.captureOAuthStorageRevision(providerId);
 		let rotation: { posted: OAuthCredential; received: OAuthCredential } | undefined;
 		let discoveryFailure: { error: OAuthRefreshCompletedError; received: OAuthCredential } | undefined;
@@ -809,7 +884,16 @@ export class AuthStorage {
 	async getOAuthApiKey(providerId: string): Promise<string | undefined> {
 		const cred = this.data[providerId];
 		const provider = getOAuthProvider(providerId);
-		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
+		if (cred?.type !== "oauth" || !provider) return undefined;
+		if (this.unpersistedChanges.has(providerId)) {
+			if (Date.now() < cred.expires) return provider.getApiKey(cred);
+			throw new OAuthCredentialUnusableError(
+				providerId,
+				cred.expires,
+				"the session-only credential could not be saved",
+			);
+		}
+		if (this.loadError) return undefined;
 		if (!this.needsOAuthRefresh(providerId, provider, cred)) return provider.getApiKey(cred);
 		let staleOnlyUpgrade = false;
 		const revision = this.captureOAuthStorageRevision(providerId);

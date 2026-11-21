@@ -33,13 +33,13 @@ export interface PlanNodeDemand {
 
 /**
  * The record version this build writes. Version 2 adds optional fields (step doubts, authority and text digest, join
- * criteria, the fan-out marker); version 3 adds the input each version was stated for (`origins`). An older build reads
- * a record of a later version as unsupported, never as a malformed one.
+ * criteria, the fan-out marker); version 3 adds the input each version was stated for (`origins`). Version 4 admits longer inline step
+ * intents. Earlier builds keep newer versions as unsupported.
  */
-export const PLAN_RECORD_VERSION = 3 as const;
+export const PLAN_RECORD_VERSION = 4 as const;
 
-/** Record versions this build decodes field by field: v1 records decode unchanged; v2 and v3 add optional fields. */
-export const PLAN_DECODABLE_VERSIONS = [1, 2, 3] as const;
+/** Record versions this build decodes field by field. */
+export const PLAN_DECODABLE_VERSIONS = [1, 2, 3, 4] as const;
 
 export const PLAN_NODE_KINDS = ["work", "collect", "reduce", "merge", "vote", "race", "verify"] as const;
 export type PlanNodeKind = (typeof PLAN_NODE_KINDS)[number];
@@ -85,7 +85,7 @@ export const PLAN_LIMITS = {
 	retainedPlans: 8,
 	idChars: 24,
 	titleChars: 120,
-	intentChars: 2_000,
+	intentChars: 4_096,
 	criterionChars: 1_000,
 	/** Vote criteria per vote join. */
 	criteria: 6,

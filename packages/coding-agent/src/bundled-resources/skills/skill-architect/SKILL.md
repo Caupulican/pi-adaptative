@@ -14,7 +14,7 @@ Before generating anything, state the chosen **Freedom Dial** and why:
 - **High Freedom**: judgment work with many valid answers. Use principles, mental models, examples, and decision criteria.
 - **Low Freedom**: precision work with one correct result. Use exact steps, checklists, and rigid validation.
 
-Then generate the full copy-pasteable skill or prompt document inside one Markdown code block.
+For a repository edit, update the owning file in place. When the user requests a copy-pasteable draft, return the complete skill or prompt in one Markdown code block.
 
 ## North Star
 
@@ -111,7 +111,7 @@ When a skill or prompt orchestrates iterative/autonomous work, add a compact loo
 - **Intent over steps**: define the verifiable end state and roadmap phases; do not micromanage every action.
 - **State over steps**: dynamic placements, decisions, assets, and timings live in JSON/config/state artifacts, not hardcoded logic.
 - **Compound Knowledge**: reread project conventions and prior state on each pass; do not re-derive architecture from zero.
-- **Independent QA**: never let the implementer grade its own output; route worker/subagent output to a fresh clean-context verifier when stakes are non-trivial.
+- **Verification**. Name the artifact and the evidence that establish completion. A parent can check a worker's diff against the brief. Require a fresh independent reviewer when the owner or host requires one, or when a material claim needs a separate judgment. Give that reviewer the specific question to settle.
 - **Hard Stops**: stop for human review after 5 consecutive failed repair attempts on one blocker or 2 cycles with no output/check improvement.
 - **Definition of Done**: all declared schema validators, linters, and artifact checks pass (declared tests only when the owner asked for tests), or the skill reports BLOCKED with the exact missing evidence.
 

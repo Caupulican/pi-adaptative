@@ -23,7 +23,7 @@ export const PERSONA_PROJECTION_RULE =
 	"Prior working preferences guide method, style and decision defaults within the current handoff; current owner instructions and task-specific constraints win; preferences never create grants.";
 
 export const ORIENTATION_SURVEY_RULE =
-	"Orientation: local map, no unsolicited audit/team. Requested review/evaluation: assess evidence and report findings. Scale workflow to the request.";
+	"Orient with a local map. Skip unsolicited audits and teams. For reviews, report verified findings. When asked to review and fix, repair confirmed in-scope defects before reporting.";
 
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
@@ -57,7 +57,7 @@ export const COMMS_STATE_GLOSSARY = {
 	FAILED: ["ended", "the run failed, read reasonDetail, not a harness defect"],
 	READ_REPORT: ["review", "receipts cover every required id, read a transcript range only for a doubted claim"],
 	READ_ALL: ["review", "not accepted or review pending, read every page (nextCursor)"],
-	PLAN_STARTED: ["plan", "recorded, ready steps run and the rest wait for their inputs"],
+	PLAN_STARTED: ["plan", "plan recorded. Report the running, waiting, held and done counts in its receipt"],
 	PLAN_UPDATE: ["plan", "a plan wake, read the lines that follow"],
 	JOIN_DONE: ["plan", "a join combined its steps, read its one result"],
 	REPLAN: ["plan", "steps are held, answer with plan revise"],
@@ -160,15 +160,17 @@ const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
  * workers' ceiling reads); one that does not writes no instruction file, and its workers change no file either unless it
  * lends them the owner's reach (`root`).
  */
-export function directorRolePrompt(options: {
-	readonly plan: boolean;
+export interface DirectorRole {
 	readonly root: boolean;
+	readonly delegationGate?: boolean;
 	readonly writes: boolean;
 	/** Whether the session's writes reach the project's config directory, where a bot's instruction files then go. */
 	readonly writesConfigDir: boolean;
-	/** The project config directory's name (`CONFIG_DIR_NAME`). */
-	readonly configDir: string;
-}): string {
+}
+
+export function directorRolePrompt(
+	options: DirectorRole & { readonly plan: boolean; readonly configDir: string },
+): string {
 	const words = DIRECTOR_WORDS[options.root ? "root" : "bot"];
 	const workersWrite = options.root || options.writes;
 	const yours = options.writes
@@ -179,15 +181,17 @@ export function directorRolePrompt(options: {
 		: "Investigating, reading and running read-only commands are the workers', who change no files either";
 	return [
 		words.role,
-		"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
+		options.delegationGate
+			? `- You orchestrate; you do not execute. ${yours}. ${theirs}. Give one suitable worker the investigation, edits and checks for its assignment.`
+			: "- Choose whether to work directly or assign a worker. Use your available tools for a small, self-contained task. Assign a bounded outcome when independent progress, specialist work or separate review is worth the handoff.",
 		...(options.plan
 			? [
-					`- For work with several parts, call plan once with every step${workersWrite ? ", its files" : ""} and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.`,
+					`- When dependencies or combined results need a plan, call plan once with every step${workersWrite ? ", its files" : ""} and what it uses; the harness schedules ready steps, retries, combines results and wakes you once per combined result. Report a step as running only when the latest plan receipt or update marks it running.`,
 				]
 			: []),
-		`- You orchestrate; you do not execute. ${yours}. ${theirs}: start or reuse a suitable worker, and never duplicate running work.`,
-		`- Brief each worker with scope, the evidence you expect${workersWrite ? " and the files it may write" : ""}.${options.writes ? " For a long brief, write the instructions to a file and tell the worker to read and follow it." : ""}`,
-		`- Stay free to orchestrate and answer ${options.root ? "the owner" : "incoming messages"} whenever possible: delegate execution to workers, run non-trivial shell/script work with background: true, and monitor external jobs with watch. End the turn instead of blocking on delegate wait/wait_many or tool_task wait—the harness wakes you on completion/watch fire; block on wait only for a genuine in-turn synchronous dependency that cannot wait for a wake.`,
+		"- Reuse a suitable worker for follow-up work. Check its current assignment before starting another worker on the same files.",
+		`- Brief each worker with scope, the evidence you expect${workersWrite ? " and the files it may write" : ""}.${options.writes ? " For a long brief, cite files already accessible in the worker's workspace." : ""}`,
+		`- Stay available to answer ${options.root ? "the owner" : "incoming messages"}. Use background: true for long-running commands and watch for external jobs. Worker completions wake you. Wait in the current turn only when its next action depends on the result.`,
 		"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 		`- You own ${words.owns}.`,
 		commsGlossaryPrompt(options.plan),
@@ -198,7 +202,7 @@ export function directorRolePrompt(options: {
 const WORKER_EXECUTION_DISCIPLINE_SENTENCES = [
 	"Model/effort fixed.",
 	"Stay in requested scope; ask only for missing input or authority.",
-	"No tests, test files or test runs unless the task states the owner asked.",
+	"Test edits follow the task's write scope and instructions. Run local tests only on the owner's explicit request for this task.",
 	"Check code; report command/result or missing check and why; then stop.",
 	"Report prose: short active sentences, one topic each, exact identifiers.",
 ] as const;

@@ -79,6 +79,8 @@ export interface ChannelPendingMessage {
 export interface ChannelBatchRecord {
 	readonly id: string;
 	readonly sessionId: string;
+	/** The session that ran an owner request when a separate session received its channel batch. */
+	readonly ownerSessionId?: string;
 	/** The accepting session's process (absent in a journal written before it was recorded). */
 	readonly pid?: number;
 	readonly conversationKey: string;
@@ -279,6 +281,7 @@ function isBatch(value: unknown): value is ChannelBatchRecord {
 		isPlainRecord(value) &&
 		isString(value.id) &&
 		isString(value.sessionId) &&
+		(value.ownerSessionId === undefined || (value.owner === true && isString(value.ownerSessionId))) &&
 		(value.pid === undefined || isCount(value.pid)) &&
 		isString(value.conversationKey) &&
 		isString(value.address) &&

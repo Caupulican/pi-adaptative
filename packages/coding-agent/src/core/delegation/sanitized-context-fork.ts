@@ -1,7 +1,7 @@
 import type { AssistantMessage, TextContent, UserMessage } from "@caupulican/pi-ai";
+import { isAssistantCommentary } from "../../kernel/assistant-answer.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
-import { isAssistantCommentary } from "../message-phase.ts";
 import {
 	MAX_WORKER_CONTEXT_FORK_BYTES,
 	MAX_WORKER_CONTEXT_FORK_MESSAGES,

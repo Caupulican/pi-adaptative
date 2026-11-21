@@ -24,6 +24,7 @@ import {
 	calls,
 	createBarrier,
 	HARNESS_PROVIDER,
+	phasedReply,
 	type ScriptedReply,
 	type ScriptedRequest,
 	type ScriptStep,
@@ -585,7 +586,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 					expect(memory.text, "the remote-owner run reads the owner's records").not.toContain("Refused");
 					ownerAnswered.release();
 				},
-				reply: { content: [{ type: "text", text: ownerAnswer }] },
+				reply: phasedReply('{"activity":"checking memory"}', ownerAnswer),
 			},
 		);
 		const friendAnswered = createBarrier();
@@ -1050,6 +1051,18 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 			},
 		});
 		const session: AgentSession = created.session;
+		const ordinary = (words: string) => {
+			const opening = manager
+				.getBranch()
+				.findLast(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes(words),
+				);
+			expect(opening, "the channel request has its own persisted opening").toBeDefined();
+			return session.getDecisionLedger()!.ordinaryWork.get(session.sessionId, opening!.id);
+		};
 		await withDeadline(trace, "the bounds leg's first poll", firstPoll);
 		trace.mark("root", "telegram-bounds.polling");
 
@@ -1085,6 +1098,10 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 		api.deliver(ownerLegUpdate(3, OWNER_ID, "stop"));
 		await withDeadline(trace, "the second stop's reply reaches the chat", api.untilSent(2));
 		expect(api.texts()[1], "with no turn left, stop says so").toBe("No turn is running.");
+		expect(ordinary(stopWords), "explicit owner stop cancels only that durable request").toMatchObject({
+			status: "cancelled",
+			continuationCount: 0,
+		});
 		trace.mark("root", "telegram-bounds.stopped");
 
 		// The emergency stop engaged in this process aborts the running owner turn at once and tells the chat.
@@ -1116,6 +1133,10 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 			stopReason: "aborted",
 			requestAborted: true,
 		});
+		expect(
+			ordinary(estopWords),
+			"authority loss holds the durable request instead of leaving a resumable active lease",
+		).toMatchObject({ status: "unverified", reason: "system_bound: owner channel authority", continuationCount: 0 });
 		const requestsWhileStopped = world.provider.requests.length;
 		const liftWords = "push the release branch";
 		api.deliver(ownerLegUpdate(5, OWNER_ID, liftWords));
@@ -1132,8 +1153,12 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(4));
 		expect(api.texts()[3], "status names the refusal and the waiting message").toBe(
 			[
-				"Owner spend: $0.00 of $0.10 in 24 hours, $0.05 per turn; no new turn: the emergency stop is engaged.",
+				"Foreground owner turns and task commands have spent or reserved $0.00 of $0.10 in 24 hours ($0.05 per turn). New turns are on hold (the emergency stop is engaged).",
 				"No turn is running. 1 message(s) wait.",
+				"Task state recorded in this session",
+				"Request remains open; automatic continuation is held.",
+				"A host execution or supervision bound stopped the run.",
+				"Automatic continuations: 0/3 spent.",
 				"No held action from this chat.",
 			].join("\n"),
 		);
@@ -1233,6 +1258,11 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 		await session.agent.waitForIdle();
 		// A tool call that ran would have sent another, unscripted request.
 		const requestsAtBound = world.provider.requests.length;
+		expect(ordinary(boundWords), "the per-turn spend bound persists an ordinary-work hold").toMatchObject({
+			status: "unverified",
+			reason: "system_bound: owner channel bound",
+			continuationCount: 0,
+		});
 		trace.mark("root", "telegram-bounds.turn-bound");
 
 		// The owner pool now holds $0.06 of $0.10: another $0.05 turn does not fit, so new messages wait.
@@ -1255,8 +1285,12 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(9));
 		expect(api.texts()[8], "status shows the spend, what waits and what is held").toBe(
 			[
-				`Owner spend: $0.06 of $0.10 in 24 hours, $0.05 per turn; no new turn: ${dayRefusal}.`,
+				`Foreground owner turns and task commands have spent or reserved $0.06 of $0.10 in 24 hours ($0.05 per turn). New turns are on hold (${dayRefusal}).`,
 				"No turn is running. 2 message(s) wait.",
+				"Task state recorded in this session",
+				"Request remains open; automatic continuation is held.",
+				"A host execution or supervision bound stopped the run.",
+				"Automatic continuations: 0/3 spent.",
 				`Held: ${heldId} (git.publish).`,
 			].join("\n"),
 		);
@@ -1434,9 +1468,13 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(2));
 		expect(api.texts()[1], "status names the pool and the subscription's decision").toBe(
 			[
-				"Owner spend: $0.00 of $0.10 in 24 hours, $0.05 per turn.",
+				"Foreground owner turns and task commands have spent or reserved $0.00 of $0.10 in 24 hours ($0.05 per turn).",
 				"Subscription usage: 40% of 95% (channels.telegram.ownerQuotaMaxUsedPercent); the dollar bounds do not apply.",
 				"No turn is running. 0 message(s) wait.",
+				"Task state recorded in this session",
+				"Request remains open; automatic continuation is held.",
+				"The stop judge is unavailable.",
+				"Automatic continuations: 0/3 spent.",
 				"No held action from this chat.",
 			].join("\n"),
 		);
@@ -1515,8 +1553,50 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 		await session.agent.waitForIdle();
 		const requestsAtBound = world.provider.requests.length;
 		expect(world.provider.requests.length, "no tool call ran after the stop").toBe(requestsAtBound);
+		const quotaOpening = manager
+			.getBranch()
+			.findLast(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					JSON.stringify(entry.message.content).includes(exhaustedWords),
+			);
+		expect(quotaOpening).toBeDefined();
+		expect(
+			session.getDecisionLedger()!.ordinaryWork.get(session.sessionId, quotaOpening!.id),
+			"quota refusal persists a hold",
+		).toMatchObject({ status: "unverified", reason: "system_bound: owner channel quota" });
 		trace.mark("root", "telegram-quota.exhausted");
 
+		allowance = { kind: "room", usedPercent: 40 };
+		for (const listener of [...allowanceListeners]) listener(session.model?.provider ?? "");
+		const shutdownReached = createBarrier();
+		const shutdownWords = "Prepare the private release outline before shutdown";
+		world.provider.enqueue("root", {
+			name: "tg-quota-shutdown-held",
+			gate: createBarrier().promise,
+			check: () => shutdownReached.release(),
+			reply: { content: [{ type: "text", text: "This interrupted reply never arrives." }] },
+		});
+		api.deliver(ownerLegUpdate(5, OWNER_ID, shutdownWords));
+		await withDeadline(
+			trace,
+			"the owner request reaches the provider before channel shutdown",
+			shutdownReached.promise,
+		);
+		const surviving = session.ordinaryWork.current()!;
+		expect(surviving.status).toBe("active");
+		await withDeadline(
+			trace,
+			"channel host shutdown preserves interrupted ordinary work",
+			session.backgroundLanes.channels.stop(),
+		);
+		await withDeadline(trace, "channel shutdown's foreground abort settles", session.waitForForegroundIdle());
+		expect(session.getDecisionLedger()!.ordinaryWork.get(session.sessionId, surviving.openingEntryId)).toMatchObject({
+			status: "unverified",
+			reason: "process_interrupted",
+			continuationCount: 0,
+		});
 		expect(await world.disposeSessionInBody(session), "the quota leg's session closes").toBeUndefined();
 		expect(api.openPolls, "closing aborts the held poll").toBe(0);
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
@@ -1531,7 +1611,11 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 interface DaemonLegJournal {
 	readonly holder?: { readonly sessionId: string; readonly away?: true };
 	readonly seen: readonly { readonly d: string }[];
-	readonly batches: readonly { readonly state: string }[];
+	readonly batches: readonly {
+		readonly state: string;
+		readonly sessionId: string;
+		readonly ownerSessionId?: string;
+	}[];
 	readonly drafts: readonly { readonly address: string; readonly state: string }[];
 	readonly ownerSession?: { readonly sessionId: string; readonly file: string };
 }
@@ -1717,6 +1801,12 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		const phone = journal().ownerSession;
 		const file = phone?.file ?? "";
 		const sessionId = phone?.sessionId ?? "";
+		const [ownerBatch, friendBatch] = journal().batches;
+		expect(ownerBatch?.ownerSessionId, "the request ran in the persistent phone session").toBe(sessionId);
+		expect(ownerBatch?.sessionId, "the channel receiver has its own session").toBe(journal().holder?.sessionId);
+		expect(friendBatch?.sessionId).toBe(ownerBatch?.sessionId);
+		expect(friendBatch?.ownerSessionId).toBeUndefined();
+		expect(ownerBatch?.ownerSessionId).not.toBe(ownerBatch?.sessionId);
 		expect(world.io.existsSync(file), "the phone session's file exists").toBe(true);
 		const phoneText = String(world.io.readFileSync(file));
 		const entries = phoneText

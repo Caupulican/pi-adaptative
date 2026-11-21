@@ -27,6 +27,11 @@ async function exercise(
 	sourceStatus: "running" | "blocked",
 	refuseCredentials = false,
 ): Promise<void> {
+	// Exercise the durable long-instruction representation through one real source/successor transfer.
+	const assignment =
+		sourceStatus === "running" && !refuseCredentials
+			? `${TASK}\n${"Inspect only limits.ts.\n".repeat(850)}Verify the final value.`
+			: TASK;
 	const id = (label: string) => `handoff-${refuseCredentials ? "credential" : sourceStatus}-${label}`;
 	const delegate = (label: string, args: Record<string, unknown>) =>
 		calls(id(label), [{ id: id(label), name: "delegate", arguments: args }]);
@@ -48,7 +53,7 @@ async function exercise(
 		delegate("start", {
 			action: "start",
 			model: "worker-a",
-			instructions: TASK,
+			instructions: assignment,
 			path: "src",
 			writePaths: ["src/limits.ts"],
 		}),
@@ -202,12 +207,12 @@ async function exercise(
 								? [message.content]
 								: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
 						)
-						.find((value) => value.includes(TASK));
+						.find((value) => value.includes(assignment));
 					expect(task).toBeDefined();
 					const fence =
 						/<untrusted_content [^>]*source="previous-worker"[^>]*>([\s\S]*?)<\/untrusted_content>/i.exec(task!);
 					expect(fence, task).toBeTruthy();
-					expect(task!.slice(0, fence!.index)).toContain(TASK);
+					expect(task!.slice(0, fence!.index)).toContain(assignment);
 					if (sourceStatus === "blocked") {
 						expect(fence![1]).toContain(BLOCKED_SUMMARY);
 						expect(fence![1]).toContain(BLOCKER);
@@ -284,6 +289,7 @@ async function exercise(
 		expect(state.agents[agentId]?.status).toBe("retired");
 		expect(final.successorAgentId).not.toBe(agentId);
 		expect(successor.modelTransferSourceAttemptId).toBe(source.attemptId);
+		expect(successor.dispatch.instructions).toBe(source.dispatch.instructions);
 		expect(successor.result).toMatchObject({
 			status: "partial",
 			reasonCode: "worker_host_findings",

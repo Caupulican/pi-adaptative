@@ -2,6 +2,7 @@ import type { ToolCall } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
+import { textContentPrefix } from "../context/message-text.ts";
 import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
 import { shellWord } from "../tools/shell-command-parser.ts";
 import { ownerOriginKind, stampedHistoryStart } from "../turn-origin.ts";
@@ -34,14 +35,7 @@ export function resolveSessionUserEvidence(
 		// inputs carried an identity, in the branch's legacy prefix). A harness, routine, extension or third-party entry, and an
 		// entry whose origin names nobody after that prefix, is not the owner's statement (see `ownerOriginKind`).
 		if (ownerOriginKind(entry, index, stampedStart) === undefined) continue;
-		const content = entry.message.content;
-		const text =
-			typeof content === "string"
-				? content
-				: content
-						.filter((part) => part.type === "text")
-						.map((part) => part.text)
-						.join("\n");
+		const text = textContentPrefix(entry.message.content);
 		if (text.trim() === quote) return { verified: true, messageEntryId: entry.id };
 	}
 	return { verified: false, reason: "no user message on the active branch matches the complete quoted statement" };

@@ -47,6 +47,7 @@ import {
 	resolveEffectiveModelPricing,
 	type SentPrefixRewriteVerdict,
 } from "./compaction/early-compaction-economics.ts";
+import { AcceptedPromptPreviews } from "./context/accepted-prompt-previews.ts";
 import {
 	BrainCurator,
 	type ContextRelevanceScope,
@@ -94,7 +95,7 @@ import {
 	getContextStoreDir,
 	migrateLegacyContextStores,
 } from "./context/context-store-retention.ts";
-import { getToolResultPolicyText } from "./context/context-tool-result.ts";
+import { getToolResultArtifactId, getToolResultPolicyText } from "./context/context-tool-result.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
 import { PathAliasRuntime, type PathAliasSyncResult } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
@@ -153,23 +154,14 @@ function degradedFields(error: unknown): { errorClass: string; code: string | un
 	};
 }
 
-/** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
-function extractArtifactId(message: AgentMessage | undefined): string | undefined {
-	if (message?.role !== "toolResult") return undefined;
-	const details = (message as { details?: unknown }).details;
-	if (typeof details !== "object" || details === null) return undefined;
-	const artifactId = (details as { artifactId?: unknown }).artifactId;
-	return typeof artifactId === "string" ? artifactId : undefined;
-}
-
 /**
  * A worker conversation's own context-policy state (agent parity): the audit history and the messages it
- * was last filled for, and the lane's own tool surface. The head-only relevance curator never reaches a
+ * was last filled for, and its accepted previews. The head-only relevance curator never reaches a
  * lane, and a lane's reports are its own, never the root's inspection state.
  */
 export interface ContextPolicyLane {
 	readonly auditHistory: ContextAuditHistory;
-	toolNames: readonly string[];
+	readonly previews: AcceptedPromptPreviews;
 }
 
 interface ContextProjectionLaneState {
@@ -323,6 +315,7 @@ export class ContextPipeline {
 	private _lastTokenBudgetAnchorKey: string | undefined = undefined;
 	private readonly _sessionToolResultEntries = new SessionToolResultEntries();
 	private readonly _auditHistory = new ContextAuditHistory();
+	private _acceptedPromptPreviews = new AcceptedPromptPreviews();
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/** Each worker conversation's own context-policy lane (`planWorkerRequest`), by its agent id. */
 	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
@@ -508,6 +501,7 @@ export class ContextPipeline {
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditHistory.clear();
+		this._acceptedPromptPreviews = new AcceptedPromptPreviews();
 		this._coveredChars.fold([]);
 		this._settledGcArtifactHolders.clear();
 		this._latestCompactionScan.reset();
@@ -577,28 +571,29 @@ export class ContextPipeline {
 		};
 		let policyLane = this._workerContextPolicyLanes.get(agentId);
 		if (!policyLane) {
-			policyLane = { auditHistory: new ContextAuditHistory(), toolNames };
+			policyLane = {
+				auditHistory: new ContextAuditHistory(),
+				previews: new AcceptedPromptPreviews(),
+			};
 			this._workerContextPolicyLanes.set(agentId, policyLane);
 		}
-		policyLane.toolNames = toolNames;
 		const contextPolicy = policyLane;
+		const canRetrieve = toolNames.includes("artifact_retrieve");
 		return new ProviderRequestContextController({
 			runContextAudit: (history, transients) => this.runContextAudit(history, transients, contextPolicy),
 			runPromptPolicyPlanning: (report) => this.runPromptPolicyPlanning(report, contextPolicy),
 			previewContextProjection: (history) => this.previewContextProjection(history, contextPolicy),
 			commitContextProjection: (projection) => this.commitContextProjection(projection, contextPolicy),
-			runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport, alignedPolicyHistory) =>
+			runPromptEnforcement: (history, report, context) =>
 				this.runPromptEnforcement(history, report, contextPolicy, {
-					sourceMessages,
-					frozenBelow,
-					gcReport,
-					alignedPolicyHistory,
+					...context,
+					canRetrieve: () => canRetrieve,
 				}),
 			applyContextGc: (history, writePayloads, frozenBelow) =>
 				this.applyContextGc(history, writePayloads, frozenBelow, lane),
 			applyPathAliases: (history) => this.applyPathAliases(history),
 			getEdgeGrants,
-		}).plan(messages, sentPrefixCount, signal, wire);
+		}).plan(messages, sentPrefixCount, signal, wire, lane.custody.lane);
 	}
 
 	/** The session is disposed: no worker conversation plans again, so their context-policy lanes go. */
@@ -751,23 +746,45 @@ export class ContextPipeline {
 		lane?: ContextPolicyLane,
 		context?: PromptEnforcementContext,
 	): EnforcePromptPolicyResult {
+		const history = lane?.previews ?? this._acceptedPromptPreviews;
+		let scope = "";
 		try {
 			const persistedSettings = this.deps.getSettingsManager().getContextPromptEnforcementSettings();
+			if (context && (persistedSettings.enabled || history.started)) {
+				const model = this.deps.getModel();
+				scope = JSON.stringify([
+					this.deps.getSessionManager().getSessionId(),
+					context.modelScope ?? (model && cacheLaneKey(model.api, model.provider, model.id)),
+				]);
+			}
+			const previews = scope ? history.begin(scope) : undefined;
 			// Relevance curation is the head's: a lane's enforcement reads only its own facts.
 			const curationEnabled = !lane && this.deps.getSettingsManager().getContextCurationSettings().enabled;
-			const toolNames = lane ? lane.toolNames : this.deps.getActiveToolNames();
+			const canRetrieve =
+				context?.canRetrieve ?? (() => this.deps.getActiveToolNames().includes("artifact_retrieve"));
 			const settings = {
 				...persistedSettings,
 				// Runtime fact, never assumed: artifact_retrieve is a companion affordance
 				// (auto-activated alongside grep/find), not a default/global tool, so active
 				// tools can differ turn to turn -- see context-prompt-enforcement.ts's doc
 				// comment on why this is checked separately from hasAvailableRetrievalPath.
-				retrievalToolAvailable: toolNames.includes("artifact_retrieve"),
+				retrievalToolAvailable: canRetrieve(),
 				brainRelevance: curationEnabled
 					? (scope: ContextRelevanceScope) => this._brainCurator.getRelevance(scope)
 					: undefined,
 			};
-			const result = enforcePromptPolicy(messages, shadowReport, settings, context);
+			const result = enforcePromptPolicy(
+				messages,
+				shadowReport,
+				settings,
+				context && {
+					...context,
+					previews,
+					artifactAvailable: (id) => this._toolArtifactStore?.has(id) === true,
+					canRetrieve: () =>
+						this.deps.getSettingsManager().getContextPromptEnforcementSettings().enabled && canRetrieve(),
+				},
+			);
 			if (!lane) this._latestPromptEnforcementReport = result.report;
 			return result;
 		} catch (error) {
@@ -776,7 +793,16 @@ export class ContextPipeline {
 			);
 			const report: PromptEnforcementReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
 			if (!lane) this._latestPromptEnforcementReport = report;
-			return { messages, transientMessages: [], report, isCurrent: () => true };
+			// Discard any partial selections made before the failure. Acceptance publishes the raw view.
+			const raw = context && history.started ? history.begin(scope) : undefined;
+			return {
+				messages,
+				transientMessages: [],
+				report,
+				isCurrent: raw?.isCurrent ?? (() => true),
+				isDispatchCurrent: raw?.isCurrent,
+				acceptProviderHistory: raw?.accept,
+			};
 		}
 	}
 
@@ -1231,7 +1257,8 @@ export class ContextPipeline {
 		let releasedAny = false;
 		for (const record of report.records) {
 			if (!PACKED_TOOL_OUTPUT_TOOLS.has(record.toolName)) continue;
-			const artifactId = extractArtifactId(messages[record.messageIndex]);
+			const message = messages[record.messageIndex];
+			const artifactId = message?.role === "toolResult" ? getToolResultArtifactId(message.details) : undefined;
 			if (!artifactId) continue;
 			const settledKey = `${artifactId}\0${record.toolCallId}`;
 			if (this._settledGcArtifactHolders.has(settledKey)) continue;

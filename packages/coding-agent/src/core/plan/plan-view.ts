@@ -32,6 +32,7 @@ export interface PlanNodeView {
 	readonly kind: PlanNodeKind;
 	readonly intent: string;
 	readonly state: PlanNodeState;
+	readonly accepted: boolean;
 	readonly outcomeStatus?: OutcomeStatus;
 	readonly nextAction?: NextAction["kind"];
 	readonly held?: PlanNodeHold;
@@ -62,6 +63,7 @@ export interface PlanNodeView {
 export interface PlanCounts {
 	readonly total: number;
 	readonly settled: number;
+	readonly accepted: number;
 	readonly running: number;
 	readonly waiting: number;
 	readonly held: number;
@@ -94,7 +96,10 @@ export function planNodeOutcome(
 
 /** A node is accepted when the outcome that settles it asks for no further action. */
 export function isPlanNodeAccepted(projection: PlanProjection, plan: PlanRuntimeState, node: PlanNodeSpec): boolean {
-	const outcome = planNodeOutcome(projection, plan, node.id);
+	return acceptedPlanOutcome(plan, node, planNodeOutcome(projection, plan, node.id));
+}
+
+function acceptedPlanOutcome(plan: PlanRuntimeState, node: PlanNodeSpec, outcome: Outcome | undefined): boolean {
 	if (!outcome) return false;
 	if (node.kind === "work") return plan.nodes[node.id]?.settled !== undefined && outcome.nextAction.kind === "accept";
 	return outcome.status === "succeeded" || outcome.status === "partial";
@@ -106,8 +111,7 @@ function releasedState(projection: PlanProjection, taskId: string): PlanNodeStat
 	if (task.task.status === "cancelled") return "cancelled";
 	const attemptId = task.attemptIds[task.attemptIds.length - 1];
 	const status = attemptId ? projection.attempts[attemptId]?.status : undefined;
-	if (status === undefined || status === "queued") return "admitted";
-	return "running";
+	return status === "running" ? "running" : "admitted";
 }
 
 function nodeState(
@@ -164,6 +168,7 @@ function nodeView(
 ): PlanNodeView {
 	const runtime = plan.nodes[node.id];
 	const outcome = planNodeOutcome(projection, plan, node.id);
+	const state = nodeState(projection, plan, record, node);
 	const placement = runtime?.release?.placement;
 	const machineName = placement?.kind === "remote_machine" ? names?.get(placement.machineId) : undefined;
 	const pinnedMachine = pinnedMachineOf(node);
@@ -172,7 +177,8 @@ function nodeView(
 		id: node.id,
 		kind: node.kind,
 		intent: node.intent,
-		state: nodeState(projection, plan, record, node),
+		state,
+		accepted: state === "settled" && acceptedPlanOutcome(plan, node, outcome),
 		...(outcome ? { outcomeStatus: outcome.status, nextAction: outcome.nextAction.kind } : {}),
 		...(runtime?.held ? { held: runtime.held } : {}),
 		...(runtime?.release
@@ -207,11 +213,17 @@ export function planCounts(nodes: readonly PlanNodeView[]): PlanCounts {
 	return {
 		total: nodes.length,
 		settled: count(["settled", "cancelled"]),
+		accepted: nodes.filter((node) => node.accepted).length,
 		running: count(["running"]),
 		waiting: count(["planned", "ready", "admitted"]),
 		held: count(["held"]),
 		heldOnOwner: nodes.filter((node) => node.held?.reason === "owner").length,
 	};
+}
+
+/** Model-facing counts for both the tool receipt and the next plan update. */
+export function planProgressText(counts: PlanCounts): string {
+	return `${counts.running} running, ${counts.waiting} waiting, ${counts.held} held, ${counts.accepted} of ${counts.total} done.`;
 }
 
 /** The brief a plan step was stated with, or undefined (no step named, no brief, a record from a newer build). */

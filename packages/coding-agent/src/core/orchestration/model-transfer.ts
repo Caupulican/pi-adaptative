@@ -1,5 +1,6 @@
 /** Durable commands that hand the current task to a separately bound worker. */
 import { isDeepStrictEqual } from "node:util";
+import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { conversationTurnOrigin, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
 import { dispatchIdentifier } from "./codec-primitives.ts";
@@ -45,6 +46,17 @@ export interface ModelTransferRecord extends ModelTransferInput {
 	readonly reasonCode?: string;
 	/** The successor host bound its checkout and accepted its credentials under the exact live lease. */
 	readonly successorStarted?: true;
+}
+
+export function modelTransferSuccessorPayload(
+	transfer: ModelTransferRecord,
+	dispatch: JsonValue | undefined,
+): JsonObject {
+	return {
+		attemptId: transfer.successorAttemptId,
+		taskId: transfer.taskId,
+		dispatch: dispatch ?? null,
+	};
 }
 
 export function modelTransferIsPending(transfer: ModelTransferRecord | undefined): boolean {

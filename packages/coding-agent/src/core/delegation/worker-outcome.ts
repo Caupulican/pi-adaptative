@@ -126,6 +126,10 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	worker_dispatch_dropped: "capacity_unavailable",
 	worker_dispatch_queue_full: "capacity_unavailable",
 	worker_interrupted: "interrupted",
+	worker_supervision_rerouted: "interrupted",
+	// These human-readable cancellation reasons were persisted before supervision wrote a stable code.
+	"Worker rerouted · progress stalled after steering": "interrupted",
+	"Worker rerouted · repeated broad validation with no new implementation": "interrupted",
 	worker_process_interrupted: "interrupted",
 	worker_cancelled: "interrupted",
 	agent_interrupted: "interrupted",

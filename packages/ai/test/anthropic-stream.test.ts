@@ -1,5 +1,8 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
+import { registerBuiltInApiProviders } from "../src/providers/register-builtins.ts";
+import { getProviderResponseAccount, ProviderResponseAccountScope, stream } from "../src/stream.ts";
 import type { Model } from "../src/types.ts";
 
 const model: Model<"anthropic-messages"> = {
@@ -22,6 +25,50 @@ function frame(event: { type: string }): string {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Anthropic wire stream", () => {
+	it.each(["adapter", "caller"] as const)(
+		"checks refusal provenance when the %s owns the SDK client",
+		async (owner) => {
+			registerBuiltInApiProviders();
+			const sent: (string | null)[] = [];
+			const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+				const request = new Request(input, init);
+				expect(new URL(request.url).origin).toBe(model.baseUrl);
+				sent.push(request.headers.get("x-api-key"));
+				return Response.json(
+					{ type: "error", error: { type: "invalid_request_error", message: "model_not_supported" } },
+					{ status: 400 },
+				);
+			};
+			vi.stubGlobal("fetch", fetch);
+			vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", "");
+			try {
+				const scope = new ProviderResponseAccountScope();
+				const client =
+					owner === "caller"
+						? new Anthropic({ apiKey: "fixture-key-b", authToken: null, baseURL: model.baseUrl, fetch })
+						: undefined;
+				const response = stream(
+					model,
+					{ messages: [] },
+					scope.bind({
+						apiKey: "fixture-key-a",
+						providerAccountKey: "anthropic#account-a",
+						maxRetries: 0,
+						client,
+					}),
+				);
+				const message = scope.project(await response.result());
+				expect(sent).toEqual([owner === "caller" ? "fixture-key-b" : "fixture-key-a"]);
+				expect(message.errorMessage).toContain("model_not_supported");
+				expect(getProviderResponseAccount(message)?.accountKey).toBe(
+					owner === "caller" ? undefined : "anthropic#account-a",
+				);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		},
+	);
+
 	it("publishes seeded content and replaces the signature", async () => {
 		const events = [
 			start,

@@ -13,8 +13,8 @@ import type {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { createOpenAIClient } from "./openai-client.ts";
+import { resolveOpenAIResponsesBaseUrl } from "./openai-endpoints.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyOpenAIServiceTierPricing,
@@ -125,7 +125,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const compat = getCompat(model);
 			let client = createOpenAIClient(model, apiKey, {
-				baseUrl: resolveBaseUrl(model),
+				baseUrl: resolveOpenAIResponsesBaseUrl(model),
 				context,
 				callerHeaders: options?.headers,
 				session: cacheSessionId
@@ -133,7 +133,17 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 					: undefined,
 			});
 			const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
-			const params = await applyProviderPayloadHook(buildParams(model, context, options), model, options?.onPayload);
+			const params = await applyProviderPayloadHook(
+				buildParams(model, context, options),
+				model,
+				options?.onPayload,
+				{
+					message: output,
+					accountScope: options?.providerAccountKey,
+					cacheControlFormat: "openai",
+					supportsLongCacheRetention: compat.supportsLongCacheRetention,
+				},
+			);
 			const requestOptions = createRetryFreeRequestOptions(
 				options,
 				model.provider === "fugu" ? FUGU_DEFAULT_TIMEOUT_MS : undefined,
@@ -149,7 +159,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				if (replacementKey) {
 					apiKey = replacementKey;
 					client = createOpenAIClient(model, apiKey, {
-						baseUrl: resolveBaseUrl(model),
+						baseUrl: resolveOpenAIResponsesBaseUrl(model),
 						context,
 						callerHeaders: options?.headers,
 						session: cacheSessionId
@@ -203,20 +213,6 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 		reasoningEffort,
 	} satisfies OpenAIResponsesOptions);
 };
-
-function resolveFuguBaseUrl(): string | undefined {
-	if (typeof process === "undefined") return undefined;
-	const value = process.env.FUGU_BASE_URL?.trim();
-	if (!value) return undefined;
-	const baseUrl = value.replace(/\/+$/, "");
-	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
-}
-
-function resolveBaseUrl(model: Model<"openai-responses">): string {
-	if (isCloudflareProvider(model.provider)) return resolveCloudflareBaseUrl(model);
-	if (model.provider === "fugu") return resolveFuguBaseUrl() ?? model.baseUrl;
-	return model.baseUrl;
-}
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);

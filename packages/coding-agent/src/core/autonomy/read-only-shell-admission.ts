@@ -5,6 +5,7 @@
  * same command gets the same verdict and the same refusal wording wherever it runs, in every execution mode.
  */
 
+import { AgentToolPolicyDeniedError } from "../../kernel/types.ts";
 import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
@@ -87,11 +88,7 @@ export function wrapToolWithReadOnlyShell<T extends EnvelopeScopedTool>(
 				sessionReadOnlyShellVoice(lane.network),
 			);
 			if (reason === undefined) return executor.execute(...args) as ReturnType<Execute>;
-			return Promise.resolve({
-				content: [{ type: "text", text: `${reason} The tool was NOT run.` }],
-				details: { outcome: "read_only_shell_refused", tool: tool.name },
-				isError: true,
-			}) as ReturnType<Execute>;
+			throw new AgentToolPolicyDeniedError(`${reason} The tool was NOT run.`);
 		};
 		return { ...executor, execute } as T;
 	});

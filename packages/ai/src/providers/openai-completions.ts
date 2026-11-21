@@ -45,7 +45,7 @@ import {
 } from "../utils/tool-repair/text-protocol-history.ts";
 import { createOpenAIClient } from "./openai-client.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { detectOpenRouterCacheControlFormat } from "./openrouter-cache.ts";
+import { detectOpenRouterCacheControlFormat, resolveCachePolicyFormat } from "./openrouter-cache.ts";
 import {
 	applyProviderPayloadHook,
 	beginAssistantResponseStream,
@@ -53,6 +53,7 @@ import {
 	createAssistantMessage,
 	createProviderRetryOptions,
 	createRetryFreeRequestOptions,
+	getAnthropicCacheControl,
 	resolveCacheRetention,
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
@@ -194,6 +195,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				buildParams(model, context, options, compat, cacheRetention),
 				model,
 				options?.onPayload,
+				{
+					message: output,
+					accountScope: options?.providerAccountKey,
+					cacheControlFormat: resolveCachePolicyFormat(model.provider, model.id, compat.cacheControlFormat),
+					supportsLongCacheRetention: compat.supportsLongCacheRetention,
+				},
 			);
 			const requestOptions = createRetryFreeRequestOptions(options);
 			const result = await retryProviderRequest(
@@ -550,7 +557,7 @@ function buildParams(
 ) {
 	const toolNameMap = createToolNameMap(context.tools ?? []);
 	const messages = convertMessages(model, context, compat, toolNameMap, options);
-	const cacheControl = getCompatCacheControl(compat, cacheRetention);
+	const cacheControl = getAnthropicCacheControl(cacheRetention, compat);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
@@ -697,18 +704,6 @@ function buildParams(
 	}
 
 	return params;
-}
-
-function getCompatCacheControl(
-	compat: ResolvedOpenAICompletionsCompat,
-	cacheRetention: CacheRetention,
-): OpenAICompatCacheControl | undefined {
-	if (compat.cacheControlFormat !== "anthropic" || cacheRetention === "none") {
-		return undefined;
-	}
-
-	const ttl = cacheRetention === "long" && compat.supportsLongCacheRetention ? "1h" : undefined;
-	return { type: "ephemeral", ...(ttl ? { ttl } : {}) };
 }
 
 function applyAnthropicCacheControl(

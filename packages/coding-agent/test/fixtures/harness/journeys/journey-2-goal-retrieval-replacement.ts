@@ -106,7 +106,11 @@ export async function verifyGoalRetrievalReplacement(
 		});
 		// An actual root preflight creates the retrieve directive; the route checkpoint's
 		// missing_work_class catalog does not offer retrieve as a semantic choice.
-		world.systemOne.enterPhase(`${label}-root-bootstrap`, judgments.bootstrap);
+		world.systemOne.enterPhase(`${label}-root-bootstrap`, {
+			...judgments.bootstrap,
+			missing_work_class: { kind: "choice", choice: "investigate", confidence: 0.55 },
+			evidence_sufficient: { kind: "noul", probability: 0.97 },
+		});
 		const bootstrapRequests = world.provider.requests.length;
 		world.provider.enqueue(
 			"root",
@@ -119,7 +123,10 @@ export async function verifyGoalRetrievalReplacement(
 		);
 		expect(bootstrap.submitted, `${label}: bootstrap reaches the real root`).toBe(true);
 		await withDeadline(world.trace, `${label}: bootstrap root released`, session.waitForForegroundIdle());
-		expect(session.objectiveExecutionController?.getLastRoute()?.route).toBe("implement");
+		expect(session.objectiveExecutionController?.getLastRoute()).toMatchObject({
+			route: "implement",
+			reason_codes: ["work_method_unsettled"],
+		});
 		expect(world.provider.requests.slice(bootstrapRequests).map((request) => request.model.id)).toEqual(["root"]);
 		for (let index = 0; index < 2; index++) {
 			world.systemOne.enterPhase(`${label}-root-learning-${index}`, judgments.later);

@@ -9,6 +9,7 @@ export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
 /** Kinds that guide every request until changed, as opposed to facts about work in progress or the past. */
 const STANDING_KNOWLEDGE_KINDS: ReadonlySet<KnowledgeKind> = new Set(["profile", "behavior", "procedure", "taste"]);
 export const isStandingKnowledgeKind = (kind: KnowledgeKind): boolean => STANDING_KNOWLEDGE_KINDS.has(kind);
+export const isReportingKnowledgeKind = (kind: KnowledgeKind): boolean => kind === "behavior" || kind === "taste";
 export type KnowledgeBasis = "explicit" | "inferred";
 
 /** Empty project/role names mean global applicability, never an implicit wildcard audience. */

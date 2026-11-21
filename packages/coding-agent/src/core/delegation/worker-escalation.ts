@@ -26,6 +26,7 @@ import type {
 	TaskRuntimeProjection,
 	TaskRuntimeState,
 } from "../orchestration/task-runtime-state.ts";
+import { MAX_WORKER_BRIEF_CHARS } from "../orchestration/worker-brief-attachment.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { isAdaptiveProfileId } from "./worker-authority-resolver.ts";
@@ -35,7 +36,7 @@ import type { WorkerLaneIsolation } from "./worker-lane-isolation.ts";
 import type { NextAction, Outcome } from "./worker-outcome-contract.ts";
 
 /** At most 16 KiB of instructions per fleet dispatch. */
-const MAX_DISPATCH_INSTRUCTIONS_CHARS = 16 * 1024;
+
 const MAX_LISTED_REQUIREMENT_CHARS = 400;
 const LOCAL_PLACEMENT: Placement = { kind: "local_worker" };
 
@@ -523,7 +524,7 @@ export class WorkerEscalation {
 			"",
 			"Original task:",
 		].join("\n");
-		const room = MAX_DISPATCH_INSTRUCTIONS_CHARS - header.length - 1;
-		return `${header}\n${room > 0 ? boundedText(original, room) : ""}`;
+		// The original assignment stays intact even when it occupies the entire dispatch budget.
+		return header.length + original.length + 1 <= MAX_WORKER_BRIEF_CHARS ? `${header}\n${original}` : original;
 	}
 }

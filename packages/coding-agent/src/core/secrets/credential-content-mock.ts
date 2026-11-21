@@ -1,4 +1,4 @@
-import { redactKnownSecrets } from "../security/secret-text.ts";
+import { redactKnownSecrets, redactQuotedPasswords } from "../security/secret-text.ts";
 import type { SourceDialect } from "../security/source-scanner.ts";
 import { createSourceBlockMask } from "./source-mask.ts";
 
@@ -19,11 +19,9 @@ const MAX_MOCKED_LINES = 200_000;
 /** The line-number prefix a numbered output puts before a line: none, `N: ` or `N` and a tab. */
 export const LINE_PREFIX_RE = /^(\s*(?:\d+[:\t]\s?)?)/u;
 const DOTENV_ASSIGNMENT_RE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*[=:]\s*)(\S.*)$/u;
+const PASSWORD_KEYS = new Set(["password", "passwd", "passphrase", "pwd"]);
 const SECRET_KEY_WORDS = new Set([
-	"password",
-	"passwd",
-	"passphrase",
-	"pwd",
+	...PASSWORD_KEYS,
 	"secret",
 	"secrets",
 	"token",
@@ -147,10 +145,17 @@ function maskLines(text: string, mask: LineMask): string {
 const QUOTED_PAIR_RE = /"([A-Za-z_][A-Za-z0-9_.-]*)"(\s*:\s*)"(?:\\.|[^"\\\r\n])*(?:"|$)/gu;
 
 /** Quoted JSON pairs whose key names a secret, anywhere in the text (a pair may span a line break before its value). */
-function mockQuotedSecretFields(text: string): string {
+function mockQuotedSecretFields(text: string, matchesKey = isCredentialSecretKey): string {
 	return text.replace(QUOTED_PAIR_RE, (match, key: string, separator: string) =>
-		isCredentialSecretKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
+		matchesKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
 	);
+}
+
+/** Stored results already carry their tool-specific mask. Replay also covers password fields in older transcripts. */
+export function maskHistoricalToolPasswords(text: string, detailPath?: readonly (string | number)[]): string {
+	const key = detailPath?.find((part) => typeof part === "string" && PASSWORD_KEYS.has(part.toLowerCase()));
+	if (typeof key === "string") return mockedValue(key);
+	return redactQuotedPasswords(mockQuotedSecretFields(text, (key) => PASSWORD_KEYS.has(key.toLowerCase())));
 }
 
 /**
