@@ -248,7 +248,7 @@ import { validateOrchestrationProfile } from "./orchestration/profile-registry.t
 import { isMeteredSpend } from "./orchestration/risk-budget.ts";
 import { claimSessionBundleLease } from "./orchestration/session-bundle-lifecycle.ts";
 import { type OrdinaryWorkAbortOptions, OrdinaryWorkController } from "./ordinary-work-controller.ts";
-import { hasPendingOrdinaryWorkResume, scheduleOrdinaryWorkResume } from "./ordinary-work-resume.ts";
+import { hasPendingOrdinaryWorkResume, resumeRecoveredOrdinaryWork } from "./ordinary-work-resume.ts";
 import { OwnerChannelSession } from "./owner-channel-session.ts";
 import type { ReturnBriefController } from "./owner-decisions/return-brief-controller.ts";
 import { OwnerInputLedger, type OwnerInputOutcome } from "./owner-input-ledger.ts";
@@ -760,7 +760,7 @@ export class AgentSession {
 			reportingRequirements: () => this._memory.reportingRequirements(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			isEnabled: () => !this._disposed && this._caps.ownsWorkLifecycle,
-			hasActiveGoal: () => this._goals.getOwnershipGoalId() !== undefined,
+			ownershipGoalId: () => this._goals.getOwnershipGoalId(),
 			mayReview: () =>
 				!this.runtimeUpdates.shouldStopAfterTurn() &&
 				!this.deliverablePendingMessageCount &&
@@ -1180,6 +1180,7 @@ export class AgentSession {
 			synchronizeGoalState: (state) => {
 				this._unsettledLadder.noteGoalState(state); // owner items a paused goal held post on resume; never throws
 				this._backgroundLanes.synchronizeGoalState(state);
+				this.ordinaryWork.settleGoalHandoff(state);
 				this._emit({ type: "goal_state_changed", state });
 			},
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
@@ -4750,15 +4751,10 @@ export class AgentSession {
 
 	/** Restored run modes call this after extensions, subscriptions and any runtime-update recovery are ready. */
 	restoreOrdinaryWorkAfterResume(): void {
-		if (!this.ordinaryWork.mayReview()) return;
-		const recovered = this.ordinaryWork.recover();
-		if (recovered)
-			scheduleOrdinaryWorkResume(this.ordinaryWork, this._foregroundRecovery, this._unsettledLadder.judges, {
-				expected: recovered.record,
-				manager: this.sessionManager,
-				mayDispatch: () => this.ordinaryWork.mayReview(),
-				warn: (message) => this._emit({ type: "warning", message }),
-			});
+		resumeRecoveredOrdinaryWork(this.ordinaryWork, this._foregroundRecovery, this._unsettledLadder.judges, {
+			manager: this.sessionManager,
+			warn: (message) => this._emit({ type: "warning", message }),
+		});
 	}
 
 	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly usageWait?: RestoredUsageWait } {

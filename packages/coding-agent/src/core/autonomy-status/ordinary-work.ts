@@ -28,6 +28,8 @@ const REASONS = [
 	"stop_review_in_progress",
 	"process_interrupted",
 	"explicit_goal_owns_request",
+	"goal_completed",
+	"goal_cancelled",
 	"system_bound",
 ] as const;
 export type OrdinaryWorkStatusReason = (typeof REASONS)[number];
@@ -43,7 +45,11 @@ export type OrdinaryWorkStatusSnapshot =
 
 export function ordinaryWorkStatusSnapshot(record: OrdinaryWorkRecord | undefined): OrdinaryWorkStatusSnapshot {
 	if (!record) return { state: "none" };
-	const reason = record.reason?.startsWith("system_bound:") ? "system_bound" : record.reason;
+	const reason = record.reason?.startsWith("system_bound:")
+		? "system_bound"
+		: record.reason?.startsWith("explicit_goal_owns_request:")
+			? "explicit_goal_owns_request"
+			: record.reason;
 	const safeReason =
 		REASONS.find((known) => known === reason) ?? (record.status === "unverified" ? "unverified" : undefined);
 	return {

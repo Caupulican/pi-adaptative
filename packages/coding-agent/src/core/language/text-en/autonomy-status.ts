@@ -220,6 +220,8 @@ export const AUTONOMY_STATUS = {
 			stop_review_in_progress: "A stop review was started; its outcome is not yet recorded.",
 			process_interrupted: "The process was interrupted; recorded receipts need reconciliation.",
 			explicit_goal_owns_request: "An explicit goal now owns this work.",
+			goal_completed: "The explicit goal that took over this work completed it.",
+			goal_cancelled: "The explicit goal that took over this work was cancelled.",
 			system_bound: "A host execution or supervision bound stopped the run.",
 		},
 		budget: (used: number, limit: number) => `Automatic continuations: ${used}/${limit} spent.`,

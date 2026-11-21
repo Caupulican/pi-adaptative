@@ -54,13 +54,19 @@ export interface OrdinaryWorkEvidence {
 	readonly unavailableAttachmentEntryIds: readonly string[];
 }
 
+/** The reason a request handed to explicit goal `goalId` waits with; the goal's end settles exactly these. */
+function goalHandoffReason(goalId: string): string {
+	return `explicit_goal_owns_request:${goalId}`;
+}
+
 interface OrdinaryWorkControllerDeps {
 	reportingRequirements?(): OrdinaryReportingRequirements;
 	getSessionManager(): SessionManager;
 	getStore(): OrdinaryWorkStore | undefined;
 	peekStore?(): OrdinaryWorkStore | undefined;
 	isEnabled(): boolean;
-	hasActiveGoal?(): boolean;
+	/** The goal that owns work started now (an active explicit goal), which takes over the ordinary request. */
+	ownershipGoalId?(): string | undefined;
 	/** Read only after `isEnabled` allowed the review, so it need not repeat that gate. */
 	mayReview?(): boolean;
 	warn?(message: string): void;
@@ -94,7 +100,7 @@ export class OrdinaryWorkController {
 	}
 
 	mayReview(): boolean {
-		return this.deps.isEnabled() && !this.deps.hasActiveGoal?.() && this.deps.mayReview?.() !== false;
+		return this.deps.isEnabled() && !this.deps.ownershipGoalId?.() && this.deps.mayReview?.() !== false;
 	}
 
 	current(): OrdinaryWorkRecord | undefined {
@@ -184,6 +190,39 @@ export class OrdinaryWorkController {
 		return undefined;
 	}
 
+	/**
+	 * The goal that took over a request settles it when the goal ends: a completed goal fulfills it (the goal's own
+	 * completion gate verified the work), a cancelled one cancels it. A goal stopped by a block, a limit or a pause keeps
+	 * it, since that goal resumes on its own.
+	 */
+	settleGoalHandoff(goal: { readonly goalId: string; readonly status: string }): void {
+		if (goal.status !== "completed" && goal.status !== "cancelled") return;
+		const manager = this.deps.getSessionManager();
+		if (!this.deps.isEnabled() || !manager.isPersisted()) return;
+		const completed = goal.status === "completed";
+		const reason = goalHandoffReason(goal.goalId);
+		try {
+			const store = this.readStore();
+			if (!store) return;
+			for (const record of store.forSession(manager.getSessionId())) {
+				if (record.status !== "waiting" || record.reason !== reason) continue;
+				store.checkpoint(
+					record,
+					{
+						status: completed ? "fulfilled" : "cancelled",
+						frontierEntryId: record.frontierEntryId,
+						reason: completed ? "goal_completed" : "goal_cancelled",
+					},
+					this.now(),
+				);
+			}
+		} catch (error) {
+			this.deps.warn?.(
+				`The goal ended, but the request it took over could not be settled: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
 	private readCurrent(store = this.readStore(), includeTerminal = false): OrdinaryWorkRecord | undefined {
 		const manager = this.deps.getSessionManager();
 		if (!store) return undefined;
@@ -268,9 +307,12 @@ export class OrdinaryWorkController {
 		const current = this.current();
 		if (this.storageReadFailed) return undefined;
 		const pending = this.pendingOpening;
-		if (this.deps.hasActiveGoal?.()) {
+		const goalId = this.deps.ownershipGoalId?.();
+		if (goalId !== undefined) {
 			this.pendingOpening = undefined;
-			if (current) this.checkpoint(current, { status: "waiting", reason: "explicit_goal_owns_request" });
+			// Only a request still working is handed over; one already settled or held keeps its own outcome.
+			if (current?.status === "active" || (current?.status === "waiting" && current.reason === "waiting"))
+				this.checkpoint(current, { status: "waiting", reason: goalHandoffReason(goalId) });
 			return undefined;
 		}
 		if (!pending) return current?.status === "active" && current.leaseId === this.lease.id ? current : undefined;

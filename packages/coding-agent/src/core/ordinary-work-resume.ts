@@ -71,3 +71,25 @@ export function scheduleOrdinaryWorkResume(
 		})
 		.catch((error: unknown) => options.warn(`Ordinary work recovery cleanup failed: ${String(error)}`));
 }
+
+/**
+ * Review the ordinary work a restored session recovered (an interrupted request, or one whose launched work reported
+ * while it waited), once, under foreground ownership. Restored run modes call it after extensions, subscriptions and
+ * any runtime-update recovery are ready.
+ */
+export function resumeRecoveredOrdinaryWork(
+	work: OrdinaryWorkController,
+	foreground: ForegroundRecoveryController,
+	judges: Pick<SettlementJudges, "decideOrdinaryWorkStop">,
+	options: { readonly manager: SessionManager; warn(message: string): void },
+): void {
+	if (!work.mayReview()) return;
+	const recovered = work.recover();
+	if (recovered)
+		scheduleOrdinaryWorkResume(work, foreground, judges, {
+			expected: recovered.record,
+			manager: options.manager,
+			mayDispatch: () => work.mayReview(),
+			warn: options.warn,
+		});
+}

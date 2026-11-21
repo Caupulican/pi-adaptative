@@ -283,6 +283,8 @@ export const AUTONOMY_STATUS = {
 			stop_review_in_progress: "Uma revisão da parada foi iniciada; seu resultado ainda não foi registrado.",
 			process_interrupted: "O processo foi interrompido; os recibos registrados precisam ser reconciliados.",
 			explicit_goal_owns_request: "Um objetivo explícito agora é responsável por este trabalho.",
+			goal_completed: "O objetivo explícito que assumiu este trabalho o concluiu.",
+			goal_cancelled: "O objetivo explícito que assumiu este trabalho foi cancelado.",
 			system_bound: "Um limite de execução ou supervisão do host interrompeu a rodada.",
 		},
 		budget: (used: number, limit: number) => `Continuações automáticas: ${used}/${limit} utilizadas.`,

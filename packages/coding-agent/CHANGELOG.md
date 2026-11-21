@@ -23,6 +23,7 @@
 - A request no longer counts as finished while a worker it started is still running. The request waits until that worker ends, including across a model handoff or restart, and is reviewed when the result arrives.
 - A phone request that was answered with an acknowledgement while its worker ran now sends its final answer to the same chat when the request settles. The answer uses the usual reply and draft rules, and it is never sent twice.
 - A message sent while a request waits on its worker joins that request instead of leaving it waiting forever. The worker's result settles it, and the final answer goes to the chat of the latest message.
+- A request taken over by an explicit goal settles when the goal completes or is cancelled, instead of waiting forever. A phone request that started the goal then receives the goal's final answer.
 
 ## [0.104.72] - 2026-11-20
 
