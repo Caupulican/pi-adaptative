@@ -1651,7 +1651,11 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	);
 	const checkpointFile = created.sessionManager.getSessionFile();
 	if (checkpointFile === undefined) throw new Error("the checkpointed session has no file");
-	expect(await world.disposeSessionInBody(session), "the checkpointed root must dispose cleanly").toBeUndefined();
+	// A process close, not an owner's abort: the request the goal took over stays handed to it across the reopen.
+	expect(
+		await world.disposeSessionInBody(session, { ordinaryWork: "preserve" }),
+		"the checkpointed root must dispose cleanly",
+	).toBeUndefined();
 	created = await world.createRootSession("root", { sessionManager: world.openSessionManager(checkpointFile) });
 	session = created.session;
 	orchestrationRoot = session;
@@ -1694,6 +1698,19 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		getLatestGoalStateSnapshot(created.sessionManager)?.status,
 		"the persisted goal snapshot agrees with the host",
 	).toBe("completed");
+	// The owner request that started the goal was handed to it; the goal's completion fulfills that request.
+	const completedGoalId = session.getGoalStateSnapshot()?.goalId;
+	const goalRequests = session.getDecisionLedger()!.ordinaryWork.forSession(created.sessionManager.getSessionId());
+	expect(
+		goalRequests.filter((row) => row.reason === `explicit_goal_owns_request:${completedGoalId}`),
+		"no request stays handed to the completed goal",
+	).toEqual([]);
+	const fulfilledByGoal = goalRequests.filter((row) => row.reason === "goal_completed");
+	expect(fulfilledByGoal.length, "the request the goal took over settles with it").toBeGreaterThan(0);
+	expect(
+		fulfilledByGoal.map((row) => row.status),
+		"a completed goal fulfills the request it took over",
+	).toEqual(fulfilledByGoal.map(() => "fulfilled"));
 	expect(
 		receiptsOf(replayMailbox).filter(
 			(receipt) => receipt.messageId === firstAdmission.messageId && receipt.kind === "control",

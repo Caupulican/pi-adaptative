@@ -213,6 +213,29 @@ export async function verifyEvaluationOccupancy(world: HarnessWorld): Promise<vo
 						: message.content.some((block) => block.type === "text" && block.text === ownerInput)),
 			),
 		).toBe(true);
+		// The follow-up joins the request still waiting on the worker it launched instead of opening one of its own.
+		const ownerEntryOf = (words: string) =>
+			created.sessionManager
+				.getBranch()
+				.find(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						(typeof entry.message.content === "string"
+							? entry.message.content === words
+							: entry.message.content.some((block) => block.type === "text" && block.text === words)),
+				)?.id;
+		const requests = session.getDecisionLedger()!.ordinaryWork.forSession(created.sessionManager.getSessionId());
+		const followUpEntry = ownerEntryOf(ownerInput);
+		expect(followUpEntry, `${label}: the follow-up is on the branch`).toBeDefined();
+		expect(
+			requests.filter((row) => row.openingEntryId === followUpEntry),
+			`${label}: the follow-up opens no request of its own`,
+		).toEqual([]);
+		expect(
+			requests.find((row) => row.openingEntryId === ownerEntryOf("Start a read-only inspection agent.")),
+			`${label}: the dispatch request still waits on its worker`,
+		).toMatchObject({ status: "waiting", reason: "waiting" });
 		expect(
 			persisted.some(
 				(message) =>

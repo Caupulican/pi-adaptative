@@ -12,6 +12,7 @@ import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } fr
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { FakeBotApi, OWNER_ID, ownerLegUpdate, seedTelegramToken, withFakeBotApi } from "./journey-4-telegram.ts";
 import { handoffBlocks, J9_ROOT_JUDGMENTS, J9_ROOT_REPLY, J9_SETTINGS, workerReport } from "./journey-9-shared.ts";
+import { exerciseWorkerWaitBound } from "./journey-12-worker-wait.ts";
 import { assertBatchOk, LIMITS_PATH, latestBatchResults, ORIGINAL_LIMITS, runJourney } from "./shared.ts";
 
 const OTHER_OWNER_ID = 555000222;
@@ -19,6 +20,15 @@ const OWNER_SETTING = "export const OWNER_BACKOFF = true;\n";
 const EDITED_LIMITS = ORIGINAL_LIMITS.replace(" = 3", " = 7");
 const AUTH_A = "synthetic-restart-initial";
 const AUTH_B = "synthetic-restart-replacement";
+/** What a phone request's final answer costs: metered, since the phone session signs in with an API key. */
+const LATE_ANSWER_USD = 0.25;
+const LATE_ANSWER_USAGE = {
+	...createEmptyUsage(),
+	input: 1,
+	output: 1000,
+	totalTokens: 1001,
+	cost: { ...createEmptyUsage().cost, output: LATE_ANSWER_USD, total: LATE_ANSWER_USD },
+};
 
 async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, change = false): Promise<void> {
 	const request = change
@@ -259,7 +269,9 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 						],
 						stopReason: "toolUse",
 					};
-				return { content: [{ type: "text", text: hasSuccessorHandoff(transport) ? answer : J9_ROOT_REPLY }] };
+				if (!hasSuccessorHandoff(transport)) return { content: [{ type: "text", text: J9_ROOT_REPLY }] };
+				// The phone chat's batch was answered by the acknowledgement; this final answer's cost joins it when it is sent.
+				return { content: [{ type: "text", text: answer }], ...(api ? { usage: LATE_ANSWER_USAGE } : {}) };
 			},
 			until: (request) => {
 				if (!hasSuccessorHandoff(request)) return false;
@@ -355,6 +367,20 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 			expect(api.sent.filter(isAnswer).map((item) => item.body)).toEqual([
 				expect.objectContaining({ chat_id: String(OWNER_ID), text: answer }),
 			]);
+			const journal = JSON.parse(
+				String(world.io.readFileSync(join(world.agentDir, "channels", "telegram.json"))),
+			) as {
+				batches: { eventDigests: string[]; state: string; usd?: number; lateAnswerAfter?: string }[];
+			};
+			const batch = journal.batches.filter((item) => item.eventDigests.includes(digest("tg:1")));
+			expect(batch, "the request's batch is answered and owes the chat nothing more").toEqual([
+				expect.objectContaining({ state: "replied" }),
+			]);
+			expect(batch[0]?.lateAnswerAfter).toBeUndefined();
+			expect(batch[0]?.usd ?? 0, "the late answer's metered cost is charged to the request's batch").toBeCloseTo(
+				change ? 0 : LATE_ANSWER_USD,
+				9,
+			);
 		}
 		const finished = fresh.getTaskRuntimeSnapshot()!;
 		expect(finished.attempts[source.attemptId]).toMatchObject({
@@ -466,7 +492,7 @@ async function exerciseRestartHandoff(world: HarnessWorld, api?: FakeBotApi, cha
 				transfer.successorAttemptId,
 			];
 			const baseStatus = [
-				"Foreground owner turns and task commands have spent or reserved $0.00 of $5.00 in 24 hours ($1.00 per turn).",
+				`Foreground owner turns and task commands have spent or reserved $${(change ? 0 : LATE_ANSWER_USD).toFixed(2)} of $5.00 in 24 hours ($1.00 per turn).`,
 				"No turn is running. 0 message(s) wait.",
 			];
 			const lifecycle = world.systemOne.enabled
@@ -571,7 +597,10 @@ export async function runWorkerModelHandoffRecovery(): Promise<void> {
 				files: { [LIMITS_PATH]: ORIGINAL_LIMITS, [projectPath("owner-settings.ts")]: OWNER_SETTING },
 			},
 			async (world) => {
-				if (!ownerChannel) return exerciseRestartHandoff(world);
+				if (!ownerChannel) {
+					await exerciseRestartHandoff(world);
+					return exerciseWorkerWaitBound(world);
+				}
 				seedTelegramToken(world, world.agentDir);
 				const file = join(world.agentDir, "channels", "telegram.json");
 				const api = new FakeBotApi(() =>

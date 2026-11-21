@@ -70,7 +70,7 @@ describe("Adaptive harness composed journeys", () => {
 		await runWorkerModelHandoffJourney();
 	}, 360_000);
 
-	it("worker handoff recovery: a reopened parent reclaims a suspended source for its reserved successor", async () => {
+	it("worker handoff recovery: a reopened parent reclaims a suspended source for its reserved successor, and a request's bounded wait on its worker holds for the owner and settles on the report", async () => {
 		await runWorkerModelHandoffRecovery();
 	}, 360_000);
 });
