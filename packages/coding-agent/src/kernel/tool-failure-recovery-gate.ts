@@ -9,6 +9,7 @@ import {
 	getToolFailureRecordRawKey,
 	getToolRawOperationKey,
 	isPromptScopedFailureCode,
+	isSelfCompactionRefusal,
 	readToolFailureReplay,
 	readVisibleToolFailureCode,
 	restoreToolFailureRecord,
@@ -403,7 +404,8 @@ export class ToolFailureRecoveryGate {
 			getToolFailureRecordExecutionKey(record) === executionKey &&
 			// A prompt-scoped block is cleared by a new owner prompt, never by the agent. It is not a
 			// repetition state, so it must not become one through the caller's failure memory either.
-			!isPromptScopedFailureCode(record.failureCode)
+			!isPromptScopedFailureCode(record.failureCode) &&
+			!isSelfCompactionRefusal(record)
 		) {
 			state = {
 				record,
@@ -476,6 +478,7 @@ export class ToolFailureRecoveryGate {
 		tool?: AgentTool<any>,
 		timeoutMs?: number | null,
 	): void {
+		if (isSelfCompactionRefusal(record)) return;
 		const executionKey = getToolExecutionKey(record.tool, args, getToolFailureRecordExecutionScope(record));
 		this.resolvedBeforeTranscriptCommit.delete(executionKey);
 		this.seenUnproductiveExecutions.add(executionKey);

@@ -369,7 +369,6 @@ export class ParentInputDeliveryController {
 			if (this.wakeCut()) return;
 			throw error;
 		}
-		let deactivate: (() => void) | undefined;
 		try {
 			const wake = manager.beginParentInputWake();
 			if (!wake) return;
@@ -396,9 +395,16 @@ export class ParentInputDeliveryController {
 				(message) => manager.getMessageEntryId(message) === inputs[0]!.entryId,
 			);
 			if (opening?.role !== "custom") throw new Error("The first parent input is missing from canonical history.");
-			deactivate = manager.activateParentInputWake(wake.wakeId);
-			if (!manager.getParentInputWake()?.completed)
-				await this.foreground.runCommittedHistory(opening, lease, this.abort.signal);
+			if (!manager.getParentInputWake()?.completed) {
+				// Only the run answering this batch binds its provider requests to the wake.
+				// Post-turn corrections hold the submission but answer a new prompt of their own.
+				const deactivate = manager.activateParentInputWake(wake.wakeId);
+				try {
+					await this.foreground.runCommittedHistory(opening, lease, this.abort.signal);
+				} finally {
+					deactivate();
+				}
+			}
 			for (const input of inputs) this.assertCurrent(manager, input, lease);
 			if (!manager.getParentInputWake()?.completed)
 				throw new Error("Parent wake has no matching terminal provider answer.");
@@ -411,7 +417,6 @@ export class ParentInputDeliveryController {
 			this.blocked = true;
 			if (!this.wakeCut(lease)) throw error;
 		} finally {
-			deactivate?.();
 			if (this.foreground.ownsSubmission(lease)) this.foreground.releaseSubmission(lease);
 		}
 	}

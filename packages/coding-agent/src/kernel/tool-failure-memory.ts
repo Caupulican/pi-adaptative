@@ -9,9 +9,17 @@ import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/type
 import { harnessLog } from "./harness-log.ts";
 import { withMessageSource } from "./message-revision.ts";
 import { PrefixFold } from "./prefix-fold.ts";
-import { boundedFailureCode, classifyToolFailure, processExitFailureCode } from "./tool-failure-code.ts";
+import {
+	boundedFailureCode,
+	classifyToolFailure,
+	firstToolResultText as firstText,
+	isLegacySelfCompactionResult,
+	isSelfCompactionRefusal,
+	processExitFailureCode,
+	readVisibleToolFailureCode,
+} from "./tool-failure-code.ts";
 
-export { classifyToolFailure } from "./tool-failure-code.ts";
+export { classifyToolFailure, isSelfCompactionRefusal, readVisibleToolFailureCode } from "./tool-failure-code.ts";
 
 import {
 	TOOL_FAILURE_LEDGER_RECORD_VERSION,
@@ -641,21 +649,6 @@ export function getUnresolvedToolFailure(
 	return tracker.get(getToolFailureKey(tool, args, executionScope));
 }
 
-/**
- * The `failure_code` a `[harness]` result shows. Only for results written without the typed field the
- * decision needs (a transcript older than `piToolFailureReplay`, or a failure result with no retained
- * record); a current result is read through its `details`.
- */
-export function readVisibleToolFailureCode(result: ToolResultMessage): string | undefined {
-	for (const block of result.content) {
-		if (block.type !== "text") continue;
-		// comms-legacy-decoder: persisted results that predate the typed replay marker carry the code only in text.
-		const match = /"failure_code"\s*:\s*"([^"]+)"/.exec(block.text);
-		if (match) return match[1];
-	}
-	return undefined;
-}
-
 /** Failures that only a new owner prompt can clear. Do not restore their circuit across user turns. */
 export function isPromptScopedFailureCode(code: string | undefined): boolean {
 	return code === "owner_authorization_required";
@@ -674,6 +667,10 @@ export function restoreToolFailureRecord(
 	// Native outcomes retain command output and projected details, not harness failure memory.
 	// Neither channel can supersede the executor receipt or masquerade as a policy/cancellation.
 	const persisted = operationOutcome ? undefined : readFailureRecord(result.details);
+	if (!persisted && isLegacySelfCompactionResult(result, invocation?.execution)) return undefined;
+	if (!operationOutcome && readFailureDirective(result.details)?.failureCode === "self_compaction_pending")
+		return undefined;
+	if (persisted && isSelfCompactionRefusal(persisted)) return undefined;
 	const outcomeCode =
 		invocation?.failureCode ?? (operationOutcome ? classifyToolFailure(firstText(result)) : undefined);
 	if (isCancelledToolFailure(persisted, firstText(result), outcomeCode)) return undefined;
@@ -1179,18 +1176,6 @@ export function readToolFailureTelemetry(details: unknown): ToolFailureTelemetry
 	};
 }
 
-function firstText(message: ToolResultMessage): string {
-	const content = message.content;
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		for (let index = 0; index < content.length; index++) {
-			const block = content[index];
-			if (block.type === "text") return block.text;
-		}
-	}
-	return "";
-}
-
 /**
  * Everything the failure-context fold knows after processing a prefix of the history. Kept as one
  * object so the fold can be RESUMED from where it stopped instead of re-walking the history on
@@ -1381,6 +1366,10 @@ function foldToolFailureContext(
 				textPayload.startsWith("[harness] "));
 		if (isHarnessFailure) {
 			const retained = readFailureRecord(message.details);
+			if (!retained && isLegacySelfCompactionResult(message, invocation?.execution)) continue;
+			// Older compaction gates persisted a generic policy refusal. Its lifetime ends at
+			// the handoff, so restore it through the same discard policy as current records.
+			if (retained && isSelfCompactionRefusal(retained)) continue;
 			// A cancelled call never reaches the ledger: see isCancelledToolFailure.
 			if (isCancelledToolFailure(retained, textPayload, invocation?.failureCode)) continue;
 			const toolName =

@@ -131,6 +131,7 @@ export class SignalLifecycle {
 	private terminalOutcome = false;
 	/** Set when the port's stop has been started, so no path (cleanup, forced exit, crash during shutdown) runs it a second time. */
 	private stopStarted = false;
+	private shutdownStep: string | undefined;
 
 	constructor(port: SignalLifecyclePort, io: Partial<SignalLifecycleIo> = {}) {
 		this.port = port;
@@ -250,11 +251,11 @@ export class SignalLifecycle {
 			const forceRemovals = this.installForceListeners();
 			try {
 				await this.runCleanupSteps([
-					() => disposeUnclaimedCliPowerShellWarmStart(),
-					() => this.port.runtimeHost.dispose(),
-					() => disposeHttpDispatcher(),
-					() => this.port.ui.terminal.drainInput(1000),
-					() => this.stopOnce(),
+					["PowerShell warm-start disposal", () => disposeUnclaimedCliPowerShellWarmStart()],
+					["session runtime disposal", () => this.port.runtimeHost.dispose()],
+					["HTTP dispatcher disposal", () => disposeHttpDispatcher()],
+					["terminal input drain", () => this.port.ui.terminal.drainInput(1000)],
+					["terminal restoration", () => this.stopOnce()],
 				]);
 			} finally {
 				for (const remove of forceRemovals) remove();
@@ -276,11 +277,11 @@ export class SignalLifecycle {
 		const forceRemovals = this.installForceListeners();
 		try {
 			await this.runCleanupSteps([
-				() => disposeUnclaimedCliPowerShellWarmStart(),
-				() => this.port.ui.terminal.drainInput(1000),
-				() => this.stopOnce(),
-				() => this.port.runtimeHost.dispose(),
-				() => disposeHttpDispatcher(),
+				["PowerShell warm-start disposal", () => disposeUnclaimedCliPowerShellWarmStart()],
+				["terminal input drain", () => this.port.ui.terminal.drainInput(1000)],
+				["terminal restoration", () => this.stopOnce()],
+				["session runtime disposal", () => this.port.runtimeHost.dispose()],
+				["HTTP dispatcher disposal", () => disposeHttpDispatcher()],
 			]);
 		} finally {
 			for (const remove of forceRemovals) remove();
@@ -306,10 +307,11 @@ export class SignalLifecycle {
 	 * Runs each cleanup step once, in order, whatever the earlier steps did: a failing step never skips a later one. Every failure is
 	 * kept. One is rethrown as it is; several are thrown together so `shutdown` reports each cause.
 	 */
-	private async runCleanupSteps(steps: ReadonlyArray<() => unknown>): Promise<void> {
+	private async runCleanupSteps(steps: ReadonlyArray<readonly [string, () => unknown]>): Promise<void> {
 		const failures: unknown[] = [];
-		for (const step of steps) {
+		for (const [name, step] of steps) {
 			if (this.terminalOutcome) return;
+			this.shutdownStep = name;
 			try {
 				await step();
 			} catch (error: unknown) {
@@ -317,6 +319,7 @@ export class SignalLifecycle {
 				failures.push(error);
 			}
 		}
+		this.shutdownStep = undefined;
 		if (failures.length === 1) throw failures[0];
 		if (failures.length > 1) {
 			// The message is the first failure's own text, converted safely: a first failure whose conversion throws must not replace the collected causes.
@@ -347,12 +350,16 @@ export class SignalLifecycle {
 	}
 
 	private forceShutdownDeadline(): void {
+		const detail = `Shutdown cleanup exceeded ${SIGNAL_SHUTDOWN_DEADLINE_MS}ms${
+			this.shutdownStep ? ` during ${this.shutdownStep}` : ""
+		}`;
 		this.finishTerminal(1, "shutdown-failed", [
 			() => {
-				this.io.declareExit("shutdown-failed", `Shutdown cleanup exceeded ${SIGNAL_SHUTDOWN_DEADLINE_MS}ms`);
+				this.io.declareExit("shutdown-failed", detail);
 			},
 			() => killTrackedDetachedChildren(),
 			() => this.stopOnce(),
+			() => this.io.stderr(`${neutralizeControls(detail)}\n`),
 		]);
 	}
 

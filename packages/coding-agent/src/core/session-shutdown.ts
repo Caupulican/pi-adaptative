@@ -1,4 +1,5 @@
 import { interfaceText } from "./language/interface-text.ts";
+import { monotonicNow } from "./util/timer-port.ts";
 
 export interface SessionShutdownTracker {
 	readonly completion: Promise<void>;
@@ -75,7 +76,7 @@ export function createSessionShutdownTracker(): SessionShutdownTracker {
 }
 
 /**
- * How long a quitting session waits for its run to settle before the run's handlers are released. The same few seconds the worker's
+ * The shared grace for a quitting session's trailing producers before their consumers are released. The same few seconds the worker's
  * physical settlement grace uses (worker-attempt-executor.ts). Past it, the run's final message may not be persisted, and that is disclosed.
  */
 export const CLOSING_RUN_SETTLE_MS = 5_000;
@@ -98,11 +99,13 @@ export interface ClosingSessionMemoryPorts {
 
 /**
  * Settle trailing run writes before memory captures its lifecycle tail, then release usage delivery.
+ * All producers share one grace period so sequential settlement cannot exhaust the process shutdown deadline.
  * A wait that times out is disclosed and its work handed to `holdLateWork`; the quit itself still completes.
  */
 export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPorts): Promise<void> {
+	const deadline = monotonicNow() + CLOSING_RUN_SETTLE_MS;
 	const settlesWithin = async (run: Promise<void>, warning: string): Promise<void> => {
-		if (await runSettlesWithin(run, CLOSING_RUN_SETTLE_MS)) return;
+		if (await runSettlesWithin(run, Math.max(0, deadline - monotonicNow()))) return;
 		ports.holdLateWork(run.then(noop, noop));
 		ports.holdWarning(warning);
 	};

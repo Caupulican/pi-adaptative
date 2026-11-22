@@ -1,12 +1,13 @@
 import type { Context } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage-delivery.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import type { ExtensionUIContext } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { feedbackRecordOf, foldFeedback } from "../../../../src/core/proactivity/proactivity-feedback.ts";
+import { SessionUnsettledLadderController } from "../../../../src/core/session-unsettled-ladder-controller.ts";
 import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
 import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
@@ -889,6 +890,8 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	// Normal order: within both bounds, the accepted note wakes its parent turn.
 	await ownerTurn(first, "daily-owner-1", "Write the release note before Friday.");
 	const wakeSettled = createBarrier();
+	const correction = "Correct the claim about the changelog.";
+	const claimCheck = vi.spyOn(SessionUnsettledLadderController.prototype, "claimCorrection");
 	const stopWake = first.sessionManager.onEntriesPersisted(() => {
 		const accepted = first.sessionManager.getEntries().some((entry) => isNote(entry, wokenNote));
 		if (accepted && first.sessionManager.getPendingParentInputs().length === 0) wakeSettled.release();
@@ -899,17 +902,35 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 		text("daily-review-1-done", "none"),
 		{
 			...text("daily-review-1-wake", "Noted."),
-			check: (request) =>
+			check: (request) => {
 				expect(JSON.stringify(request.context.messages), "the woken parent turn carries the note").toContain(
 					wokenNote,
-				),
+				);
+				claimCheck.mockResolvedValueOnce(correction);
+			},
+		},
+		{
+			...text("daily-review-1-correction", "The changelog entry is still pending."),
+			check: (request) => {
+				expect(JSON.stringify(request.context.messages)).toContain(correction);
+				expect(first.sessionManager.getActiveParentInputWake()).toBeUndefined();
+			},
 		},
 	);
-	const control = await withDeadline(trace, "daily bounds: review within both bounds", lanes.runProactiveReviewOnce());
-	expect(control.delivered.map((note) => note.text)).toEqual([wokenNote]);
-	expect(control.deliveryHold, "nothing holds a delivery within both bounds").toBeUndefined();
-	await withDeadline(trace, "daily bounds: the woken parent turn settles", wakeSettled.promise);
-	stopWake();
+	try {
+		const control = await withDeadline(
+			trace,
+			"daily bounds: review within both bounds",
+			lanes.runProactiveReviewOnce(),
+		);
+		expect(control.delivered.map((note) => note.text)).toEqual([wokenNote]);
+		expect(control.deliveryHold, "nothing holds a delivery within both bounds").toBeUndefined();
+		await withDeadline(trace, "daily bounds: the woken parent turn settles", wakeSettled.promise);
+		expect(world.provider.reached).toContain("root:daily-review-1-correction");
+	} finally {
+		claimCheck.mockRestore();
+		stopWake();
+	}
 	// The note is consumed at its request's terminal; the woken turn ends before the owner's next prompt.
 	await withDeadline(trace, "daily bounds: the woken parent turn ends", first.session.agent.waitForIdle());
 	expect(acceptedMode(first, wokenNote), "the note was accepted as a parent wake").toBe("turn");

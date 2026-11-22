@@ -3,6 +3,9 @@ import { Agent } from "../src/kernel/agent.ts";
 import { PrefixFirstMatch, PrefixFold, takePrefixFoldOperations } from "../src/kernel/prefix-fold.ts";
 import {
 	createToolFailureMemoryTracker,
+	createToolFailureResult,
+	rememberToolFailure,
+	restoreToolFailureRecord,
 	sanitizeToolFailureContext,
 	type ToolFailureMemoryRecord,
 	trackerFromFailureRecords,
@@ -10,6 +13,37 @@ import {
 import type { AgentMessage } from "../src/kernel/types.ts";
 
 const row = (timestamp: number): AgentMessage => ({ role: "user", content: "test", timestamp });
+
+it.each(["self_compaction_pending", "blocked"])("can retry a peer call after a saved %s compaction refusal", (code) => {
+	const args = { action: "obligations" };
+	const diagnostic =
+		'Tool "peer" is refused: a self_compact note is saved and the context is compacted when this turn ends.';
+	const record = rememberToolFailure(
+		new Map(),
+		"peer",
+		args,
+		"rejected",
+		code,
+		"Finish the turn.",
+		diagnostic,
+		"policy",
+	);
+	const refusal = {
+		...createToolFailureResult(record),
+		role: "toolResult" as const,
+		toolCallId: "peer-1",
+		toolName: "peer",
+		timestamp: 1,
+		isError: true,
+	};
+	expect(restoreToolFailureRecord(refusal, "peer", args)).toBeUndefined();
+	expect(createToolFailureMemoryTracker([refusal]).size).toBe(0);
+	if (code === "blocked") {
+		const raw = { ...refusal, details: undefined };
+		expect(restoreToolFailureRecord(raw, "peer", args)).toBeUndefined();
+		expect(restoreToolFailureRecord({ ...raw, errorKind: "operation_outcome" }, "peer", args)).toBeDefined();
+	}
+});
 
 it("reads only appended Agent rows and invalidates structural and content changes", () => {
 	const agent = new Agent({ initialState: { messages: [row(1), row(2), row(3)] } });

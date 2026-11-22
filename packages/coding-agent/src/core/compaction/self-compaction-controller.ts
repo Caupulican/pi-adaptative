@@ -556,6 +556,7 @@ export class SelfCompactionController {
 		if (state.status !== "pending" && handsOff && this.batchHandsOff(assistantMessage)) {
 			return {
 				block: true,
+				failureCode: "self_compaction_pending",
 				reason: `Tool "${toolName}" was not run: ${SELF_COMPACT_TOOL_NAME} is in the same batch, so this turn ends at the handoff and your note must describe the state before this call. Call ${SELF_COMPACT_TOOL_NAME} alone; after compaction, run this call again if your note still needs it.`,
 				terminate: true,
 			};
@@ -563,6 +564,7 @@ export class SelfCompactionController {
 		if (state.status === "pending") {
 			return {
 				block: true,
+				failureCode: "self_compaction_pending",
 				reason: `Tool "${toolName}" is refused: a ${SELF_COMPACT_TOOL_NAME} note is saved and ${this.releaseText()}. Stop here; the note comes back verbatim as the next message.`,
 				...terminate,
 			};
@@ -570,6 +572,7 @@ export class SelfCompactionController {
 		if (this.toolsLocked(state, level, thresholds)) {
 			return {
 				block: true,
+				failureCode: "self_compaction_pending",
 				reason: `Tool "${toolName}" is refused: context is at the forced self-compaction line (${thresholds.forcedTokens.toLocaleString("en-US")} tokens). Write note_to_self and call ${SELF_COMPACT_TOOL_NAME} now; every other tool is refused until ${this.deps.releasesAtTurnEnd() ? "this turn's context is released" : "the context is compacted"}.`,
 				...terminate,
 			};

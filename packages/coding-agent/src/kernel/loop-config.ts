@@ -137,6 +137,8 @@ export interface BeforeToolCallResult {
 	reason?: string;
 	terminate?: boolean;
 	correction?: string;
+	/** Stable policy identity used by the recovery registry, including transient refusals. */
+	failureCode?: string;
 }
 
 /**

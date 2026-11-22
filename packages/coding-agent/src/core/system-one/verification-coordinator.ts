@@ -610,7 +610,7 @@ export class VerificationCoordinator {
 					status: "unresolved" as const,
 					reason: "judgment_probability_missing_or_invalid",
 					nextAction:
-						"System One returned no valid probability for this proof. Keep the finding pending and retry resolution when a valid judgment is available; do not treat this as a low-confidence rejection.",
+						"The judgment has no valid probability. Keep the finding pending and retry when a valid judgment is available; this is not a low-confidence rejection.",
 				};
 			const gapAnswer = verdict.answers.evidence_closes_gap as { choice?: unknown } | undefined;
 			const gapProbability = choiceProbability(gapAnswer, "closes_gap");
@@ -668,10 +668,10 @@ export class VerificationCoordinator {
 								}
 							: { reproduction: "exactly one current-candidate reproduction" },
 						nextAction: evidenceGap
-							? "The evidence gap remains open. Read the missing source or record a justified narrower delivery claim with the limitation retained, then submit its fresh current-candidate receipt as reproduction evidence."
+							? "Read the missing source or record a justified narrower claim retaining the limitation. Submit its fresh current-candidate receipt as reproduction evidence."
 							: repaired
-								? "The repair proof remains uncertain. Gather distinct receiving-lane evidence that reproduces this finding, repairs its cause on the candidate, and successfully rechecks the required behavior after the final repair; the same proof cannot be judged again."
-								: "The rejection proof remains uncertain. Gather distinct receiving-lane evidence that directly refutes this finding on the current candidate, then retry resolution; the same proof cannot be judged again.",
+								? "Collect new receiving-lane reproduction, causal repair and successful recheck evidence on the current candidate. Retry resolution; the same proof cannot be judged again."
+								: "Collect new receiving-lane evidence directly refuting this finding on the current candidate. Retry resolution; the same proof cannot be judged again.",
 					},
 				};
 			}

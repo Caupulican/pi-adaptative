@@ -145,8 +145,21 @@ export function createPeerReviewToolDefinition(
 						: input.resolution
 							? await verification.resolve(input.resolution, context?.executionContext?.sessionId, signal)
 							: { status: "unresolved", reason: "resolution with finding ID and host receipt IDs is required" };
+				// Failed results pass through the kernel's bounded diagnostic. Put the reason and
+				// corrective action first, together, so JSON scaffolding cannot crowd out the repair.
+				let text: string;
+				if (result.status === "unresolved" && "reason" in result) {
+					text = `Unresolved: ${result.reason}`;
+					if ("nextAction" in result && result.nextAction) {
+						text += `. ${result.nextAction}`;
+					} else if ("remediation" in result && result.remediation) {
+						text += `. ${result.remediation.nextAction}`;
+					}
+				} else {
+					text = JSON.stringify(result);
+				}
 				return {
-					content: [{ type: "text", text: JSON.stringify(result) }],
+					content: [{ type: "text", text }],
 					details: result,
 					isError: result.status !== "obligations" && result.status !== "resolved",
 				};

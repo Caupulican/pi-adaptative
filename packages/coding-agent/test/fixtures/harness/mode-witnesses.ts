@@ -840,6 +840,9 @@ async function runActualHostSignalShutdown(
 			expect(harness.endCalls, "the deadline is the first terminal outcome and exits with failure").toEqual([
 				{ code: 1, reason: "shutdown-failed" },
 			]);
+			const detail = `Shutdown cleanup exceeded ${SIGNAL_SHUTDOWN_DEADLINE_MS}ms during session runtime disposal`;
+			expect(harness.stderr).toContain(`${detail}\n`);
+			expect(harness.endDeclarations).toContainEqual({ reason: "shutdown-failed", detail });
 			expect(
 				harness.calls.filter((call) => call === "terminal.stop"),
 				"deadline restores the real mode terminal once",

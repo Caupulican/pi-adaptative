@@ -175,6 +175,18 @@ interface ToolExecutionErrorCatalogueEntry {
 
 export const TOOL_EXECUTION_ERROR_CATALOGUE = [
 	{
+		name: "selfCompactionPending",
+		phase: "policy",
+		failureCode: "self_compaction_pending",
+		attemptMemory: "discard",
+		retainDiagnostic: true,
+		guidance: "Finish the self-compaction handoff. Retry the operation after the context is released.",
+		matches(): boolean {
+			// Only the host policy boundary may assign this identity.
+			return false;
+		},
+	},
+	{
 		name: "broadSearchRejected",
 		phase: "policy",
 		failureCode: "operation_rejected",

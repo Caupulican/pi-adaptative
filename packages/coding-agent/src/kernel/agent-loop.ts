@@ -28,6 +28,7 @@ import {
 import type {
 	AgentContext,
 	AgentLoopConfig,
+	BeforeToolCallResult,
 	ProviderRequestPrefixState,
 	StreamFn,
 	ToolCallStartContext,
@@ -102,7 +103,6 @@ import type {
 	ToolCallRepairInfo,
 } from "./types.ts";
 import {
-	AgentToolPolicyDeniedError,
 	DEFAULT_MAX_PROVIDER_TURNS,
 	DEFAULT_MAX_REPEATED_FAILURES,
 	DEFAULT_MAX_STALL_TURNS,
@@ -1762,8 +1762,8 @@ function createAbortedToolCallOutcome(
 	};
 }
 
-function createPolicyDeniedToolCallOutcome(denial: AgentToolPolicyDeniedError): ImmediateToolCallOutcome {
-	const diagnostic = denial.message;
+function createPolicyDeniedToolCallOutcome(denial: BeforeToolCallResult): ImmediateToolCallOutcome {
+	const diagnostic = denial.reason || "Tool execution was blocked";
 	return {
 		kind: "immediate",
 		result: {
@@ -1772,7 +1772,7 @@ function createPolicyDeniedToolCallOutcome(denial: AgentToolPolicyDeniedError): 
 		},
 		isError: true,
 		phase: "policy",
-		failureCode: "blocked",
+		failureCode: denial.failureCode ?? "blocked",
 		correction: denial.correction ?? "Choose an allowed approach or request the required authority before retrying.",
 		diagnostic,
 	};
@@ -2205,9 +2205,7 @@ async function prepareToolCall(
 			}
 			if (beforeResult?.block) {
 				return {
-					...createPolicyDeniedToolCallOutcome(
-						new AgentToolPolicyDeniedError(beforeResult.reason, beforeResult.terminate, beforeResult.correction),
-					),
+					...createPolicyDeniedToolCallOutcome(beforeResult),
 					executionScope: binding?.executionScope,
 					validationEvent,
 				};
@@ -2609,7 +2607,7 @@ async function executePreparedToolCall(
 				rejection: {
 					...(cancelled
 						? createAbortedToolCallOutcome(prepared.validationEvent, signal?.reason, policyDenial.message)
-						: createPolicyDeniedToolCallOutcome(policyDenial)),
+						: createPolicyDeniedToolCallOutcome({ ...policyDenial, reason: policyDenial.message })),
 					executionScope: prepared.binding?.executionScope,
 				},
 			};
