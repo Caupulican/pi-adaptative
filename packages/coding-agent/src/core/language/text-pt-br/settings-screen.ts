@@ -71,6 +71,14 @@ export const SETTINGS_SCREEN = {
 			"subscription-first": "Assinaturas primeiro",
 			balanced: "Equilibrado",
 		},
+		workerAccount: {
+			other: "Conta separada (auto)",
+			same: "Mesmo da sessão",
+		},
+		workerThinking: {
+			step_down: "Um nível abaixo",
+			inherit: "Herdar do principal",
+		},
 		transport: {
 			sse: "Streaming (SSE)",
 			websocket: "WebSocket",
@@ -564,6 +572,72 @@ export const SETTINGS_SCREEN = {
 			description:
 				"Deixa os workers alterarem arquivos pelas ferramentas de escrita e edição; a autoridade padrão vale para toda a máquina e false explícito a revoga",
 		},
+		account: {
+			label: "Conta dos workers",
+			description:
+				"Conta separada envia novos workers para outra conta configurada ou modelo workhorse; Mesmo da sessão mantém o modelo ativo",
+		},
+		thinking: {
+			label: "Raciocínio dos workers",
+			description:
+				"Um nível abaixo reduz o raciocínio do worker em relação ao principal quando sem pin; Herdar copia o esforço do principal",
+		},
+		routing: {
+			label: "Roteamento dos workers",
+			description: (preview?: string, inherited?: boolean) => {
+				const parts: string[] = [
+					"Provedores ordenados (sempre o workhorse mais recente) ou modelos exatos tentados em novos workers.",
+				];
+				if (preview) parts.push(`Resolvido agora: ${preview}.`);
+				if (inherited) parts.push("Herdado do escopo global; editar grava neste escopo.");
+				return parts.join(" ");
+			},
+			autoValue: (preview?: string) => (preview ? `Auto (${preview})` : "Auto (mais recente)"),
+			title: "Ordem de roteamento dos workers",
+			subtitle: (preview?: string) =>
+				preview
+					? `Provedores acompanham o workhorse mais recente dinamicamente. Resolvido agora: ${preview}`
+					: "Provedores acompanham o workhorse mais recente dinamicamente; modelos exatos ficam fixos.",
+			useAutomatic: "Automático (sempre o workhorse de assinatura mais recente)",
+			useAutomaticDescription:
+				"Limpa a lista explícita neste escopo e escolhe dinamicamente o workhorse mais recente",
+			addProvider: "+ Adicionar provedor (sempre o mais recente)...",
+			addProviderDescription:
+				"Escolha um provedor autenticado para acompanhar automaticamente seu modelo workhorse mais recente",
+			addProviderTitle: "Adicionar provedor ao roteamento dos workers",
+			addProviderSubtitle: "Provedores sem modelo fixo resolvem sempre para o workhorse elegível mais recente",
+			addModel: "+ Adicionar modelo específico...",
+			addModelDescription:
+				"Escolha uma referência provedor/modelo exata em vez de acompanhar o workhorse mais recente do provedor",
+			latestWorkhorse: (modelId: string) => `workhorse mais recente: ${modelId}`,
+			noWorkhorseAvailable: "nenhum workhorse elegível disponível agora",
+			entryProviderDescription: (latest?: string) =>
+				latest
+					? `Acompanha o workhorse mais recente (${latest}) · Enter para reordenar ou remover`
+					: "Acompanha o workhorse mais recente · Enter para reordenar ou remover",
+			entryModelDescription: "Modelo exato · Enter para reordenar ou remover",
+			entryActionsTitle: (entry: string) => `Entrada de roteamento: ${entry}`,
+			entryActionsDescription: "Reordene a prioridade ou remova esta entrada da lista de roteamento",
+			moveToTop: "Mover para primeiro (maior prioridade)",
+			moveUp: "Subir uma posição",
+			removeEntry: "Remover da lista de roteamento",
+		},
+		defaultPin: {
+			label: "Pin padrão de worker",
+			description: (shadowedByGlobal?: boolean): string =>
+				shadowedByGlobal
+					? "O pin padrão global tem precedência sobre pins do projeto; troque o Escopo de gravação para Global para alterá-lo ou limpá-lo."
+					: "Modelo fixo opcional para papéis sem pin; deixe em Automático para o roteamento escolher sempre o modelo mais recente.",
+			autoOption: "Automático (usar roteamento dos workers)",
+			autoOptionDescription: "Limpa o pin padrão neste escopo preservando os pins de papel e líder",
+			autoValue: "Automático (roteamento)",
+		},
+		defaultPinThinking: {
+			label: "Raciocínio do pin padrão",
+			description: "Esforço de raciocínio para o modelo fixado no pin padrão dos workers",
+			title: "Raciocínio do pin padrão dos workers",
+			descriptionSubmenu: "Escolha um nível de esforço suportado para o modelo fixado nos workers",
+		},
 	},
 	learningPolicy: {
 		scope: {
@@ -1009,6 +1083,21 @@ export const SETTINGS_SCREEN = {
 			customTitle: "Modelo do peer",
 			customDescription: "Digite uma referência provedor/modelo exata.",
 			customEmptyHint: "vazio deixa o agente escolher",
+		},
+		workerModel: {
+			title: "Modelo de roteamento dos workers",
+			description: "Digite para filtrar modelos configurados para adicionar ao roteamento, ou use entrada manual.",
+			customTitle: "Entrada personalizada de roteamento",
+			customDescription: 'Digite um provedor (ex.: "google-antigravity") ou uma referência provedor/modelo exata.',
+			customEmptyHint: "vazio cancela",
+		},
+		workerPin: {
+			title: "Pin padrão de modelo dos workers",
+			description:
+				"Escolha Automático para usar o roteamento dinâmico, ou selecione um modelo fixo para novos workers.",
+			customTitle: "Pin padrão de worker personalizado",
+			customDescription: "Digite uma referência provedor/modelo exata. Vazio limpa o pin padrão.",
+			customEmptyHint: "vazio limpa o pin padrão",
 		},
 		autoLearn: {
 			title: "Modelo coletor do Auto Learn",

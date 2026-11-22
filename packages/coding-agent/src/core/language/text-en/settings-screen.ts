@@ -70,6 +70,14 @@ export const SETTINGS_SCREEN = {
 			"subscription-first": "Subscriptions first",
 			balanced: "Balanced",
 		},
+		workerAccount: {
+			other: "Separate account (auto)",
+			same: "Same as session",
+		},
+		workerThinking: {
+			step_down: "Step down",
+			inherit: "Inherit foreground",
+		},
 		transport: {
 			sse: "Streaming (SSE)",
 			websocket: "WebSocket",
@@ -555,6 +563,71 @@ export const SETTINGS_SCREEN = {
 			description:
 				"Let workers change files through direct write/edit tools; default authority is machine-wide and explicit false revokes it",
 		},
+		account: {
+			label: "Worker account",
+			description:
+				"Separate account routes fresh workers to another configured account or workhorse model; Same as session keeps them on the active model",
+		},
+		thinking: {
+			label: "Worker thinking",
+			description:
+				"Step down lowers worker reasoning one notch below foreground when unpinned; Inherit copies the foreground effort",
+		},
+		routing: {
+			label: "Worker routing",
+			description: (preview?: string, inherited?: boolean) => {
+				const parts: string[] = [
+					"Ordered providers (always latest workhorse) or exact models tried for fresh workers.",
+				];
+				if (preview) parts.push(`Resolved now: ${preview}.`);
+				if (inherited) parts.push("Currently inherited from global; editing writes this scope.");
+				return parts.join(" ");
+			},
+			autoValue: (preview?: string) => (preview ? `Auto (${preview})` : "Auto (latest)"),
+			title: "Worker Routing Order",
+			subtitle: (preview?: string) =>
+				preview
+					? `Providers track their latest workhorse on the fly. Resolved now: ${preview}`
+					: "Providers track their latest workhorse on the fly; exact models stay fixed.",
+			useAutomatic: "Automatic (always latest subscription workhorse)",
+			useAutomaticDescription:
+				"Clear explicit route overrides in this scope and pick the latest workhorse dynamically",
+			addProvider: "+ Add provider (always latest)...",
+			addProviderDescription: "Pick an authenticated provider to track its latest workhorse model automatically",
+			addProviderTitle: "Add Worker Routing Provider",
+			addProviderSubtitle: "Bare providers always resolve to the newest eligible workhorse model on the fly",
+			addModel: "+ Add specific model...",
+			addModelDescription:
+				"Pick an exact provider/model reference instead of tracking the provider's latest workhorse",
+			latestWorkhorse: (modelId: string) => `latest workhorse: ${modelId}`,
+			noWorkhorseAvailable: "no eligible workhorse currently available",
+			entryProviderDescription: (latest?: string) =>
+				latest
+					? `Tracks latest workhorse (${latest}) · Enter to reorder or remove`
+					: "Tracks latest workhorse · Enter to reorder or remove",
+			entryModelDescription: "Exact model · Enter to reorder or remove",
+			entryActionsTitle: (entry: string) => `Route Entry: ${entry}`,
+			entryActionsDescription: "Reorder priority or remove this entry from the worker route list",
+			moveToTop: "Move to first (highest priority)",
+			moveUp: "Move up one position",
+			removeEntry: "Remove from routing list",
+		},
+		defaultPin: {
+			label: "Default worker pin",
+			description: (shadowedByGlobal?: boolean): string =>
+				shadowedByGlobal
+					? "Global default pin takes precedence over project pins; switch Save scope to Global to change or clear it."
+					: "Optional fixed model for unpinned worker roles; leave Automatic to let worker routing pick the latest model on the fly.",
+			autoOption: "Automatic (use worker routing)",
+			autoOptionDescription: "Clear the default worker pin in this scope while preserving role and leader pins",
+			autoValue: "Automatic (routing)",
+		},
+		defaultPinThinking: {
+			label: "Default pin thinking",
+			description: "Reasoning effort for the default worker model pin",
+			title: "Default Worker Pin Thinking",
+			descriptionSubmenu: "Choose a supported effort level for the pinned default worker model",
+		},
 	},
 	learningPolicy: {
 		scope: {
@@ -987,6 +1060,21 @@ export const SETTINGS_SCREEN = {
 			customTitle: "Peer Model",
 			customDescription: "Enter an exact provider/model reference.",
 			customEmptyHint: "empty lets the agent choose",
+		},
+		workerModel: {
+			title: "Worker Routing Model",
+			description: "Type to filter configured models to append to worker routing, or choose manual entry.",
+			customTitle: "Custom Worker Routing Entry",
+			customDescription: 'Enter a bare provider (e.g. "google-antigravity") or exact provider/model reference.',
+			customEmptyHint: "empty cancels",
+		},
+		workerPin: {
+			title: "Default Worker Model Pin",
+			description:
+				"Choose Automatic to use dynamic worker routing, or select a fixed model for default worker dispatches.",
+			customTitle: "Custom Default Worker Model Pin",
+			customDescription: "Enter an exact provider/model reference. Empty clears the default pin.",
+			customEmptyHint: "empty clears the default pin",
 		},
 		autoLearn: {
 			title: "Auto Learn Scavenger Model",

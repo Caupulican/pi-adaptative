@@ -12,6 +12,7 @@ import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import type { Component, Container, EditorComponent, SelectItem, TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { CostGuardSettings } from "../../core/cost-guard.ts";
+import { previewWorkerModel } from "../../core/delegation/worker-authority-resolver.ts";
 import type {
 	HmoeIndependence,
 	HmoePreference,
@@ -25,6 +26,8 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { describeRouterCalibration, formatRouterCalibrationRow } from "../../core/model-router/calibration.ts";
 import { formatRouterPoolSummary } from "../../core/model-router/candidate-pool.ts";
+import { selectLatestProviderModel } from "../../core/models/latest-model-selector.ts";
+import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../../core/orchestration/worker-model-pins.ts";
 import type { ProfileRegistry } from "../../core/profile-registry.ts";
 import type {
 	AdvisorSettings,
@@ -52,8 +55,11 @@ import type {
 	ThinkingLevel,
 	TransportSetting,
 	WarningSettings,
+	WorkerAccountRouting,
 	WorkerDelegationSettings,
+	WorkerThinkingPolicy,
 } from "../../core/settings/settings-schema.ts";
+import type { WorkerDelegationSettingsPatch } from "../../core/settings/worker-delegation-settings.ts";
 import type { PlainSettingKey } from "../../core/settings-manager.ts";
 import type { SystemOneProviderChoice } from "../../core/system-one/access.ts";
 import { describeSystemOneAccess } from "../../core/system-one/access.ts";
@@ -64,6 +70,7 @@ import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { type ModelRouterPoolView, SettingsSelectorComponent } from "./components/settings-selector.ts";
+import type { WorkerDelegationEditableView } from "./components/worker-delegation-settings-submenu.ts";
 
 /** The words for the scope a setting was saved to; the scope value itself stays the code's own word. */
 function scopeLabel(scope: SettingsScope | undefined): string {
@@ -122,6 +129,7 @@ export interface SettingsSelectorFlowSettingsSource {
 		hmoeWeights?: HmoeWeights;
 	};
 	getProfileRegistry(): ProfileRegistry;
+	getGlobalSettings(): Settings;
 	getProjectContextFiles(): "on-demand" | "off";
 	getProjectContextFilesScope(): SettingsScope | undefined;
 	getProjectSettings(): Settings;
@@ -143,7 +151,10 @@ export interface SettingsSelectorFlowSettingsSource {
 	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	getTrustedResourceRoots(): string[];
 	getWarnings(): WarningSettings;
+	getWorkerAccountRouting(): WorkerAccountRouting;
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
+	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
+	getWorkerThinkingPolicy(): WorkerThinkingPolicy;
 	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
 	setAutoLearnSettings(settings: AutoLearnSettings, scope?: SettingsScope): void;
 	setAutocompleteMaxVisible(maxVisible: number): void;
@@ -176,6 +187,7 @@ export interface SettingsSelectorFlowSettingsSource {
 	setTransport(transport: TransportSetting): void;
 	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void;
 	setWarnings(warnings: WarningSettings): void;
+	patchWorkerDelegationSettings(patch: WorkerDelegationSettingsPatch, scope?: SettingsScope): void;
 	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope?: SettingsScope): void;
 }
 
@@ -237,6 +249,107 @@ export function buildModelRouterPoolView(
 		favoriteRefs: rows.filter((row) => favorites.has(row.ref)).map((row) => row.ref),
 		calibration: rows.map(formatRouterCalibrationRow),
 		needsCalibration: rows.filter((row) => row.needsCalibration).map((row) => row.ref),
+	};
+}
+
+function buildWorkerRoutingProviderOptions(
+	host: Pick<SettingsSelectorHost, "session" | "modelRegistry">,
+): SelectItem[] {
+	host.modelRegistry.refresh();
+	const available = host.modelRegistry.getAvailable();
+	const foreground = host.session.model;
+	const text = interfaceText().settingsScreen.workerDelegation.routing;
+	const providers = Array.from(
+		new Set(
+			available
+				.map((model) => model.provider)
+				.filter((provider) => host.modelRegistry.authStorage.hasAuth(provider)),
+		),
+	);
+	providers.sort((a, b) => {
+		const aOAuth = host.modelRegistry.authStorage.get(a)?.type === "oauth" ? 0 : 1;
+		const bOAuth = host.modelRegistry.authStorage.get(b)?.type === "oauth" ? 0 : 1;
+		if (aOAuth !== bOAuth) return aOAuth - bOAuth;
+		return host.modelRegistry.getProviderDisplayName(a).localeCompare(host.modelRegistry.getProviderDisplayName(b));
+	});
+	return providers.map((provider) => {
+		const latest = selectLatestProviderModel(provider, available, {
+			tier: "workhorse",
+			requireBackgroundLanes: true,
+			excludeModelId: foreground?.provider === provider ? foreground.id : undefined,
+		});
+		const displayName = host.modelRegistry.getProviderDisplayName(provider);
+		const detail = latest ? text.latestWorkhorse(latest.id) : text.noWorkhorseAvailable;
+		return {
+			value: provider,
+			label: provider,
+			description: `${displayName} · ${detail}`,
+		};
+	});
+}
+
+function readWorkerDelegationState(
+	host: Pick<SettingsSelectorHost, "session" | "settingsManager" | "modelRegistry">,
+	scope: SettingsScope,
+): WorkerDelegationEditableView {
+	const resolved = host.settingsManager.getWorkerDelegationSettings();
+	const routing = host.settingsManager.getWorkerAccountRouting();
+	const thinking = host.settingsManager.getWorkerThinkingPolicy();
+	const pinPolicy = host.settingsManager.getWorkerModelPinPolicy();
+	const globalLayer = host.settingsManager.getGlobalSettings().workerDelegation;
+	const projectLayer = host.settingsManager.getProjectSettings().workerDelegation;
+	const scopeLayer = scope === "project" ? projectLayer : globalLayer;
+	// Match compileWorkerModelPinPolicy precedence: global > directoryProfile > project.
+	const compiledDefaultPin =
+		pinPolicy.status === "active"
+			? Object.values(pinPolicy.byRole).find((entry) => entry?.tier === "default")
+			: undefined;
+	const defaultPin =
+		globalLayer?.modelPins?.default ?? compiledDefaultPin?.binding ?? projectLayer?.modelPins?.default;
+	const defaultPinSource: SettingsScope | undefined = globalLayer?.modelPins?.default
+		? "global"
+		: compiledDefaultPin
+			? compiledDefaultPin.source
+			: projectLayer?.modelPins?.default
+				? "project"
+				: undefined;
+	const foreground = host.session.model;
+	const available = host.modelRegistry.getAvailable();
+	const preview = foreground
+		? previewWorkerModel({
+				foregroundModel: foreground,
+				pin: pinPolicy.status === "active" ? resolveWorkerModelPin(pinPolicy, "implementer")?.binding : undefined,
+				routing,
+				role: "implementer",
+				modelRegistry: host.modelRegistry,
+				isModelExhausted: () => false,
+			})
+		: undefined;
+	const latestWorkhorseByProvider: Record<string, string | undefined> = {};
+	for (const entry of routing.routeProviders) {
+		if (entry.includes("/")) continue;
+		latestWorkhorseByProvider[entry] = selectLatestProviderModel(entry, available, {
+			tier: "workhorse",
+			requireBackgroundLanes: true,
+			excludeModelId: foreground?.provider === entry ? foreground.id : undefined,
+		})?.id;
+	}
+	return {
+		effective: {
+			enabled: resolved.enabled,
+			maxUsd: resolved.maxUsd,
+			maxWallClockMs: resolved.maxWallClockMs,
+			writeEnabled: resolved.writeEnabled,
+			account: routing.account,
+			thinking,
+			routeProviders: [...routing.routeProviders],
+			...(defaultPin ? { defaultPin } : {}),
+		},
+		scopeLayer,
+		...(defaultPinSource ? { defaultPinSource } : {}),
+		globalHasRouteProviders: (globalLayer?.routeProviders?.length ?? 0) > 0,
+		previewModel: preview ? `${preview.provider}/${preview.id}` : undefined,
+		latestWorkhorseByProvider,
 	};
 }
 
@@ -308,6 +421,8 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				researchLaneScope: projectSettings.researchLane ? "project" : "global",
 				workerDelegation: host.settingsManager.getWorkerDelegationSettings(),
 				workerDelegationScope: projectSettings.workerDelegation ? "project" : "global",
+				readWorkerDelegationState: (scope) => readWorkerDelegationState(host, scope),
+				workerRoutingProviderOptions: buildWorkerRoutingProviderOptions(host),
 				contextCuration: host.settingsManager.getContextCurationSettings(),
 				contextCurationScope: projectSettings.contextPolicy?.curation ? "project" : "global",
 				learningPolicy: host.settingsManager.getLearningPolicySettings(),
@@ -511,6 +626,10 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				},
 				onWorkerDelegationChange: (settings, scope) => {
 					host.settingsManager.setWorkerDelegationSettings(settings, scope);
+					host.showStatus(interfaceText().settingsScreen.statuses.workerDelegationSaved(scopeLabel(scope)));
+				},
+				onWorkerDelegationPatch: (patch, scope) => {
+					host.settingsManager.patchWorkerDelegationSettings(patch, scope);
 					host.showStatus(interfaceText().settingsScreen.statuses.workerDelegationSaved(scopeLabel(scope)));
 				},
 				onLearningPolicyChange: (settings, scope) => {

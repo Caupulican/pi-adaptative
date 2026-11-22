@@ -23,17 +23,36 @@ export function defaultModelFamilyResolver(modelId: string, provider: string): s
 		if (lower.includes("opus")) return "claude-opus";
 		if (lower.includes("sonnet")) return "claude-sonnet";
 		if (lower.includes("haiku")) return "claude-haiku";
+		if (lower.includes("fable")) return "claude-fable";
 		return "claude";
 	}
-	if (provider === "openai" || lower.includes("gpt") || lower.startsWith("o1") || lower.startsWith("o3")) {
+	if (
+		provider === "openai" ||
+		provider === "openai-codex" ||
+		lower.includes("gpt") ||
+		lower.startsWith("o1") ||
+		lower.startsWith("o3") ||
+		lower.startsWith("o4")
+	) {
 		if (lower.includes("gpt-4o")) return "gpt-4o";
-		if (lower.startsWith("o1") || lower.startsWith("o3")) return "openai-reasoning";
+		if (lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4")) return "openai-reasoning";
+		if (lower.includes("astra")) return "gpt-astra";
+		if (lower.includes("sol")) return "gpt-sol";
+		if (lower.includes("terra")) return "gpt-terra";
+		if (lower.includes("luna")) return "gpt-luna";
 		return "gpt";
 	}
-	if (provider === "google" || lower.includes("gemini")) {
+	if (provider === "google" || provider === "google-antigravity" || lower.includes("gemini")) {
+		if (lower.includes("neon")) return "gemini-neon";
+		if (lower.includes("argon")) return "gemini-argon";
+		if (lower.includes("carbon")) return "gemini-carbon";
+		if (lower.includes("hydrogen")) return "gemini-hydrogen";
 		if (lower.includes("pro")) return "gemini-pro";
 		if (lower.includes("flash")) return "gemini-flash";
 		return "gemini";
+	}
+	if (provider === "xai" || lower.includes("grok")) {
+		return "grok";
 	}
 	if (provider === "deepseek" || lower.includes("deepseek")) {
 		if (lower.includes("r1")) return "deepseek-reasoner";

@@ -16,6 +16,7 @@ import { BotChatChronology, mergeByTime } from "../bots/bot-chat-chronology.ts";
 import type { BotHistoryRead } from "../bots/bot-history.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { defaultFallbackWorkhorseModelId } from "../models/latest-model-selector.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { botChatOperatorText, botReplyText } from "./bot-chat-text.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
@@ -60,7 +61,7 @@ export class BotChatTranscript {
 			content: [{ type: "text", text: `[Prior turn summary]: ${summary}` }],
 			api: "anthropic-messages",
 			provider: bot?.provider ?? "anthropic",
-			model: bot?.modelId ?? "claude-haiku-5-5",
+			model: bot?.modelId ?? defaultFallbackWorkhorseModelId(),
 			usage: {
 				totalTokens: 0,
 				input: 0,

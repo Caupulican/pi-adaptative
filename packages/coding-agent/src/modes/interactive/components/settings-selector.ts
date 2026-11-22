@@ -2,10 +2,7 @@ import type { Transport } from "@caupulican/pi-ai";
 import {
 	Container,
 	getCapabilities,
-	getKeybindings,
-	Input,
 	type SelectItem,
-	SelectList,
 	type SettingItem,
 	SettingsList,
 	Spacer,
@@ -41,13 +38,10 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_ENABLED,
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
-	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
 	HMOE_INDEPENDENCE_LEVELS,
 	HMOE_PREFERENCES,
 	HMOE_PRESETS,
 	HMOE_TEAM_STRATEGIES,
-	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings/settings-rules.ts";
 import type {
 	AdvisorSettings,
@@ -68,22 +62,35 @@ import type {
 	WarningSettings,
 	WorkerDelegationSettings,
 } from "../../../core/settings/settings-schema.ts";
+import type { WorkerDelegationSettingsPatch } from "../../../core/settings/worker-delegation-settings.ts";
 import { SYSTEM_ONE_PROVIDER_CHOICES, type SystemOneProviderChoice } from "../../../core/system-one/access.ts";
 import type { ThinkingLevel } from "../../../kernel/index.ts";
 import { keyDisplayText } from "../../../presentation/keybinding-hints.ts";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../../../presentation/theme-model.ts";
+import { getSettingsListTheme, theme } from "../../../presentation/theme-model.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { languageSettingsItem } from "./language-settings-item.ts";
-import { COMPACT_SELECTOR_LIST_LAYOUT, SelectorHeading } from "./selector-list.ts";
+import {
+	AUTO_LEARN_CUSTOM_MODEL_VALUE,
+	ModelSelectionSubmenu,
+	SelectSubmenu,
+	SettingsListSubmenu,
+	screenText,
+	TextInputSubmenu,
+} from "./settings-submenu-primitives.ts";
 import {
 	booleanSettingValue,
 	normalizeOptionalString,
 	numberSettingValue,
 	optionalStringValue,
 } from "./settings-value-text.ts";
+import {
+	type WorkerDelegationEditableView,
+	WorkerDelegationSettingsSubmenu,
+} from "./worker-delegation-settings-submenu.ts";
 
-const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
+export { SelectSubmenu };
+
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
 const MODEL_ROUTER_INHERIT_THINKING_VALUE = "__inherit_model_router_thinking__";
 
@@ -115,14 +122,6 @@ const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
 	includeInPrompt: true,
 	allowExternalEgress: false,
 } as const;
-
-/**
- * The settings screen's words. A row stores and saves a machine value and reads the label for it here when
- * the row is drawn, so a change of language needs no restart.
- */
-function screenText() {
-	return interfaceText().settingsScreen;
-}
 
 function routerTierValue(
 	model: string | undefined,
@@ -480,6 +479,10 @@ export interface SettingsConfig {
 	researchLane: ResearchLaneSettings;
 	researchLaneScope?: SettingsScope;
 	workerDelegation: WorkerDelegationSettings;
+	/** Scope-aware reader for `/settings -> Worker delegation`, keeping display separate from scope-local patches. */
+	readWorkerDelegationState?: (scope: SettingsScope) => WorkerDelegationEditableView;
+	/** Authenticated providers shown in the worker routing provider picker. */
+	workerRoutingProviderOptions?: SelectItem[];
 	contextCuration: ContextCurationSettings;
 	contextCurationScope?: SettingsScope;
 	learningPolicy: LearningPolicySettings;
@@ -550,6 +553,7 @@ export interface SettingsCallbacks {
 	onAutonomyChange: (settings: AutonomySettings, scope: SettingsScope) => void;
 	onResearchLaneChange: (settings: ResearchLaneSettings, scope: SettingsScope) => void;
 	onWorkerDelegationChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void;
+	onWorkerDelegationPatch?: (patch: WorkerDelegationSettingsPatch, scope: SettingsScope) => void;
 	onContextCurationChange: (settings: ContextCurationSettings, scope: SettingsScope) => void;
 	onLearningPolicyChange: (settings: LearningPolicySettings, scope: SettingsScope) => void;
 	onAdvisorChange?: (settings: AdvisorSettings, scope: SettingsScope) => AdvisorSettings & { error?: string };
@@ -563,162 +567,6 @@ export interface SettingsCallbacks {
 	/** Router Setup actions: configure-models, calibrate-*, preview:<task>, preview-live:<task>, diagnostics. */
 	onModelRouterAction?: (action: string) => void;
 	onCancel: () => void;
-}
-
-class TextInputSubmenu extends Container {
-	private input: Input;
-
-	constructor(
-		title: string,
-		description: string,
-		currentValue: string,
-		onSubmit: (value: string) => void,
-		onCancel: () => void,
-		emptyHint = screenText().hints.emptyClearsSetting,
-	) {
-		super();
-
-		this.addChild(new SelectorHeading(title, description));
-
-		this.input = new Input();
-		this.input.setValue(currentValue);
-		this.input.focused = true;
-		this.input.onSubmit = onSubmit;
-		this.input.onEscape = onCancel;
-		this.addChild(this.input);
-
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.textInput(emptyHint)}`), 0, 0));
-	}
-
-	handleInput(data: string): void {
-		this.input.handleInput(data);
-	}
-}
-
-class ModelSelectionSubmenu extends Container {
-	private searchInput: Input;
-	private selectList: SelectList;
-	private customInput: TextInputSubmenu | null = null;
-
-	constructor(
-		options: SelectItem[],
-		currentValue: string,
-		onSelect: (value: string) => void,
-		onCancel: () => void,
-		labels: {
-			title: string;
-			description: string;
-			customTitle: string;
-			customDescription: string;
-			customEmptyHint: string;
-			customEmptyValue: string | undefined;
-		} = {
-			title: screenText().modelPicker.autoLearn.title,
-			description: screenText().modelPicker.autoLearn.description,
-			customTitle: screenText().modelPicker.autoLearn.customTitle,
-			customDescription: screenText().modelPicker.autoLearn.customDescription,
-			customEmptyHint: screenText().modelPicker.autoLearn.customEmptyHint,
-			customEmptyValue: DEFAULT_AUTO_LEARN_SETTINGS.model,
-		},
-	) {
-		super();
-
-		this.addChild(new SelectorHeading(labels.title, labels.description));
-
-		this.searchInput = new Input();
-		this.searchInput.focused = true;
-		this.addChild(this.searchInput);
-		this.addChild(new Spacer(1));
-
-		this.selectList = new SelectList(
-			options,
-			Math.min(options.length, 10),
-			getSelectListTheme(),
-			COMPACT_SELECTOR_LIST_LAYOUT,
-		);
-
-		const currentIndex = options.findIndex((option) => option.value === currentValue);
-		if (currentIndex !== -1) {
-			this.selectList.setSelectedIndex(currentIndex);
-		}
-
-		this.selectList.onSelect = (item) => {
-			if (item.value === AUTO_LEARN_CUSTOM_MODEL_VALUE) {
-				this.customInput = new TextInputSubmenu(
-					labels.customTitle,
-					labels.customDescription,
-					currentValue === labels.customEmptyValue ? "" : currentValue,
-					(value) => {
-						onSelect(normalizeOptionalString(value) ?? labels.customEmptyValue ?? "");
-					},
-					() => {
-						this.customInput = null;
-					},
-					labels.customEmptyHint,
-				);
-				return;
-			}
-			onSelect(item.value);
-		};
-		this.selectList.onCancel = onCancel;
-		this.addChild(this.selectList);
-
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.filterAndSelect}`), 0, 0));
-	}
-
-	handleInput(data: string): void {
-		if (this.customInput) {
-			this.customInput.handleInput(data);
-			return;
-		}
-
-		const kb = getKeybindings();
-		if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down")) {
-			this.selectList.handleInput(data);
-			return;
-		}
-		if (kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel")) {
-			this.selectList.handleInput(data);
-			return;
-		}
-
-		this.searchInput.handleInput(data);
-		this.selectList.setFilter(this.searchInput.getValue());
-	}
-
-	render(width: number): string[] {
-		return this.customInput ? this.customInput.render(width) : super.render(width);
-	}
-
-	invalidate(): void {
-		super.invalidate();
-		this.customInput?.invalidate?.();
-	}
-}
-
-class SettingsListSubmenu extends Container {
-	private settingsList!: SettingsList;
-
-	protected mountSettingsList(
-		items: SettingItem[],
-		onChange: (id: string, newValue: string) => void,
-		onCancel: () => void,
-	): void {
-		this.settingsList = new SettingsList(
-			items,
-			Math.min(items.length, 10),
-			getSettingsListTheme(),
-			onChange,
-			onCancel,
-		);
-		this.addChild(this.settingsList);
-	}
-
-	handleInput(data: string): void {
-		this.settingsList.handleInput(data);
-	}
 }
 
 class CostGuardSettingsSubmenu extends SettingsListSubmenu {
@@ -1497,127 +1345,6 @@ class ContextCurationSettingsSubmenu extends SettingsListSubmenu {
 						break;
 					case "context-curation-max-jobs":
 						this.state = { ...this.state, maxJobsPerTurn: Number(newValue) };
-						break;
-					default:
-						return;
-				}
-				onChange({ ...this.state }, this.scope);
-			},
-			onCancel,
-		);
-	}
-}
-
-class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
-	private state: WorkerDelegationSettings;
-	private scope: SettingsScope;
-
-	constructor(
-		settings: WorkerDelegationSettings,
-		onChange: (settings: WorkerDelegationSettings, scope: SettingsScope) => void,
-		onCancel: () => void,
-		scope: SettingsScope = "global",
-	) {
-		super();
-		this.state = {
-			...settings,
-			enabled: settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED,
-			maxUsd: settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD,
-			maxWallClockMs: settings.maxWallClockMs ?? DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-		};
-		this.scope = scope;
-
-		const items: SettingItem[] = [
-			{
-				id: "worker-delegation-scope",
-				label: screenText().workerDelegation.scope.label,
-				description: screenText().workerDelegation.scope.description,
-				currentValue: this.scope,
-				values: ["global", "project"],
-				valueLabels: screenText().valueLabels.scope,
-			},
-			{
-				id: "worker-delegation-enabled",
-				label: screenText().workerDelegation.enabled.label,
-				description: screenText().workerDelegation.enabled.description,
-				currentValue: String(this.state.enabled),
-				values: ["true", "false"],
-				valueLabels: screenText().valueLabels.onOff,
-			},
-			{
-				id: "worker-delegation-max-usd",
-				label: screenText().workerDelegation.budget.label,
-				description: screenText().workerDelegation.budget.description,
-				currentValue: String(this.state.maxUsd),
-				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						screenText().workerDelegation.budgetTitle,
-						screenText().workerDelegation.budgetDescription(MAX_WORKER_DELEGATION_MAX_USD),
-						String(this.state.maxUsd),
-						(value) => {
-							const maxUsd = Number(value.trim());
-							if (Number.isFinite(maxUsd) && maxUsd >= 0 && maxUsd <= MAX_WORKER_DELEGATION_MAX_USD) {
-								this.state = { ...this.state, maxUsd };
-								done(String(maxUsd));
-								return;
-							}
-							done();
-						},
-						() => done(),
-						screenText().workerDelegation.budgetHint(MAX_WORKER_DELEGATION_MAX_USD),
-					),
-			},
-			{
-				id: "worker-delegation-max-wall-clock-ms",
-				label: screenText().workerDelegation.milliseconds.label,
-				description: screenText().workerDelegation.milliseconds.description,
-				currentValue: String(this.state.maxWallClockMs),
-				submenu: (_currentValue, done) =>
-					new TextInputSubmenu(
-						screenText().workerDelegation.millisecondsTitle,
-						screenText().workerDelegation.millisecondsDescription,
-						String(this.state.maxWallClockMs),
-						(value) => {
-							const maxWallClockMs = Number(value.trim());
-							if (Number.isSafeInteger(maxWallClockMs) && maxWallClockMs >= 0) {
-								this.state = { ...this.state, maxWallClockMs };
-								done(String(maxWallClockMs));
-								return;
-							}
-							done();
-						},
-						() => done(),
-						screenText().workerDelegation.millisecondsHint,
-					),
-			},
-			{
-				id: "worker-delegation-write-enabled",
-				label: screenText().workerDelegation.writeEnabled.label,
-				description: screenText().workerDelegation.writeEnabled.description,
-				currentValue: String(this.state.writeEnabled ?? DEFAULT_WORKER_DELEGATION_WRITE_ENABLED),
-				values: ["true", "false"],
-				valueLabels: screenText().valueLabels.onOff,
-			},
-		];
-
-		this.mountSettingsList(
-			items,
-			(id, newValue) => {
-				switch (id) {
-					case "worker-delegation-scope":
-						this.scope = newValue as SettingsScope;
-						break;
-					case "worker-delegation-enabled":
-						this.state = { ...this.state, enabled: newValue === "true" };
-						break;
-					case "worker-delegation-max-usd":
-						this.state = { ...this.state, maxUsd: Number(newValue) };
-						break;
-					case "worker-delegation-max-wall-clock-ms":
-						this.state = { ...this.state, maxWallClockMs: Number(newValue) };
-						break;
-					case "worker-delegation-write-enabled":
-						this.state = { ...this.state, writeEnabled: newValue === "true" };
 						break;
 					default:
 						return;
@@ -2576,69 +2303,6 @@ class WarningSettingsSubmenu extends SettingsListSubmenu {
 	}
 }
 
-export class SelectSubmenu extends Container {
-	private selectList: SelectList;
-
-	getSelectList(): SelectList {
-		return this.selectList;
-	}
-
-	constructor(
-		title: string,
-		description: string,
-		options: SelectItem[],
-		currentValue: string,
-		onSelect: (value: string) => void,
-		onCancel: () => void,
-		onSelectionChange?: (value: string) => void,
-	) {
-		super();
-
-		this.addChild(new SelectorHeading(title, description));
-
-		// Select list
-		this.selectList = new SelectList(
-			options,
-			Math.min(options.length, 10),
-			getSelectListTheme(),
-			COMPACT_SELECTOR_LIST_LAYOUT,
-		);
-
-		// Pre-select current value
-		const currentIndex = options.findIndex((o) => o.value === currentValue);
-		if (currentIndex !== -1) {
-			this.selectList.setSelectedIndex(currentIndex);
-		}
-
-		this.selectList.onSelect = (item) => {
-			onSelect(item.value);
-		};
-
-		this.selectList.onCancel = onCancel;
-
-		if (onSelectionChange) {
-			this.selectList.onSelectionChange = (item) => {
-				onSelectionChange(item.value);
-			};
-		}
-
-		this.addChild(this.selectList);
-
-		// Hint
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.select}`), 0, 0));
-	}
-
-	handleInput(data: string): void {
-		const kb = getKeybindings();
-		if (kb.matches(data, "app.interrupt") || kb.matches(data, "app.clear")) {
-			this.selectList.onCancel?.();
-			return;
-		}
-		this.selectList.handleInput(data);
-	}
-}
-
 /**
  * Main settings selector component.
  */
@@ -2836,16 +2500,52 @@ export class SettingsSelectorComponent extends Container {
 				label: screenText().rows.workerDelegation.label,
 				description: screenText().rows.workerDelegation.description,
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
-				submenu: (_currentValue, done) =>
-					new WorkerDelegationSettingsSubmenu(
-						currentWorkerDelegation,
-						(settings, scope) => {
-							currentWorkerDelegation = { ...settings };
-							callbacks.onWorkerDelegationChange(settings, scope);
+				submenu: (_currentValue, done) => {
+					const readState =
+						config.readWorkerDelegationState ??
+						((_scope: SettingsScope): WorkerDelegationEditableView => ({
+							effective: {
+								enabled: currentWorkerDelegation.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED,
+								maxUsd: currentWorkerDelegation.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD,
+								maxWallClockMs: currentWorkerDelegation.maxWallClockMs ?? 0,
+								writeEnabled: currentWorkerDelegation.writeEnabled ?? true,
+								account: currentWorkerDelegation.account ?? "other",
+								thinking: currentWorkerDelegation.thinking ?? "step_down",
+								routeProviders: currentWorkerDelegation.routeProviders ?? [],
+								defaultPin: currentWorkerDelegation.modelPins?.default,
+							},
+							scopeLayer: currentWorkerDelegation,
+							globalHasRouteProviders: (currentWorkerDelegation.routeProviders?.length ?? 0) > 0,
+							latestWorkhorseByProvider: {},
+						}));
+					return new WorkerDelegationSettingsSubmenu({
+						readState,
+						providerOptions: config.workerRoutingProviderOptions ?? [],
+						modelOptions: config.autoLearnModelOptions ?? [],
+						resolveModelThinkingLevels: config.resolveModelThinkingLevels,
+						onPatch: (patch, scope) => {
+							if (callbacks.onWorkerDelegationPatch) {
+								callbacks.onWorkerDelegationPatch(patch, scope);
+							} else {
+								currentWorkerDelegation = { ...currentWorkerDelegation, ...patch };
+								callbacks.onWorkerDelegationChange(currentWorkerDelegation, scope);
+							}
+							const refreshed = readState(scope);
+							currentWorkerDelegation = {
+								...currentWorkerDelegation,
+								enabled: refreshed.effective.enabled,
+								maxUsd: refreshed.effective.maxUsd,
+								maxWallClockMs: refreshed.effective.maxWallClockMs,
+								writeEnabled: refreshed.effective.writeEnabled,
+								account: refreshed.effective.account,
+								thinking: refreshed.effective.thinking,
+								routeProviders: [...refreshed.effective.routeProviders],
+							};
 						},
-						() => done(workerDelegationSummary(currentWorkerDelegation)),
-						config.workerDelegationScope ?? "global",
-					),
+						onCancel: () => done(workerDelegationSummary(currentWorkerDelegation)),
+						initialScope: config.workerDelegationScope ?? "global",
+					});
+				},
 			},
 			{
 				id: "learning-policy",

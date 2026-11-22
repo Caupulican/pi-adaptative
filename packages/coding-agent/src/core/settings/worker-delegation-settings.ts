@@ -3,6 +3,8 @@
  * resolved from the merged `workerDelegation` layer. Pure; the manager delegates to them.
  */
 
+import type { OrchestrationModelBinding } from "../orchestration/contracts.ts";
+import { compileWorkerModelPinPolicy, type WorkerModelPinsSettings } from "../orchestration/worker-model-pins.ts";
 import {
 	DEFAULT_WORKER_DELEGATION_ACCOUNT,
 	DEFAULT_WORKER_DELEGATION_ENABLED,
@@ -22,7 +24,9 @@ import {
 import type {
 	ResolvedWorkerDelegationSettings,
 	Settings,
+	SettingsScope,
 	WorkerAccountRouting,
+	WorkerDelegationSettings,
 	WorkerThinkingPolicy,
 } from "./settings-schema.ts";
 
@@ -84,4 +88,95 @@ export function resolveWorkerAccountRouting(settings: Pick<Settings, "workerDele
 		routeProviders: configured.routeProviders ?? [],
 		...(configured.routeProvidersByRole ? { routeProvidersByRole: configured.routeProvidersByRole } : {}),
 	};
+}
+
+/**
+ * Scope-local partial update to `workerDelegation`: only own keys present on the patch are written or cleared
+ * (`undefined` deletes that key in the target scope), leaving untouched keys and sibling pins intact.
+ */
+export type WorkerDelegationSettingsPatch = Partial<Omit<WorkerDelegationSettings, "modelPins">> & {
+	modelPins?: WorkerModelPinsSettings | undefined;
+	/** Set or clear only `modelPins.default` while preserving `modelPins.leader` and `modelPins.roles`. */
+	defaultModelPin?: OrchestrationModelBinding | undefined;
+};
+
+const PATCHABLE_WORKER_DELEGATION_KEYS = [
+	"enabled",
+	"orchestrationProfile",
+	"maxUsd",
+	"maxWallClockMs",
+	"writeEnabled",
+	"reportHandshake",
+	"haltReportDeadlineMs",
+	"thinking",
+	"account",
+	"routeProviders",
+	"routeProvidersByRole",
+	"outcomes",
+] as const;
+
+function hasAnyModelPin(pins: WorkerModelPinsSettings | undefined): boolean {
+	if (!pins) return false;
+	return (
+		pins.default !== undefined ||
+		pins.leader !== undefined ||
+		(pins.roles !== undefined && Object.keys(pins.roles).length > 0)
+	);
+}
+
+/**
+ * Apply a scope-local patch onto `existing` (that scope's raw `workerDelegation` layer only, never the merged
+ * effective settings). Returns `undefined` when clearing fields leaves the scope layer empty.
+ */
+export function applyWorkerDelegationPatch(
+	existing: WorkerDelegationSettings | undefined,
+	patch: WorkerDelegationSettingsPatch,
+	scope: SettingsScope,
+): WorkerDelegationSettings | undefined {
+	const next: WorkerDelegationSettings = existing ? structuredClone(existing) : {};
+
+	for (const key of PATCHABLE_WORKER_DELEGATION_KEYS) {
+		if (!Object.hasOwn(patch, key)) continue;
+		const value = patch[key];
+		if (value === undefined) {
+			delete next[key];
+			continue;
+		}
+		const normalized = normalizeWorkerDelegationLayer({ [key]: value });
+		if (normalized && Object.hasOwn(normalized, key)) {
+			(next as Record<string, unknown>)[key] = structuredClone((normalized as Record<string, unknown>)[key]);
+		}
+	}
+
+	if (Object.hasOwn(patch, "modelPins")) {
+		if (patch.modelPins === undefined || !hasAnyModelPin(patch.modelPins)) {
+			delete next.modelPins;
+		} else {
+			const policy = compileWorkerModelPinPolicy({ [scope]: patch.modelPins });
+			if (policy.status === "invalid") {
+				throw new Error(`Invalid worker model pin settings: ${policy.diagnostics.join("; ")}`);
+			}
+			next.modelPins = structuredClone(patch.modelPins);
+		}
+	}
+
+	if (Object.hasOwn(patch, "defaultModelPin")) {
+		const nextPins: WorkerModelPinsSettings = next.modelPins ? structuredClone(next.modelPins) : {};
+		if (patch.defaultModelPin === undefined) {
+			delete nextPins.default;
+		} else {
+			nextPins.default = structuredClone(patch.defaultModelPin);
+			const policy = compileWorkerModelPinPolicy({ [scope]: nextPins });
+			if (policy.status === "invalid") {
+				throw new Error(`Invalid worker model pin settings: ${policy.diagnostics.join("; ")}`);
+			}
+		}
+		if (hasAnyModelPin(nextPins)) {
+			next.modelPins = nextPins;
+		} else {
+			delete next.modelPins;
+		}
+	}
+
+	return Object.keys(next).length > 0 ? next : undefined;
 }

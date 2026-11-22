@@ -25,7 +25,7 @@ import {
 import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
-import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
+import { cliProviderAliases, resolveDefaultModelForProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { TYPESAFE_PROVIDER } from "../../core/review/typesafe-contract.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -37,10 +37,6 @@ import type { EditorOverlayHost } from "./editor-overlay-host.ts";
 
 function isUnknownModel(model: Model<any> | undefined): boolean {
 	return !!model && model.provider === "unknown" && model.id === "unknown" && model.api === "unknown";
-}
-
-function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
-	return providerId in defaultModelPerProvider;
 }
 
 const LOGIN_CANCELLATION_MESSAGES = ["Login cancelled"] as const;
@@ -443,15 +439,12 @@ export class AuthDialogsController {
 		if (persisted && isUnknownModel(previousModel) && isUnknownModel(this.session.model)) {
 			const availableModels = this.modelRegistry.getAvailable();
 			const providerModels = availableModels.filter((model) => model.provider === providerId);
-			if (!hasDefaultModelProvider(providerId)) {
-				selectionError = text.noDefaultModel(actionLabel, providerId);
-			} else if (providerModels.length === 0) {
+			if (providerModels.length === 0) {
 				selectionError = text.noModels(actionLabel);
 			} else {
-				const defaultModelId = defaultModelPerProvider[providerId];
-				selectedModel = providerModels.find((model) => model.id === defaultModelId);
+				selectedModel = resolveDefaultModelForProvider(providerId, providerModels);
 				if (!selectedModel) {
-					selectionError = text.defaultModelUnavailable(actionLabel, defaultModelId);
+					selectionError = text.noDefaultModel(actionLabel, providerId);
 				} else {
 					try {
 						await this.session.setModel(selectedModel);

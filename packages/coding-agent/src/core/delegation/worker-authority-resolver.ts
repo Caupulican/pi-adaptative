@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { checkSoulText } from "../agent-identity.ts";
@@ -14,8 +14,13 @@ import {
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
-import { defaultModelPerProvider } from "../model-resolver.ts";
-import { antigravityGeminiEffortFamily } from "../models/antigravity-effort.ts";
+import {
+	DEFAULT_WORKHORSE_PROVIDER_ORDER,
+	isEligibleAgentModel,
+	isStickyWorkhorseModelId,
+	resolveAntigravityEffortSibling,
+	selectLatestProviderModel,
+} from "../models/latest-model-selector.ts";
 import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import {
 	type HarnessCapability,
@@ -271,12 +276,10 @@ export function previewWorkerModel(input: {
 	return selectRoutedWorkerModel(input) ?? input.foregroundModel;
 }
 
-/**
- * Every model a fresh, unpinned worker may run on under `account: "other"`, in routing order: the
- * first is where it runs, the rest are where it moves when that account runs out of quota.
- */
-export function routedWorkerModels(input: Parameters<typeof selectRoutedWorkerModel>[0]): Model<Api>[] {
-	const routed = collectRoutedWorkerModels(input, Number.POSITIVE_INFINITY);
+function appendForegroundFallback(
+	routed: Model<Api>[],
+	input: Parameters<typeof selectRoutedWorkerModel>[0],
+): Model<Api>[] {
 	if (
 		routed.length > 0 &&
 		input.routing.account === "other" &&
@@ -291,6 +294,14 @@ export function routedWorkerModels(input: Parameters<typeof selectRoutedWorkerMo
 		routed.push(input.foregroundModel);
 	}
 	return routed;
+}
+
+/**
+ * Every model a fresh, unpinned worker may run on under `account: "other"`, in routing order: the
+ * first is where it runs, the rest are where it moves when that account runs out of quota.
+ */
+export function routedWorkerModels(input: Parameters<typeof selectRoutedWorkerModel>[0]): Model<Api>[] {
+	return appendForegroundFallback(collectRoutedWorkerModels(input, Number.POSITIVE_INFINITY), input);
 }
 
 /**
@@ -311,17 +322,33 @@ export function selectRoutedWorkerModel(input: {
 	return collectRoutedWorkerModels(input, 1)[0];
 }
 
-export const STICKY_WORKHORSE_MODEL_REFS = [
-	"anthropic/claude-haiku-5-5",
-	"google-antigravity/gemini-3.8-flash-high",
-] as const;
-
 export function isStickyWorkhorseModel(provider: string, modelId: string): boolean {
-	const ref = `${provider}/${modelId}`;
-	return (STICKY_WORKHORSE_MODEL_REFS as readonly string[]).includes(ref);
+	return isStickyWorkhorseModelId(provider, modelId);
 }
 
-function collectRoutedWorkerModels(
+interface RoutedWorkerEntry {
+	readonly model: Model<Api>;
+	/** True when the entry resolved dynamically from a bare provider or automatic routing (may promote effort siblings). */
+	readonly dynamicFamily: boolean;
+}
+
+function isEligibleRoutedWorkerModel(
+	model: Model<Api>,
+	input: {
+		modelRegistry: WorkerAuthorityResolverModelSource;
+		isModelExhausted: (model: Model<Api>) => boolean;
+		isModelLimited?: (model: Model<Api>) => boolean;
+	},
+): boolean {
+	if (!input.modelRegistry.hasConfiguredAuth(model) || input.isModelExhausted(model)) return false;
+	if (!isEligibleAgentModel(model, { requireBackgroundLanes: true })) return false;
+	// A candidate whose account is limited right now (a 429 a sibling saw, an exhausted window)
+	// is skipped for this dispatch: the ledger is a scheduler input, not only a wait.
+	if (input.isModelLimited?.(model)) return false;
+	return true;
+}
+
+function collectRoutedWorkerEntries(
 	input: {
 		foregroundModel: Model<Api>;
 		routing: WorkerAccountRouting;
@@ -331,11 +358,12 @@ function collectRoutedWorkerModels(
 		isModelLimited?: (model: Model<Api>) => boolean;
 	},
 	limit: number,
-): Model<Api>[] {
-	const found: Model<Api>[] = [];
-	const add = (model: Model<Api> | undefined): boolean => {
-		if (model && !found.some((entry) => entry.provider === model.provider && entry.id === model.id))
-			found.push(model);
+): RoutedWorkerEntry[] {
+	const found: RoutedWorkerEntry[] = [];
+	const add = (model: Model<Api> | undefined, dynamicFamily: boolean): boolean => {
+		if (model && !found.some((entry) => entry.model.provider === model.provider && entry.model.id === model.id)) {
+			found.push({ model, dynamicFamily });
+		}
 		return found.length >= limit;
 	};
 	if (input.routing.account !== "other" || input.foregroundModel.provider === "faux") return found;
@@ -343,10 +371,6 @@ function collectRoutedWorkerModels(
 	const configuredOrder =
 		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
 		input.routing.routeProviders;
-	const ordered =
-		configuredOrder.length > 0
-			? configuredOrder
-			: [STICKY_WORKHORSE_MODEL_REFS[0], "google-antigravity/gemini-3.8-flash-low", STICKY_WORKHORSE_MODEL_REFS[1]];
 	const available = modelRegistry.getAvailable();
 	// Automatic candidates are ACCOUNTS: providers with a stored credential (OAuth or API key). A
 	// provider that merely needs no auth (a local llama-cpp server, a models.json entry with a
@@ -356,43 +380,69 @@ function collectRoutedWorkerModels(
 	// Subscriptions are always preferred: a provider reached only by an API key joins a worker wave when the owner names it in
 	// `routeProviders` (an explicit choice), never because the harness found a key lying there.
 	const isSubscription = (provider: string): boolean => modelRegistry.authStorage.get(provider)?.type === "oauth";
-	const candidate = (provider: string, modelId?: string, explicit = false): Model<Api> | undefined => {
-		if (provider === foregroundModel.provider && (modelId === undefined || modelId === foregroundModel.id)) {
-			return undefined;
-		}
+	const isForegroundExact = (model: Model<Api>): boolean =>
+		model.provider === foregroundModel.provider && model.id === foregroundModel.id;
+
+	const selectDynamicForProvider = (
+		provider: string,
+		options: { explicit: boolean; allowForegroundProvider: boolean },
+	): Model<Api> | undefined => {
+		if (!options.explicit && !isSubscription(provider)) return undefined;
+		if (!options.allowForegroundProvider && provider === foregroundModel.provider) return undefined;
+		const eligible = available.filter(
+			(model) =>
+				model.provider === provider && !isForegroundExact(model) && isEligibleRoutedWorkerModel(model, input),
+		);
+		return selectLatestProviderModel(provider, eligible, {
+			tier: "workhorse",
+			requireBackgroundLanes: true,
+		});
+	};
+
+	const selectExact = (provider: string, modelId: string, explicit: boolean): Model<Api> | undefined => {
 		if (!explicit && !isSubscription(provider)) return undefined;
-		const model = modelId
-			? modelRegistry.find(provider, modelId)
-			: (modelRegistry.find(provider, defaultModelPerProvider[provider as KnownProvider] ?? "") ??
-				available.find((entry) => entry.provider === provider));
-		if (!model || !modelRegistry.hasConfiguredAuth(model) || input.isModelExhausted(model)) return undefined;
-		if (!deriveModelCapabilityProfile({ contextWindow: model.contextWindow }).backgroundLanesEnabled)
-			return undefined;
-		// A candidate whose account is limited right now (a 429 a sibling saw, an exhausted window)
-		// is skipped for this dispatch: the ledger is a scheduler input, not only a wait.
-		if (input.isModelLimited?.(model)) return undefined;
+		const model = modelRegistry.find(provider, modelId);
+		if (!model || isForegroundExact(model) || !isEligibleRoutedWorkerModel(model, input)) return undefined;
 		return model;
 	};
-	const owned = configuredOrder.length > 0;
-	for (const entry of ordered) {
-		const slash = entry.indexOf("/");
-		if (
-			add(
-				slash > 0
-					? candidate(entry.slice(0, slash), entry.slice(slash + 1), owned)
-					: candidate(entry, undefined, owned),
-			)
-		)
-			return found;
+
+	if (configuredOrder.length > 0) {
+		for (const entry of configuredOrder) {
+			const slash = entry.indexOf("/");
+			if (slash > 0) {
+				if (add(selectExact(entry.slice(0, slash), entry.slice(slash + 1), true), false)) return found;
+			} else {
+				// An explicit bare provider resolves dynamically to the latest eligible workhorse on that provider,
+				// excluding only the exact foreground model id rather than rejecting the whole provider.
+				if (add(selectDynamicForProvider(entry, { explicit: true, allowForegroundProvider: true }), true))
+					return found;
+			}
+		}
+	} else {
+		for (const provider of DEFAULT_WORKHORSE_PROVIDER_ORDER) {
+			if (add(selectDynamicForProvider(provider, { explicit: false, allowForegroundProvider: true }), true)) {
+				return found;
+			}
+		}
 	}
+
 	const seen = new Set<string>();
 	for (const model of available) {
 		if (seen.has(model.provider)) continue;
 		seen.add(model.provider);
 		if (!isAccount(model.provider)) continue;
-		if (add(candidate(model.provider))) return found;
+		if (add(selectDynamicForProvider(model.provider, { explicit: false, allowForegroundProvider: false }), true)) {
+			return found;
+		}
 	}
 	return found;
+}
+
+function collectRoutedWorkerModels(
+	input: Parameters<typeof collectRoutedWorkerEntries>[0],
+	limit: number,
+): Model<Api>[] {
+	return collectRoutedWorkerEntries(input, limit).map((entry) => entry.model);
 }
 
 function selectModelBinding(
@@ -406,6 +456,7 @@ function selectModelBinding(
 	accountRouting: WorkerAccountRouting,
 	isModelExhausted: (model: Model<Api>) => boolean,
 	isModelLimited: ((model: Model<Api>) => boolean) | undefined,
+	isModelAllowed: ((model: Model<Api>) => boolean) | undefined,
 	routeChoice: OrchestrationModelBinding | undefined,
 	rankRoutedModels: WorkerAuthorityResolutionInput["rankRoutedModels"],
 ):
@@ -438,14 +489,22 @@ function selectModelBinding(
 	// profile binding. An authored choice is never moved to another account.
 	if (!authority?.model && !base && foregroundModel) {
 		const role = defaultWorkerRole(authority, base);
-		const eligible = routedWorkerModels({
+		const routeInput = {
 			foregroundModel,
 			routing: accountRouting,
 			role,
 			modelRegistry,
 			isModelExhausted,
 			isModelLimited,
-		});
+		};
+		const entries = collectRoutedWorkerEntries(routeInput, Number.POSITIVE_INFINITY);
+		const dynamicFamilyRefs = new Set(
+			entries.filter((entry) => entry.dynamicFamily).map((entry) => `${entry.model.provider}/${entry.model.id}`),
+		);
+		const eligible = appendForegroundFallback(
+			entries.map((entry) => entry.model),
+			routeInput,
+		);
 		// Evidence orders the subscription-filtered list; it never adds or removes a candidate.
 		const routed = rankRoutedModels
 			? rankRoutedModels(eligible, { role, write: authority?.readOnly !== true })
@@ -468,15 +527,28 @@ function selectModelBinding(
 			const order = routed.map(bind);
 			// An explicit effort request can select a capable sibling on the same routed account. Pins and explicitly named models bypass this path.
 			if (explicitThinking && order[0]?.thinkingLevel !== explicitThinking) {
-				const family = antigravityGeminiEffortFamily(routed[0]!);
-				const sibling =
-					family &&
-					routed.findIndex(
-						(model, index) =>
-							antigravityGeminiEffortFamily(model) === family &&
-							order[index]?.thinkingLevel === explicitThinking,
+				const primary = routed[0]!;
+				const routedSibling = resolveAntigravityEffortSibling(primary, explicitThinking, routed);
+				if (routedSibling) {
+					const siblingIndex = routed.findIndex(
+						(candidate) => candidate.provider === routedSibling.provider && candidate.id === routedSibling.id,
 					);
-				if (typeof sibling === "number" && sibling > 0) order.unshift(...order.splice(sibling, 1));
+					if (siblingIndex > 0) order.unshift(...order.splice(siblingIndex, 1));
+				} else if (dynamicFamilyRefs.has(`${primary.provider}/${primary.id}`)) {
+					// Only bare-provider or automatic routing promotes from the live registry; explicit `provider/modelId`
+					// routes never substitute an unlisted sibling.
+					const registrySiblings = modelRegistry
+						.getAvailable()
+						.filter(
+							(candidate) =>
+								candidate.provider === primary.provider &&
+								!(candidate.provider === foregroundModel.provider && candidate.id === foregroundModel.id) &&
+								isEligibleRoutedWorkerModel(candidate, routeInput) &&
+								(!isModelAllowed || isModelAllowed(candidate)),
+						);
+					const sibling = resolveAntigravityEffortSibling(primary, explicitThinking, registrySiblings);
+					if (sibling) order.unshift(bind(sibling));
+				}
 			}
 			// The harness's own choice moves to the front; the routed order behind it stays the worker's way out.
 			const chosen = routeChoice
@@ -665,6 +737,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.accountRouting ?? { account: DEFAULT_WORKER_DELEGATION_ACCOUNT, routeProviders: [] },
 		isModelExhausted,
 		input.isModelLimited,
+		input.isModelAllowed,
 		input.routeChoice,
 		input.rankRoutedModels,
 	);

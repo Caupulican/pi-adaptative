@@ -6,19 +6,17 @@ import type { Agent } from "../kernel/agent.ts";
 import { type ClassifiedError, classifyFailure } from "../kernel/reliability/index.ts";
 import { decideBillingFailover } from "./billing-failover.ts";
 import { interfaceText } from "./language/interface-text.ts";
+import { defaultModelPerProvider, resolveDefaultModelForProvider } from "./model-resolver.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { writeFileAtomicSync } from "./util/atomic-file.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
 export interface BillingFailoverControllerModelSource {
 	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAvailable?(): Model<Api>[];
 	hasConfiguredAuth(model: Model<Api>): boolean;
 	isUsingSubscription(model: Model<Api>): boolean;
 }
-
-const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
-	"openai-codex": "gpt-5.6-sol",
-};
 
 /**
  * Which identity an exhaustion invalidates: one model deployment (`model`, the default) or every
@@ -237,8 +235,16 @@ export class BillingFailoverController {
 
 	private resolveFailover(failedModel: Model<Api>, failedRef: string): { notice: string; continuedOn?: Model<Api> } {
 		const pinned = this.deps.isModelPinned?.() === true;
-		const defaultModelId = DEFAULT_MODEL_PER_PROVIDER[failedModel.provider];
-		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
+		const available = this.deps.modelRegistry.getAvailable?.();
+		const dynamicDefault = available ? resolveDefaultModelForProvider(failedModel.provider, available) : undefined;
+		const defaultModelId =
+			dynamicDefault?.id ??
+			(Object.hasOwn(defaultModelPerProvider, failedModel.provider)
+				? defaultModelPerProvider[failedModel.provider as keyof typeof defaultModelPerProvider]
+				: undefined);
+		const hop =
+			dynamicDefault ??
+			(defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined);
 		// Resolved after the failed model is marked exhausted, so the router never hands it back.
 		const fallback = pinned ? undefined : this.deps.resolveFallbackModel?.(failedModel);
 		const action = decideBillingFailover({

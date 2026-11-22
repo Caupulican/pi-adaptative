@@ -7,6 +7,7 @@ import { watchPath } from "../../utils/fs-watch.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { defaultFallbackWorkhorseModelId } from "../models/latest-model-selector.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
 	type AwayEventDecisionInput,
@@ -997,10 +998,9 @@ export class PersistentBotTeamStore {
 			throw new Error(`"${agentId}" names who created a bot, so no bot can take it; choose another name.`);
 		if (!existing) assertBotId(agentId);
 		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
-		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
-
+		const modelId =
+			(input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || defaultFallbackWorkhorseModelId();
 		const now = nowIso ?? new Date().toISOString();
-
 		const record: PersistentBotRecord = {
 			agentId,
 			displayName: input.displayName?.trim() || existing?.displayName || agentId,
@@ -1962,7 +1962,7 @@ export class PersistentBotTeamStore {
 			mkdirSync(dirname(filePath), { recursive: true });
 			const bot = this.bots.get(normId);
 			const displayName = bot?.displayName ?? normId;
-			const model = bot ? `${bot.provider}/${bot.modelId}` : "anthropic/claude-haiku-5-5";
+			const model = bot ? `${bot.provider}/${bot.modelId}` : `anthropic/${defaultFallbackWorkhorseModelId()}`;
 			const header = `# Bot Memory: ${displayName} (${normId})\n\n- Model: ${model}\n\n## Continuity & Notes\n`;
 			createMemoryHeader(filePath, header);
 		}

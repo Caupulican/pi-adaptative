@@ -187,9 +187,11 @@ import {
 	resolveWindowsShellSettings,
 } from "./settings/tool-runtime-settings.ts";
 import {
+	applyWorkerDelegationPatch,
 	resolveWorkerAccountRouting,
 	resolveWorkerDelegationSettings,
 	resolveWorkerThinkingPolicy,
+	type WorkerDelegationSettingsPatch,
 } from "./settings/worker-delegation-settings.ts";
 import {
 	type ResolvedWorkerOutcomeSettings,
@@ -3006,30 +3008,25 @@ export class SettingsManager {
 		return typeof profileId === "string" && profileId.trim().length > 0 ? profileId.trim() : undefined;
 	}
 
-	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {
-		const normalizedSettings = normalizeWorkerDelegationLayer(settings) ?? {};
-		const sourceSettings = scope === "project" ? this.projectSettings : this.globalSettings;
-		const existingPins = sourceSettings.workerDelegation?.modelPins;
-		if (Object.hasOwn(settings, "modelPins")) {
-			const policy = compileWorkerModelPinPolicy({ [scope]: settings.modelPins });
-			if (policy.status === "invalid") {
-				throw new Error(`Invalid worker model pin settings: ${policy.diagnostics.join("; ")}`);
-			}
-			if (settings.modelPins !== undefined) normalizedSettings.modelPins = structuredClone(settings.modelPins);
-		} else if (existingPins !== undefined) {
-			normalizedSettings.modelPins = structuredClone(existingPins);
-		}
+	patchWorkerDelegationSettings(patch: WorkerDelegationSettingsPatch, scope: SettingsScope = "global"): void {
+		const source = scope === "project" ? this.projectSettings : this.globalSettings;
+		const next = applyWorkerDelegationPatch(source.workerDelegation, patch, scope);
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
-			projectSettings.workerDelegation = normalizedSettings;
+			if (next) projectSettings.workerDelegation = next;
+			else delete projectSettings.workerDelegation;
 			this.markProjectModified("workerDelegation");
 			this.saveProjectSettings(projectSettings);
 			return;
 		}
-
-		this.globalSettings.workerDelegation = normalizedSettings;
+		if (next) this.globalSettings.workerDelegation = next;
+		else delete this.globalSettings.workerDelegation;
 		this.markModified("workerDelegation");
 		this.save();
+	}
+
+	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope: SettingsScope = "global"): void {
+		this.patchWorkerDelegationSettings(settings, scope);
 	}
 
 	getLearningPolicySettings(): ResolvedLearningPolicySettings {

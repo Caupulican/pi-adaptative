@@ -2,13 +2,14 @@
  * Model resolution, scoping, and initial selection
  */
 
-import { modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import { getModels, getProviders, modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai/types";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import type { ThinkingLevel } from "../kernel/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { findRenamedFreeTierModel } from "./model-registry.ts";
+import { selectLatestProviderModel } from "./models/latest-model-selector.ts";
 import type { ProfileRegistry } from "./profile-registry.ts";
 import { isValidThinkingLevel } from "./thinking-level.ts";
 
@@ -20,47 +21,88 @@ export interface ModelResolverModelSource {
 	hasConfiguredAuth(model: Model<Api>): boolean;
 }
 
-/** Default model IDs for each known provider */
-export const defaultModelPerProvider: Record<KnownProvider, string> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-	anthropic: "claude-opus-4-8",
-	openai: "gpt-5.4",
-	fugu: "fugu",
-	"azure-openai-responses": "gpt-5.4",
-	"openai-codex": "gpt-6.2-sol",
-	deepseek: "deepseek-v4-pro",
-	google: "gemini-3.1-pro-preview",
-	"google-vertex": "gemini-3.1-pro-preview",
-	"github-copilot": "gpt-5.4",
-	openrouter: "moonshotai/kimi-k2.6",
-	"vercel-ai-gateway": "zai/glm-5.1",
-	xai: "grok-4.7",
-	groq: "openai/gpt-oss-120b",
-	cerebras: "gpt-oss-120b",
-	zai: "glm-5.2",
-	mistral: "devstral-medium-latest",
-	minimax: "MiniMax-M2.7",
-	"minimax-cn": "MiniMax-M2.7",
-	moonshotai: "kimi-k2.6",
-	"moonshotai-cn": "kimi-k2.6",
-	huggingface: "moonshotai/Kimi-K2.6",
-	fireworks: "accounts/fireworks/models/kimi-k3",
-	together: "moonshotai/Kimi-K3",
-	opencode: "kimi-k2.6",
-	"opencode-go": "kimi-k3",
-	"kimi-coding": "kimi-for-coding",
-	"command-code": "deepseek/deepseek-v4.1-flash-fast",
-	"llama-cpp": "local",
-	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
-	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
-	"qwen-token-plan": "qwen3.7-max",
-	"qwen-token-plan-cn": "qwen3.7-max",
-	xiaomi: "mimo-v2.5-pro",
-	"xiaomi-token-plan-cn": "mimo-v2.5-pro",
-	"xiaomi-token-plan-ams": "mimo-v2.5-pro",
-	"xiaomi-token-plan-sgp": "mimo-v2.5-pro",
-	typesafe: "jev-1.13.0",
-};
+/** Provider priority when selecting an initial or fallback model across multiple authenticated providers. */
+const DEFAULT_PROVIDER_PRIORITY: readonly string[] = [
+	"amazon-bedrock",
+	"anthropic",
+	"openai",
+	"fugu",
+	"azure-openai-responses",
+	"openai-codex",
+	"google-antigravity",
+	"deepseek",
+	"google",
+	"google-vertex",
+	"github-copilot",
+	"openrouter",
+	"vercel-ai-gateway",
+	"xai",
+	"groq",
+	"cerebras",
+	"zai",
+	"mistral",
+	"minimax",
+	"minimax-cn",
+	"moonshotai",
+	"moonshotai-cn",
+	"huggingface",
+	"fireworks",
+	"together",
+	"opencode",
+	"opencode-go",
+	"kimi-coding",
+	"command-code",
+	"llama-cpp",
+	"cloudflare-workers-ai",
+	"cloudflare-ai-gateway",
+	"qwen-token-plan",
+	"qwen-token-plan-cn",
+	"xiaomi",
+	"xiaomi-token-plan-cn",
+	"xiaomi-token-plan-ams",
+	"xiaomi-token-plan-sgp",
+	"typesafe",
+];
+
+/**
+ * Resolve the latest default (flagship/general) model for `provider` on the fly from `availableModels`.
+ * Works for both built-in providers and runtime-discovered providers (such as `google-antigravity`).
+ */
+export function resolveDefaultModelForProvider(
+	provider: string,
+	availableModels: readonly Model<Api>[],
+): Model<Api> | undefined {
+	return selectLatestProviderModel(provider, availableModels, { tier: "default" });
+}
+
+function buildDefaultModelPerProvider(): Record<KnownProvider, string> {
+	const defaults = {} as Record<KnownProvider, string>;
+	for (const provider of getProviders()) {
+		const models = getModels(provider);
+		defaults[provider] = resolveDefaultModelForProvider(provider, models)?.id ?? models[0]?.id ?? "";
+	}
+	return defaults;
+}
+
+/** Dynamically derived default model IDs for each known catalog provider (never pinned to stale versions). */
+export const defaultModelPerProvider: Record<KnownProvider, string> = buildDefaultModelPerProvider();
+
+function pickDefaultAvailableModel(availableModels: readonly Model<Api>[]): Model<Api> | undefined {
+	if (availableModels.length === 0) return undefined;
+	const seen = new Set<string>();
+	for (const provider of DEFAULT_PROVIDER_PRIORITY) {
+		seen.add(provider);
+		const match = resolveDefaultModelForProvider(provider, availableModels);
+		if (match) return match;
+	}
+	for (const model of availableModels) {
+		if (seen.has(model.provider)) continue;
+		seen.add(model.provider);
+		const match = resolveDefaultModelForProvider(model.provider, availableModels);
+		if (match) return match;
+	}
+	return availableModels[0];
+}
 
 export interface ScopedModel {
 	model: Model<Api>;
@@ -237,10 +279,7 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
 	const providerModels = availableModels.filter((m) => m.provider === provider);
 	if (providerModels.length === 0) return undefined;
 
-	const defaultId = defaultModelPerProvider[provider as KnownProvider];
-	const baseModel = defaultId
-		? (providerModels.find((m) => m.id === defaultId) ?? providerModels[0])
-		: providerModels[0];
+	const baseModel = resolveDefaultModelForProvider(provider, providerModels) ?? providerModels[0];
 
 	return {
 		...baseModel,
@@ -666,9 +705,7 @@ export function resolveCliProviderDefault(options: {
 		};
 	}
 
-	const defaultId = defaultModelPerProvider[provider as KnownProvider];
-	const model =
-		(defaultId ? providerModels.find((candidate) => candidate.id === defaultId) : undefined) ?? providerModels[0];
+	const model = resolveDefaultModelForProvider(provider, providerModels) ?? providerModels[0];
 	return { model, warning: undefined, thinkingLevel: undefined, error: undefined };
 }
 
@@ -763,25 +800,11 @@ export async function findInitialModel(options: {
 
 	// 4. Try first available model with valid API key
 	const availableModels = await modelRegistry.getAvailable();
-
-	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				return {
-					model: match,
-					thinkingLevel: resolveModelThinkingLevel(match, defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
-					fallbackMessage: undefined,
-				};
-			}
-		}
-
-		// If no default found, use first available
+	const picked = pickDefaultAvailableModel(availableModels);
+	if (picked) {
 		return {
-			model: availableModels[0],
-			thinkingLevel: resolveModelThinkingLevel(availableModels[0], defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
+			model: picked,
+			thinkingLevel: resolveModelThinkingLevel(picked, defaultThinkingLevel, DEFAULT_THINKING_LEVEL),
 			fallbackMessage: undefined,
 		};
 	}
@@ -873,24 +896,8 @@ export async function restoreModelFromSession(
 
 	// Try to find any available model
 	const availableModels = await modelRegistry.getAvailable();
-
-	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		let fallbackModel: Model<Api> | undefined;
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				fallbackModel = match;
-				break;
-			}
-		}
-
-		// If no default found, use first available
-		if (!fallbackModel) {
-			fallbackModel = availableModels[0];
-		}
-
+	const fallbackModel = pickDefaultAvailableModel(availableModels);
+	if (fallbackModel) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
 		}

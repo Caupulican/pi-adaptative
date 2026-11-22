@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+
+- `/settings -> Worker delegation` submenu for managing worker save scope, account mode, thinking policy, live-preview routing order, default worker pin, budget limits, and write permissions directly in the TUI.
+
+### Changed
+
+- Provider default models and unpinned worker routing now select the latest eligible flagship or workhorse model dynamically from the live catalog instead of hardcoded version maps, including Gemini 4 Hydrogen workhorse selection and Antigravity effort sibling resolution.
+- Explicit bare providers in `workerDelegation.routeProviders` now exclude only the exact foreground model ID rather than skipping the whole provider, so a foreground flagship can route workers to the latest workhorse on the same account.
+
+### Fixed
+
+- Editing worker delegation settings now patches only the selected scope layer (`global` or `project`), preserving untouched keys (`account`, `thinking`, `routeProviders`, `routeProvidersByRole`, `outcomes`) and sibling pins (`leader` and `roles`).
+
 ## [0.104.73] - 2026-11-21
 
 ### Added
