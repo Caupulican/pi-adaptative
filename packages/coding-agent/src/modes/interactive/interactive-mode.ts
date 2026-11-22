@@ -1695,11 +1695,11 @@ export class InteractiveMode {
 			setupAutocompleteProvider: () => this.setupAutocompleteProvider(),
 			showLoadedResources: (options) => this.showLoadedResources(options),
 			sessionFlowHost: () => this.sessionFlowHost(),
-			getCurrentAutoLearnSettings: () => this.getCurrentAutoLearnSettings(),
+			getCurrentAutoLearnSettings: () => this.autoLearnController.getEffectiveAutoLearnSettings(),
 			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
 			getAppKeyDisplay: (action) => this.getAppKeyDisplay(action),
 			handleAutonomyCommand: (text) => this.handleAutonomyCommand(text),
-			handleAutoLearnCommand: (text) => this.handleAutoLearnCommand(text),
+			handleAutoLearnCommand: (text) => autonomyCommands.handleAutoLearnCommand(this.autonomyHost(), text),
 			handleModelsCommand: (argsText) => this.handleModelsCommand(argsText),
 			showFitnessModelSelector: () => this.showFitnessModelSelector(),
 			showSettingsSelector: (initialItemId) => this.showSettingsSelector(initialItemId),
@@ -2639,14 +2639,6 @@ export class InteractiveMode {
 		return this.autoLearnController.getEffectiveAutoLearnSettings();
 	}
 
-	private getCurrentAutoLearnSettings(): Required<AutoLearnSettings> {
-		return this.autoLearnController.getCurrentAutoLearnSettings();
-	}
-
-	private getAutoLearnTenantKey(): string {
-		return this.autoLearnController.getAutoLearnTenantKey();
-	}
-
 	private getAutoLearnTenantDataDir(): string {
 		return this.autoLearnController.getAutoLearnTenantDataDir();
 	}
@@ -2804,18 +2796,18 @@ export class InteractiveMode {
 			formatAutoLearnStatus: () => this.formatAutoLearnStatus(),
 			getEffectiveAutoLearnSettings: () => this.getEffectiveAutoLearnSettings(),
 			getPrunedAutoLearnState: () => this.getPrunedAutoLearnState(),
-			getAutoLearnTenantKey: () => this.getAutoLearnTenantKey(),
+			getAutoLearnTenantKey: () => this.autoLearnController.getAutoLearnTenantKey(),
 			getAutoLearnDataDir: () => this.getAutoLearnDataDir(),
 			getAutoLearnTenantDataDir: () => this.getAutoLearnTenantDataDir(),
+			exportSkillComparison: (runId, index) => this.autoLearnController.exportSkillComparison(runId, index),
+			describeSkillComparison: (runId, index) => this.autoLearnController.describeSkillComparison(runId, index),
+			reofferSkillComparison: (runId, index, studyId) =>
+				this.autoLearnController.reofferSkillComparison(runId, index, studyId),
 		};
 	}
 
 	private handleAutonomyCommand(text: string): void {
 		autonomyCommands.handleAutonomyCommand(this.autonomyHost(), text);
-	}
-
-	private handleAutoLearnCommand(text: string): void {
-		autonomyCommands.handleAutoLearnCommand(this.autonomyHost(), text);
 	}
 
 	/** Wide seam for the /settings selector; the hideThinkingBlock field is read+written here. */

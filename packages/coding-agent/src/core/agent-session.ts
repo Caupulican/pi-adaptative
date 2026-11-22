@@ -33,7 +33,7 @@ import {
 	attachSessionAdaptiveRuntime,
 	buildSessionContextCompositionReport,
 	createGoalProofWrites,
-	createLessonRoutePort,
+	createSessionAutoLearnPorts,
 	createSessionOperatorProjection,
 	createSessionProjectRules,
 	createSessionProviderRequestContext,
@@ -177,7 +177,6 @@ import { subscribeHumanInputActivity } from "./human-input-activity.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import {
 	type AutoLearnProposalSet,
-	type AutoLearnReportEntry,
 	applyAutoLearnProposals as decideAutoLearnProposals,
 } from "./learning/auto-learn-proposals.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
@@ -5031,21 +5030,22 @@ export class AgentSession {
 		return this._reflection.rollbackLearningWrite(auditId);
 	}
 
-	/**
-	 * Decide and apply a background learner's returned proposals under this session's autonomy mode
-	 * and autoLearn eligibility. The learner process wrote nothing; every entry gets a report row.
-	 */
-	applyAutoLearnProposals(set: AutoLearnProposalSet, runId: string): Promise<AutoLearnReportEntry[]> {
-		return decideAutoLearnProposals(set, runId, {
-			context: this._reflection.captureLearningContext(),
-			settingsManager: this.settingsManager,
-			skillVault: this._skillVault,
-			applyWrites: (rawWrites, id, guard) => this._reflection.applyLearnerWrites(rawWrites, { runId: id, guard }),
-			routeLesson: createLessonRoutePort({
-				agentDir: () => this._agentDir,
-				engine: () => this._semanticPlane.recordingSemanticEngine(),
-			}),
-		});
+	/** Apply the read-only learner's proposals under session policy and report each disposition. */
+	applyAutoLearnProposals(
+		set: AutoLearnProposalSet,
+		runId: string,
+		options: { reviewedSkillComparison?: boolean } = {},
+	) {
+		const ports = createSessionAutoLearnPorts(
+			this,
+			this.settingsManager,
+			this._agentDir,
+			this._cwd,
+			this._reflection,
+			() => this._semanticPlane.recordingSemanticEngine(),
+			options.reviewedSkillComparison === true,
+		);
+		return decideAutoLearnProposals(set, runId, ports);
 	}
 
 	getSelfCompactionView(): SelfCompactionView {

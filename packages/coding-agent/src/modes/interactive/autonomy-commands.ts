@@ -53,6 +53,9 @@ export interface AutonomyHost {
 	getAutoLearnTenantKey(): string;
 	getAutoLearnDataDir(): string;
 	getAutoLearnTenantDataDir(): string;
+	exportSkillComparison?(runId: string, index: number): string;
+	describeSkillComparison?(runId: string, index: number): string;
+	reofferSkillComparison?(runId: string, index: number, studyId?: string): Promise<string>;
 }
 
 export function formatAutonomyStatus(
@@ -189,6 +192,33 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 
 export function handleAutoLearnCommand(host: AutonomyHost, text: string): void {
 	const action = text.slice("/auto-learn".length).trim() || "status";
+	const match =
+		/^(comparison|export-comparison|reoffer-comparison) ([A-Za-z0-9._-]+) (\d+)(?: ([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}))?$/.exec(
+			action,
+		);
+	if (match) {
+		const [, operation, runId, rawIndex, studyId] = match;
+		const index = Number(rawIndex);
+		if (!Number.isSafeInteger(index) || (studyId !== undefined && operation !== "reoffer-comparison")) {
+			host.showStatus("Invalid Auto Learn entry index");
+			return;
+		}
+		try {
+			if (operation === "comparison") {
+				host.showStatus(host.describeSkillComparison?.(runId!, index) ?? "Comparison details are unavailable");
+			} else if (operation === "export-comparison") {
+				host.showStatus(host.exportSkillComparison?.(runId!, index) ?? "Comparison export is unavailable");
+			} else {
+				void host.reofferSkillComparison?.(runId!, index, studyId).then(
+					(message) => host.showStatus(message),
+					(error) => host.showStatus(String(error)),
+				);
+			}
+		} catch (error) {
+			host.showStatus(String(error));
+		}
+		return;
+	}
 	if (action === "run" || action === "now" || action === "run-now") {
 		host.showStatus(host.launchAutoLearn("manual", true));
 		return;

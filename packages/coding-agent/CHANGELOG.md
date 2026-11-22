@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Auto Learn records skill-edit predictions and holds automatic shortening for a matching hosted-model comparison. Export and reoffer commands keep the proposal in its owning session and project. The paired coding evaluator grades both revisions, checks a synthetic disclosure boundary and records token use.
+
 ## [0.104.75] - 2026-11-22
 
 ### Fixed

@@ -4,6 +4,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../packages/coding-agent/src/config.ts";
 import { killTreeNow } from "../../packages/coding-agent/src/kernel/reliability/process-tree.ts";
+import { grade } from "./corpus.mjs";
 
 export function saveJson(path, data) {
 	writeFileSync(path + ".tmp", JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
@@ -74,10 +75,23 @@ export async function supervise({
 	try {
 		mkdirSync(trialDir, { mode: 0o700 });
 		mkdirSync(agentDir, { mode: 0o700 });
+		if (config.skillMode) {
+			const skillDirectory = join(agentDir, "skills", "study");
+			mkdirSync(skillDirectory, { recursive: true, mode: 0o700 });
+			writeFileSync(
+				join(skillDirectory, "SKILL.md"),
+				`---\nname: ${JSON.stringify(config.skillName)}\ndescription: Guidance selected for this coding task.\n---\n\n${config.skillBody}\n`,
+				{ mode: 0o600, flag: "wx" },
+			);
+		}
 		const seedCommit = seedWorkspace(cwd, task);
 		const input = join(trialDir, "input.json");
 		saveJson(input, { ...config, agentDir, seedCommit });
-		const env = { ...fixtureEnvironment(cwd), [ENV_AGENT_DIR]: agentDir, [ENV_SESSION_DIR]: join(agentDir, "sessions") };
+		const env = {
+			...fixtureEnvironment(cwd),
+			[ENV_AGENT_DIR]: agentDir,
+			[ENV_SESSION_DIR]: join(agentDir, "sessions"),
+		};
 		const child = fork(entry, [input], {
 			cwd,
 			env,
@@ -99,6 +113,19 @@ export async function supervise({
 			signal.addEventListener("abort", abort, { once: true });
 			if (signal.aborted) abort();
 			child.on("message", (message) => {
+				if (config.skillMode && message?.kind === "grade") {
+					try {
+						const findings =
+							typeof message.answer === "string" && message.answer.length <= 1024 * 1024
+								? grade(task, cwd, message.answer)
+								: ["Submission exceeds the grader input bound."];
+						child.send({ kind: "grade-result", request: message.request, findings });
+					} catch {
+						row.diagnostic = "Independent grader failed";
+						stop("error");
+					}
+					return;
+				}
 				Object.assign(row, message);
 				try {
 					checkpoint({ ...row, elapsedMs: Math.round(performance.now() - start) });

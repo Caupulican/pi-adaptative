@@ -48,7 +48,8 @@ export const AUTONOMY_COMMANDS = {
 		researchResult: (status: string, reason: string) => `Pesquisa em segundo plano ${status}${reason}`,
 		researchReason: (reason: string) => ` (${reason})`,
 		usage: "Uso: /autonomy [status|diagnostics|research|rollback <auditId>|off|safe|balanced|full]",
-		autoLearnUsage: "Uso: /auto-learn [status|run]",
+		autoLearnUsage:
+			"Uso: /auto-learn [status|run|comparison RUN INDEX|export-comparison RUN INDEX|reoffer-comparison RUN INDEX STUDY_ID]",
 		enabled: "ativado",
 		disabled: "desativado",
 	},

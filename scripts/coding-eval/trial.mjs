@@ -1,5 +1,6 @@
 // One production SDK session per arm. Only projected evidence crosses back to the comparison driver.
 import { clampThinkingLevel } from "@caupulican/pi-ai/models";
+import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,8 +18,11 @@ import {
 import { DefaultResourceLoader } from "../../packages/coding-agent/src/core/resource-loader.ts";
 import { createAgentSession } from "../../packages/coding-agent/src/core/sdk.ts";
 import { SettingsManager } from "../../packages/coding-agent/src/core/settings-manager.ts";
+import { loadSkillsFromDir } from "../../packages/coding-agent/src/core/skills.ts";
+import { ACTIVE_SKILL_RECORD_KIND_PREFIX } from "../../packages/coding-agent/src/core/provider-request-context-controller.ts";
 import { runGradedTask } from "./comparison.mjs";
-import { cases, grade } from "./corpus.mjs";
+import { cases, grade, skillSafetyCase } from "./corpus.mjs";
+import { skillBodyDigest } from "../../packages/coding-agent/src/core/learning/skill-comparison.ts";
 
 const send = (message) =>
 	new Promise((resolve, reject) => process.send(message, (error) => (error ? reject(error) : resolve())));
@@ -63,8 +67,14 @@ async function settledTurn(session, manager, prompt) {
 		.join("\n");
 }
 
-function evidence(session) {
+function evidence(session, skillMode = false) {
 	const costs = session.getCostSummary();
+	const reading = session.getDurableCumulativeUsage();
+	const counts = [reading.usage.input, reading.usage.output, reading.usage.cacheRead, reading.usage.cacheWrite];
+	const tokens =
+		reading.settled && counts.every((count) => Number.isSafeInteger(count) && count >= 0)
+			? counts.reduce((sum, count) => sum + count, 0)
+			: null;
 	const metrics = session.getTaskAndModelMetrics();
 	const state = session.backgroundLanes.getTaskRuntimeSnapshot();
 	const spend = state && retainedWorkerTaskSpend(state);
@@ -92,6 +102,7 @@ function evidence(session) {
 		(!attempts.length ||
 			(spend.attempts === attempts.length && workerModelUsd > 0 && workerModelUsd + 1e-9 >= spend.recordedUsd));
 	return {
+		...(skillMode ? { tokens } : {}),
 		attempts,
 		outcomes,
 		models: metrics.models,
@@ -110,8 +121,10 @@ function evidence(session) {
 async function main() {
 	const config = JSON.parse(readFileSync(process.argv[2], "utf8"));
 	const { agentDir, ownerDir, arm } = config;
+	const skillMode = config.skillMode === true;
+	let skillApplied = false;
 	const cwd = process.cwd();
-	const task = cases.find((item) => item.id === config.caseId);
+	const task = [...cases, skillSafetyCase].find((item) => item.id === config.caseId);
 	const authStorage = AuthStorage.create(join(ownerDir, "auth.json"));
 	const registry = ModelRegistry.create(authStorage, join(ownerDir, "models.json"));
 	const modelAllowed = (candidate) => !config.hostedOnly || !isLocalExecutionModel(candidate);
@@ -144,7 +157,7 @@ async function main() {
 	const settings = {
 		worktreeSync: { gate: "on", gateCommand: `git diff --check ${config.seedCommit}` },
 		systemOne: { enabled: config.systemOne },
-		modelRouter: { enabled: true },
+		modelRouter: { enabled: !skillMode },
 		orchestrator: { delegationGate: false },
 		routines: { automaticIntake: false, away: { enabled: false, autostart: "off" } },
 		workerDelegation: {
@@ -156,15 +169,19 @@ async function main() {
 	};
 	writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings), { mode: 0o600 });
 	const settingsManager = SettingsManager.create(cwd, agentDir);
+	const evaluationSkills = skillMode
+		? loadSkillsFromDir({ dir: join(agentDir, "skills"), source: "user" })
+		: undefined;
 	const resourceLoader = new DefaultResourceLoader({
 		cwd,
 		agentDir,
 		settingsManager,
 		noContextFiles: true,
 		noExtensions: true,
-		noSkills: true,
+		noSkills: !skillMode,
 		noThemes: true,
 		noPromptTemplates: true,
+		...(evaluationSkills ? { skillsOverride: () => evaluationSkills } : {}),
 		installMissingPackages: false,
 	});
 	await resourceLoader.reload();
@@ -194,6 +211,48 @@ async function main() {
 		settingsManager,
 		resourceLoader,
 	});
+	if (skillMode) {
+		try {
+			if (evaluationSkills.skills.length !== 1 || evaluationSkills.skills[0].name !== config.skillName)
+				throw new Error("The isolated evaluation skill was not discovered");
+			const loaded = session.skillVault.load(config.skillName, "user", true);
+			if (!loaded.ok || !loaded.pinned) throw new Error("The selected evaluation skill could not be pinned");
+			const snapshot = session.agent.onProviderRequestSnapshot;
+			session.agent.onProviderRequestSnapshot = async (context, signal) => {
+				if (context.model.provider !== model.provider || context.model.id !== model.id)
+					throw new Error("Skill comparison switched away from its selected hosted model");
+				const sections = session.skillVault.previewSkillSections();
+				const selected = sections.find((section) => section.name === config.skillName);
+				const record = context.sourceContext.messages.findLast(
+					(message) =>
+						message.role === "custom" &&
+						message.customType === `${ACTIVE_SKILL_RECORD_KIND_PREFIX}${config.skillName}`,
+				);
+				const visible = context.context.messages.some(
+					(message) =>
+						message.role === "user" &&
+						(typeof message.content === "string"
+							? [message.content]
+							: message.content.filter((part) => part.type === "text").map((part) => part.text)
+						).some(
+							(text) => text.includes(`ACTIVE SKILL ${config.skillName}`) && text.includes(config.skillBody),
+						),
+				);
+				if (
+					sections.length !== 1 ||
+					!selected?.section.includes(config.skillBody) ||
+					record?.content !== selected.section ||
+					!visible
+				)
+					throw new Error("Selected native skill context is absent from the accepted provider request");
+				await snapshot?.(context, signal);
+				skillApplied = true;
+			};
+		} catch (error) {
+			await session.disposeAndWait();
+			throw error;
+		}
+	}
 	// A hard cutoff cannot ask a hung child for a final snapshot. Keep the latest observed usage and
 	// attempt identities in the parent's checkpoint while the trial still owns its event loop.
 	let previousSample;
@@ -202,7 +261,7 @@ async function main() {
 		if (sampling) return;
 		sampling = true;
 		try {
-			const sample = evidence(session);
+			const sample = evidence(session, skillMode);
 			const key = JSON.stringify(sample);
 			if (key !== previousSample) {
 				await send({ ...sample, costUsd: null });
@@ -232,24 +291,40 @@ async function main() {
 			activeTools,
 			availableWorkerModels,
 			settings,
-			sessionFile: session.sessionFile,
+			...(skillMode ? { skillDigest: skillBodyDigest(config.skillBody) } : { sessionFile: session.sessionFile }),
 			foreground: { provider: session.model?.provider, model: session.model?.id, thinking: session.thinkingLevel },
 		});
 		if (activeTools.includes("delegate") !== (arm === "auto"))
 			throw new Error("The effective delegation tool does not match the assigned arm");
 		status = await runGradedTask({
 			task: assignment,
-			maxCorrections: config.maxCorrections,
+			maxCorrections: skillMode && task.id === skillSafetyCase.id ? 0 : config.maxCorrections,
 			turn: (prompt) => settledTurn(session, sessionManager, prompt),
-			assess: (answer) => grade(task, cwd, answer),
-			observe: (data) => send({ ...data, ...evidence(session) }),
+			assess: skillMode
+				? (answer) =>
+						new Promise((resolve, reject) => {
+							const request = randomUUID();
+							const receive = (message) => {
+								if (message?.kind !== "grade-result" || message.request !== request) return;
+								process.off("message", receive);
+								resolve(message.findings);
+							};
+							process.on("message", receive);
+							send({ kind: "grade", request, answer }).catch((error) => {
+								process.off("message", receive);
+								reject(error);
+							});
+						})
+				: (answer) => grade(task, cwd, answer),
+			observe: (data) => send({ ...data, ...evidence(session, skillMode) }),
 		});
 		clearInterval(sampler);
-		const measured = evidence(session);
-		if (arm === "direct" && measured.attempts.length) throw new Error("Direct session dispatched worker work");
-		await send(measured);
+		const measured = evidence(session, skillMode);
+		if ((arm === "direct" || skillMode) && measured.attempts.length)
+			throw new Error("Foreground-only session dispatched worker work");
+		await send({ ...measured, ...(skillMode ? { skillApplied } : {}) });
 	} catch (error) {
-		await send({ ...evidence(session), costUsd: null });
+		await send({ ...evidence(session, skillMode), costUsd: null });
 		throw error;
 	} finally {
 		clearInterval(sampler);

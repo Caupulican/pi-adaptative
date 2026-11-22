@@ -14,11 +14,18 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { checkSkillEvolutionEligibility, isValidSkillName } from "../session-skill-policy.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schema.ts";
-import type { SkillRepairInput, SkillRepairResult } from "../skill-repair.ts";
+import type { SkillInspectResult, SkillRepairInput, SkillRepairResult } from "../skill-repair.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
 import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH } from "../skills.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import {
+	type AutoLearnSkillBaselines,
+	type AutoLearnSkillContext,
+	type AutoLearnSkillEvidence,
+	evaluateAutoLearnSkillEvidence,
+	prepareAutoLearnSkillEvidence,
+} from "./auto-learn-skill-evidence.ts";
 import type { LearningApplicationGuard } from "./learning-write-journal.ts";
 import { MAX_REFLECTION_WRITES } from "./reflection-engine.ts";
 import {
@@ -75,6 +82,9 @@ function isTunableAutoLearnSetting(key: string): key is TunableAutoLearnSettingK
 export type AutoLearnVerdict = "PASS" | "BLOCKED" | "FAIL";
 
 export interface AutoLearnSkillUpdateProposal {
+	rationale?: string;
+	predictedEffect?: string;
+	skillEvidence?: AutoLearnSkillEvidence;
 	index: number;
 	name: string;
 	description?: string;
@@ -202,7 +212,24 @@ export function parseAutoLearnProposals(output: string): AutoLearnParseResult {
 				set.malformed.push({ index, reason: "skill_update needs a valid name and a bounded body/description" });
 				return;
 			}
-			set.skillUpdates.push({ index, name: name.trim(), body, ...(description ? { description } : {}) });
+			const rationale = boundedString(entry.rationale, MAX_AUTO_LEARN_RATIONALE_BYTES);
+			const predictedEffect = boundedString(entry.predictedEffect, MAX_AUTO_LEARN_RATIONALE_BYTES);
+			if (
+				(entry.rationale !== undefined && !rationale?.trim()) ||
+				(entry.predictedEffect !== undefined && !predictedEffect?.trim()) ||
+				entry.skillEvidence !== undefined
+			) {
+				set.malformed.push({ index, reason: "skill_update evidence or rationale is invalid" });
+				return;
+			}
+			set.skillUpdates.push({
+				index,
+				name: name.trim(),
+				body,
+				...(description ? { description } : {}),
+				...(rationale ? { rationale } : {}),
+				...(predictedEffect ? { predictedEffect } : {}),
+			});
 			return;
 		}
 		if (entry.kind === "settings") {
@@ -247,6 +274,9 @@ export type AutoLearnEntryOutcome =
 	| "forwarded";
 
 export interface AutoLearnReportEntry {
+	rationale?: string;
+	predictedEffect?: string;
+	skillEvidence?: AutoLearnSkillEvidence;
 	index: number;
 	kind: string;
 	subject?: string;
@@ -262,6 +292,9 @@ export interface AutoLearnReportEntry {
 }
 
 export interface AutoLearnApplyPorts {
+	/** Set only by the native owner-invoked reoffer, never by learner JSON. */
+	reviewedSkillComparison?: boolean;
+	skillContext?(): AutoLearnSkillContext | undefined;
 	/** Captured before the whole batch; navigation never renews its execution authority. */
 	context: LearningApplicationGuard;
 	settingsManager: {
@@ -271,7 +304,7 @@ export interface AutoLearnApplyPorts {
 		setAutoLearnSettings(settings: AutoLearnSettings, scope?: "global" | "project"): void;
 	};
 	skillVault: {
-		inspect(name: string): { ok: true; version: string } | { ok: false; message: string };
+		inspect(name: string): SkillInspectResult;
 		repairSkill(input: SkillRepairInput): SkillRepairResult;
 		/** Names of the skills this session has loaded: the only skills a learner may edit. */
 		getLoadedSkillNames(): readonly string[];
@@ -333,6 +366,17 @@ export async function applyAutoLearnProposals(
 	ports: AutoLearnApplyPorts,
 ): Promise<AutoLearnReportEntry[]> {
 	const report: AutoLearnReportEntry[] = [];
+	const freshlyPreparedSkills = new Set<number>();
+	// Bind fresh proposals before any asynchronous routing can change their baseline.
+	for (const update of set.skillUpdates) {
+		const skillContext = ports.skillContext?.();
+		if (update.skillEvidence || !skillContext) continue;
+		const inspected = ports.skillVault.inspect(update.name);
+		if (inspected.ok) {
+			update.skillEvidence = prepareAutoLearnSkillEvidence(skillContext, inspected, update.body);
+			freshlyPreparedSkills.add(update.index);
+		}
+	}
 	const recordIfContextChanged = (index: number, kind: string, subject?: string): boolean => {
 		const reasonCode = ports.context();
 		if (!reasonCode) return false;
@@ -438,7 +482,14 @@ export async function applyAutoLearnProposals(
 	}
 
 	for (const update of set.skillUpdates) {
-		const base = { index: update.index, kind: "skill_update", subject: update.name };
+		const base = {
+			index: update.index,
+			kind: "skill_update",
+			subject: update.name,
+			rationale: update.rationale,
+			predictedEffect: update.predictedEffect,
+			skillEvidence: update.skillEvidence,
+		};
 		if (recordIfContextChanged(base.index, base.kind, base.subject)) continue;
 		// A preceding memory write can await I/O while the owner revokes automatic skill changes, and the session can load
 		// a skill meanwhile, so both facts are read here, at the decision.
@@ -471,10 +522,27 @@ export async function applyAutoLearnProposals(
 			report.push({ ...base, outcome: "failed", reasonCode: "skill_not_found", detail: inspected.message });
 			continue;
 		}
+		const measured = evaluateAutoLearnSkillEvidence(
+			ports.skillContext?.(),
+			inspected,
+			update,
+			ports.reviewedSkillComparison && !freshlyPreparedSkills.has(update.index),
+		);
+		base.skillEvidence = measured.evidence;
+		if (measured.hold) {
+			report.push({
+				...base,
+				outcome: "proposed",
+				reasonCode: measured.hold,
+				suggestion: { body: update.body, ...(update.description ? { description: update.description } : {}) },
+			});
+			continue;
+		}
 		const repaired = ports.skillVault.repairSkill({
 			name: update.name,
 			body: update.body,
 			expectedVersion: inspected.version,
+			...(measured.canonicalFile ? { expectedCanonicalFile: measured.canonicalFile } : {}),
 			...(update.description ? { description: update.description } : {}),
 		});
 		report.push(
@@ -538,6 +606,7 @@ export async function applyAutoLearnProposals(
 }
 
 export interface AutoLearnHandoffRecord {
+	skillBaselines?: AutoLearnSkillBaselines;
 	version: 1;
 	runId: string;
 	/** Session that launched the learner. */
@@ -592,6 +661,9 @@ export function formatAutoLearnHandoffNote(record: AutoLearnHandoffRecord): stri
 		lines.push(
 			`- #${entry.index} ${entry.kind}${entry.subject ? ` "${entry.subject.replace(/[\r\n]+/g, " ")}"` : ""}: ${entry.outcome} (${entry.reasonCode})${entry.proposalId ? ` audit=${entry.proposalId}` : ""}${entry.routeFailure !== undefined ? ` lesson not recorded in the structural backlog: ${entry.routeFailure}` : ""}`,
 		);
+		if (entry.kind === "skill_update" && entry.outcome === "proposed" && entry.skillEvidence) {
+			lines.push(`  Export comparison inputs with /auto-learn export-comparison ${record.runId} ${entry.index}`);
+		}
 	}
 	if (unresolved.length > MAX_AUTO_LEARN_NOTE_ENTRIES) {
 		lines.push(

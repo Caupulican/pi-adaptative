@@ -13,6 +13,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionConfig, AgentSessionEvent } from "./agent-session-contracts.ts";
 import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
@@ -51,6 +52,7 @@ import {
 import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import type { AutoLearnApplyPorts } from "./learning/auto-learn-proposals.ts";
+import { activeAutoLearnSkillContext } from "./learning/auto-learn-skill-evidence.ts";
 import { ObservationStore, observationKey } from "./learning/observation-store.ts";
 import { type LessonCandidate, type LessonJudge, routeLesson } from "./learning/structural-backlog.ts";
 import { type ContinuousChatRequestSource, splitContinuousChatRequest } from "./memory/continuous-chat-projection.ts";
@@ -840,7 +842,7 @@ function observedCountOf(agentDir: string, lesson: LessonCandidate): number {
  * one boolean question per call, and a judgment System One cannot answer is `open`. Undefined where no System One engine is
  * bound, and then nothing is routed.
  */
-export function createLessonRoutePort(owners: {
+function createLessonRoutePort(owners: {
 	readonly agentDir: () => string;
 	readonly engine: () => SemanticDecisionEngine | undefined;
 }): AutoLearnApplyPorts["routeLesson"] {
@@ -880,6 +882,27 @@ export function createLessonRoutePort(owners: {
 			judge,
 			now: Date.now(),
 		});
+	};
+}
+
+/** Bind learner writes to this session, reading the active model and effort again at the write boundary. */
+export function createSessionAutoLearnPorts(
+	session: Pick<AgentSession, "model" | "thinkingLevel" | "skillVault">,
+	settingsManager: AutoLearnApplyPorts["settingsManager"],
+	agentDir: string,
+	cwd: string,
+	reflection: Pick<ReflectionController, "captureLearningContext" | "applyLearnerWrites">,
+	engine: () => SemanticDecisionEngine | undefined,
+	reviewedSkillComparison: boolean,
+): AutoLearnApplyPorts {
+	return {
+		reviewedSkillComparison,
+		skillContext: () => activeAutoLearnSkillContext(agentDir, cwd, session.model, session.thinkingLevel),
+		context: reflection.captureLearningContext(),
+		settingsManager,
+		skillVault: session.skillVault,
+		applyWrites: (rawWrites, id, guard) => reflection.applyLearnerWrites(rawWrites, { runId: id, guard }),
+		routeLesson: createLessonRoutePort({ agentDir: () => agentDir, engine }),
 	};
 }
 

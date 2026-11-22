@@ -8,6 +8,7 @@ import {
 	type AutoLearnReportEntry,
 	parseAutoLearnProposals,
 } from "./auto-learn-proposals.ts";
+import { bindAutoLearnSkillBaselines } from "./auto-learn-skill-evidence.ts";
 
 export const MAX_AUTO_LEARN_REOFFER_RECORDS = 32;
 const MAX_REOFFER_DIAGNOSTICS = 32;
@@ -104,6 +105,7 @@ export async function reofferAutoLearnProposals(ports: AutoLearnReofferPorts): P
 			record.detail = `retained proposals report ${parsed.set.verdict}; not applied`;
 		} else {
 			try {
+				if (record.skillBaselines) bindAutoLearnSkillBaselines(parsed.set, record.skillBaselines);
 				record.entries = await ports.applyProposals(parsed.set, runId);
 				record.status = "reported";
 				record.detail = `re-offered at the startup of session ${ports.sessionId}${wasDetail ? ` (originally: ${wasDetail})` : ""}`;

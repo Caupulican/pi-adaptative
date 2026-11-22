@@ -49,6 +49,8 @@ export interface SkillRepairInput {
 	name: string;
 	body: string;
 	expectedVersion: string;
+	/** Optional physical file identity bound by a reviewed project-specific comparison. */
+	expectedCanonicalFile?: string;
 	description?: string;
 }
 
@@ -113,6 +115,13 @@ function repairSkillFileLocked(
 	input: SkillRepairInput,
 	fallbackDescription?: string,
 ): SkillRepairResult {
+	if (input.expectedCanonicalFile !== undefined && input.expectedCanonicalFile !== filePath) {
+		return {
+			ok: false,
+			reason: "stale_source",
+			message: "The skill's physical file changed after comparison review.",
+		};
+	}
 	const trimmedBody = input.body.trim();
 	if (!trimmedBody) {
 		return { ok: false, reason: "invalid_body", message: "Skill repair requires body content." };

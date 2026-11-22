@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { readHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import {
@@ -10,10 +10,16 @@ import {
 	ownProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
-import { isMissingFileError, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { isMissingFileError, withFileLock, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
-import { type AutoLearnHandoffRecord, MAX_AUTO_LEARN_BLOCK_BYTES } from "./auto-learn-proposals.ts";
+import {
+	type AutoLearnHandoffRecord,
+	type AutoLearnReportEntry,
+	MAX_AUTO_LEARN_BLOCK_BYTES,
+} from "./auto-learn-proposals.ts";
+import { isAutoLearnSkillBaselines, isAutoLearnSkillEvidence } from "./auto-learn-skill-evidence.ts";
 
 const OWNED_SUFFIX = ".reoffer-owned";
 const JOURNAL_SUFFIX = ".reoffer-journal";
@@ -111,6 +117,7 @@ function isHandoffRecord(value: unknown): value is AutoLearnHandoffRecord {
 		!optionalString(value.rationale) ||
 		!optionalString(value.detail) ||
 		!optionalString(value.unappliedProposals) ||
+		(value.skillBaselines !== undefined && !isAutoLearnSkillBaselines(value.skillBaselines)) ||
 		typeof value.completedAt !== "string" ||
 		!Array.isArray(value.entries) ||
 		!Array.isArray(value.forwarded)
@@ -136,6 +143,9 @@ function isHandoffRecord(value: unknown): value is AutoLearnHandoffRecord {
 				optionalString(entry.subject) &&
 				optionalString(entry.detail) &&
 				optionalString(entry.proposalId) &&
+				optionalString(entry.rationale) &&
+				optionalString(entry.predictedEffect) &&
+				(entry.skillEvidence === undefined || isAutoLearnSkillEvidence(entry.skillEvidence)) &&
 				(entry.suggestion === undefined ||
 					(isPlainRecord(entry.suggestion) &&
 						optionalString(entry.suggestion.description) &&
@@ -357,6 +367,101 @@ export class AutoLearnHandoffStore {
 			}
 			return isPending(record) ? { kind: "pending", mtimeMs: lstatSync(file).mtimeMs } : { kind: "final" };
 		});
+	}
+
+	/** Read a settled handoff only for the session that owns it. */
+	readForSession(directory: string, runId: string, sessionId: string): AutoLearnHandoffRecord {
+		return this.locked(directory, (canonical) => {
+			const file = this.file(canonical, runId);
+			if (this.protected(file, false) || this.retained.has(file)) throw new Error("Auto Learn handoff is in use");
+			const record = readRecord(file);
+			if (record.runId !== runId || (record.reoffered?.sessionId ?? record.sessionId) !== sessionId)
+				throw new Error("Auto Learn handoff belongs to another session");
+			return record;
+		});
+	}
+
+	/** Resolve an exact retained run only inside this project's tenants and current effective ownership. */
+	findForSession(tenantsDir: string, cwdHash: string, runId: string, sessionId: string): string {
+		if (!/^[a-f0-9]{8}$/.test(cwdHash) || !validRunId(runId)) throw new Error("Invalid Auto Learn selection");
+		const root = realpathSync(tenantsDir);
+		const matches: string[] = [];
+		for (const tenant of readBoundedDirectoryNamesSync(root, MAX_DIRECTORY_ENTRIES, "Auto Learn tenants")) {
+			if (!tenant.endsWith(`-${cwdHash}`)) continue;
+			const directory = join(root, tenant, "handoffs");
+			const file = this.file(directory, runId);
+			if (!existsSync(file)) continue;
+			const canonicalDirectory = realpathSync(directory);
+			if (
+				!isPathWithinScope(canonicalDirectory, root) ||
+				!isPathWithinScope(realpathSync(file), canonicalDirectory) ||
+				!basename(dirname(canonicalDirectory)).endsWith(`-${cwdHash}`)
+			)
+				throw new Error("Auto Learn handoff escaped its project storage");
+			const record = this.locked(directory, (canonical) => readRecord(this.file(canonical, runId)));
+			if (record.runId === runId && (record.reoffered?.sessionId ?? record.sessionId) === sessionId)
+				matches.push(directory);
+		}
+		if (matches.length !== 1) throw new Error("No unique Auto Learn handoff is owned by this session");
+		return matches[0]!;
+	}
+
+	/** Serialize a selected entry's application and publication against every handoff writer. */
+	async reofferEntry(
+		directory: string,
+		runId: string,
+		sessionId: string,
+		index: number,
+		apply: (entry: AutoLearnReportEntry) => Promise<AutoLearnReportEntry>,
+	): Promise<AutoLearnReportEntry> {
+		const canonical = realpathSync(directory);
+		return withFileLock(
+			canonical,
+			async () => {
+				const file = this.file(canonical, runId);
+				if (this.protected(file) || this.retained.has(file)) throw new Error("Auto Learn handoff is in use");
+				const record = readRecord(file);
+				if (record.runId !== runId || (record.reoffered?.sessionId ?? record.sessionId) !== sessionId)
+					throw new Error("Auto Learn handoff belongs to another session");
+				const entry = record.entries.find((item) => item.index === index);
+				if (!entry) throw new Error("Auto Learn entry not found");
+				if (entry.outcome === "applied" || entry.reasonCode === "skill_candidate_already_present") return entry;
+				const result = await apply(entry);
+				if (result.index !== index || result.kind !== entry.kind || result.subject !== entry.subject)
+					throw new Error("Auto Learn reoffer changed the selected entry identity");
+				const updated = {
+					...entry,
+					...result,
+					skillEvidence: result.skillEvidence ?? entry.skillEvidence,
+					rationale: entry.rationale,
+					predictedEffect: entry.predictedEffect,
+					suggestion: entry.suggestion,
+				};
+				record.entries = record.entries.map((item) => (item.index === index ? updated : item));
+				writeFileAtomicSync(file, recordText(record), { mode: 0o600 });
+				return updated;
+			},
+			{ retries: 0, realpath: true },
+		);
+	}
+
+	/** Bounded, validated local attempt history for the current session's next learner. */
+	recentSkillOutcomes(directory: string, sessionId: string): AutoLearnHandoffRecord[] {
+		if (!existsSync(directory)) return [];
+		const names = readBoundedDirectoryNamesSync(directory, MAX_DIRECTORY_ENTRIES, "Auto Learn handoff history")
+			.filter((name) => name.endsWith(".json") && validRunId(name.slice(0, -5)))
+			.sort()
+			.reverse()
+			.slice(0, 24);
+		const records: AutoLearnHandoffRecord[] = [];
+		for (const name of names) {
+			try {
+				records.push(this.readForSession(directory, name.slice(0, -5), sessionId));
+			} catch {
+				/* An in-use, malformed or foreign record supplies no history. */
+			}
+		}
+		return records;
 	}
 
 	/** Accounting can acknowledge a publication even after its UI notice has been consumed. */

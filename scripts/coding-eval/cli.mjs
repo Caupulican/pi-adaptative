@@ -1,15 +1,22 @@
 // Offline plan by default. Paid execution requires an explicit run and a fresh private output directory.
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, readlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { isPathWithinScope, realPathIdentity } from "../../packages/coding-agent/src/core/autonomy/path-scope.ts";
 import { ORCHESTRATION_THINKING_LEVELS } from "../../packages/coding-agent/src/core/orchestration/contracts.ts";
+import { MAX_ACTIVE_SKILL_BODY_BYTES, validateSkillName } from "../../packages/coding-agent/src/core/skills.ts";
+import { getDirectoryResourceProfileInfo } from "../../packages/coding-agent/src/core/settings/settings-rules.ts";
+import { readBoundedTextFileSync } from "../../packages/coding-agent/src/core/util/bounded-file.ts";
 import { getAgentDir } from "../../packages/coding-agent/src/config.ts";
+import {
+	recordSkillComparison,
+	skillBodyDigest,
+} from "../../packages/coding-agent/src/core/learning/skill-comparison.ts";
 import { planTrials, summarize } from "./comparison.mjs";
-import { cases, corpusVersion } from "./corpus.mjs";
+import { cases, corpusVersion, skillSafetyCase } from "./corpus.mjs";
 import { saveJson, supervise } from "./driver.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -24,6 +31,9 @@ const usage = `npm run eval:coding -- [--run --model provider/model --out NEW_DI
   --repetitions N    Matched pairs per case (default 1)
   --max-corrections N  Standard feedback turns after first submission (default 1)
   --timeout-ms N     Wall-clock limit per session (default 300000)
+  --skill-name NAME --baseline-skill FILE --candidate-skill FILE
+                     Compare two Markdown skill bodies with foreground-only tools
+  --project PATH     Project scope for a skill comparison (default invocation cwd)
 Without --run this prints the ordered plan without opening a provider session.`;
 
 function integer(value, min, max, name) {
@@ -69,6 +79,10 @@ async function main() {
 			repetitions: { type: "string", default: "1" },
 			"max-corrections": { type: "string", default: "1" },
 			"timeout-ms": { type: "string", default: "300000" },
+			"skill-name": { type: "string" },
+			"baseline-skill": { type: "string" },
+			"candidate-skill": { type: "string" },
+			project: { type: "string" },
 		},
 	});
 	if (values.help) return console.log(usage);
@@ -82,6 +96,30 @@ async function main() {
 	}
 	const selected = cases.filter((task) => !values.case.length || values.case.includes(task.id));
 	const repetitions = integer(values.repetitions, 1, 100, "repetitions");
+	const skillMode = [values["skill-name"], values["baseline-skill"], values["candidate-skill"]].some(
+		(value) => value !== undefined,
+	);
+	let skillBodies;
+	const project = realPathIdentity(resolve(values.project ?? process.cwd()));
+	if (skillMode) {
+		if (!values["skill-name"] || !values["baseline-skill"] || !values["candidate-skill"])
+			throw new Error("Skill comparison requires --skill-name, --baseline-skill and --candidate-skill");
+		if (validateSkillName(values["skill-name"]).length) throw new Error("Invalid skill name");
+		if (!lstatSync(project).isDirectory()) throw new Error("Project scope must be a directory");
+		if (values["probe-worker"] || values["account-routing"] || values.candidate.length || values["system-one"])
+			throw new Error("Skill comparisons require identical foreground-only execution without automatic routing");
+		skillBodies = Object.fromEntries(
+			["baseline", "candidate"].map((arm) => {
+				const path = resolve(values[`${arm}-skill`]);
+				const body = readBoundedTextFileSync(path, MAX_ACTIVE_SKILL_BODY_BYTES, "Evaluation skill body").trim();
+				if (!body || body.includes("\0")) throw new Error("Skill body must be nonempty Markdown text");
+				return [arm, body];
+			}),
+		);
+		if (skillBodyDigest(skillBodies.baseline) === skillBodyDigest(skillBodies.candidate))
+			throw new Error("Baseline and candidate skill bodies must differ");
+	} else if (values.project) throw new Error("--project requires a skill comparison");
+	if (skillMode) selected.push(skillSafetyCase);
 	if (values.candidate.length && !values["account-routing"]) throw new Error("--candidate requires --account-routing");
 	if (!ORCHESTRATION_THINKING_LEVELS.includes(values.thinking)) throw new Error("Unknown thinking level");
 	if (values["probe-worker"] && values["account-routing"])
@@ -90,14 +128,15 @@ async function main() {
 		probeWorker: values["probe-worker"],
 		thinking: values.thinking,
 		accountRouting: values["account-routing"],
-		hostedOnly: values["hosted-only"],
+		hostedOnly: skillMode || values["hosted-only"],
 		systemOne: values["system-one"],
 		model: values.model ?? null,
 		candidates: values.candidate,
 		maxCorrections: integer(values["max-corrections"], 0, 5, "max-corrections"),
 		timeoutMs: integer(values["timeout-ms"], 1, 2147483647, "timeout-ms"),
+		...(skillMode ? { skillName: values["skill-name"], skillMode: true } : {}),
 	};
-	const trials = planTrials(selected, repetitions);
+	const trials = planTrials(selected, repetitions, skillMode ? ["baseline", "candidate"] : undefined);
 	const digest = createHash("sha256");
 	for (const name of ["corpus.mjs", "../lib/live-native-driver.mjs", "../lib/fixture-module.mjs"])
 		digest.update(readFileSync(new URL(name, import.meta.url)));
@@ -115,10 +154,32 @@ async function main() {
 		config,
 		cases: selected.map(({ id, kind, prompt }) => ({ id, kind, prompt })),
 		trials,
+		...(skillMode
+			? {
+					studyId: randomUUID(),
+					projectHash: getDirectoryResourceProfileInfo(project).hash,
+					baselineDigest: skillBodyDigest(skillBodies.baseline),
+					candidateDigest: skillBodyDigest(skillBodies.candidate),
+				}
+			: {}),
 	};
 	if (!values.run) return console.log(JSON.stringify(manifest, null, 2));
 	if (!config.model || !values.out) throw new Error("--run requires --model and --out");
 	const out = resolve(values.out);
+	if (skillMode) {
+		let parent = out;
+		while (!existsSync(parent)) parent = dirname(parent);
+		let repository;
+		try {
+			repository = execFileSync("git", ["-C", parent, "rev-parse", "--show-toplevel"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		} catch {
+			/* Outside a repository. */
+		}
+		if (repository) throw new Error("Private skill evaluation output must be outside Git working trees");
+	}
 	const ownerDir = resolve(getAgentDir());
 	if (isPathWithinScope(realPathIdentity(out), realPathIdentity(ownerDir))) {
 		throw new Error(
@@ -133,16 +194,22 @@ async function main() {
 	process.once("SIGINT", abort);
 	process.once("SIGTERM", abort);
 	let finalSourceSha256 = null;
-	const report = (active = null) => saveJson(join(out, "report.json"), {
-		...summarize(trials, rows), active, sourceSha256, finalSourceSha256,
-	});
+	let skillComparison = skillMode ? { status: "pending" } : undefined;
+	const report = (active = null) =>
+		saveJson(join(out, "report.json"), {
+			...summarize(trials, rows),
+			active,
+			sourceSha256,
+			finalSourceSha256,
+			...(skillComparison ? { skillComparison } : {}),
+		});
 	try {
 		report();
 		for (const trial of trials) {
 			if (controller.signal.aborted) break;
 			report(trial);
 			const row = await supervise({
-				config: { ...config, ...trial, ownerDir },
+				config: { ...config, ...trial, ownerDir, ...(skillMode ? { skillBody: skillBodies[trial.arm] } : {}) },
 				task: selected.find((t) => t.id === trial.caseId),
 				trialDir: join(out, trial.id),
 				signal: controller.signal,
@@ -156,7 +223,62 @@ async function main() {
 		}
 		finalSourceSha256 = measuredSourceDigest();
 		report();
-		if (finalSourceSha256 !== sourceSha256) throw new Error("Evaluation source changed during the study. Run results span different source trees.");
+		if (finalSourceSha256 !== sourceSha256)
+			throw new Error("Evaluation source changed during the study. Run results span different source trees.");
+		const effectiveThinking = rows[0]?.foreground?.thinking;
+		const completeSkillEvidence =
+			ORCHESTRATION_THINKING_LEVELS.includes(effectiveThinking) &&
+			rows.length === trials.length &&
+			rows.every(
+				(row) =>
+					["accepted", "rejected"].includes(row.status) &&
+					row.skillApplied === true &&
+					row.foreground?.thinking === effectiveThinking &&
+					[ row.foreground?.provider, row.foreground?.model ].join("/") === config.model &&
+					row.skillDigest === manifest[`${row.arm}Digest`] &&
+					Number.isSafeInteger(row.tokens) &&
+					row.tokens > 0 &&
+					!row.attempts?.length,
+			);
+		if (skillMode && completeSkillEvidence) {
+			const pairs = trials
+				.filter((trial) => trial.arm === "baseline")
+				.map((trial) => {
+					const reading = (arm) => {
+						const row = rows.find(
+							(item) => item.caseId === trial.caseId && item.repetition === trial.repetition && item.arm === arm,
+						);
+						return { passed: row.status === "accepted", corrections: row.corrections, tokens: row.tokens };
+					};
+					return {
+						caseId: trial.caseId,
+						repetition: trial.repetition,
+						baseline: reading("baseline"),
+						candidate: reading("candidate"),
+					};
+				});
+			const receipt = recordSkillComparison(ownerDir, project, {
+				studyId: manifest.studyId,
+				skill: config.skillName,
+				model: config.model,
+				thinkingLevel: effectiveThinking,
+				baselineDigest: manifest.baselineDigest,
+				candidateDigest: manifest.candidateDigest,
+				corpusDigest: manifest.corpusSha256,
+				sourceDigest: sourceSha256,
+				completedAt: new Date().toISOString(),
+				pairs,
+			});
+			saveJson(join(out, "receipt.json"), receipt);
+			skillComparison = { status: "recorded", receipt };
+		} else if (skillMode) {
+			skillComparison = {
+				status: "inconclusive",
+				reason:
+					"Every planned arm must finish grading with the selected body present, positive settled token usage, and no worker attempts.",
+			};
+		}
+		report();
 		console.log(JSON.stringify(summarize(trials, rows).arms, null, 2));
 		console.log(join(out, "report.json"));
 		process.exitCode = controller.signal.aborted ? 130 : rows.some((r) => r.status !== "accepted") ? 1 : 0;

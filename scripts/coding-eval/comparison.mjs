@@ -1,9 +1,9 @@
 // Paired design and outcome accounting shared by the live driver and offline regression fixtures.
-export function planTrials(tasks, repetitions) {
+export function planTrials(tasks, repetitions, armNames = ["direct", "auto"]) {
 	const trials = [];
 	for (let repetition = 1; repetition <= repetitions; repetition++) {
 		for (const [index, task] of tasks.entries()) {
-			const arms = (repetition + index) % 2 ? ["direct", "auto"] : ["auto", "direct"];
+			const arms = (repetition + index) % 2 ? armNames : [...armNames].reverse();
 			for (const arm of arms)
 				trials.push({ id: `${task.id}-${repetition}-${arm}`, caseId: task.id, repetition, arm });
 		}
@@ -17,7 +17,7 @@ export async function runGradedTask({ task, turn, assess, maxCorrections, observ
 	for (let corrections = 0; ; corrections++) {
 		await observe({ corrections });
 		const answer = await turn(prompt);
-		const findings = assess(answer);
+		const findings = await assess(answer);
 		submissions.push({ corrections, findings });
 		await observe({ corrections, submissions: [...submissions] });
 		if (!findings.length) return "accepted";
@@ -30,7 +30,8 @@ export function summarize(plan, rows) {
 	const byId = new Map(rows.map((row) => [row.id, row]));
 	const arms = {};
 	const pairs = [];
-	for (const name of ["direct", "auto"]) {
+	const names = plan.some((trial) => trial.arm === "baseline") ? ["baseline", "candidate"] : ["direct", "auto"];
+	for (const name of names) {
 		const planned = plan.filter((p) => p.arm === name);
 		const finished = planned.map((p) => byId.get(p.id)).filter(Boolean);
 		const accepted = finished.filter((r) => r.status === "accepted");
@@ -58,17 +59,25 @@ export function summarize(plan, rows) {
 				complete && measured.length === planned.length && accepted.length ? knownCostUsd / accepted.length : null,
 		};
 	}
-	for (const p of plan.filter((trial) => trial.arm === "direct")) {
+	for (const p of plan.filter((trial) => trial.arm === names[0])) {
 		const direct = byId.get(p.id);
-		const auto = byId.get(`${p.caseId}-${p.repetition}-auto`);
+		const auto = byId.get(`${p.caseId}-${p.repetition}-${names[1]}`);
 		if (!direct || !auto) continue;
 		pairs.push({
 			caseId: p.caseId,
 			repetition: p.repetition,
-			direct: direct.status,
-			auto: auto.status,
+			[names[0]]: direct.status,
+			[names[1]]: auto.status,
 			acceptedDelta: Number(auto.status === "accepted") - Number(direct.status === "accepted"),
 			correctionsDelta: auto.corrections - direct.corrections,
+			...(names[0] === "baseline"
+				? {
+						tokensDelta:
+							Number.isSafeInteger(auto.tokens) && Number.isSafeInteger(direct.tokens)
+								? auto.tokens - direct.tokens
+								: null,
+					}
+				: {}),
 			elapsedMsDelta: auto.elapsedMs - direct.elapsedMs,
 			costUsdDelta:
 				Number.isFinite(auto.costUsd) && Number.isFinite(direct.costUsd) ? auto.costUsd - direct.costUsd : null,
