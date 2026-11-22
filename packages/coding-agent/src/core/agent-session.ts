@@ -1770,14 +1770,14 @@ export class AgentSession {
 			replaceUnsupportedModel: (message, signal) => this._modelAccess.replaceUnsupportedModel(message, signal),
 			onRunStopped: (message, classified) => this._usageReset.runStopped(message, classified),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
+			hasPendingCompactionHandoff: () => this._selfCompaction.state().status === "pending",
 			settleRuntimeUpdate: (signal, beginRuntimeHandoff) => this.runtimeUpdates.settle(signal, beginRuntimeHandoff),
 			holdUndeliveredQueue: () => {
 				this._pendingQueue.holdUndelivered();
 				this._emitQueueUpdate();
 			},
 			onSubmissionReleased: (lease) => this._goals.endSubmissionExecution(lease.epoch),
-			// Compaction rewrites the history a turn runs on, so it occupies the foreground. A tree navigation's rewrite is
-			// owned by the controller itself (`beginHistoryRewrite`), which also keeps it exclusive with a running turn.
+			// Compaction and the controller's tree navigation each require exclusive access to foreground history.
 			isCompacting: () => this._compaction.isRunning(),
 			isExtendedBusy: () =>
 				(this._semanticPlane.controller?.isEvaluating ?? false) ||

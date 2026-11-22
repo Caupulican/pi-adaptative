@@ -1,6 +1,6 @@
 {
   "name": "herdr-sibling-panels",
-  "description": "Interactive sibling panels in caller workspace/tab: Agy Gemini 3.8 Flash (High effort) builder and validator. Designed for Herdr current-pane placement.",
+  "description": "Interactive sibling panels in caller workspace/tab: newest eligible native Agy workhorse at High effort for builder and validator. Designed for Herdr current-pane placement.",
   "deadlineSeconds": 1800,
   "agents": [
     {
@@ -8,21 +8,27 @@
       "name": "gemini-builder",
       "task": "Own implementation edits; write or run no tests unless the owner explicitly asked. Produce concrete diffs and verified build/check results.",
       "direction": "right",
-      "model": "gemini-3.8-flash-high",
-      "args": ["--effort", "high"]
+      "args": [
+        "--effort",
+        "high"
+      ],
+      "modelTier": "workhorse"
     },
     {
       "provider": "agy",
       "name": "gemini-validator",
       "task": "Run targeted validation and adversarial checks. Verify edge cases and report concrete findings.",
       "direction": "down",
-      "model": "gemini-3.8-flash-high",
-      "args": ["--effort", "high"]
+      "args": [
+        "--effort",
+        "high"
+      ],
+      "modelTier": "workhorse"
     }
   ],
   "notes": [
     "Uses placement: current-pane automatically when invoked inside Herdr (HERDR_ENV=1).",
-    "Spawns native agy with --model gemini-3.8-flash-high --effort high --dangerously-skip-permissions.",
+    "Resolves the newest eligible native Agy workhorse from its current catalog at High effort before launch; exact model pins remain available through model.",
     "Panels are split directly in the caller's active tab without focusing away or creating an isolated daemon."
   ]
 }

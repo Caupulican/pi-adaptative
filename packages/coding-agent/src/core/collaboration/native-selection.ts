@@ -37,11 +37,17 @@ export function normalizeNativeProviderSelection(
 	rawArgs: readonly string[],
 	requested: NativeProviderSelection = {},
 ): { selection: NativeProviderSelection; args: string[] } {
+	if (
+		requested.modelTier !== undefined &&
+		(requested.modelTier !== "workhorse" || kind !== "agy" || requested.model !== undefined)
+	)
+		throw new Error("Native workhorse selection requires Agy and cannot be combined with an exact model.");
 	if (kind !== "pi" && requested.provider !== undefined)
 		throw new Error(
 			"The apiProvider selector is supported only for native Pi; use the native provider's authenticated environment.",
 		);
 	const selection = { ...requested };
+	delete selection.effort;
 	const args: string[] = [];
 	let agyEffort: string | undefined;
 	for (let index = 0; index < rawArgs.length; index++) {
@@ -87,7 +93,10 @@ export function normalizeNativeProviderSelection(
 		const modelEffort = /-(low|medium|high)$/.exec(selection.model ?? "")?.[1];
 		if (modelEffort && modelEffort !== agyEffort)
 			throw new Error("Native AGY model conflicts with its selected effort.");
+		selection.effort = agyEffort as "low" | "medium" | "high";
 	}
+	if (selection.modelTier !== undefined && selection.model !== undefined)
+		throw new Error("Native workhorse selection cannot be combined with an exact model argument.");
 	if (kind === "codex") {
 		for (let index = 0; index < args.length; index++) {
 			const argument = args[index]!;

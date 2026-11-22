@@ -529,7 +529,7 @@ async function runLoop(
 	};
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
-	while (true) {
+	run: while (true) {
 		let hasMoreToolCalls = true;
 
 		// Inner loop: process tool calls and steering messages
@@ -616,12 +616,11 @@ async function runLoop(
 				return;
 			}
 
-			// Check for tool calls
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
-			let batchHandoff = false;
+			let batchHandoff: ExecutedToolCallBatch["handoff"];
 			if (toolCalls.length > 0) {
 				toolFailureMemory ??= trackerFromFailureRecords(response.activeFailureRecords);
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
@@ -647,7 +646,7 @@ async function runLoop(
 				);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
-				batchHandoff = executedToolBatch.handoff === true;
+				batchHandoff = executedToolBatch.handoff;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -695,6 +694,7 @@ async function runLoop(
 			if (verificationBlocksCompletion && !signal?.aborted) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
+			if (batchHandoff === "resume_after_idle") break run;
 
 			// One call failing identically N times ends the run, whatever else rode in its batches:
 			// keyed on the ledger's own count, not on batch or result-text repetition.
@@ -839,7 +839,6 @@ async function runLoop(
 			continue;
 		}
 
-		// No more messages, exit
 		break;
 	}
 
@@ -1162,7 +1161,7 @@ function releasePendingPreparations(execCtx: ToolExecutionContext): unknown[] {
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
-	handoff?: boolean;
+	handoff?: AgentToolResult<unknown>["handoff"];
 	failure?: { cause: unknown };
 };
 
@@ -1783,6 +1782,9 @@ function finalizeExecutedToolBatch(
 	calls: FinalizedToolCallOutcome[],
 ): ExecutedToolCallBatch {
 	const terminate = calls.length > 0 && calls.every((call) => call.result.terminate === true);
+	if (calls.some((call) => !call.isError && call.result.terminate && call.result.handoff === "resume_after_idle")) {
+		return { messages, terminate: true, handoff: "resume_after_idle" };
+	}
 	const handoff = terminate && calls.every((call) => call.result.handoff === true);
 	return { messages, terminate, ...(handoff ? { handoff: true } : {}) };
 }

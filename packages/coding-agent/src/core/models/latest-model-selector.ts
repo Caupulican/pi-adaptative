@@ -6,7 +6,7 @@
 import { ANTIGRAVITY_EFFORT_ORDER, type Api, type KnownProvider, type Model } from "@caupulican/pi-ai";
 import { getModels, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { deriveModelCapabilityProfile } from "../model-capability.ts";
-import type { OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import { antigravityGeminiEffortFamily } from "./antigravity-effort.ts";
 
 export type LatestModelTier = "default" | "workhorse";
@@ -65,8 +65,12 @@ const NATIVE_PROVIDER_LINEAGE: Readonly<Record<string, string>> = {
 const WORKHORSE_EFFORT_PREFERENCE: readonly string[] = ["medium", "low", "high", "xhigh"];
 const DEFAULT_EFFORT_PREFERENCE: readonly string[] = ["high", "medium", "xhigh", "low"];
 
-interface ParsedModelFeatures {
-	readonly model: Model<Api>;
+/** Native provider catalogs may expose identity and presets without context or price metadata. */
+export type LatestModelCandidate = Pick<Model<Api>, "id" | "provider"> &
+	Partial<Pick<Model<Api>, "name" | "input" | "contextWindow" | "reasoning" | "defaultThinkingLevel" | "cost">>;
+
+interface ParsedModelFeatures<T extends LatestModelCandidate = LatestModelCandidate> {
+	readonly model: T;
 	readonly lineage: string;
 	readonly hasVersion: boolean;
 	readonly version: readonly [number, number, number];
@@ -81,14 +85,18 @@ interface ParsedModelFeatures {
 
 /** Whether a catalog model is eligible to run an agentic text/coding turn. Never softened as a fallback. */
 export function isEligibleAgentModel(
-	model: Model<Api>,
+	model: LatestModelCandidate,
 	options?: Pick<LatestModelSelectionOptions, "requireBackgroundLanes" | "excludeModelId">,
 ): boolean {
 	if (options?.excludeModelId !== undefined && model.id === options.excludeModelId) return false;
 	if (Array.isArray(model.input) && model.input.length > 0 && !model.input.includes("text")) return false;
 	if (NON_AGENTIC_MODEL_PATTERN.test(model.id)) return false;
 	if (options?.requireBackgroundLanes) {
-		if (!deriveModelCapabilityProfile({ contextWindow: model.contextWindow }).backgroundLanesEnabled) return false;
+		if (
+			model.contextWindow === undefined ||
+			!deriveModelCapabilityProfile({ contextWindow: model.contextWindow }).backgroundLanesEnabled
+		)
+			return false;
 	}
 	return true;
 }
@@ -240,30 +248,34 @@ function flagshipAffinityOf(leaf: string, lineage: string): number {
 }
 
 function effortPreferenceRank(
-	model: Model<Api>,
+	model: LatestModelCandidate,
 	tier: LatestModelTier,
 	preferredEffort?: OrchestrationThinkingLevel,
 ): number {
 	const effort = model.defaultThinkingLevel?.toLowerCase();
 	if (!effort) return 0;
 	const baseOrder = tier === "workhorse" ? WORKHORSE_EFFORT_PREFERENCE : DEFAULT_EFFORT_PREFERENCE;
+	const requestedIndex = preferredEffort === undefined ? -1 : ORCHESTRATION_THINKING_LEVELS.indexOf(preferredEffort);
 	const order = preferredEffort
-		? [preferredEffort, ...baseOrder.filter((item) => item !== preferredEffort)]
+		? [
+				...ORCHESTRATION_THINKING_LEVELS.slice(0, requestedIndex + 1).reverse(),
+				...ORCHESTRATION_THINKING_LEVELS.slice(requestedIndex + 1),
+			]
 		: baseOrder;
 	const index = order.indexOf(effort);
 	return index >= 0 ? order.length - index : 0;
 }
 
-function parseFeatures(
-	model: Model<Api>,
+function parseFeatures<T extends LatestModelCandidate>(
+	model: T,
 	tier: LatestModelTier,
 	preferredEffort?: OrchestrationThinkingLevel,
-): ParsedModelFeatures {
+): ParsedModelFeatures<T> {
 	const { withoutDate, isAlias, isLatestAlias, isPreview } = canonicalModelLeaf(model.id);
 	const lineage = modelLineageOf(withoutDate);
 	const { hasVersion, version } = parseModelVersionTuple(model.id);
-	const input = Number.isFinite(model.cost?.input) ? model.cost.input : 0;
-	const output = Number.isFinite(model.cost?.output) ? model.cost.output : 0;
+	const input = Number.isFinite(model.cost?.input) ? (model.cost?.input ?? 0) : 0;
+	const output = Number.isFinite(model.cost?.output) ? (model.cost?.output ?? 0) : 0;
 	const blendedCost = input + output;
 	return {
 		model,
@@ -288,7 +300,9 @@ function compareStableId(a: ParsedModelFeatures, b: ParsedModelFeatures): number
  * Narrow each lineage in `candidates` to its latest major generation so an older recognized workhorse (e.g. Gemini 4
  * Hydrogen) never shadows a newer generation whose codename is not yet in the keyword table (e.g. Gemini 5).
  */
-function keepLatestGenerationPerLineage(candidates: readonly ParsedModelFeatures[]): ParsedModelFeatures[] {
+function keepLatestGenerationPerLineage<T extends LatestModelCandidate>(
+	candidates: readonly ParsedModelFeatures<T>[],
+): ParsedModelFeatures<T>[] {
 	const maxMajorByLineage = new Map<string, number>();
 	for (const candidate of candidates) {
 		if (!candidate.hasVersion) continue;
@@ -309,6 +323,7 @@ function compareTierCandidates(
 	b: ParsedModelFeatures,
 	tier: LatestModelTier,
 	singleLineage: boolean,
+	preferEffort = false,
 ): number {
 	const aAffinity = tier === "workhorse" ? a.workhorseAffinity : a.flagshipAffinity;
 	const bAffinity = tier === "workhorse" ? b.workhorseAffinity : b.flagshipAffinity;
@@ -325,17 +340,20 @@ function compareTierCandidates(
 		const versionDelta = compareVersionsDesc(a.version, b.version);
 		if (versionDelta !== 0) return versionDelta;
 	}
-	if (a.model.reasoning !== b.model.reasoning) return a.model.reasoning ? -1 : 1;
+	if (!!a.model.reasoning !== !!b.model.reasoning) return a.model.reasoning ? -1 : 1;
 	if (a.isPreview !== b.isPreview) return a.isPreview ? 1 : -1;
 	if (a.isAlias !== b.isAlias) return a.isAlias ? -1 : 1;
 	if (tier === "workhorse") {
+		if (preferEffort && b.effortRank !== a.effortRank) return b.effortRank - a.effortRank;
 		if (a.blendedCost !== b.blendedCost) return a.blendedCost - b.blendedCost;
 		if (b.effortRank !== a.effortRank) return b.effortRank - a.effortRank;
-		if (b.model.contextWindow !== a.model.contextWindow) return b.model.contextWindow - a.model.contextWindow;
+		if (b.model.contextWindow !== a.model.contextWindow)
+			return (b.model.contextWindow ?? 0) - (a.model.contextWindow ?? 0);
 	} else {
 		if (a.isLatestAlias !== b.isLatestAlias) return a.isLatestAlias ? -1 : 1;
 		if (b.effortRank !== a.effortRank) return b.effortRank - a.effortRank;
-		if (b.model.contextWindow !== a.model.contextWindow) return b.model.contextWindow - a.model.contextWindow;
+		if (b.model.contextWindow !== a.model.contextWindow)
+			return (b.model.contextWindow ?? 0) - (a.model.contextWindow ?? 0);
 		// For the default/flagship tier, higher price breaks remaining ties toward the stronger model.
 		if (a.blendedCost !== b.blendedCost) return b.blendedCost - a.blendedCost;
 	}
@@ -348,11 +366,11 @@ function compareTierCandidates(
  * Returns `undefined` when no eligible general-purpose agent model exists for `provider`, so callers advance to the
  * next provider rather than falling back to an embedding, image, or other non-agentic model.
  */
-export function selectLatestProviderModel(
+export function selectLatestProviderModel<T extends LatestModelCandidate>(
 	provider: string,
-	models: readonly Model<Api>[],
+	models: readonly T[],
 	options: LatestModelSelectionOptions = {},
-): Model<Api> | undefined {
+): T | undefined {
 	const tier = options.tier ?? "default";
 	const eligible = models.filter((model) => model.provider === provider && isEligibleAgentModel(model, options));
 	if (eligible.length === 0) return undefined;
@@ -367,7 +385,9 @@ export function selectLatestProviderModel(
 	if (tier === "workhorse") {
 		const recognized = latestGeneration.filter((entry) => entry.workhorseAffinity > 0);
 		const pool = recognized.length > 0 ? recognized : latestGeneration;
-		pool.sort((a, b) => compareTierCandidates(a, b, "workhorse", singleLineage));
+		pool.sort((a, b) =>
+			compareTierCandidates(a, b, "workhorse", singleLineage, options.preferredEffort !== undefined),
+		);
 		return pool[0]?.model;
 	}
 

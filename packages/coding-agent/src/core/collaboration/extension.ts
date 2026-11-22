@@ -57,6 +57,7 @@ const agentSpec = Type.Object({
 	cwd: Type.Optional(text),
 	path: Type.Optional(text),
 	model: Type.Optional(text),
+	modelTier: Type.Optional(Type.Literal("workhorse")),
 	apiProvider: Type.Optional(text),
 	tools: Type.Optional(Type.Array(text, { maxItems: 128 })),
 	resourceProfile: Type.Optional(text),
@@ -148,6 +149,14 @@ const parameters = Type.Object({
 	),
 });
 type Params = Static<typeof parameters>;
+
+interface PendingNativeModelSelection {
+	agentId: string;
+	provider: string;
+	tier: "workhorse";
+	effort?: string;
+	dependency: "native-model-catalog";
+}
 
 /**
  * One tool call's knowledge grant. The block stays in this object (parent memory) and is handed to each reserved
@@ -437,7 +446,11 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		params: Params,
 		probe: boolean,
 		toolCallId: string,
-	): Promise<NewCollaborationJob> => {
+	): Promise<{
+		job: NewCollaborationJob;
+		pendingModelSelections: PendingNativeModelSelection[];
+	}> => {
+		const pendingModelSelections: PendingNativeModelSelection[] = [];
 		const template = params.teamTemplate ? templates().find((item) => item.name === params.teamTemplate) : undefined;
 		if (params.teamTemplate && !template) throw new Error("Unknown collaboration template.");
 		const specs = params.agents ??
@@ -530,14 +543,25 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				{
 					provider: spec.apiProvider,
 					model: spec.model,
+					modelTier: spec.modelTier,
 					executable,
 					env: { ...process.env, ...env },
 					cwd: agentCwd,
 				},
 			);
+			if (!probe && spec.modelTier)
+				pendingModelSelections.push({
+					agentId,
+					provider,
+					tier: spec.modelTier,
+					effort: normalized.selection.effort,
+					dependency: "native-model-catalog",
+				});
 			const readiness = probe ? await providers.inspect(provider, normalized.selection) : undefined;
-			if (readiness && !readiness.authenticated)
-				throw new Error(`Provider ${provider} is not admitted: ${readiness.status}. No agent task was submitted.`);
+			if (readiness && readiness.status !== "ready")
+				throw new Error(
+					`Provider ${provider} is not admitted: ${readiness.status}. ${readiness.detail ?? ""} No agent task was submitted.`,
+				);
 			const invocation = readiness?.invocation ?? providers.resolveInvocation(provider, normalized.selection);
 			Object.assign(env, invocation.environment);
 			const resources = !spec.resourceProfile ? pi.getEffectiveResourceProfile() : undefined;
@@ -597,7 +621,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				executable: provider === "pi" || executable ? invocation.executable : undefined,
 			});
 		}
-		return result;
+		return { job: result, pendingModelSelections };
 	};
 
 	pi.registerTool({
@@ -662,9 +686,17 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				// Another session's job: shown read-only, never mutated from here.
 				details = { readOnly: true, job: store.describe(params.jobId) };
 			} else if (["workspace_plan", "launch_workspace", "fire_task"].includes(action)) {
-				const plan = await prepare(ctx, params, action !== "workspace_plan" && params.dryRun !== true, _id);
-				if (action === "workspace_plan" || params.dryRun) details = { dryRun: true, job: plan };
+				const { job: plan, pendingModelSelections } = await prepare(
+					ctx,
+					params,
+					action !== "workspace_plan" && params.dryRun !== true,
+					_id,
+				);
+				if (action === "workspace_plan" || params.dryRun)
+					details = { dryRun: true, job: plan, pendingModelSelections };
 				else {
+					if (pendingModelSelections.length)
+						throw new Error("Native model catalog selection is still pending; no agent task was submitted.");
 					let task = params.task ?? params.body;
 					if (action === "fire_task" && !task?.trim()) {
 						const agentTasks = plan.agents.map((a) => a.task?.trim());

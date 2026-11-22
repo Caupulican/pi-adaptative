@@ -140,6 +140,8 @@ export interface ForegroundRecoveryControllerDeps
 	): Promise<"continue" | "stop" | undefined>;
 	/** Input admitted to the agent's queue that no round could deliver returns to the pending queue, held. */
 	holdUndeliveredQueue?(): void;
+	/** A saved compaction note will start a new run after this foreground submission releases its context. */
+	hasPendingCompactionHandoff?(): boolean;
 	/**
 	 * The submission holding `lease` is releasing the foreground, whatever its run's outcome (a retry window closed or
 	 * abandoned, an abort, an error, no run at all): what it owned ends here, before the foreground is free for another.
@@ -1056,7 +1058,7 @@ export class ForegroundRecoveryController {
 			} else {
 				await this.deps.agent.continue();
 			}
-			while (true) {
+			while (!this.deps.hasPendingCompactionHandoff?.()) {
 				const failed = this.lastAssistantMessage?.stopReason === "error" && !signal?.aborted;
 				if (failed) {
 					// A transport error is not an agent decision to abandon repair. Keep its existing
@@ -1191,12 +1193,7 @@ export class ForegroundRecoveryController {
 		}
 	}
 
-	/**
-	 * The one closing gate for every point where this submission could start a provider round: the submission was cancelled, or
-	 * the session is shutting down. `agent.abort()` reaches only a run that already exists and does not clear admitted queues, so
-	 * each start (the first prompt/continue after `prepareRun()`, every further round, and stranded-input delivery) asks here.
-	 * Admitted input is never deleted by this gate; whatever stays queued is held for the owner by `deliverStrandedInput`.
-	 */
+	/** Check before each provider round. Aborting a running provider leaves admitted input in the queue. */
 	private isClosing(signal?: AbortSignal): boolean {
 		return signal?.aborted === true || this.shutdownReason !== undefined;
 	}
@@ -1210,17 +1207,14 @@ export class ForegroundRecoveryController {
 		return count;
 	}
 
-	/**
-	 * A run ended by an exit that has no round of its own left (no assistant message to classify, a
-	 * recovery that declined another round, the stall cap) while the agent's queue still holds admitted
-	 * input. A runtime-update stop and a usage-limit stop never come here: neither may start another
-	 * round, so their input is held. Each further round delivers what the agent's queue mode releases at a boundary
-	 * (all, or one per round) until the queue is empty. A round that delivers nothing, or an abort, ends
-	 * it, and whatever is still queued goes back to the pending queue, held, visible and recoverable.
-	 */
+	/** Drain admitted input until delivery stalls, cancellation holds it, or a saved handoff claims the next round. */
 	private async deliverStrandedInput(signal?: AbortSignal): Promise<void> {
 		try {
-			while (this.deps.agent.hasQueuedMessages() && !this.isClosing(signal)) {
+			while (
+				this.deps.agent.hasQueuedMessages() &&
+				!this.isClosing(signal) &&
+				!this.deps.hasPendingCompactionHandoff?.()
+			) {
 				const before = this.countInputMessages();
 				await this.deps.agent.continue();
 				if (this.countInputMessages() === before) break;
@@ -1228,7 +1222,12 @@ export class ForegroundRecoveryController {
 		} finally {
 			// The run's last queue check: from here it consumes nothing, so later input waits for the next run instead.
 			this.setConsumingRun(false);
-			if (this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
+			// A scheduled handoff is the next consumer of admitted input. Cancellation still holds that input for its owner.
+			if (
+				this.deps.agent.hasQueuedMessages() &&
+				(this.isClosing(signal) || !this.deps.hasPendingCompactionHandoff?.())
+			)
+				this.deps.holdUndeliveredQueue?.();
 		}
 	}
 

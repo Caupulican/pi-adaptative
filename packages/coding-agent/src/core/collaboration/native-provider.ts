@@ -1,3 +1,5 @@
+import { ANTIGRAVITY_EFFORT_ORDER } from "@caupulican/pi-ai";
+import { type LatestModelCandidate, selectLatestProviderModel } from "../models/latest-model-selector.ts";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import {
 	type CollaborationCommandResult,
@@ -8,6 +10,10 @@ import {
 export interface NativeProviderSelection {
 	provider?: string;
 	model?: string;
+	/** Resolve from the native Agy catalog at launch; an exact model is a separate choice. */
+	modelTier?: "workhorse";
+	/** Native effort extracted from validated --effort arguments before catalog selection. */
+	effort?: "low" | "medium" | "high";
 	/** Explicit wrapper binary, probed with the selected provider's native status protocol. */
 	executable?: string;
 	env?: NodeJS.ProcessEnv;
@@ -15,6 +21,8 @@ export interface NativeProviderSelection {
 }
 export interface NativeAuthVerdict {
 	authenticated: boolean;
+	modelAvailable?: boolean;
+	detail?: string;
 	launchArgs: string[];
 }
 export interface NativeProviderInvocation {
@@ -40,7 +48,9 @@ export interface NativeProviderReadiness {
 	invocation?: NativeProviderInvocation;
 	installed: boolean;
 	authenticated: boolean;
-	status: "ready" | "not-installed" | "login-required" | "probe-failed" | "unsupported";
+	status: "ready" | "not-installed" | "login-required" | "probe-failed" | "unsupported" | "model-unavailable";
+	modelAvailable?: boolean;
+	detail?: string;
 	launchArgs: string[];
 	/** Local CLI evidence is not a paid inference or a guarantee against server-side revocation. */
 	evidence: "native-status" | "model-catalog" | "none";
@@ -135,17 +145,43 @@ const nativeStrategies: readonly NativeProviderStrategy[] = [
 		presenceArgs: ["--help"],
 		authArgs: () => ["models"],
 		parseAuth: (result, selection) => {
-			const models = new Set<string>();
+			const models = new Map<string, LatestModelCandidate>();
 			for (const line of result.stdout.split(/\r?\n/)) {
 				const trimmed = line.trimStart();
-				const match = /^([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\t[^\t\r\n]{1,256}$/.exec(trimmed);
-				if (match) models.add(match[1]);
+				const match = /^([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})\t([^\t\r\n]{1,256})$/.exec(trimmed);
+				if (match) {
+					const defaultThinkingLevel = ANTIGRAVITY_EFFORT_ORDER.find((effort) => match[1].endsWith(`-${effort}`));
+					models.set(match[1], {
+						id: match[1],
+						name: match[2],
+						provider: "google-antigravity",
+						defaultThinkingLevel,
+					});
+				}
 			}
 			const hasCatalog = models.size > 0;
-			const authenticated = Boolean(hasCatalog && (!selection.model || models.has(selection.model)));
+			const selected = selection.modelTier
+				? selectLatestProviderModel("google-antigravity", [...models.values()], {
+						tier: selection.modelTier,
+						preferredEffort: selection.effort,
+					})
+				: undefined;
+			const modelAvailable = Boolean(
+				(!selection.model || models.has(selection.model)) &&
+					(!selection.modelTier ||
+						(selected && (!selection.effort || selected.defaultThinkingLevel === selection.effort))),
+			);
 			return {
-				authenticated,
-				launchArgs: [],
+				authenticated: hasCatalog,
+				modelAvailable,
+				...(hasCatalog && !modelAvailable
+					? {
+							detail: selection.modelTier
+								? `The authenticated Agy catalog has no eligible ${selection.modelTier} model${selection.effort ? ` at ${selection.effort} effort` : ""}.`
+								: `The authenticated Agy catalog does not list model ${selection.model}.`,
+						}
+					: {}),
+				launchArgs: modelAvailable && selected ? ["--model", selected.id] : [],
 			};
 		},
 	},
@@ -234,8 +270,15 @@ export class NativeProviderRegistry {
 		return {
 			...base,
 			...verdict,
-			launchArgs: verdict.authenticated ? nativeCollaborationLaunchArgs(strategy.kind, verdict.launchArgs) : [],
-			status: verdict.authenticated ? "ready" : "login-required",
+			launchArgs:
+				verdict.authenticated && verdict.modelAvailable !== false
+					? nativeCollaborationLaunchArgs(strategy.kind, verdict.launchArgs)
+					: [],
+			status: !verdict.authenticated
+				? "login-required"
+				: verdict.modelAvailable === false
+					? "model-unavailable"
+					: "ready",
 			evidence: id === "agy" ? "model-catalog" : "native-status",
 		};
 	}

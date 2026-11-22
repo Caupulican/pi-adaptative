@@ -800,6 +800,7 @@ export function createSelfCompactToolDefinition(
 				],
 				details: { accepted: true, handoffId: outcome.record.id, noteChars: outcome.record.note.length },
 				terminate: true,
+				handoff: "resume_after_idle",
 			};
 		},
 	};

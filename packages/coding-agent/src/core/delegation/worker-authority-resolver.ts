@@ -353,6 +353,7 @@ function collectRoutedWorkerEntries(
 		foregroundModel: Model<Api>;
 		routing: WorkerAccountRouting;
 		role?: string;
+		preferredEffort?: OrchestrationThinkingLevel;
 		modelRegistry: WorkerAuthorityResolverModelSource;
 		isModelExhausted: (model: Model<Api>) => boolean;
 		isModelLimited?: (model: Model<Api>) => boolean;
@@ -395,6 +396,7 @@ function collectRoutedWorkerEntries(
 		);
 		return selectLatestProviderModel(provider, eligible, {
 			tier: "workhorse",
+			preferredEffort: input.preferredEffort,
 			requireBackgroundLanes: true,
 		});
 	};
@@ -489,10 +491,14 @@ function selectModelBinding(
 	// profile binding. An authored choice is never moved to another account.
 	if (!authority?.model && !base && foregroundModel) {
 		const role = defaultWorkerRole(authority, base);
+		const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
 		const routeInput = {
 			foregroundModel,
 			routing: accountRouting,
 			role,
+			preferredEffort:
+				authority?.thinkingLevel ??
+				(foregroundThinkingPolicy === "inherit" ? inherited : stepDownThinkingLevel(inherited)),
 			modelRegistry,
 			isModelExhausted,
 			isModelLimited,
@@ -511,7 +517,6 @@ function selectModelBinding(
 			: eligible;
 		if (routed.length > 0) {
 			const explicitThinking = authority?.thinkingLevel;
-			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
 			const bind = (model: Model<Api>): OrchestrationModelBinding => ({
 				provider: model.provider,
 				modelId: model.id,

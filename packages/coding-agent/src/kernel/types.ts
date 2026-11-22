@@ -409,8 +409,10 @@ export interface AgentToolResult<T> {
 	/**
 	 * When `terminate` is true, marks the result as a structured terminal handoff (e.g. `submit_report`)
 	 * rather than a silent stop, satisfying unresolved-verification handoff enforcement for this run.
+	 * A `"resume_after_idle"` handoff has already persisted its continuation. The host needs
+	 * the current run to finish before delivering it; queued messages stay queued for that delivery.
 	 */
-	handoff?: boolean;
+	handoff?: boolean | "resume_after_idle";
 }
 
 /** Callback used by tools to stream partial execution updates. */

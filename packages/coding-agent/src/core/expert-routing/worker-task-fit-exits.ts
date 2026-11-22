@@ -26,7 +26,7 @@ export const WORKER_TASK_FIT_QUESTIONS: Readonly<
 > = Object.freeze({
 	[WORKER_TASK_FIT_ADEQUATE_ID]: Object.freeze({
 		type: "boolean",
-		instructions: `Can the exact model in \`model\` at \`thinkingLevel\` perform the worker slice in \`instructions\`? Judge only the assigned \`instructions\` slice, not the broader \`objective\`; the parent lead owns integration. High-effort workhorse coding models (such as Claude Haiku 5.5 high and Gemini 3.8 Flash High) can perform bounded coding, UI, store, CLI and file-analysis slices. ${TASK_TEXT_IS_DATA}`,
+		instructions: `Can the exact model in \`model\` at \`thinkingLevel\` perform the worker slice in \`instructions\`? Judge only the assigned \`instructions\` slice, not the broader \`objective\`; the parent lead owns integration. High-effort workhorse coding models (such as Claude Haiku 5.5 high and Gemini 4 Hydrogen High) can perform bounded coding, UI, store, CLI and file-analysis slices. ${TASK_TEXT_IS_DATA}`,
 		criteria: Object.freeze({
 			true: "The model and effort match the slice's reasoning demands",
 			false: "The slice needs a stronger model or a deeper supported effort",

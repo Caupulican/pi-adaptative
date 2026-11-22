@@ -4,6 +4,12 @@
 
 - Auto Learn records skill-edit predictions and holds automatic shortening for a matching hosted-model comparison. Export and reoffer commands keep the proposal in its owning session and project. The paired coding evaluator grades both revisions, checks a synthetic disclosure boundary and records token use.
 
+### Fixed
+
+- After saving a self-compaction note, Pi ends the current run before draining queued work. The host can release the old context and deliver the note without sending another tool batch into the compaction gate.
+- Fresh workers routed to an Antigravity account select the current Gemini workhorse at the assignment’s effective thinking level. The bundled Herdr sibling template also selects from the native Agy catalog at launch. Explicit model pins remain supported.
+- Windows standalone updates extract verified release archives with the ZIP API available in Windows PowerShell 5.1.
+
 ## [0.104.75] - 2026-11-22
 
 ### Fixed
