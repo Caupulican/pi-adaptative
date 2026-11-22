@@ -49,7 +49,6 @@ export interface SkillRepairInput {
 	name: string;
 	body: string;
 	expectedVersion: string;
-	/** Optional physical file identity bound by a reviewed project-specific comparison. */
 	expectedCanonicalFile?: string;
 	description?: string;
 }
