@@ -11,7 +11,7 @@ import {
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
 import { detectOpenRouterCacheControlFormat } from "../src/providers/openrouter-cache.ts";
-import { isAnthropicHaiku55 } from "../src/providers/anthropic-model-family.ts";
+import { isAnthropicHaiku55, isAnthropicOpus55 } from "../src/providers/anthropic-model-family.ts";
 import { gemini4ArgonThinkingMetadata, isGemini3FlashModel, isGemini3ProModel, isGemini4ArgonModel, isGemma4Model } from "../src/providers/google-model-family.ts";
 import type {
 	AnthropicMessagesCompat,
@@ -23,7 +23,7 @@ import type {
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
-import { COMMAND_CODE_PROVIDER, fetchCommandCodeModels } from "./command-code-catalog.ts";
+import { COMMAND_CODE_PROVIDER, loadCommandCodeModels } from "./command-code-catalog.ts";
 import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
 import { replaceModelCatalogProvider } from "./model-catalog-provider-update.ts";
 import { parseOpenRouterCatalogCost, parseOpenRouterCatalogMetadata, type OpenRouterCatalogMetadata } from "./openrouter-catalog-metadata.ts";
@@ -586,8 +586,11 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 	) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
 	}
-	if (isAnthropicHaiku55(modelId)) {
+	if (isAnthropicHaiku55(modelId) || isAnthropicOpus55(modelId)) {
 		model.defaultThinkingLevel = "medium";
+	}
+	if (isAnthropicOpus55(modelId)) {
+		mergeThinkingLevelMap(model, { off: null });
 	}
 	if (modelId.includes("fable-5")) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh", max: "max" });
@@ -1497,8 +1500,8 @@ async function generateModels() {
 				}),
 		needAiGateway ? fetchAiGatewayModels() : Promise.resolve([] as Model<any>[]),
 		needCommandCode
-			? fetchCommandCodeModels().catch((error: unknown) => {
-					throw new Error("Failed to fetch Command Code models", { cause: error });
+			? loadCommandCodeModels(process.env.PI_COMMAND_CODE_CATALOG_FILE).catch((error: unknown) => {
+					throw new Error("Failed to load Command Code models", { cause: error });
 				})
 			: Promise.resolve([] as Model<any>[]),
 	]);

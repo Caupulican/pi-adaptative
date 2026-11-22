@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated the Command Code adapter to the 1.93.2 wire version. Its catalog now includes `thinkingmachines/inkling-2-mini` and can be refreshed from a local CLI catalog with `npm run sync:command-code-models -- --from-file <catalog.json>`.
+
+### Fixed
+
+- Claude Opus 5.5 uses adaptive thinking on the Anthropic API and defaults to medium effort where the provider catalog defers to the model. Pi no longer sends disabled or budget-based thinking to this model.
+
 ## [0.104.74] - 2026-11-22
 
 ## [0.104.73] - 2026-11-21

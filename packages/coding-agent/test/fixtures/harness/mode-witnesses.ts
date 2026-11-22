@@ -475,6 +475,8 @@ interface DeadlineGuardRun extends GuardRun {
 	readonly alarmAtRuntimeDispose: readonly { readonly delayMs: number; readonly keepAlive: boolean }[];
 	readonly exitsAtDeadline: readonly number[];
 	readonly logAtDeadline: readonly string[];
+	readonly stderrAtDeadline: readonly string[];
+	readonly endCallsAtDeadline: readonly { readonly code: number; readonly reason: string }[];
 	readonly pendingAfterSettlement: readonly { readonly delayMs: number; readonly keepAlive: boolean }[];
 }
 
@@ -492,6 +494,8 @@ async function runGuardDeadline(): Promise<DeadlineGuardRun> {
 	host.timers.fire();
 	const exitsAtDeadline = [...host.exits];
 	const logAtDeadline = [...host.log];
+	const stderrAtDeadline = [...host.stderr];
+	const endCallsAtDeadline = [...host.endCalls];
 	host.hold.release();
 	await shutdown;
 	host.lifecycle.unregisterSignalHandlers();
@@ -500,6 +504,8 @@ async function runGuardDeadline(): Promise<DeadlineGuardRun> {
 		alarmAtRuntimeDispose,
 		exitsAtDeadline,
 		logAtDeadline,
+		stderrAtDeadline,
+		endCallsAtDeadline,
 		pendingAfterSettlement: host.timers.pending(),
 	};
 }
@@ -849,6 +855,7 @@ async function runActualHostSignalShutdown(
 			).toHaveLength(1);
 			const callsAtDeadline = [...harness.calls];
 			const declarationsAtDeadline = [...harness.endDeclarations];
+			const stderrAtDeadline = [...harness.stderr];
 			resourceHold.release();
 			let lateFailureObserved = false;
 			try {
@@ -875,6 +882,7 @@ async function runActualHostSignalShutdown(
 			expect(harness.endDeclarations, "late rejection cannot declare a second terminal outcome").toEqual(
 				declarationsAtDeadline,
 			);
+			expect(harness.stderr, "late rejection cannot append a shutdown diagnostic").toEqual(stderrAtDeadline);
 			expect(harness.endCalls, "late rejection cannot reclassify or repeat exit").toEqual([
 				{ code: 1, reason: "shutdown-failed" },
 			]);
@@ -2049,7 +2057,16 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		"dispose",
 		"stop",
 	]);
-	expect(deadline.stderr, "late runtime rejection cannot reclassify or report after forced exit").toEqual([]);
+	expect(deadline.stderrAtDeadline, "the deadline reports the stalled cleanup step once").toEqual([
+		`Shutdown cleanup exceeded ${SIGNAL_SHUTDOWN_DEADLINE_MS}ms during session runtime disposal\n`,
+	]);
+	expect(deadline.stderr, "late runtime rejection cannot report after forced exit").toEqual(deadline.stderrAtDeadline);
+	expect(deadline.endCallsAtDeadline, "the deadline declares one failed shutdown").toEqual([
+		{ code: 1, reason: "shutdown-failed" },
+	]);
+	expect(deadline.endCalls, "late runtime rejection cannot reclassify the forced exit").toEqual(
+		deadline.endCallsAtDeadline,
+	);
 	expect(deadline.exits, "late runtime rejection cannot trigger a second process outcome").toEqual([1]);
 	expect(deadline.pendingAfterSettlement, "the deadline alarm is cleared after its outcome is claimed").toEqual([]);
 	expect(deadline.deadlinesCleared, "the fired deadline is disarmed when its terminal outcome is claimed").toBe(1);

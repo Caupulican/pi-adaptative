@@ -8,6 +8,7 @@
  * list price (a price is never invented).
  */
 
+import { readFile } from "node:fs/promises";
 import type { Model, ModelCost, ModelCostTier, ThinkingLevelMap } from "../src/types.ts";
 
 export const COMMAND_CODE_PROVIDER = "command-code";
@@ -206,13 +207,17 @@ export function commandCodeModels(
 	return models;
 }
 
-/** The service's live catalogue as pi models. */
-export async function fetchCommandCodeModels(): Promise<Model<"command-code-generate">[]> {
-	console.log("Fetching models from the Command Code catalogue...");
+async function fetchCatalogBody(): Promise<unknown> {
 	const response = await fetch(COMMAND_CODE_CATALOG_URL, { headers: { accept: "application/json" } });
 	if (!response.ok) throw new Error(`Model catalog request failed (${response.status}): ${COMMAND_CODE_CATALOG_URL}`);
+	return response.json();
+}
+
+/** Both the installed CLI snapshot and the live service use the same versioned catalogue body. */
+export async function loadCommandCodeModels(snapshotFile?: string): Promise<Model<"command-code-generate">[]> {
+	const body = snapshotFile === undefined ? await fetchCatalogBody() : JSON.parse(await readFile(snapshotFile, "utf8"));
 	const warn = (message: string) => console.warn(message);
-	const models = commandCodeModels(readCommandCodeCatalog(await response.json(), warn), warn);
-	console.log(`Fetched ${models.length} catalog models from Command Code`);
+	const models = commandCodeModels(readCommandCodeCatalog(body, warn), warn);
+	console.log(`Loaded ${models.length} Command Code models from ${snapshotFile ?? COMMAND_CODE_CATALOG_URL}`);
 	return models;
 }

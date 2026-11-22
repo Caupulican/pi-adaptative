@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamAnthropic } from "../src/providers/anthropic.ts";
+import { streamAnthropic, streamSimpleAnthropic } from "../src/providers/anthropic.ts";
 import { registerBuiltInApiProviders } from "../src/providers/register-builtins.ts";
 import { getProviderResponseAccount, ProviderResponseAccountScope, stream } from "../src/stream.ts";
 import type { Model } from "../src/types.ts";
@@ -25,6 +25,40 @@ function frame(event: { type: string }): string {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Anthropic wire stream", () => {
+	it.each(["simple-high", "simple-off", "explicit-effort"] as const)(
+		"preserves mandatory Opus 5.5 thinking on a custom deployment for %s",
+		async (route) => {
+			const deployment = { ...model, name: "Claude Opus 5.5" };
+			const bodies: Record<string, unknown>[] = [];
+			vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+				bodies.push(await new Request(input, init).json());
+				return new Response(frame(start) + frame({ type: "message_stop" }), {
+					headers: { "content-type": "text/event-stream" },
+				});
+			});
+			const options = { apiKey: "local-key", maxTokens: 37, temperature: 0.5 };
+			const context = { messages: [] };
+			const response =
+				route === "explicit-effort"
+					? streamAnthropic(deployment, context, { ...options, thinkingEnabled: false, effort: "high" })
+					: streamSimpleAnthropic(deployment, context, {
+							...options,
+							reasoning: route === "simple-high" ? "high" : "off",
+						});
+			await response.result();
+			expect(bodies).toHaveLength(1);
+			expect(bodies[0].max_tokens).toBe(37);
+			expect(bodies[0]).not.toHaveProperty("temperature");
+			if (route === "simple-off") {
+				expect(bodies[0]).not.toHaveProperty("thinking");
+				expect(bodies[0]).not.toHaveProperty("output_config");
+			} else {
+				expect(bodies[0].thinking).toMatchObject({ type: "adaptive" });
+				expect(bodies[0].output_config).toMatchObject({ effort: "high" });
+			}
+		},
+	);
+
 	it.each(["adapter", "caller"] as const)(
 		"checks refusal provenance when the %s owns the SDK client",
 		async (owner) => {

@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- A correction after a CI-watch answer now runs as its own prompt. The completed watch keeps its original answer and receipt.
+- Tool calls paused for self-compaction can run again after the handoff, including when reopening an affected session.
+- Peer review failures show the reason and the next action when a proposed resolution lacks the required evidence.
+- Shutdown shares a five-second grace period across trailing producers. If the ten-second process deadline expires, Pi reports the active cleanup stage in the terminal and crash record.
+
 ## [0.104.74] - 2026-11-22
 
 ### Added

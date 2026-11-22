@@ -46,6 +46,13 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./anthropic-identity.ts";
+import {
+	type AnthropicEffort,
+	type AnthropicThinkingDisplay,
+	mapAnthropicThinkingEffort,
+	requiresAnthropicThinking,
+	usesAdaptiveAnthropicThinking,
+} from "./anthropic-model-family.ts";
 import { buildAnthropicOAuthHeaders } from "./anthropic-oauth-headers.ts";
 import { AnthropicUsageAccumulator } from "./anthropic-usage.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -59,7 +66,6 @@ import {
 	createRetryFreeRequestOptions,
 	executeWithAuthRecovery,
 	getAnthropicCacheControl,
-	mapStandardThinkingEffort,
 	resolveCacheRetention,
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
@@ -143,9 +149,7 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	return blocks;
 }
 
-export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
-
-export type AnthropicThinkingDisplay = "summarized" | "omitted";
+export type { AnthropicEffort, AnthropicThinkingDisplay } from "./anthropic-model-family.ts";
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
@@ -829,17 +833,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	return stream;
 };
 
-/**
- * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
- * The catalog defines which effort levels each model supports.
- */
-function mapThinkingLevelToEffort(
-	model: Model<"anthropic-messages">,
-	level: SimpleStreamOptions["reasoning"],
-): AnthropicEffort {
-	return mapStandardThinkingEffort(model, level) as AnthropicEffort;
-}
-
 export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -857,8 +850,8 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 
 	// For models with adaptive thinking: use an effort level.
 	// For older models: use budget-based thinking.
-	if (model.compat?.forceAdaptiveThinking === true) {
-		const effort = mapThinkingLevelToEffort(model, options.reasoning);
+	if (usesAdaptiveAnthropicThinking(model)) {
+		const effort = mapAnthropicThinkingEffort(model, options.reasoning);
 		return streamAnthropic(model, context, {
 			...base,
 			thinkingEnabled: true,
@@ -906,7 +899,7 @@ async function createClient(
 	cacheSessionId?: string,
 ): Promise<{ client: Anthropic; isOAuthToken: boolean; compatibility?: AnthropicCompatibilitySnapshot }> {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
-	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
+	const needsInterleavedBeta = interleavedThinking && !usesAdaptiveAnthropicThinking(model);
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -1092,7 +1085,13 @@ function buildParams(
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based),
 	// and some newer Anthropic models reject it entirely.
-	if (options?.temperature !== undefined && !options?.thinkingEnabled && compat.supportsTemperature) {
+	const requiresThinking = requiresAnthropicThinking(model);
+	if (
+		options?.temperature !== undefined &&
+		!options?.thinkingEnabled &&
+		!requiresThinking &&
+		compat.supportsTemperature
+	) {
 		params.temperature = options.temperature;
 	}
 
@@ -1109,14 +1108,14 @@ function buildParams(
 
 	// Configure thinking mode: adaptive, budget-based, or explicitly disabled.
 	if (model.reasoning) {
-		if (options?.thinkingEnabled) {
+		if (options?.thinkingEnabled || (requiresThinking && options?.effort !== undefined)) {
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").
-			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
-			if (model.compat?.forceAdaptiveThinking === true) {
+			const display: AnthropicThinkingDisplay = options?.thinkingDisplay ?? "summarized";
+			if (usesAdaptiveAnthropicThinking(model)) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
-				if (options.effort) {
+				if (options?.effort) {
 					// The Anthropic SDK types can lag newly supported effort values such as "xhigh".
 					params.output_config =
 						options.effort === "xhigh"
@@ -1129,11 +1128,12 @@ function buildParams(
 				// Budget-based thinking for older models
 				params.thinking = {
 					type: "enabled",
-					budget_tokens: options.thinkingBudgetTokens || 1024,
+					budget_tokens: options?.thinkingBudgetTokens || 1024,
 					display,
 				};
 			}
-		} else if (options?.thinkingEnabled === false) {
+		} else if (options?.thinkingEnabled === false && !requiresThinking) {
+			// Opus 5.5 always reasons and rejects disabled; omission retains its required adaptive default.
 			params.thinking = { type: "disabled" };
 		}
 	}
