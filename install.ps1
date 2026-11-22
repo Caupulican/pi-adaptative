@@ -473,7 +473,8 @@ function Install-PiAdaptative {
             $checksum = Get-SelectedChecksum $checksumPath $assetName
             Assert-Checksum $archivePath $checksum
             Assert-ZipEntries $archivePath
-            Expand-Archive -LiteralPath $archivePath -DestinationPath $staging -Force
+            # The two-argument overload is available in Windows PowerShell 5.1 and PowerShell 7.
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $staging)
             $stagedExecutable = Join-Path $staging "pi.exe"
             if (-not (Test-Path -LiteralPath $stagedExecutable -PathType Leaf)) { Fail "release archive extracted without root-level pi.exe." }
             Invoke-VersionSmoke $stagedExecutable $version

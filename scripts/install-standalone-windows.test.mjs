@@ -187,7 +187,7 @@ test("Windows installer is a self-contained, owned-release PowerShell script", (
 	assert.doesNotMatch(installer, /Get-FileHash/u);
 	assert.match(installer, /exactly one valid checksum entry/u);
 	assert.match(installer, /Split\('\/'\) -contains '\.\.'/u);
-	assert.match(installer, /Expand-Archive/u);
+	assert.match(installer, /ZipFile\]::ExtractToDirectory\(\$archivePath, \$staging\)/u);
 	assert.match(installer, /current\.version/u);
 	assert.match(installer, /PI_ADAPTATIVE_MANAGED_LAUNCHER/u);
 	assert.match(installer, /Mutex/u);
