@@ -64,14 +64,19 @@ const DEFAULT_PROVIDER_PRIORITY: readonly string[] = [
 	"typesafe",
 ];
 
+const KNOWN_DEFAULT_PROVIDERS: ReadonlySet<string> = new Set([...DEFAULT_PROVIDER_PRIORITY, ...getProviders()]);
+
 /**
- * Resolve the latest default (flagship/general) model for `provider` on the fly from `availableModels`.
- * Works for both built-in providers and runtime-discovered providers (such as `google-antigravity`).
+ * Resolve the latest default (flagship/general) model for a built-in provider on the fly from `availableModels`.
+ * Works for both static catalog providers and runtime-discovered providers (such as `google-antigravity`).
+ * Returns `undefined` for custom/unknown providers so callers preserve the provider's declared first model
+ * instead of re-ranking user-defined models or cloning another model's capabilities onto custom ids.
  */
 export function resolveDefaultModelForProvider(
 	provider: string,
 	availableModels: readonly Model<Api>[],
 ): Model<Api> | undefined {
+	if (!KNOWN_DEFAULT_PROVIDERS.has(provider)) return undefined;
 	return selectLatestProviderModel(provider, availableModels, { tier: "default" });
 }
 
@@ -89,16 +94,8 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = buildDefau
 
 function pickDefaultAvailableModel(availableModels: readonly Model<Api>[]): Model<Api> | undefined {
 	if (availableModels.length === 0) return undefined;
-	const seen = new Set<string>();
-	for (const provider of DEFAULT_PROVIDER_PRIORITY) {
-		seen.add(provider);
+	for (const provider of KNOWN_DEFAULT_PROVIDERS) {
 		const match = resolveDefaultModelForProvider(provider, availableModels);
-		if (match) return match;
-	}
-	for (const model of availableModels) {
-		if (seen.has(model.provider)) continue;
-		seen.add(model.provider);
-		const match = resolveDefaultModelForProvider(model.provider, availableModels);
 		if (match) return match;
 	}
 	return availableModels[0];
