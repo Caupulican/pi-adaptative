@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Clarified Pi's instructions for explicit foreground model requests, scoped worker memory access, batching and reusing lookups, and progress updates during extended work.
+
+### Fixed
+
+- Python scripts that use Pi's edit or write tools preserve receipts for completed file changes when the script fails, is cancelled, or an after-tool hook rejects its result. The verifier identifies missing file-change receipts explicitly.
+- Bot instructions can forbid credential disclosure without triggering the disclosure warning. Instructions that request disclosure are still flagged.
+
 ## [0.104.77] - 2026-11-23
 
 ## [0.104.76] - 2026-11-22

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the generated provider model catalog, including entries for OpenCode, OpenRouter, and Z.AI.
+
 ## [0.104.77] - 2026-11-23
 
 ## [0.104.76] - 2026-11-22
