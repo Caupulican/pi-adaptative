@@ -95,7 +95,8 @@ export function hasRecalledHistoryMarker(details: unknown): boolean {
  * statistics classify a result by them, so an oversized failed result must stay a counted failure.
  * And the proof sheets a goal completion, a worker handoff or a plan result carries: the review gauge and the owner's
  * quiz read them back from the branch. And the stakes the host read from a python script: the proof sheet of its call
- * reads them, and a stub without them would rate the script unread.
+ * reads them, and a stub without them would rate the script unread. A Python bridge report also
+ * carries settled file-change evidence independent of the parent invocation's outcome.
  */
 export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piVerification",
@@ -106,6 +107,7 @@ export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piToolInvocation",
 	"proofSheet",
 	"scriptStakes",
+	"toolBridge",
 ] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
 /**
@@ -119,6 +121,7 @@ const RETAINED_RECEIPT_BYTE_BUDGETS: Readonly<Record<string, number>> = {
 	// Proof sheets are bounded by construction: lists of at most 8 lines of 120 characters per sheet, and one text of
 	// 6 KiB, or 24 KiB shared across the up to 8 sheets of a batched worker handoff; that worst case fits this budget.
 	proofSheet: 512 * 1024,
+	toolBridge: MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES,
 };
 
 /** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */

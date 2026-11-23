@@ -20,11 +20,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { type AgentToolFailureReceipt, readAgentToolFailureReceipt } from "../../kernel/tool-failure-receipt.ts";
 import { formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
 import { type NestedCallHost, type NestedCallOutcome, startNestedCall } from "./nested-tool-call.ts";
 import { renderToolBridgeClient } from "./tool-bridge-client.ts";
 import {
 	isToolBridgeMutation,
+	MAX_TOOL_BRIDGE_CALLS,
 	MAX_TOOL_BRIDGE_CONCURRENT_CALLS,
 	MAX_TOOL_BRIDGE_RESULT_BYTES,
 	MAX_TOOL_BRIDGE_TRACE_LINES,
@@ -84,6 +86,37 @@ export interface ToolBridgeReport {
 	readonly ms: number;
 	/** The first calls to settle (at most {@link MAX_TOOL_BRIDGE_TRACE_LINES}); a script's calls settle in order. */
 	readonly trace: readonly ToolBridgeTraceEntry[];
+	/** Host-observed paths mutated by admitted, succeeded `edit`/`write` calls in this run, deduplicated in order. */
+	readonly changedPaths?: readonly string[];
+}
+
+/** Preserve settled write evidence without putting trace diagnostics or stdout into a thrown receipt. */
+export function toolBridgeFailureReceipt(
+	report: ToolBridgeReport | undefined,
+	base: AgentToolFailureReceipt | undefined,
+): AgentToolFailureReceipt | undefined {
+	if (!report?.changedPaths?.length) return base;
+	const observed = report.changedPaths;
+	const scriptReceipt = readAgentToolFailureReceipt(base);
+	const project = (changedPaths: readonly string[]) =>
+		readAgentToolFailureReceipt({
+			...scriptReceipt,
+			toolBridge: {
+				tools: report.tools,
+				outcomes: { ok: report.outcomes.ok },
+				changedPaths,
+				omittedChangedPaths: observed.length - changedPaths.length,
+			},
+		});
+	const paths: string[] = [];
+	let receipt = project([]);
+	for (const path of observed) {
+		paths.push(path);
+		const candidate = project(paths);
+		if (candidate) receipt = candidate;
+		else paths.pop();
+	}
+	return receipt ?? base;
 }
 
 export interface ToolBridgeRunOptions {
@@ -179,6 +212,7 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 	const byTool: Record<string, number> = {};
 	const outcomes = emptyOutcomes();
 	const trace: ToolBridgeTraceEntry[] = [];
+	const changedPaths: string[] = [];
 	const inflight = new Set<Promise<ToolBridgeReply>>();
 	let admissionTail: Promise<unknown> = Promise.resolve();
 	const runBody = boundedRunner(MAX_TOOL_BRIDGE_CONCURRENT_CALLS);
@@ -205,8 +239,13 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 			admissionTail = admission.catch(() => undefined);
 			const started = await admission;
 			if (!("run" in started)) return replyFor(started.settled);
-			const { run } = started;
-			return replyFor(await runBody(mutation ? () => runMutation(run) : run));
+			const { args, run } = started;
+			const outcome = await runBody(mutation ? () => runMutation(run) : run);
+			if (mutation && outcome.status === "ok" && changedPaths.length < MAX_TOOL_BRIDGE_CALLS) {
+				const path = args.path;
+				if (typeof path === "string" && path.length > 0 && !changedPaths.includes(path)) changedPaths.push(path);
+			}
+			return replyFor(outcome);
 		} catch {
 			// Admission throws only when the call's signal ended it (the run ending, or the call's time running out).
 			return cancelled(
@@ -274,6 +313,7 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 					authFailures: opened.authFailures,
 					ms: Date.now() - startedAt,
 					trace,
+					...(changedPaths.length > 0 ? { changedPaths } : {}),
 				};
 				harnessLog.debug("tools", "a script's tool calls settled", () => ({
 					calls,

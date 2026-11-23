@@ -67,6 +67,7 @@ import {
 	openToolBridge,
 	summarizeToolBridgeReport,
 	type ToolBridgeReport,
+	toolBridgeFailureReceipt,
 } from "./tool-bridge.ts";
 import {
 	DEFAULT_TOOL_BRIDGE_MAX_CALLS,
@@ -108,8 +109,8 @@ export interface PythonToolOptions {
 }
 
 const PYTHON_DESCRIPTION =
-	"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to a work directory outside the repository (a worker's own scratch directory). Edit source with read/edit/write; Python file transforms must preserve encoding and newlines, write atomically and verify the diff.";
-const PYTHON_TOOL_BRIDGE_DESCRIPTION = ` With \`tools\` the script calls Pi tools through \`import ${TOOL_BRIDGE_CLIENT_MODULE}\` in this one call: use it for 3 or more dependent or bulk calls (search, read the matches, edit them) and print only what you need.`;
+	"Run Python through Pi's uv runtime. Bounded stdout/stderr can spill to a work directory outside the repository. Use edit/write for host file-change receipts. Raw transforms must preserve encoding and newlines, write atomically and verify the diff.";
+const PYTHON_TOOL_BRIDGE_DESCRIPTION = ` With \`tools\` the script calls Pi tools through \`import ${TOOL_BRIDGE_CLIENT_MODULE}\` in this one call.`;
 
 /** The script's import path starts with the bridge client's directory; an inherited one follows it. */
 function pythonPathWith(entry: string, environment: ExecutionEnvironment): Record<string, string> {
@@ -243,13 +244,13 @@ async function finishPythonStream(
 }
 
 /**
- * Carries the scan's receipt on an error a run throws after its scan, so a failed run keeps the stakes it read. The
+ * Carries host-observed script facts and settled bridge writes on an execution error. The
  * receipt goes on a new error, never on the thrown value: an abort reason is one object shared by every call on its
  * signal, and a thrown string has no properties. The new error keeps the class and message the loop classifies by, so
  * the failure is classified as before. An error that already carries a receipt, a policy refusal (a decision of the
  * gate, not a failed run), and a run without a scanned script pass as thrown.
  */
-function carryScriptReceipt(error: unknown, receipt: AgentToolFailureReceipt | undefined): unknown {
+function carryPythonFailureReceipt(error: unknown, receipt: AgentToolFailureReceipt | undefined): unknown {
 	if (receipt === undefined || readAgentToolPolicyDeniedError(error) !== undefined) return error;
 	const described = describeThrownToolError(error);
 	if (described.receipt !== undefined) return error;
@@ -351,6 +352,7 @@ export function createPythonToolDefinition(
 				scriptPath === undefined ? undefined : await readScriptStakes(scriptPath, baseCwd, localBackend, signal);
 			// The facts every failure below keeps: the stakes the host read from the file, whatever the run's outcome.
 			const receipt = scriptStakes ? { scriptStakes } : undefined;
+			let bridgeReport: ToolBridgeReport | undefined;
 			try {
 				const reduceStreams = input.fullOutput !== true && reductionEnabled;
 				let reductionOptions: ReduceToolOutputOptions | undefined;
@@ -384,14 +386,7 @@ export function createPythonToolDefinition(
 				const runtime = await awaitPreflight(resolveRuntime, signal);
 				signal?.throwIfAborted();
 				if (runtime.status !== "ready") {
-					throw new AgentToolExecutionError(
-						runtime.reason,
-						"runtime_unavailable",
-						"",
-						"tool_failure",
-						undefined,
-						receipt,
-					);
+					throw new AgentToolExecutionError(runtime.reason, "runtime_unavailable", "", "tool_failure");
 				}
 				const backendEnvironment = await awaitPreflight(() => operations.getEnvironment(cwd, signal), signal);
 				signal?.throwIfAborted();
@@ -424,7 +419,6 @@ export function createPythonToolDefinition(
 				const stdoutProjector = project();
 				const stderrProjector = project();
 				let execution: PythonExecutionResult;
-				let bridgeReport: ToolBridgeReport | undefined;
 				try {
 					const runSnippet = async () => {
 						signal?.throwIfAborted();
@@ -537,8 +531,6 @@ export function createPythonToolDefinition(
 								"timeout",
 								outputSignature,
 								"operation_outcome",
-								undefined,
-								receipt,
 							);
 						}
 						if (execution.reason === "aborted") {
@@ -547,8 +539,6 @@ export function createPythonToolDefinition(
 								"aborted",
 								outputSignature,
 								"tool_failure",
-								undefined,
-								receipt,
 							);
 						}
 						const termination = execution.signal
@@ -559,12 +549,12 @@ export function createPythonToolDefinition(
 							execution.exitCode === null ? "exit_unknown" : `exit_${execution.exitCode}`,
 							outputSignature,
 							"operation_outcome",
-							undefined,
-							receipt,
 						);
 					}
+					const failureReceipt = toolBridgeFailureReceipt(bridgeReport, receipt);
 					return {
 						content: [{ type: "text", text }],
+						...(failureReceipt ? { failureReceipt } : {}),
 						details: {
 							mode: scriptPath ? "script" : "code",
 							cwd,
@@ -599,7 +589,7 @@ export function createPythonToolDefinition(
 					await Promise.all([stdout.closeTempFile(), stderr.closeTempFile()]);
 				}
 			} catch (error) {
-				throw carryScriptReceipt(error, receipt);
+				throw carryPythonFailureReceipt(error, toolBridgeFailureReceipt(bridgeReport, receipt));
 			}
 		},
 		renderCall(args, theme) {

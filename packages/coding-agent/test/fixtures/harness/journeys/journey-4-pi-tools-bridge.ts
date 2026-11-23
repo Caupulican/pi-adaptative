@@ -513,6 +513,7 @@ export async function runJourney4PiToolsBridgePhase(world: HarnessWorld): Promis
 						byTool: bridgeReport.byTool,
 						authFailures: bridgeReport.authFailures as unknown,
 						outcomes: bridgeReport.outcomes,
+						changedPaths: bridgeReport.changedPaths,
 					}
 				: undefined,
 			replies: wireReplies.map((reply) => ({
@@ -570,6 +571,7 @@ export async function runJourney4PiToolsBridgePhase(world: HarnessWorld): Promis
 				limit: 1,
 				cancelled: 0,
 			},
+			changedPaths: ["src/bridge-target.ts"],
 		},
 		replies: [
 			{

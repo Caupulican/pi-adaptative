@@ -437,9 +437,9 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		states_files_changed: Object.freeze({
 			type: "boolean",
 			instructions:
-				"Does `final_answer` assert creating, editing or writing workspace files during the work identified by `work_scope` (or the current execution when no scope is supplied)? Listing the files belonging to a named existing commit or artifact describes its contents; it does not itself assert editing those files in this work. A request to edit is not an assertion that it happened. Classify the answer's assertion, never whether it is true.",
+				"Does `final_answer` assert creating, editing or writing files during the work identified by `work_scope` (or the current execution when no scope is supplied)? Listing the files belonging to a named existing commit or artifact describes its contents; it does not itself assert editing those files in this work. A request to edit is not an assertion that it happened. Classify the answer's assertion, never whether it is true.",
 			criteria: Object.freeze({
-				true: "The answer directly claims that the agent created, edited, modified, or wrote workspace files during this work.",
+				true: "The answer directly claims that the agent created, edited, modified, or wrote files during this work.",
 				false: "The answer only inspects existing files, reports pre-existing working-tree state, says no files were modified, or makes no current-work file-change claim.",
 			}),
 		}),

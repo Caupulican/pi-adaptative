@@ -28,6 +28,12 @@ export function isToolBridgeMutation(name: string): boolean {
 	return TOOL_BRIDGE_MUTATION_NAME_SET.has(name);
 }
 
+export function requestsToolBridgeMutation(args: unknown): boolean {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+	const tools = (args as { tools?: unknown }).tools;
+	return Array.isArray(tools) && tools.some((tool) => typeof tool === "string" && isToolBridgeMutation(tool));
+}
+
 /** The module a bridged script imports. */
 export const TOOL_BRIDGE_CLIENT_MODULE = "pi_tools";
 /**
@@ -55,3 +61,29 @@ export const TOOL_BRIDGE_HELLO_TIMEOUT_MS = 10_000;
 export const MAX_TOOL_BRIDGE_TRACE_LINES = 24;
 /** A refusal or failure reason shown in the trace is cut to this many characters. */
 export const MAX_TOOL_BRIDGE_TRACE_REASON_CHARS = 160;
+
+/**
+ * Host-observed paths modified by admitted, successful `edit`/`write` calls, even if the parent script fails.
+ * Requires the producing call and bridge report both to name a mutation bridge tool and keeps the list bounded
+ * by {@link MAX_TOOL_BRIDGE_CALLS} and by the report's recorded `ok` count.
+ */
+export function readToolBridgeChangedPaths(args: unknown, details: unknown): readonly string[] {
+	if (!requestsToolBridgeMutation(args)) return [];
+	if (!details || typeof details !== "object" || Array.isArray(details)) return [];
+	const bridge = (details as { toolBridge?: unknown }).toolBridge;
+	if (!bridge || typeof bridge !== "object" || Array.isArray(bridge)) return [];
+	const report = bridge as { tools?: unknown; outcomes?: unknown; changedPaths?: unknown };
+	if (!requestsToolBridgeMutation(report)) return [];
+	if (!report.outcomes || typeof report.outcomes !== "object" || Array.isArray(report.outcomes)) return [];
+	const okCount = (report.outcomes as { ok?: unknown }).ok;
+	if (typeof okCount !== "number" || !Number.isSafeInteger(okCount) || okCount <= 0) return [];
+	if (
+		!Array.isArray(report.changedPaths) ||
+		report.changedPaths.length === 0 ||
+		report.changedPaths.length > MAX_TOOL_BRIDGE_CALLS ||
+		report.changedPaths.length > okCount ||
+		!report.changedPaths.every((path): path is string => typeof path === "string" && path.length > 0)
+	)
+		return [];
+	return [...new Set(report.changedPaths)];
+}

@@ -7,7 +7,42 @@
 
 export type ThreatScope = "context" | "strict";
 
-const THREAT_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp; scope: ThreatScope }> = [
+// Match literal prohibitions on disclosure. Any qualifier or additional action leaves the
+// clause subject to the normal scan, and other threats are always scanned over the original text.
+const DISCLOSURE_ACTION = "(?:reveal|print|dump|exfiltrate|send|upload)";
+const SECRET_NOUN = "(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?)";
+const GUARDED_ACTION = `(?:${DISCLOSURE_ACTION}|expose|copy|share)`;
+const GUARDED_OBJECT = String.raw`(?:${SECRET_NOUN}|private harness files|\.env)`;
+const DISCLOSURE_PROHIBITION = new RegExp(
+	String.raw`^\s*(?:[-*+]\s+)?(?:never|do not|don't)\s+` +
+		String.raw`${GUARDED_ACTION}(?:\s*,\s*${GUARDED_ACTION}){0,3}(?:(?:\s*,\s*|\s+)(?:or|and)\s+${GUARDED_ACTION})?\s+` +
+		String.raw`${GUARDED_OBJECT}(?:\s*,\s*${GUARDED_OBJECT}){0,4}(?:(?:\s*,\s*|\s+)(?:or|and)\s+${GUARDED_OBJECT})?\s*[.!?;]?\s*$`,
+	"i",
+);
+// Dots within paths and versions are not clause boundaries.
+const SECRET_EXFILTRATION = new RegExp(
+	String.raw`\b${DISCLOSURE_ACTION}\b(?:(?![.!?;](?:\s|$)).){0,80}(?:\b${SECRET_NOUN}\b|(?<!\w)\.env\b)`,
+	"i",
+);
+const DISCLOSURE_REFERENCE = new RegExp(String.raw`\b${DISCLOSURE_ACTION}\s+(?:them|it|(?:those|these) values)\b`, "i");
+
+function requestsSecretDisclosure(content: string): boolean {
+	let followsProhibition = false;
+	for (const clause of content.split(/[\r\n]+|(?<=[.!?;])\s+/)) {
+		const prohibition = DISCLOSURE_PROHIBITION.test(clause);
+		if (!prohibition) {
+			if (SECRET_EXFILTRATION.test(clause) || (followsProhibition && DISCLOSURE_REFERENCE.test(clause))) return true;
+		}
+		followsProhibition = prohibition;
+	}
+	return false;
+}
+
+const THREAT_PATTERNS: ReadonlyArray<{
+	label: string;
+	scope: ThreatScope;
+	pattern: Pick<RegExp, "test">;
+}> = [
 	{
 		label: "instruction override",
 		pattern:
@@ -16,10 +51,7 @@ const THREAT_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp; scope: Th
 	},
 	{
 		label: "secret exfiltration",
-		// Bind the action to its object within one clause. Dots inside versions, domains and
-		// paths are not sentence boundaries; an unrelated following sentence is not an order.
-		pattern:
-			/\b(?:reveal|print|dump|exfiltrate|send|upload)\b(?:(?![.!?;](?:\s|$)).){0,80}(?:\b(?:secrets?|tokens?|api[_ -]?keys?|credentials?|environment variables?)\b|(?<!\w)\.env\b)/i,
+		pattern: { test: requestsSecretDisclosure },
 		scope: "context",
 	},
 	{

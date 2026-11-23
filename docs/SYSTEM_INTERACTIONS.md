@@ -30,6 +30,7 @@ cancellations were distinguished from harness defects.
 | Current request-only knowledge and wire position | Kernel request materializer; knowledge owners supply a current projection | Root memory controller and worker knowledge broker supply `HOST_REQUEST_ONLY_DETAILS`; provider planner converts, measures and dispatches the same sequence | Unchanged knowledge stays in place as history grows; correction/forgetting/withholding takes effect immediately; projected values never become durable history or compaction input |
 | Summary response accounting and subsequent dispatch | Completion usage owns receipts; shared summary spend owns persistent admission; adapter coordinates physical settlement | Physical response settlement updates the exact durable token; runtime reads `dispatchHold`; physical admission checks spend under the same lock | Each identity has one physical request; unknown/unretained usage holds new work across restarts; old completions cannot clear newer failures; validated physical cost counts once |
 | Worker writable scopes and execution workspace | Reservation owner defines applicability and confinement; shared worker admission applies them before creation | Execution-plan admission, worker creation and reservation persistence consume the same scope rule | A forbidden scope requiring reservation is refused before worker creation; the existing machine-authority exemption remains; diagnostics retain the actionable reason |
+| Settled writes from a Python tool bridge | The bridge records completed typed edits and writes | Python's structured result or failure receipt carries the evidence to foreground claim delivery and worker mutation tracking | Child receipts describe file changes independently of the parent status. Bounded failure receipts disclose omitted paths. Raw script output cannot establish a host receipt. |
 
 The intended precedence is explicit: current knowledge and privacy override cache reuse;
 an accounting hold refuses undispatched work while dispatched receipts settle with their original
@@ -46,11 +47,18 @@ owner; execution-workspace confinement overrides model-supplied mutation paths.
 | Complete an older request successfully | Keep a newer accounting failure held | Recovery can clear only the exact circuit generation its request acquired |
 | End logical work | Receive a late physical accounting failure | Physical settlement still updates the captured owner and lane circuit |
 | Accept an absolute worker mutation path | Reserve it under a confined execution root | Shared admission now refuses invalid scopes before worker creation; persistence retains its own check through the same rule |
+| Settle an admitted Python bridge write | Fail or cancel the parent Python invocation | The bounded failure receipt carries the settled path. Consumers retain the parent failure status and use the child evidence independently. |
 
 These are source-reviewed scenarios and prepared regression coverage, not executed composition
 proof. Negative controls are listed with each finding below.
 
 ## Findings and repairs
+
+### Python bridge receipts and private memory handoff, November 23
+
+A memory update used raw Python to write files, so the final claim had no host file-change receipt. The initial bridge patch missed raw writes and lost settled child evidence when the parent script failed. The prompt now directs file changes through typed edit and write tools. Python passes bounded, host-observed bridge evidence through the existing result and failure receipt paths. Foreground and worker consumers account for settled writes independently of the parent status. Raw Python, read-only calls, and invalid reports supply no write receipt. [Bridge](../packages/coding-agent/src/core/tools/tool-bridge.ts) · [Receipt regression](../packages/coding-agent/test/python-bridge-claim-receipts.test.ts)
+
+The same session used a broad temporary copy to hand protected memory to a worker, and the bot validator rejected a rule that prohibited credential disclosure. The director now points workers to the scoped memory broker, keeps protected persistence with the authorized session, and uses explicit model selection for work that requires a different foreground model. The scanner accepts a complete disclosure prohibition and still checks affirmative commands in neighboring clauses. The root prompt calls for progress updates during extended work and reuses current lookup results. These prompt rules guide model behavior. Source review and prepared regression coverage leave the composed runtime behavior unverified. [Prompt contracts](../packages/coding-agent/src/core/provider-prompt-contracts.ts) · [Threat scanner regression](../packages/coding-agent/test/context-threat-scanner.test.ts)
 
 ### H-20261111-1: summary backlog continues after usage accounting fails
 

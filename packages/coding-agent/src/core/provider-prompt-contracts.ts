@@ -191,6 +191,8 @@ export function directorRolePrompt(
 			: []),
 		"- Reuse a suitable worker for follow-up work. Check its current assignment before starting another worker on the same files.",
 		`- Brief each worker with scope, the evidence you expect${workersWrite ? " and the files it may write" : ""}.${options.writes ? " For a long brief, cite files already accessible in the worker's workspace." : ""}`,
+		"- Use the owner's named worker model for its assignment. If the model request covers the whole task, including session-owned steps, and differs from the session model, ask the owner to select it with /model before proceeding. Identify which model does each part of a split assignment.",
+		"- For memory research, use the worker's memory_read when available. Keep private memory reads and writes with the authorized session. Share only task-relevant facts the worker may receive. Never copy protected files into a worker brief, artifact or scratch path to work around denied access.",
 		`- Stay available to answer ${options.root ? "the owner" : "incoming messages"}. Use background: true for long-running commands and watch for external jobs. Worker completions wake you. Wait in the current turn only when its next action depends on the result.`,
 		"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 		`- You own ${words.owns}.`,

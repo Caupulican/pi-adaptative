@@ -12,6 +12,7 @@ import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { isProvablyObservationalToolCall } from "../model-router/tool-escalation.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime-state.ts";
+import { readToolBridgeChangedPaths, requestsToolBridgeMutation } from "../tools/tool-bridge-policy.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { readWorkerActionMutationProgress } from "./worker-action-journal.ts";
 import type { AppliedActionsReport } from "./worker-actions.ts";
@@ -29,12 +30,7 @@ type MutationProgressStore = Pick<
 	"getMutationProgress" | "recordChangedFile" | "recordNativeWriteProgress" | "recordUncertainMutation"
 >;
 
-function writeTarget(cwd: string, toolName: string, args: unknown): string | undefined {
-	if ((toolName !== "write" && toolName !== "edit") || !args || typeof args !== "object" || Array.isArray(args)) {
-		return undefined;
-	}
-	const rawPath = (args as Record<string, unknown>).path;
-	if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+function normalizeMutationPath(cwd: string, rawPath: string): string {
 	const absolutePath = path.resolve(cwd, rawPath);
 	let canonicalPath = absolutePath;
 	try {
@@ -43,6 +39,15 @@ function writeTarget(cwd: string, toolName: string, args: unknown): string | und
 		// A write may create the file after this observation.
 	}
 	return path.relative(cwd, canonicalPath).split(path.sep).join("/");
+}
+
+function writeTarget(cwd: string, toolName: string, args: unknown): string | undefined {
+	if ((toolName !== "write" && toolName !== "edit") || !args || typeof args !== "object" || Array.isArray(args)) {
+		return undefined;
+	}
+	const rawPath = (args as Record<string, unknown>).path;
+	if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+	return normalizeMutationPath(cwd, rawPath);
 }
 
 interface WorkerMutationEvidenceOptions {
@@ -63,6 +68,7 @@ export class WorkerMutationEvidence {
 	readonly changedFiles: Set<string>;
 	private readonly options: WorkerMutationEvidenceOptions;
 	private readonly inFlight = new Map<string, { writeId: string; target: string }>();
+	private readonly inFlightBridgedPython = new Map<string, unknown>();
 	private uncertain: boolean;
 	private uncertaintyPersisted: boolean;
 
@@ -80,6 +86,8 @@ export class WorkerMutationEvidence {
 			// Record intent before file I/O so an abruptly interrupted process can still report it.
 			this.options.store.recordNativeWriteProgress(this.options.attemptId, writeId);
 			this.inFlight.set(toolCallId, { writeId, target });
+		} else if (toolName === "python" && requestsToolBridgeMutation(args)) {
+			this.inFlightBridgedPython.set(toolCallId, args);
 		}
 		if (
 			isLaneProcessTool(toolName) &&
@@ -95,7 +103,19 @@ export class WorkerMutationEvidence {
 	/** Describes a successful native write, including its path when durable evidence is available. */
 	end(toolCallId: string, result: unknown): NativeWriteCompletion | undefined {
 		const write = this.inFlight.get(toolCallId);
-		if (!write) return undefined;
+		if (!write) {
+			const pythonArgs = this.inFlightBridgedPython.get(toolCallId);
+			if (pythonArgs !== undefined) {
+				this.inFlightBridgedPython.delete(toolCallId);
+				const details = (result as { details?: unknown } | undefined)?.details;
+				for (const rawPath of readToolBridgeChangedPaths(pythonArgs, details)) {
+					const target = normalizeMutationPath(this.options.cwd, rawPath);
+					this.recordChangedFile(target);
+					this.options.onOwnedWrite?.(target);
+				}
+			}
+			return undefined;
+		}
 		this.inFlight.delete(toolCallId);
 		if (!result || (result as { isError?: boolean }).isError === true) {
 			this.noteUncertainty();
@@ -142,6 +162,7 @@ export class WorkerMutationEvidence {
 			this.inFlight.clear();
 			this.uncertain = true;
 		}
+		this.inFlightBridgedPython.clear();
 		this.persistUncertainty();
 	}
 

@@ -27,6 +27,7 @@ import {
 } from "../delegation/worker-receipts.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
+import { readToolBridgeChangedPaths } from "../tools/tool-bridge-policy.ts";
 import type { WorkUnitRecord } from "../work-units.ts";
 import { EPOCH_CHANGED_PATHS_CAP } from "../worktree-sync/codes.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
@@ -188,13 +189,20 @@ export function collectClaimReceiptEvents(
 			Object.hasOwn(result.details, "piToolInvocation")
 		)
 			continue;
-		if (invocation) {
-			if (invocation.execution !== "completed") continue;
+		if (invocation?.execution === "not_started" || invocation?.execution === "running") continue;
+		if (invocation?.execution === "completed") {
 			const seen = seenRequests.get(invocation.requestId) ?? new Set<string>();
 			if (seen.has(result.toolCallId)) continue;
 			seen.add(result.toolCallId);
 			seenRequests.set(invocation.requestId, seen);
 		}
+		// Child write receipts describe settled operations independently of the parent Python status.
+		if (result.toolName === "python") {
+			for (const path of readToolBridgeChangedPaths(call.arguments, result.details)) {
+				if (!filesChanged.includes(path)) filesChanged.push(path);
+			}
+		}
+		if (invocation && invocation.execution !== "completed") continue;
 		const ok = invocation ? invocation.operationStatus === "success" : !result.isError;
 		totals.toolCalls += 1;
 		if (ok) totals.succeededToolCalls += 1;
@@ -402,7 +410,7 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 		findings.push({
 			kind: "files_changed",
 			verdict: "unsupported",
-			reason: "the answer says files were changed; no file change was recorded during this work",
+			reason: "the answer says files were changed, but this work has no host file-change receipt",
 		});
 	return findings;
 }
@@ -440,7 +448,7 @@ const CLAIM_STATEMENTS: Readonly<Record<ClaimKind, string>> = {
 	committed: "The agent created a new git commit during this work",
 	pushed: "The agent pushed changes to a git remote during this work",
 	published: "The agent published a package or release during this work",
-	files_changed: "The agent created, edited or wrote workspace files during this work",
+	files_changed: "The agent created, edited or wrote files during this work",
 };
 
 export interface AnswerClaimCheckerDeps {

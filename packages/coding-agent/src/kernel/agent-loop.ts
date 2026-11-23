@@ -67,7 +67,7 @@ import {
 	toolFailureCorrection,
 	trackerFromFailureRecords,
 } from "./tool-failure-memory.ts";
-import { createErrorToolResult } from "./tool-failure-receipt.ts";
+import { createErrorToolResult, readAgentToolFailureReceipt } from "./tool-failure-receipt.ts";
 import {
 	ToolFailureRecoveryGate,
 	type ToolFailureRecoveryGateEffect,
@@ -2613,28 +2613,19 @@ async function executePreparedToolCall(
 					executionScope: prepared.binding?.executionScope,
 				},
 			};
-		} else if (cancelled) {
-			const cancellationText = abortedToolCallText(signal?.reason, message);
-			executed = {
-				result: createErrorToolResult(cancellationText, undefined, described.receipt),
-				operationCompleted: false,
-				isError: true,
-				errorClass: described.errorClass,
-				failureMessage: cancellationText,
-				failureCode: "aborted",
-				errorKind: "tool_failure",
-			};
 		} else {
+			const failureMessage = cancelled ? abortedToolCallText(signal?.reason, message) : message;
+			const failure = cancelled ? undefined : toolFailure;
+			const failureCode = cancelled ? "aborted" : failure?.failureCode;
 			executed = {
-				result: createErrorToolResult(message, toolFailure?.details, described.receipt),
-				operationCompleted: toolFailure?.errorKind === "operation_outcome",
+				result: createErrorToolResult(failureMessage, failure?.details, described.receipt),
+				operationCompleted: failure?.errorKind === "operation_outcome",
 				isError: true,
 				errorClass: described.errorClass,
-				failureMessage: message,
-				errorKind: toolFailure?.errorKind ?? "tool_failure",
-				...(toolFailure
-					? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature }
-					: {}),
+				failureMessage,
+				errorKind: failure?.errorKind ?? "tool_failure",
+				...(failureCode === undefined ? {} : { failureCode }),
+				...(failure ? { outputSignature: failure.outputSignature } : {}),
 			};
 		}
 	} finally {
@@ -2708,6 +2699,7 @@ async function finalizeExecutedToolCall(
 	// Capture the executor's validated receipt before a hook can mutate or replace its details.
 	// Presentation/policy failures must not erase a completed check or invent a different pass.
 	const verificationDetails = retainedVerificationDetails(result.details);
+	const failureReceipt = readAgentToolFailureReceipt(result.failureReceipt);
 	// Same for the recalled-history marker: a harness failure record that replaces a history read's details
 	// is still that read's result, and history capture must not index it as conversation.
 	const recalledHistory = hasRecalledHistoryMarker(result.details);
@@ -2849,7 +2841,8 @@ async function finalizeExecutedToolCall(
 				record,
 				args: prepared.args,
 			};
-			result = { ...createToolFailureResult(record, result.terminate), usage };
+			const failureResult = createToolFailureResult(record, result.terminate);
+			result = { ...failureResult, details: { ...failureReceipt, ...failureResult.details }, usage };
 		}
 	} else {
 		clearToolFailure(

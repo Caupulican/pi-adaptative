@@ -134,7 +134,9 @@ export interface NestedCallOutcome extends NestedOutputEvidence {
 }
 
 /** A sub-call that is admitted and waiting to run, or one already settled. */
-export type StartedNestedCall = { run: () => Promise<NestedCallOutcome> } | { settled: NestedCallOutcome };
+export type StartedNestedCall =
+	| { readonly args: Readonly<Record<string, unknown>>; run: () => Promise<NestedCallOutcome> }
+	| { settled: NestedCallOutcome };
 
 export function refusedNestedOutcome(diagnostic: string, correction?: string): NestedCallOutcome {
 	const reason = correction ? `${diagnostic} ${correction}` : diagnostic;
@@ -261,6 +263,7 @@ export async function startNestedCall(
 	}
 	const executor = binding?.tool ?? tool;
 	return {
+		args,
 		run: async () => {
 			try {
 				try {

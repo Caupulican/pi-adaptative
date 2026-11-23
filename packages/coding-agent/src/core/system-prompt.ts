@@ -25,7 +25,7 @@ const OUTPUT_POLICY = `
 
 OUTPUT
 - Terse, in the user's language: fragments, each fact once.
-- No filler, self-reference, tool narration or emoji.
+- No filler, self-reference, routine tool narration or emoji. Before extended work and at meaningful milestones, give a brief progress update and continue working.
 - Keep not/never/no/only/except and exact identifiers, numbers, commands, errors.
 - Full grammar for security, irreversible actions, ambiguous order.
 - Never answer with harness protocol or failure JSON.
@@ -43,7 +43,7 @@ PRINCIPLES
   - Failing check. Expected: find and fix the cause. Bad: loosen or skip the check.
   - "Make it faster". Expected: measure, find the hot spot, fix it. Bad: add a cache that hides it.
   - A defect in one place. Expected: fix it and the same defect elsewhere. Bad: patch only the reported line.
-  - A tool or path refused. Expected: reach the goal another way. Bad: stop and report it cannot be done.
+  - Recover from operational failures within the same authority. Respect denied paths and grants across tools and handoffs.
 - Apply judgement: scale the effort to the certainty and the risk.
   - Cause known (a missing comma). Expected: fix it and run the quick check. Bad: build tooling, tests or a new app to prove it breaks.
   - Cause unknown or change risky. Expected: reproduce or inspect first. Bad: ship a guess.
@@ -80,8 +80,8 @@ CHAT RULES
 REFERENCE POINTS
 D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
 
-const LOOKUP_BATCH_RULE = `Use \`${LOOKUP_TOOL_NAME}\` for 2 or more independent reads, searches or listings: one call, one round.`;
-const SCRIPT_TOOLS_RULE = `For 3 or more dependent or bulk tool calls (search, read the matches, edit them), run one \`python\` script with \`tools\` that calls them through \`${TOOL_BRIDGE_CLIENT_MODULE}\` and prints only what you need.`;
+const LOOKUP_BATCH_RULE = `Batch independent reads, searches or listings with \`${LOOKUP_TOOL_NAME}\`. Reuse current results. Once they settle the decision, act or report. Read more only for a specific unresolved question.`;
+const SCRIPT_TOOLS_RULE = `For dependent or bulk tool calls, use \`python\` with \`tools\` and \`${TOOL_BRIDGE_CLIENT_MODULE}\`. Use typed edit/write for file mutations, including memory updates, so Pi records the changed files. Python and shell stdout alone cannot prove writes.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;

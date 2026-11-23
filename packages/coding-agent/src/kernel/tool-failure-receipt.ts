@@ -1,7 +1,7 @@
 /**
  * Bounded structured facts a tool attaches to a failed call's persisted result, beside the flat outcome details.
  * A receipt states the tool's own fixed facts, such as the stakes the host read from a script the call failed to run.
- * It carries no output text and no paths. The kernel copies it strictly, so nothing a runtime copy of the error holds
+ * It carries no output text or output file locations. The kernel copies it strictly, so nothing a runtime copy of the error holds
  * (getters, cycles, unbounded data) reaches the record, and the failed result is built here.
  */
 import type { AgentToolOutcomeDetails, AgentToolResult } from "./types.ts";
@@ -52,6 +52,7 @@ export function createErrorToolResult(
 	return {
 		content: [{ type: "text", text: message }],
 		details: { ...receipt, ...details },
+		...(receipt ? { failureReceipt: receipt } : {}),
 	};
 }
 

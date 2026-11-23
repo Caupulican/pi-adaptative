@@ -59,7 +59,7 @@ export function redactedThrownToolError(error: unknown, redact: (text: string) =
  * under the receipt bounds: a value the redaction lengthens past a bound drops the whole receipt rather than persisting it.
  * Keys are the tool's own names and are not redacted.
  */
-function redactedFailureReceipt(
+export function redactedFailureReceipt(
 	receipt: AgentToolFailureReceipt | undefined,
 	redact: (text: string) => string,
 ): AgentToolFailureReceipt | undefined {

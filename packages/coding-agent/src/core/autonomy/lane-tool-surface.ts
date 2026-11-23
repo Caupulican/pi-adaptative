@@ -6,6 +6,7 @@ import {
 	type AgentTool,
 	AgentToolPolicyDeniedError,
 	type BeforeToolCallResult,
+	describeThrownToolError,
 } from "../../kernel/index.ts";
 import { resolveInstalledManagedTool } from "../../utils/tools-manager.ts";
 import type { ToolDecision } from "../autonomy-status/tool-manifest.ts";
@@ -882,6 +883,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 						}
 						result = await executor.execute(toolCallId, args, signal, onUpdate);
 						return result;
+					} catch (error) {
+						const { receipt } = describeThrownToolError(error);
+						if (receipt) result = { content: [], details: receipt, isError: true };
+						throw error;
 					} finally {
 						for (let index = 0; index < started; index++) observers[index]!.end(toolCallId, result);
 					}

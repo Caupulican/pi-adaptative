@@ -222,7 +222,7 @@ export function readAgentToolPolicyDeniedError(error: unknown): AgentToolPolicyD
  * the persisted result in place of the empty details a thrown error would otherwise leave.
  *
  * `receipt` is the bounded facts the tool attaches to the failed result, beside `details` (see
- * {@link "./tool-failure-receipt.ts"}). It carries no output text and no paths, and the kernel copies it strictly.
+ * {@link "./tool-failure-receipt.ts"}). It carries no output text or output file locations, and the kernel copies it strictly.
  */
 export class AgentToolExecutionError extends Error {
 	readonly failureCode: string;
@@ -378,6 +378,8 @@ export interface AgentToolResult<T> {
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/** Bounded host facts to keep if this result is replaced by a failure record. */
+	failureReceipt?: AgentToolFailureReceipt;
 	/**
 	 * Marks a completed execution as a failure without throwing.
 	 *

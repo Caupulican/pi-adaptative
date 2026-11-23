@@ -4,6 +4,7 @@ import {
 	type AgentTool,
 	AgentToolExecutionError,
 	type AgentToolResult,
+	describeThrownToolError,
 	type ExecutionContext,
 	type ExecutionPathAuthority,
 } from "../../kernel/index.ts";
@@ -36,7 +37,7 @@ import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtectio
 import { createExposureMock, type ExposureMock, type ExposureTextKind, errorMaskFor } from "./exposure-mock.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
-import { redactedThrownToolError } from "./redacted-tool-error.ts";
+import { redactedFailureReceipt, redactedThrownToolError } from "./redacted-tool-error.ts";
 import { callPrintsProgramSource, resultHoldsWholeOutput } from "./source-assessment.ts";
 
 /** Tools whose path arguments name the files they read or write. */
@@ -1031,8 +1032,11 @@ function redactResult<T>(
 	// get only known-value and secret-shape masking.
 	const redactKey = createOutputRedactor(boundary, redactKnownSecrets, additionalValues);
 	const budget = { nodes: 0 };
+	const { failureReceipt, ...toolResult } = result;
+	const safeReceipt = redactedFailureReceipt(failureReceipt, redactDetail);
 	return {
-		...result,
+		...toolResult,
+		...(safeReceipt ? { failureReceipt: safeReceipt } : {}),
 		content: result.content.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
 		details: redactStructuredDetails(result.details, redactDetail, redactKey, budget) as T,
 	};
@@ -1164,10 +1168,13 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					exposureMock.fragment,
 				);
 			} catch (error) {
-				// A cancellation is not this guard's to describe: the run's abort reason (a plain string for a
-				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
-				// the call as `Operation aborted (<reason>)` without a second line about the guard.
-				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
+				// Pass through the abort reason itself. An executor's separate error may carry a
+				// receipt for effects completed before cancellation, so that error still needs redaction.
+				if (
+					(signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) &&
+					(error === signal?.reason || !describeThrownToolError(error).receipt)
+				)
+					throw error;
 				throw redactedThrownToolError(error, createOutputRedactor(boundary, errorMock, sensitiveValues));
 			}
 		},
