@@ -213,6 +213,12 @@ it("resolves a transferred held comparison for its receiving session and records
 	expect(store.publish(directory, record).status).toBe("persisted");
 	expect(() => store.findForSession(tenants, hash, runId, "first")).toThrow();
 	const selected = store.findForSession(tenants, hash, runId, "second");
+	await expect(
+		store.reofferEntry(selected, runId, "second", 0, async () => {
+			throw new Error("applied before delivery acknowledgement");
+		}),
+	).rejects.toThrow("Auto Learn handoff is in use");
+	expect(store.acknowledge(selected, record)).toBe(true);
 	const result = await store.reofferEntry(selected, runId, "second", 0, async (entry) => ({
 		...entry,
 		outcome: "applied",
