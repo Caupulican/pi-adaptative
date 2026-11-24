@@ -4,7 +4,7 @@
  */
 
 import { isRecord } from "../utils/value-guards.ts";
-import { requestBoundedAccountJson } from "./account-request.ts";
+import { MAX_ACCOUNT_RESPONSE_BYTES, readBoundedResponseText, requestBoundedAccountJson } from "./account-request.ts";
 import { COMMAND_CODE_BASE_URL, COMMAND_CODE_CLIENT_VERSION } from "./command-code-request.ts";
 
 export const DEFAULT_COMMAND_CODE_ACCOUNT_BASE_URL = COMMAND_CODE_BASE_URL;
@@ -30,6 +30,15 @@ export interface CommandCodeAccountRequestOptions {
 	signal?: AbortSignal;
 	fetch?: typeof fetch;
 }
+
+export type CommandCodeApiKeyValidation =
+	| { valid: true; whoami: unknown }
+	| {
+			valid: false;
+			error: "invalid_key" | "network_error" | "server_error";
+			status?: number;
+			cause?: unknown;
+	  };
 
 export interface CommandCodeUser {
 	id?: string;
@@ -229,6 +238,48 @@ function accountHeaders(apiKey: string): Headers {
 		"x-command-code-version": COMMAND_CODE_CLIENT_VERSION,
 		"x-cli-environment": "production",
 	});
+}
+
+/** Validate a manually entered key through the native sign-in route without starting the broader usage fan-out. */
+export async function validateCommandCodeApiKey(
+	apiKey: string,
+	options?: CommandCodeAccountRequestOptions,
+): Promise<CommandCodeApiKeyValidation> {
+	options?.signal?.throwIfAborted();
+	const fetchImpl = options?.fetch ?? globalThis.fetch;
+	if (typeof fetchImpl !== "function") {
+		return { valid: false, error: "network_error", cause: new Error("Fetch is unavailable in this runtime") };
+	}
+	try {
+		const response = await fetchImpl(buildEndpointUrl(resolveBaseUrl(options?.baseUrl), "/alpha/whoami"), {
+			method: "GET",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"Content-Type": "application/json",
+			},
+			signal: options?.signal,
+		});
+		if (response.status === 401) {
+			await response.body?.cancel().catch(() => {});
+			return { valid: false, error: "invalid_key", status: response.status };
+		}
+		if (!response.ok) {
+			await response.body?.cancel().catch(() => {});
+			return { valid: false, error: "server_error", status: response.status };
+		}
+		const body = await readBoundedResponseText(response, MAX_ACCOUNT_RESPONSE_BYTES);
+		if (body === undefined) {
+			return {
+				valid: false,
+				error: "network_error",
+				cause: new Error("Command Code whoami response exceeded the account response limit"),
+			};
+		}
+		return { valid: true, whoami: JSON.parse(body) as unknown };
+	} catch (error) {
+		options?.signal?.throwIfAborted();
+		return { valid: false, error: "network_error", cause: error };
+	}
 }
 
 function parseOrgLimit(value: unknown): CommandCodeOrgLimit | undefined {
