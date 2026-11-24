@@ -151,6 +151,7 @@ function resolveOAuthProvider(providerOrId: OAuthProviderId | OAuthProviderInter
 export async function refreshOAuthToken(
 	providerOrId: OAuthProviderId | OAuthProviderInterface,
 	credentials: OAuthCredentials,
+	options?: { signal?: AbortSignal },
 ): Promise<OAuthCredentials> {
 	const provider = resolveOAuthProvider(providerOrId);
 	let providerRefreshes = inFlightRefreshes.get(provider);
@@ -162,7 +163,7 @@ export async function refreshOAuthToken(
 	let refresh = providerRefreshes.get(refreshToken);
 	if (!refresh) {
 		const snapshot = structuredClone(credentials);
-		refresh = provider.refreshToken(snapshot).finally(() => {
+		refresh = provider.refreshToken(snapshot, options).finally(() => {
 			providerRefreshes.delete(refreshToken);
 		});
 		providerRefreshes.set(refreshToken, refresh);

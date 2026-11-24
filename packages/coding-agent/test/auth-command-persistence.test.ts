@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { registerOAuthProvider, unregisterOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { anthropicOAuthProvider, registerOAuthProvider, unregisterOAuthProviders } from "@caupulican/pi-ai/oauth";
 import { type Component, Container, type TUI } from "@caupulican/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -11,6 +11,7 @@ import {
 	type AuthStorageBackend,
 	FileAuthStorageBackend,
 	InMemoryAuthStorageBackend,
+	type ProviderRefreshLease,
 } from "../src/core/auth-storage.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
@@ -39,9 +40,81 @@ class FailingBackend implements AuthStorageBackend {
 	withProviderRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
 		return this.bytes.withProviderRefreshLock(providerId, fn);
 	}
+	withProviderRefreshLease<T>(providerId: string, fn: (lease: ProviderRefreshLease) => Promise<T>): Promise<T> {
+		return this.bytes.withProviderRefreshLease(providerId, fn);
+	}
+	preflightRefreshPersistence(providerId: string): Promise<void> {
+		if (this.failWrites) throw new Error("Synthetic credential write refused");
+		return this.bytes.preflightRefreshPersistence(providerId);
+	}
 	private check<T>(change: LockResult<T>): LockResult<T> {
 		if (change.next !== undefined && this.failWrites) throw new Error("Synthetic credential write refused");
 		return change;
+	}
+}
+
+class CompromisingRefreshBackend implements AuthStorageBackend {
+	private readonly bytes = new InMemoryAuthStorageBackend();
+	private activeRefresh: AbortController | undefined;
+	private refreshLockReads = 0;
+
+	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
+		return this.bytes.withLock(fn);
+	}
+	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
+		if (this.activeRefresh && ++this.refreshLockReads === 2) {
+			this.activeRefresh.abort(new Error("Synthetic provider refresh lease lost after response"));
+		}
+		return this.bytes.withLockAsync(fn);
+	}
+	withProviderRefreshLock<T>(_providerId: string, fn: () => Promise<T>): Promise<T> {
+		return fn();
+	}
+	async withProviderRefreshLease<T>(_providerId: string, fn: (lease: ProviderRefreshLease) => Promise<T>): Promise<T> {
+		this.refreshLockReads = 0;
+		const activeRefresh = new AbortController();
+		this.activeRefresh = activeRefresh;
+		try {
+			return await fn({
+				signal: activeRefresh.signal,
+				assertHeld: () => activeRefresh.signal.throwIfAborted(),
+			});
+		} finally {
+			this.activeRefresh = undefined;
+		}
+	}
+	async preflightRefreshPersistence(_providerId: string): Promise<void> {}
+}
+
+class CallbackThenThrowBackend implements AuthStorageBackend {
+	private value: string | undefined;
+	private asyncCalls = 0;
+
+	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
+		const change = fn(this.value);
+		if (change.next !== undefined) this.value = change.next;
+		return change.result;
+	}
+	async withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
+		const change = await fn(this.value);
+		this.asyncCalls += 1;
+		if (this.asyncCalls === 2) throw new Error("Synthetic failure after locked credential inspection");
+		if (change.next !== undefined) this.value = change.next;
+		return change.result;
+	}
+	withProviderRefreshLock<T>(_providerId: string, fn: () => Promise<T>): Promise<T> {
+		return fn();
+	}
+	withProviderRefreshLease<T>(_providerId: string, fn: (lease: ProviderRefreshLease) => Promise<T>): Promise<T> {
+		const signal = new AbortController().signal;
+		return fn({ signal, assertHeld: () => signal.throwIfAborted() });
+	}
+	async preflightRefreshPersistence(_providerId: string): Promise<void> {}
+	replace(providerId: string, credential: Record<string, unknown> | undefined): void {
+		const current = this.value ? (JSON.parse(this.value) as Record<string, unknown>) : {};
+		if (credential) current[providerId] = credential;
+		else delete current[providerId];
+		this.value = JSON.stringify(current);
 	}
 }
 
@@ -318,6 +391,219 @@ describe("OAuth refresh lock ownership", () => {
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
+	});
+
+	it("proves durable persistence before a provider rotates its refresh token", async () => {
+		const f = fixture();
+		const rotated = {
+			...credentials,
+			access: "synthetic-rotated-access",
+			refresh: "synthetic-rotated-refresh",
+		};
+		const refreshToken = vi.fn(async () => rotated);
+		registerOAuthProvider(
+			{
+				id: oauthId,
+				name: oauthId,
+				login: async () => credentials,
+				refreshToken,
+				requiresRefreshPersistencePreflight: true,
+				getApiKey: (value) => value.access,
+			},
+			source,
+		);
+		f.storage.set(oauthId, { type: "oauth", ...credentials, expires: 0 });
+		f.backend.failWrites = true;
+		await expect(f.storage.getOAuthApiKey(oauthId)).rejects.toThrow(/persist|write|storage/i);
+		expect(refreshToken).not.toHaveBeenCalled();
+
+		f.backend.failWrites = false;
+		await expect(f.storage.getOAuthApiKey(oauthId)).resolves.toBe(rotated.access);
+		expect(refreshToken).toHaveBeenCalledOnce();
+		expect(f.reader().get(oauthId)).toEqual({ type: "oauth", ...rotated });
+	});
+
+	it("saves a completed rotation after the provider refresh lease is compromised", async () => {
+		const backend = new CompromisingRefreshBackend();
+		const storage = AuthStorage.fromStorage(backend);
+		const expired = { ...credentials, expires: 0 };
+		const rotated = { ...credentials, access: "rotated-access", refresh: "rotated-refresh" };
+		const refreshToken = vi.fn(async () => rotated);
+		registerOAuthProvider(
+			{
+				id: oauthId,
+				name: oauthId,
+				login: async () => credentials,
+				refreshToken,
+				getApiKey: (value) => value.access,
+			},
+			source,
+		);
+		storage.set(oauthId, { type: "oauth", ...expired });
+
+		await expect(storage.getOAuthApiKey(oauthId)).resolves.toBe(rotated.access);
+		expect(refreshToken).toHaveBeenCalledOnce();
+		expect(AuthStorage.fromStorage(backend).get(oauthId)).toEqual({ type: "oauth", ...rotated });
+	});
+
+	it("merges an Anthropic rotation over a sibling metadata-only edit", async () => {
+		const f = fixture();
+		const expired = { ...credentials, expires: 0, accountId: "account-before", scopes: ["user:inference"] };
+		const sibling = { ...expired, accountId: "account-sibling" };
+		const rotated = {
+			...expired,
+			access: "rotated-access",
+			refresh: "rotated-refresh",
+			expires: credentials.expires,
+		};
+		const refreshToken = vi.fn(async () => {
+			f.storage.set(oauthId, { type: "oauth", ...sibling });
+			return rotated;
+		});
+		registerOAuthProvider(
+			{
+				...anthropicOAuthProvider,
+				id: oauthId,
+				name: oauthId,
+				refreshToken,
+			},
+			source,
+		);
+		f.storage.set(oauthId, { type: "oauth", ...expired });
+
+		await expect(f.storage.getOAuthApiKey(oauthId)).resolves.toBe(rotated.access);
+		expect(f.reader().get(oauthId)).toEqual({
+			type: "oauth",
+			...rotated,
+			accountId: sibling.accountId,
+		});
+	});
+
+	it("preserves Anthropic metadata omitted by an uncontended refresh", async () => {
+		const f = fixture();
+		const expired = {
+			...credentials,
+			expires: 0,
+			accountId: "account",
+			scopes: ["user:inference"],
+			accountRegion: "fixture-region",
+		};
+		const rotated = {
+			access: "rotated-access",
+			refresh: "rotated-refresh",
+			expires: credentials.expires,
+			scopes: ["user:inference", "user:profile"],
+		};
+		registerOAuthProvider(
+			{
+				...anthropicOAuthProvider,
+				id: oauthId,
+				name: oauthId,
+				refreshToken: async () => rotated,
+			},
+			source,
+		);
+		f.storage.set(oauthId, { type: "oauth", ...expired });
+
+		await expect(f.storage.getOAuthApiKey(oauthId)).resolves.toBe(rotated.access);
+		expect(f.reader().get(oauthId)).toEqual({ type: "oauth", ...expired, ...rotated });
+	});
+
+	it("adopts a sibling Anthropic rotation with a different refresh token", async () => {
+		const f = fixture();
+		const expired = { ...credentials, expires: 0, accountId: "account" };
+		const sibling = {
+			...expired,
+			access: "sibling-access",
+			refresh: "sibling-refresh",
+			expires: credentials.expires,
+		};
+		const postedResult = {
+			...expired,
+			access: "posted-access",
+			refresh: "posted-refresh",
+			expires: credentials.expires,
+		};
+		registerOAuthProvider(
+			{
+				...anthropicOAuthProvider,
+				id: oauthId,
+				name: oauthId,
+				refreshToken: async () => {
+					f.storage.set(oauthId, { type: "oauth", ...sibling });
+					return postedResult;
+				},
+			},
+			source,
+		);
+		f.storage.set(oauthId, { type: "oauth", ...expired });
+
+		await expect(f.storage.getOAuthApiKey(oauthId)).resolves.toBe(sibling.access);
+		expect(f.reader().get(oauthId)).toEqual({ type: "oauth", ...sibling });
+	});
+
+	it.each(["logout", "sibling"] as const)(
+		"does not revive a rotated token after observing durable %s",
+		async (newer) => {
+			const backend = new CallbackThenThrowBackend();
+			const storage = AuthStorage.fromStorage(backend);
+			const expired = { ...credentials, expires: 0 };
+			const sibling = {
+				...expired,
+				access: "sibling-access",
+				refresh: "sibling-refresh",
+				expires: credentials.expires,
+			};
+			const rotated = {
+				...expired,
+				access: "rotated-access",
+				refresh: "rotated-refresh",
+				expires: credentials.expires,
+			};
+			registerOAuthProvider(
+				{
+					...anthropicOAuthProvider,
+					id: oauthId,
+					name: oauthId,
+					refreshToken: async () => {
+						backend.replace(oauthId, newer === "sibling" ? { type: "oauth", ...sibling } : undefined);
+						return rotated;
+					},
+				},
+				source,
+			);
+			storage.set(oauthId, { type: "oauth", ...expired });
+
+			await expect(storage.getOAuthApiKey(oauthId)).resolves.toBe(newer === "sibling" ? sibling.access : undefined);
+			expect(AuthStorage.fromStorage(backend).get(oauthId)).toEqual(
+				newer === "sibling" ? { type: "oauth", ...sibling } : undefined,
+			);
+		},
+	);
+
+	it("does not revive a credential after a session-only logout during refresh", async () => {
+		const f = fixture();
+		const expired = { ...credentials, expires: 0 };
+		const rotated = { ...credentials, access: "rotated-access", refresh: "rotated-refresh" };
+		registerOAuthProvider(
+			{
+				...anthropicOAuthProvider,
+				id: oauthId,
+				name: oauthId,
+				refreshToken: async () => {
+					f.backend.failWrites = true;
+					expect(f.storage.remove(oauthId)).toBe(false);
+					f.backend.failWrites = false;
+					return rotated;
+				},
+			},
+			source,
+		);
+		f.storage.set(oauthId, { type: "oauth", ...expired });
+
+		await expect(f.storage.getOAuthApiKey(oauthId)).resolves.toBeUndefined();
+		expect(f.storage.get(oauthId)).toBeUndefined();
+		expect(f.reader().get(oauthId)).toEqual({ type: "oauth", ...expired });
 	});
 });
 

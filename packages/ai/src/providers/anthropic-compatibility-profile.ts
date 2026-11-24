@@ -145,6 +145,11 @@ export const REVIEWED_CLAUDE_INSTALLATIONS: readonly ReviewedClaudeInstallation[
 		sha256: "30e2724e2aecb1bf5dc9f3130901afb71c5fa229051c190a6d7ad9aff6378d6d",
 		oauth: ANTHROPIC_OAUTH_PROTOCOL,
 	}),
+	reviewedInstallation(
+		"2.1.331",
+		"4c00839cf46beb2b38ec310105f2d538f7f9321fe46c636299b74bcab94626b1",
+		ANTHROPIC_OAUTH_PROTOCOL,
+	),
 ]);
 
 export const PACKAGED_ANTHROPIC_IDENTITY: AnthropicClientIdentity = Object.freeze({ ...ANTHROPIC_CLIENT_CONFIG });

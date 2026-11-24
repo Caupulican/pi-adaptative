@@ -53,7 +53,12 @@ import {
 	requiresAnthropicThinking,
 	usesAdaptiveAnthropicThinking,
 } from "./anthropic-model-family.ts";
-import { buildAnthropicOAuthHeaders } from "./anthropic-oauth-headers.ts";
+import {
+	buildAnthropicOAuthClientOptions,
+	hasAnthropicAuthorizationHeader,
+	mergeAnthropicHeaders,
+	resolveAnthropicOAuthAuthentication,
+} from "./anthropic-oauth-headers.ts";
 import { AnthropicUsageAccumulator } from "./anthropic-usage.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -234,24 +239,6 @@ export interface AnthropicOptions extends StreamOptions {
 	 * `AnthropicVertex` that shares the same messaging API.
 	 */
 	client?: Anthropic;
-}
-
-function mergeHeaders(...headerSources: (Record<string, string | null> | undefined)[]): Record<string, string | null> {
-	const merged: Record<string, string | null> = {};
-	for (const headers of headerSources) {
-		if (headers) {
-			Object.assign(merged, headers);
-		}
-	}
-	return merged;
-}
-
-function hasAuthorizationHeader(...headerSources: (Record<string, string> | undefined)[]): boolean {
-	return headerSources.some((headers) =>
-		Object.entries(headers ?? {}).some(
-			([name, value]) => name.toLowerCase() === "authorization" && value.trim().length > 0,
-		),
-	);
 }
 
 interface ServerSentEvent {
@@ -539,7 +526,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			);
 
 			const initClient = async (key: string | undefined) => {
-				if (!key && !hasAuthorizationHeader(model.headers, options?.headers)) {
+				if (!key && !hasAnthropicAuthorizationHeader(model.headers, options?.headers)) {
 					throw new Error(`No API key for provider: ${model.provider}`);
 				}
 
@@ -554,6 +541,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				const created = await createClient(
 					model,
 					key,
+					options?.providerRequestContext,
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					toolDisclosure.mode === "native",
@@ -839,7 +827,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = options?.apiKey;
-	if (!apiKey && !hasAuthorizationHeader(model.headers, options?.headers)) {
+	if (!apiKey && !hasAnthropicAuthorizationHeader(model.headers, options?.headers)) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 
@@ -876,10 +864,6 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 	} satisfies AnthropicOptions);
 };
 
-function isOAuthToken(apiKey: string): boolean {
-	return apiKey.includes("sk-ant-oat");
-}
-
 type AnthropicClientOptions = NonNullable<ConstructorParameters<typeof Anthropic>[0]>;
 
 function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
@@ -889,6 +873,7 @@ function createAnthropicSdkClient(options: AnthropicClientOptions): Anthropic {
 async function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string | undefined,
+	providerRequestContext: Readonly<Record<string, unknown>> | undefined,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
 	useToolSchemaDisclosure: boolean,
@@ -909,12 +894,12 @@ async function createClient(
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
 	}
 
-	if (!apiKey && hasAuthorizationHeader(model.headers, optionsHeaders)) {
+	if (!apiKey && hasAnthropicAuthorizationHeader(model.headers, optionsHeaders)) {
 		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: null,
 			baseURL: model.provider === "cloudflare-ai-gateway" ? resolveCloudflareBaseUrl(model) : model.baseUrl,
-			defaultHeaders: mergeHeaders(
+			defaultHeaders: mergeAnthropicHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -930,13 +915,31 @@ async function createClient(
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
+	const createOAuthClient = async () => {
+		const { options, compatibility } = await buildAnthropicOAuthClientOptions({
+			accessToken: apiKey,
+			baseUrl: model.baseUrl,
+			betaFeatures,
+			modelHeaders: model.headers,
+			optionsHeaders,
+			sessionId,
+			getCompatibility,
+		});
+		return { client: createAnthropicSdkClient(options), isOAuthToken: true as const, compatibility };
+	};
+
+	// The stored credential owner outranks a model compatibility override. Otherwise authFormat
+	// could silently turn an Anthropic subscription session into an ordinary bearer request.
+	if (model.provider === "anthropic" && resolveAnthropicOAuthAuthentication(providerRequestContext, apiKey)) {
+		return createOAuthClient();
+	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
 		const client = createAnthropicSdkClient({
 			apiKey: null,
 			authToken: null,
 			baseURL: resolveCloudflareBaseUrl(model),
-			defaultHeaders: mergeHeaders(
+			defaultHeaders: mergeAnthropicHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -959,7 +962,7 @@ async function createClient(
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
-			defaultHeaders: mergeHeaders(
+			defaultHeaders: mergeAnthropicHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -974,21 +977,7 @@ async function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	if (isOAuthToken(apiKey)) {
-		const compatibility = await getCompatibility();
-		const client = createAnthropicSdkClient({
-			apiKey: null,
-			authToken: apiKey,
-			baseURL: model.baseUrl,
-			defaultHeaders: mergeHeaders(
-				buildAnthropicOAuthHeaders(betaFeatures, compatibility.identity.messagesUserAgent, sessionId),
-				model.headers,
-				optionsHeaders,
-			),
-		});
-
-		return { client, isOAuthToken: true, compatibility };
-	}
+	if (resolveAnthropicOAuthAuthentication(undefined, apiKey)) return createOAuthClient();
 
 	// API key auth
 	const sessionAffinityHeaders: Record<string, string | null> =
@@ -999,7 +988,7 @@ async function createClient(
 		apiKey,
 		authToken: null,
 		baseURL: model.baseUrl,
-		defaultHeaders: mergeHeaders(
+		defaultHeaders: mergeAnthropicHeaders(
 			{
 				accept: "application/json",
 				"anthropic-dangerous-direct-browser-access": "true",

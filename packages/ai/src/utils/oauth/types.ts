@@ -9,6 +9,10 @@ export type OAuthCredentials = {
 
 export type OAuthProviderId = string;
 
+export interface OAuthRefreshOptions {
+	signal?: AbortSignal;
+}
+
 /**
  * Non-secret provider state frozen with an OAuth credential at a request boundary.
  * Generic transports never serialize this value; the owning provider validates and consumes it.
@@ -76,7 +80,20 @@ export interface OAuthProviderInterface {
 	usesCallbackServer?: boolean;
 
 	/** Refresh expired credentials, return updated credentials to persist */
-	refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+	refreshToken(credentials: OAuthCredentials, options?: OAuthRefreshOptions): Promise<OAuthCredentials>;
+
+	/** Ask the storage owner to prepare its persistence policy before a rotating refresh starts. */
+	requiresRefreshPersistencePreflight?: boolean;
+
+	/**
+	 * Build the credential committed after refresh. Returning credentials commits them; undefined
+	 * delegates to the generic whole-record CAS so a sibling rotation/replacement stays authoritative.
+	 */
+	mergeRefreshCommit?(
+		current: OAuthCredentials,
+		posted: OAuthCredentials,
+		received: OAuthCredentials,
+	): OAuthCredentials | undefined;
 
 	/**
 	 * Optional account/catalog migration that does not rotate an otherwise valid access token.

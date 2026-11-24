@@ -1,15 +1,21 @@
 import { get } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { streamAnthropic } from "../src/providers/anthropic.ts";
 import {
 	ANTHROPIC_OAUTH_PROTOCOL,
 	PACKAGED_ANTHROPIC_IDENTITY,
 	REVIEWED_CLAUDE_INSTALLATIONS,
 } from "../src/providers/anthropic-compatibility-profile.ts";
+import { resolveAnthropicOAuthAuthentication } from "../src/providers/anthropic-oauth-headers.ts";
+import type { Model } from "../src/types.ts";
 import { anthropicOAuthProvider, loginAnthropic } from "../src/utils/oauth/anthropic.ts";
 import { startAnthropicCallback } from "../src/utils/oauth/anthropic-callback.ts";
 
 vi.mock("../src/providers/anthropic-identity.ts", () => ({
-	resolveAnthropicCompatibility: async () => ({ oauth: ANTHROPIC_OAUTH_PROTOCOL }),
+	resolveAnthropicCompatibility: async () => ({
+		oauth: ANTHROPIC_OAUTH_PROTOCOL,
+		identity: PACKAGED_ANTHROPIC_IDENTITY,
+	}),
 }));
 beforeEach(() => {
 	vi.stubEnv("PI_OAUTH_CALLBACK_HOST", "127.0.0.1");
@@ -83,6 +89,72 @@ describe("Claude refresh scope migration", () => {
 			scope: stored.scopes.join(" "),
 		});
 		expect(credentials.scopes).toEqual(stored.scopes);
+	});
+});
+
+describe("Claude request authentication ownership", () => {
+	it("uses stored credential authority and only a prefix check for raw overrides", () => {
+		const context = anthropicOAuthProvider.getRequestContext!({
+			access: "opaque-access-token",
+			refresh: "opaque-refresh-token",
+			expires: Date.now() + 60_000,
+		});
+		expect(resolveAnthropicOAuthAuthentication(context, "opaque-access-token")).toBe(true);
+		expect(resolveAnthropicOAuthAuthentication(undefined, "sk-ant-oat01-raw-override")).toBe(true);
+		expect(resolveAnthropicOAuthAuthentication(undefined, "api-key-containing-sk-ant-oat-inside")).toBe(false);
+		expect(() => resolveAnthropicOAuthAuthentication({ provider: "anthropic" }, "opaque-access-token")).toThrow(
+			"Invalid Anthropic account session",
+		);
+	});
+
+	it("keeps stored OAuth authoritative over a bearer compatibility override", async () => {
+		const requests: Request[] = [];
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+			requests.push(new Request(input, init));
+			const events = [
+				{
+					type: "message_start",
+					message: { id: "oauth-owner", usage: { input_tokens: 1, output_tokens: 0 } },
+				},
+				{ type: "message_stop" },
+			];
+			return new Response(
+				events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+				{
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		});
+		const oauthModel: Model<"anthropic-messages"> = {
+			id: "oauth-owner",
+			name: "OAuth owner",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://unused.invalid",
+			reasoning: false,
+			input: ["text"],
+			contextWindow: 1000,
+			maxTokens: 100,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: { authFormat: "bearer" },
+		};
+		await streamAnthropic(
+			oauthModel,
+			{ messages: [] },
+			{
+				apiKey: "opaque-access-token",
+				providerRequestContext: anthropicOAuthProvider.getRequestContext!({
+					access: "opaque-access-token",
+					refresh: "opaque-refresh-token",
+					expires: Date.now() + 60_000,
+				}),
+			},
+		).result();
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]!.headers.get("authorization")).toBe("Bearer opaque-access-token");
+		expect(requests[0]!.headers.get("x-api-key")).toBeNull();
+		expect(requests[0]!.headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
 	});
 });
 
@@ -237,6 +309,7 @@ describe("Claude authorization", () => {
 		expect(profiles.get("2.1.326")?.loginScopes).toContain("user:privacy_consents:write");
 		expect(profiles.get("2.1.328")).toBe(ANTHROPIC_OAUTH_PROTOCOL);
 		expect(profiles.get("2.1.329")).toBe(ANTHROPIC_OAUTH_PROTOCOL);
+		expect(profiles.get("2.1.331")).toBe(ANTHROPIC_OAUTH_PROTOCOL);
 		expect(ANTHROPIC_OAUTH_PROTOCOL.inferenceScopes).not.toContain("user:privacy_consents:write");
 	});
 });

@@ -111,13 +111,13 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 		callbacks.onProgress?.("Discovering Antigravity models...");
 		return { ...credentials, ...(await discoverAntigravityAccount(credentials.access, callbacks.signal)) };
 	},
-	async refreshToken(credentials) {
+	async refreshToken(credentials, options) {
 		// Native savingTokenSource rotates and saves tokens independently of account discovery.
 		const submitted = structuredClone(credentials);
 		return exchangeToken(
 			{ grant_type: "refresh_token", refresh_token: submitted.refresh },
 			submitted,
-			undefined,
+			options?.signal,
 			"refresh",
 		);
 	},

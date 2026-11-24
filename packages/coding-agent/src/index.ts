@@ -45,6 +45,7 @@ export {
 	FileAuthStorageBackend,
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
+	type ProviderRefreshLease,
 } from "./core/auth-storage.ts";
 export * from "./core/autonomy/index.ts";
 // Copied bundled extensions resolve runtime dependencies through this public module. Bun embeds

@@ -12,6 +12,10 @@ export type { BedrockOptions, BedrockThinkingDisplay } from "./providers/amazon-
 export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./providers/anthropic.ts";
 export * from "./providers/anthropic-account.ts";
 export { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./providers/anthropic-identity.ts";
+export {
+	buildAnthropicOAuthHeaders,
+	resolveAnthropicOAuthAuthentication,
+} from "./providers/anthropic-oauth-headers.ts";
 export * from "./providers/antigravity-account.ts";
 export type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses.ts";
 export type { CommandCodeOptions } from "./providers/command-code.ts";
@@ -57,6 +61,7 @@ export type {
 	OAuthProviderId,
 	OAuthProviderInfo,
 	OAuthProviderInterface,
+	OAuthRefreshOptions,
 	OAuthSelectOption,
 	OAuthSelectPrompt,
 	ProviderRequestContext,

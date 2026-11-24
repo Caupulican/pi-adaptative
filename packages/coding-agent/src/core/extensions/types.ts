@@ -15,8 +15,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
-	OAuthCredentials,
-	OAuthLoginCallbacks,
+	OAuthProviderInterface,
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
@@ -1612,20 +1611,7 @@ export interface ProviderConfig {
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
-	oauth?: {
-		/** Display name for the provider in login UI. */
-		name: string;
-		/** Whether access through this auth method is backed by a provider subscription. */
-		isSubscription?: boolean;
-		/** Run the login flow, return credentials to persist. */
-		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
-		/** Refresh expired credentials, return updated credentials to persist. */
-		refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
-		/** Convert credentials to API key string for the provider. */
-		getApiKey(credentials: OAuthCredentials): string;
-		/** Optional: modify models for this provider (e.g., update baseUrl based on credentials). */
-		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
-	};
+	oauth?: Omit<OAuthProviderInterface, "id">;
 }
 
 /** Configuration for a model within a provider. */

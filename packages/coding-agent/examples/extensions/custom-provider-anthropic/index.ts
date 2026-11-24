@@ -28,14 +28,15 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	buildAnthropicOAuthHeaders,
 	type Context,
 	calculateCost,
 	createAssistantMessageEventStream,
 	type ImageContent,
 	type Message,
 	type Model,
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
+	resolveAnthropicCompatibility,
+	resolveAnthropicOAuthAuthentication,
 	type SimpleStreamOptions,
 	type StopReason,
 	type TextContent,
@@ -44,120 +45,13 @@ import {
 	type ToolCall,
 	type ToolResultMessage,
 } from "@caupulican/pi-ai";
+import { anthropicOAuthProvider } from "@caupulican/pi-ai/oauth";
 
 // =============================================================================
-// OAuth Implementation (copied from packages/ai/src/utils/oauth/anthropic.ts)
+// OAuth integration
 // =============================================================================
 
-const decode = (s: string) => atob(s);
-const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
-const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
-const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
-const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
-const SCOPES = "org:create_api_key user:profile user:inference";
-
-async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
-	const array = new Uint8Array(32);
-	crypto.getRandomValues(array);
-	const verifier = btoa(String.fromCharCode(...array))
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/, "");
-
-	const encoder = new TextEncoder();
-	const data = encoder.encode(verifier);
-	const hash = await crypto.subtle.digest("SHA-256", data);
-	const challenge = btoa(String.fromCharCode(...new Uint8Array(hash)))
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/, "");
-
-	return { verifier, challenge };
-}
-
-async function loginAnthropic(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-	const { verifier, challenge } = await generatePKCE();
-	const expectedState = crypto.randomUUID();
-
-	const authParams = new URLSearchParams({
-		code: "true",
-		client_id: CLIENT_ID,
-		response_type: "code",
-		redirect_uri: REDIRECT_URI,
-		scope: SCOPES,
-		code_challenge: challenge,
-		code_challenge_method: "S256",
-		state: expectedState,
-	});
-
-	callbacks.onAuth({ url: `${AUTHORIZE_URL}?${authParams.toString()}` });
-
-	const authCode = await callbacks.onPrompt({ message: "Paste the authorization code:" });
-	const [code, state, extra] = authCode.trim().split("#", 3);
-	if (!code || state !== expectedState || extra !== undefined) throw new Error("Invalid authorization code or state");
-
-	const tokenResponse = await fetch(TOKEN_URL, {
-		method: "POST",
-		redirect: "error",
-		signal: callbacks.signal,
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			grant_type: "authorization_code",
-			client_id: CLIENT_ID,
-			code,
-			state,
-			redirect_uri: REDIRECT_URI,
-			code_verifier: verifier,
-		}),
-	});
-
-	if (!tokenResponse.ok) {
-		await tokenResponse.body?.cancel();
-		throw new Error(`Token exchange failed (HTTP ${tokenResponse.status})`);
-	}
-
-	const data = (await tokenResponse.json()) as {
-		access_token: string;
-		refresh_token: string;
-		expires_in: number;
-	};
-
-	return {
-		refresh: data.refresh_token,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-	};
-}
-
-async function refreshAnthropicToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	const response = await fetch(TOKEN_URL, {
-		method: "POST",
-		redirect: "error",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({
-			grant_type: "refresh_token",
-			client_id: CLIENT_ID,
-			refresh_token: credentials.refresh,
-		}),
-	});
-
-	if (!response.ok) {
-		await response.body?.cancel();
-		throw new Error(`Token refresh failed (HTTP ${response.status})`);
-	}
-
-	const data = (await response.json()) as {
-		access_token: string;
-		refresh_token: string;
-		expires_in: number;
-	};
-
-	return {
-		refresh: data.refresh_token,
-		access: data.access_token,
-		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-	};
-}
+const { id: _anthropicOAuthProviderId, ...sharedAnthropicOAuth } = anthropicOAuthProvider;
 
 // =============================================================================
 // Streaming Implementation (simplified from packages/ai/src/providers/anthropic.ts)
@@ -183,10 +77,6 @@ const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
 	const matched = tools?.find((t) => t.name.toLowerCase() === lowerName);
 	return matched?.name ?? name;
 };
-
-function isOAuthToken(apiKey: string): boolean {
-	return apiKey.includes("sk-ant-oat");
-}
 
 function sanitizeSurrogates(text: string): string {
 	return text.replace(/[\uD800-\uDFFF]/g, "\uFFFD");
@@ -366,7 +256,7 @@ function streamCustomAnthropic(
 
 		try {
 			const apiKey = options?.apiKey ?? "";
-			const isOAuth = isOAuthToken(apiKey);
+			const isOAuth = resolveAnthropicOAuthAuthentication(options?.providerRequestContext, apiKey);
 
 			// Configure client based on auth type
 			const betaFeatures = ["fine-grained-tool-streaming-2025-05-14", "interleaved-thinking-2025-05-14"];
@@ -376,15 +266,14 @@ function streamCustomAnthropic(
 			};
 
 			if (isOAuth) {
+				const compatibility = await resolveAnthropicCompatibility();
 				clientOptions.apiKey = null;
 				clientOptions.authToken = apiKey;
-				clientOptions.defaultHeaders = {
-					accept: "application/json",
-					"anthropic-dangerous-direct-browser-access": "true",
-					"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
-					"user-agent": "claude-cli/2.1.2 (external, cli)",
-					"x-app": "cli",
-				};
+				clientOptions.defaultHeaders = buildAnthropicOAuthHeaders(
+					betaFeatures,
+					compatibility.identity.messagesUserAgent,
+					options?.sessionId,
+				);
 			} else {
 				clientOptions.apiKey = apiKey;
 				clientOptions.defaultHeaders = {
@@ -600,10 +489,8 @@ export default function (pi: ExtensionAPI) {
 		],
 
 		oauth: {
+			...sharedAnthropicOAuth,
 			name: "Custom Anthropic (Claude Pro/Max)",
-			login: loginAnthropic,
-			refreshToken: refreshAnthropicToken,
-			getApiKey: (cred) => cred.access,
 		},
 
 		streamSimple: streamCustomAnthropic,

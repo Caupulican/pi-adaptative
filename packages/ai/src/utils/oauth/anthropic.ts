@@ -8,6 +8,7 @@
 import { readBoundedResponseText } from "../../providers/account-request.ts";
 import type { AnthropicOAuthProtocol } from "../../providers/anthropic-compatibility-profile.ts";
 import { resolveAnthropicCompatibility } from "../../providers/anthropic-identity.ts";
+import { anthropicOAuthRequestContext } from "../../providers/anthropic-oauth-headers.ts";
 import { isRecord } from "../value-guards.ts";
 import { startAnthropicCallback } from "./anthropic-callback.ts";
 import { awaitAuthorizationInput } from "./authorization-input.ts";
@@ -411,6 +412,7 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 	name: "Anthropic (Claude Pro/Max)",
 	isSubscription: true,
 	usesCallbackServer: true,
+	requiresRefreshPersistencePreflight: true,
 
 	async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 		return loginAnthropic({
@@ -422,16 +424,45 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 		});
 	},
 
-	async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+	async refreshToken(credentials: OAuthCredentials, options): Promise<OAuthCredentials> {
 		return refreshAnthropicToken(credentials.refresh, {
 			scopes: credentials.scopes,
 			clientId: credentials.clientId,
 			accountId: credentials.accountId,
 			subscriptionType: credentials.subscriptionType,
+			signal: options?.signal,
 		});
 	},
 
 	getApiKey(credentials: OAuthCredentials): string {
 		return credentials.access;
+	},
+
+	getRequestContext() {
+		return anthropicOAuthRequestContext();
+	},
+
+	mergeRefreshCommit(current, posted, received) {
+		if (current.refresh !== "" && current.refresh !== posted.refresh) return undefined;
+		const { refreshRefused: _refreshRefused, ...retained } = current;
+		return {
+			...retained,
+			access: received.access,
+			refresh: received.refresh,
+			expires: received.expires,
+			...(Object.hasOwn(received, "refreshTokenExpiresAt")
+				? { refreshTokenExpiresAt: received.refreshTokenExpiresAt }
+				: {}),
+			...(Object.hasOwn(received, "scopes") ? { scopes: received.scopes } : {}),
+			...(Object.hasOwn(received, "subscriptionType") ? { subscriptionType: received.subscriptionType } : {}),
+			...(Object.hasOwn(received, "subscriptionTypeSource")
+				? { subscriptionTypeSource: received.subscriptionTypeSource }
+				: {}),
+			...(Object.hasOwn(received, "subscriptionTypeVerifiedAt")
+				? { subscriptionTypeVerifiedAt: received.subscriptionTypeVerifiedAt }
+				: {}),
+			...(Object.hasOwn(received, "rateLimitTier") ? { rateLimitTier: received.rateLimitTier } : {}),
+			...(Object.hasOwn(received, "clientId") ? { clientId: received.clientId } : {}),
+		};
 	},
 };
