@@ -70,6 +70,7 @@ export async function resolveScoutModel(
 		apiKey: auth.apiKey,
 		headers: auth.headers,
 		credentialHeaders: auth.credentialHeaders,
+		providerRequestContext: auth.providerRequestContext,
 		providerAccountKey: auth.providerAccountKey,
 		textToolCallProtocol: protocolResolution.protocol,
 	};

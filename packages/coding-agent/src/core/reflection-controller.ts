@@ -1541,10 +1541,6 @@ export class ReflectionController {
 				// Same synthetic per-lane affinity key as the one-shot path above — never the real sessionId.
 				sessionId: affinityKey,
 				...conversation,
-				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
-				...(options.headers !== undefined ? { headers: options.headers } : {}),
-				...(options.credentialHeaders !== undefined ? { credentialHeaders: options.credentialHeaders } : {}),
-				...(options.providerAccountKey !== undefined ? { providerAccountKey: options.providerAccountKey } : {}),
 				getApiKey: agent.getApiKey,
 				resolveProviderRequestAuth:
 					agent.resolveProviderRequestAuth ??

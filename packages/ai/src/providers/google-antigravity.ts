@@ -3,9 +3,10 @@ import type { Model, SimpleStreamOptions, StreamFunction } from "../types.ts";
 import {
 	ANTIGRAVITY_ENDPOINT,
 	antigravityHeaders,
+	antigravityProjectFromRequestContext,
 	antigravityThinkingBudget,
 	antigravityThinkingLevel,
-	resolveAntigravityProjectOnce,
+	resolveAntigravityProject,
 	toAntigravityThinkingLevel,
 } from "../utils/antigravity.ts";
 import { AntigravityStreamAdapter } from "./antigravity-stream.ts";
@@ -42,7 +43,13 @@ async function generateAntigravityContent(
 	if (!token?.trim()) throw new Error("Missing Antigravity credentials. Sign in with /login.");
 	if (model.baseUrl !== ANTIGRAVITY_ENDPOINT) throw new Error("Antigravity requires its trusted service endpoint");
 	const config = params.config;
-	const projectId = await resolveAntigravityProjectOnce(token, config?.abortSignal);
+	const boundProject = antigravityProjectFromRequestContext(options.providerRequestContext);
+	if (options.providerRequestContext !== undefined && boundProject === undefined) {
+		throw new Error("Invalid Antigravity account session; resolve credentials again");
+	}
+	// Raw API-key overrides have no stored account session. OAuth requests always use the project
+	// frozen beside their token and never retain a token-keyed global cache.
+	const projectId = boundProject ?? (await resolveAntigravityProject(token, config?.abortSignal));
 	config?.abortSignal?.throwIfAborted();
 	const headers = new Headers({ ...model.headers, ...options.headers });
 	for (const [key, value] of Object.entries(antigravityHeaders(token))) headers.set(key, value);

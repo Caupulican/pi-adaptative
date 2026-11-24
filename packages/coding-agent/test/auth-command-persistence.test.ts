@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -6,7 +6,12 @@ import { registerOAuthProvider, unregisterOAuthProviders } from "@caupulican/pi-
 import { type Component, Container, type TUI } from "@caupulican/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { AuthStorage, type AuthStorageBackend, InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
+import {
+	AuthStorage,
+	type AuthStorageBackend,
+	FileAuthStorageBackend,
+	InMemoryAuthStorageBackend,
+} from "../src/core/auth-storage.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
 import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-controller.ts";
@@ -30,6 +35,9 @@ class FailingBackend implements AuthStorageBackend {
 	}
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<LockResult<T>>): Promise<T> {
 		return this.bytes.withLockAsync(async (current) => this.check(await fn(current)));
+	}
+	withProviderRefreshLock<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
+		return this.bytes.withProviderRefreshLock(providerId, fn);
 	}
 	private check<T>(change: LockResult<T>): LockResult<T> {
 		if (change.next !== undefined && this.failWrites) throw new Error("Synthetic credential write refused");
@@ -296,6 +304,21 @@ describe("credential durability across later public reads", () => {
 			expect(stripVTControlCharacters(selector.render(120).join("\n"))).toContain("✓ configured");
 		});
 	}
+});
+
+describe("OAuth refresh lock ownership", () => {
+	it("releases a provider lock after a nested auth-file transaction", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-auth-refresh-lock-"));
+		try {
+			const backend = new FileAuthStorageBackend(join(directory, "auth.json"));
+			await backend.withProviderRefreshLock(oauthId, async () => {
+				await backend.withLockAsync(async (current) => ({ result: undefined, next: current ?? "{}" }));
+			});
+			expect(readdirSync(directory).filter((name) => name.endsWith(".refresh.lock"))).toEqual([]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("public AuthStorage login supersession", () => {

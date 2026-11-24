@@ -99,7 +99,14 @@ function bindCurrentAccount(selected: Model<Api>, auth: RequestAuth | undefined)
 	const effective = auth.model ?? selected;
 	if (effective.provider !== selected.provider || effective.id !== selected.id) return undefined;
 	const scope = providerResponseAccountFor(effective, auth);
-	if (!scope && (auth.providerAccountKey !== undefined || effective.headers || auth.headers || auth.credentialHeaders))
+	if (
+		!scope &&
+		(auth.providerAccountKey !== undefined ||
+			effective.headers ||
+			auth.headers ||
+			auth.credentialHeaders ||
+			auth.providerRequestContext)
+	)
 		return undefined;
 	return {
 		scope,

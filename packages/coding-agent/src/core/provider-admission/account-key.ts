@@ -58,7 +58,15 @@ function digest(material: string | undefined): string | undefined {
 }
 
 export function providerAccountKey(provider: string, credential: AuthCredential | undefined): string {
-	const identity = credentialIdentity(credential);
+	let providerIdentity: string | undefined;
+	if (credential?.type === "oauth") {
+		try {
+			providerIdentity = nonEmptyString(getOAuthProvider(provider)?.getAccountId?.(credential));
+		} catch {
+			providerIdentity = undefined;
+		}
+	}
+	const identity = providerIdentity ?? credentialIdentity(credential);
 	return identity ? `${provider}#${identity}` : provider;
 }
 

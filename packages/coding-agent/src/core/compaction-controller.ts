@@ -1336,16 +1336,7 @@ export class CompactionController {
 				const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
 				return this.deps.resolveModelAndAuth(model, sessionModel);
 			},
-			summarizeAndVerify: async (
-				params,
-				model,
-				apiKey,
-				headers,
-				credentialHeaders,
-				providerAccountKey,
-				branch,
-				requestGuard,
-			) => {
+			summarizeAndVerify: async (params, model, auth, branch) => {
 				const preparation = this.prepareCompactionWithPackedHostRecords(
 					branch,
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
@@ -1358,12 +1349,12 @@ export class CompactionController {
 						compact(
 							preparation,
 							model,
-							apiKey,
-							headers,
+							auth.apiKey,
+							auth.headers,
 							effectiveInstructions,
 							signal,
 							compactionThinkingLevel,
-							this.streamWithFrozenAuth(credentialHeaders, providerAccountKey, requestGuard),
+							this.streamWithFrozenAuth(auth),
 							this.deps.buildPreDigest(),
 							this.buildExecutionOptions(
 								preparation,
@@ -1739,16 +1730,7 @@ export class CompactionController {
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) =>
 					this.deps.resolveModelAndAuth(modelTier === "session" ? model : this.deps.resolveModel(model), model),
-				summarizeAndVerify: async (
-					params,
-					compactModel,
-					apiKey,
-					headers,
-					credentialHeaders,
-					providerAccountKey,
-					branchEntries,
-					requestGuard,
-				) => {
+				summarizeAndVerify: async (params, compactModel, auth, branchEntries) => {
 					fromExtension = false;
 					const preparation = this.prepareCompactionWithPackedHostRecords(
 						branchEntries,
@@ -1785,12 +1767,12 @@ export class CompactionController {
 							compact(
 								preparation,
 								compactModel,
-								apiKey,
-								headers,
+								auth.apiKey,
+								auth.headers,
 								effectiveInstructions,
 								signal,
 								compactionThinkingLevel,
-								this.streamWithFrozenAuth(credentialHeaders, providerAccountKey, requestGuard),
+								this.streamWithFrozenAuth(auth),
 								this.deps.buildPreDigest(),
 								this.buildExecutionOptions(
 									preparation,
@@ -2304,7 +2286,7 @@ export class CompactionController {
 						undefined,
 						signal,
 						this.deps.resolveThinkingLevel(auth.model, model),
-						this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey, auth.requestGuard),
+						this.streamWithFrozenAuth(auth),
 						this.deps.buildPreDigest(),
 						this.buildExecutionOptions(preparation, auth.model, model, false, budgetScale, usageComponents),
 					),

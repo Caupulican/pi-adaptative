@@ -893,9 +893,9 @@ export class ModelRegistry implements ModelRegistryContract {
 				apiKey,
 				credential?.type === "api_key" ? credential.key : undefined,
 			);
-			const credentialHeaders = apiKeyFromAuthStorage
-				? this.authStorage.getOAuthRequestHeaders(model.provider, apiKeyFromAuthStorage)
-				: undefined;
+			const oauthRequest = apiKeyFromAuthStorage
+				? this.authStorage.getOAuthRequestProjection(model.provider, apiKeyFromAuthStorage)
+				: {};
 			const generation = this.providerCatalogGenerations.get(model.provider);
 			const capturedCredential = structuredClone(credential);
 			const capturedProviderConfig = structuredClone(providerConfig);
@@ -917,7 +917,7 @@ export class ModelRegistry implements ModelRegistryContract {
 						}
 					: {}),
 				...(!requestHeaders.configInputs.reusable ? { canCacheAccountIdentity: false } : {}),
-				...(credentialHeaders ? { credentialHeaders } : {}),
+				...oauthRequest,
 				providerAccountKey: resolveProviderAccountKey(this.authStorage, model.provider, apiKey),
 				requestGuard: (_model, signal) => {
 					signal?.throwIfAborted();

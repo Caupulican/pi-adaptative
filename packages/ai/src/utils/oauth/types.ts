@@ -9,6 +9,12 @@ export type OAuthCredentials = {
 
 export type OAuthProviderId = string;
 
+/**
+ * Non-secret provider state frozen with an OAuth credential at a request boundary.
+ * Generic transports never serialize this value; the owning provider validates and consumes it.
+ */
+export type ProviderRequestContext = Readonly<Record<string, unknown>>;
+
 /** @deprecated Use OAuthProviderId instead */
 export type OAuthProvider = OAuthProviderId;
 
@@ -73,9 +79,17 @@ export interface OAuthProviderInterface {
 	refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
 
 	/**
-	 * Optional: whether unexpired credentials were stored by an older version of this provider and
-	 * lack data it now reads. They are refreshed like expired ones; a failed refresh leaves the
-	 * still-valid credentials in use.
+	 * Optional account/catalog migration that does not rotate an otherwise valid access token.
+	 * Providers use this for durable session state discovered after OAuth (for example an account project).
+	 */
+	updateCredentials?(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+
+	/** Whether an unexpired credential needs {@link updateCredentials}. */
+	needsCredentialUpdate?(credentials: OAuthCredentials): boolean;
+
+	/**
+	 * Legacy credential-update hook. New providers should implement `needsCredentialUpdate` and
+	 * `updateCredentials` so account/catalog migration cannot rotate a valid token.
 	 */
 	needsRefresh?(credentials: OAuthCredentials): boolean;
 
@@ -83,6 +97,12 @@ export interface OAuthProviderInterface {
 	getApiKey(credentials: OAuthCredentials): string;
 
 	getRequestHeaders?(credentials: OAuthCredentials): Record<string, string> | undefined;
+
+	/** Project validated, non-secret provider state into one frozen request. */
+	getRequestContext?(credentials: OAuthCredentials): ProviderRequestContext | undefined;
+
+	/** Stable non-secret identity for account-scoped limits and in-flight work. */
+	getAccountId?(credentials: OAuthCredentials): string | undefined;
 
 	/** Optional: modify models for this provider (e.g., update baseUrl) */
 	modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];

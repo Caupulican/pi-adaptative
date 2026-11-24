@@ -61,3 +61,37 @@ it("makes a newly advertised model selectable on upgrade without refreshing a cu
 	await refreshStaleModelCatalogs(storage);
 	expect(resolve).toHaveBeenCalledOnce();
 });
+
+it("freezes the Antigravity project with the token and keeps account identity stable across rotation", async () => {
+	const id = "google-antigravity";
+	const modelId = "gemini-session";
+	const credential = {
+		type: "oauth" as const,
+		refresh: "stable-refresh",
+		access: "first-access",
+		expires: Date.now() + 3600000,
+		projectId: "stable-project",
+		catalogVersion: ANTIGRAVITY_CATALOG_VERSION,
+		clientVersion: ANTIGRAVITY_CLIENT_CONFIG.version,
+		modelCatalog: { [modelId]: { maxTokens: 32000, maxOutputTokens: 1024 } },
+	};
+	const storage = AuthStorage.inMemory({ [id]: credential });
+	let registry = ModelRegistry.inMemory(storage);
+	const firstModel = registry.find(id, modelId)!;
+	await expect(registry.getApiKeyAndHeaders(firstModel)).resolves.toMatchObject({
+		ok: true,
+		apiKey: "first-access",
+		providerRequestContext: { projectId: "stable-project" },
+		providerAccountKey: `${id}#stable-project`,
+	});
+
+	storage.set(id, { ...credential, access: "rotated-access" });
+	registry = ModelRegistry.inMemory(storage);
+	const rotatedModel = registry.find(id, modelId)!;
+	await expect(registry.getApiKeyAndHeaders(rotatedModel)).resolves.toMatchObject({
+		ok: true,
+		apiKey: "rotated-access",
+		providerRequestContext: { projectId: "stable-project" },
+		providerAccountKey: `${id}#stable-project`,
+	});
+});

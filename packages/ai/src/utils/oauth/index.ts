@@ -134,6 +134,7 @@ export function getOAuthProviderInfoList(): OAuthProviderInfo[] {
 // A provider ID can name a replacement adapter or credentials for several accounts.
 // Only callers using the same adapter and refresh token may share a rotation.
 const inFlightRefreshes = new WeakMap<OAuthProviderInterface, Map<string, Promise<OAuthCredentials>>>();
+const inFlightCredentialUpdates = new WeakMap<OAuthProviderInterface, Map<string, Promise<OAuthCredentials>>>();
 
 function resolveOAuthProvider(providerOrId: OAuthProviderId | OAuthProviderInterface): OAuthProviderInterface {
 	const provider = typeof providerOrId === "string" ? getOAuthProvider(providerOrId) : providerOrId;
@@ -169,6 +170,36 @@ export async function refreshOAuthToken(
 	return refresh;
 }
 
+/** Whether an unexpired credential needs provider-owned account/catalog state updated. */
+export function needsOAuthCredentialUpdate(provider: OAuthProviderInterface, credentials: OAuthCredentials): boolean {
+	return provider.needsCredentialUpdate?.(credentials) ?? provider.needsRefresh?.(credentials) ?? false;
+}
+
+/** Update provider-owned credential state without rotating a valid OAuth token. */
+export async function updateOAuthCredentials(
+	providerOrId: OAuthProviderId | OAuthProviderInterface,
+	credentials: OAuthCredentials,
+): Promise<OAuthCredentials> {
+	const provider = resolveOAuthProvider(providerOrId);
+	if (!provider.updateCredentials) return refreshOAuthToken(provider, credentials);
+	let providerUpdates = inFlightCredentialUpdates.get(provider);
+	if (!providerUpdates) {
+		providerUpdates = new Map();
+		inFlightCredentialUpdates.set(provider, providerUpdates);
+	}
+	// A refresh token may survive access-token rotation; never share discovery across two access tokens.
+	const updateKey = `${credentials.refresh}\0${credentials.access}`;
+	let update = providerUpdates.get(updateKey);
+	if (!update) {
+		const snapshot = structuredClone(credentials);
+		update = provider.updateCredentials(snapshot).finally(() => {
+			providerUpdates.delete(updateKey);
+		});
+		providerUpdates.set(updateKey, update);
+	}
+	return update;
+}
+
 /**
  * Get API key for a provider from OAuth credentials.
  * Automatically refreshes expired tokens.
@@ -189,12 +220,15 @@ export async function getOAuthApiKey(
 		return null;
 	}
 
-	// Refresh if expired, or stored by an older provider version that lacks data it now reads
+	// Token rotation and provider-owned account/catalog migration are separate operations.
 	const expired = Date.now() >= creds.expires;
-	if (expired || provider.needsRefresh?.(creds)) {
+	const needsUpdate = !expired && needsOAuthCredentialUpdate(provider, creds);
+	if (expired || needsUpdate) {
 		const fallback = structuredClone(creds);
 		try {
-			creds = await refreshOAuthToken(provider, fallback);
+			creds = expired
+				? await refreshOAuthToken(provider, fallback)
+				: await updateOAuthCredentials(provider, fallback);
 		} catch (error) {
 			if (error instanceof OAuthRefreshCompletedError) throw error;
 			if (expired || Date.now() >= fallback.expires) {

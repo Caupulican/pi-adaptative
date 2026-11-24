@@ -607,6 +607,7 @@ export interface ResolvedProviderRequestAuth {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	credentialHeaders?: Record<string, string>;
+	providerRequestContext?: Readonly<Record<string, unknown>>;
 	/** Non-secret account scope derived from `apiKey`; never sent to a provider. */
 	providerAccountKey?: string;
 	requestGuard?: SimpleStreamOptions["requestGuard"];

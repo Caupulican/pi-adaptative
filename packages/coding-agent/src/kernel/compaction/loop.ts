@@ -33,12 +33,8 @@ export interface CompactionLoopDeps {
 	summarizeAndVerify(
 		params: CompactionCycleParams,
 		model: Model<any>,
-		apiKey: string | undefined,
-		headers: Record<string, string> | undefined,
-		credentialHeaders: Record<string, string> | undefined,
-		providerAccountKey: string | undefined,
+		auth: ResolvedProviderRequestAuth,
 		branch: SessionEntry[],
-		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
 	): Promise<{ result: CompactionResult }>;
 	buildDeterministicCheckpoint(
 		params: CompactionCycleParams,
@@ -251,16 +247,7 @@ async function runCompactionCycles(deps: CompactionLoopDeps): Promise<Compaction
 
 		let result: CompactionResult;
 		try {
-			({ result } = await deps.summarizeAndVerify(
-				params,
-				modelInfo.model,
-				modelInfo.apiKey,
-				modelInfo.headers,
-				modelInfo.credentialHeaders,
-				modelInfo.providerAccountKey,
-				branch,
-				modelInfo.requestGuard,
-			));
+			({ result } = await deps.summarizeAndVerify(params, modelInfo.model, modelInfo, branch));
 		} catch (error) {
 			if (error instanceof MaintenanceUsageRetentionError)
 				return { kind: "failed", reason: error.message, cycles: cycle };

@@ -37,6 +37,7 @@ export interface ScoutControllerDeps {
 				apiKey?: string;
 				headers?: Record<string, string>;
 				credentialHeaders?: Record<string, string>;
+				providerRequestContext?: Readonly<Record<string, unknown>>;
 				providerAccountKey?: string;
 				textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
 		  }
@@ -117,6 +118,9 @@ export class ScoutController {
 						...(modelResolution.headers !== undefined ? { headers: modelResolution.headers } : {}),
 						...(modelResolution.credentialHeaders !== undefined
 							? { credentialHeaders: modelResolution.credentialHeaders }
+							: {}),
+						...(modelResolution.providerRequestContext !== undefined
+							? { providerRequestContext: modelResolution.providerRequestContext }
 							: {}),
 						...(modelResolution.providerAccountKey !== undefined
 							? { providerAccountKey: modelResolution.providerAccountKey }

@@ -499,18 +499,17 @@ export class CompactionSupport {
 }
 
 export function compactionAuthStream(readStream: () => StreamFn) {
-	return (
-		credentialHeaders: Record<string, string> | undefined,
-		providerAccountKey: string | undefined,
-		requestGuard?: ResolvedProviderRequestAuth["requestGuard"],
-	): StreamFn => {
+	return (auth: ResolvedProviderRequestAuth): StreamFn => {
 		const streamFn = readStream();
 		return (model, context, options) =>
 			streamFn(model, context, {
 				...options,
-				...(requestGuard ? { requestGuard } : {}),
-				...(credentialHeaders !== undefined ? { credentialHeaders } : {}),
-				...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
+				...(auth.requestGuard ? { requestGuard: auth.requestGuard } : {}),
+				...(auth.credentialHeaders !== undefined ? { credentialHeaders: auth.credentialHeaders } : {}),
+				...(auth.providerRequestContext !== undefined
+					? { providerRequestContext: auth.providerRequestContext }
+					: {}),
+				...(auth.providerAccountKey !== undefined ? { providerAccountKey: auth.providerAccountKey } : {}),
 			});
 	};
 }

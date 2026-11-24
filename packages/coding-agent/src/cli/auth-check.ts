@@ -1,6 +1,6 @@
 import { findEnvKeys, getEnvApiKey } from "@caupulican/pi-ai/env-api-keys";
 import { getProviders } from "@caupulican/pi-ai/models";
-import { getOAuthProvider, getOAuthProviders } from "@caupulican/pi-ai/oauth";
+import { getOAuthProvider, getOAuthProviders, needsOAuthCredentialUpdate } from "@caupulican/pi-ai/oauth";
 import chalk from "chalk";
 import { AuthStorage } from "../core/auth-storage.ts";
 import { ModelRegistry } from "../core/model-registry.ts";
@@ -55,7 +55,7 @@ export function parseAuthCheckArgs(args: string[]): AuthCheckOptions {
 export async function refreshStaleModelCatalogs(storage: AuthStorage): Promise<void> {
 	for (const provider of storage.getOAuthProviders()) {
 		const stored = storage.get(provider.id);
-		if (!provider.modifyModels || stored?.type !== "oauth" || !provider.needsRefresh?.(stored)) continue;
+		if (!provider.modifyModels || stored?.type !== "oauth" || !needsOAuthCredentialUpdate(provider, stored)) continue;
 		const report = await checkProviderAuth(provider.id, storage, {});
 		if (report.error) console.error(`Could not refresh the ${provider.id} model catalog. Using cached models.`);
 	}
@@ -86,7 +86,8 @@ export async function checkProviderAuth(
 			let error: string | undefined;
 			if (
 				!options.noRefresh &&
-				(credential.expires - Date.now() < 5 * 60_000 || oauthProvider?.needsRefresh?.(credential))
+				(credential.expires - Date.now() < 5 * 60_000 ||
+					(oauthProvider ? needsOAuthCredentialUpdate(oauthProvider, credential) : false))
 			) {
 				try {
 					const apiKey = await authStorage.getOAuthApiKey(provider);
@@ -95,7 +96,7 @@ export async function checkProviderAuth(
 					else {
 						tokenRefreshed = current.access !== credential.access || current.expires !== credential.expires;
 						credential = current;
-						if (oauthProvider?.needsRefresh?.(current))
+						if (oauthProvider && needsOAuthCredentialUpdate(oauthProvider, current))
 							error = "Provider account metadata could not be refreshed";
 					}
 				} catch (err) {

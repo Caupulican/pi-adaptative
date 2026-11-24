@@ -1,6 +1,7 @@
 import {
 	AnthropicAccountError,
 	AntigravityAccountError,
+	antigravityCredentialProjectId,
 	CommandCodeAccountError,
 	fetchCommandCodeAccountUsage,
 	getAnthropicOAuthUsage,
@@ -129,6 +130,7 @@ export function createAntigravityUsageAdapter(fetchImpl?: typeof fetch): Account
 					return antigravityUsageSnapshot(
 						await getAntigravityAccountUsage({
 							accessToken: credential.access,
+							projectId: antigravityCredentialProjectId(credential),
 							signal,
 							...(fetchImpl ? { fetch: fetchImpl } : {}),
 						}),

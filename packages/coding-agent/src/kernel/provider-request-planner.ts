@@ -290,6 +290,7 @@ export async function resolveProviderRequestAuthOptions(
 		| "apiKey"
 		| "headers"
 		| "credentialHeaders"
+		| "providerRequestContext"
 		| "providerAccountKey"
 		| "getApiKey"
 		| "resolveProviderRequestAuth"
@@ -305,6 +306,7 @@ export async function resolveProviderRequestAuthOptions(
 		: (config.getApiKey ? await config.getApiKey(config.model.provider, config.model) : undefined) || config.apiKey;
 	const headers = resolved?.headers || config.headers ? { ...resolved?.headers, ...config.headers } : undefined;
 	const credentialHeaders = resolverOwnsAuth ? resolved.credentialHeaders : config.credentialHeaders;
+	const providerRequestContext = resolverOwnsAuth ? resolved.providerRequestContext : config.providerRequestContext;
 	const providerAccountKey = resolverOwnsAuth ? resolved.providerAccountKey : config.providerAccountKey;
 	const model = resolved?.model ?? config.model;
 	if (model.provider !== config.model.provider || model.id !== config.model.id) {
@@ -323,6 +325,7 @@ export async function resolveProviderRequestAuthOptions(
 		apiKey,
 		headers,
 		credentialHeaders,
+		providerRequestContext,
 		providerAccountKey,
 		requestGuard,
 	};

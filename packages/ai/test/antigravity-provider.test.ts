@@ -10,7 +10,6 @@ import {
 	antigravityThinkingLevel,
 	discoverAntigravityAccount,
 	parseAntigravityModels,
-	resolveAntigravityProjectOnce,
 } from "../src/utils/antigravity.ts";
 import { antigravityOAuthProvider } from "../src/utils/oauth/google-antigravity.ts";
 
@@ -88,8 +87,12 @@ describe("Antigravity packaged provider", () => {
 			expect(authorization.get("code_challenge")).toBe(Buffer.from(challenge).toString("base64url"));
 			expect(authorization.get("code_challenge_method")).toBe("S256");
 			expect(credentials.projectId).toBe("project");
-			expect(antigravityOAuthProvider.needsRefresh!(credentials)).toBe(false);
-			expect(antigravityOAuthProvider.needsRefresh!({ ...credentials, clientVersion: "1.5.9" })).toBe(true);
+			expect(antigravityOAuthProvider.needsCredentialUpdate!(credentials)).toBe(false);
+			expect(antigravityOAuthProvider.needsCredentialUpdate!({ ...credentials, clientVersion: "1.5.12" })).toBe(
+				true,
+			);
+			expect(antigravityOAuthProvider.getRequestContext!(credentials)).toEqual({ projectId: "project" });
+			expect(antigravityOAuthProvider.getAccountId!(credentials)).toBe("project");
 		},
 	);
 
@@ -123,21 +126,82 @@ describe("Antigravity packaged provider", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it("retains the rotated refresh token when catalog discovery fails during the client upgrade", async () => {
+	it("rotates and retains the account session without coupling refresh to discovery", async () => {
 		const fetchMock = vi
 			.fn<typeof fetch>()
-			.mockResolvedValueOnce(Response.json({ access_token: "fresh", refresh_token: "rotated", expires_in: 3600 }))
-			.mockRejectedValue(new Error("discovery offline"));
+			.mockResolvedValueOnce(Response.json({ access_token: "fresh", refresh_token: "rotated", expires_in: 3600 }));
 		vi.stubGlobal("fetch", fetchMock);
-		const old = { access: "old", refresh: "old-refresh", expires: 1, clientVersion: "1.5.9", projectId: "project" };
-		await expect(antigravityOAuthProvider.refreshToken(old)).rejects.toMatchObject({
-			name: "OAuthRefreshCompletedError",
-			credentials: { access: "fresh", refresh: "rotated", projectId: "project" },
+		const old = {
+			access: "old",
+			refresh: "old-refresh",
+			expires: 1,
+			clientVersion: "1.5.12",
+			projectId: "project",
+			modelCatalog: { "gemini-chat": {} },
+		};
+		await expect(antigravityOAuthProvider.refreshToken(old)).resolves.toMatchObject({
+			access: "fresh",
+			refresh: "rotated",
+			projectId: "project",
+			modelCatalog: old.modelCatalog,
 		});
 		const submitted = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
 		expect(submitted.get("grant_type")).toBe("refresh_token");
 		expect(submitted.get("refresh_token")).toBe("old-refresh");
 		expect(old.refresh).toBe("old-refresh");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("updates stale account metadata without rotating the valid token", async () => {
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "current-project" }))
+			.mockResolvedValueOnce(
+				Response.json({
+					models: { "gemini-chat": { maxTokens: 32000, maxOutputTokens: 1024 } },
+					agentModelSorts: [{ groups: [{ modelIds: ["gemini-chat"] }] }],
+				}),
+			);
+		vi.stubGlobal("fetch", fetchMock);
+		const old = { access: "still-valid", refresh: "refresh", expires: Date.now() + 3600_000 };
+		await expect(antigravityOAuthProvider.updateCredentials!(old)).resolves.toMatchObject({
+			access: "still-valid",
+			refresh: "refresh",
+			projectId: "current-project",
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls.every(([url]) => !String(url).includes("oauth2.googleapis.com/token"))).toBe(true);
+	});
+
+	it("rejects a malformed project before it becomes durable session state", async () => {
+		const fetchMock = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(Response.json({ cloudaicompanionProject: " project " }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(discoverAntigravityAccount("fixture")).rejects.toThrow("accessible project");
+		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+
+	it("classifies a rejected refresh token without exposing the response description", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn<typeof fetch>()
+				.mockResolvedValue(
+					Response.json(
+						{ error: "invalid_grant", error_description: "sensitive provider detail" },
+						{ status: 400 },
+					),
+				),
+		);
+		await expect(
+			antigravityOAuthProvider.refreshToken({ access: "old", refresh: "rejected", expires: 1 }),
+		).rejects.toMatchObject({
+			name: "OAuthRefreshRejectedError",
+			providerId: "google-antigravity",
+			reason: "rejected",
+			message: expect.not.stringContaining("sensitive provider detail"),
+		});
 	});
 
 	it("discovers new advertised presets from a catalog larger than an ordinary account response", async () => {
@@ -175,50 +239,6 @@ describe("Antigravity packaged provider", () => {
 		);
 		await expect(discoverAntigravityAccount("fixture")).rejects.toThrow("256 KiB");
 		await expect(discoverAntigravityAccount("fixture")).rejects.toThrow("1024 KiB");
-	});
-
-	it("keeps an independent waiter alive when a shared project lookup caller cancels", async () => {
-		let deliver!: (response: Response) => void;
-		let requestSignal: AbortSignal | undefined;
-		const fetchMock = vi.fn<typeof fetch>().mockImplementation((_url, init) => {
-			requestSignal = init?.signal ?? undefined;
-			return new Promise<Response>((resolve) => {
-				deliver = resolve;
-			});
-		});
-		vi.stubGlobal("fetch", fetchMock);
-		const caller = new AbortController();
-		const first = resolveAntigravityProjectOnce("local-independent-waiters", caller.signal);
-		const second = resolveAntigravityProjectOnce("local-independent-waiters");
-		const rejected = expect(first).rejects.toThrow("cancel caller");
-		caller.abort(new Error("cancel caller"));
-		await rejected;
-		expect(requestSignal?.aborted).toBe(false);
-		deliver(Response.json({ cloudaicompanionProject: "project" }));
-		await expect(second).resolves.toBe("project");
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-	});
-
-	it("cancels the upstream request after the final waiter leaves and permits a fresh lookup", async () => {
-		let requestSignal: AbortSignal | undefined;
-		const fetchMock = vi
-			.fn<typeof fetch>()
-			.mockImplementationOnce((_url, init) => {
-				requestSignal = init?.signal ?? undefined;
-				return new Promise<Response>((_resolve, reject) => {
-					requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
-				});
-			})
-			.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fresh" }));
-		vi.stubGlobal("fetch", fetchMock);
-		const caller = new AbortController();
-		const first = resolveAntigravityProjectOnce("local-final-waiter", caller.signal);
-		const rejected = expect(first).rejects.toThrow("cancel final");
-		caller.abort(new Error("cancel final"));
-		await rejected;
-		expect(requestSignal?.aborted).toBe(true);
-		await expect(resolveAntigravityProjectOnce("local-final-waiter")).resolves.toBe("fresh");
-		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
 	it("retains partial Google counts and projects details without double counting", () => {

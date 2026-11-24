@@ -192,6 +192,11 @@ export interface StreamOptions {
 	 */
 	providerAccountKey?: string;
 	/**
+	 * Non-secret provider-owned state frozen with the request credential. Generic transports never
+	 * serialize it; only the selected provider may validate and consume it.
+	 */
+	providerRequestContext?: Readonly<Record<string, unknown>>;
+	/**
 	 * Preferred transport for providers that support multiple transports.
 	 * Providers that do not support this option ignore it.
 	 */

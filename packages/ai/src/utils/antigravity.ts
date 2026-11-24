@@ -7,6 +7,7 @@ import {
 	isGemini4ArgonModel,
 } from "../providers/google-model-family.ts";
 import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
+import type { OAuthCredentials, ProviderRequestContext } from "./oauth/types.ts";
 import { isRecord } from "./value-guards.ts";
 
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
@@ -59,11 +60,47 @@ export const REVIEWED_ANTIGRAVITY_INSTALLATIONS = Object.freeze([
 		version: "1.5.12",
 		sha256: "94104f028e6962fa2f71d393a7ae27d835ceba1c4898422a103e22c6a5fd6828",
 	}),
+	Object.freeze({
+		version: "1.5.15",
+		sha256: "7b004d26c3fdea25a7c9d456de4bfaccef4be1e4cc7fd6db628859c5c941fa2d",
+	}),
 ]);
 
 export function antigravityObject(value: unknown): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error("Invalid Antigravity response");
 	return value;
+}
+
+export interface AntigravityRequestContext extends ProviderRequestContext {
+	readonly projectId: string;
+}
+
+function validatedProjectId(value: unknown): string | undefined {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		value.length > 1024 ||
+		value.trim() !== value ||
+		/[^\x20-\x7e]/.test(value)
+	) {
+		return undefined;
+	}
+	return value;
+}
+
+/** The durable account binding discovered at login/update and stored beside the OAuth token. */
+export function antigravityCredentialProjectId(credentials: OAuthCredentials): string {
+	const projectId = validatedProjectId(credentials.projectId);
+	if (!projectId) throw new Error("Antigravity credentials have no valid account project; sign in again");
+	return projectId;
+}
+
+export function antigravityCredentialRequestContext(credentials: OAuthCredentials): AntigravityRequestContext {
+	return Object.freeze({ projectId: antigravityCredentialProjectId(credentials) });
+}
+
+export function antigravityProjectFromRequestContext(context: ProviderRequestContext | undefined): string | undefined {
+	return validatedProjectId(context?.projectId);
 }
 
 export function antigravityHeaders(
@@ -247,68 +284,6 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 	return models;
 }
 
-/**
- * The project each access token resolved to. The native client resolves the project once at
- * startup, not per request; a refreshed token is a new key and resolves again. Concurrent first
- * calls share one lookup, and a failed lookup is not kept.
- */
-interface ProjectLookup {
-	promise: Promise<string>;
-	controller: AbortController;
-	waiters: number;
-	settled: boolean;
-}
-const resolvedProjects = new Map<string, ProjectLookup>();
-const MAX_RESOLVED_PROJECTS = 16;
-
-export async function resolveAntigravityProjectOnce(token: string, signal?: AbortSignal): Promise<string> {
-	signal?.throwIfAborted();
-	let lookup = resolvedProjects.get(token);
-	if (!lookup) {
-		const controller = new AbortController();
-		lookup = { promise: resolveAntigravityProject(token, controller.signal), controller, waiters: 0, settled: false };
-		const created = lookup;
-		resolvedProjects.set(token, created);
-		if (resolvedProjects.size > MAX_RESOLVED_PROJECTS)
-			resolvedProjects.delete(resolvedProjects.keys().next().value as string);
-		created.promise.then(
-			() => {
-				created.settled = true;
-			},
-			() => {
-				created.settled = true;
-				if (resolvedProjects.get(token) === created) resolvedProjects.delete(token);
-			},
-		);
-	}
-	const shared = lookup;
-	return new Promise<string>((resolve, reject) => {
-		let finished = false;
-		const finish = (result: { project: string } | { error: unknown }) => {
-			if (finished) return;
-			finished = true;
-			signal?.removeEventListener("abort", onAbort);
-			shared.waiters--;
-			if ("project" in result) resolve(result.project);
-			else reject(result.error);
-		};
-		const onAbort = () => {
-			finish({ error: signal?.reason });
-			if (shared.waiters === 0 && !shared.settled) {
-				if (resolvedProjects.get(token) === shared) resolvedProjects.delete(token);
-				shared.controller.abort();
-			}
-		};
-		shared.waiters++;
-		signal?.addEventListener("abort", onAbort, { once: true });
-		shared.promise.then(
-			(project) => finish({ project }),
-			(error: unknown) => finish({ error }),
-		);
-		if (signal?.aborted) onAbort();
-	});
-}
-
 export async function resolveAntigravityProject(token: string, signal?: AbortSignal): Promise<string> {
 	const account = await antigravityRequest(
 		token,
@@ -323,8 +298,10 @@ export async function resolveAntigravityProject(token: string, signal?: AbortSig
 
 export function antigravityProjectId(account: Record<string, unknown>): string {
 	const project = account.cloudaicompanionProject;
-	const projectId = typeof project === "string" ? project : project ? antigravityObject(project).id : undefined;
-	if (typeof projectId !== "string" || !projectId.trim()) {
+	const projectId = validatedProjectId(
+		typeof project === "string" ? project : project ? antigravityObject(project).id : undefined,
+	);
+	if (!projectId) {
 		throw new Error(
 			"Antigravity did not return an accessible project. Complete account setup in AGY and sign in again.",
 		);

@@ -13,6 +13,7 @@ export interface RequestAuth {
 	apiKey?: string;
 	headers?: Record<string, string>;
 	credentialHeaders?: Record<string, string>;
+	providerRequestContext?: Readonly<Record<string, unknown>>;
 	providerAccountKey?: string;
 	requestGuard?: SimpleStreamOptions["requestGuard"];
 }
@@ -59,7 +60,14 @@ export function bindAccountRead(
 		verify();
 		return fetchImpl(url, options);
 	};
-	return { model, apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders, fetch: guardedFetch, verify };
+	return {
+		model,
+		apiKey: auth.apiKey,
+		credentialHeaders: auth.credentialHeaders,
+		providerRequestContext: auth.providerRequestContext,
+		fetch: guardedFetch,
+		verify,
+	};
 }
 
 /**
@@ -77,6 +85,7 @@ export function materializeRequestAuth(
 		...(auth.apiKey !== undefined ? { apiKey: auth.apiKey } : {}),
 		...(auth.headers !== undefined ? { headers: auth.headers } : {}),
 		...(auth.credentialHeaders !== undefined ? { credentialHeaders: auth.credentialHeaders } : {}),
+		...(auth.providerRequestContext !== undefined ? { providerRequestContext: auth.providerRequestContext } : {}),
 		...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
 		...(auth.requestGuard !== undefined ? { requestGuard: auth.requestGuard } : {}),
 	};

@@ -242,6 +242,9 @@ export class SessionTreeNavigator {
 							...(requestAuth.credentialHeaders !== undefined
 								? { credentialHeaders: requestAuth.credentialHeaders }
 								: {}),
+							...(requestAuth.providerRequestContext !== undefined
+								? { providerRequestContext: requestAuth.providerRequestContext }
+								: {}),
 							...(requestAuth.providerAccountKey !== undefined
 								? { providerAccountKey: requestAuth.providerAccountKey }
 								: {}),

@@ -39,6 +39,7 @@ export interface AntigravityAccountUsage {
 
 export interface AntigravityAccountRequestOptions {
 	accessToken: string;
+	projectId: string;
 	signal?: AbortSignal;
 	fetch?: typeof fetch;
 }
@@ -110,6 +111,13 @@ export async function getAntigravityAccountUsage(
 	options.signal?.throwIfAborted();
 	if (!options.accessToken || options.accessToken.length > 64 * 1024 || /[^\x21-\x7e]/.test(options.accessToken))
 		throw new AntigravityAccountError("Antigravity access token is not a valid header value");
+	if (
+		!options.projectId ||
+		options.projectId.length > 1024 ||
+		options.projectId.trim() !== options.projectId ||
+		/[^\x20-\x7e]/.test(options.projectId)
+	)
+		throw new AntigravityAccountError("Antigravity account project is invalid");
 	const signal = options.signal
 		? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)])
 		: AbortSignal.timeout(30_000);
@@ -123,10 +131,13 @@ export async function getAntigravityAccountUsage(
 			label: "Antigravity account",
 			createError: (message, status, retryAfterMs) => new AntigravityAccountError(message, status, retryAfterMs),
 		});
+	// Account details remain fresh, but the stored session project is authoritative. A changed
+	// loadCodeAssist result is a session mismatch, not permission to silently retarget this request.
 	const account = await request("loadCodeAssist", { metadata: ANTIGRAVITY_ACCOUNT_METADATA });
 	if (!isRecord(account)) throw new AntigravityAccountError("Invalid Antigravity account response");
-	const project = antigravityProjectId(account);
-	const quota = await request("retrieveUserQuotaSummary", { project });
+	if (antigravityProjectId(account) !== options.projectId)
+		throw new AntigravityAccountError("Antigravity account project changed; sign in again");
+	const quota = await request("retrieveUserQuotaSummary", { project: options.projectId });
 	signal.throwIfAborted();
 	if (!isRecord(quota)) throw new AntigravityAccountError("Invalid Antigravity quota summary");
 	const groups = list(quota.groups).map((value) => {

@@ -3,12 +3,14 @@ import { ANTIGRAVITY_CLIENT_CONFIG } from "../../providers/antigravity-client-co
 import {
 	ANTIGRAVITY_CATALOG_VERSION,
 	ANTIGRAVITY_PROVIDER,
+	antigravityCredentialProjectId,
+	antigravityCredentialRequestContext,
 	discoverAntigravityAccount,
 	parseAntigravityModels,
 } from "../antigravity.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput } from "./authorization-input.ts";
 import { base64urlEncode, generatePKCE } from "./pkce.ts";
-import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
+import { OAuthRefreshRejectedError } from "./refresh-rejected-error.ts";
 import { createOAuthRequestSignal } from "./request-signal.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthProviderInterface } from "./types.ts";
@@ -20,10 +22,29 @@ const SCOPES = ["cloud-platform", "userinfo.email", "userinfo.profile", "cclog",
 	.map((scope) => `https://www.googleapis.com/auth/${scope}`)
 	.concat("openid");
 
+type TokenOperation = "exchange" | "refresh";
+
+function tokenFailure(status: number, raw: string, operation: TokenOperation): Error {
+	let code: string | undefined;
+	try {
+		const body = JSON.parse(raw) as unknown;
+		if (body && typeof body === "object" && !Array.isArray(body)) {
+			const candidate = (body as Record<string, unknown>).error;
+			if (typeof candidate === "string" && /^[a-z_]{1,80}$/.test(candidate)) code = candidate;
+		}
+	} catch {}
+	const message = `Antigravity token ${operation} failed (HTTP ${status}${code ? `, ${code}` : ""})`;
+	if (operation === "refresh" && (status === 401 || code === "invalid_grant")) {
+		return new OAuthRefreshRejectedError(ANTIGRAVITY_PROVIDER, "rejected", message);
+	}
+	return new Error(message);
+}
+
 async function exchangeToken(
 	fields: Record<string, string>,
 	previous?: OAuthCredentials,
 	signal?: AbortSignal,
+	operation: TokenOperation = "exchange",
 ): Promise<OAuthCredentials> {
 	const requestSignal = createOAuthRequestSignal(signal);
 	const response = await fetch("https://oauth2.googleapis.com/token", {
@@ -33,13 +54,10 @@ async function exchangeToken(
 		body: new URLSearchParams({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, ...fields }),
 		signal: requestSignal,
 	});
-	if (!response.ok) {
-		await response.body?.cancel().catch(() => {});
-		throw new Error(`Antigravity token exchange failed (HTTP ${response.status})`);
-	}
 	const raw = await readBoundedResponseText(response, 64 * 1024);
 	requestSignal.throwIfAborted();
 	if (raw === undefined) throw new Error("Antigravity token response exceeded the 64 KiB limit");
+	if (!response.ok) throw tokenFailure(response.status, raw, operation);
 	let token: unknown;
 	try {
 		token = JSON.parse(raw);
@@ -94,27 +112,33 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 		return { ...credentials, ...(await discoverAntigravityAccount(credentials.access, callbacks.signal)) };
 	},
 	async refreshToken(credentials) {
-		// The omitted-token fallback and retained account metadata must describe
-		// the credential submitted, even if the caller mutates its object during I/O.
+		// Native savingTokenSource rotates and saves tokens independently of account discovery.
 		const submitted = structuredClone(credentials);
-		const refreshed = await exchangeToken(
+		return exchangeToken(
 			{ grant_type: "refresh_token", refresh_token: submitted.refresh },
 			submitted,
+			undefined,
+			"refresh",
 		);
-		try {
-			return { ...refreshed, ...(await discoverAntigravityAccount(refreshed.access)) };
-		} catch (error) {
-			throw new OAuthRefreshCompletedError(ANTIGRAVITY_PROVIDER, refreshed, error);
-		}
+	},
+	async updateCredentials(credentials) {
+		const submitted = structuredClone(credentials);
+		return { ...submitted, ...(await discoverAntigravityAccount(submitted.access)) };
 	},
 	getApiKey(credentials) {
 		return credentials.access;
 	},
-	needsRefresh(credentials) {
+	needsCredentialUpdate(credentials) {
 		return (
 			credentials.catalogVersion !== ANTIGRAVITY_CATALOG_VERSION ||
 			credentials.clientVersion !== ANTIGRAVITY_CLIENT_CONFIG.version
 		);
+	},
+	getRequestContext(credentials) {
+		return antigravityCredentialRequestContext(credentials);
+	},
+	getAccountId(credentials) {
+		return antigravityCredentialProjectId(credentials);
 	},
 	modifyModels(models, credentials) {
 		const discovered = parseAntigravityModels(credentials.modelCatalog ?? {});

@@ -41,6 +41,7 @@ export * from "./stream.ts";
 export * from "./tool-schema-disclosure.ts";
 export * from "./types.ts";
 export * from "./usage.ts";
+export { antigravityCredentialProjectId } from "./utils/antigravity.ts";
 export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
 // `types.ts` declares a structurally identical type alias of the same name; the class (value and type) wins here.
@@ -58,6 +59,7 @@ export type {
 	OAuthProviderInterface,
 	OAuthSelectOption,
 	OAuthSelectPrompt,
+	ProviderRequestContext,
 } from "./utils/oauth/types.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/provider-retry.ts";

@@ -94,6 +94,13 @@ export interface SessionStreamChainInput {
 	authStorage: {
 		get(provider: string): AuthCredential | undefined;
 		getOAuthRequestHeaders(provider: string, apiKey: string): Record<string, string> | undefined;
+		getOAuthRequestProjection(
+			provider: string,
+			apiKey: string,
+		): {
+			credentialHeaders?: Record<string, string>;
+			providerRequestContext?: Readonly<Record<string, unknown>>;
+		};
 	};
 	/** The current host credential boundary; looked up lazily for each request. */
 	redactSensitiveText?: (text: string, additionalValues?: readonly string[]) => string;
@@ -204,17 +211,18 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	};
 	const credentialed: StreamFn =
 		baseStreamFn === streamSimple
-			? (model, context, options) =>
-					redactedBase(model, context, {
+			? (model, context, options) => {
+					const oauthRequest = options?.apiKey
+						? input.authStorage.getOAuthRequestProjection(model.provider, options.apiKey)
+						: {};
+					return redactedBase(model, context, {
 						...options,
-						credentialHeaders:
-							options?.credentialHeaders ??
-							(options?.apiKey
-								? input.authStorage.getOAuthRequestHeaders(model.provider, options.apiKey)
-								: undefined),
+						credentialHeaders: options?.credentialHeaders ?? oauthRequest.credentialHeaders,
 						credentialHeadersFor: (apiKey: string) =>
 							input.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
-					})
+						providerRequestContext: options?.providerRequestContext ?? oauthRequest.providerRequestContext,
+					});
+				}
 			: redactedBase;
 	// Perf profiling is attributed per provider lane. The lane is read once, where the request
 	// starts, because the samples are recorded later from stream callbacks.

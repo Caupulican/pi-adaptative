@@ -2,13 +2,13 @@
 
 Sign in with `/login` and select **Google Antigravity**. Pi discovers the models available to that account; it does not add models the account cannot access. Select an advertised `gemini-4-argon-low`, `gemini-4-argon-medium`, or `gemini-4-argon-high` model with `/model`.
 
-Pi uses the consumer sign-in flow reviewed against AGY 1.5.12. After signing in, paste the authorization code shown on the Antigravity page, or paste the complete callback URL from that login, including its `state` parameter. Pi submits the matching PKCE verifier when it exchanges the code.
+Pi uses the consumer sign-in flow reviewed against AGY 1.5.15. After signing in, paste the authorization code shown on the Antigravity page, or paste the complete callback URL from that login, including its `state` parameter. Pi submits the matching PKCE verifier when it exchanges the code.
 
 Each variant uses its catalog thinking level. Selecting a different reasoning effort does not override a fixed variant; select the corresponding model instead. If the account advertises an unpreset `gemini-4-argon`, it supports Low, Medium, and High, with Medium as the default. Argon uses thinking levels rather than thinking-token budgets, and Pi omits its unsupported temperature parameter.
 
 Gemini 4 Hydrogen is discovered the same way when the account advertises it: `gemini-4-hydrogen-low`, `gemini-4-hydrogen-medium`, `gemini-4-hydrogen-high`, and `gemini-4-hydrogen-xhigh`. The first three use catalog levels 1, 2, and 3. XHigh uses catalog level 100, and Pi sends that value rather than a caller-selected effort.
 
-Existing Antigravity credentials refresh their discovered catalog when the packaged client identity or catalog format changes. Refresh failures remain visible. If the account has no Argon models, check its entitlement in AGY; refreshing Pi cannot grant access. Google lists Argon availability by plan in its [model documentation](https://www.antigravity.google/docs/models/).
+Existing Antigravity credentials update their discovered account project and catalog when the packaged client identity or catalog format changes. That update does not rotate a still-valid access token. Expired-token rotation preserves the stored account session and persists independently; permanent Google refresh rejection requires a new sign-in. If the account has no Argon models, check its entitlement in AGY; refreshing Pi cannot grant access. Google lists Argon availability by plan in its [model documentation](https://www.antigravity.google/docs/models/).
 
 The reviewed AGY 1.3.5 presets have a 1,048,576-token context window and a 65,536-token output cap. Thinking counts toward that output cap. Pi uses the account's advertised limits when discovering models. Google’s larger background long-decode API is a separate transport and is not provided by this Antigravity integration.
 
