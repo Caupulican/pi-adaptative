@@ -21,6 +21,10 @@ export const REVIEWED_XAI_INSTALLATIONS = Object.freeze([
 		version: "1.0.85",
 		sha256: "a8302a0651289f8b6e6cd519977c8cf7941ba2ad7dce6c674cd2a7b34cb4eb66",
 	}),
+	Object.freeze({
+		version: "1.0.92",
+		sha256: "add4d201dbf2c0bd6077a36feb55a76939de30bae48dbb06f16b2307d38ceacb",
+	}),
 ]);
 
 /** Headers shared by Grok inference and billing requests. */

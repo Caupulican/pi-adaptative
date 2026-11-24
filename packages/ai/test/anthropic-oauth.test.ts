@@ -173,6 +173,13 @@ describe("Claude authorization", () => {
 		}
 	});
 
+	it("settles a callback waiter when the owner closes the listener", async () => {
+		const callback = await startAnthropicCallback("state");
+		const waiting = callback.waitForCode();
+		callback.finish(false);
+		await expect(waiting).rejects.toThrow("callback server closed");
+	});
+
 	it.each([true, false])("holds the browser response through token exchange (success %s)", async (success) => {
 		const started = Promise.withResolvers<void>();
 		const exchange = Promise.withResolvers<Response>();
