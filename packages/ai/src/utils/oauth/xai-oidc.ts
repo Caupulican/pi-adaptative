@@ -1,5 +1,6 @@
 /** Grok OIDC discovery and ID-token verification. */
 
+import type { webcrypto } from "node:crypto";
 import { readBoundedResponseText } from "../../providers/account-request.ts";
 import { createOAuthRequestSignal } from "./request-signal.ts";
 
@@ -104,8 +105,8 @@ function decodeJwtPart(part: string, label: string): JsonObject {
 }
 
 function verificationAlgorithm(alg: string): {
-	importAlgorithm: RsaHashedImportParams | EcKeyImportParams | Algorithm;
-	verifyAlgorithm: RsaPssParams | EcdsaParams | Algorithm;
+	importAlgorithm: webcrypto.RsaHashedImportParams | webcrypto.EcKeyImportParams | webcrypto.Algorithm;
+	verifyAlgorithm: webcrypto.RsaPssParams | webcrypto.EcdsaParams | webcrypto.Algorithm;
 } {
 	switch (alg) {
 		case "RS256":
@@ -175,7 +176,7 @@ export async function verifyXaiIdToken(options: {
 	const keys = jwks.keys;
 	if (!Array.isArray(keys)) throw new Error("xAI OIDC JWKS response is invalid");
 	const jwk = keys.find(
-		(value): value is JsonWebKey & JsonObject =>
+		(value): value is webcrypto.JsonWebKey & JsonObject =>
 			!!value &&
 			typeof value === "object" &&
 			!Array.isArray(value) &&
