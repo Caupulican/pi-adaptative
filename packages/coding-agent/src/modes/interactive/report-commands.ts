@@ -422,6 +422,25 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 			],
 		},
 		{
+			title: window.sections.workbench,
+			rows: (
+				[
+					"app.mouse.toggle",
+					"app.graph.toggle",
+					"app.graph.narrow",
+					"app.graph.widen",
+					"app.graph.view",
+					"app.graph.follow",
+					"app.workbench.layout",
+					"app.execution.toggle",
+					"app.workbench.grow",
+					"app.workbench.shrink",
+					"app.inspector.toggle",
+					"app.execution.maximize",
+				] as const
+			).map((action) => ({ keys: host.getAppKeyDisplay(action), action: interfaceText().keys.bindings[action] })),
+		},
+		{
 			title: window.sections.other,
 			rows: [
 				{ keys: tab, action: rows.pathCompletion },

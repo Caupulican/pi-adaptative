@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { CiStatusView } from "../../../core/ci-status-view.ts";
 import type { SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
@@ -18,6 +19,7 @@ import { formatRouteValue } from "../../../core/route-text.ts";
 import type { SessionWorkState } from "../../../core/session-work-state.ts";
 import { type SemanticPlaneHealth, semanticPlaneHealthValue } from "../../../core/system-one/semantic-plane-health.ts";
 import { theme } from "../../../presentation/theme-model.ts";
+import type { ActivityStatusRow } from "./activity-lane.ts";
 import { SELF_COMPACTION_GAUGE_GLYPHS, selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 /**
@@ -97,6 +99,8 @@ export interface OperatorPovSegment {
 	readonly bare?: boolean;
 	/** The value as drawn, with its own colors (a gauge, a status symbol). Plain mode and compact use `value`. */
 	readonly styled?: string;
+	/** How the phase supplements a live activity subject, if it adds information. */
+	readonly duringActivity?: "detail" | "alert" | "input";
 }
 
 /** Facts are told apart by their quiet labels and the space between them, never by rules. */
@@ -168,20 +172,24 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			? workState.phase === "idle" || workState.phase === "waiting_worker" || workState.phase === "waiting_tool"
 			: isIdleProjection(projection));
 
+	let duringActivity: OperatorPovSegment["duringActivity"];
 	let phaseLabel = operator.working;
 	let phaseTone: "accent" | "warning" | "error" | "success" | undefined;
 	let phaseValue = projection.current_action;
 	let phaseBare = false;
 
 	if (livenessFault) {
+		duringActivity = "alert";
 		phaseLabel = operator.livenessFault;
 		phaseTone = "error";
 		phaseValue = workState?.faultReason ?? projection.why ?? operator.livenessValue;
 	} else if (needsInput) {
+		duringActivity = "input";
 		phaseLabel = operator.needsInput;
 		phaseTone = "warning";
 		phaseValue = projection.why || operator.needsInputValue;
 	} else if (projection.phase === "blocked" || workState?.phase === "blocked") {
+		duringActivity = "alert";
 		phaseLabel = operator.blocked;
 		phaseTone = "error";
 		phaseValue = projection.why || operator.blockedValue;
@@ -202,6 +210,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseTone = "accent";
 		phaseValue = projection.current_action || operator.systemOneEvaluatingValue;
 	} else if (workState?.phase === "continuation_armed") {
+		duringActivity = "detail";
 		phaseLabel = operator.continuing;
 		phaseTone = "accent";
 		phaseValue = projection.current_action || operator.continuingValue;
@@ -210,11 +219,16 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseTone = "warning";
 		phaseValue = projection.why || projection.current_action || operator.retryingValue;
 	} else {
-		// The activity row above already says that it is working, and for how long: this row says on what.
-		phaseLabel = operator.working;
-		phaseTone = undefined;
+		if (
+			projection.phase === "plan" ||
+			projection.phase === "adapt" ||
+			projection.phase === "verify" ||
+			projection.phase === "deliver"
+		) {
+			duringActivity = "detail";
+		}
 		phaseBare = true;
-		phaseValue = `${projection.phase}: ${projection.current_action}`;
+		phaseValue = projection.current_action || interfaceText().frame.activity.working;
 	}
 
 	segments.push({
@@ -223,6 +237,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		value: phaseValue,
 		dropOrder: 0,
 		tone: phaseTone,
+		duringActivity,
 		...(phaseBare ? { bare: true } : {}),
 	});
 
@@ -452,17 +467,18 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	return segments;
 }
 
-function renderSegment(segment: OperatorPovSegment, withExtension: boolean, plain: boolean, compact = false): string {
+function renderPhase(segment: OperatorPovSegment, plain: boolean): string {
+	if (plain) return segment.bare ? segment.value : `${segment.label} ${segment.value}`;
+	const styled = theme.fg(segment.tone ?? "text", segment.value);
+	return segment.bare
+		? `${theme.fg("muted", "●")} ${styled}`
+		: `${theme.bold(theme.fg(segment.tone ?? "accent", segment.label))} ${styled}`;
+}
+
+function renderSegment(segment: OperatorPovSegment, withExtension: boolean, plain: boolean, compact: boolean): string {
 	const base = compact && segment.compact ? segment.compact : segment.value;
 	const extension = withExtension && segment.extension ? ` ${segment.extension}` : "";
-	if (plain) return `${segment.label} ${base}${extension}`;
-	// The phase leads the row: its state word carries the tone, or a dot when the word would repeat the value.
-	if (segment.id === "working") {
-		const styled = theme.fg(segment.tone ?? "text", `${base}${extension}`);
-		return segment.bare
-			? `${theme.fg("muted", "●")} ${styled}`
-			: `${theme.bold(theme.fg(segment.tone ?? "accent", segment.label))} ${styled}`;
-	}
+	if (plain) return segment.bare ? `${base}${extension}` : `${segment.label} ${base}${extension}`;
 	const styled =
 		segment.styled && !(compact && segment.compact)
 			? `${segment.styled}${extension ? theme.fg("muted", extension) : ""}`
@@ -470,46 +486,38 @@ function renderSegment(segment: OperatorPovSegment, withExtension: boolean, plai
 	return segment.bare ? styled : `${theme.fg("dim", segment.label.toLowerCase())} ${styled}`;
 }
 
-/**
- * The left block never shrinks below this many cells before a right segment is dropped instead: what is
- * happening is the first answer on the row, so it stays readable ("READY Ready for operator instructions")
- * and the low-priority facts (PEER, CI, CTX) yield width to it.
- */
 const MIN_WORKING_WIDTH = 40;
+const MIN_LIVE_WIDTH = 20;
 
-/** Only the phase text stays on the left; every operator fact, BLOCK included, anchors right. */
-function isLeftSegment(segment: OperatorPovSegment): boolean {
-	return segment.id === "working";
-}
-
-/**
- * Lays the segments out as two blocks, exactly `width` cells: the phase text (WORKING / NEEDS INPUT
- * plus its BLOCK) on the left, and the operator facts (CONTROL, ACTOR, models, ROUTE, JEV, COST,
- * PROOF, CTX) anchored to the right edge, so those columns never move while the left text changes
- * length. The left text truncates first; right segments drop in priority order, then extensions
- * shed, then values compact, only when the width cannot hold them beside a minimal left block.
- * Routing, System One and cost are never dropped: an operator must always be able to answer who is
- * running and what it costs, even on a narrow terminal.
- */
+/** Live activity (or the phase when idle) leads. Contextual facts share the row and yield to the live subject. */
 export function layoutOperatorPovSegments(
 	segments: readonly OperatorPovSegment[],
 	width: number,
-	options: { plain?: boolean } = {},
+	options: { plain?: boolean; activity?: ActivityStatusRow } = {},
 ): string {
 	const plain = options.plain ?? false;
-	let kept = [...segments];
+	const { activity } = options;
+	const phase = segments.find((segment) => segment.id === "working");
+	let kept = segments.filter((segment) => segment.id !== "working");
+	const alert =
+		phase?.duringActivity === "alert" || (phase?.duringActivity === "input" && !activity?.awaitingInput)
+			? phase
+			: undefined;
+	if (activity && alert) {
+		// Keep the state word even when the reason cannot fit beside the live clock.
+		kept.unshift({ ...alert, compact: alert.label, bare: true, value: `${alert.label}: ${alert.value}` });
+	} else if (activity && phase?.duringActivity === "detail") {
+		kept.unshift({ ...phase, bare: true, dropOrder: 25 });
+	}
+	const preferredWidth = Math.min(width, Math.max(MIN_WORKING_WIDTH, activity?.preferredWidth ?? 0));
 	let extensions = true;
 	let compact = false;
 	const renderBlock = (block: readonly OperatorPovSegment[]): string =>
 		block.map((segment) => renderSegment(segment, extensions, plain, compact)).join(OPERATOR_POV_SEPARATOR);
 	const separator = visibleWidth(OPERATOR_POV_SEPARATOR);
 
-	const leftRoom = (): number => {
-		const right = kept.filter((segment) => !isLeftSegment(segment));
-		const rightWidth = right.length ? visibleWidth(renderBlock(right)) : 0;
-		return width - rightWidth - (right.length ? separator : 0);
-	};
-	while (leftRoom() < MIN_WORKING_WIDTH) {
+	const leftRoom = (): number => width - (kept.length ? visibleWidth(renderBlock(kept)) + separator : 0);
+	while (leftRoom() < preferredWidth) {
 		const droppable = kept.filter((segment) => segment.dropOrder > 0).sort((a, b) => a.dropOrder - b.dropOrder);
 		if (droppable.length > 0) {
 			const victim = droppable[0];
@@ -527,18 +535,19 @@ export function layoutOperatorPovSegments(
 		break;
 	}
 
-	const right = kept.filter((segment) => !isLeftSegment(segment));
-	const left = kept.filter(isLeftSegment);
-	const rightText = right.length ? renderBlock(right) : "";
-	const rightWidth = visibleWidth(rightText);
-	const room = width - rightWidth - (right.length ? separator : 0);
-	if (room < 0) {
-		// Narrower than the mandatory facts themselves: the only honest output is the cut row.
-		return truncateToWidth(renderBlock([...left, ...right]), width, "…");
+	const renderLead = (room: number, live: ActivityStatusRow | undefined): string => {
+		const line = live?.render(room);
+		if (line) return plain ? stripVTControlCharacters(line) : line;
+		return truncateToWidth(phase ? renderPhase(phase, plain) : "", room, "…");
+	};
+	const room = leftRoom();
+	if (room < Math.min(MIN_LIVE_WIDTH, width)) {
+		// At very narrow widths, keep the alert or live subject rather than cut its timer for telemetry.
+		return renderLead(width, alert ? undefined : activity);
 	}
-	const leftText = truncateToWidth(renderBlock(left), room, "…");
-	const gap = Math.max(right.length ? separator : 0, width - visibleWidth(leftText) - rightWidth);
-	return `${leftText}${" ".repeat(gap)}${rightText}`;
+	const rightText = renderBlock(kept);
+	const leftText = renderLead(room, activity);
+	return `${leftText}${" ".repeat(width - visibleWidth(leftText) - visibleWidth(rightText))}${rightText}`;
 }
 
 /**
@@ -549,14 +558,23 @@ export function layoutOperatorPovSegments(
 export class OperatorPovBarComponent implements Component {
 	private readonly readSegments: () => readonly OperatorPovSegment[] | undefined;
 	private readonly invalidateSegments: () => void;
+	private readonly readActivity: () => ActivityStatusRow | undefined;
 
-	constructor(readSegments: () => readonly OperatorPovSegment[] | undefined, invalidateSegments: () => void) {
+	constructor(
+		readSegments: () => readonly OperatorPovSegment[] | undefined,
+		invalidateSegments: () => void,
+		readActivity: () => ActivityStatusRow | undefined,
+	) {
 		this.readSegments = readSegments;
 		this.invalidateSegments = invalidateSegments;
+		this.readActivity = readActivity;
 	}
 
 	render(width: number): string[] {
-		return [` ${layoutOperatorPovSegments(this.readSegments() ?? [], Math.max(0, width - 1))}`];
+		const row = layoutOperatorPovSegments(this.readSegments() ?? [], Math.max(0, width - 1), {
+			activity: this.readActivity(),
+		});
+		return [` ${row}`];
 	}
 
 	invalidate(): void {

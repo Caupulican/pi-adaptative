@@ -24,7 +24,7 @@ import { FlowAnimator } from "./flow-animator.ts";
 import { fitRow, labelRow, surfaceRow, WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 import { lastUserShell } from "./workbench-shell-lookup.ts";
 
-/** The title strip names the work; the run state lives on the live row inside the conversation zone. */
+/** The title strip names the work; run state lives in the status band. */
 export interface WorkbenchHeadline {
 	title?: string;
 }
@@ -64,8 +64,8 @@ export interface WorkbenchOptions {
 	dock: Component[];
 	/** Rows directly below the input. */
 	dockBelow?: Component[];
-	/** Live activity line under the title strip. */
-	activity?: Component;
+	/** Loader surface used directly only in the tiny-terminal fallback. */
+	nativeStatus?: Component;
 	brand: string;
 	/** Fallback title when no plan or goal names the work. */
 	title?: () => string;
@@ -193,9 +193,9 @@ export function workAreaRows(available: number, geometry: WorkbenchGeometry): nu
 /**
  * Human-facing composition only. The original transcript still owns all messages and actions.
  *
- * Rows, top to bottom: title strip, live activity, the work area (inspector left, execution right)
- * at a fixed height unless the operator collapses it, its divider, conversation header, conversation
- * rows, the status band, input, rows below the input and the status line. Zones separate by surface tone
+ * Rows, top to bottom: title strip, the work area (inspector left, execution right), its divider,
+ * conversation header, conversation rows, the status band with live activity, input, rows below
+ * the input and the status line. Zones separate by surface tone
  * and spacing, never by frames. Only the operator changes the work area's size or visibility.
  */
 export class WorkbenchComponent extends Container {
@@ -293,7 +293,7 @@ export class WorkbenchComponent extends Container {
 			options.header,
 			options.operatorStatus,
 			options.conversation,
-			options.activity,
+			options.nativeStatus,
 			...options.dock,
 			options.editor,
 			...(options.dockBelow ?? []),
@@ -465,7 +465,7 @@ export class WorkbenchComponent extends Container {
 		if (this.leftPaneHidden) this.showLeftPane();
 		else this.leftPaneHidden = true;
 	}
-	/** Hide the whole left pane: the Chats list's chevron. */
+	/** Hide the whole left pane, regardless of which view it draws. */
 	hideLeftPane(): void {
 		this.leftPaneHidden = true;
 	}
@@ -478,10 +478,6 @@ export class WorkbenchComponent extends Container {
 		this.leftPaneHidden = false;
 		if (opens === "graph") this.graphHidden = false;
 	}
-	/** Hide the Decision graph only: the graph's chevron. The Chats list takes the pane where the host offers one. */
-	hideGraph(): void {
-		this.graphHidden = true;
-	}
 	cycleGraphView(): void {
 		// The view list's order, wrapping: List → Diagram → Lanes → List.
 		this.graphView =
@@ -492,6 +488,15 @@ export class WorkbenchComponent extends Container {
 	}
 	resizeGraph(fraction: number): void {
 		this.graphFraction = Math.max(MIN_GRAPH_FRACTION, Math.min(MAX_GRAPH_FRACTION, fraction));
+	}
+	stepLeftPaneWidth(direction: -1 | 1): boolean {
+		const width = this.resolvedGraphWidth(this.zoneWidth);
+		if (!width) return false;
+		const previous = this.graphFraction;
+		this.resizeGraph((width + direction * 4) / this.zoneWidth);
+		if (this.resolvedGraphWidth(this.zoneWidth) !== width) return true;
+		this.graphFraction = previous;
+		return false;
 	}
 	resizeUpper(rows: number): void {
 		this.upperLimit = clampUpperRows(rows);
@@ -582,7 +587,7 @@ export class WorkbenchComponent extends Container {
 		const cells = visibleWidth(name);
 		const left = Math.floor((width - cells) / 2);
 		const pill = `${" ".repeat(left)}${name}${" ".repeat(width - cells - left)}`;
-		const buttons: WorkbenchPaneTitleButton[] = [{ action: "hideGraph", label: "▾", leading: true }];
+		const buttons: WorkbenchPaneTitleButton[] = [{ action: "hideLeftPane", label: "▾", leading: true }];
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
 			buttons.push({ action: "followCurrent", label: text.followCurrent });
 		}
@@ -671,13 +676,11 @@ export class WorkbenchComponent extends Container {
 		this.conversation.invalidate();
 		this.options.onInvalidateCachedConversations?.();
 		this.execution?.invalidate();
-		this.options.activity?.invalidate();
 		for (const section of this.sections) if (!Array.isArray(section.body)) section.body.invalidate();
 	}
 
 	/**
-	 * The work's name; the application and the location are on the terminal title and the status line. State belongs to the live row,
-	 * where the answer lands.
+	 * The work's name; the application and location are on the terminal title and the status line.
 	 */
 	private headline(columns: number): string {
 		const inner = Math.max(0, columns - 2);
@@ -697,13 +700,10 @@ export class WorkbenchComponent extends Container {
 		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
 		const headingWidth = visibleWidth(convTitle) + visibleWidth(stateText);
 		// The way back to a pane the operator hid, offered while the left pane draws nothing; it names what a click opens at this width.
-		const opens =
-			(this.leftPaneHidden || this.graphHidden) && !this.effectiveLeftPaneMode(this.zoneWidth)
-				? this.leftPaneToOpen(this.zoneWidth)
-				: undefined;
+		const mayOpen = (this.leftPaneHidden || this.graphHidden) && !this.leftPaneKind;
+		const opens = mayOpen ? this.leftPaneToOpen(this.zoneWidth) : undefined;
 		// The roster's own rows select every chat while it is drawn, so its chip is offered only without it.
-		const switchChatLabel =
-			this.effectiveLeftPaneMode(this.zoneWidth) === "chats" ? undefined : this.options.switchChatChip?.();
+		const switchChatLabel = this.leftPaneKind === "chats" ? undefined : this.options.switchChatChip?.();
 		// Chips drop from the end on a narrow header; the only way back to a hidden left pane comes first.
 		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
 			...(opens
@@ -1210,15 +1210,11 @@ export class WorkbenchComponent extends Container {
 
 	private renderColumns(
 		columns: number,
+		leftWidth: number,
 		available: number,
 		head: string[],
-		liveRow: string,
 		dockRows: string[],
 	): string[] {
-		const minLeft = 30;
-		const minRight = MIN_INSPECTOR_WIDTH + 2;
-		let leftWidth = Math.max(minLeft, Math.floor(columns * this.conversationFraction));
-		if (columns - leftWidth - 2 < minRight) leftWidth = Math.max(minLeft, columns - 2 - minRight);
 		const rightX = leftWidth + 2;
 		const rightWidth = Math.max(1, columns - rightX);
 		this.workLeft = rightX;
@@ -1232,8 +1228,9 @@ export class WorkbenchComponent extends Container {
 			fitRow(line, leftWidth),
 		);
 		const right = this.renderUpper(rightWidth, available, head.length, rightX);
-		const main = left.map((line, row) => `${line}  ${fitRow(right[row] ?? "", rightWidth)}`);
-		return [...head, ...main, liveRow, ...dockRows];
+		const rule = theme.fg("borderMuted", "│");
+		const main = left.map((line, row) => `${line}${rule} ${fitRow(right[row] ?? "", rightWidth)}`);
+		return [...head, ...main, ...dockRows];
 	}
 
 	override render(width: number): string[] {
@@ -1271,14 +1268,13 @@ export class WorkbenchComponent extends Container {
 			const nativeEditor = this.options.editor.render(columns);
 			const remaining = Math.max(0, total - nativeEditor.length);
 			const dock = remaining
-				? this.options.dock.flatMap((component) => component.render(columns)).slice(-remaining)
+				? [
+						...(this.options.nativeStatus?.render(columns) ?? []),
+						...this.options.dock.flatMap((component) => component.render(columns)),
+					].slice(-remaining)
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		const model = this.graphSource?.(
-			!this.leftPaneHidden && !this.graphHidden && columns >= SIDE_BY_SIDE_MIN_COLUMNS,
-		);
-		if (model && graphHasContent(model)) this.frameGraphModel = model;
 		const dockBudget = Math.max(0, total - editor.length - 8);
 		const above =
 			dockBudget > 0 ? this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget) : [];
@@ -1296,23 +1292,25 @@ export class WorkbenchComponent extends Container {
 			...below.map((line) => surfaceRow(gutter(line, inner), columns)),
 			surfaceRow(this.statusLine(columns), columns),
 		];
-		// The live row is reserved even when idle so the geometry never jumps between turns.
-		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
-		const liveRow = activity.length ? gutter(activity[0]!, inner) : "";
 		const head = [this.headline(columns)];
-		const available = total - head.length - 1 - dockRows.length;
+		const available = total - head.length - dockRows.length;
 		this.lastAvailable = available;
 		this.workLeft = 0;
 		this.workWidth = columns;
-		if (this.columns && columns >= SIDE_BY_SIDE_MIN_COLUMNS && !this.collapsed && available >= 2) {
-			return this.renderColumns(columns, available, head, liveRow, dockRows);
-		}
+		const sideBySide = this.columns && columns >= SIDE_BY_SIDE_MIN_COLUMNS && !this.collapsed && available >= 2;
+		const zoneWidth = sideBySide
+			? Math.max(30, Math.min(Math.floor(columns * this.conversationFraction), columns - MIN_INSPECTOR_WIDTH - 4))
+			: columns;
+		const graphFits = zoneWidth >= leftPaneZoneMinimum("graph");
+		const model = this.graphSource?.(graphFits && !this.leftPaneHidden && !this.graphHidden);
+		if (model && graphHasContent(model)) this.frameGraphModel = model;
+		if (sideBySide) return this.renderColumns(columns, zoneWidth, available, head, dockRows);
 		if (this.workAreaIsEmpty(columns)) {
 			this.upperTop = head.length;
 			this.upperHeight = 0;
 			this.dividerRow = -1;
 			const zone = this.renderZone(0, columns, head.length, Math.max(0, available - 1));
-			return [...head, ...zone, liveRow, ...dockRows];
+			return [...head, ...zone, ...dockRows];
 		}
 		const upperRows = workAreaRows(available, this.geometry());
 		const upper = upperRows >= 2 ? this.renderUpper(columns, upperRows, head.length) : [];
@@ -1325,7 +1323,6 @@ export class WorkbenchComponent extends Container {
 			...upper,
 			this.divider(columns, upper.length > 0, this.dividerJunctions()),
 			...zone,
-			liveRow,
 			...dockRows,
 		];
 	}

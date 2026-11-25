@@ -556,6 +556,12 @@ export class InteractiveLayout {
 		const operatorStatus = new OperatorPovBarComponent(
 			() => statusProjection.read(),
 			() => statusProjection.reset(),
+			() => {
+				// Compatibility loaders (e.g. extension indicators) are another source for the same row.
+				return port.activityLane?.readStatusRow(
+					port.statusContainer.children.length ? (width) => port.statusContainer.render(width) : undefined,
+				);
+			},
 		);
 		this.subscribe();
 		const view = new WorkbenchComponent({
@@ -565,7 +571,7 @@ export class InteractiveLayout {
 			onInvalidateCachedConversations: () => port.onInvalidateCachedConversations?.(),
 			editor: port.editorContainer,
 			header: port.headerContainer,
-			activity: port.activityLane,
+			nativeStatus: port.statusContainer,
 			operatorStatus,
 			brand: APP_NAME,
 			title: () => port.getSessionManager().getSessionName() || path.basename(port.getSessionManager().getCwd()),
@@ -580,7 +586,7 @@ export class InteractiveLayout {
 			},
 			pullRequest: () =>
 				readPullRequestView(port.getSessionManager().getCwd(), port.footerDataProvider.getGitBranch()),
-			dock: [port.pendingMessagesContainer, port.statusContainer, port.widgetContainerAbove, port.footer],
+			dock: [port.pendingMessagesContainer, port.widgetContainerAbove, port.footer],
 			dockBelow: [port.widgetContainerBelow],
 			viewportRows: () => port.ui.terminal.rows,
 		});

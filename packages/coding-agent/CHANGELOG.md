@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Workbench shows one activity row with the live timer instead of repeating the working state. Subsecond activity animation no longer requests a fresh session projection on each frame.
+- Both sidebar chevrons hide the full left pane. `Alt+G` still works with a tall editor, and `Alt+,` / `Alt+.` let you resize the visible pane without a mouse.
+
 ## [0.105.0] - 2026-11-25
 
 ### Breaking Changes

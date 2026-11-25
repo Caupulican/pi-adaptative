@@ -417,7 +417,10 @@ export class InteractiveMode {
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.activityLane = this.hasHumanAudience
-			? new ActivityLaneComponent(theme, () => this.ui.requestRender())
+			? new ActivityLaneComponent(theme, (kind) => {
+					if (kind === "presentation") this.ui.requestPresentationRender();
+					else this.ui.requestRender();
+				})
 			: undefined;
 		this.runtimeStatus = new RuntimeStatusController({
 			ui: this.ui,

@@ -533,6 +533,12 @@ export class WorkbenchController {
 			this.ports.requestPresentationRender();
 			return { consume: true };
 		}
+		// Sidebar visibility is a preference even while a tall input takes the whole viewport.
+		if (keys.matches(data, "app.graph.toggle")) {
+			this.changeGeometry(() => this.view.toggleLeftPane());
+			this.ports.requestPresentationRender();
+			return { consume: true };
+		}
 		if (this.view.conversationHeight === 0) {
 			this.selecting = false;
 			this.pressPoint = undefined;
@@ -552,8 +558,11 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.execution.pageDown")) this.view.pageExecution(1);
 		else if (keys.matches(data, "app.inspector.toggle")) this.changeGeometry(() => this.view.toggleInspector());
 		else if (keys.matches(data, "app.workbench.layout")) this.changeGeometry(() => this.view.toggleLayout());
-		else if (keys.matches(data, "app.graph.toggle")) this.changeGeometry(() => this.view.toggleLeftPane());
-		else if (keys.matches(data, "app.graph.view")) this.changeGeometry(() => this.view.cycleGraphView());
+		else if (keys.matches(data, "app.graph.narrow") || keys.matches(data, "app.graph.widen")) {
+			if (this.view.stepLeftPaneWidth(keys.matches(data, "app.graph.narrow") ? -1 : 1)) {
+				this.ports.geometry?.save(this.view.geometry());
+			}
+		} else if (keys.matches(data, "app.graph.view")) this.changeGeometry(() => this.view.cycleGraphView());
 		else if (keys.matches(data, "app.graph.follow")) this.changeGeometry(() => this.view.followCurrentGraph());
 		else if (keys.matches(data, "app.execution.maximize"))
 			this.changeGeometry(() => this.view.toggleExecutionMaximized());
@@ -646,7 +655,6 @@ export class WorkbenchController {
 				const titleAction = this.view.paneTitleAction(column, row);
 				if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
 				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
-				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.hideGraph());
 				else if (titleAction === "hideLeftPane") this.changeGeometry(() => this.view.hideLeftPane());
 				else if (titleAction === "toggleLeftPaneMode") this.changeGeometry(() => this.view.toggleLeftPaneMode());
 				else if (titleAction === "switchChat") this.ports.onSwitchChat?.();

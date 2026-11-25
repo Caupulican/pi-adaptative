@@ -78,6 +78,8 @@ const BINDINGS = {
 	"app.mouse.toggle":
 		"Give the mouse to the workbench (wheel scroll, chips) or back to the terminal (native selection and paste)",
 	"app.graph.toggle": "Hide or show the left pane (Decision graph or Chats list) beside the conversation",
+	"app.graph.narrow": "Make the left pane narrower",
+	"app.graph.widen": "Make the left pane wider",
 	"app.graph.view": "Cycle the Decision graph view: List, Diagram, Lanes",
 	"app.graph.follow": "Follow current decision graph stage and clear scroll pin",
 	"app.workbench.layout": "Put the conversation and Execution side by side, or stack them",
@@ -135,6 +137,7 @@ export const KEYS = {
 		sections: {
 			navigation: "Navigation",
 			editing: "Editing",
+			workbench: "Workbench",
 			other: "Other",
 			extensions: "Extensions",
 		},

@@ -75,6 +75,8 @@ const BINDINGS = {
 	"app.mouse.toggle":
 		"Entregar o mouse ao painel de trabalho (rolagem pela roda, chips) ou devolvê-lo ao terminal (seleção e colagem nativas)",
 	"app.graph.toggle": "Ocultar ou mostrar o painel esquerdo (grafo de decisões ou lista de chats) ao lado da conversa",
+	"app.graph.narrow": "Estreitar o painel esquerdo",
+	"app.graph.widen": "Alargar o painel esquerdo",
 	"app.graph.view": "Alternar a visão do grafo de decisões: lista, diagrama, raias",
 	"app.graph.follow": "Acompanhar a etapa atual do grafo de decisões e limpar a rolagem fixada",
 	"app.workbench.layout": "Pôr a conversa e o painel Execução lado a lado, ou empilhados",
@@ -132,6 +134,7 @@ export const KEYS = {
 		sections: {
 			navigation: "Navegação",
 			editing: "Edição",
+			workbench: "Painel de trabalho",
 			other: "Outros",
 			extensions: "Extensões",
 		},

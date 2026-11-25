@@ -1,4 +1,4 @@
-import type { Component } from "@caupulican/pi-tui";
+import { stripVTControlCharacters } from "node:util";
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
@@ -282,6 +282,7 @@ export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): Ac
  */
 const TURN_TEXT_MAX = 32;
 const ANIMATED_TURN_TEXT_MAX = 44;
+const INDICATOR_TEXT_MAX = 48;
 /** The subject keeps at least this much of the slot when the timing suffix is long. */
 const TURN_TEXT_MIN_LABEL = 8;
 const EVENT_TEXT_MAX = 36;
@@ -492,28 +493,65 @@ function renderConcurrency(theme: Theme, groups: readonly AggregateGroup[]): str
 	return parts.join(theme.fg("dim", " · "));
 }
 
-export function renderActivityLaneLine(
+export interface ActivityStatusRow {
+	readonly preferredWidth: number;
+	readonly awaitingInput?: boolean;
+	render(width: number): string;
+}
+
+type ActivityIndicator = (width: number) => readonly string[];
+
+function activityStatusRow(
 	theme: Theme,
 	items: readonly ActivityLaneItem[],
-	width: number,
-	now?: number,
-	animate = false,
-): string[] {
-	const safeWidth = Math.max(1, width);
-	if (items.length === 0 || safeWidth < 3) return [];
+	now: number,
+	animate: boolean,
+	compatibilityIndicator?: ActivityIndicator,
+): ActivityStatusRow | undefined {
 	const slots = classifySlots(items);
 	if (!slots.turn && !slots.overlay) slots.overlay = slots.externalWait;
-	if (!slots.turn && !slots.overlay && !slots.plan && slots.groups.length === 0 && !slots.queue && !slots.event)
-		return [];
+	const indicator =
+		slots.overlay?.status === "waiting"
+			? ""
+			: (compatibilityIndicator?.(INDICATOR_TEXT_MAX)
+					.find((line) => stripVTControlCharacters(line).trim())
+					?.trim() ?? "");
+	if (
+		!indicator &&
+		!slots.turn &&
+		!slots.overlay &&
+		!slots.plan &&
+		!slots.groups.length &&
+		!slots.queue &&
+		!slots.event
+	)
+		return undefined;
 
-	const indent = " ";
+	// Give the live subject and any message-queue controls room before adding optional telemetry.
+	const preferredWidth =
+		(indicator ? Math.min(INDICATOR_TEXT_MAX, visibleWidth(indicator)) : TURN_TEXT_MAX) +
+		(slots.plan ? PLAN_TEXT_MIN + SLOT_GAP_WIDTH : 0) +
+		(slots.queue ? Math.min(QUEUE_TEXT_MAX, visibleWidth(slots.queue.label)) + SLOT_GAP_WIDTH : 0);
+	return {
+		preferredWidth,
+		awaitingInput: slots.overlay?.phase === "input" && !slots.running.some((item) => isActivityRunning(item.status)),
+		render: (width) => renderActivityLaneLine(theme, slots, width, now, animate, indicator),
+	};
+}
+
+function renderActivityLaneLine(
+	theme: Theme,
+	slots: LaneSlots,
+	safeWidth: number,
+	now: number,
+	animate: boolean,
+	indicator: string,
+): string {
+	if (safeWidth < 3) return "";
 	const gap = " ".repeat(SLOT_GAP_WIDTH);
-	// One parenthetical carries every timing fact about the subject, in one unit vocabulary, with no
-	// glyph of its own: the row's only glyph is the status dot. The first-token half appears only
-	// once the wait is long enough to mean something (FIRST_TOKEN_NOTICE_MS), so a fast provider
-	// renders exactly what it always did.
+	// Keep timing at the end of the subject, in units that do not depend on the label.
 	const elapsed = (item: ActivityLaneItem | undefined): string => {
-		if (item?.startedAt === undefined || now === undefined) return "";
+		if (item?.startedAt === undefined) return "";
 		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
 		const activity = interfaceText().frame.activity;
 		const kind =
@@ -521,20 +559,30 @@ export function renderActivityLaneLine(
 		return ` (${kind}${total})`;
 	};
 
-	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
-	// running tool is the subject when there is exactly one; otherwise the live runtime label is.
-	// A generic Working... yields its words to concurrent work, but the turn clock stays.
+	// A specific tool can replace the generic Working subject; it keeps the turn's clock.
 	let turnPart = "";
+	let namesSoloTool = false;
 	const backgroundSubject = !slots.turn && slots.running.length > 0 ? oldestTimedItem(slots.running) : undefined;
 	const externalRunning = slots.running.some((item) => isActivityRunning(item.status));
 	const wait = slots.overlay?.status === "waiting" ? slots.overlay : undefined;
 	const subject = slots.turn ?? backgroundSubject ?? slots.overlay;
-	if (subject) {
+	if (indicator) {
+		turnPart = truncateToWidth(indicator, Math.min(INDICATOR_TEXT_MAX, safeWidth), "…");
+	} else if (subject) {
 		const status = externalRunning ? "active" : (wait?.status ?? subject.status);
 		const dotColor: ThemeColor = status === "waiting" ? "warning" : "accent";
-		const elapsedMs = now === undefined || subject.startedAt === undefined ? 0 : Math.max(0, now - subject.startedAt);
+		const elapsedMs = subject.startedAt === undefined ? 0 : Math.max(0, now - subject.startedAt);
+		const solo = slots.soloTool;
+		const soloTool = solo?.kind === "tool" && !isBackgroundToolActivityItem(solo) ? solo : undefined;
+		const toolSubject =
+			!slots.overlay &&
+			soloTool &&
+			isActivityRunning(soloTool.status) &&
+			slots.turn?.label === interfaceText().frame.working.workingMessage
+				? soloTool
+				: undefined;
 		let mode: ActivityStatusMode | undefined;
-		if (!slots.overlay) {
+		if (!slots.overlay && !toolSubject) {
 			if (slots.running.some((item) => item.phase === "worker-wait")) mode = "worker-wait";
 			else if (slots.turn?.label === interfaceText().frame.working.thinkingMessage) mode = "thinking";
 			else if (slots.turn?.label === interfaceText().frame.working.workingMessage) mode = "working";
@@ -545,44 +593,38 @@ export function renderActivityLaneLine(
 		let animatedLabel = "";
 		const withTiming = (label: string, item: ActivityLaneItem): string => {
 			let suffix = elapsed(item);
-			const available = Math.max(0, Math.min(turnTextMax, safeWidth - 3));
-			if (
-				visibleWidth(suffix) + TURN_TEXT_MIN_LABEL > available &&
-				item.startedAt !== undefined &&
-				now !== undefined
-			) {
+			const available = Math.max(0, Math.min(turnTextMax, safeWidth - 2));
+			if (visibleWidth(suffix) + TURN_TEXT_MIN_LABEL > available && item.startedAt !== undefined) {
 				const kind = item.clockKind === "observed" ? interfaceText().frame.activity.observed : "";
 				suffix = ` (${kind}${formatElapsed((item.completedAt ?? now) - item.startedAt)})`;
 			}
 			if (!label) return suffix.trim();
 			const labelWidth = Math.max(0, Math.min(turnTextMax, available) - visibleWidth(suffix));
 			if (mode) label = activityStatusPhrase(mode);
-			if (safeWidth < 24 && visibleWidth(label) > labelWidth)
-				label =
-					status === "waiting" ? interfaceText().frame.activity.waiting : interfaceText().frame.activity.working;
+			if (mode && safeWidth < 24 && visibleWidth(label) > labelWidth) label = interfaceText().frame.activity.working;
 			const renderedLabel = truncateToWidth(label, labelWidth, "…");
 			if (mode) animatedLabel = renderedLabel;
 			return `${renderedLabel}${suffix}`;
 		};
 		let text = "";
 		if (slots.turn) {
+			namesSoloTool = toolSubject !== undefined;
 			text = withTiming(
 				wait
 					? externalRunning
 						? interfaceText().frame.activity.working
 						: wait.label
-					: (slots.overlay?.label ?? slots.turn.label),
+					: (slots.overlay?.label ?? toolSubject?.label ?? slots.turn.label),
 				slots.turn,
 			);
 		} else if (slots.overlay && !externalRunning) {
 			text = withTiming(slots.overlay.label, slots.overlay);
 		} else if (backgroundSubject) {
+			namesSoloTool = soloTool !== undefined && isActivityRunning(soloTool.status);
 			const label =
 				backgroundSubject.status === "waiting"
 					? interfaceText().frame.activity.agentsQueued
-					: slots.running.length === 1 &&
-							backgroundSubject.kind === "tool" &&
-							!isBackgroundToolActivityItem(backgroundSubject)
+					: namesSoloTool
 						? backgroundSubject.label
 						: interfaceText().frame.activity.backgroundWork;
 			text = withTiming(label, backgroundSubject);
@@ -596,14 +638,11 @@ export function renderActivityLaneLine(
 				theme.fg("muted", text.slice(animatedLabel.length))
 			: theme.fg("muted", text);
 		turnPart = text ? `${pulse} ${renderedText}` : pulse;
-		// Rotating phrases occupy a stable slot so the plan does not sway every six seconds.
-		if (mode && slots.plan && !slots.queue && safeWidth >= 80)
+		if (mode && slots.plan && !slots.queue && safeWidth >= ANIMATED_TURN_TEXT_MAX + PLAN_TEXT_MIN + 4)
 			turnPart += " ".repeat(Math.max(0, turnTextMax + 2 - visibleWidth(turnPart)));
-	} else if (slots.plan) {
-		turnPart = theme.fg("muted", interfaceText().frame.activity.paused);
 	}
 
-	// Plan slot: task/goal only. Do not copy the turn label into the plan slot.
+	// Plan slot: task/goal only. With no timed activity, its label leads.
 	const planItem = slots.plan;
 	const planText = planItem?.label ?? "";
 	const planColor: ThemeColor = planItem
@@ -616,11 +655,7 @@ export function renderActivityLaneLine(
 
 	// Right-aligned slots at natural size. Events and concurrency drop before the plan
 	// shrinks below its preferred width; the user-owned queue state remains visible.
-	// The solo tool already names itself in the turn slot; a "1 bash" count would repeat it.
-	let concurrencyPart =
-		!slots.turn && slots.soloTool?.kind === "tool" && !isBackgroundToolActivityItem(slots.soloTool)
-			? ""
-			: renderConcurrency(theme, slots.groups);
+	let concurrencyPart = namesSoloTool ? "" : renderConcurrency(theme, slots.groups);
 	const secondary =
 		slots.queue?.label ??
 		(externalRunning && wait
@@ -628,7 +663,11 @@ export function renderActivityLaneLine(
 			: slots.externalWait !== slots.overlay
 				? slots.externalWait?.label
 				: undefined);
-	const queuePart = secondary ? theme.fg("warning", truncateToWidth(secondary, QUEUE_TEXT_MAX, "…")) : "";
+	const leftBase = visibleWidth(turnPart);
+	const secondaryBudget = Math.max(0, safeWidth - leftBase - SLOT_GAP_WIDTH);
+	const queuePart = secondary
+		? theme.fg("warning", truncateToWidth(secondary, Math.min(secondaryBudget, QUEUE_TEXT_MAX), "…"))
+		: "";
 	let eventPart =
 		slots.event &&
 		!(
@@ -641,9 +680,12 @@ export function renderActivityLaneLine(
 				)}`
 			: "";
 
-	const leftBase = visibleWidth(indent) + (turnPart ? visibleWidth(turnPart) : 0);
-	const planGap = turnPart && planText ? SLOT_GAP_WIDTH : 0;
 	const rightPart = (): string => [concurrencyPart, queuePart, eventPart].filter(Boolean).join(gap);
+	if (queuePart) {
+		if (visibleWidth(rightPart()) > secondaryBudget) eventPart = "";
+		if (visibleWidth(rightPart()) > secondaryBudget) concurrencyPart = "";
+	}
+	const planGap = turnPart && planText ? SLOT_GAP_WIDTH : 0;
 	const planBudget = (): number => {
 		let right = visibleWidth(rightPart());
 		if (right > 0) right += SLOT_GAP_WIDTH; // breathing room before the right block
@@ -660,17 +702,17 @@ export function renderActivityLaneLine(
 
 	const renderedRightPart = rightPart();
 
-	let line = indent + turnPart + (turnPart && planPart ? gap : "") + planPart;
+	let line = turnPart + (turnPart && planPart ? gap : "") + planPart;
 	if (renderedRightPart) {
 		const pad = Math.max(SLOT_GAP_WIDTH, safeWidth - visibleWidth(line) - visibleWidth(renderedRightPart));
 		line += " ".repeat(pad) + renderedRightPart;
 	}
-	return [truncateToWidth(line, safeWidth, "")];
+	return truncateToWidth(line, safeWidth, "");
 }
 
-export class ActivityLaneComponent implements Component {
+export class ActivityLaneComponent {
 	private readonly theme: Theme;
-	private readonly requestRender: () => void;
+	private readonly requestRender: (kind?: "presentation") => void;
 	private readonly terminalHoldMs: number;
 	private sessionKey: string | undefined;
 	private readonly canonical = new Map<string, ActivityLaneItem>();
@@ -692,7 +734,7 @@ export class ActivityLaneComponent implements Component {
 
 	constructor(
 		theme: Theme,
-		requestRender: () => void,
+		requestRender: (kind?: "presentation") => void,
 		terminalHoldMs = DEFAULT_TERMINAL_HOLD_MS,
 		wallNow: () => number = Date.now,
 		monotonicNow: () => number = wallNow === Date.now ? () => performance.now() : wallNow,
@@ -730,7 +772,13 @@ export class ActivityLaneComponent implements Component {
 		}
 		if (timed && !this.ticker) {
 			this.tickerIntervalMs = intervalMs;
-			this.ticker = setInterval(() => this.requestRender(), intervalMs);
+			let second = Math.floor(this.now() / ELAPSED_TICK_MS);
+			this.ticker = setInterval(() => {
+				// Animation only needs a paint. Refresh the sampled graph and other views at clock cadence.
+				const nextSecond = Math.floor(this.now() / ELAPSED_TICK_MS);
+				this.requestRender(intervalMs === ACTIVITY_FRAME_MS && second === nextSecond ? "presentation" : undefined);
+				second = nextSecond;
+			}, intervalMs);
 			this.ticker.unref?.();
 		} else if (!timed && this.ticker) {
 			clearInterval(this.ticker);
@@ -1004,17 +1052,15 @@ export class ActivityLaneComponent implements Component {
 		this.requestRender();
 	}
 
-	render(width: number): string[] {
-		return renderActivityLaneLine(
+	readStatusRow(indicator?: ActivityIndicator): ActivityStatusRow | undefined {
+		return activityStatusRow(
 			this.theme,
 			this.getItems().filter((item) => this.parentVisible || !isParentRuntimeItem(item)),
-			width,
 			this.now(),
 			!reducedMotionFromEnv(),
+			indicator,
 		);
 	}
-
-	invalidate(): void {}
 
 	dispose(): void {
 		if (this.ticker) clearInterval(this.ticker);

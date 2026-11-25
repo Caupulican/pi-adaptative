@@ -54,7 +54,6 @@ export type WorkbenchPaneTitleAction =
 	| "maximize"
 	| "layout"
 	| "graphCycle"
-	| "hideGraph"
 	| "hideLeftPane"
 	| "followCurrent"
 	| "toggleLeftPaneMode"

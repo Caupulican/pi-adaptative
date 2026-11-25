@@ -8,8 +8,7 @@ const PULSE_FRAMES = ["·", "•", "●", "•"];
 export const ACTIVITY_FRAME_MS = 120;
 
 /**
- * The words for what the harness is doing: one short label per mode. The row says that it is working and for how long; what
- * it is working on is the status bar's business, so the two never repeat each other.
+ * The short labels for the animated subject of the unified status row.
  */
 export function activityStatusPhrase(mode: ActivityStatusMode): string {
 	const activity = interfaceText().frame.activity;

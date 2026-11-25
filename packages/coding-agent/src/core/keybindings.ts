@@ -49,6 +49,8 @@ export interface AppKeybindings {
 	"app.execution.pageUp": true;
 	"app.execution.pageDown": true;
 	"app.graph.toggle": true;
+	"app.graph.narrow": true;
+	"app.graph.widen": true;
 	"app.graph.view": true;
 	"app.graph.follow": true;
 	"app.workbench.layout": true;
@@ -203,6 +205,8 @@ export const KEYBINDINGS = {
 		defaultKeys: "alt+g",
 		description: "Hide or show the left pane (Decision graph or Chats list) beside the conversation",
 	},
+	"app.graph.narrow": { defaultKeys: "alt+,", description: "Make the left pane narrower" },
+	"app.graph.widen": { defaultKeys: "alt+.", description: "Make the left pane wider" },
 	"app.graph.view": {
 		defaultKeys: "alt+l",
 		description: "Cycle the Decision graph view: List, Diagram, Lanes",
