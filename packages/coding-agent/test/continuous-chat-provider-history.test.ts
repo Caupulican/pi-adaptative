@@ -42,6 +42,7 @@ import {
 import type { AgentContext, AgentLoopConfig } from "../src/kernel/loop-config.ts";
 import { advanceMessageContentRevision, immutableHistoryMessage } from "../src/kernel/message-revision.ts";
 import { convertToLlm, createCustomMessage } from "../src/kernel/messages.ts";
+import { estimateProviderRequestTokens } from "../src/kernel/provider-request-estimator.ts";
 import { startPlannedAgentProviderRequestWithId } from "../src/kernel/provider-request-planner.ts";
 import type { SessionEntry } from "../src/kernel/session/session-entries.ts";
 import {
@@ -219,7 +220,8 @@ describe("continuous chat at the native provider boundary", () => {
 			type: "toolCall" as const,
 			name: "bash",
 			id: `tool-${index}`,
-			arguments: {},
+			// The sanitizer removes redundant unsent successes by command, independent of call IDs.
+			arguments: { command: `printf '%s' check-${index}` },
 		}));
 		await f.send(calls);
 		for (const call of calls)
@@ -232,8 +234,10 @@ describe("continuous chat at the native provider boundary", () => {
 				timestamp: 10,
 			});
 		await f.send();
-		const previous = f.wires.at(-1)!.messages;
+		const priorRequest = f.wires.at(-1)!;
+		const previous = priorRequest.messages;
 		expect(previous.length).toBeGreaterThan(128);
+		expect(estimateProviderRequestTokens(priorRequest, model)).toBeGreaterThan(48_000);
 		await f.begin("Continue using that evidence.");
 		await f.send();
 		expect(f.wires.at(-1)!.messages.slice(0, previous.length)).toEqual(previous);
