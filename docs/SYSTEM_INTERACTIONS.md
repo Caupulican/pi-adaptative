@@ -1585,6 +1585,12 @@ first property access and keeps it on the options object for the hook chain. Thi
 source-supported. The release workflow runs the new provider, harness, and TUI regression fixtures
 on the exact tag.
 
+The first `v0.104.79` exact-tag run exposed two fixture assumptions. A projection receipt may
+name its predecessor while certifying zero reusable rows. The revocation and authority-change
+cases now require zero reused rows and check that obsolete content is absent from the wire. The
+late-extension case now uses a fixed Codex API fixture because the model catalog retired the ID
+that the test looked up. The unchanged-header cases still require the full accepted prefix.
+
 [Prompt builder](../packages/coding-agent/src/core/system-prompt-builder.ts) ·
 [Extension runner](../packages/coding-agent/src/core/extensions/runner.ts) ·
 [Provider prompt renderer](../packages/coding-agent/src/core/system-prompt.ts)

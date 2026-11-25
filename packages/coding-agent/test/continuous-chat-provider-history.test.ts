@@ -292,14 +292,15 @@ describe("continuous chat at the native provider boundary", () => {
 			await f.begin("Follow up on that review.");
 			await f.send();
 			const next = f.wires.at(-1)!.messages;
-			if (variant === "revoked between turns") {
-				expect(providerMessagePrefix(next)?.previous).not.toBe(previous);
-				expect(JSON.stringify(next)).not.toContain("Guidance for reviewing plots.");
-				return;
-			}
-			if (variant === "authority changed") {
-				expect(providerMessagePrefix(next)?.previous).not.toBe(previous);
-				expect(JSON.stringify(next)).toContain("Current scope changed");
+			if (variant === "revoked between turns" || variant === "authority changed") {
+				expect(providerMessagePrefix(next)?.count).toBe(0);
+				const wire = JSON.stringify(next);
+				expect(wire).not.toContain("Done.");
+				if (variant === "revoked between turns") expect(wire).not.toContain("Guidance for reviewing plots.");
+				else {
+					expect(wire).toContain("Current scope changed");
+					expect(wire).not.toContain("Current scope original");
+				}
 				return;
 			}
 			expect(providerMessagePrefix(next)?.previous).toBe(previous);

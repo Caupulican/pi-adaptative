@@ -101,9 +101,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Harness journeys
-        run: npm run check:harness-journeys
-
       - name: Provider regressions
         if: inputs.release_verification == true
         run: npm run check:provider-regressions
@@ -119,6 +116,9 @@ jobs:
       - name: Dependency fork installation
         if: inputs.release_verification == true
         run: npm run check:sandbox-fork-install
+
+      - name: Harness journeys
+        run: npm run check:harness-journeys
 
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.

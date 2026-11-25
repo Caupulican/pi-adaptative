@@ -1,4 +1,4 @@
-import type { Context, Message } from "@caupulican/pi-ai";
+import type { Context, Message, Model } from "@caupulican/pi-ai";
 import {
 	acceptsReadOnlyProviderInput,
 	observeHistoryWork,
@@ -16,6 +16,18 @@ import {
 } from "../src/core/secrets/credential-request-projection.ts";
 
 const model = getModel("xai", "grok-4.7-build-fast")!;
+const codexModel: Model<"openai-codex-responses"> = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	id: "fixture-codex",
+	name: "Fixture Codex",
+	baseUrl: "https://unused.invalid",
+	reasoning: false,
+	input: ["text"],
+	contextWindow: 100_000,
+	maxTokens: 1_000,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+};
 const providers = new Set(["xai"]);
 const hide = (s: string) => s.replaceAll("test-secret", "[masked]");
 function project() {
@@ -178,7 +190,7 @@ it("reuses the exact credential scope after an interleaved tool request and drop
 	expect(after("fixture-session")).toBe("fixture-session");
 });
 
-it.each([model, getModel("openai-codex", "gpt-5.4")!])(
+it.each([model, codexModel])(
 	"gives a late extension a mutable private payload and redacts its changes on $api",
 	async (requestModel) => {
 		const projection = new CredentialRequestProjection();
