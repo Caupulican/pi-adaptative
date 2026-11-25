@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Azure OpenAI Responses no longer sends a prompt cache affinity key when `cacheRetention` is `none`. The provider can still apply its own automatic caching.
+
 ## [0.105.0] - 2026-11-25
 
 ## [0.104.79] - 2026-11-25

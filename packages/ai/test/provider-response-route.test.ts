@@ -2,6 +2,7 @@ import { devNull } from "node:os";
 import { Readable } from "node:stream";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { afterEach, expect, it, vi } from "vitest";
+import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.ts";
 import { registerBuiltInApiProviders } from "../src/providers/register-builtins.ts";
 import {
 	getProviderResponseAccount,
@@ -79,6 +80,40 @@ it.each([
 		expect(JSON.stringify(response)).not.toContain("malformed-fixture-secret");
 		expect(getProviderResponseAccount(response)).toBeUndefined();
 	}
+});
+
+it.each(["short", "none"] as const)("honors Azure cache retention %s", async (cacheRetention) => {
+	const azureBaseUrl = "https://offline.invalid/openai/v1";
+	const model: Model<"azure-openai-responses"> = {
+		id: "fixture-model",
+		name: "Fixture",
+		api: "azure-openai-responses",
+		provider: "azure-openai-responses",
+		baseUrl: azureBaseUrl,
+		reasoning: false,
+		input: ["text"],
+		contextWindow: 16384,
+		maxTokens: 512,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	};
+	const payloads: unknown[] = [];
+	vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+		payloads.push(await new Request(input, init).json());
+		return Response.json({ error: { message: "offline fixture" } }, { status: 400 });
+	});
+	const context = { messages: [{ role: "user" as const, content: "Fixture", timestamp: 1 }] };
+	await streamAzureOpenAIResponses(model, context, {
+		apiKey: "fixture",
+		azureBaseUrl,
+		azureApiVersion: "v1",
+		azureDeploymentName: model.id,
+		cacheRetention,
+		sessionId: "fixture-session",
+	}).result();
+
+	expect(payloads).toHaveLength(1);
+	if (cacheRetention === "short") expect(payloads[0]).toHaveProperty("prompt_cache_key", "fixture-session");
+	else expect(payloads[0]).not.toHaveProperty("prompt_cache_key");
 });
 
 it.each(["<authenticated>", "configured-but-unused"])(

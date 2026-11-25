@@ -138,7 +138,7 @@ function buildParams(
 		instructions: buildResponsesInstructions(context),
 		input: messages,
 		stream: true,
-		prompt_cache_key: clampOpenAIPromptCacheKey(options?.sessionId),
+		prompt_cache_key: options?.cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
 	};
 
 	if (options?.maxTokens) {
