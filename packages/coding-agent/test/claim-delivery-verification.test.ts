@@ -103,9 +103,18 @@ it("warns on missing check evidence without a paid consultation or correction tu
 	const warn = vi.fn();
 	const settle = vi.fn();
 	const checker = new AnswerClaimChecker({ getController: () => undefined, warn, settle });
-	const answers = { states_checks_pass: { kind: "choice", choice: "current_success", confidence: 0.99 } };
+	const answers = {
+		states_checks_pass: {
+			type: "choice",
+			choice: "current_success",
+			confidence: 0.99,
+			probabilities: { current_success: 0.99, historical_only: 0.005, no_current_success: 0.005 },
+		},
+	};
 	const empty = collectClaimReceipts([]);
-	await expect(checker.resolve(judgeClaims(answers, empty), "The checks pass.", [])).resolves.toBeUndefined();
+	const findings = judgeClaims(answers, empty);
+	expect(findings).toMatchObject([{ kind: "checks_pass", verdict: "unsupported" }]);
+	await expect(checker.resolve(findings, "The checks pass.", [])).resolves.toBeUndefined();
 	expect(settle).not.toHaveBeenCalled();
 	expect(warn).toHaveBeenCalledOnce();
 	const failed = { ...empty, checks: { passed: 0, failed: 1, lastPassed: false } };
