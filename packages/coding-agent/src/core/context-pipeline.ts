@@ -33,7 +33,7 @@ import {
 } from "../kernel/compaction/compaction.ts";
 import { TokenBudget } from "../kernel/compaction/token-budget.ts";
 import { harnessLog } from "../kernel/harness-log.ts";
-import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
+import type { AgentContextPlan } from "../kernel/index.ts";
 import { messageContentRevision } from "../kernel/message-revision.ts";
 import { PrefixFold } from "../kernel/prefix-fold.ts";
 import type { CompactionEntry } from "../kernel/session/session-entries.ts";
@@ -110,6 +110,7 @@ import {
 	type ContextGcResult,
 	type SentPrefixRewriteBatch,
 } from "./context-gc.ts";
+import type { ParentExecutionPolicy } from "./delegation/parent-execution-context.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -547,16 +548,7 @@ export class ContextPipeline {
 	 * mechanics every agent needs, none of the head-only steps. Each worker keeps its own context-policy lane.
 	 */
 	planWorkerRequest(
-		input: {
-			agentId: string;
-			model: Model<Api>;
-			compactionTriggerTokens: number | undefined;
-			messages: AgentMessage[];
-			sentPrefixCount: number;
-			toolNames: readonly string[];
-			signal?: AbortSignal;
-			wire?: AgentContextWire;
-		},
+		input: Parameters<NonNullable<ParentExecutionPolicy["planWorkerRequest"]>>[0],
 		getEdgeGrants: () => readonly EdgeGrantView[],
 	): Promise<AgentContextPlan> {
 		const { agentId, model, compactionTriggerTokens, messages, sentPrefixCount, toolNames, signal, wire } = input;
@@ -592,6 +584,7 @@ export class ContextPipeline {
 			applyContextGc: (history, writePayloads, frozenBelow) =>
 				this.applyContextGc(history, writePayloads, frozenBelow, lane),
 			applyPathAliases: (history) => this.applyPathAliases(history),
+			skillDiscovery: input.skillDiscovery,
 			getEdgeGrants,
 		}).plan(messages, sentPrefixCount, signal, wire, lane.custody.lane);
 	}

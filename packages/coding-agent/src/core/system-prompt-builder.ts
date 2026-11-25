@@ -411,8 +411,9 @@ export class SystemPromptBuilder {
 			MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS[modelCapability.class],
 		);
 
-		const loaderSystemPrompt = this.deps.getResourceLoader().getSystemPrompt();
-		const loaderAppendSystemPrompt = this.deps.getResourceLoader().getAppendSystemPrompt();
+		const resourceLoader = this.deps.getResourceLoader();
+		const loaderSystemPrompt = resourceLoader.getSystemPrompt();
+		const loaderAppendSystemPrompt = resourceLoader.getAppendSystemPrompt();
 		const activeExtensions = this.deps.getActiveExtensions();
 		const appendSystemPromptParts = [
 			// R6: situational soul — the active profile's identity prefix, switched atomically with the
@@ -424,7 +425,7 @@ export class SystemPromptBuilder {
 			this._buildModelAdaptationPrompt(),
 			this._buildToolSelectionHintPrompt(validToolNames),
 		].filter((part): part is string => Boolean(part));
-		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
+		const loadedContextFiles = resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._promptDate ??= promptDate(this._promptNow());
 		const writeSource = {
@@ -434,12 +435,20 @@ export class SystemPromptBuilder {
 		// Where a bot writes its instruction files: the place the delegation gate counts as its own (`instructionFilePlaces`).
 		const configDir = join(this.deps.getCwd(), CONFIG_DIR_NAME);
 		const instructionPlaces = instructionFilePlaces(writeSource, configDir);
+		let readExtensionSkills = false;
+		let extensionSkills: BuildSystemPromptOptions["skills"];
 		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),
 			contextFiles: loadedContextFiles,
-			// Metadata remains available to extension hooks, but buildSystemPrompt never renders it.
-			skills: [...this.deps.getResourceLoader().getActiveSkills()],
+			get skills() {
+				if (!readExtensionSkills) this.skills = [...resourceLoader.getActiveSkills()];
+				return extensionSkills;
+			},
+			set skills(value) {
+				readExtensionSkills = true;
+				extensionSkills = value;
+			},
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt:
 				[...appendSystemPromptParts, ...(loaderAppendSystemPrompt ?? [])].join("\n\n") || undefined,

@@ -28,6 +28,8 @@ cancellations were distinguished from harness defects.
 | Shared thing | Owner | Participants and signal | Required invariant |
 | --- | --- | --- | --- |
 | Current request-only knowledge and wire position | Kernel request materializer; knowledge owners supply a current projection | Root memory controller and worker knowledge broker supply `HOST_REQUEST_ONLY_DETAILS`; provider planner converts, measures and dispatches the same sequence | Unchanged knowledge stays in place as history grows; correction/forgetting/withholding takes effect immediately; projected values never become durable history or compaction input |
+| Discovered skill headers | Conversation-local skill discovery admits the selected header; the provider context planner owns its wire record | Resource profile and exclusion checks gate candidates and recheck results; System One ranks eligible compact headers; worker brokers supply their own selection to worker request planning | Search reveals at most one header and consumes no body slot. The eight reusable record identities keep compaction carry bounded. A resource change or session switch invalidates stale selection. |
+| Prompt construction options | The system prompt builder owns the generated prompt and the options exposed to host extension hooks | The renderer reads instructions and tools. A `before_agent_start` handler can read the active skill metadata through its options | The generated prompt omits the catalog. A host hook that reads skill metadata receives the profile-admitted snapshot |
 | Summary response accounting and subsequent dispatch | Completion usage owns receipts; shared summary spend owns persistent admission; adapter coordinates physical settlement | Physical response settlement updates the exact durable token; runtime reads `dispatchHold`; physical admission checks spend under the same lock | Each identity has one physical request; unknown/unretained usage holds new work across restarts; old completions cannot clear newer failures; validated physical cost counts once |
 | Worker writable scopes and execution workspace | Reservation owner defines applicability and confinement; shared worker admission applies them before creation | Execution-plan admission, worker creation and reservation persistence consume the same scope rule | A forbidden scope requiring reservation is refused before worker creation; the existing machine-authority exemption remains; diagnostics retain the actionable reason |
 | Settled writes from a Python tool bridge | The bridge records completed typed edits and writes | Python's structured result or failure receipt carries the evidence to foreground claim delivery and worker mutation tracking | Child receipts describe file changes independently of the parent status. Bounded failure receipts disclose omitted paths. Raw script output cannot establish a host receipt. |
@@ -1509,6 +1511,84 @@ its identity metadata before interactive login reports completion.
 | Manual validation + credential persistence | The Command Code account client alone owns `GET /alpha/whoami`. The OAuth coordinator maps a valid key into the shared credential envelope; AuthStorage rechecks cancellation and performs the one durable write before its login promise completes. | HTTP 401 returns to manual entry as an invalid key. Other non-success responses and network/parse failures retain the native retry categories. Native persistence failure returns to manual entry; Pi intentionally refuses the login because its provider-neutral AuthStorage owner cannot advertise an uncommitted credential. | Source-supported by native manual validation/config builders and Pi's account/AuthStorage owners; regressions maintained, not executed locally. |
 | Reviewed bundle + environment scope | The exact installed 1.93.2 bundle digest owns the admitted production sign-in behavior and `x-command-code-version`. | A different bundle does not inherit the review. Native local/staging studio branches are deliberately not selected independently because Pi's Command Code inference adapter is production-scoped; live login, account and inference acceptance remain unverified. | BinaryAnalysis intake plus original-bundle byte-span hashes; target not executed. |
 
+### Pi long-session RAM interaction audit, 2026-11-24
+
+Observable invariant: after an ICM turn, rendered transcript row or worker transcript has no active
+consumer, its exact durable payload may remain on disk but must not remain strongly rooted by the
+process. A consumer that is still active must keep one shared canonical core, and active streaming,
+tool execution and transcript commits must still fence their respective teardown.
+
+| Shared thing or action pair | Authority and ordering | Failure/race handling | Evidence |
+| --- | --- | --- | --- |
+| Settled ICM turn + foreground session history | Foreground cleanup reaches one post-run boundary after the provider, tool-message flush and queued extension commands settle. `SessionManager` owns the hot/cold transition and advances one monotonic entry cursor, replacing each newly settled nonempty `content`/`output` property with an exact JSONL-backed getter. | An unflushed prefix stays hot and is reconsidered later. Uncertain persistence or a missing canonical record produces an operator warning without converting a successful answer into a failed submission. Navigation resets the scan cursor; getters retain message identity and replay the exact stored property. | Source-supported; short-payload and monotonic-cursor regression maintained, not executed locally. |
+| ICM provider projection + after-run compaction | ICM continues to send only the running turn and skips a threshold summary that no later request would use. The new payload lifecycle releases the settled canonical bytes instead of relying on that skipped compaction to make old history cold. | Overflow/provider recovery and within-turn compaction keep their existing owners. Non-ICM sessions retain their normal compaction policy. Session entry metadata remains append-only; this repair bounds retained payload bytes, not the number of durable entry descriptors. | Source-supported by the projection, compaction and session owners; runtime heap attribution remains unmeasured. |
+| Worker conversation reuse + garbage collection | `WorkerConversationStore` indexes each cache record through `WeakRef`. Every active execution, inspection or reconciliation view holds the cache record strongly and therefore reuses the same core. When the last view disappears, the JSONL transcript is the only durable owner and collection may reclaim the parsed `SessionManager`; a finalizer removes the dead path key. | A second live view receives the same core. `clearCache` still refuses while that core has an active transcript cursor. Cold reopen revalidates raw file and metadata revisions before constructing a new core, so collection grants no authority and cannot bypass append/claim fencing. | Source-supported; shared-core and active-cursor regression maintained, not executed locally. |
+| Worker project admission + materialized agent | A claimed project conversation is consumed directly and never copied into the lane-id allocation map. A fresh allocation remains there only until its durable agent and claim are materialized; successful materialization deletes the transient selection. | Setup failure retains an allocated selection so cancellation can settle it. Published claims keep only the claim identity needed by the release owner; they do not keep the admission conversation alive. | Source-supported by project preparation, materialization and release owners; no runtime heap trial executed. |
+| Root TUI rows + canonical session messages | Initial/rebuild rendering selects at most 1,000 estimated lines from the tail without reading the omitted cold prefix. Live root chat trims settled components from 260 down toward 220 while protecting streaming replies, sequential status and active tool transcripts. Withdrawable user-echo references remain until withdrawal or exact durable-session identity proves delivery; history reload never registers them. | Listener delivery precedes persistence, so reconciliation runs afterward and retains a buffered/failed route's withdrawal handle. The notice discloses omitted history, and the full canonical JSONL remains available outside the rendered window. If protected live components alone exceed the target, they remain until their active operation settles; the next trim can release them. | Source-supported; reload-tail, echo-lifecycle and live-component regressions maintained, not executed locally. |
+| QA report + source attribution | The current Pi Trello board was read through the same Bitwarden-backed integration used by GrimDex. Its newest QA card has no recoverable description, comments, attachments, checklist or custom-field evidence, and board search contains no RAM-specific report. Source inspection independently confirms the retention paths above. | The empty card does not prove no report was ever authored, and source reachability does not prove any candidate caused the observed QA process growth. Runtime attribution requires a controlled long-session witness. | Trello observation plus source-supported candidates; no live heap trial executed. |
+
+**Witness and control.** Before the repair, repeat short ICM turns: provider requests project only
+the current turn, after-run compaction is skipped, and the append-only session arrays retain every
+small payload because compaction coldification starts at 16 KiB. In the worker control, open many
+distinct transcripts and release their normal work: the store's strong map keeps every parsed core
+until controller shutdown. The negative controls are a non-ICM session, which retains its existing
+compaction lifecycle, and two simultaneous views of one worker transcript, which must still share
+one core and reject cache clearing during an active commit.
+
+**Escape gaps.** Prepared coverage checks ordinary short payloads, exact lazy rehydration,
+incremental suffix release, weak cache shape, live-core reuse, commit fencing, cold-prefix avoidance
+and live-row trimming. It has not been executed locally under the repository's on-demand test policy.
+No heap snapshot, soak trial or QA reproduction was run, so the repair is **Guarded by source and
+prepared regression**, not runtime reproduced. Session entry descriptors, active content, bounded
+derived TUI state and provider/runtime allocations remain live; this does not claim constant process
+memory or prove the QA incident's attribution.
+
+[Session hot/cold owner](../packages/coding-agent/src/kernel/session/session-manager.ts) ·
+[Foreground handoff](../packages/coding-agent/src/core/agent-session.ts) ·
+[Worker cache owner](../packages/coding-agent/src/core/delegation/worker-conversation-store.ts) ·
+[TUI retention owner](../packages/coding-agent/src/modes/interactive/live-transcript-retention.ts) ·
+[Payload regression](../packages/coding-agent/test/context-gc-policy-snapshot.test.ts) ·
+[Worker cache regression](../packages/coding-agent/test/worker-conversation-cache-retention.test.ts) ·
+[TUI regression](../packages/coding-agent/test/tui-transcript-retention.test.ts)
+
+### Workbench responsiveness and reading position
+
+| Shared thing | Witness and control | Workbench rule |
+| --- | --- | --- |
+| Render demand and session views | Typing a character called Decision graph, POV and roster builders even when only the editor changed. A worker update changes session facts and should refresh those views. | Application render requests advance the TUI request revision. The Workbench samples graph, status and roster outside paint. Local navigation, typing, autocomplete and graph animation request presentation paint. The viewport reuses its visible rows by content revision and dimensions. Execution layouts hold the hit targets for their own width and invalidate on new evidence or a local expansion change. |
+| Reading anchor and root transcript retention | A trim could evict the anchor from a scrolled viewport and return the reader to the tail. When already following, new output should still appear at the tail. | The viewport supplies the root owners of its visible rows and anchor. Workbench eviction cuts at saved user-turn boundaries and hands off a visible prefix by component identity. An unusually long turn can delay that cut. Withdrawal of an anchor selects a surviving neighbor. A chat switch releases selection and cancels pending reads. |
+| Saved history and Workbench paging | Background reconstruction allocated older components before the user requested them. A reload racing a live append could overwrite that append in the viewport. | The pager reads the selected branch with asynchronous, position-based JSONL reads. It holds adjacent rendered segments and prefetches one decoded page near the older edge. Pages retain a shared segment at a scroll boundary, and repeated input queues a bounded residual. Reloads check the live view revision and branch before installation. Oversized records have an inline marker and remain intact in the session file. |
+| Streaming source and Markdown rows | Each reply update re-expanded every path alias, and finishing a stream rewrapped already settled rows. A split alias can become a different path, and a later reference definition can change earlier Markdown. | Text progress coalesces over 32 ms. Alias expansion retains the unfinished token and validates prior source and legend identity before reusing its prefix. Markdown reuses independent settled blocks only when their source and separator still match, including after the final extension transform. At most 16,384 code units of unfinished source reach the live lexer. Longer live content shows a bounded plain-text tail. |
+| Editor text, paste markers and visual rows | Cursor movement and unrelated repaints rebuilt the same wraps; a width or paste-marker identity change can affect the wrap without changing the text. | The editor shares one per-line wrap layout across paint and navigation. Text edits reuse matching logical lines, width changes recompute layout, and paint materializes only visible rows. |
+| Terminal frame and cursor position | Two changed rows with stable text between them caused the entire span to be sent. A viewport shift or image placement needs the existing ordered paint. | Equal-length text updates inside the current viewport can move over stable gaps when the cursor sequence is cheaper. Scrolling, image placements, and resize keep their existing paths. |
+| Tool progress and execution lifecycle | Several partial results in one frame formatted the same tool repeatedly. A final result or session replacement can arrive while a partial result is pending. | The interactive event controller retains the latest partial display state per active component for one update interval. Final results take its latest arguments, and clearing active calls cancels the queue. |
+| Conversation row cache and viewport identity | A small scroll through a large assistant reply formatted and normalized the whole message as terminal rows. An extension may supply only the full-render interface. | Owned text and assistant components expose indexed rows from one canonical layout. The viewport frames, normalizes and clips its visible rows. Full-render extension rows keep bounded cache admission. Action membership invalidates the transcript snapshot and content edits invalidate only the associated rows. |
+| Path completion and input | Completion listed directories and checked symlinks on the input event loop. A stale result can arrive after the draft changes. | The provider reads directories and symlink metadata asynchronously, with one directory stream and serial metadata checks per request. The editor allows one replacement while a cancelled request settles and queues only the latest request if both slots are occupied. Cancellation and the draft snapshot govern publication. |
+| Transcript append and input | Slow session storage kept input queued during settled-message commits. A later branch change or append can otherwise run against an earlier unpublished leaf. | The Linux Workbench awaits a worker that runs the existing file admission, lock, write, and readback transaction. One ordered operation prepares against the current leaf and publishes canonical IDs and observers after the receipt. Competing synchronous commits join before preparation, and claimed worker sessions keep their local lock scope. An unknown write outcome fences the session. |
+
+Source review and static checks cover the ownership paths. Live paint latency, scroll behavior,
+and streaming appearance remain unverified. A synchronous mutation can still join a background
+append for up to two seconds. The control is a mutation with no pending append. A single long
+turn can exceed the 260-component retention target until a subsequent durable user boundary.
+
+[Workbench views](../packages/coding-agent/src/modes/interactive/workbench-view-projection.ts) ·
+[Conversation viewport](../packages/coding-agent/src/modes/interactive/components/conversation-window.ts) ·
+[Streaming Markdown](../packages/tui/src/components/streaming-markdown.ts)
+
+### Release audit of skill metadata and prompt hooks
+
+Removing the skill catalog from prompt generation also removed `systemPromptOptions.skills` from
+the host-side `before_agent_start` event. A handler reading the field would receive `undefined`.
+The control is prompt generation without a hook reading the field. The renderer already omits
+skill entries from its output. The builder now resolves the profile-admitted skill snapshot on
+first property access and keeps it on the options object for the hook chain. This correction is
+source-supported. The release workflow runs the new provider, harness, and TUI regression fixtures
+on the exact tag.
+
+[Prompt builder](../packages/coding-agent/src/core/system-prompt-builder.ts) ·
+[Extension runner](../packages/coding-agent/src/core/extensions/runner.ts) ·
+[Provider prompt renderer](../packages/coding-agent/src/core/system-prompt.ts)
+
 ## Product rating, 2026-11-20
 
 The last assessment of the published v0.104.72 release was **8/10 overall**. The working-tree assessment below uses the installed upgrade, independently graded coding trials and composed journeys. The target requires at least 9 in every area and evidence that the same release can complete work across those boundaries.
@@ -1876,3 +1956,34 @@ The integrated working-tree assessment is **8/10, provisional**. Each rating ide
 | Memory, learning and proactive work | 8 | A retained owner rule reached the transferred worker and both live foreground providers. A reopened run corrected a controlled omission with one tool-free turn. The host withholds certification on a failed read with an outstanding proof, and rechecks late confirmations inside the SQLite checkpoint. A subject cited only from an earlier input can no longer excuse an omission after the owner steers during the request. A fabricated citation can leave a correct answer unverified. A hidden confirmed rule now keeps completion unverified. A reviewer can still omit a component or cite the subject as proof of a missing label, even when that label is a separate confirmed rule. |
 | Bots, schedules, phone control and paired machines | 8 | Simulated Telegram delivered same-turn corrections and distinguished queued, running and finished scheduled follow-ups. An acknowledged phone request now sends its final answer to the original chat once it settles. A follow-up owner message sent while the worker runs joins the waiting request. The turns behind a late answer are charged to the owner pool. Physical device delivery remains unverified. |
 | Workbench, extensibility and distribution | 9 on the exercised Linux upgrade | The installed candidate preserved pending work and a working extension. The nine installed extension and provider checks covered explicit selection and exclusions. |
+
+### On-demand skill discovery and provider context
+
+A search that completes after a catalog refresh, exclusion, or session switch must not publish a
+stale header. The skill discovery owner rechecks eligibility and the conversation generation
+after semantic ranking. The provider planner checks the selected projection again before
+acceptance. Repeating an unchanged search retains the original record slot. A newly selected
+header can replace one slot, and a worker's search cannot modify the parent selection. A separate
+body load is the control that changes the loaded-skill slots.
+
+The conversation's semantic ranker shares in-flight work only for the same evidence and accounting
+origin. Cancelling one caller leaves other callers attached. The last cancellation aborts the
+request. A deadline or provider failure permits local search during a short cooldown. Only decisive
+results are memoized, and the discovery owner rechecks catalog and provider identity before
+publishing them. The cache and cooldown use bounded, process-local state.
+
+The loader caches parsed frontmatter only after file admission, and an unchanged version can reuse
+it on later refreshes. Discovery holds compiled metadata for one eligible catalog and reuses the
+most recent lexical ranking while the query and work-path membership stay the same. A semantic
+miss can refresh and rerank a changed catalog within the original deadline. The vault shares its
+immutable request projection and cached records, with live file checks before preparation,
+acceptance, and physical dispatch.
+
+Continuous chat can move a disclosed header into the fresh frame at the next turn. When the
+accepted provider prefix already carries the same validated header, the continuation keeps it in
+its original wire position. Changed authority or a skill header that was revoked between
+requests still requires a fresh frame. The owner compares canonical slot digests and checks
+that each relied-on record was materialized on the wire.
+
+Source and static verification only. Runtime composition and provider cache behavior have not
+been measured.

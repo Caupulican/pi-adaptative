@@ -169,14 +169,13 @@ function estimateTokens(value: unknown): number | undefined {
 }
 
 function estimateContentTokens(content: readonly unknown[]): number | undefined {
-	const text = content
-		.map((block) => {
-			if (!block || typeof block !== "object") return "";
-			const candidate = block as { type?: unknown; text?: unknown };
-			return candidate.type === "text" && typeof candidate.text === "string" ? candidate.text : "";
-		})
-		.join("\n");
-	return estimateTokens(text);
+	let length = Math.max(0, content.length - 1);
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const candidate = block as { type?: unknown; text?: unknown };
+		if (candidate.type === "text" && typeof candidate.text === "string") length += candidate.text.length;
+	}
+	return length === 0 ? undefined : Math.ceil(length / 4);
 }
 
 function modelToolKey(modelRef: string, intentClass: ToolSelectionIntentClass, tool: string): ToolPerformanceKey {
@@ -211,7 +210,7 @@ function candidateFor(
 		riskCost: tool.riskCost,
 		contextCost: tool.contextCost,
 		deterministicMatch: tool.name === actualTool && tool.pathValidated !== false,
-		automaticEligible: tool.pathValidated !== false,
+		automaticEligible: tool.name === actualTool && tool.pathValidated !== false,
 	};
 }
 
@@ -285,6 +284,7 @@ export class ToolSelectionController {
 
 	/** Capture the materialized request, before transport, without retaining its prompt or messages. */
 	observeProviderRequest(requestId: string, modelRef: string, systemPrompt: string): void {
+		if (!this.observeEnabled) return;
 		this.requestHints = {
 			requestId,
 			modelRef,
@@ -297,7 +297,8 @@ export class ToolSelectionController {
 		toolName: string,
 		args: unknown,
 		source: { modelRef: string; requestId?: string },
-	): ToolSelectionPendingObservation {
+	): ToolSelectionPendingObservation | undefined {
+		if (!this.observeEnabled) return undefined;
 		const selectionStartedAt = performance.now();
 		const { modelRef, requestId } = source;
 		const activeTools = this.getAllowedTools();
@@ -310,12 +311,7 @@ export class ToolSelectionController {
 		const statsByTool = new Map(intentStats.map((stats) => [stats.tool, stats]));
 		const recoveryBoost = this.recoveryBoost;
 		const candidates = activeTools.map((tool) => {
-			const candidate = candidateFor(
-				intentClass,
-				tool.name === toolName ? tool : { ...tool, pathValidated: false },
-				toolName,
-				statsByTool.get(tool.name),
-			);
+			const candidate = candidateFor(intentClass, tool, toolName, statsByTool.get(tool.name));
 			return recoveryBoost.has(tool.name) ? { ...candidate, value: Math.min(1, candidate.value + 0.3) } : candidate;
 		});
 		this.recoveryBoost.clear();

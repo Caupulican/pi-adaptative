@@ -19,6 +19,7 @@ import { applyContextGc } from "../src/core/context-gc.ts";
 import { ownerSessionStorageRoots } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { createVersionedMessageHistory, immutableHistoryMessage } from "../src/kernel/message-revision.ts";
 import { SessionManager } from "../src/kernel/session/session-manager.ts";
+import { SettledSessionPayloadReleaser } from "../src/kernel/session/session-payload-retention.ts";
 
 function record(
 	messageIndex: number,
@@ -190,4 +191,82 @@ it("keeps a disk-backed tool result unchanged across acceptance and the next fro
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+it("releases every settled persisted payload once, including ordinary short chat turns", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-settled-payloads-"));
+	try {
+		const session = SessionManager.create(dir, ownerSessionStorageRoots(dir));
+		const first = session.appendMessage({ role: "user", content: "first short turn", timestamp: 1 });
+		const second = session.appendMessage({
+			role: "assistant",
+			api: "test",
+			content: [{ type: "text", text: "second short turn" }],
+			provider: "test",
+			model: "test",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.flushBufferedEntries();
+		session.releasePersistedMessagePayload(first);
+		const hotFirst = session.getEntry(first);
+		expect(hotFirst?.type).toBe("message");
+		if (hotFirst?.type !== "message") throw new Error("Expected persisted message");
+		expect(Object.getOwnPropertyDescriptor(hotFirst.message, "content")?.get).toBeUndefined();
+
+		expect(session.releaseSettledMessagePayloads()).toBe(2);
+		const firstMessage = session.getEntry(first);
+		const secondMessage = session.getEntry(second);
+		expect(firstMessage?.type).toBe("message");
+		expect(secondMessage?.type).toBe("message");
+		if (firstMessage?.type !== "message" || secondMessage?.type !== "message") {
+			throw new Error("Expected persisted messages");
+		}
+		const firstContent = firstMessage.message as unknown as { content: unknown };
+		const secondContent = secondMessage.message as unknown as { content: unknown };
+		expect(Object.getOwnPropertyDescriptor(firstContent, "content")?.get).toBeTypeOf("function");
+		expect(Object.getOwnPropertyDescriptor(secondContent, "content")?.get).toBeTypeOf("function");
+		expect(firstContent.content).toBe("first short turn");
+		expect(secondContent.content).toEqual([{ type: "text", text: "second short turn" }]);
+		expect(session.releaseSettledMessagePayloads()).toBe(0);
+
+		const third = session.appendMessage({ role: "user", content: "third short turn", timestamp: 3 });
+		expect(session.releaseSettledMessagePayloads()).toBe(1);
+		const thirdMessage = session.getEntry(third);
+		expect(thirdMessage?.type).toBe("message");
+		if (thirdMessage?.type !== "message") throw new Error("Expected persisted message");
+		const thirdContent = thirdMessage.message as unknown as { content: unknown };
+		expect(Object.getOwnPropertyDescriptor(thirdContent, "content")?.get).toBeTypeOf("function");
+		expect(thirdContent.content).toBe("third short turn");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+it("retries the same settled payload after its cold-storage handoff fails", () => {
+	const attempts: string[] = [];
+	let fail = true;
+	const releaser = new SettledSessionPayloadReleaser({
+		entryCount: () => 1,
+		isDurable: () => true,
+		persistenceStateUncertain: () => false,
+		messageEntryIdAt: () => "entry-1",
+		release: (entryId) => {
+			attempts.push(entryId);
+			if (fail) throw new Error("cold storage unavailable");
+		},
+	});
+
+	expect(() => releaser.release()).toThrow("cold storage unavailable");
+	fail = false;
+	expect(releaser.release()).toBe(1);
+	expect(attempts).toEqual(["entry-1", "entry-1"]);
 });

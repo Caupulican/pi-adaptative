@@ -49,20 +49,6 @@ export class ActionTranscriptComponent implements Component {
 		bumpActionTranscriptEpoch();
 	}
 
-	/** Hands one admitted action to another segment, so a partition boundary never splits a turn. */
-	removeAction(action: ToolExecutionComponent): void {
-		const index = this.actions.indexOf(action);
-		if (index === -1) return;
-		this.actions.splice(index, 1);
-		const conversation = action.getConversationComponent();
-		if (conversation) {
-			const conversationIndex = this.conversation.indexOf(conversation);
-			if (conversationIndex !== -1) this.conversation.splice(conversationIndex, 1);
-		}
-		this.revision++;
-		bumpActionTranscriptEpoch();
-	}
-
 	actionComponents(): readonly ToolExecutionComponent[] {
 		return this.actions;
 	}
@@ -84,26 +70,22 @@ export class ActionTranscriptComponent implements Component {
 			this.transcriptExpanded = expanded;
 			for (const action of this.actions) action.setExpanded(expanded);
 			this.revision++;
-			bumpActionTranscriptEpoch();
 		}
 	}
 
 	setShowImages(show: boolean): void {
 		for (const action of this.actions) action.setShowImages(show);
 		this.revision++;
-		bumpActionTranscriptEpoch();
 	}
 
 	setImageWidthCells(width: number): void {
 		for (const action of this.actions) action.setImageWidthCells(width);
 		this.revision++;
-		bumpActionTranscriptEpoch();
 	}
 
 	invalidate(): void {
 		for (const action of this.actions) action.invalidate();
 		this.revision++;
-		bumpActionTranscriptEpoch();
 	}
 
 	render(width: number): string[] {

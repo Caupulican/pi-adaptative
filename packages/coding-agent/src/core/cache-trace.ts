@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { appendFileSync } from "node:fs";
 import {
 	type Api,
 	type Context,
@@ -9,6 +8,7 @@ import {
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
 import { historyWorkFallback, providerMessagePrefix } from "@caupulican/pi-ai/history-work";
+import { isImmutableHistoryMessage } from "../kernel/message-revision.ts";
 import {
 	type ContinuousChatCacheComparison,
 	type ContinuousChatCacheFingerprint,
@@ -16,6 +16,7 @@ import {
 	compareContinuousChatCache,
 	fingerprintContinuousChatCache,
 } from "./memory/continuous-chat-cache.ts";
+import { appendBoundedJsonLine } from "./util/bounded-jsonl.ts";
 
 /**
  * Prompt-prefix stability. A provider caches the longest byte-identical prefix of a request, so a
@@ -35,13 +36,20 @@ import {
  * cache custody guard classifies each one as a priced (sanctioned) rewrite or an unsanctioned break
  * and records it in the decision ledger; a second opinion here only flagged priced rewrites.
  *
- * `PI_CACHE_TRACE=<file>` additionally appends one JSON line per request with a hash and size per
- * segment, in wire order. No prompt text is written.
+ * `PI_CACHE_TRACE=<file>` collects recent request fingerprints with a hash and size per segment, in
+ * wire order. It skips requests while a previous write is pending. No prompt text is written.
  */
 
 /** Warnings reported per conversation before further changes are only counted. */
 const MAX_REPORTS_PER_CONVERSATION = 5;
 const MAX_TRACKED_CONVERSATIONS = 32;
+const CACHE_TRACE_LIMITS = {
+	maxBytes: 8 * 1024 * 1024,
+	targetBytes: 4 * 1024 * 1024,
+	maxRecords: 2048,
+	fileMode: 0o600,
+	lockRetries: 0,
+};
 
 type SegmentFingerprint = [label: string, hash: string, chars: number];
 
@@ -55,11 +63,9 @@ interface RequestFingerprint {
 	system: SegmentFingerprint;
 	/** The system prompt text, kept only to show where it changed; never written to the trace file. */
 	systemText: string;
-	/** The ICM chat view the request carries, kept only to compare it across turns; never written to the trace file. */
-	viewText: string | undefined;
-	/** Text blocks through the last explicit cache marker; their boundaries are part of the prefix. */
-	viewCacheBlocks: readonly string[] | undefined;
-	viewCache: ContinuousChatCacheFingerprint | undefined;
+	/** The ICM view and its immutable source, kept for comparison and never written to the trace. */
+	view: ChatView | undefined;
+	viewSource: WeakRef<Message> | undefined;
 	tools: SegmentFingerprint[];
 	/**
 	 * The deferred tools a harness-disclosed request's search tool lists, kept only to recognize activation; never
@@ -81,6 +87,8 @@ const CHAT_VIEW_TAIL_FRACTION = 0.1;
 const viewPositions = new WeakMap<readonly Message[], number>();
 function chatViewIndex(messages: readonly Message[]): number {
 	const proof = providerMessagePrefix(messages);
+	const known = proof && viewPositions.get(messages);
+	if (known !== undefined) return known;
 	const prior = proof?.previous ? viewPositions.get(proof.previous) : undefined;
 	let index = prior !== undefined && prior >= 0 && prior < proof!.count ? prior : -1;
 	if (index < 0) {
@@ -100,10 +108,15 @@ function chatViewIndex(messages: readonly Message[]): number {
 	return index;
 }
 
+interface ChatView {
+	text: string;
+	/** Text blocks through the last explicit cache marker. */
+	cacheBlocks?: readonly string[];
+	cache?: ContinuousChatCacheFingerprint;
+}
+
 /** The text of the ICM chat view when the request's view is that user message; undefined otherwise. */
-function chatView(
-	first: Message | undefined,
-): { text: string; cacheBlocks?: readonly string[]; cache?: ContinuousChatCacheFingerprint } | undefined {
+function chatView(first: Message | undefined): ChatView | undefined {
 	if (first?.role !== "user" || typeof first.content === "string") return undefined;
 	const text = first.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 	if (!text.startsWith(CHAT_VIEW_OPENING)) return undefined;
@@ -155,17 +168,24 @@ function segmentLabel(messages: readonly Message[], viewIndex: number, index: nu
 	return `turn:${index - viewIndex - 2}:${role}`;
 }
 
-function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
+function fingerprintRequest(
+	model: Model<Api>,
+	context: Context,
+	previous: RequestFingerprint | undefined,
+	system: LineageSystem | undefined,
+): RequestFingerprint {
 	if (process.env.PI_CACHE_TRACE) historyWorkFallback(context.messages, "full-cache-trace-requested");
 	const viewIndex = chatViewIndex(context.messages);
-	const view = chatView(context.messages[viewIndex]);
+	const source = context.messages[viewIndex];
+	const immutable = source && isImmutableHistoryMessage(source);
+	const reused = immutable && previous?.viewSource?.deref() === source ? previous : undefined;
+	const systemText = context.systemPrompt ?? "";
 	return {
 		model: `${model.provider}/${model.id}`,
-		system: segment("system", context.systemPrompt ?? ""),
-		systemText: context.systemPrompt ?? "",
-		viewText: view?.text,
-		viewCacheBlocks: view?.cacheBlocks,
-		viewCache: view?.cache,
+		system: system?.systemText === systemText ? system.system : segment("system", systemText),
+		systemText,
+		view: reused ? reused.view : chatView(source),
+		viewSource: reused?.viewSource ?? (immutable ? new WeakRef(source) : undefined),
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		harnessDeferred: harnessDeferredCatalog(context),
 		messages: !process.env.PI_CACHE_TRACE
@@ -211,12 +231,15 @@ function prefixChange(
 	const deferred = current.harnessDeferred ?? previous.harnessDeferred;
 	const previousTools = deferred ? previous.tools.filter(([name]) => !deferred.has(name)) : previous.tools;
 	const currentTools = deferred ? current.tools.filter(([name]) => !deferred.has(name)) : current.tools;
-	const previousNames = previousTools.map(([name]) => name);
-	const currentNames = currentTools.map(([name]) => name);
-	const added = currentNames.filter((name) => !previousNames.includes(name));
-	const removed = previousNames.filter((name) => !currentNames.includes(name));
-	if (added.length > 0 || removed.length > 0) {
-		return `tool set changed (${[...added.map((name) => `+${name}`), ...removed.map((name) => `-${name}`)].join(", ")})`;
+	if (
+		previousTools.length !== currentTools.length ||
+		previousTools.some(([name], i) => name !== currentTools[i]?.[0])
+	) {
+		const previousNames = new Set(previousTools.map(([name]) => name));
+		const currentNames = new Set(currentTools.map(([name]) => name));
+		const added = currentTools.filter(([name]) => !previousNames.has(name)).map(([name]) => `+${name}`);
+		const removed = previousTools.filter(([name]) => !currentNames.has(name)).map(([name]) => `-${name}`);
+		if (added.length > 0 || removed.length > 0) return `tool set changed (${[...added, ...removed].join(", ")})`;
 	}
 	for (let index = 0; index < previousTools.length; index++) {
 		const before = previousTools[index];
@@ -227,21 +250,22 @@ function prefixChange(
 	}
 	if (viewChange?.warning) return viewChange.warning;
 	if (viewChange?.rewrite) return undefined;
+	const beforeView = previous.view;
+	const afterView = current.view;
+	if (beforeView === afterView || !beforeView || !afterView) return undefined;
 	// A shorter causal view can reuse the overlapping marked blocks. Pending lines after the marker
 	// were never declared stable; replacing them does not rewrite that prefix.
-	if (previous.viewCacheBlocks && current.viewCacheBlocks) {
-		const count = Math.min(previous.viewCacheBlocks.length, current.viewCacheBlocks.length);
+	if (beforeView.cacheBlocks && afterView.cacheBlocks) {
+		const count = Math.min(beforeView.cacheBlocks.length, afterView.cacheBlocks.length);
 		for (let index = 0; index < count; index++) {
-			const before = previous.viewCacheBlocks[index]!;
-			const after = current.viewCacheBlocks[index]!;
+			const before = beforeView.cacheBlocks[index]!;
+			const after = afterView.cacheBlocks[index]!;
 			if (before !== after) return `chat view cache block ${index + 1} changed ${describeTextChange(before, after)}`;
 		}
 		return undefined;
 	}
 	// Requests without an explicit marker retain the heuristic for implicit prefix caching.
-	return previous.viewText !== undefined && current.viewText !== undefined
-		? chatViewChange(previous.viewText, current.viewText)
-		: undefined;
+	return beforeView.text === afterView.text ? undefined : chatViewChange(beforeView.text, afterView.text);
 }
 
 type LineageSystem = Pick<RequestFingerprint, "model" | "system" | "systemText">;
@@ -264,6 +288,7 @@ export class PromptPrefixMonitor {
 	/** Per conversation, the system prompt each lineage last sent: each variant of a session's prompt is its own prefix. */
 	private readonly lineageSystems = new Map<string, Map<string, LineageSystem>>();
 	private readonly reports = new Map<string, number>();
+	private traceWriting = false;
 
 	/**
 	 * Fingerprint a request, optionally trace it, and describe how it broke its conversation's previous request's
@@ -274,15 +299,18 @@ export class PromptPrefixMonitor {
 		const { sessionId, conversationId } = request;
 		const lineage = request.lineage ?? "";
 		const key = conversationId === undefined ? (sessionId ?? "") : `${sessionId ?? ""}\u0000${conversationId}`;
-		const current = fingerprintRequest(model, context);
 		const previous = this.previous.get(key);
 		const systems = this.lineageSystems.get(key) ?? new Map<string, LineageSystem>();
 		const system = systems.get(lineage);
+		const current = fingerprintRequest(model, context, previous, system);
 		systems.set(lineage, { model: current.model, system: current.system, systemText: current.systemText });
 		this.lineageSystems.set(key, systems);
 		const viewChange =
-			previous?.viewCache && current.viewCache && previous.model === current.model
-				? compareContinuousChatCache(previous.viewCache, current.viewCache)
+			previous?.view?.cache &&
+			current.view?.cache &&
+			previous.view !== current.view &&
+			previous.model === current.model
+				? compareContinuousChatCache(previous.view.cache, current.view.cache)
 				: undefined;
 		this.writeTrace(sessionId, conversationId, current, viewChange?.rewrite);
 		this.previous.delete(key);
@@ -312,18 +340,29 @@ export class PromptPrefixMonitor {
 		viewRewrite: ContinuousChatCacheRewrite | undefined,
 	): void {
 		const path = process.env.PI_CACHE_TRACE;
-		if (!path) return;
+		if (!path || this.traceWriting) return;
 		const {
 			systemText: _systemText,
-			viewText: _viewText,
-			viewCacheBlocks: _viewCacheBlocks,
-			viewCache: _viewCache,
+			view: _view,
+			viewSource: _viewSource,
 			harnessDeferred: _harnessDeferred,
 			...traced
 		} = fingerprint;
-		appendFileSync(
+		this.traceWriting = true;
+		void appendBoundedJsonLine(
 			path,
-			`${JSON.stringify({ at: new Date().toISOString(), session: sessionId, ...(conversationId ? { conversation: conversationId } : {}), ...traced, ...(viewRewrite ? { viewRewrite } : {}) })}\n`,
-		);
+			{
+				at: new Date().toISOString(),
+				session: sessionId,
+				...(conversationId ? { conversation: conversationId } : {}),
+				...traced,
+				...(viewRewrite ? { viewRewrite } : {}),
+			},
+			CACHE_TRACE_LIMITS,
+		)
+			.catch(() => undefined)
+			.finally(() => {
+				this.traceWriting = false;
+			});
 	}
 }

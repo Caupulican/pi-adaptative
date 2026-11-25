@@ -82,6 +82,22 @@ export interface SessionEntryFileLocation {
 	length: number;
 }
 
+export function readSessionFileRangeSync(file: string, { offset, length }: SessionEntryFileLocation): string {
+	const buffer = Buffer.allocUnsafe(length);
+	const fd = openSync(file, "r");
+	let bytesRead = 0;
+	try {
+		while (bytesRead < buffer.length) {
+			const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, offset + bytesRead);
+			if (count === 0) break;
+			bytesRead += count;
+		}
+	} finally {
+		closeSync(fd);
+	}
+	return buffer.subarray(0, bytesRead).toString("utf8");
+}
+
 export function loadEntriesFromFileInternal(
 	filePath: string,
 	options?: { maxLineChars?: number; requireComplete?: boolean; after?: Stats },

@@ -6,6 +6,7 @@ import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { PrefixFirstMatchByFirstItem } from "../kernel/prefix-fold.ts";
 import { isContextPlanDispatchCurrent } from "../kernel/provider-request-planner.ts";
+import { transientRecordDigest } from "../kernel/transient-record-decision.ts";
 import { recordedTransientKinds, transientRecordMessageOf } from "../kernel/transient-records.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import {
@@ -44,7 +45,13 @@ import {
 	type ReturnBriefPlan,
 } from "./owner-decisions/return-brief.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
-import type { SkillPromptSection, SkillVaultController } from "./skill-vault.ts";
+import { EMPTY_SKILL_PROMPT_SECTIONS, type SkillDiscovery, type SkillPromptSection } from "./skill-header-discovery.ts";
+import {
+	clearedDiscoveredSkillText,
+	DISCOVERED_SKILL_RECORD_KIND,
+	DISCOVERED_SKILL_RECORD_KIND_PREFIX,
+} from "./skill-header-record.ts";
+import type { SkillVaultController } from "./skill-vault.ts";
 import {
 	TASK_DIRECTORY_CONTEXT_CLEARED,
 	TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
@@ -101,10 +108,8 @@ export interface ProviderRequestContextControllerDeps {
 	getRoutedGoalContext?(): RoutedGoalContext | undefined;
 	/** Why automatic continuation is stopped for a lasting reason, in one sentence for the model; undefined while it is not. */
 	getGoalAutoContinueNote?(): string | undefined;
-	skillVault?: Pick<
-		SkillVaultController,
-		"previewSkillSections" | "getContextRevision" | "previewExclusionReminder" | "commitSkillSections"
-	>;
+	skillVault?: Pick<SkillVaultController, "captureRequestContext" | "acceptRequestContext">;
+	skillDiscovery?: Pick<SkillDiscovery, "previewSkillHeaders" | "restoreSkillHeaders">;
 	/**
 	 * Edge authority grants the run in progress may use (`effectiveEdgeGrants`: the session's on the owner's own runs and
 	 * outside a run and on a full-authority phone run, fewer on a fenced or guarded phone run); projected after compaction or whenever active.
@@ -147,6 +152,7 @@ function deterministicTransientTimestamp(content: string): string {
  * skill's identity and its kind never changes for a loaded skill, so a change re-sends only that skill's record.
  */
 export const ACTIVE_SKILL_RECORD_KIND_PREFIX = "active_skill_context:";
+export { DISCOVERED_SKILL_RECORD_KIND_PREFIX } from "./skill-header-record.ts";
 /** The combined kind the skill context used before it split per skill. Nothing produces it now; a session holding it gets one cleared record. */
 export const ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE = "active_skill_context";
 /** Kind of the session-wide exclusion reminder, which rides beside the per-skill records. */
@@ -154,10 +160,6 @@ export const ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE = "active_skill_exclusions";
 /** Typed identity a per-skill record carries in `details.record`: the record kind and the skill name. */
 const ACTIVE_SKILL_RECORD_KIND = "active_skill";
 const ACTIVE_SKILL_RECORD_VERSION = 1;
-
-function activeSkillRecordKind(name: string): string {
-	return `${ACTIVE_SKILL_RECORD_KIND_PREFIX}${name}`;
-}
 
 function activeSkillClearedText(name: string): string {
 	return `ACTIVE SKILL "${name}": no longer active. Every record of this skill above is stale; load the skill again before relying on it.`;
@@ -180,36 +182,48 @@ function clearedRecordNeeded(
 	return last !== undefined && last.content !== clearedText;
 }
 
-/**
- * The skill records a request offers, appended once per change by `reconcileTransientRecords`: one record per active skill (its
- * section), a cleared record for each skill on record that is no longer active, the exclusion reminder, and one cleared record
- * for the retired combined kind where a session holds it. An unchanged skill offers the same content, so it is not re-sent.
- * `recorded` is the last record of each kind on the request's records (its history and carried head), so a request reads the
- * skill records it needs in place of rescanning the history and re-deciding every skill ever loaded.
- */
-function skillTransientMessages(
+const skillSectionMessages = new WeakMap<SkillPromptSection, Extract<AgentMessage, { role: "custom" }>>();
+
+function skillSectionMessage(entry: SkillPromptSection, customType: string, kind: string): AgentMessage {
+	const cached = skillSectionMessages.get(entry);
+	if (cached?.customType === customType) return cached;
+	const message = createCustomMessage(
+		customType,
+		entry.section,
+		false,
+		{
+			record: {
+				v: ACTIVE_SKILL_RECORD_VERSION,
+				k: kind,
+				name: entry.name,
+				...(entry.discovery ? { sourceId: entry.discovery.sourceId, order: entry.discovery.order } : {}),
+			},
+			digest: entry.discovery?.digest ?? transientRecordDigest(entry.section),
+		},
+		deterministicTransientTimestamp(entry.section),
+	);
+	skillSectionMessages.set(entry, message);
+	return message;
+}
+
+function skillSectionRecords(
 	sections: readonly SkillPromptSection[],
 	recorded: ReturnType<typeof recordedTransientKinds>,
-	exclusionReminder: string | undefined,
+	prefix: string,
+	kind: string,
+	clearedText: (name: string) => string,
 ): AgentMessage[] {
-	const active = new Set(sections.map((entry) => entry.name));
-	const messages: AgentMessage[] = sections.map((entry) =>
-		createCustomMessage(
-			activeSkillRecordKind(entry.name),
-			entry.section,
-			false,
-			{ record: { v: ACTIVE_SKILL_RECORD_VERSION, k: ACTIVE_SKILL_RECORD_KIND, name: entry.name } },
-			deterministicTransientTimestamp(entry.section),
-		),
-	);
-	for (const kind of recorded.keys()) {
-		if (!kind.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX)) continue;
-		const name = kind.slice(ACTIVE_SKILL_RECORD_KIND_PREFIX.length);
-		const cleared = activeSkillClearedText(name);
-		if (active.has(name) || !clearedRecordNeeded(recorded, kind, cleared)) continue;
+	const active = new Set(sections.map((entry) => entry.recordId ?? entry.name));
+	const messages = sections.map((entry) => skillSectionMessage(entry, prefix + (entry.recordId ?? entry.name), kind));
+	for (const type of recorded.keys()) {
+		if (!type.startsWith(prefix)) continue;
+		const name = type.slice(prefix.length);
+		if (active.has(name)) continue;
+		const cleared = clearedText(name);
+		if (!clearedRecordNeeded(recorded, type, cleared)) continue;
 		messages.push(
 			createCustomMessage(
-				kind,
+				type,
 				cleared,
 				false,
 				HOST_TRANSIENT_CLEARED_DETAILS,
@@ -217,6 +231,22 @@ function skillTransientMessages(
 			),
 		);
 	}
+	return messages;
+}
+
+function skillTransientMessages(
+	sections: readonly SkillPromptSection[],
+	recorded: ReturnType<typeof recordedTransientKinds>,
+	exclusionReminder: string | undefined,
+): AgentMessage[] {
+	const messages = skillSectionRecords(
+		sections,
+		recorded,
+		ACTIVE_SKILL_RECORD_KIND_PREFIX,
+		ACTIVE_SKILL_RECORD_KIND,
+		activeSkillClearedText,
+	);
+
 	if (clearedRecordNeeded(recorded, ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE, ACTIVE_SKILL_LEGACY_CLEARED_TEXT)) {
 		messages.push(
 			createCustomMessage(
@@ -252,14 +282,6 @@ function skillTransientMessages(
 		);
 	}
 	return messages;
-}
-
-/** Whether two skill section lists are the same skills with the same sections, in the same order. */
-function sameSkillSections(left: readonly SkillPromptSection[], right: readonly SkillPromptSection[]): boolean {
-	return (
-		left.length === right.length &&
-		left.every((entry, index) => entry.name === right[index]?.name && entry.section === right[index]?.section)
-	);
 }
 
 /** Durable record kind carrying the session authority and active edge grants projection. */
@@ -388,6 +410,7 @@ function resolveAuthorityContext(
 export function isCarriedRecordKind(kind: string): boolean {
 	return (
 		kind.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX) ||
+		kind.startsWith(DISCOVERED_SKILL_RECORD_KIND_PREFIX) ||
 		kind === AUTHORITY_CONTEXT_CUSTOM_TYPE ||
 		kind === TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE
 	);
@@ -493,6 +516,7 @@ export class ProviderRequestContextController {
 		const requestRecords: readonly AgentMessage[] =
 			carriedSubset.length === 0 ? messages : [...carriedSubset, ...messages];
 		const recorded = recordedTransientKinds(requestRecords);
+		this.deps.skillDiscovery?.restoreSkillHeaders((slot) => recorded.get(DISCOVERED_SKILL_RECORD_KIND_PREFIX + slot));
 		// The view's facts come from one pass over the view, run by the first question that reaches the view and reused for the
 		// rest of this plan. A plan that asks neither question (a granted authority, no directory to judge) runs no pass.
 		let viewScan: RequestViewScan | undefined;
@@ -637,10 +661,26 @@ export class ProviderRequestContextController {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const skillVault = this.deps.skillVault;
-		const skillSections = skillVault?.previewSkillSections() ?? [];
-		const skillRevision = skillVault?.getContextRevision() ?? 0;
-		const exclusionReminder = skillVault?.previewExclusionReminder?.();
-		const skillRecords = skillVault ? skillTransientMessages(skillSections, recorded, exclusionReminder) : [];
+		const skillContext = skillVault?.captureRequestContext();
+		const skillRecords = skillContext
+			? skillTransientMessages(skillContext.sections, recorded, skillContext.exclusionReminder)
+			: [];
+		const workerDiscovery = this.deps.skillDiscovery;
+		const skillHeaders =
+			workerDiscovery?.previewSkillHeaders() ?? skillContext?.headers ?? EMPTY_SKILL_PROMPT_SECTIONS;
+		const skillContextCurrent = (checkFiles: boolean) =>
+			skillVault?.captureRequestContext(checkFiles) === skillContext &&
+			(!workerDiscovery || workerDiscovery.previewSkillHeaders() === skillHeaders);
+		const headerRecords =
+			skillContext || workerDiscovery
+				? skillSectionRecords(
+						skillHeaders,
+						recorded,
+						DISCOVERED_SKILL_RECORD_KIND_PREFIX,
+						DISCOVERED_SKILL_RECORD_KIND,
+						clearedDiscoveredSkillText,
+					)
+				: [];
 
 		// The history is a separate array from the view only when it is not the view itself; a view that is the history was scanned above.
 		const authorityContext = resolveAuthorityContext(
@@ -652,7 +692,7 @@ export class ProviderRequestContextController {
 		);
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
-		const beforeLegend = [...withAuthority, ...skillRecords];
+		const beforeLegend = [...withAuthority, ...headerRecords, ...skillRecords];
 		// A carried frame's legend is made on the turn's first request, while its wire carries none yet; later requests read the
 		// one the head carries. `carry` marks a projection that places the records of a carried head ahead of its frame.
 		const frameLegend =
@@ -680,7 +720,6 @@ export class ProviderRequestContextController {
 			directoryPlan?.isCurrent() !== false &&
 			automationPlan?.isCurrent() !== false &&
 			(returnBriefPlan?.content === undefined || returnBriefPlan.isCurrent()) &&
-			(skillVault?.getContextRevision() ?? 0) === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState?.() === goalState &&
 			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
@@ -700,12 +739,7 @@ export class ProviderRequestContextController {
 		// and the curator digests the GC pass looked up -- which `previewGc.isCurrent()` re-resolves.
 		// Re-projecting the whole request per stage, and deep-comparing every message to prove the
 		// re-projection matched, cost three full passes over the history on every request.
-		const planCurrent = () =>
-			dependenciesCurrent() &&
-			previewGc.isCurrent() &&
-			previewEnforcement.isCurrent() &&
-			(skillVault === undefined || sameSkillSections(skillVault.previewSkillSections(), skillSections)) &&
-			skillVault?.previewExclusionReminder?.() === exclusionReminder;
+		const planCurrent = () => dependenciesCurrent() && previewGc.isCurrent() && previewEnforcement.isCurrent();
 
 		const history = composeProviderHistory(previewGc, previewEnforcement);
 		let committed = false;
@@ -726,11 +760,12 @@ export class ProviderRequestContextController {
 			transientMessages,
 			verifyPathAliases: pathAliasPlan.verifyPathAliases,
 			...(carriedRecords === undefined ? {} : { carriedRecords }),
-			isCurrent: dependenciesCurrent,
+			isCurrent: () => dependenciesCurrent() && skillContextCurrent(false),
 			isDispatchCurrent: () =>
 				previewEnforcement.isDispatchCurrent?.() !== false &&
+				skillContextCurrent(true) &&
 				(memoryPlan === undefined || isContextPlanDispatchCurrent(memoryPlan)),
-			prepareCommit: () => planCurrent(),
+			prepareCommit: () => planCurrent() && skillContextCurrent(true),
 			commit: () => {
 				if (!planCurrent()) {
 					throw new Error("Committed provider request context diverged from its accepted plan");
@@ -739,8 +774,9 @@ export class ProviderRequestContextController {
 				if (shadowReport) this.deps.correlatePromptPolicyWithContextGc?.(previewGc.report, shadowReport);
 				if (shadowReport) this.deps.enqueueRelevanceCuration?.(extensionMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration?.();
-				if (skillVault && !sameSkillSections(skillVault.commitSkillSections(), skillSections)) {
-					throw new Error("Committed active skill context diverged from its accepted plan");
+				if (skillContext) skillVault?.acceptRequestContext(skillContext);
+				if (workerDiscovery && workerDiscovery.previewSkillHeaders() !== skillHeaders) {
+					throw new Error("Committed skill headers diverged from their accepted plan");
 				}
 				reflectionCuePlan?.commit();
 				// Published only now: a discarded plan leaves memory diagnostics and recall accounting untouched.

@@ -451,6 +451,8 @@ Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
 PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx packages/tui/test/chat-simple.ts
 ```
 
+Captures are opt-in and buffered. A capture stops at 8 MiB. When the path is an existing directory, Pi writes a uniquely named capture and keeps up to four recent captures. See [diagnostic log retention](settings.md#logging).
+
 ## Performance
 
 Cache rendered output when possible:

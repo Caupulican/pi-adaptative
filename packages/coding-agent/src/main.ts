@@ -50,6 +50,7 @@ import { dropSessionSecretsFromProcess } from "./core/harness-environment.ts";
 import { configureHttpDispatcher, disposeHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { bindInterfaceLanguage } from "./core/language/language-binding.ts";
+import { configureTuiDiagnosticWorkDir } from "./core/log/debug-work-run.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
 import {
 	resolveCliModel,
@@ -106,7 +107,7 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { normalizePath, resolveCliPaths, resolvePath } from "./utils/paths.ts";
-import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
+import { getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
 export interface MainModelSource {
@@ -646,9 +647,7 @@ export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
 	const workAgentDir = getAgentDir();
 	process.env[PI_WORK_ROOT_ENV] = getWorkRoot(workAgentDir);
-	if (process.env.PI_TUI_DEBUG === "1") {
-		process.env.PI_TUI_WORK_DIR = getProcessWorkRun(workAgentDir, "debug", "tui").path;
-	}
+	configureTuiDiagnosticWorkDir(workAgentDir);
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";

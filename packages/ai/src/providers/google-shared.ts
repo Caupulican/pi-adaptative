@@ -217,6 +217,11 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 /**
  * Convert internal messages to Gemini Content[] format.
  */
+function normalizeToolCallId(id: string, model: { id: string }): string {
+	if (!requiresToolCallId(model.id)) return id;
+	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
 export function convertMessages<T extends GoogleApiType>(
 	model: Model<T>,
 	context: Context,
@@ -226,11 +231,6 @@ export function convertMessages<T extends GoogleApiType>(
 	// AGY sends JSON directly. SDK transports own the encoding of their bytes fields.
 	const agyRequiresFirstCallSignature =
 		model.api === "google-antigravity" && (getGeminiMajorVersion(model.id) ?? 0) >= 3;
-	const normalizeToolCallId = (id: string): string => {
-		if (!requiresToolCallId(model.id)) return id;
-		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-	};
-
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	let pendingToolResultImageParts: Part[] = [];
 	const flushPendingToolResultImages = (): void => {

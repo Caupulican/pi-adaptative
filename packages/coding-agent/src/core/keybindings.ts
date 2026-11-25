@@ -138,7 +138,7 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
-	"app.history.load": { defaultKeys: "ctrl+shift+h", description: "Load deferred session history" },
+	"app.history.load": { defaultKeys: "ctrl+shift+h", description: "Read earlier session history" },
 	"app.tools.background": { defaultKeys: "ctrl+b", description: "Move active tool calls to background" },
 	"app.agents.open": { defaultKeys: "ctrl+q", description: "Toggle goal, plan, and agent details" },
 	"app.agents.close": { defaultKeys: "escape", description: "Close work details" },

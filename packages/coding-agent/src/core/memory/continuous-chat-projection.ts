@@ -415,6 +415,8 @@ export function createContinuousChatPlanWrapper(
 				request.sourceMessage,
 				{
 					headMessages: head.wire.length,
+					head: head.records,
+					turnMessages: plan.messages,
 					legend: frameLegend,
 					bodyAliases: (handoff) => {
 						if (!handoff) return replayableBodyAliases(plan.messages, false);

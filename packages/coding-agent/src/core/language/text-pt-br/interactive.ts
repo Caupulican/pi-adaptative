@@ -97,6 +97,8 @@ export const INTERACTIVE = {
 		`Histórico antigo da TUI oculto para manter o FPS (${components} componentes). A sessão completa continua disponível para o modelo.`,
 	historyWindow: (lines: number, omitted: number) =>
 		`Mostrando as últimas ~${lines} linhas do histórico da TUI; ${omitted} ${omitted === 1 ? "mensagem anterior omitida" : "mensagens anteriores omitidas"}. A sessão completa continua disponível para o modelo.`,
+	historyRecordOversized: "Entrada longa no histórico. O conteúdo completo continua na sessão salva.",
+	historyToolResultUnavailable: "O resultado da ferramenta não está disponível nesta página.",
 	imagesBlocked:
 		"O modelo selecionado não aceita imagem como entrada. Troque para um modelo que aceite imagem ou mande esta inspeção para um worker de visão.",
 

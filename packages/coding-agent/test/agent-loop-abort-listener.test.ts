@@ -7,9 +7,11 @@ import {
 	type Model,
 } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { Agent } from "../src/kernel/agent.ts";
 import { type AgentEventSink, runAgentLoop, runAgentLoopContinue } from "../src/kernel/agent-loop.ts";
 import type { AgentContext, AgentLoopConfig, StreamFn } from "../src/kernel/loop-config.ts";
 import { convertToLlm } from "../src/kernel/messages.ts";
+import type { AgentEvent } from "../src/kernel/types.ts";
 
 const model: Model<Api> = {
 	id: "abort-listener-fixture",
@@ -99,4 +101,28 @@ describe("agent-loop outer abort listener lifetime", () => {
 		);
 		expect(getEventListeners(signal, "abort")).toEqual(before);
 	});
+});
+
+it("keeps awaited listener changes out of the current event dispatch", async () => {
+	const agent = new Agent({ initialState: { model }, streamFn: responseStream });
+	const delivered: string[] = [];
+	const options = { publishesMessageEdits: true } as const;
+	const late = (event: AgentEvent) => {
+		if (event.type === "message_start") delivered.push(`late:${event.message.role}`);
+	};
+	let remove = () => {};
+	agent.subscribe(async (event) => {
+		if (event.type !== "message_start") return;
+		delivered.push(`first:${event.message.role}`);
+		if (event.message.role !== "user") return;
+		await Promise.resolve();
+		remove();
+		agent.subscribe(late, options);
+		agent.subscribe(late, options);
+	}, options);
+	remove = agent.subscribe((event) => {
+		if (event.type === "message_start") delivered.push(`original:${event.message.role}`);
+	}, options);
+	await agent.prompt(prompt);
+	expect(delivered).toEqual(["first:user", "original:user", "first:assistant", "late:assistant"]);
 });

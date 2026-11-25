@@ -1,9 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { observeHistoryWork, registerProviderMessagePrefix } from "../src/history-work.ts";
 import { streamAnthropic, streamSimpleAnthropic } from "../src/providers/anthropic.ts";
 import { registerBuiltInApiProviders } from "../src/providers/register-builtins.ts";
 import { getProviderResponseAccount, ProviderResponseAccountScope, stream } from "../src/stream.ts";
-import type { Model } from "../src/types.ts";
+import type { Message, Model, ToolCall } from "../src/types.ts";
+import { createEmptyUsage } from "../src/usage.ts";
 
 const model: Model<"anthropic-messages"> = {
 	id: "local-stream",
@@ -102,6 +104,62 @@ describe("Anthropic wire stream", () => {
 			}
 		},
 	);
+
+	it("reuses history while resolving provisional tool output and preserving historical names", async () => {
+		const bodies: { messages: { content: unknown }[] }[] = [];
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+			bodies.push(await new Request(input, init).json());
+			return new Response(frame(start) + frame({ type: "message_stop" }), {
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const options = { apiKey: "local-key", cacheRetention: "short" } as const;
+		const tool = (id: string, name: string): ToolCall => ({ type: "toolCall", id, name, arguments: {} });
+		const assistant = (content: ToolCall[]): Message => ({
+			role: "assistant",
+			model: model.id,
+			api: model.api,
+			provider: model.provider,
+			timestamp: 2,
+			stopReason: "toolUse",
+			usage: createEmptyUsage(),
+			content,
+		});
+		const result = (call: ToolCall): Message => ({
+			role: "toolResult",
+			toolName: call.name,
+			toolCallId: call.id,
+			isError: false,
+			timestamp: 3,
+			content: [{ type: "text", text: call.id }],
+		});
+		const first = tool("first", "a.b");
+		const second = tool("second", "a/b");
+		const third = tool("third", second.name);
+		const prior: Message[] = [
+			{ role: "user", timestamp: 1, content: [{ type: "text", text: "Boundary", cacheBoundary: true }] },
+			assistant([first, second]),
+			result(first),
+		];
+		const next = [...prior, result(second), assistant([third]), result(third)];
+		Object.freeze(prior);
+		Object.freeze(next);
+		registerProviderMessagePrefix(prior, undefined, 0);
+		registerProviderMessagePrefix(next, prior, prior.length);
+		const work = observeHistoryWork(next);
+
+		for (const messages of [prior, next, [...next]]) {
+			expect((await streamAnthropic(model, { messages }, options).result()).stopReason).toBe("stop");
+		}
+		expect(bodies[1]).toEqual(bodies[2]);
+		expect(bodies[1]?.messages[1]?.content).toMatchObject([{ name: "a_b" }, { name: "a_b_2" }]);
+		expect(bodies[1]?.messages[2]?.content).toMatchObject([
+			{ tool_use_id: first.id, content: first.id },
+			{ tool_use_id: second.id, content: second.id },
+		]);
+		expect(bodies[1]?.messages[3]?.content).toMatchObject([{ name: "a_b_2" }]);
+		expect(work.wireRowsConverted).toBeLessThan(next.length);
+	});
 
 	it("publishes seeded content and replaces the signature", async () => {
 		const events = [

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- Reuse settled Markdown blocks, visible terminal rows, and editor wraps across redraws. Skip unchanged rows when a cursor move costs less than repainting them.
+- Complete paths asynchronously and buffer opt-in terminal diagnostics within fixed file limits.
+
 ## [0.104.78] - 2026-11-23
 
 ## [0.104.77] - 2026-11-23

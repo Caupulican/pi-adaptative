@@ -14,7 +14,13 @@ import type {
 	ResponseReasoningItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
-import { countHistoryWork, freezeOwnedJson, historyWorkFallback, providerMessagePrefix } from "../history-work.ts";
+import {
+	countHistoryWork,
+	freezeOwnedJson,
+	historyWorkFallback,
+	providerMessagePrefix,
+	recordProviderInput,
+} from "../history-work.ts";
 import { modelImageProjection } from "../image-support.ts";
 import { calculateCost } from "../models.ts";
 import {
@@ -43,14 +49,14 @@ import type {
 import { parseProviderReportedCost } from "../usage.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { parseStreamingJson, settleToolArguments, stageToolArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type IndexedToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import {
 	beginResponsesFork,
 	findResponsesPredecessor,
 	type ResponsesFrame,
-	recordResponsesInput,
+	ResponsesSearchCalls,
 	rememberResponsesInput,
 	withoutForeignThinking,
 } from "./openai-responses-history.ts";
@@ -224,9 +230,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
 	const proof =
-		options?.reuseAcceptedPrefix && !options.toolNameMap && model.api === "openai-responses"
-			? providerMessagePrefix(context.messages)
-			: undefined;
+		options?.reuseAcceptedPrefix && !options.toolNameMap ? providerMessagePrefix(context.messages) : undefined;
 	const scope = proof
 		? JSON.stringify([
 				model.provider,
@@ -238,6 +242,7 @@ export function convertResponsesMessages<TApi extends Api>(
 				options?.requestFormat,
 				options?.includeMessageType,
 				options?.imageDetail,
+				options?.toolSearch?.mode,
 				allowedToolCallProviders.has(model.provider),
 				context.tools?.map((tool) => tool.name),
 			])
@@ -256,8 +261,8 @@ export function convertResponsesMessages<TApi extends Api>(
 					output: [],
 					checkpoints: [],
 					names: proof ? createOpenAIResponsesToolNameMap(context.tools ?? []) : undefined,
+					searches: new ResponsesSearchCalls(!!proof),
 				};
-	const nativeSearchCalls = new Map<string, ToolCall["toolSearch"]>();
 	const imageDetail = options?.imageDetail === undefined ? "auto" : options.imageDetail;
 	const useXaiCliFormat = options?.requestFormat === "xai-cli";
 	const includeMessageType = useXaiCliFormat || options?.includeMessageType === true;
@@ -269,6 +274,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		const checkpoint = frame.checkpoints[from - 1];
 		frame.transform.rewind(checkpoint?.transform ?? 0);
 		frame.names!.rewind(checkpoint?.names ?? context.tools?.length ?? 0);
+		frame.searches.rewind(checkpoint?.search ?? 0);
 		frame.output.length = checkpoint?.output ?? 0;
 		frame.checkpoints.length = from;
 		msgIndex = checkpoint?.messageIndex ?? 0;
@@ -407,14 +413,14 @@ export function convertResponsesMessages<TApi extends Api>(
 							(toolCall.toolSearch ||
 								(options?.toolSearch?.mode === "native" && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
 						) {
-							nativeSearchCalls.set(callId, toolCall.toolSearch);
+							frame.searches.remember(callId, toolCall.toolSearch);
 							output.push({
 								type: "tool_search_call",
 								...(toolCall.toolSearch?.id ? { id: toolCall.toolSearch.id } : {}),
 								call_id: callId,
 								execution: "client",
 								status: "completed",
-								arguments: toolCall.arguments,
+								arguments: proof ? structuredClone(toolCall.arguments) : toolCall.arguments,
 							});
 							continue;
 						}
@@ -439,9 +445,9 @@ export function convertResponsesMessages<TApi extends Api>(
 				messages.push(...output);
 			} else if (msg.role === "toolResult") {
 				const [searchCallId] = (msg.toolCallId || "").split("|");
-				if (nativeSearchCalls.has(searchCallId)) {
+				if (frame.searches.entries.has(searchCallId)) {
 					// Old transcripts lack a captured result. Never reconstruct their past from today's registry.
-					const captured = msg.toolSearch ?? nativeSearchCalls.get(searchCallId);
+					const captured = msg.toolSearch ?? frame.searches.entries.get(searchCallId);
 					messages.push({
 						type: "tool_search_output",
 						call_id: searchCallId,
@@ -508,6 +514,7 @@ export function convertResponsesMessages<TApi extends Api>(
 				messageIndex: msgIndex,
 				transform: frame.transform.checkpoint,
 				names: frame.names!.checkpoint,
+				search: frame.searches.checkpoint,
 			});
 	}
 	// An open tool group is provisional. Its synthetic results are emitted but never stored in the prefix.
@@ -525,7 +532,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		for (let index = frame.output.length; index < result.length; index++) freezeOwnedJson(result[index]);
 		Object.freeze(result);
 		const predecessor = reusable && from ? previous?.emitted.deref() : undefined;
-		recordResponsesInput(result, context.messages, predecessor ? stableOutput : 0, predecessor);
+		recordProviderInput(result, context.messages, predecessor ? stableOutput : 0, predecessor);
 		rememberResponsesInput(frame, context.messages, result);
 	}
 	return result;
@@ -1105,7 +1112,7 @@ export async function processResponsesStream<TApi extends Api>(
 			} else if (event.type === "response.function_call_arguments.delta") {
 				if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
 					currentBlock.partialJson = (currentBlock.partialJson ?? "") + event.delta;
-					currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+					stageToolArguments(currentBlock, currentBlock.partialJson, event.delta);
 					stream.push({
 						type: "toolcall_delta",
 						contentIndex: blockIndex(),
@@ -1118,6 +1125,7 @@ export async function processResponsesStream<TApi extends Api>(
 					const previousPartialJson = currentBlock.partialJson;
 					currentBlock.partialJson = event.arguments;
 					currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+					settleToolArguments(currentBlock);
 
 					if (previousPartialJson !== undefined && event.arguments.startsWith(previousPartialJson)) {
 						const delta = event.arguments.slice(previousPartialJson.length);

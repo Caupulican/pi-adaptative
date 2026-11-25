@@ -20,11 +20,7 @@ import {
 	requestContextForOpening,
 	selectRequestOpening,
 } from "./closing-request.ts";
-import {
-	assistantMessageText,
-	collapseDegenerateAssistantMessage,
-	shouldAbortDegenerateStream,
-} from "./degenerate-assistant-text.ts";
+import { collapseDegenerateAssistantMessage, StreamingDegenerationDetector } from "./degenerate-assistant-text.ts";
 import type {
 	AgentContext,
 	AgentLoopConfig,
@@ -42,7 +38,10 @@ import {
 import { hasRecalledHistoryMarker, RECALLED_HISTORY_DETAIL_KEY } from "./session/message-retention.ts";
 import {
 	canHandOffToolCalls,
+	materializeToolValidationFeedback,
 	prepareToolCallArguments,
+	readToolArgumentValidationError,
+	type ToolArgumentFailure,
 	toolCallForm,
 	toolCallHandoff,
 	validationFailureCorrection,
@@ -958,6 +957,7 @@ async function streamAssistantResponse(
 		let partialMessage: AssistantMessage | null = null;
 		let addedPartial = false;
 		let abortedForDegeneration = false;
+		const degeneration = new StreamingDegenerationDetector();
 		/**
 		 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
 		 * that carries actual generated content (`isFirstTokenEvent`: a non-empty `_delta`, never a
@@ -993,12 +993,7 @@ async function streamAssistantResponse(
 							assistantMessageEvent: event,
 							message: { ...partialMessage },
 						});
-						if (
-							!abortedForDegeneration &&
-							!signal?.aborted &&
-							!partialMessage.content.some((block) => block.type === "toolCall") &&
-							shouldAbortDegenerateStream(assistantMessageText(partialMessage))
-						) {
+						if (!abortedForDegeneration && !signal?.aborted && degeneration.check(partialMessage)) {
 							abortedForDegeneration = true;
 							degenerationAbort.abort();
 						}
@@ -1874,35 +1869,10 @@ function resolveToolConcurrency(config: AgentLoopConfig): number {
 	return DEFAULT_TOOL_CONCURRENCY;
 }
 
-function readToolArgumentValidationError(error: unknown):
-	| {
-			message: string;
-			toolName: string;
-			signature: string;
-			enrichment: string;
-	  }
-	| undefined {
-	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
-	try {
-		if (Reflect.get(error, "name") !== "ToolArgumentValidationError") return undefined;
-		const message = Reflect.get(error, "message");
-		const toolName = Reflect.get(error, "toolName");
-		const signature = Reflect.get(error, "signature");
-		const enrichment = Reflect.get(error, "enrichment");
-		if (typeof message !== "string" || message.length === 0) return undefined;
-		if (typeof toolName !== "string" || typeof signature !== "string" || typeof enrichment !== "string") {
-			return undefined;
-		}
-		return { message, toolName, signature, enrichment };
-	} catch {
-		return undefined;
-	}
-}
-
 function recordValidationBounce(
 	signature: string,
 	toolName: string,
-	enrichment: string,
+	enrichment: ToolArgumentFailure["enrichment"],
 	config: AgentLoopConfig,
 	tracker: ToolValidationFailureTracker,
 ): ValidationFailureHandling {
@@ -1935,21 +1905,29 @@ function recordValidationBounce(
 	});
 	return {
 		message: `Repeated validation failure (${episode.repeats} identical attempts).`,
-		providerFeedback: enrichment,
+		providerFeedback: materializeToolValidationFeedback(enrichment),
 	};
 }
 
 function handleValidationFailure(
-	error: { message: string; toolName: string; signature: string; enrichment: string },
+	error: ToolArgumentFailure,
 	config: AgentLoopConfig,
 	tracker: ToolValidationFailureTracker,
 	parserDiagnostic?: string,
 ): ValidationFailureHandling {
-	const enrichment = parserDiagnostic ? `${parserDiagnostic}\n\n${error.enrichment}` : error.enrichment;
-	const handling = recordValidationBounce(error.signature, error.toolName, enrichment, config, tracker);
+	const handling = recordValidationBounce(
+		error.signature,
+		error.toolName,
+		() => {
+			const enrichment = typeof error.enrichment === "function" ? error.enrichment() : error.enrichment;
+			return parserDiagnostic ? `${parserDiagnostic}\n\n${enrichment}` : enrichment;
+		},
+		config,
+		tracker,
+	);
 	return {
 		message: handling.providerFeedback
-			? `${error.message}\n\n${handling.message} Use this full schema and example before retrying:\n${handling.providerFeedback}`
+			? `${error.message}\n\n${handling.message} Use this schema guidance before retrying:\n${handling.providerFeedback}`
 			: error.message,
 		...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
 	};
@@ -1978,10 +1956,6 @@ function parserDiagnosticFromRawArguments(toolCall: AgentToolCall): string | und
 		`Provider parse diagnostic (${kind}${offset})${context}`,
 		MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
 	);
-}
-
-function providerMalformedCallEnrichment(tool: AgentTool, parserDetail: string): string {
-	return `${parserDetail}\n\n${formatToolValidationEnrichment(tool)}`;
 }
 
 const MAX_UNKNOWN_TOOL_PREVIEW = 8;
@@ -2064,10 +2038,11 @@ async function prepareToolCall(
 			toolCall.errorMessage,
 			MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
 		);
+		const { parameters } = tool;
 		const handling = recordValidationBounce(
 			`malformed_call:${tool.name}:${parserDetail}`,
 			tool.name,
-			providerMalformedCallEnrichment(tool, parserDetail),
+			() => `${parserDetail}\n\n${formatToolValidationEnrichment({ parameters })}`,
 			config,
 			validationFailureTracker,
 		);

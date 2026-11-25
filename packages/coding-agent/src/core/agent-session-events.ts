@@ -65,7 +65,7 @@ export interface AgentSessionEventsPorts {
 	disposed(): boolean;
 	extensionRunner(): ExtensionRunner;
 	isClosingRuntimeWaitOnly(): boolean;
-	getListeners(): AgentSessionEventListener[];
+	getListeners(): readonly AgentSessionEventListener[];
 	holdUnlistenedWarning(message: string): void;
 	emitQueueUpdate(): void;
 	setDeliveryState(state: DeliveryState): void;
@@ -118,11 +118,12 @@ export class AgentSessionEvents {
 			if (event.type === "warning") this.ports.holdUnlistenedWarning(event.message);
 			return;
 		}
-		if (event.type === "warning" && this.ports.getListeners().length === 0) {
+		const listeners = this.ports.getListeners();
+		if (event.type === "warning" && listeners.length === 0) {
 			this.ports.holdUnlistenedWarning(event.message);
 			return;
 		}
-		for (const listener of [...this.ports.getListeners()]) {
+		for (const listener of listeners) {
 			try {
 				// Public listeners are observers. Freeze this emission's generation and invoke it
 				// synchronously to preserve ordering, but contain both synchronous failures and rejected
@@ -183,9 +184,9 @@ export class AgentSessionEvents {
 		if (this.ports.closingConsumerReleased()) return;
 
 		const suppressRetryPromptEvent =
-			this.ports.modelRouter().isRetryInFlight() &&
 			(event.type === "message_start" || event.type === "message_end") &&
-			(event.message.role === "user" || event.message.role === "custom");
+			(event.message.role === "user" || event.message.role === "custom") &&
+			this.ports.modelRouter().isRetryInFlight();
 
 		// This is the authoritative message_start for a user message already painted early (see
 		// _promptUnserialized). Set#delete both tests and consumes membership in one step, so only
@@ -206,7 +207,9 @@ export class AgentSessionEvents {
 			if (this.ports.modelRouter().captureSessionMessage(event.message, event.origin)) {
 				// buffered by the router; persistence is deferred to the routed-turn flush
 			} else if (event.message.role === "custom") {
-				this.ports.foregroundLifecycle().appendCustomMessage(event.message);
+				await this.ports
+					.foregroundLifecycle()
+					.appendMessageBatchAwaitable([{ kind: "custom", message: event.message }]);
 				this.ports.durableCustomMessageTurns().notePersisted(event.message);
 				messagePersisted = true;
 			} else if (
@@ -215,7 +218,9 @@ export class AgentSessionEvents {
 				event.message.role === "toolResult"
 			) {
 				// The append is the Delivered point of an owner input this message carries (the ledger hears it there).
-				this.ports.foregroundLifecycle().appendMessage(event.message, event.origin);
+				await this.ports
+					.foregroundLifecycle()
+					.appendMessageBatchAwaitable([{ kind: "message", message: event.message, origin: event.origin }]);
 				messagePersisted = true;
 			}
 			// Track the response for ordered retry/failover/compaction handling after agent_end.

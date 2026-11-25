@@ -1,12 +1,10 @@
 /**
- * The monotonic revision behind every action-transcript cache key: one counter that moves whenever an
- * admitted tool call's rendered presentation can change, so a viewport can detect change without
- * walking the transcript's children.
+ * The revision of action-transcript membership. Tool content updates are tracked by their own row revisions.
  */
 
 let actionTranscriptEpoch = 0;
 
-/** Called by every mutation that can change what an action transcript renders. */
+/** Called when a transcript admits a new action. */
 export function bumpActionTranscriptEpoch(): void {
 	actionTranscriptEpoch++;
 }

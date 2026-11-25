@@ -8,6 +8,15 @@
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
 import type { AgentMessage } from "./types.ts";
 
+/** Text typed by the sender, without adding separators between text parts or including image payloads. */
+export function getUserMessageText(message: Message): string {
+	if (message.role !== "user") return "";
+	if (typeof message.content === "string") return message.content;
+	let text = "";
+	for (const part of message.content) if (part.type === "text") text += part.text;
+	return text;
+}
+
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
 <summary>

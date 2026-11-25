@@ -1,11 +1,11 @@
 import type * as NodeOs from "node:os";
 import type {
-	NamespaceTool,
 	Tool as OpenAITool,
 	ResponseInput,
 	ResponseInputItem,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
+import { canReuseProviderInput, providerInputPrefix, providerMessagePrefix } from "../history-work.ts";
 
 // NEVER convert to top-level runtime imports - breaks browser/Vite builds
 let _os: typeof NodeOs | null = null;
@@ -56,6 +56,7 @@ import {
 	DEFAULT_OPENAI_CODEX_BASE_URL,
 	requireOpenAICodexAccountId,
 } from "./openai-codex-auth.ts";
+import { groupCodexResponsesLiteTools, withCodexLitePreamble } from "./openai-codex-lite-input.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyOpenAIServiceTierPricing,
@@ -851,10 +852,11 @@ function buildRequestBody(
 	const lite = model.openaiResponsesLite === true;
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
 	const toolSearch = planCodexToolSearch(model, context);
+	const reuse = canReuseProviderInput(context.messages, options?.onPayload);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		imageDetail: lite ? null : "auto",
 		includeMessageType: lite,
-		toolNameMap,
+		...(reuse ? { reuseAcceptedPrefix: true } : { toolNameMap }),
 		toolSearch,
 	});
 	const configuredInstructions = buildResponsesInstructions(context);
@@ -866,7 +868,7 @@ function buildRequestBody(
 			: [];
 	const tools = lite && !toolSearch ? groupCodexResponsesLiteTools(convertedTools) : convertedTools;
 	const input: ResponseInput = lite
-		? [
+		? withCodexLitePreamble(messages, [
 				{
 					type: "additional_tools",
 					role: "developer",
@@ -881,8 +883,7 @@ function buildRequestBody(
 							} satisfies ResponseInputItem.Message,
 						]
 					: []),
-				...messages,
-			]
+			])
 		: messages;
 
 	const body: RequestBody = {
@@ -938,26 +939,6 @@ function buildRequestBody(
 	}
 
 	return body;
-}
-
-function groupCodexResponsesLiteTools(tools: OpenAITool[]): OpenAITool[] {
-	if (tools.length === 0) return [];
-
-	const functions: NamespaceTool.Function[] = tools.map((tool) => {
-		if (tool.type !== "function") {
-			throw new Error(`Unsupported Responses Lite tool type: ${tool.type}`);
-		}
-		return tool;
-	});
-
-	return [
-		{
-			type: "namespace",
-			name: "functions",
-			description: "",
-			tools: functions,
-		},
-	];
 }
 
 function resolveCodexServiceTier(
@@ -1308,11 +1289,13 @@ interface CachedWebSocketContinuationState {
 	baselineInputTail?: CachedWebSocketInputPart;
 	sourceMessages: Context["messages"];
 	sourceMessageCount: number;
+	sourceInput?: WeakRef<ResponseInput>;
 	responseItems: ResponseInput;
 }
 
 interface PreparedWebSocketRequest {
 	requestBody: RequestBody;
+	sourceInput?: ResponseInput;
 	currentInputTail?: CachedWebSocketInputPart;
 	/** Set when the request goes out in full; names the refusal for the transport telemetry. */
 	deltaSkipReason?: DeltaSkipReason;
@@ -2158,21 +2141,28 @@ function getCachedWebSocketInputDelta(
 	const currentInput = body.input ?? [];
 	const baselineLength = continuation.baselineInputTail?.totalItems ?? 0;
 	if (currentInput.length < baselineLength) return undefined;
+	const proof = providerInputPrefix(currentInput);
+	const priorInput = continuation.sourceInput?.deref();
+	const accepted = priorInput && proof?.previous === priorInput ? Math.min(proof.count, baselineLength) : 0;
 	const parts: ResponseInput[] = [];
 	let currentPart = continuation.baselineInputTail;
-	while (currentPart) {
+	while (currentPart && currentPart.totalItems > accepted) {
 		parts.push(currentPart.input);
 		currentPart = currentPart.previous;
 	}
-	let currentIndex = 0;
+	let currentIndex = accepted;
+	let start = accepted - (currentPart?.totalItems ?? 0);
 	for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
-		for (const item of parts[partIndex]) {
+		const part = parts[partIndex];
+		for (let itemIndex = start; itemIndex < part.length; itemIndex++) {
+			const item = part[itemIndex];
 			const candidate = currentInput[currentIndex];
 			if (!jsonValuesEqual(candidate, item) && !responseItemsMatchAfterRedaction(candidate, item)) {
 				return undefined;
 			}
 			currentIndex++;
 		}
+		start = 0;
 	}
 	return currentInput.slice(currentIndex);
 }
@@ -2204,6 +2194,7 @@ function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: Req
 	const continuation = entry.continuation;
 	const full = (deltaSkipReason: DeltaSkipReason): PreparedWebSocketRequest => ({
 		requestBody: body,
+		sourceInput: body.input,
 		currentInputTail: appendCachedWebSocketInput(undefined, body.input ?? []),
 		deltaSkipReason,
 	});
@@ -2224,12 +2215,15 @@ function prepareFullWebSocketRequest(entry: CachedWebSocketConnection, body: Req
 	}
 	return {
 		requestBody: { ...body, previous_response_id: continuation.lastResponseId, input: delta },
+		sourceInput: body.input,
 		currentInputTail: appendCachedWebSocketInput(continuation.baselineInputTail, delta),
 	};
 }
 
 function messagesPreserveCachedPrefix(context: Context, continuation: CachedWebSocketContinuationState): boolean {
 	if (context.messages.length < continuation.sourceMessageCount) return false;
+	const proof = providerMessagePrefix(context.messages);
+	if (proof?.previous === continuation.sourceMessages && proof.count >= continuation.sourceMessageCount) return true;
 	for (let index = 0; index < continuation.sourceMessageCount; index++) {
 		const current = context.messages[index];
 		const previous = continuation.sourceMessages[index];
@@ -2381,6 +2375,7 @@ async function processWebSocketStream(
 				baselineInputTail: appendCachedWebSocketInput(prepared.currentInputTail, responseItems),
 				sourceMessages: context.messages,
 				sourceMessageCount: context.messages.length,
+				sourceInput: prepared.sourceInput && new WeakRef(prepared.sourceInput),
 				responseItems,
 			};
 		}

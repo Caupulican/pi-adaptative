@@ -1078,11 +1078,23 @@ Project settings (`.pi/settings.json`) override global settings. Nested objects 
 
 ### Logging
 
-The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, `fleet`, `plan`, `leaders`, `settings`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
+The harness writes one JSON line per diagnostic event to `<agent dir>/logs/harness/harness-<UTC date>.jsonl`, with severity, category, process ID, and role. Writers should record operational metadata. The host redacts known secret patterns before writing.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `logging.level` | `off` \| `error` \| `warn` \| `info` \| `debug` \| `trace` | `warn` | What is written. Below the level a log call costs one comparison. `PI_LOG_LEVEL` overrides it |
 | `logging.categories` | string[] | all | Only these categories are written. `PI_LOG_CATEGORIES` (comma list) overrides it |
-| `logging.maxFileMb` | number | `8` | A log file past this size is rotated once (`.1`) |
-| `logging.retainDays` | number | `14` | Log files older than this are deleted at start |
+| `logging.maxFileMb` | number | `8` | Active segment limit in MiB, capped at 8. Pi rotates to `.1` before a batch crosses the limit |
+| `logging.retainDays` | number | `14` | Number of UTC dates eligible for retention, including today. Checked at startup and when writing on a new UTC date |
+
+Harness logs have a **32 MiB budget per agent profile**, shared by the main process and workers. Pi keeps the newest segments within that budget, reserving up to 8 MiB for today's active file. Entries are limited to 16 KiB and buffered batches to 128 KiB. For oversized entries Pi retains metadata when it fits. Buffer overflow, lock contention, or filesystem errors can drop diagnostic entries without interrupting the session.
+
+| Other diagnostics | Retention |
+|-------------------|-----------|
+| `PI_CACHE_TRACE=<file>` | Opt-in prompt fingerprint trace. Keeps the newest 2,048 records within 8 MiB per file, compacting toward 4 MiB. Writes are asynchronous and may skip requests while a write is pending |
+| Pi Chat delivery audit | Keeps the newest 4,096 metadata records within 4 MiB per file, compacting toward 2 MiB |
+| `PI_TUI_WRITE_LOG=<path>` | Opt-in raw terminal capture. Stops at 8 MiB per file. Directory mode keeps up to four Pi capture files and removes captures older than seven days when starting a new one |
+| `PI_DEBUG_REDRAW=1` and `PI_TUI_DEBUG=1` | Opt-in asynchronous captures. Redraw reasons stop at 1 MiB and sampled frame details stop at 4 MiB per run |
+| `/debug` | On-demand report of recent rendered rows and messages. Replaces the previous report in the same run and stays under 4 MiB |
+
+The TUI captures and `/debug` report can contain conversation text. When a managed debug run starts, Pi prunes inactive runs against seven days, six runs, and 32 MiB per debug category. Live runs stay leased. Session history, accounting, and recovery artifacts have their own lifecycle rules.

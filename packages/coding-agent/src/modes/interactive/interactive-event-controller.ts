@@ -3,7 +3,7 @@ import { isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import { type Container, type Loader, type MarkdownTheme, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
-import { expandArgumentsForDisplay, expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
+import { expandArgumentsForDisplay, StreamingPathAliasDisplay } from "../../core/context/path-alias-display.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { englishText, interfaceText } from "../../core/language/interface-text.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
@@ -114,8 +114,11 @@ export interface InteractiveEventPort {
 	addMessageToChat(message: AgentMessage): void;
 	/** Take back the transcript echo of an owner message that was never delivered (see `user_message_withdrawn`). */
 	removeUserMessageFromChat(message: AgentMessage): void;
+	/** Release echo associations whose exact owner message is now present in the durable session. */
+	reconcileUserMessageEchoes(): void;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
 	transformMarkdownForDisplay: MarkdownTransformFn;
+	trimLiveTuiHistory(): void;
 	attachToolExecutionComponent(
 		toolName: string,
 		toolCallId: string,
@@ -141,7 +144,10 @@ export interface InteractiveEventPort {
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 }
 
-const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
+const STREAMING_UI_UPDATE_INTERVAL_MS = 32;
+const TOOL_PROGRESS_INTERVAL_MS = 16;
+
+type ToolProgress = Extract<AgentSessionEvent, { type: "tool_execution_update" }>;
 
 /**
  * Single owner for AgentSessionEvent -> terminal UI state transitions. Owns the streaming reply being
@@ -154,6 +160,9 @@ export class InteractiveEventController {
 	private streamingMessage: AssistantMessage | undefined;
 	private streamingUiUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastStreamingUiUpdateAt = 0;
+	private readonly streamingAliases = new StreamingPathAliasDisplay();
+	private readonly toolProgress = new Map<string, { component: ToolExecutionComponent; event: ToolProgress }>();
+	private toolProgressTimer?: ReturnType<typeof setTimeout>;
 	private retryEscapeHandler: (() => void) | undefined;
 	private retryCountdown: CountdownTimer | undefined;
 	private autoCompactionEscapeHandler: (() => void) | undefined;
@@ -172,8 +181,39 @@ export class InteractiveEventController {
 
 	/** Forgets the streaming reply when the transcript it was drawn into is replaced. */
 	discardStreaming(): void {
+		this.clearPendingStreamingUiUpdate();
+		this.streamingAliases.clear();
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
+	}
+
+	discardToolProgress(): void {
+		clearTimeout(this.toolProgressTimer);
+		this.toolProgressTimer = undefined;
+		this.toolProgress.clear();
+	}
+
+	private queueToolProgress(component: ToolExecutionComponent, event: ToolProgress): void {
+		this.toolProgress.set(event.toolCallId, { component, event });
+		if (this.toolProgressTimer) return;
+		this.toolProgressTimer = setTimeout(() => {
+			this.toolProgressTimer = undefined;
+			const updates = [...this.toolProgress];
+			this.toolProgress.clear();
+			let changed = false;
+			for (const [id, { component, event }] of updates) {
+				if (this.port.activeToolCalls.getActive(id) !== component) continue;
+				component.updateResult({ ...event.partialResult, isError: false }, true, event);
+				changed = true;
+			}
+			if (changed) this.port.ui.requestRender();
+		}, TOOL_PROGRESS_INTERVAL_MS);
+	}
+
+	private takeToolProgress(id: string, component: ToolExecutionComponent | undefined): ToolProgress | undefined {
+		const pending = this.toolProgress.get(id);
+		this.toolProgress.delete(id);
+		return pending && pending.component === component ? pending.event : undefined;
 	}
 
 	/** The working loader belongs to RuntimeStatusController; this is the controller's view of it. */
@@ -209,10 +249,8 @@ export class InteractiveEventController {
 
 	/**
 	 * @param argumentsComplete whether the tool call's arguments have finished streaming. Alias
-	 * expansion walks the whole argument payload, and this runs once per streamed chunk (a tool call
-	 * bypasses the UI update throttle), so expanding mid-stream is O(chunks x payload) — a 1MB write
-	 * cost 2.2s of UI work. Partial arguments are also mid-token, so expanding them is meaningless:
-	 * the value is only final, and only worth expanding, once the message ends.
+	 * expansion walks the whole argument payload. Partial values can end mid-token, so expand
+	 * the arguments only when the assistant message ends.
 	 */
 	private attachStreamingToolActions(message: AssistantMessage, argumentsComplete: boolean): void {
 		for (const content of message.content) {
@@ -232,27 +270,18 @@ export class InteractiveEventController {
 		}
 	}
 
-	private applyStreamingMessageUpdate(message: AssistantMessage, options: { force?: boolean } = {}): void {
+	private applyStreamingMessageUpdate(message: AssistantMessage, phase: "boundary" | "progress" | "end"): void {
 		this.streamingMessage = message;
 		this.port.runtimeStatus.updateRuntimeStatus(message);
 		if (!this.streamingComponent) return;
 
 		const now = performance.now();
 		const elapsed = now - this.lastStreamingUiUpdateAt;
-		const hasToolCall = message.content.some((content) => content.type === "toolCall");
-		const shouldUpdateNow = options.force || hasToolCall || elapsed >= STREAMING_UI_UPDATE_INTERVAL_MS;
-
-		// `force` marks the message_start and message_end updates; only at message_end are a tool
-		// call's arguments complete. Every other update is a mid-stream chunk.
-		const argumentsComplete = options.force === true;
+		const shouldUpdateNow = phase !== "progress" || elapsed >= STREAMING_UI_UPDATE_INTERVAL_MS;
+		const argumentsComplete = phase === "end";
 		const update = () => {
 			if (!this.streamingComponent || !this.streamingMessage) return;
-			// Recomputed from the raw accumulated message on every call, never cached or expanded
-			// incrementally: an alias split across chunk boundaries renders literally for one update
-			// and self-heals on the next. `this.streamingMessage` is never reassigned here — at
-			// message_end it is the live history object (session state must keep raw aliases
-			// forever), so only this local, freshly-built copy is ever handed to rendering.
-			const displayMessage = expandMessageTextForDisplay(
+			const displayMessage = this.streamingAliases.expand(
 				this.port.getSession().peekPathAliasTable(),
 				this.streamingMessage,
 			);
@@ -272,7 +301,7 @@ export class InteractiveEventController {
 		this.streamingUiUpdateTimer = setTimeout(
 			() => {
 				this.streamingUiUpdateTimer = undefined;
-				update();
+				if (this.port.isInitialized()) update();
 			},
 			Math.max(0, STREAMING_UI_UPDATE_INTERVAL_MS - elapsed),
 		);
@@ -420,7 +449,7 @@ export class InteractiveEventController {
 					this.port.ui.requestRender();
 				} else if (event.message.role === "assistant") {
 					this.clearPendingStreamingUiUpdate();
-					this.lastStreamingUiUpdateAt = 0;
+					this.streamingAliases.clear();
 					const modelRef = replyModelRef(event.message);
 					const byline = this.port.replyBylines.shouldShow(modelRef)
 						? replyByline(
@@ -443,7 +472,7 @@ export class InteractiveEventController {
 					this.streamingMessage = event.message;
 					this.port.chatContainer.addChild(this.streamingComponent);
 					this.updateCommentaryActivity(this.streamingMessage);
-					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
+					this.applyStreamingMessageUpdate(this.streamingMessage, "boundary");
 				}
 				break;
 
@@ -460,12 +489,21 @@ export class InteractiveEventController {
 				}
 				if (this.streamingComponent) {
 					this.updateCommentaryActivity(event.message);
-					this.applyStreamingMessageUpdate(event.message);
+					const type = event.assistantMessageEvent.type;
+					this.applyStreamingMessageUpdate(
+						event.message,
+						type === "toolcall_start" || type === "toolcall_end" ? "boundary" : "progress",
+					);
 				}
 				break;
 
 			case "message_end":
-				if (event.message.role === "user") break;
+				if (event.message.role === "user") {
+					// Session persistence occurs after listener delivery. Reconcile in the next microtask so a
+					// buffered/failed route keeps its withdrawal handle while a durable message releases it.
+					queueMicrotask(() => this.port.reconcileUserMessageEchoes());
+					break;
+				}
 				if (this.streamingComponent && event.message.role === "assistant") {
 					const streamingComponent = this.streamingComponent;
 					this.streamingMessage = event.message;
@@ -476,21 +514,24 @@ export class InteractiveEventController {
 						errorMessage = abortedTurnText(this.port.getSession().retryAttempt, englishText().conversation);
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					// Mark final before the last (force) render so this update's markdown transforms see
+					// Mark final before flushing the update so the Markdown transforms see
 					// isStreaming:false, matching the message's now-complete state.
 					streamingComponent.setStreaming(false);
-					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
+					this.applyStreamingMessageUpdate(this.streamingMessage, "end");
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						errorMessage ??= this.streamingMessage.errorMessage || interfaceText().notices.errorWord;
-						for (const [, component] of this.port.activeToolCalls.activeEntries()) {
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+						for (const [id, component] of this.port.activeToolCalls.activeEntries()) {
+							component.updateResult(
+								{ content: [{ type: "text", text: errorMessage }], isError: true },
+								false,
+								this.takeToolProgress(id, component),
+							);
 						}
 						this.port.clearActiveToolCalls();
 					} else {
 						for (const [, component] of this.port.activeToolCalls.activeEntries()) component.setArgsComplete();
 					}
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
+					this.discardStreaming();
 					this.port.footer.invalidate();
 				}
 				this.port.ui.requestRender();
@@ -530,11 +571,7 @@ export class InteractiveEventController {
 
 			case "tool_execution_update": {
 				const component = this.port.activeToolCalls.getActive(event.toolCallId);
-				if (component) {
-					component.updateArgs(event.args, event.repair);
-					component.updateResult({ ...event.partialResult, isError: false }, true);
-					this.port.ui.requestRender();
-				}
+				if (component) this.queueToolProgress(component, event);
 				break;
 			}
 
@@ -555,8 +592,9 @@ export class InteractiveEventController {
 					}
 				}
 				const component = this.port.activeToolCalls.getActive(event.toolCallId);
+				const progress = this.takeToolProgress(event.toolCallId, component);
 				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
+					component.updateResult({ ...event.result, isError: event.isError }, false, progress);
 					this.port.activeToolCalls.finish(event.toolCallId);
 					this.port.ui.requestRender();
 				}
@@ -607,10 +645,10 @@ export class InteractiveEventController {
 				}
 				if (this.streamingComponent) {
 					this.port.chatContainer.removeChild(this.streamingComponent);
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
+					this.discardStreaming();
 				}
 				this.port.clearActiveToolCalls();
+				this.port.trimLiveTuiHistory();
 				this.port.activityLane?.removeByPrefix("tool:");
 				await this.port.checkShutdownRequested();
 				this.port.ui.requestRender();

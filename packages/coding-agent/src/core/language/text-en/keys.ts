@@ -52,7 +52,7 @@ const BINDINGS = {
 	"app.model.cycleBackward": "Cycle to previous model",
 	"app.model.select": "Open model selector",
 	"app.tools.expand": "Toggle tool output",
-	"app.history.load": "Load deferred session history",
+	"app.history.load": "Read earlier session history",
 	"app.tools.background": "Move active tool calls to background",
 	"app.agents.open": "Toggle goal, plan, and agent details",
 	"app.agents.close": "Close work details",

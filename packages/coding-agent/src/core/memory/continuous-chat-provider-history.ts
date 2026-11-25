@@ -17,6 +17,7 @@ import {
 } from "../../kernel/provider-request-estimator.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import type { PathAliasLegendEntry } from "../comms/host-injection-records.ts";
+import { isDiscoveredSkillRecord, replayableDiscoveredSkill } from "../skill-header-record.ts";
 import {
 	mergeRetainedAliases,
 	renderRetainedAliasAdditions,
@@ -45,6 +46,8 @@ export interface ProviderHistoryRetentionSource {
 
 export interface ProviderHistoryFrame {
 	headMessages: number;
+	head: readonly AgentMessage[];
+	turnMessages: readonly AgentMessage[];
 	legend?: readonly PathAliasLegendEntry[];
 	bodyAliases(handoff: AgentMessage | undefined): readonly PathAliasLegendEntry[] | undefined;
 	verifyAliases: AgentContextPlan["verifyPathAliases"];
@@ -71,7 +74,8 @@ interface AcceptedRequest {
 	envelope: ProviderHistoryCandidate;
 	scope: string;
 	requestOnly: ProviderHistoryCandidate["requestOnly"];
-	fixedHeadMessages: number;
+	fixedHead: readonly Message[];
+	skillHeaders: ReadonlyMap<string, string>;
 	aliases: readonly PathAliasLegendEntry[];
 	verifyAliases: ProviderHistoryFrame["verifyAliases"];
 	messages: readonly Message[];
@@ -119,6 +123,63 @@ function equalWireMessages(left: readonly Message[], right: readonly Message[], 
 			),
 		)
 	);
+}
+
+type CustomMessage = Extract<AgentMessage, { role: "custom" }>;
+
+function wasDelivered(record: CustomMessage, delivered: Message): boolean {
+	const wire = convertToLlm([record])[0];
+	return !!wire && delivered.timestamp === wire.timestamp && equalWireMessages([delivered], [wire], true);
+}
+
+function fixedFrameEvidence(candidate: ProviderHistoryCandidate, frame: ProviderHistoryFrame) {
+	const fixedHead: Message[] = [];
+	const fixedIndices: number[] = [];
+	const headers = new Map<string, string>();
+	const stop = frame.headMessages - (frame.legend ? 1 : 0);
+	for (let index = 0; index < stop; index++) {
+		const record = frame.head[index];
+		const wire = candidate.context.messages[index];
+		if (!wire) return undefined;
+		if (record && isDiscoveredSkillRecord(record)) {
+			const digest = replayableDiscoveredSkill(record);
+			if (typeof digest !== "string" || !wasDelivered(record, wire)) return undefined;
+			headers.set(record.customType, digest);
+		} else {
+			fixedHead.push(wire);
+			fixedIndices.push(index);
+		}
+	}
+	return { fixedHead, fixedIndices, headers };
+}
+
+function acceptedSkillHeaders(
+	candidate: ProviderHistoryCandidate,
+	frame: ProviderHistoryFrame,
+	initial: ReadonlyMap<string, string>,
+): ReadonlyMap<string, string> {
+	const latest = new Map<string, CustomMessage>();
+	for (const rows of [frame.turnMessages, candidate.transientTail]) {
+		for (const row of rows) if (isDiscoveredSkillRecord(row)) latest.set(row.customType, row);
+	}
+	if (latest.size === 0) return initial;
+	const delivered = new Map<number, Message>();
+	const wanted = new Set([...latest.values()].map((record) => record.timestamp));
+	for (const wire of candidate.context.messages) if (wanted.has(wire.timestamp)) delivered.set(wire.timestamp, wire);
+	const result = new Map(initial);
+	for (const [kind, record] of latest) {
+		const wire = delivered.get(record.timestamp);
+		const digest = wire && wasDelivered(record, wire) ? replayableDiscoveredSkill(record) : undefined;
+		if (digest === null) result.delete(kind);
+		else result.set(kind, digest ?? "");
+	}
+	return result;
+}
+
+function sameSkillHeaders(current: ReadonlyMap<string, string>, previous: ReadonlyMap<string, string>): boolean {
+	if (current.size !== previous.size) return false;
+	for (const [kind, digest] of current) if (previous.get(kind) !== digest) return false;
+	return true;
 }
 
 function providerHistoryScope(candidate: ProviderHistoryCandidate): string | undefined {
@@ -235,7 +296,6 @@ export class ContinuousChatProviderHistory {
 			if (!handoff) return prior;
 			return [...prior, retain && continuation?.work ? bindHandoffWork(handoff, continuation.work) : handoff];
 		};
-		const fixedHeadMessages = frame.headMessages - (frame.legend ? 1 : 0);
 		const aliasesCurrent = (aliases: readonly PathAliasLegendEntry[]): boolean => {
 			try {
 				return aliases.length === 0 || frame.verifyAliases?.(aliases) === true;
@@ -286,7 +346,8 @@ export class ContinuousChatProviderHistory {
 				if (!dependencies.complete || !dependencies.isCurrent() || !canUseHistory() || !candidate.nativeHistory)
 					return undefined;
 				const scope = providerHistoryScope(candidate);
-				if (scope === undefined) return undefined;
+				const fixed = fixedFrameEvidence(candidate, frame);
+				if (scope === undefined || !fixed) return undefined;
 				const openingEvidence = durableOpening && captureHandoff(this.source, durableOpening);
 				if (durableOpening && openingEvidence) {
 					const { start, count } = candidate.requestOnly;
@@ -320,7 +381,7 @@ export class ContinuousChatProviderHistory {
 					candidate,
 					scope,
 					frame,
-					fixedHeadMessages,
+					fixed,
 					additions,
 					handle.boundary.totalMessages,
 					continuation,
@@ -360,7 +421,8 @@ export class ContinuousChatProviderHistory {
 				)
 					return;
 				const scope = providerHistoryScope(candidate);
-				if (scope === undefined) return;
+				const fixed = fixedFrameEvidence(candidate, frame);
+				if (scope === undefined || !fixed) return;
 				const { start, count } = candidate.requestOnly;
 				const frameMessages: Message[] = [];
 				for (let index = 0; index < start + count; index++) {
@@ -393,7 +455,8 @@ export class ContinuousChatProviderHistory {
 					envelope,
 					scope,
 					requestOnly: retained?.requestOnly ?? candidate.requestOnly,
-					fixedHeadMessages,
+					fixedHead: fixed.fixedIndices.map((index) => frameMessages[index]!),
+					skillHeaders: acceptedSkillHeaders(candidate, frame, fixed.headers),
 					aliases: offeredAliases,
 					verifyAliases: frame.verifyAliases,
 					messages: stableMessages,
@@ -454,7 +517,7 @@ export class ContinuousChatProviderHistory {
 		candidate: ProviderHistoryCandidate,
 		scope: string,
 		frame: ProviderHistoryFrame,
-		fixedHeadMessages: number,
+		fixed: NonNullable<ReturnType<typeof fixedFrameEvidence>>,
 		additions: readonly PathAliasLegendEntry[],
 		endId: number,
 		continuation: ProviderHistoryContinuation,
@@ -469,13 +532,9 @@ export class ContinuousChatProviderHistory {
 		if (
 			previous.request.scope !== scope ||
 			start !== frame.headMessages + 2 ||
-			previous.request.fixedHeadMessages !== fixedHeadMessages ||
 			state?.role !== "user" ||
-			!equalWireMessages(
-				old.context.messages.slice(0, fixedHeadMessages),
-				fresh.messages.slice(0, fixedHeadMessages),
-				true,
-			) ||
+			!sameSkillHeaders(fixed.headers, previous.request.skillHeaders) ||
+			!equalWireMessages(previous.request.fixedHead, fixed.fixedHead, true) ||
 			!equalWireMessages(
 				old.context.messages.slice(oldStart, oldStart + old.requestOnly.count),
 				fresh.messages.slice(start, end),

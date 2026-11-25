@@ -108,6 +108,10 @@ jobs:
         if: inputs.release_verification == true
         run: npm run check:provider-regressions
 
+      - name: Performance regressions
+        if: inputs.release_verification == true
+        run: npm run check:performance-regressions
+
       - name: Dependency hardening
         if: inputs.release_verification == true && runner.os == 'Windows'
         run: npm run check:dependency-forks

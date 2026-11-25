@@ -225,6 +225,7 @@ export interface ParentExecutionPolicy {
 		sentPrefixCount: number;
 		/** The worker's own tool surface: what its lane's context policy can rely on (a retrieval tool). */
 		toolNames: readonly string[];
+		skillDiscovery?: ReadOnlySkillBroker["headers"];
 		signal?: AbortSignal;
 		/** What the request carries to the model outside `messages` (`AgentContextPlanRequest.wire`). */
 		wire?: AgentContextWire;
@@ -273,7 +274,7 @@ export interface ParentExecutionPolicy {
 	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
 	getHandoffPersonaGuidance?(): string | undefined;
 	/** Host-owned read-only skill broker; no SkillVaultController crosses this boundary. */
-	getSkillReadBroker?(): ReadOnlySkillBroker;
+	getSkillReadBroker?(agentId?: string): ReadOnlySkillBroker;
 	/** Host-owned skill metadata source for read-only audit; paths are redacted before projection. */
 	getSkillAuditSource?(): Pick<SkillAuditToolOptions, "getSkills"> &
 		Required<Pick<SkillAuditToolOptions, "redactPath">>;

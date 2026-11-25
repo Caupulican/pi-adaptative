@@ -52,10 +52,13 @@ import {
 } from "./components/workbench-tool-preview.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
+type ExecutionRowTarget = { readonly id: string; readonly role: RowRole } | undefined;
+
 interface WorkbenchPorts {
 	keybindings: KeybindingsManager;
 	isInteractive: () => boolean;
 	requestRender: () => void;
+	requestPresentationRender: () => void;
 	messages: () => Iterable<AgentMessage>;
 	copy: (text: string) => Promise<void>;
 	notice: (text: string, error?: boolean) => void;
@@ -72,7 +75,7 @@ interface WorkbenchPorts {
 	activeForegroundCount?: () => number;
 	activeBackgroundCount?: () => number;
 	/** Composes the Decision graph's model from live state; absent, the conversation zone is chat only. */
-	graph?: () => DecisionGraphModel | undefined;
+	graph?: (visible: boolean) => DecisionGraphModel | undefined;
 	/** The lane's one ticker: told whether the drawn graph carries a running clock. */
 	clock?: (running: boolean) => void;
 	/** Who decides and who executes, read at render time so the Decider's clock and verdict stay live. */
@@ -145,7 +148,8 @@ export class WorkbenchController {
 	/** The operator's choice per entry (a click); entries without one follow the pane's own policy. */
 	private readonly entryViews = new Map<string, EntryView>();
 	/** What the Execution pane drew last: the entry and role of each content row, and each entry's view. */
-	private executionRows: ({ readonly id: string; readonly role: RowRole } | undefined)[] = [];
+	private executionRows: ExecutionRowTarget[] = [];
+	private readonly executionLayouts = new Map<number, { rows: string[]; targets: ExecutionRowTarget[] }>();
 	private readonly drawnViews = new Map<string, EntryView>();
 	/** A failed evaluation keeps its own row: it needs attention, unlike a routine judgment. */
 	private readonly systemOneFailures = new Map<string, Component>();
@@ -175,7 +179,7 @@ export class WorkbenchController {
 		this.view = view;
 		this.ports = ports;
 		this.workspace = workspace;
-		if (ports.graph) view.setDecisionGraph(ports.graph, ports.clock, ports.requestRender);
+		if (ports.graph) view.setDecisionGraph(ports.graph, ports.clock, ports.requestPresentationRender);
 	}
 
 	/** Receipts of the current cycle: completed actions, observed file effects, negative outcomes. */
@@ -194,6 +198,7 @@ export class WorkbenchController {
 		this.observationTurn++;
 		this.submissionEpoch = undefined;
 		this.previews = [];
+		this.executionLayouts.clear();
 		this.resetSystemOneEvidence();
 		this.invocations.reset();
 		this.fileEffects = 0;
@@ -366,6 +371,7 @@ export class WorkbenchController {
 
 	refreshExecution(): void {
 		if (this.disposed) return;
+		this.executionLayouts.clear();
 		const { current, retained, partial } = this.invocations.snapshot();
 		const inFlight = this.ports.activeForegroundCount?.() ?? 0;
 		const background = this.ports.activeBackgroundCount?.() ?? 0;
@@ -403,6 +409,7 @@ export class WorkbenchController {
 			{
 				render: (width) => this.renderExecution(width, summary),
 				invalidate: () => {
+					this.executionLayouts.clear();
 					for (const preview of this.previews) preview.invalidate();
 				},
 			},
@@ -419,9 +426,14 @@ export class WorkbenchController {
 	 * for that entry. Every row records which entry and what part of it it is, so a click can be answered.
 	 */
 	private renderExecution(width: number, summary: string): string[] {
+		const cached = this.executionLayouts.get(width);
+		if (cached) {
+			this.executionRows = cached.targets;
+			return cached.rows;
+		}
 		const rows: string[] = [];
-		const targets: ({ readonly id: string; readonly role: RowRole } | undefined)[] = [];
-		const push = (row: string, target?: { readonly id: string; readonly role: RowRole }) => {
+		const targets: ExecutionRowTarget[] = [];
+		const push = (row: string, target?: ExecutionRowTarget) => {
 			rows.push(row);
 			targets.push(target);
 		};
@@ -452,6 +464,13 @@ export class WorkbenchController {
 			for (const row of wrapTextWithAnsi(summary, width)) push(row);
 		}
 		this.executionRows = targets;
+		if (rows.length <= 1024 && rows.reduce((size, row) => size + row.length, 0) <= 128 * 1024) {
+			if (this.executionLayouts.size >= 2) {
+				const oldest = this.executionLayouts.keys().next().value;
+				if (oldest !== undefined) this.executionLayouts.delete(oldest);
+			}
+			this.executionLayouts.set(width, { rows, targets });
+		}
 		return rows;
 	}
 
@@ -469,7 +488,8 @@ export class WorkbenchController {
 			target.id,
 			target.role === "more" ? "full" : current === "collapsed" ? "expanded" : "collapsed",
 		);
-		this.ports.requestRender();
+		this.executionLayouts.clear();
+		this.ports.requestPresentationRender();
 		return true;
 	}
 
@@ -510,7 +530,7 @@ export class WorkbenchController {
 		// Mouse ownership is a session choice, not a pane action: it works before the first frame too.
 		if (keys.matches(data, "app.mouse.toggle")) {
 			this.toggleMouse();
-			this.ports.requestRender();
+			this.ports.requestPresentationRender();
 			return { consume: true };
 		}
 		if (this.view.conversationHeight === 0) {
@@ -683,7 +703,7 @@ export class WorkbenchController {
 			}
 			// Consume terminal mouse reports even outside the pane; never insert protocol bytes into input.
 		}
-		this.ports.requestRender();
+		this.ports.requestPresentationRender();
 		return { consume: true };
 	}
 

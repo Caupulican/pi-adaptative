@@ -850,13 +850,15 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext();
+		let context: ExtensionContext | undefined;
 		let result: SessionBeforeEventResult | undefined;
 		let treeSummaryUsage: Usage | undefined;
 
 		extensions: for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
+			context ??= this.createContext();
+			const ctx = context;
 
 			for (const handler of handlers) {
 				try {
@@ -897,9 +899,9 @@ export class ExtensionRunner {
 	 * without triggering all other extensions' handlers.
 	 */
 	async emitToExtension(extension: Extension, event: RunnerEmitEvent): Promise<void> {
-		const ctx = this.createContext();
 		const handlers = extension.handlers.get(event.type);
 		if (!handlers || handlers.length === 0) return;
+		const ctx = this.createContext();
 
 		for (const handler of handlers) {
 			try {
@@ -911,13 +913,14 @@ export class ExtensionRunner {
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
-		const ctx = this.createContext();
+		let ctx: ExtensionContext | undefined;
 		let currentMessage = event.message;
 		let modified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("message_end");
 			if (!handlers || handlers.length === 0) continue;
+			ctx ??= this.createContext();
 
 			for (const handler of handlers) {
 				try {
@@ -1014,10 +1017,7 @@ export class ExtensionRunner {
 			}
 		}
 
-		if (!modified) {
-			return undefined;
-		}
-
+		if (!modified) return undefined;
 		return {
 			content: currentEvent.content,
 			details: currentEvent.details,

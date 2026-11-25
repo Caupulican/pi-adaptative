@@ -90,14 +90,22 @@ export interface ToolArgumentValidationOptions {
 export class ToolArgumentValidationError extends Error {
 	public readonly toolName: string;
 	public readonly signature: string;
-	public readonly enrichment: string;
+	declare public readonly enrichment: string;
 
-	constructor(message: string, options: { toolName: string; signature: string; enrichment: string }) {
+	constructor(message: string, options: { toolName: string; signature: string; enrichment: string | (() => string) }) {
 		super(message);
 		this.name = "ToolArgumentValidationError";
 		this.toolName = options.toolName;
 		this.signature = options.signature;
-		this.enrichment = options.enrichment;
+		const { enrichment } = options;
+		let rendered: string | undefined;
+		Object.defineProperty(this, "enrichment", {
+			enumerable: true,
+			configurable: true,
+			...(typeof enrichment === "string"
+				? { value: enrichment, writable: true }
+				: { get: () => (rendered ??= enrichment()) }),
+		});
 	}
 }
 
@@ -805,10 +813,17 @@ function validationFailureSignature(errors: readonly TLocalizedValidationError[]
  * Authoritative, bounded schema guidance for a provider- or validator-rejected tool call.
  * Kept here so every recovery path teaches the same schema and validator-safe minimal example.
  */
-export function formatToolValidationEnrichment(tool: Tool): string {
-	const example = minimalExample(tool.parameters);
-	const exampleText = example === undefined ? "" : `\nValid example:\n${formatCompactJson(example, 2000)}`;
-	return `Full tool schema:\n${formatCompactJson(tool.parameters, 4000)}${exampleText}`;
+export function formatToolValidationEnrichment(tool: Pick<Tool, "parameters">): string {
+	const schema = `Full tool schema:\n${formatCompactJson(tool.parameters, 4000)}`;
+	try {
+		const example = minimalExample(tool.parameters);
+		if (example !== undefined && getValidator(tool.parameters).Check(example)) {
+			return `${schema}\nValid example:\n${formatCompactJson(example, 2000)}`;
+		}
+	} catch {
+		// An unrenderable example must not replace the diagnostic for the rejected call.
+	}
+	return schema;
 }
 
 /**
@@ -848,7 +863,8 @@ export function validateToolArguments(
 	options?: ToolArgumentValidationOptions,
 ): Record<string, unknown> {
 	const args = toolCall.arguments;
-	const validator = getValidator(tool.parameters);
+	const parameters = tool.parameters;
+	const validator = getValidator(parameters);
 
 	if (validator.Check(args)) {
 		return args;
@@ -857,8 +873,8 @@ export function validateToolArguments(
 	// A union of action shapes is validated against the branch the supplied discriminator names,
 	// so the errors, the repairs and the repair text all speak about that branch (measured live:
 	// a `list` call was told to fix the `set` branch's fields and its "true" was never coerced).
-	const branch = selectUnionBranch(tool.parameters, args);
-	const schema = branch ?? tool.parameters;
+	const branch = selectUnionBranch(parameters, args);
+	const schema = branch ?? parameters;
 	const branchValidator = branch ? getValidator(branch) : validator;
 	const validationErrors = normalizeValidationErrors([...branchValidator.Errors(args)]);
 	const repairIssues = analyzeToolArgumentErrors(toolCall.name, schema, args, validationErrors);
@@ -907,6 +923,6 @@ export function validateToolArguments(
 	throw new ToolArgumentValidationError(errorMessage, {
 		toolName: toolCall.name,
 		signature: validationFailureSignature(reportedErrors),
-		enrichment: formatToolValidationEnrichment(tool),
+		enrichment: () => formatToolValidationEnrichment({ parameters }),
 	});
 }

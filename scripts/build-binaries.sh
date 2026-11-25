@@ -141,6 +141,7 @@ BINARY_ENTRYPOINTS=(
     ./src/utils/image-resize-worker.ts
     ./src/core/memory/providers/transcript-recall-worker.ts
     ./src/core/tool-recovery-log-worker.ts
+    ./src/kernel/session/session-append-worker.ts
 )
 
 for platform in "${PLATFORMS[@]}"; do

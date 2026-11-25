@@ -78,12 +78,9 @@ if (!commandArguments.has(firstArg ?? "")) {
 	if (interactiveLaunch) holdStartupTypeahead();
 }
 
-const { configureHttpDispatcher } = await import("./core/http-dispatcher.ts");
-// Configure undici's global dispatcher before provider SDKs issue requests.
-// Runtime settings are applied once SettingsManager has loaded global/project settings.
-configureHttpDispatcher();
 // Installers use the activated release's sole Herdr provisioner, without loading sessions/settings.
 if (firstArg === "--provision-herdr" && cliArgs.length === 1) {
+	await configureDefaultHttpDispatcher();
 	const { runHerdrProvisionCommand } = await import("./core/collaboration/herdr-provision.ts");
 	await runHerdrProvisionCommand();
 	process.exit(0);
@@ -112,6 +109,7 @@ if (!supervised) {
 	// through their own process.exit calls, which declare no end.
 	if (interactiveLaunch) processEnd.installProcessEndRecorder();
 	try {
+		await configureDefaultHttpDispatcher();
 		// Extensions this process loads bind to its live modules; see host-extension-modules.ts.
 		await import("./core/extensions/host-extension-modules.ts");
 		// The built-in model providers are registered once, here, by the process root.
@@ -125,6 +123,12 @@ if (!supervised) {
 	}
 	// The program finished: the event loop draining from here is this process's declared end.
 	processEnd.declareExit("completed");
+}
+
+/** Configure network defaults before the request-handling process loads its providers and extensions. */
+async function configureDefaultHttpDispatcher(): Promise<void> {
+	const { configureHttpDispatcher } = await import("./core/http-dispatcher.ts");
+	configureHttpDispatcher();
 }
 
 /** Runs a supervised interactive launch without loading the session program into this process. */

@@ -1878,7 +1878,7 @@ export interface BuildSystemPromptOptions {
 	cwd: string;
 	/** Global instruction files (with content) plus on-demand project paths (path only). */
 	contextFiles?: Array<{ path: string; content?: string }>;
-	/** Discovered skills remain host-side; retained for extension/API construction compatibility. */
+	/** Profile-admitted skill metadata, loaded on access for extension hooks. The base prompt omits the list. */
 	skills?: Skill[];
 	/** Discovered extensions currently active. */
 	extensions?: Extension[];

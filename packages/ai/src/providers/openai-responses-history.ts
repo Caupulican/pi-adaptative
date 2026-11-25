@@ -1,6 +1,6 @@
 /** Checkpoints and immutable wire-input receipts owned by the native Responses encoder. */
 import type { ResponseInput } from "openai/resources/responses/responses.js";
-import type { Api, Message, Model } from "../types.ts";
+import type { Api, Message, Model, ToolCall } from "../types.ts";
 import type { IndexedToolNameMap } from "../utils/tool-names.ts";
 import type { MessageTransformCursor } from "./transform-messages.ts";
 
@@ -9,6 +9,7 @@ interface ResponsesCheckpoint {
 	readonly messageIndex: number;
 	readonly transform: number;
 	readonly names: number;
+	readonly search: number;
 }
 export interface ResponsesFrame {
 	readonly scope: string;
@@ -16,6 +17,7 @@ export interface ResponsesFrame {
 	readonly transform: MessageTransformCursor;
 	readonly output: ResponseInput;
 	readonly names?: IndexedToolNameMap;
+	readonly searches: ResponsesSearchCalls;
 	readonly checkpoints: ResponsesCheckpoint[];
 	current?: ResponsesReceipt;
 	prior?: ResponsesReceipt;
@@ -29,6 +31,34 @@ interface ResponsesReceipt {
 }
 
 const acceptedInputs = new WeakMap<readonly Message[], ResponsesReceipt>();
+
+export class ResponsesSearchCalls {
+	readonly entries = new Map<string, ToolCall["toolSearch"]>();
+	private readonly undo?: (() => void)[];
+
+	constructor(reversible: boolean) {
+		if (reversible) this.undo = [];
+	}
+
+	get checkpoint(): number {
+		return this.undo?.length ?? 0;
+	}
+
+	remember(callId: string, search: ToolCall["toolSearch"]): void {
+		const had = this.entries.has(callId);
+		const prior = this.entries.get(callId);
+		this.undo?.push(() => {
+			if (had) this.entries.set(callId, prior);
+			else this.entries.delete(callId);
+		});
+		this.entries.set(callId, search);
+	}
+
+	rewind(checkpoint: number): void {
+		if (!this.undo) return;
+		while (this.undo.length > checkpoint) this.undo.pop()!();
+	}
+}
 
 export function findResponsesPredecessor(source: readonly Message[]): ResponsesReceipt | undefined {
 	const receipt = acceptedInputs.get(source);
@@ -72,21 +102,4 @@ export function withoutForeignThinking<TApi extends Api>(msg: Message, model: Mo
 		};
 	}
 	return msg;
-}
-
-/** A native Responses input array records its actual stable output extent, excluding provisional results. */
-const wirePrefixes = new WeakMap<object, { source: readonly Message[]; count: number; previous?: WeakRef<object> }>();
-export function recordResponsesInput(
-	input: object,
-	source: readonly Message[],
-	count: number,
-	previous?: object,
-): void {
-	wirePrefixes.set(input, { source, count, previous: previous && new WeakRef(previous) });
-}
-export function responsesInputPrefix(input: object) {
-	const receipt = wirePrefixes.get(input);
-	if (!receipt) return undefined;
-	const previous = receipt.previous?.deref();
-	return { source: receipt.source, count: previous ? receipt.count : 0, previous };
 }

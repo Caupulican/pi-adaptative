@@ -3,12 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import {
-	type AgentContextWire,
-	type AgentMessage,
-	decodeExecutionContext,
-	type ExecutionContext,
-} from "../../kernel/index.ts";
+import { type AgentMessage, decodeExecutionContext, type ExecutionContext } from "../../kernel/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
@@ -3299,10 +3294,8 @@ export class WorkerDelegationController {
 				},
 				laneId,
 			);
-			if (project) {
-				project.consumed = true;
-				this.projectAgents.set(laneId, project);
-			}
+			if (project) project.consumed = true;
+			if (project?.admission.kind === "allocated") this.projectAgents.set(laneId, project);
 			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
 			if (ownerEpoch !== undefined) this.notifications.noteAttemptOwnerEpoch(value.attempt.attemptId, ownerEpoch);
 			return value;
@@ -3446,6 +3439,7 @@ export class WorkerDelegationController {
 			}
 			const materialized = materializeWorkerResourceBundle(existing.resumeContext.contextPointers);
 			if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
+			this.projectAgents.delete(agentId);
 			return {
 				conversation,
 				resources: materialized.pointers,
@@ -3494,6 +3488,7 @@ export class WorkerDelegationController {
 			role: immutableWorker.profile.role,
 			resumeContext: conversation.getResumeContext(),
 		});
+		this.projectAgents.delete(agentId);
 		return {
 			conversation,
 			resources: materialized.pointers,
@@ -5253,7 +5248,7 @@ export class WorkerDelegationController {
 				adapterSources.getContextGcStoreDir = () => this.deps.getContextGcStoreDir?.();
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "skill")) {
-			const broker = this.deps.getSkillReadBroker?.();
+			const broker = this.deps.getSkillReadBroker?.(agentId);
 			if (broker) adapterSources.skill = broker;
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "skill_audit")) {
@@ -5666,12 +5661,7 @@ export class WorkerDelegationController {
 				: {}),
 			...(this.deps.planWorkerRequest
 				? {
-						planRequest: (
-							messages: AgentMessage[],
-							sentPrefixCount: number,
-							signal?: AbortSignal,
-							wire?: AgentContextWire,
-						) =>
+						planRequest: (messages, sentPrefixCount, signal, wire) =>
 							this.deps.planWorkerRequest!({
 								agentId,
 								model,
@@ -5679,6 +5669,7 @@ export class WorkerDelegationController {
 								messages,
 								sentPrefixCount,
 								toolNames: toolSurface.tools.map((tool) => tool.name),
+								skillDiscovery: adapterSources.skill?.headers,
 								...(signal ? { signal } : {}),
 								...(wire ? { wire } : {}),
 							}),

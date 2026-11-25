@@ -35,7 +35,7 @@ import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
 import { CredentialContentProjectionError } from "./secrets/credential-model-content.ts";
 import { CredentialRequestProjection } from "./secrets/credential-request-projection.ts";
-import { redactTokenShapes } from "./security/secret-text.ts";
+import { createTokenShapeRedactor } from "./security/secret-text.ts";
 import type {
 	ResolvedFleetSettings,
 	ResolvedProviderAdmissionSettings,
@@ -175,6 +175,7 @@ function failedRedactionStream(
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
 	const projection = new CredentialRequestProjection();
+	const maskTokenShapes = createTokenShapeRedactor();
 	const redactedBase: StreamFn = async (model, context, options) => {
 		let redactedContext = context;
 		let redactedOptions = options;
@@ -187,7 +188,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 				((text: string) => input.redactSensitiveText?.(text, additionalValues) ?? text);
 			// Known values are exact; token shapes are the floor for keys the host has never seen. Both are
 			// unconditional: a session without a credential boundary still never sends a recognizable key.
-			const redact = (text: string) => redactTokenShapes(redactKnown(text));
+			const redact = (text: string) => maskTokenShapes(redactKnown(text));
 			const projected = projection.prepare(model, context, redactKnown, redact, options?.onPayload);
 			redactedContext = projected.context;
 			redactedOptions = projected.onPayload ? { ...options, onPayload: projected.onPayload } : options;

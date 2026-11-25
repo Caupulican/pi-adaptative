@@ -45,8 +45,7 @@ import type {
 	ResourceProfileSettings,
 	Settings,
 } from "./settings/settings-schema.ts";
-import type { Skill } from "./skills.ts";
-import { loadSkills } from "./skills.ts";
+import { loadSkills, type Skill, SkillFrontmatterCache } from "./skills.ts";
 import { createSourceInfo, type PathMetadata, type SourceInfo } from "./source-info.ts";
 import { readWorkerExtensionToolGrants } from "./worker-extension-grants.ts";
 
@@ -470,6 +469,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	private extensionsResult: LoadExtensionsResult;
 	private skills: Skill[];
+	private readonly skillFrontmatter = new SkillFrontmatterCache();
 	private skillDiagnostics: ResourceDiagnostic[];
 	private prompts: PromptTemplate[];
 	private promptDiagnostics: ResourceDiagnostic[];
@@ -1047,6 +1047,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.pendingReloadSnapshot = undefined;
 		const reloadCanonicalPaths = new Map<string, string>();
 		this.reloadCanonicalPaths = reloadCanonicalPaths;
+		let loaded: readonly Extension[] = [];
+		let candidate: LoadExtensionsResult | undefined;
 		try {
 			if (!options.skipSettingsReload) {
 				await this.settingsManager.reload();
@@ -1111,8 +1113,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 				return resource.path;
 			};
 
-			const enabledSkills = enabledSkillResources.map(mapSkillPath);
-
 			// Add CLI paths metadata
 			for (const r of cliExtensionPaths.skills) {
 				if (!metadataByPath.has(r.path)) {
@@ -1127,9 +1127,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 			// Gather effective external resource roots
 			const effectiveRoots = this.settingsManager.getEffectiveExternalResourceRoots();
-
-			const filterPathsByProfile = (paths: string[], kind: ResourceProfileKind): string[] =>
-				this.filterPathsByProfile(paths, kind);
 
 			// Authority-bearing bundled extensions stay profile-gated. Passive default-on extensions
 			// are the narrow exception and still honor explicit user/profile blocks.
@@ -1156,7 +1153,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// CLI paths carry an exact owner grant, but an active profile and user disables still bound
 			// that authority. Other disk extensions require an active profile before their modules cross
 			// the import boundary; discovery remains metadata-only when no profile is active.
-			const profileFilteredCliExtensions = filterPathsByProfile(cliEnabledExtensions, "extensions");
+			const profileFilteredCliExtensions = this.filterPathsByProfile(cliEnabledExtensions, "extensions");
 			const profileFilteredConfiguredExtensions = hasProfileExtensionAuthority ? enabledExtensions : [];
 			const defaultOnBundledExtensions = bundledExtensions.filter(
 				(entryPath) =>
@@ -1171,9 +1168,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const profileFilteredBundledExtensions =
 				!hasProfileExtensionAuthority || extensionProfileFilter.allow.length === 0
 					? []
-					: filterPathsByProfile(bundledExtensions, "extensions");
+					: this.filterPathsByProfile(bundledExtensions, "extensions");
 			const profileFilteredExternalExtensions = hasProfileExtensionAuthority
-				? filterPathsByProfile(externalExtensions, "extensions")
+				? this.filterPathsByProfile(externalExtensions, "extensions")
 				: [];
 
 			// A worker process's launch profile may grant tools from specific extension files; those files are
@@ -1185,7 +1182,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 					metadataByPath.set(grantedPath, { source: "cli", scope: "temporary", origin: "top-level" });
 				}
 			}
-			const profileFilteredGrantedExtensions = filterPathsByProfile(workerGrantedExtensionPaths, "extensions");
+			const profileFilteredGrantedExtensions = this.filterPathsByProfile(workerGrantedExtensionPaths, "extensions");
 
 			const extensionPaths = this.filterInstructionPaths(
 				this.noExtensions
@@ -1216,6 +1213,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const extensionsResult = await loadExtensions(admittedExtensionPaths, this.cwd, this.eventBus, {
 				agentDir: this.agentDir,
 			});
+			loaded = extensionsResult.extensions;
 			if (workerCeiling) {
 				for (const path of cliEnabledExtensions.filter(
 					(entry) => !isWorkerAdmittedExtensionPath(entry, workerGrantedExtensionPaths),
@@ -1258,17 +1256,16 @@ export class DefaultResourceLoader implements ResourceLoader {
 					}
 				}
 			}
-			const resolvedExtensionsResult = this.extensionsOverride
-				? this.extensionsOverride(extensionsResult)
-				: extensionsResult;
-			if (options.failOnExtensionErrors && resolvedExtensionsResult.errors.length > 0) {
-				const summary = resolvedExtensionsResult.errors
+			if (this.extensionsOverride) loaded = [...loaded];
+			candidate = this.extensionsOverride ? this.extensionsOverride(extensionsResult) : extensionsResult;
+			if (options.failOnExtensionErrors && candidate.errors.length > 0) {
+				const summary = candidate.errors
 					.slice(0, 6)
 					.map((error) => `${error.path}: ${error.error}`)
 					.join("; ");
 				throw new Error(`Extension reload failed preflight: ${summary}`);
 			}
-			this.extensionsResult = resolvedExtensionsResult;
+			this.extensionsResult = candidate;
 			this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
 			// Discover external skills
@@ -1287,6 +1284,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Build skill paths with precedence: CLI > user/project > bundled > additional.
 			// Bundled skills are expanded into individual SKILL.md paths so they pass through the
 			// resource-profile filter exactly like user/external skills (no source bypasses the profile).
+			const resolvedEnabledSkills = new Map(
+				enabledSkillResources.map((resource) => [resource, mapSkillPath(resource)]),
+			);
 			const bundledSkillsDir = getBundledSkillsDir();
 			const bundledSkillPaths = readResourceDirectory(bundledSkillsDir, { followSymbolicLinks: false })
 				.filter((entry) => entry.isDirectory)
@@ -1299,7 +1299,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.noSkills
 					? this.mergePaths([...cliEnabledSkills], additionalSkillPaths)
 					: this.mergePaths(
-							[...cliEnabledSkills, ...enabledSkills, ...externalSkills, ...bundledSkillPaths],
+							[...cliEnabledSkills, ...resolvedEnabledSkills.values(), ...externalSkills, ...bundledSkillPaths],
 							additionalSkillPaths,
 						),
 				metadataByPath,
@@ -1308,12 +1308,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.lastSkillPaths = skillPaths;
 			const discoverableResolvedSkillPaths = resolvedPaths.skills
 				.filter((resource) => this.isInstructionPathAdmitted(resource.path, resource.metadata.scope))
-				.map(mapSkillPath);
+				.map((resource) => resolvedEnabledSkills.get(resource) ?? mapSkillPath(resource));
 			this.discoverableSkillPaths = this.filterInstructionPaths(
 				this.mergePaths(
 					[
 						...cliEnabledSkills,
-						...enabledSkillResources.map(mapSkillPath),
+						...resolvedEnabledSkills.values(),
 						...discoverableResolvedSkillPaths,
 						...externalSkills,
 						...bundledSkillPaths,
@@ -1539,9 +1539,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				await disposeExtensionEventSubscriptions(snapshot.extensionsResult.extensions);
 			}
 		} catch (error) {
-			if (this.extensionsResult !== snapshot.extensionsResult) {
-				await disposeExtensionEventSubscriptions(this.extensionsResult.extensions);
-			}
+			const discarded = new Set([...loaded, ...(candidate?.extensions ?? [])]);
+			for (const extension of snapshot.extensionsResult.extensions) discarded.delete(extension);
+			if (discarded.size) await disposeExtensionEventSubscriptions([...discarded]);
 			this.restoreSnapshot(snapshot);
 			throw error;
 		} finally {
@@ -1577,7 +1577,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				skillPaths: admittedSkillPaths,
 				includeDefaults: false,
 				includeProjectDefaults: false,
-				// Profile UAC: denied skill files are never read from disk.
+				frontmatterCache: this.skillFrontmatter,
 				isPathAllowed: (path) => this.filterPathsByProfile([path], "skills").length > 0,
 			});
 		}

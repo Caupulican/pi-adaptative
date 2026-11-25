@@ -2,13 +2,12 @@
  * Minimal TUI implementation with differential rendering
  */
 
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import { createFrameCapture, createRedrawCapture, frameRowSample } from "./debug-capture.ts";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import { changedTerminalRows, paintChangedTerminalRows } from "./terminal-render-diff.ts";
 import {
 	extractSegments,
 	fitToWidth,
@@ -54,6 +53,7 @@ export interface Component {
 	 * @returns Array of strings, each representing a line
 	 */
 	render(width: number): string[];
+	renderRows?(width: number): import("./terminal-rows.ts").TerminalRows;
 
 	/**
 	 * Explicit opt-in cache contract. Increment whenever rendered output can change; components
@@ -377,6 +377,7 @@ export class TUI extends Container {
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
 	private renderRequested = false;
+	private _renderRequestRevision = 0;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
@@ -395,6 +396,8 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private stopped = false;
+	private readonly redrawCapture = createRedrawCapture();
+	private readonly frameCapture = createFrameCapture();
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -873,6 +876,17 @@ export class TUI extends Container {
 			this.requestFullRender("saved-lines");
 			return;
 		}
+		this._renderRequestRevision++;
+		this.requestPresentationRender();
+	}
+
+	/** Changes even when multiple application update requests share one terminal frame. */
+	get renderRequestRevision(): number {
+		return this._renderRequestRevision;
+	}
+
+	/** Paints local UI state or a published view without requesting another application read. */
+	requestPresentationRender(): void {
 		if (this.renderRequested || this.terminal.inputOnly) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
@@ -880,6 +894,7 @@ export class TUI extends Container {
 
 	private requestFullRender(clearMode: FullRedrawClearMode): void {
 		if (this.terminal.inputOnly) return;
+		this._renderRequestRevision++;
 		// A public force redraw remains the strongest request if width detection races it.
 		if (this.pendingFullRedrawClearMode !== "saved-lines") {
 			this.pendingFullRedrawClearMode = clearMode;
@@ -995,7 +1010,7 @@ export class TUI extends Container {
 				return;
 			}
 			this.focusedComponent.handleInput(data);
-			this.requestRender();
+			this.requestPresentationRender();
 		}
 	}
 
@@ -1436,15 +1451,12 @@ export class TUI extends Container {
 			this.previousHeight = height;
 		};
 
-		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string): void => {
-			if (!debugRedraw) return;
-			const logDirectory =
-				process.env.PI_TUI_WORK_DIR ?? process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
-			const logPath = path.join(logDirectory, "pi-debug.log");
-			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
-			fs.mkdirSync(logDirectory, { recursive: true });
-			fs.appendFileSync(logPath, msg);
+			if (this.redrawCapture?.acceptsEntry) {
+				this.redrawCapture.write(
+					`[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`,
+				);
+			}
 		};
 
 		// First render - just output everything without clearing (assumes clean screen)
@@ -1479,31 +1491,10 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Find first and last changed lines
-		let firstChanged = -1;
-		let lastChanged = -1;
-		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
-			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
-			const newLine = i < newLines.length ? newLines[i] : "";
-
-			if (oldLine !== newLine) {
-				if (firstChanged === -1) {
-					firstChanged = i;
-				}
-				lastChanged = i;
-			}
-		}
+		const [firstChanged, changedThrough] = changedTerminalRows(this.previousLines, newLines);
 		const appendedLines = newLines.length > this.previousLines.length;
-		if (appendedLines) {
-			if (firstChanged === -1) {
-				firstChanged = this.previousLines.length;
-			}
-			lastChanged = newLines.length - 1;
-		}
-		if (firstChanged !== -1) {
-			lastChanged = this.expandLastChangedForKittyImages(firstChanged, lastChanged);
-		}
+		const lastChanged =
+			firstChanged === -1 ? changedThrough : this.expandLastChangedForKittyImages(firstChanged, changedThrough);
 		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
 
 		// No changes - but still need to update hardware cursor position if it moved
@@ -1598,22 +1589,15 @@ export class TUI extends Container {
 
 		buffer += appendStart ? "\r\n" : "\r"; // Move to column 0
 
-		// Only render changed lines (firstChanged to lastChanged), not all lines to end.
-		// Prefer paint-over-then-clear-tail for text lines instead of clear-then-paint.
-		// Some terminals visibly flash when EL2 blanks the row before the replacement
-		// text arrives, especially while typing or during high-frequency agent updates.
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
-		for (let i = firstChanged; i <= renderEnd; i++) {
-			if (i > firstChanged) buffer += "\r\n";
-			const line = newLines[i];
-			const isImage = isImageLine(line);
-			if (isImage) buffer += "\x1b[2K"; // Clear reserved/image rows before redrawing placements.
-			buffer += isImage ? line : this.fitLineToWidth(line, width);
-			// Screen rows hold lines truncated to the terminal width, so compare effective widths.
-			const lineWidth = isImage ? 0 : Math.min(visibleWidth(line), width);
-			const prevWidth = isImage ? 0 : Math.min(visibleWidth(this.previousLines[i] ?? ""), width);
-			if (!isImage && lineWidth < prevWidth) buffer += "\x1b[K";
-		}
+		buffer += paintChangedTerminalRows(
+			this.previousLines,
+			newLines,
+			firstChanged,
+			renderEnd,
+			width,
+			renderEnd <= prevViewportBottom,
+		);
 
 		// Track where cursor ended up after rendering
 		let finalCursorRow = renderEnd;
@@ -1636,35 +1620,27 @@ export class TUI extends Container {
 
 		buffer += "\x1b[?2026l"; // End synchronized output
 
-		if (process.env.PI_TUI_DEBUG === "1") {
-			const debugDir =
-				process.env.PI_TUI_WORK_DIR ??
-				path.join(os.tmpdir(), "pi", "work", "debug", "tui", `process-${process.pid}`);
-			fs.mkdirSync(debugDir, { recursive: true });
-			const debugPath = path.join(debugDir, `render-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
-			const debugData = [
-				`firstChanged: ${firstChanged}`,
-				`viewportTop: ${viewportTop}`,
-				`cursorRow: ${this.cursorRow}`,
-				`height: ${height}`,
-				`lineDiff: ${lineDiff}`,
-				`hardwareCursorRow: ${hardwareCursorRow}`,
-				`renderEnd: ${renderEnd}`,
-				`finalCursorRow: ${finalCursorRow}`,
-				`cursorPos: ${JSON.stringify(cursorPos)}`,
-				`newLines.length: ${newLines.length}`,
-				`previousLines.length: ${this.previousLines.length}`,
-				"",
-				"=== newLines ===",
-				JSON.stringify(newLines, null, 2),
-				"",
-				"=== previousLines ===",
-				JSON.stringify(this.previousLines, null, 2),
-				"",
-				"=== buffer ===",
-				JSON.stringify(buffer),
-			].join("\n");
-			fs.writeFileSync(debugPath, debugData);
+		if (this.frameCapture?.acceptsEntry) {
+			this.frameCapture.write(
+				`${JSON.stringify({
+					at: new Date().toISOString(),
+					pid: process.pid,
+					firstChanged,
+					viewportTop,
+					cursorRow: this.cursorRow,
+					height,
+					lineDiff,
+					hardwareCursorRow,
+					renderEnd,
+					finalCursorRow,
+					cursorPos,
+					newLineCount: newLines.length,
+					previousLineCount: this.previousLines.length,
+					newRows: frameRowSample(newLines),
+					previousRows: frameRowSample(this.previousLines),
+					outputPrefix: buffer.slice(0, 8192),
+				})}\n`,
+			);
 		}
 
 		// Write entire buffer at once

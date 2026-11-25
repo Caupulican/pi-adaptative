@@ -32,12 +32,22 @@ import {
 } from "../src/core/memory/continuous-chat-projection.ts";
 import type { ProviderHistoryContinuation } from "../src/core/memory/continuous-chat-provider-history.ts";
 import { IcmTurnCoordinator } from "../src/core/memory/continuous-chat-turn-coordinator.ts";
+import {
+	clearedDiscoveredSkillText,
+	DISCOVERED_SKILL_RECORD_KIND,
+	DISCOVERED_SKILL_RECORD_KIND_PREFIX,
+	discoveredSkillDigest,
+} from "../src/core/skill-header-record.ts";
 import type { AgentContext, AgentLoopConfig } from "../src/kernel/loop-config.ts";
 import { advanceMessageContentRevision, immutableHistoryMessage } from "../src/kernel/message-revision.ts";
 import { convertToLlm, createCustomMessage } from "../src/kernel/messages.ts";
 import { startPlannedAgentProviderRequestWithId } from "../src/kernel/provider-request-planner.ts";
 import type { SessionEntry } from "../src/kernel/session/session-entries.ts";
-import { HOST_REQUEST_ONLY_DETAILS } from "../src/kernel/transient-records.ts";
+import {
+	HOST_REQUEST_ONLY_DETAILS,
+	HOST_TRANSIENT_CLEARED_DETAILS,
+	transientRecordMessageOf,
+} from "../src/kernel/transient-records.ts";
 import type { AgentMessage } from "../src/kernel/types.ts";
 
 const model: Model<Api> = {
@@ -198,6 +208,107 @@ function fixture(certified = false) {
 }
 
 describe("continuous chat at the native provider boundary", () => {
+	it.each(["unchanged", "cleared on wire", "revoked between turns", "authority changed"] as const)(
+		"retains a learned skill header without moving its accepted wire record when %s",
+		async (variant) => {
+			const f = fixture(true);
+			const name = "plot-review";
+			const kind = `${DISCOVERED_SKILL_RECORD_KIND_PREFIX}1`;
+			const text = `DISCOVERED SKILL [1] "${name}"\nGuidance for reviewing plots.`;
+			const sourceId = "chart-header-source";
+			const authority = (scope: string) =>
+				createCustomMessage(
+					"authority_context",
+					`Current scope ${scope}`,
+					false,
+					undefined,
+					new Date(0).toISOString(),
+				);
+			if (variant === "authority changed") f.frameRecords.push(authority("original"));
+			const discovered = createCustomMessage(
+				kind,
+				text,
+				false,
+				{
+					record: { v: 1, k: DISCOVERED_SKILL_RECORD_KIND, name, sourceId, order: 1 },
+					digest: discoveredSkillDigest(text, sourceId, 1),
+				},
+				new Date(0).toISOString(),
+			);
+
+			await f.begin("Assess this plot.");
+			await f.send([
+				{ type: "toolCall", name: "skill", id: "search", arguments: { action: "search", query: "review plots" } },
+			]);
+			f.source.messages.push({
+				role: "toolResult",
+				toolName: "skill",
+				toolCallId: "search",
+				isError: false,
+				content: [{ type: "text", text: `skill search: ${name}` }],
+				timestamp: 9,
+			});
+			f.transient.push(discovered);
+			await f.send(
+				variant === "cleared on wire"
+					? [
+							{
+								type: "toolCall",
+								name: "skill",
+								id: "exclude",
+								arguments: { action: "exclude", name, reason: "Owner excluded it" },
+							},
+						]
+					: undefined,
+			);
+			if (variant === "cleared on wire") {
+				f.source.messages.push({
+					role: "toolResult",
+					toolName: "skill",
+					toolCallId: "exclude",
+					isError: false,
+					content: [{ type: "text", text: "skill excluded" }],
+					timestamp: 10,
+				});
+				f.transient.splice(
+					0,
+					1,
+					createCustomMessage(
+						kind,
+						clearedDiscoveredSkillText("1"),
+						false,
+						HOST_TRANSIENT_CLEARED_DETAILS,
+						new Date(0).toISOString(),
+					),
+				);
+				await f.send();
+			}
+			const previous = f.wires.at(-1)!.messages;
+			const previousInput = f.inputs.at(-1)!;
+			if (variant === "authority changed") f.frameRecords[0] = authority("changed");
+			if (variant === "unchanged" || variant === "authority changed")
+				f.frameRecords.push(transientRecordMessageOf(discovered)!);
+			else f.transient.length = 0;
+			await f.begin("Follow up on that review.");
+			await f.send();
+			const next = f.wires.at(-1)!.messages;
+			if (variant === "revoked between turns") {
+				expect(providerMessagePrefix(next)?.previous).not.toBe(previous);
+				expect(JSON.stringify(next)).not.toContain("Guidance for reviewing plots.");
+				return;
+			}
+			if (variant === "authority changed") {
+				expect(providerMessagePrefix(next)?.previous).not.toBe(previous);
+				expect(JSON.stringify(next)).toContain("Current scope changed");
+				return;
+			}
+			expect(providerMessagePrefix(next)?.previous).toBe(previous);
+			expect(providerMessagePrefix(next)?.count).toBe(previous.length);
+			expect(responsesInputPrefix(f.inputs.at(-1)!)?.previous).toBe(previousInput);
+			expect(JSON.stringify(next).match(/Guidance for reviewing plots\./g)).toHaveLength(1);
+		},
+	);
+
 	it("bridges the exact dispatched tool history into the next Responses conversion", async () => {
 		const f = fixture(true);
 		await f.begin("Inspect the build.");

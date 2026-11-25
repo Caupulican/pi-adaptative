@@ -157,7 +157,7 @@ import type {
 } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
-import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
+import { createForegroundAppendPort, ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import type { ChannelProvider, JobSchedulerProvider } from "./gateways/channel-provider.ts";
@@ -196,6 +196,7 @@ import {
 	continuousChatTurnAudit,
 	resolveContinuousChatTurnStart,
 } from "./memory/continuous-chat-projection.ts";
+import { releaseIcmSessionPayloads } from "./memory/continuous-chat-session-retention.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
 import { sessionContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
 import { knowledgeSessionHooks } from "./memory/knowledge-announcement.ts";
@@ -404,7 +405,7 @@ export class AgentSession {
 
 	private _unsubscribeAgent?: () => void;
 	private _unsubscribeSettingsChanges?: () => void;
-	private _eventListeners: AgentSessionEventListener[] = [];
+	private _eventListeners: readonly AgentSessionEventListener[] = [];
 	private readonly _onClosingWarnings: (warnings: readonly string[]) => void;
 	private _extensionsChangedListeners: Array<() => void> = [];
 
@@ -1010,7 +1011,9 @@ export class AgentSession {
 			getSkills: () => skillsForSessionRole(this._resourceLoader.getActiveSkills()),
 			getFullSkills: () => skillsForSessionRole(this._resourceLoader.getSkills().skills),
 			refreshSkills: () => this._resourceLoader.refreshSkills?.(),
-			getSkillDiagnostics: () => this._resourceLoader.getSkills().diagnostics.map((d) => `${d.path}: ${d.message}`),
+			getSemanticEngine: () => this._semanticPlane.recordingSemanticEngine(),
+			getSemanticProvider: () => config.systemOne?.provider ?? this.settingsManager.getSystemOneSettings().provider,
+			getSearchOrigin: () => this._semanticUsage.captureOrigin(),
 			getMaxBodyBytes: () =>
 				Math.min(
 					resolveActiveSkillBodyByteLimit(this.model?.contextWindow),
@@ -1791,15 +1794,14 @@ export class AgentSession {
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
 			afterRun: async (beginRuntimeHandoff, signal) => {
-				// The submission is over, including a retry its last agent_end predicted and nothing started (an abort during the
-				// backoff, a runtime stop): a later wake-started run must not read this run's owner words as its own request.
 				this._reflection.ownerEvidence.endOwnerTurn();
-				if (!signal.aborted && !isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
+				if (!signal.aborted && !isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason))
 					this._selfCompaction.schedule();
-				}
 				this._toolProtocol.restoreWithheldTools();
 				this._bash.flushPendingBashMessages();
 				await this._drainQueuedExtensionCommands(beginRuntimeHandoff);
+				const warning = releaseIcmSessionPayloads(this._memory.continuousChatHost(), this.sessionManager);
+				if (warning) this._emit({ type: "warning", message: warning });
 			},
 		});
 		this._pendingQueue.bindForeground(this._foregroundRecovery);
@@ -1885,7 +1887,7 @@ export class AgentSession {
 			getModel: () => this.model ?? undefined,
 			getSettingsManager: () => this.settingsManager,
 			getSessionManager: () => this.sessionManager,
-			appendSessionMessageBatch: (batch, attempt) => this._foregroundLifecycle.appendMessageBatch(batch, attempt),
+			...createForegroundAppendPort(() => this._foregroundLifecycle),
 			returnUnpersistedInput: (messages) => {
 				if (this._pendingQueue.returnUnpersisted(messages)) this._emitQueueUpdate();
 			},
@@ -3468,15 +3470,13 @@ export class AgentSession {
 	 */
 	subscribe(listener: AgentSessionEventListener, options?: { publishesMessageEdits: true }): () => void {
 		if (!options?.publishesMessageEdits) this._hasMutableEventListeners = true;
-		this._eventListeners.push(listener);
+		this._eventListeners = [...this._eventListeners, listener];
 		this._foregroundLifecycle.emitPendingWarnings((message) => this._emit({ type: "warning", message }));
 
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this._eventListeners.indexOf(listener);
-			if (index !== -1) {
-				this._eventListeners.splice(index, 1);
-			}
+			if (index !== -1) this._eventListeners = this._eventListeners.toSpliced(index, 1);
 		};
 	}
 
@@ -3588,10 +3588,10 @@ export class AgentSession {
 		safely(() => this._localPrefixWarm.cancel());
 		// Existing close-time user events end here; only the physical mutation join remains visible.
 		this._closingRuntimeWaitOnly = true;
-		// Enroll this whole phase now. Its own tracker joins resources added after physical mutation
-		// settlement; the outer tracker is never extended after finish captures its work.
+		// Enroll this phase before finish captures the tracker's work.
 		trackRequired(async () => {
 			await humanInputPreparation;
+			await this.sessionManager.settleBackgroundAppends();
 			if (this._runtimeBuilder.hasPendingMutation)
 				await this._runtimeBuilder.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock);
 			await this._durableCustomMessageTurns.closeParentInputsBefore(() => this._disposeRuntimeDependencies());
@@ -4196,7 +4196,7 @@ export class AgentSession {
 	getIdlePreparationView(): IdlePreparationView | undefined {
 		return this._compaction.getIdlePreparationView();
 	}
-
+	readonly getRunningBackgroundToolCount = () => this._backgroundToolTasks.getRunningTaskCount();
 	/**
 	 * Resolve once the foreground is idle: no submission holds the lease (the agent run has ended AND the
 	 * prompt that owned it has finished its tail), no retry, compaction or history rewrite is active, no

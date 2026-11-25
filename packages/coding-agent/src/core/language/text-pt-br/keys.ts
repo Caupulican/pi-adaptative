@@ -48,7 +48,7 @@ const BINDINGS = {
 	"app.model.cycleBackward": "Passar para o modelo anterior",
 	"app.model.select": "Abrir o seletor de modelos",
 	"app.tools.expand": "Expandir ou recolher a saída das ferramentas",
-	"app.history.load": "Carregar o restante do histórico da sessão",
+	"app.history.load": "Ler o histórico anterior da sessão",
 	"app.tools.background": "Mover as chamadas de ferramenta ativas para segundo plano",
 	"app.agents.open": "Mostrar ou ocultar os detalhes de objetivo, plano e agentes",
 	"app.agents.close": "Fechar os detalhes do trabalho",

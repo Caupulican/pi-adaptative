@@ -61,14 +61,68 @@ export function flushModelRouterSessionBufferPrefix(
 	return flushBufferedMessages(buffer, appendBatch, true);
 }
 
-/** Synchronous append callbacks may add a suffix, but cannot publish the same prefix recursively. */
+/** A publication can grow a suffix, with one commit owning the submitted prefix. */
 const publishingBuffers = new WeakSet<ModelRouterSessionBuffer>();
+
+type BufferPublication = Generator<
+	[readonly ModelRouterBufferedSessionMessage[], symbol],
+	Map<AgentMessage, string>,
+	readonly string[]
+>;
+
+export interface RoutedSessionAppendPort {
+	appendSessionMessageBatch(
+		entries: readonly ModelRouterBufferedSessionMessage[],
+		attempt?: symbol,
+	): readonly string[];
+	appendSessionMessageBatchAwaitable?(
+		entries: readonly ModelRouterBufferedSessionMessage[],
+		attempt?: symbol,
+	): Promise<readonly string[]>;
+}
+
+export async function flushModelRouterSessionBufferAwaitable(
+	buffer: ModelRouterSessionBuffer,
+	port: RoutedSessionAppendPort,
+): Promise<Map<AgentMessage, string>> {
+	const operation = bufferedPublication(buffer, false);
+	const prepared = operation.next();
+	if (prepared.done) return prepared.value;
+	let ids: readonly string[];
+	try {
+		ids = await (port.appendSessionMessageBatchAwaitable?.(...prepared.value) ??
+			port.appendSessionMessageBatch(...prepared.value));
+	} catch (error) {
+		return finishBufferPublication(operation.throw(error));
+	}
+	return finishBufferPublication(operation.next(ids));
+}
 
 function flushBufferedMessages(
 	buffer: ModelRouterSessionBuffer,
 	appendBatch: (entries: readonly ModelRouterBufferedSessionMessage[], attempt: symbol) => readonly string[],
 	prefixOnly: boolean,
 ): Map<AgentMessage, string> {
+	const operation = bufferedPublication(buffer, prefixOnly);
+	const prepared = operation.next();
+	if (prepared.done) return prepared.value;
+	let ids: readonly string[];
+	try {
+		ids = appendBatch(...prepared.value);
+	} catch (error) {
+		return finishBufferPublication(operation.throw(error));
+	}
+	return finishBufferPublication(operation.next(ids));
+}
+
+function finishBufferPublication(
+	result: IteratorResult<unknown, Map<AgentMessage, string>>,
+): Map<AgentMessage, string> {
+	if (!result.done) throw new Error("A routed session publication requested a second commit.");
+	return result.value;
+}
+
+function* bufferedPublication(buffer: ModelRouterSessionBuffer, prefixOnly: boolean): BufferPublication {
 	if (buffer.uncertain) throw buffer.uncertain;
 	if (buffer.committed || (prefixOnly && buffer.prefixCommitted)) return new Map();
 	if (publishingBuffers.has(buffer)) throw new Error("A routed session buffer is already being published.");
@@ -81,7 +135,7 @@ function flushBufferedMessages(
 		let failure: SessionAppendCommittedError | undefined;
 		if (entries.length > 0) {
 			try {
-				ids = appendBatch(entries, attempt);
+				ids = yield [entries, attempt];
 			} catch (error) {
 				if (
 					error instanceof SessionAppendUncertainError &&

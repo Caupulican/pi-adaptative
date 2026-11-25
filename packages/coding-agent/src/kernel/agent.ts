@@ -267,7 +267,7 @@ export class AgentBusyError extends Error {
  */
 export class Agent {
 	private _state: MutableAgentState;
-	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
+	private listeners: readonly ((event: AgentEvent, signal: AbortSignal) => Promise<void> | void)[] = [];
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
 
@@ -429,12 +429,16 @@ export class Agent {
 		listener: (event: AgentEvent, signal: AbortSignal) => Promise<void> | void,
 		options?: { publishesMessageEdits: true },
 	): () => void {
-		this.listeners.add(listener);
+		if (!this.listeners.includes(listener)) this.listeners = [...this.listeners, listener];
 		if (!options?.publishesMessageEdits) {
 			this.supportsIsolatedHistory = false;
 			this.requestHistory.reset();
 		}
-		return () => this.listeners.delete(listener);
+		return () => {
+			if (!this.listeners.includes(listener)) return false;
+			this.listeners = this.listeners.filter((registered) => registered !== listener);
+			return true;
+		};
 	}
 
 	/** Install the host's eligibility check for isolated request history. */
@@ -1025,7 +1029,7 @@ export class Agent {
 			// Every listener hears the end of the run: one that fails does not hide it from the rest, and the first failure is thrown
 			// once all of them have run.
 			const failures: unknown[] = [];
-			for (const listener of [...this.listeners]) {
+			for (const listener of this.listeners) {
 				try {
 					await listener(event, signal);
 				} catch (error: unknown) {
@@ -1041,7 +1045,7 @@ export class Agent {
 			}
 			return;
 		}
-		for (const listener of [...this.listeners]) {
+		for (const listener of this.listeners) {
 			await listener(event, signal);
 		}
 	}

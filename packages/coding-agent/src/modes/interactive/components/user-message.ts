@@ -1,10 +1,16 @@
-import { Box, Container, Markdown, type MarkdownTheme } from "@caupulican/pi-tui";
+import {
+	Box,
+	Container,
+	collectTerminalRows,
+	componentTerminalRows,
+	joinTerminalRows,
+	Markdown,
+	type MarkdownTheme,
+	type TerminalRows,
+} from "@caupulican/pi-tui";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
-
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+import { markPromptZone } from "./prompt-zone-rows.ts";
 
 /**
  * Component that renders a user message
@@ -48,17 +54,13 @@ export class UserMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
+		return collectTerminalRows(this.renderRows(width));
+	}
+
+	renderRows(width: number): TerminalRows {
 		if (this.transformMarkdown) {
 			applyMarkdownTransform(this.markdownSlot, this.transformMarkdown, false, width);
 		}
-
-		const lines = super.render(width);
-		if (lines.length === 0) {
-			return lines;
-		}
-
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
-		return lines;
+		return markPromptZone(joinTerminalRows(this.children.map((child) => componentTerminalRows(child, width))));
 	}
 }

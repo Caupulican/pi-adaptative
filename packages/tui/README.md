@@ -782,3 +782,5 @@ Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
 ```bash
 PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx test/chat-simple.ts
 ```
+
+Captures are buffered and stop at 8 MiB per file. An existing directory receives a per-process capture, with up to four recent captures retained and expiration checked at the start of each new capture. `PI_DEBUG_REDRAW=1` records redraw reasons up to 1 MiB. `PI_TUI_DEBUG=1` writes sampled frame data up to 4 MiB. Raw output and frame samples may include text displayed in the terminal.

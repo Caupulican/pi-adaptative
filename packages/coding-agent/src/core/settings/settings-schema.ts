@@ -42,8 +42,8 @@ export interface LoggingSettings {
 	level?: "off" | "error" | "warn" | "info" | "debug" | "trace";
 	/** Only these subsystems are logged (delegation, link, bots, tools, readiness, ...); absent logs every one. */
 	categories?: string[];
-	maxFileMb?: number; // default: 8; a log file past it is rotated
-	retainDays?: number; // default: 14; older log files are deleted at start
+	maxFileMb?: number; // default and ceiling: 8; rotate before exceeding this size
+	retainDays?: number; // default: 14; expired segments are removed during log maintenance
 }
 
 export interface OrchestratorSettings {

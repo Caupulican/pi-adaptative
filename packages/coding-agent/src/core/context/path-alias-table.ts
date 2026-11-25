@@ -22,7 +22,9 @@ export const DEFAULT_MIN_ALIAS_SAVING = 10;
 const LEFT_BOUNDARY_CLASS = String.raw`[\s"'=(\x60\[|;<>:,{}&]`;
 // A token never ends in a dot: sentence-final punctuation after an emitted id
 // (`see p/grep.ts.`) stays outside the token so legend scans and expansion still match.
-const PATH_ALIAS_TOKEN_SRC = String.raw`p\/(?:[\w.+@~%-]+\/)*[\w.+@~%-]*[\w+@~%-]`;
+const PATH_ALIAS_SEGMENT_CHAR = String.raw`[\w.+@~%-]`;
+const PATH_ALIAS_TOKEN_SRC = String.raw`p\/(?:${PATH_ALIAS_SEGMENT_CHAR}+\/)*${PATH_ALIAS_SEGMENT_CHAR}*[\w+@~%-]`;
+const PATH_ALIAS_CONTINUATION = new RegExp(`${PATH_ALIAS_SEGMENT_CHAR}|/`);
 // A token counts as an alias reference only when it stands alone at a shared boundary.
 // Preceded by a path separator or path-token character it is part of a real filesystem
 // path (src/p/util.ts) and must never be expanded.
@@ -621,12 +623,22 @@ function expandedPath(table: PathAliasTable, path: string, absolute: boolean): s
 }
 
 export function expandText(table: PathAliasTable, text: string, absolute = false): string {
-	if (table.entries.length === 0) return text;
+	// Every minted alias starts with the literal `p/`. Most display text contains no alias at all;
+	// avoid running the global token matcher over an accumulated streaming reply in that common case.
+	if (table.entries.length === 0 || !text.includes("p/")) return text;
 	const byId = compileExpander(table);
 	return text.replace(STANDALONE_TOKEN_RE, (token) => {
 		const path = byId.get(token);
 		return path === undefined ? token : expandedPath(table, path, absolute);
 	});
+}
+
+/** The delimiter is retained by the suffix so the full matcher sees the original left boundary. */
+export function findAliasAppendBoundary(text: string, appendedAt: number): number | undefined {
+	for (let index = text.length - 1; index >= appendedAt; index--) {
+		if (!PATH_ALIAS_CONTINUATION.test(text[index]!)) return index;
+	}
+	return undefined;
 }
 
 /**

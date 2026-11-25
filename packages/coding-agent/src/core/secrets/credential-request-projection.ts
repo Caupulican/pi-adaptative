@@ -5,10 +5,11 @@ import {
 	freezeOwnedJson,
 	historyWorkFallback,
 	inheritHistoryWork,
+	providerInputPrefix,
 	providerMessagePrefix,
 	readOnlyProviderPayloadHook,
+	recordProviderInput,
 	registerProviderMessagePrefix,
-	responsesInputPrefix,
 } from "@caupulican/pi-ai/history-work";
 import { redactCredentialContent } from "./credential-model-content.ts";
 import { createProviderRequestSecretPolicy } from "./provider-request-secrets.ts";
@@ -187,35 +188,43 @@ export class CredentialRequestProjection {
 				policy.payloadString,
 			);
 		const active = hookActivity.get(hook);
-		const shared = certified && !!active && !active() && model.api === "openai-responses";
+		const field = model.api === "anthropic-messages" ? "messages" : "input";
+		const supportsSharedInput =
+			model.api === "openai-responses" ||
+			model.api === "azure-openai-responses" ||
+			model.api === "openai-codex-responses" ||
+			model.api === "anthropic-messages";
+		const shared = certified && supportsSharedInput && !!active && !active();
 		const onPayload: PayloadHook = async (payload, payloadModel) => {
 			const input =
 				shared && payload && typeof payload === "object" && Object.getPrototypeOf(payload) === Object.prototype
-					? Object.getOwnPropertyDescriptor(payload, "input")?.value
+					? Object.getOwnPropertyDescriptor(payload, field)?.value
 					: undefined;
-			const receipt = shared && Array.isArray(input) ? responsesInputPrefix(input) : undefined;
+			const receipt = shared && Array.isArray(input) ? providerInputPrefix(input) : undefined;
 			if (receipt?.source === safe.messages && Array.isArray(input)) {
 				const count = prior?.safeInput && append && receipt.previous === prior.rawInput ? receipt.count : 0;
 				const suffix = count ? input.slice(count) : input;
 				const base = payload as Record<string, unknown>;
-				const shell = count ? { ...base, input: suffix } : base;
+				const shell = count ? { ...base, [field]: suffix } : base;
 				const result = apply(shell);
 				const previousSafe = prior?.safeInput;
-				const useOriginal = (!count || previousSafe === prior?.rawInput) && suffix === result.input;
+				const safeSuffix = result[field];
+				if (!Array.isArray(safeSuffix)) throw new Error("Invalid provider input projection");
+				const useOriginal = (!count || previousSafe === prior?.rawInput) && suffix === safeSuffix;
 				const safeInput = useOriginal
 					? input
 					: count
-						? previousSafe!.slice(0, count).concat(result.input)
-						: result.input;
-				if (!Array.isArray(safeInput)) throw new Error("Invalid Responses input projection");
+						? previousSafe!.slice(0, count).concat(safeSuffix)
+						: safeSuffix;
 				// Exposed transport arrays cannot modify a later request's redacted prefix.
 				if (!useOriginal) {
 					for (let index = count; index < safeInput.length; index++) freezeOwnedJson(safeInput[index]);
 					Object.freeze(safeInput);
+					recordProviderInput(safeInput, safe.messages, count, count ? previousSafe : undefined);
 				}
 				frame.safeInput = safeInput;
 				frame.rawInput = input;
-				const safePayload = result === shell && useOriginal ? payload : { ...result, input: safeInput };
+				const safePayload = result === shell && useOriginal ? payload : { ...result, [field]: safeInput };
 				if (!active!()) return safePayload;
 				// A handler installed while the request was in flight owns a mutable private copy.
 				const detached = structuredClone(safePayload);

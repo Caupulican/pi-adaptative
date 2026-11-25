@@ -29,6 +29,7 @@ import {
 	decodeBackgroundToolImageManifest,
 	readBackgroundToolImage,
 } from "./background-tool-images.ts";
+import { runningBackgroundToolTaskCount, runningBackgroundToolTaskIds } from "./background-tool-task-views.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
 import { oneLine } from "./provider-tool-text.ts";
@@ -942,6 +943,7 @@ export class BackgroundToolTaskController {
 	list(): BackgroundToolTaskRecord[] {
 		return [...this.tasks.values()].map((state) => ({ ...state.record }));
 	}
+	readonly getRunningTaskCount = () => runningBackgroundToolTaskCount(this.tasks.values());
 
 	async readImage(taskId: string, imageIndex: number): Promise<BackgroundToolImageRead> {
 		const record = this.tasks.get(taskId)?.record ?? this.loadRetiredTerminalRecord(taskId);
@@ -956,9 +958,7 @@ export class BackgroundToolTaskController {
 		return {
 			disposed: this.disposed,
 			physicalExecutions: this.executions.size,
-			runningTaskIds: states
-				.filter((state) => state.record.status === "running")
-				.map((state) => state.record.taskId),
+			runningTaskIds: runningBackgroundToolTaskIds(states),
 			handoffRequests: [...this.handoffRequests.values()].reduce((count, requests) => count + requests.size, 0),
 			waitingConsumers: states.reduce((count, state) => count + state.waitingConsumers, 0),
 			taskWatchdogs: states.filter((state) => state.terminalWatchdog !== undefined).length,

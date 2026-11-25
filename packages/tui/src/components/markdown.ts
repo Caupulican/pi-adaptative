@@ -1,9 +1,11 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
 import { type AlertKind, libraryText } from "../library-text.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import type { TerminalRows } from "../terminal-rows.ts";
 import type { Component } from "../tui.ts";
 import { visibleWidth, wrapTextWithAnsi } from "../utils.ts";
-import { CachedTextComponent, frameTextLines } from "./text-layout.ts";
+import { StreamingMarkdown } from "./streaming-markdown.ts";
+import { CachedTextComponent, frameTextRows, type PreparedTextBlock } from "./text-layout.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -78,6 +80,12 @@ const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
+
+function lexMarkdown(source: string): readonly Token[] {
+	const tokens = markdownParser.lexer(source);
+	trimPartialClosingFences(tokens);
+	return tokens;
+}
 
 /**
  * Default text styling for markdown content.
@@ -156,6 +164,8 @@ export class Markdown extends CachedTextComponent implements Component {
 	private theme: MarkdownTheme;
 	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
+	private streaming?: StreamingMarkdown;
+	private streamingActive = false;
 
 	constructor(
 		text: string,
@@ -171,47 +181,65 @@ export class Markdown extends CachedTextComponent implements Component {
 		this.options = options ? { ...options } : {};
 	}
 
-	render(width: number): string[] {
-		const start = this.renderState.begin(this.text, width, this.paddingX);
-		if (start.kind === "complete") return start.lines;
+	/** The live preview can defer work until the authoritative final Markdown render. */
+	setStreaming(streaming: boolean): void {
+		if (this.streamingActive === streaming) return;
+		this.streamingActive = streaming;
+		if (streaming) this.streaming = new StreamingMarkdown();
+		this.renderState.invalidate();
+	}
 
-		// Parse markdown to HTML-like tokens
-		const tokens = markdownParser.lexer(start.prepared.normalizedText);
-		trimPartialClosingFences(tokens);
+	override invalidate(): void {
+		super.invalidate();
+		this.streaming?.clear();
+		this.defaultStylePrefix = undefined;
+	}
 
-		// Convert tokens to styled terminal output
-		const renderedLines: string[] = [];
-
-		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i];
-			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, start.prepared.contentWidth, nextToken?.type);
-			for (const tokenLine of tokenLines) {
-				renderedLines.push(tokenLine);
-			}
-		}
-
-		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
-			if (isImageLine(line)) {
-				wrappedLines.push(line);
-			} else {
-				for (const wrappedLine of wrapTextWithAnsi(line, start.prepared.contentWidth)) {
-					wrappedLines.push(wrappedLine);
-				}
-			}
-		}
-
-		const bgFn = this.defaultTextStyle?.bgColor;
-		const result = frameTextLines(wrappedLines, {
+	protected layoutRows({ normalizedText, contentWidth }: PreparedTextBlock, width: number): TerminalRows {
+		const wrapped = this.streaming
+			? this.streaming.render(
+					normalizedText.replace(/\r\n?/g, "\n"),
+					contentWidth,
+					{
+						lex: lexMarkdown,
+						render: (tokens, columns, first, end) => this.renderTokenRows(tokens, columns, first, end),
+						preview: (text, columns) => this.renderPlainPreview(text, columns),
+					},
+					!this.streamingActive,
+				)
+			: this.renderTokenRows(lexMarkdown(normalizedText), contentWidth);
+		if (!this.streamingActive) this.streaming = undefined;
+		return frameTextRows(wrapped, {
 			width,
 			paddingX: this.paddingX,
 			paddingY: this.paddingY,
-			background: bgFn,
+			background: this.defaultTextStyle?.bgColor,
 			isPassthrough: isImageLine,
 		});
-		return this.renderState.finish(this.text, width, result);
+	}
+
+	private renderTokenRows(tokens: readonly Token[], width: number, start = 0, end = tokens.length): string[] {
+		const wrapped: string[] = [];
+		for (let i = start; i < end; i++) {
+			const nextToken = tokens[i + 1];
+			for (const line of this.renderToken(tokens[i]!, width, nextToken?.type)) {
+				if (isImageLine(line)) {
+					wrapped.push(line);
+					continue;
+				}
+				for (const row of wrapTextWithAnsi(line, width)) wrapped.push(row);
+			}
+		}
+		return wrapped;
+	}
+
+	private renderPlainPreview(text: string, width: number): string[] {
+		// The cut can start inside terminal control data. Only printable source reaches this preview.
+		const plain = Array.from(text, (char) => {
+			const code = char.charCodeAt(0);
+			return char === "\n" || (code >= 32 && (code < 127 || code > 159)) ? char : "";
+		}).join("");
+		return ["…", ...wrapTextWithAnsi(this.applyDefaultStyle(plain), width)];
 	}
 
 	/**

@@ -508,6 +508,17 @@ function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
 	return undefined;
 }
 
+/** Project saved history without applying the provider's compaction selection to the reading view. */
+export function sessionHistoryMessage(entry: SessionEntry): AgentMessage | undefined {
+	return entry.type === "compaction" ? sessionCompactionMessage(entry, entry.summary) : sessionContextMessage(entry);
+}
+
+function sessionCompactionMessage(entry: CompactionEntry, summary: string): AgentMessage {
+	return retainSynthesizedSessionContextMessage(
+		createCompactionSummaryMessage(summary, entry.tokensBefore, entry.timestamp, entry.details, entry.id),
+	);
+}
+
 /** The typed worker-message identity a persisted user message carries, to be written before it on its entry. */
 export function deliveredWorkerControl(message: AgentMessage): { workerControl?: ReturnType<typeof workerControlOf> } {
 	const record = message.role === "user" ? workerControlOf(message) : undefined;
@@ -556,15 +567,7 @@ export function sessionContextItems(path: readonly SessionEntry[]): SessionConte
 		if (originalUserEntry) appendMessage(originalUserEntry);
 		items.push({
 			entry: compaction,
-			message: retainSynthesizedSessionContextMessage(
-				createCompactionSummaryMessage(
-					providerSummary,
-					compaction.tokensBefore,
-					compaction.timestamp,
-					compaction.details,
-					compaction.id,
-				),
-			),
+			message: sessionCompactionMessage(compaction, providerSummary),
 		});
 
 		for (const entry of selection.carried) appendMessage(entry);

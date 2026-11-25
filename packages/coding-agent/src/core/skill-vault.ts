@@ -4,6 +4,8 @@ import { minimatch } from "minimatch";
 import { composeRequestSystemPrompt } from "../kernel/provider-request-planner.ts";
 import { sealSystemPrompt } from "../kernel/sealed-directives.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
+import type { AccountingOrigin } from "./cost/accounting-evidence.ts";
+import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import { OWNER_PRECEDENCE_POLICY } from "./provider-prompt-contracts.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import {
@@ -18,6 +20,13 @@ import {
 	type SkillExclusionRecord,
 } from "./session-skill-policy.ts";
 import {
+	EMPTY_SKILL_PROMPT_SECTIONS,
+	SkillDiscovery,
+	type SkillDiscoveryOptions,
+	type SkillPromptSection,
+	type SkillSearchResult,
+} from "./skill-header-discovery.ts";
+import {
 	inspectSkillFile,
 	repairSkillFile,
 	type SkillInspectResult,
@@ -25,6 +34,7 @@ import {
 	type SkillRepairResult,
 } from "./skill-repair.ts";
 import {
+	isWorkerEligibleSkill,
 	MAX_ACTIVE_SKILL_BODY_BYTES,
 	MAX_SKILL_FRONTMATTER_BYTES,
 	type Skill,
@@ -32,17 +42,14 @@ import {
 } from "./skills.ts";
 import { readBoundedTextFileSync, sameFileVersion } from "./util/bounded-file.ts";
 
+export type { SkillPromptSection, SkillSearchResult } from "./skill-header-discovery.ts";
 export { MAX_ACTIVE_SKILL_BODY_BYTES };
 export const DEFAULT_SKILL_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 export const MIN_ACTIVE_SKILL_BODY_BYTES = 4 * 1024;
 export const MAX_LOADED_SKILLS = 3;
 export const MAX_PINNED_SKILLS = 2;
-const MAX_SEARCH_RESULTS = 5;
-const MAX_SEARCH_DESCRIPTION_CHARS = 240;
 /** Recent working-tree files the vault remembers for path-scoped skill ranking (most recent kept). */
 export const MAX_SKILL_WORK_PATHS = 64;
-/** Rank bonus for a text match whose skill declares `paths` matching the session's recent file work. */
-const PATH_MATCH_SCORE = 10;
 
 type SkillVaultRequester = "model" | "user";
 type SkillVaultUnloadReason = "explicit" | "idle_expired" | "resource_unavailable" | "budget_exceeded";
@@ -52,7 +59,7 @@ type SkillFileStat = Stats;
 interface LoadedSkill {
 	skill: Skill;
 	bodyBytes: number;
-	systemPromptSection: string;
+	promptSection: SkillPromptSection;
 	requester: SkillVaultRequester;
 	pinned: boolean;
 	loadedAtMs: number;
@@ -66,12 +73,6 @@ interface LoadedSkill {
 type SkillSlotState =
 	| ({ state: "loaded_pending" } & LoadedSkill)
 	| ({ state: "active"; lastUsedAtMs: number; useCount: number } & LoadedSkill);
-
-/** One active skill's section as a request carries it: its name (the record identity) and its rendered section. */
-export interface SkillPromptSection {
-	readonly name: string;
-	readonly section: string;
-}
 
 export interface SkillSlotStatus {
 	state: SkillSlotState["state"];
@@ -91,21 +92,10 @@ export interface SkillVaultStatus {
 	exclusions?: Array<{ name: string; reason: string }>;
 }
 
-export interface SkillSearchResult {
-	candidates: Array<{
-		name: string;
-		description: string;
-		/** The query names one output format and this bundled skill produces it; listed first, never loaded for the model. */
-		recommended?: true;
-	}>;
-	/** Skills on disk the loader could not index (`<path>: <reason>`), so a broken SKILL.md is visible. */
-	diagnostics?: string[];
-}
-
 export type SkillLoadResult =
 	| {
 			ok: true;
-			state: "loaded_pending";
+			state: SkillSlotState["state"];
 			name: string;
 			baseDir: string;
 			pinned: boolean;
@@ -138,6 +128,13 @@ export type SkillExcludeResult =
 type SkillReadFailure = Exclude<SkillReadResult, { ok: true }>;
 type SkillBodyReadResult = { ok: true; body: string; bodyBytes: number; file: SkillFileStat } | SkillReadFailure;
 
+export interface SkillRequestContext {
+	readonly revision: number;
+	readonly sections: readonly SkillPromptSection[];
+	readonly headers: readonly SkillPromptSection[];
+	readonly exclusionReminder: string | undefined;
+}
+
 export interface SkillVaultControllerOptions {
 	getSkills(): readonly Skill[];
 	/** Full skill inventory, ignoring profile or model eligibility filters, for repairs and audits. */
@@ -148,8 +145,9 @@ export interface SkillVaultControllerOptions {
 	 * live: two refusals 45 minutes apart for a skill that existed on disk the whole time).
 	 */
 	refreshSkills?: () => void;
-	/** Loader diagnostics for skills that failed to index, rendered as `<path>: <message>`. */
-	getSkillDiagnostics?: () => readonly string[];
+	getSemanticEngine?(): SemanticDecisionEngine | undefined;
+	getSemanticProvider?(): string | undefined;
+	getSearchOrigin?(): AccountingOrigin | undefined;
 	now?: () => number;
 	idleTimeoutMs?: number;
 	getMaxBodyBytes?: () => number;
@@ -161,91 +159,6 @@ export interface SkillVaultControllerOptions {
 	 * opened read-only) and refuses an exclusion rather than keeping one the session never records.
 	 */
 	appendPolicyEntry?: SessionSkillPolicyPort["appendCustomEntry"];
-}
-
-function compactDescription(description: string): string {
-	const normalized = description.replace(/\s+/g, " ").trim();
-	if (normalized.length <= MAX_SEARCH_DESCRIPTION_CHARS) return normalized;
-	return `${normalized.slice(0, MAX_SEARCH_DESCRIPTION_CHARS - 1)}…`;
-}
-
-function queryTokens(value: string): string[] {
-	return [...new Set(value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])];
-}
-
-function searchScore(skill: Skill, query: string, tokens: readonly string[]): number {
-	const name = skill.name.toLowerCase();
-	const description = skill.description.toLowerCase();
-	let score = name === query ? 100 : name.includes(query) ? 40 : description.includes(query) ? 20 : 0;
-	for (const token of tokens) {
-		if (name === token) score += 16;
-		else if (name.includes(token)) score += 8;
-		if (description.includes(token)) score += 3;
-	}
-	return score;
-}
-
-/** Verbs that ask for an artifact to be produced; a format word beside none of them names a topic, not a demand. */
-const OUTPUT_VERBS = "(?:make|build|create|generate|produce|write|draw|render|design|show|give|visuali[sz]e|present)";
-/** Words that make a format word the name of a subject (an html parsing bug, a video player) instead of an artifact. */
-const SUBJECT_FOLLOWER =
-	"(?!\\s+(?:parsing|parser|player|codec|decoder|encoder|driver|stream|streaming|call|buffer|element|tag|api|playback|bug|renderer|rendering|library|loader|loading|handler|error|crash|syntax))";
-
-/** A demand for the artifact `noun` names: a producing verb, then at most four words, then the noun. */
-function makeDemand(noun: string): RegExp {
-	return new RegExp(`\\b${OUTPUT_VERBS}\\b(?:\\s+[\\w'-]+){0,4}?\\s+${noun}\\b${SUBJECT_FOLLOWER}`, "i");
-}
-
-/** A demand that names the format as the output ("as an html page", "in html", "into mermaid"). */
-function formatDemand(noun: string): RegExp {
-	return new RegExp(`\\b(?:as|in|into)\\s+(?:an?\\s+|the\\s+)?${noun}\\b${SUBJECT_FOLLOWER}`, "i");
-}
-
-const DIAGRAM_NOUN = "(?:diagrams?|flow ?charts?|mermaid|svg|sequence charts?|concept maps?)";
-const HTML_ARTIFACT_NOUN = "(?:html\\s+(?:pages?|files?|documents?|explainers?|reports?|slides?)|web ?pages?)";
-const HTML_FORMAT_NOUN = "(?:html(?:\\s+(?:pages?|files?|documents?))?|web ?pages?)";
-const VIDEO_NOUN = "(?:videos?|screencasts?)";
-
-/**
- * The output formats an owner can demand and the bundled skill that produces each. The skills are found by
- * their own descriptions and `skill search`; this table is what lets the search answer a format query with that
- * skill first, whatever other skills mention the same words.
- * A demand is an output verb or phrase ("make a diagram", "explain it in HTML", "explainer video", "draw
- * the flow"), never the bare format word: "html parsing bug" asks for no page.
- */
-const OUTPUT_FORMAT_SKILL_ROUTES: ReadonlyArray<{ readonly skill: string; readonly demands: readonly RegExp[] }> = [
-	{
-		skill: "explain-diagram",
-		demands: [
-			makeDemand(DIAGRAM_NOUN),
-			formatDemand(DIAGRAM_NOUN),
-			/\bdraw\s+(?:me\s+|up\s+|out\s+)?(?:an?|the|how|what|this|that|it)\b/i,
-		],
-	},
-	{
-		skill: "explain-html",
-		demands: [makeDemand(HTML_ARTIFACT_NOUN), formatDemand(HTML_FORMAT_NOUN)],
-	},
-	{
-		skill: "explain-video",
-		demands: [
-			makeDemand(VIDEO_NOUN),
-			formatDemand(VIDEO_NOUN),
-			/\b(?:explainer|narrated)\s+(?:videos?|walkthroughs?|explainers?)\b/i,
-			/\bscreencasts?\b/i,
-			/\b3b1b\b/i,
-			/\b(?:as|into|to)\s+(?:an?\s+)?mp4\b/i,
-		],
-	},
-];
-
-/**
- * The one format skill a query demands. A query that names several formats has no single answer, so it
- * returns nothing and the model chooses (prompt rule: several fit means a System One choice).
- */
-function demandedFormatSkill(query: string): string | undefined {
-	const matches = OUTPUT_FORMAT_SKILL_ROUTES.filter((route) => route.demands.some((demand) => demand.test(query)));
-	return matches.length === 1 ? matches[0]?.skill : undefined;
 }
 
 function activeSkillContext(skill: Skill, body: string): string {
@@ -305,7 +218,10 @@ export class SkillVaultController {
 	private readonly getSkills: () => readonly Skill[];
 	private readonly getFullSkills: (() => readonly Skill[]) | undefined;
 	private readonly refreshSkills: (() => void) | undefined;
-	private readonly getSkillDiagnostics: (() => readonly string[]) | undefined;
+	private readonly discovery: SkillDiscovery;
+	private readonly getSemanticEngine?: SkillVaultControllerOptions["getSemanticEngine"];
+	private readonly getSemanticProvider?: SkillVaultControllerOptions["getSemanticProvider"];
+	private readonly getSearchOrigin?: SkillVaultControllerOptions["getSearchOrigin"];
 	private readonly now: () => number;
 	private readonly idleTimeoutMs: number;
 	private readonly getMaxBodyBytes: () => number;
@@ -323,8 +239,10 @@ export class SkillVaultController {
 	private loadedSkillNames = new Set<string>();
 	/** Recent working-tree file paths (cwd-relative, `/` separators), oldest first; ranks path-scoped skills. */
 	private workPaths = new Set<string>();
+	private pathsRevision = 0;
 	private unloadReason: SkillVaultUnloadReason | undefined;
 	private contextRevision = 0;
+	private requestContext?: SkillRequestContext;
 
 	constructor(options: SkillVaultControllerOptions) {
 		if (!Number.isFinite(options.idleTimeoutMs ?? DEFAULT_SKILL_IDLE_TIMEOUT_MS)) {
@@ -333,13 +251,16 @@ export class SkillVaultController {
 		this.getSkills = options.getSkills;
 		this.getFullSkills = options.getFullSkills;
 		this.refreshSkills = options.refreshSkills;
-		this.getSkillDiagnostics = options.getSkillDiagnostics;
+		this.getSemanticEngine = options.getSemanticEngine;
+		this.getSemanticProvider = options.getSemanticProvider;
+		this.getSearchOrigin = options.getSearchOrigin;
 		this.now = options.now ?? (() => performance.now());
 		this.idleTimeoutMs = Math.max(1, options.idleTimeoutMs ?? DEFAULT_SKILL_IDLE_TIMEOUT_MS);
 		this.getMaxBodyBytes = options.getMaxBodyBytes ?? (() => MAX_ACTIVE_SKILL_BODY_BYTES);
 		this.onSkillUsed = options.onSkillUsed;
 		this.getSessionManager = options.getSessionManager;
 		this.appendPolicyEntry = options.appendPolicyEntry;
+		this.discovery = this.createDiscovery(false);
 	}
 
 	private syncExclusions(): void {
@@ -350,16 +271,20 @@ export class SkillVaultController {
 			const isInitialBind = this.cachedSessionId === undefined;
 			const hadPriorState = this.slots.size > 0 || this.exclusions.size > 0;
 			this.slots.clear();
+			this.discovery.clear();
+			this.workPaths.clear();
+			this.pathsRevision++;
 			this.exclusions.clear();
 			this.loadedSkillNames.clear();
 			this.cachedSessionId = currentSessionId;
 			this.lastReplayedIndex = 0;
 			if (!isInitialBind || hadPriorState) {
-				this.contextRevision++;
+				this.invalidateRequestContext();
 			}
 		}
 		const currentCount = sm.getEntryCount();
 		if (currentCount < this.lastReplayedIndex) {
+			if (this.exclusions.size > 0) this.invalidateRequestContext();
 			this.exclusions.clear();
 			this.lastReplayedIndex = 0;
 		}
@@ -385,7 +310,7 @@ export class SkillVaultController {
 				}
 			}
 			if (updated) {
-				this.contextRevision++;
+				this.invalidateRequestContext();
 			}
 		}
 	}
@@ -395,9 +320,10 @@ export class SkillVaultController {
 	 * tool calls, so it needs no model cooperation; only the most recent {@link MAX_SKILL_WORK_PATHS} are kept.
 	 */
 	noteWorkPaths(paths: readonly string[]): void {
+		this.syncExclusions();
 		for (const path of paths) {
 			if (path.length === 0) continue;
-			this.workPaths.delete(path);
+			if (!this.workPaths.delete(path)) this.pathsRevision++;
 			this.workPaths.add(path);
 		}
 		while (this.workPaths.size > MAX_SKILL_WORK_PATHS) {
@@ -433,8 +359,13 @@ export class SkillVaultController {
 	}
 
 	previewExclusionReminder(): string | undefined {
-		const exclusions = this.getExclusions();
-		if (exclusions.length === 0) return undefined;
+		this.syncExclusions();
+		return this.renderExclusionReminder();
+	}
+
+	private renderExclusionReminder(): string | undefined {
+		if (this.exclusions.size === 0) return undefined;
+		const exclusions = [...this.exclusions.values()];
 		const lines = exclusions.map((e) => `- ${e.name}: ${e.reason}`);
 		return `EXCLUDED SKILLS (session-wide; conflict with owner instructions; superseded and inactive):\n${lines.join("\n")}`;
 	}
@@ -514,7 +445,7 @@ export class SkillVaultController {
 			next.delete(name);
 			this.replaceState(next, "explicit");
 		} else {
-			this.contextRevision++;
+			this.invalidateRequestContext();
 		}
 		return { ok: true, name, reason: boundedReason };
 	}
@@ -545,58 +476,58 @@ export class SkillVaultController {
 		return result;
 	}
 
-	search(rawQuery: string): SkillSearchResult {
+	search(rawQuery: string, options?: SkillDiscoveryOptions): Promise<SkillSearchResult> {
 		this.syncExclusions();
-		const query = rawQuery.trim().toLowerCase();
-		const tokens = queryTokens(query);
-		if (!query || tokens.length === 0) return { candidates: [] };
-		let candidates = this.searchCandidates(query, tokens);
-		if (candidates.length === 0 && this.refreshSkills) {
-			this.refreshSkills();
-			candidates = this.searchCandidates(query, tokens);
-		}
-		const diagnostics = this.getSkillDiagnostics?.() ?? [];
-		return { candidates, ...(diagnostics.length > 0 ? { diagnostics: [...diagnostics] } : {}) };
+		return this.discovery.search(rawQuery, options);
 	}
 
-	private searchCandidates(query: string, tokens: readonly string[]): SkillSearchResult["candidates"] {
-		const eligible = this.getSkills().filter(
-			(skill) => !skill.disableModelInvocation && !this.isExcluded(skill.name),
-		);
-		// A path match only reorders skills the query already matched; it never adds a candidate.
-		const pathMatched = new Set<Skill>();
-		const ranked = eligible
-			.map((skill) => ({ skill, score: searchScore(skill, query, tokens) }))
-			.filter((entry) => entry.score > 0)
-			.map((entry) => {
-				if (!this.matchesWorkPaths(entry.skill)) return entry;
-				pathMatched.add(entry.skill);
-				return { skill: entry.skill, score: entry.score + PATH_MATCH_SCORE };
-			})
-			.sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name))
-			.map(({ skill }) => skill);
-		const demanded = demandedFormatSkill(query);
-		const recommended = demanded === undefined ? undefined : eligible.find((skill) => skill.name === demanded);
-		const ordered = recommended ? [recommended, ...ranked.filter((skill) => skill !== recommended)] : ranked;
-		return ordered.slice(0, MAX_SEARCH_RESULTS).map((skill) => ({
-			name: skill.name,
-			description: compactDescription(skill.description),
-			...(skill === recommended ? { recommended: true as const } : {}),
-			...(pathMatched.has(skill) ? { pathMatch: true as const } : {}),
-		}));
+	previewSkillHeaders(): readonly SkillPromptSection[] {
+		return this.discovery.previewSkillHeaders();
+	}
+
+	createWorkerDiscovery(): SkillDiscovery {
+		this.syncExclusions();
+		return this.createDiscovery(true);
+	}
+
+	private createDiscovery(worker: boolean): SkillDiscovery {
+		const sessionId = this.cachedSessionId;
+		return new SkillDiscovery({
+			getEligibleSkills: () => {
+				this.syncExclusions();
+				if (worker && sessionId !== this.cachedSessionId) return [];
+				const skills = this.getSkills();
+				return this.modelEligibleSkills(skills, worker);
+			},
+			refreshSkills: this.refreshSkills,
+			matchesWorkPaths: (skill) => this.matchesWorkPaths(skill),
+			workPathsRevision: () => this.pathsRevision,
+			getSemanticEngine: this.getSemanticEngine,
+			getSemanticProvider: this.getSemanticProvider,
+			now: this.now,
+			getOrigin: this.getSearchOrigin,
+		});
+	}
+
+	private modelEligibleSkills(skills: readonly Skill[], worker: boolean): readonly Skill[] {
+		return skills.filter((skill) => this.isEligible(skill, "model", worker) && isValidSkillName(skill.name));
 	}
 
 	/** The named eligible skill, after one re-scan of the roots when the first lookup misses. */
-	private findEligible(name: string, requester: SkillVaultRequester): Skill | undefined {
+	private findEligible(
+		name: string,
+		requester: SkillVaultRequester,
+		worker = false,
+		refresh = this.refreshSkills,
+	): Skill | undefined {
 		if (this.isExcluded(name)) return undefined;
-		const eligible = (candidate: Skill) =>
-			candidate.name === name &&
-			!this.isExcluded(candidate.name) &&
-			(requester === "user" || !candidate.disableModelInvocation);
+		const eligible = (candidate: Skill) => candidate.name === name && this.isEligible(candidate, requester, worker);
 		const found = this.getSkills().find(eligible);
-		if (found || !this.refreshSkills) return found;
-		this.refreshSkills();
-		return this.getSkills().find(eligible);
+		if (found || !refresh) return found;
+		const sessionId = this.cachedSessionId;
+		refresh();
+		this.syncExclusions();
+		return sessionId === this.cachedSessionId ? this.getSkills().find(eligible) : undefined;
 	}
 
 	private notFound(name: string): { ok: false; reason: "not_found"; message: string } {
@@ -617,13 +548,21 @@ export class SkillVaultController {
 		};
 	}
 
+	private isEligible(skill: Skill, requester: SkillVaultRequester, worker: boolean): boolean {
+		return (
+			!this.exclusions.has(skill.name) &&
+			(requester === "user" || !skill.disableModelInvocation) &&
+			(!worker || isWorkerEligibleSkill(skill))
+		);
+	}
+
 	/** Read one eligible skill body without loading, evicting, or otherwise mutating the vault. */
-	read(name: string, requester: SkillVaultRequester = "model"): SkillReadResult {
+	read(name: string, requester: SkillVaultRequester = "model", worker = false): SkillReadResult {
 		this.syncExclusions();
 		if (this.isExcluded(name)) {
 			return this.exclusionError(name);
 		}
-		const skill = this.findEligible(name, requester);
+		const skill = this.findEligible(name, requester, worker);
 		if (!skill) return this.notFound(name);
 		const bodyResult = this.readSkillBody(skill, this.resolveMaxBodyBytes(), "read");
 		if (!bodyResult.ok) return bodyResult;
@@ -647,6 +586,7 @@ export class SkillVaultController {
 	loadMany(rawNames: readonly string[], requester: SkillVaultRequester, pin = false): SkillBatchLoadResult {
 		const now = this.now();
 		this.syncExclusions();
+		const sessionId = this.cachedSessionId;
 		this.reconcile(now);
 		const names = new Set(rawNames.map((name) => name.trim()).filter(Boolean));
 		if (names.size === 0) return { ok: false, reason: "not_found", message: "skill load requires an exact name" };
@@ -662,28 +602,22 @@ export class SkillVaultController {
 				message: `At most ${MAX_LOADED_SKILLS} skills can be loaded together; choose a smaller set.`,
 			};
 		}
-		// Pinning is a retention preference, never a reason to refuse the load the model asked for
-		// (2026-09-10 census: two sessions lost a turn each to a pin-cap refusal and retried unpinned).
-		// Requested names take the remaining pin room in request order; the rest load unpinned and
-		// say so, while slots pinned by earlier loads keep their pins.
-		let pinRoom = MAX_PINNED_SKILLS;
-		if (pin) {
-			for (const [slotName, slot] of this.slots) {
-				if (!names.has(slotName) && slot.pinned) pinRoom--;
-			}
-		}
-		const pinnedNames = new Set<string>();
-		const pinCapReached = new Set<string>();
-		for (const name of names) {
-			if (!pin) break;
-			if (pinnedNames.size < pinRoom) pinnedNames.add(name);
-			else pinCapReached.add(name);
-		}
 		const maxBodyBytes = this.resolveMaxBodyBytes();
 		const prepared = new Map<string, SkillSlotState>();
+		let refreshed = false;
+		const refresh = () => {
+			if (refreshed) return;
+			refreshed = true;
+			this.refreshSkills?.();
+		};
 		for (const name of names) {
-			const skill = this.findEligible(name, requester);
+			const skill = this.findEligible(name, requester, false, refresh);
 			if (!skill) return this.notFound(name);
+			const resident = this.slots.get(name);
+			if (resident?.skill.filePath === skill.filePath && resident.skill.baseDir === skill.baseDir) {
+				prepared.set(name, { ...resident, skill, requester });
+				continue;
+			}
 			const bodyResult = this.readSkillBody(skill, maxBodyBytes, "load");
 			if (!bodyResult.ok) return bodyResult;
 			const { body, bodyBytes, file } = bodyResult;
@@ -691,9 +625,9 @@ export class SkillVaultController {
 				state: "loaded_pending",
 				skill,
 				bodyBytes,
-				systemPromptSection: activeSkillContext(skill, body),
+				promptSection: Object.freeze({ name, section: activeSkillContext(skill, body) }),
 				requester,
-				pinned: pinnedNames.has(name),
+				pinned: false,
 				loadedAtMs: now,
 				fileDevice: file.dev,
 				fileInode: file.ino,
@@ -711,9 +645,18 @@ export class SkillVaultController {
 			};
 		}
 		// A rescan for a later member can revoke or replace an earlier member. Recheck the
-		// complete admission against one final resource snapshot before publishing any of it.
+		// complete admission against the current session and resource inventory before publishing it.
 		const skills = this.getSkills();
+		this.syncExclusions();
+		if (this.cachedSessionId !== sessionId) {
+			return {
+				ok: false,
+				reason: "read_failed",
+				message: "Session changed during skill admission; retry the load.",
+			};
+		}
 		for (const slot of prepared.values()) {
+			if (this.exclusions.has(slot.skill.name)) return this.exclusionError(slot.skill.name);
 			if (this.reconcileSlot(slot, skills, admissionLimit, now) !== undefined) {
 				return {
 					ok: false,
@@ -731,13 +674,35 @@ export class SkillVaultController {
 			next.delete(victim);
 			evicted.push(victim);
 		}
+		const pinCapReached = new Set<string>();
+		if (pin) {
+			let room = MAX_PINNED_SKILLS;
+			for (const slot of next.values()) if (slot.pinned) room--;
+			for (const [name, slot] of prepared) {
+				if (slot.pinned) continue;
+				if (room <= 0) {
+					pinCapReached.add(name);
+					continue;
+				}
+				room--;
+				const pinned = { ...slot, pinned: true };
+				prepared.set(name, pinned);
+				next.set(name, pinned);
+			}
+		}
 		for (const slot of prepared.values()) this.loadedSkillNames.add(slot.skill.name);
-		this.replaceState(next);
+		const sameSections =
+			next.size === this.slots.size &&
+			[...prepared].every(
+				([name, slot]) => this.slots.get(name)?.promptSection.section === slot.promptSection.section,
+			);
+		if (sameSections) this.slots = next;
+		else this.replaceState(next);
 		return {
 			ok: true,
 			results: [...prepared.values()].map((slot, index) => ({
 				ok: true,
-				state: "loaded_pending",
+				state: slot.state,
 				name: slot.skill.name,
 				baseDir: slot.skill.baseDir,
 				pinned: slot.pinned,
@@ -778,12 +743,21 @@ export class SkillVaultController {
 	 * skill, so a request re-sends only the skills whose section changed.
 	 */
 	commitSkillSections(): readonly SkillPromptSection[] {
+		const projection = this.captureRequestContext();
+		this.noteRequestAccepted();
+		return projection.sections;
+	}
+
+	acceptRequestContext(expected: SkillRequestContext): void {
+		if (this.captureRequestContext() !== expected) {
+			throw new Error("Committed skill context diverged from its accepted plan");
+		}
+		this.noteRequestAccepted();
+	}
+
+	private noteRequestAccepted(): void {
 		const now = this.now();
-		this.syncExclusions();
-		this.reconcile(now);
-		const sections: SkillPromptSection[] = [];
 		for (const [name, slot] of this.slots) {
-			sections.push({ name, section: slot.systemPromptSection });
 			const firstUse = slot.state === "loaded_pending";
 			const useCount = firstUse ? 1 : slot.useCount + 1;
 			this.slots.set(name, { ...slot, state: "active", lastUsedAtMs: now, useCount });
@@ -795,14 +769,34 @@ export class SkillVaultController {
 				}
 			}
 		}
-		return sections;
+	}
+
+	/** A shared projection whose identity changes only when its provider-visible inputs change. */
+	captureRequestContext(checkFiles = true): SkillRequestContext {
+		this.syncExclusions();
+		const hasHeaders = this.discovery.hasSelectedHeaders();
+		const skills = this.slots.size > 0 || hasHeaders ? this.getSkills() : [];
+		this.reconcile(this.now(), skills, checkFiles);
+		const headers = hasHeaders
+			? this.discovery.previewSkillHeaders(skills, (skill) => this.isEligible(skill, "model", false))
+			: EMPTY_SKILL_PROMPT_SECTIONS;
+		const previous = this.requestContext;
+		if (previous?.revision === this.contextRevision && previous.headers === headers) return previous;
+		const bodyChanged = previous?.revision !== this.contextRevision;
+		this.requestContext = Object.freeze({
+			revision: this.contextRevision,
+			sections: bodyChanged
+				? Object.freeze([...this.slots.values()].map((slot) => slot.promptSection))
+				: previous.sections,
+			headers,
+			exclusionReminder: bodyChanged ? this.renderExclusionReminder() : previous.exclusionReminder,
+		});
+		return this.requestContext;
 	}
 
 	/** The sections a request would carry, in load order, without treating a diagnostic read as use. */
 	previewSkillSections(): readonly SkillPromptSection[] {
-		this.syncExclusions();
-		this.reconcile(this.now());
-		return [...this.slots].map(([name, slot]) => ({ name, section: slot.systemPromptSection }));
+		return this.captureRequestContext().sections;
 	}
 
 	/**
@@ -816,9 +810,7 @@ export class SkillVaultController {
 
 	/** Monotonic identity for provider-visible skill projection changes. */
 	getContextRevision(): number {
-		this.syncExclusions();
-		this.reconcile(this.now());
-		return this.contextRevision;
+		return this.captureRequestContext().revision;
 	}
 
 	/** Record host-observed work derived from an active skill, independent of agent cooperation. */
@@ -909,28 +901,28 @@ export class SkillVaultController {
 		return { ok: true, body, bodyBytes, file };
 	}
 
-	private reconcile(now: number): void {
+	private reconcile(now: number, skills?: readonly Skill[], checkFiles = true): void {
 		if (this.slots.size === 0) return;
 		const maxBodyBytes = this.resolveMaxBodyBytes();
-		const skills = this.getSkills();
-		const next = new Map(this.slots);
+		const inventory = skills ?? this.getSkills();
+		let next: Map<string, SkillSlotState> | undefined;
 		let reason: SkillVaultUnloadReason | undefined;
 		for (const [name, slot] of this.slots) {
-			const slotReason = this.reconcileSlot(slot, skills, maxBodyBytes, now);
+			const slotReason = this.reconcileSlot(slot, inventory, maxBodyBytes, now, checkFiles);
 			if (slotReason !== undefined) {
+				next ??= new Map(this.slots);
 				next.delete(name);
 				reason = slotReason;
 			}
 		}
-		while (aggregateBodyBytes(next) > maxBodyBytes) {
+		while (aggregateBodyBytes(next ?? this.slots) > maxBodyBytes) {
+			next ??= new Map(this.slots);
 			const victim = evictionVictimName(next);
 			if (!victim) break;
 			next.delete(victim);
 			reason = "budget_exceeded";
 		}
-		if (next.size !== this.slots.size) {
-			this.replaceState(next, reason);
-		}
+		if (next) this.replaceState(next, reason);
 	}
 
 	private reconcileSlot(
@@ -938,37 +930,46 @@ export class SkillVaultController {
 		skills: readonly Skill[],
 		maxBodyBytes: number,
 		now: number,
+		checkFiles = true,
 	): SkillVaultUnloadReason | undefined {
 		if (slot.bodyBytes > maxBodyBytes) return "budget_exceeded";
 		const currentSkill = skills.find(
 			(skill) =>
 				skill.name === slot.skill.name &&
 				skill.filePath === slot.skill.filePath &&
+				skill.baseDir === slot.skill.baseDir &&
 				(slot.requester === "user" || !skill.disableModelInvocation),
 		);
 		if (!currentSkill) return "resource_unavailable";
-		try {
-			const file = statSync(slot.skill.filePath);
-			if (
-				file.dev !== slot.fileDevice ||
-				file.ino !== slot.fileInode ||
-				file.size !== slot.fileSize ||
-				file.mtimeMs !== slot.fileModifiedAtMs ||
-				file.ctimeMs !== slot.fileChangedAtMs
-			) {
-				return "resource_unavailable";
-			}
-		} catch {
-			return "resource_unavailable";
-		}
+		if (checkFiles && !this.isCurrentSkillFile(slot)) return "resource_unavailable";
 		if (now - slotLastUsedAtMs(slot) >= this.idleTimeoutMs) return "idle_expired";
 		return undefined;
+	}
+
+	private isCurrentSkillFile(slot: SkillSlotState): boolean {
+		try {
+			const file = statSync(slot.skill.filePath);
+			return (
+				file.dev === slot.fileDevice &&
+				file.ino === slot.fileInode &&
+				file.size === slot.fileSize &&
+				file.mtimeMs === slot.fileModifiedAtMs &&
+				file.ctimeMs === slot.fileChangedAtMs
+			);
+		} catch {
+			return false;
+		}
 	}
 
 	private replaceState(slots: Map<string, SkillSlotState>, unloadReason?: SkillVaultUnloadReason): void {
 		this.slots = slots;
 		if (unloadReason !== undefined) this.unloadReason = unloadReason;
+		this.invalidateRequestContext();
+	}
+
+	private invalidateRequestContext(): void {
 		this.contextRevision++;
+		this.requestContext = undefined;
 	}
 
 	private resolveMaxBodyBytes(): number {

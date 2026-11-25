@@ -7,9 +7,9 @@
  * state, so they live outside interactive-mode and are unit-testable in isolation.
  */
 
-import type { Message } from "@caupulican/pi-ai";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { getUserMessageText } from "../../kernel/messages.ts";
 
 export const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
 export const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;
@@ -30,15 +30,6 @@ export function getContentText(content: unknown): string {
 			.join("");
 	}
 	return "";
-}
-
-export function getUserMessageText(message: Message): string {
-	if (message.role !== "user") return "";
-	const textBlocks =
-		typeof message.content === "string"
-			? [{ type: "text", text: message.content }]
-			: message.content.filter((c: { type: string }) => c.type === "text");
-	return textBlocks.map((c) => (c as { text: string }).text).join("");
 }
 
 export function getTuiHistoryMessageText(message: AgentMessage): string {

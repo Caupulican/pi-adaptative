@@ -1,5 +1,6 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import { canReuseProviderInput } from "../history-work.ts";
 import type { Context, Model, SimpleStreamOptions, StreamFunction, StreamOptions } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -125,7 +126,12 @@ function buildParams(
 	deploymentName: string,
 ) {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
-	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS, { toolNameMap });
+	const messages = convertResponsesMessages(
+		model,
+		context,
+		AZURE_TOOL_CALL_PROVIDERS,
+		canReuseProviderInput(context.messages, options?.onPayload) ? { reuseAcceptedPrefix: true } : { toolNameMap },
+	);
 
 	const params: ResponseCreateParamsStreaming = {
 		model: deploymentName,

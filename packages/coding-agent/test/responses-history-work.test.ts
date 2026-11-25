@@ -178,22 +178,25 @@ it("reuses the exact credential scope after an interleaved tool request and drop
 	expect(after("fixture-session")).toBe("fixture-session");
 });
 
-it("gives a late extension a mutable private payload and redacts its changes", async () => {
-	const projection = new CredentialRequestProjection();
-	let active = false;
-	const hook = conditionalPayloadHook(
-		() => active,
-		(payload) => {
-			const input = (payload as { input: { content: { text: string }[] }[] }).input;
-			input[0]!.content[0]!.text = "test-secret";
-		},
-	);
-	const source: Message[] = [{ role: "user", content: "unchanged", timestamp: 1 }];
-	registerProviderMessagePrefix(source, undefined, 0);
-	const prepared = projection.prepare(model, { messages: source }, hide, hide, hook);
-	const input = convertResponsesMessages(model, prepared.context, providers, { reuseAcceptedPrefix: true });
-	active = true;
-	const safe = await prepared.onPayload!({ input }, model);
-	expect(JSON.stringify(safe)).toContain("[masked]");
-	expect(JSON.stringify(input)).toContain("unchanged");
-});
+it.each([model, getModel("openai-codex", "gpt-5.4")!])(
+	"gives a late extension a mutable private payload and redacts its changes on $api",
+	async (requestModel) => {
+		const projection = new CredentialRequestProjection();
+		let active = false;
+		const hook = conditionalPayloadHook(
+			() => active,
+			(payload) => {
+				const input = (payload as { input: { content: { text: string }[] }[] }).input;
+				input[0]!.content[0]!.text = "test-secret";
+			},
+		);
+		const source: Message[] = [{ role: "user", content: "unchanged", timestamp: 1 }];
+		registerProviderMessagePrefix(source, undefined, 0);
+		const prepared = projection.prepare(requestModel, { messages: source }, hide, hide, hook);
+		const input = convertResponsesMessages(requestModel, prepared.context, providers, { reuseAcceptedPrefix: true });
+		active = true;
+		const safe = await prepared.onPayload!({ input }, requestModel);
+		expect(JSON.stringify(safe)).toContain("[masked]");
+		expect(JSON.stringify(input)).toContain("unchanged");
+	},
+);

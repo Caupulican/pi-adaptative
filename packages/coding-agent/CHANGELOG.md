@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Changed
+
+- The Linux Workbench writes settled transcript batches off the UI thread and loads older history in pages. The live view retains recent turns and keeps the current scroll anchor when trimming.
+- The skill vault discovers headers on demand, ranks with Jev when available, and falls back to local matching. Discovered headers can stay in the conversation context, while loading a skill body remains a separate action.
+- Harness diagnostics rotate within a 32 MiB profile budget. Cache traces, chat audit records, and opt-in TUI diagnostics have explicit retention limits.
+
+### Fixed
+
+- Release expired transcript and worker payloads after their active consumers finish. Reject stale extension reload candidates and release their resources.
+
 ## [0.104.78] - 2026-11-23
 
 ### Changed

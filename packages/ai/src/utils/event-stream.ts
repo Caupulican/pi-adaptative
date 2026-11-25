@@ -1,6 +1,7 @@
 import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 import { createEmptyUsage } from "../usage.ts";
 import { EventStream, STREAM_ENDED_WITHOUT_TERMINAL } from "./generic-event-stream.ts";
+import { settleToolArguments } from "./json-parse.ts";
 
 export { EventStream, STREAM_ENDED_WITHOUT_TERMINAL };
 
@@ -22,9 +23,14 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 	}
 
 	override push(event: AssistantMessageEvent): void {
-		if (event.type === "done") lastPartials.set(this, event.message);
-		else if (event.type === "error") lastPartials.set(this, event.error);
-		else lastPartials.set(this, event.partial);
+		if (event.type === "done" || event.type === "error") {
+			const message = event.type === "done" ? event.message : event.error;
+			for (const block of message.content) if (block.type === "toolCall") settleToolArguments(block);
+			lastPartials.set(this, message);
+		} else {
+			if (event.type === "toolcall_end") settleToolArguments(event.toolCall);
+			lastPartials.set(this, event.partial);
+		}
 		super.push(event);
 	}
 
@@ -34,6 +40,7 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 			return;
 		}
 		const source = lastPartials.get(this);
+		for (const block of source?.content ?? []) if (block.type === "toolCall") settleToolArguments(block);
 		super.end({
 			role: "assistant",
 			content: source?.content ?? [],

@@ -1,3 +1,4 @@
+import { collectTerminalRows, type TerminalRows } from "../terminal-rows.ts";
 import { applyBackgroundToLine, fitToWidth } from "../utils.ts";
 
 export interface PreparedTextBlock {
@@ -16,13 +17,13 @@ export interface TextFrameOptions {
 export class TextRenderCache {
 	private text?: string;
 	private width?: number;
-	private lines?: string[];
+	private lines?: TerminalRows;
 
-	read(text: string, width: number): string[] | undefined {
-		return this.lines && this.text === text && this.width === width ? this.lines.slice() : undefined;
+	read(text: string, width: number): TerminalRows | undefined {
+		return this.lines && this.text === text && this.width === width ? this.lines : undefined;
 	}
 
-	write(text: string, width: number, lines: string[]): void {
+	write(text: string, width: number, lines: TerminalRows): void {
 		this.text = text;
 		this.width = width;
 		this.lines = lines;
@@ -35,7 +36,9 @@ export class TextRenderCache {
 	}
 }
 
-export type TextRenderStart = { kind: "complete"; lines: string[] } | { kind: "render"; prepared: PreparedTextBlock };
+export type TextRenderStart =
+	| { kind: "complete"; lines: TerminalRows }
+	| { kind: "render"; prepared: PreparedTextBlock };
 
 /** Owns the cache/revision lifecycle shared by terminal text components. */
 export class TextRenderState {
@@ -61,17 +64,18 @@ export class TextRenderState {
 
 		const lines: string[] = [];
 		this.cache.write(text, width, lines);
-		return { kind: "complete", lines: [] };
+		return { kind: "complete", lines };
 	}
 
-	finish(text: string, width: number, lines: string[]): string[] {
+	finish(text: string, width: number, rows: TerminalRows): TerminalRows {
+		const lines = rows.length > 0 ? rows : [""];
 		this.cache.write(text, width, lines);
-		return lines.length > 0 ? lines.slice() : [""];
+		return lines;
 	}
 }
 
 /** Shared mutable lifecycle for cache-backed text components. */
-export class CachedTextComponent {
+export abstract class CachedTextComponent {
 	protected text: string;
 	protected paddingX: number;
 	protected paddingY: number;
@@ -88,9 +92,22 @@ export class CachedTextComponent {
 		return this.renderState.revision;
 	}
 
+	render(width: number): string[] {
+		return collectTerminalRows(this.renderRows(width));
+	}
+
+	renderRows(width: number): TerminalRows {
+		const start = this.renderState.begin(this.text, width, this.paddingX);
+		if (start.kind === "complete") return start.lines;
+		return this.renderState.finish(this.text, width, this.layoutRows(start.prepared, width));
+	}
+
+	protected abstract layoutRows(prepared: PreparedTextBlock, width: number): TerminalRows;
+
 	setText(text: string): void {
+		if (this.text === text) return;
 		this.text = text;
-		this.invalidate();
+		this.renderState.invalidate();
 	}
 
 	invalidate(): void {
@@ -106,37 +123,32 @@ export function prepareTextBlock(text: string, width: number, paddingX: number):
 	};
 }
 
-export function frameTextLines(lines: readonly string[], options: TextFrameOptions): string[] {
-	const leftMargin = " ".repeat(options.paddingX);
-	const rightMargin = leftMargin;
-	const result: string[] = [];
-	const emptyLine = " ".repeat(options.width);
-	const framedEmptyLine = options.background
-		? applyBackgroundToLine(emptyLine, options.width, options.background)
-		: emptyLine;
-
-	for (let index = 0; index < options.paddingY; index++) {
-		result.push(framedEmptyLine);
-	}
-
-	for (const line of lines) {
-		if (options.isPassthrough?.(line)) {
-			result.push(line);
-			continue;
-		}
-
-		const lineWithMargins = leftMargin + line + rightMargin;
-		if (options.background) {
-			result.push(applyBackgroundToLine(lineWithMargins, options.width, options.background));
-			continue;
-		}
-
-		result.push(fitToWidth(lineWithMargins, options.width, true));
-	}
-
-	for (let index = 0; index < options.paddingY; index++) {
-		result.push(framedEmptyLine);
-	}
-
-	return result;
+export function frameTextRows(lines: readonly string[], options: TextFrameOptions): TerminalRows {
+	const margin = " ".repeat(options.paddingX);
+	const length = lines.length + 2 * options.paddingY;
+	const framedRows: string[] | undefined = length <= 64 ? [] : undefined;
+	let empty: string | undefined;
+	return {
+		length,
+		at(index) {
+			if (index < 0 || index >= length) return undefined;
+			const line = lines[index - options.paddingY];
+			if (line === undefined) {
+				if (empty === undefined) {
+					const spaces = " ".repeat(options.width);
+					empty = options.background ? applyBackgroundToLine(spaces, options.width, options.background) : spaces;
+				}
+				return empty;
+			}
+			if (options.isPassthrough?.(line)) return line;
+			const cached = framedRows?.[index];
+			if (cached !== undefined) return cached;
+			const framed = margin + line + margin;
+			const result = options.background
+				? applyBackgroundToLine(framed, options.width, options.background)
+				: fitToWidth(framed, options.width, true);
+			if (framedRows && result.length <= 8192) framedRows[index] = result;
+			return result;
+		},
+	};
 }

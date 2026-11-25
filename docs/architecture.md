@@ -89,7 +89,10 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/parent-input-consumption.ts` | (no header comment) |
 | `kernel/session/parent-input-ledger.ts` | (no header comment) |
 | `kernel/session/parent-input-session-indexes.ts` | The indexes a session keeps over every entry it holds, on any branch, for its parent inputs: the saved input of each delivery (`ParentInputReceipts`), and the source its parent-input consumption reads, live and for historical imports alike (`ParentInputConsumptionSources`): its entries by id, durable for the session, a |
+| `kernel/session/session-append-disk.ts` | Executes the admitted physical phase of an ordered transcript append. |
+| `kernel/session/session-append-order.ts` | Orders session append preparation, the disk receipt, and publication for both call styles. |
 | `kernel/session/session-append-receipt.ts` | (no header comment) |
+| `kernel/session/session-append-worker.ts` | Worker adapter for the admitted physical phase of a session append. |
 | `kernel/session/session-bundle-lifecycle.ts` | (no header comment) |
 | `kernel/session/session-bundle-paths.ts` | (no header comment) |
 | `kernel/session/session-cleanup-release.ts` | The record a session's bundle keeps of an unfinished cleanup of it that was cancelled over what is left of the bundle (`session-bundle-lifecycle.ts`): by the owner's open of the session (admission mode `open`), or by a write admitted into the session's bundle once the cleanup had removed all of it (admission mode `writ |
@@ -102,6 +105,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-file-reading.ts` | Session transcript file reading: entry parsing, bounded strict snapshot recovery, streamed and offset-indexed loading, and header reads with parent lineage checks. |
 | `kernel/session/session-file-writing.ts` | Transcript file writes under the session file lock: the lock wrapper that shares an active synchronous scope, the append to an existing history, and the full-file write. |
 | `kernel/session/session-header.ts` | (no header comment) |
+| `kernel/session/session-history-page.ts` | Bounded, chronological transcript reads over the session's selected ancestry and canonical file offsets. |
 | `kernel/session/session-id-generation.ts` | Session and entry id generation: fresh session ids, the auto-learn session id test, and the entry id space that keeps generated ids unique within one transcript. |
 | `kernel/session/session-identity.ts` | Defines the one session id rule and the validators that admit a session id read from a record or a session file header. |
 | `kernel/session/session-json.ts` | Stack-safe JSON encoding for durable session rows, with the property semantics of JSON.stringify. |
@@ -109,6 +113,8 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-listing.ts` | Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. |
 | `kernel/session/session-manager-types.ts` | Public record types of the session transcript: the header and entry file union, the context and tree views, session info, and persisted-entry events and listeners. |
 | `kernel/session/session-manager.ts` | (no header comment) |
+| `kernel/session/session-message-batch.ts` | Prepares a bounded mixed message batch without changing the session tree. |
+| `kernel/session/session-payload-retention.ts` | Hot/cold ownership for persisted message payloads and the monotonic settled-history scan. |
 | `kernel/session/session-retention-index.ts` | What a home's session tombstones (`deletions/<session-key>.json`, `session-bundle-lifecycle.ts`) record beside their schema-3 marker, in files of their own, so a build that reads only the marker reads every tombstone as before: - `<session-key>.removing`: the retention's remover may have begun removing the bundle. |
 | `kernel/session/session-tree.ts` | Walks session entry ancestry from a leaf to the root with parent-cycle detection and collects the active branch ending at a leaf. |
 | `kernel/session/session-version-migration.ts` | Session transcript format versions: the current version constants and the ordered migrations that upgrade entries from older formats to the current one. |
@@ -162,7 +168,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-128 kernel modules, 70 with a header comment.
+134 kernel modules, 76 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 

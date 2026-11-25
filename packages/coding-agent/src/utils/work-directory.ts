@@ -708,11 +708,17 @@ export function removeWorkRun(lease: WorkRunLease): boolean {
 	return removeRunIfInactive(lease.path, Date.now());
 }
 
-export function getProcessWorkRun(agentDir: string, category: string, tenant: string, runId?: string): WorkRunLease {
+export function getProcessWorkRun(
+	agentDir: string,
+	category: string,
+	tenant: string,
+	runId?: string,
+	retention?: WorkRetentionOptions,
+): WorkRunLease {
 	const key = `${agentDir}\0${category}\0${tenant}\0${runId ?? ""}`;
 	const existing = processWorkRuns.get(key);
 	if (existing && existsSync(existing.path)) return existing;
-	const acquired = acquireWorkRun({ agentDir, category, tenant, runId });
+	const acquired = acquireWorkRun({ agentDir, category, tenant, runId, retention });
 	processWorkRuns.set(key, acquired);
 	return acquired;
 }

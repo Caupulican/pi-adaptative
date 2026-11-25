@@ -1,6 +1,6 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { wrapBracketedPaste } from "./bracketed-paste.ts";
+import { createTerminalCapture } from "./debug-capture.ts";
 import { setKittyProtocolActive } from "./keys.ts";
 import { loadNativeAddon } from "./native-loader.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
@@ -192,20 +192,9 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
-	private writeLogPath = (() => {
-		const env = process.env.PI_TUI_WRITE_LOG || "";
-		if (!env) return "";
-		try {
-			if (fs.statSync(env).isDirectory()) {
-				const now = new Date();
-				const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}-${String(now.getMinutes()).padStart(2, "0")}-${String(now.getSeconds()).padStart(2, "0")}`;
-				return path.join(env, `tui-${ts}-${process.pid}.log`);
-			}
-		} catch {
-			// Not an existing directory - use as-is (file path)
-		}
-		return env;
-	})();
+	private readonly writeCapture = process.env.PI_TUI_WRITE_LOG
+		? createTerminalCapture(process.env.PI_TUI_WRITE_LOG)
+		: undefined;
 
 	get kittyProtocolActive(): boolean {
 		return this._kittyProtocolActive;
@@ -551,13 +540,7 @@ export class ProcessTerminal implements Terminal {
 
 	write(data: string): void {
 		process.stdout.write(data);
-		if (this.writeLogPath) {
-			try {
-				fs.appendFileSync(this.writeLogPath, data, { encoding: "utf8" });
-			} catch {
-				// Ignore logging errors
-			}
-		}
+		this.writeCapture?.write(data);
 	}
 
 	get columns(): number {

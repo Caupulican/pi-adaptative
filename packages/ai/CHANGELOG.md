@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- Reuse unchanged provider request prefixes where the adapter can verify their identity. Extend incremental tool-argument parsing and schema feedback across the shared request path.
+- Match the current Antigravity, Claude Code, Grok CLI, and Command Code sign-in behavior.
+
 ## [0.104.78] - 2026-11-23
 
 ### Changed

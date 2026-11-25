@@ -2,6 +2,7 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { checkSkillEvolutionEligibility } from "../session-skill-policy.ts";
 import type { AutoLearnSettings, AutonomySettings } from "../settings/settings-schema.ts";
+import type { SkillDiscovery } from "../skill-header-discovery.ts";
 import {
 	MAX_LOADED_SKILLS,
 	MAX_PINNED_SKILLS,
@@ -75,7 +76,7 @@ const skillSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const SKILL_VAULT_DESCRIPTION = `Skill vault: search, load, unload, inspect and exclude skills. Up to ${MAX_LOADED_SKILLS} stay loaded under one byte budget. A batch load admits every requested skill or none; a load may evict loaded skills, preferring the oldest unpinned, and reports them. A loaded or available skill that conflicts with owner instructions: exclude it at once with its exact name and a reason, then continue authorized work.`;
+const SKILL_VAULT_DESCRIPTION = `Skill vault: search with a specific task or exact name. Reuse a matching header already in context. Call load by exact name when you need its instructions. Unload, inspect and exclude are also available. Up to ${MAX_LOADED_SKILLS} stay loaded under one byte budget. A batch load admits every requested skill or none; a load may evict loaded skills, preferring the oldest unpinned, and reports them. A loaded or available skill that conflicts with owner instructions: exclude it at once with its exact name and a reason, then continue authorized work.`;
 
 const workerSkillSchema = Type.Object(
 	{
@@ -96,7 +97,8 @@ export type SkillToolDetails =
 	| { action: "repair"; result: SkillRepairResult };
 
 export interface ReadOnlySkillBroker {
-	search(query: string): SkillSearchResult;
+	search(query: string, signal?: AbortSignal): SkillSearchResult | Promise<SkillSearchResult>;
+	readonly headers?: Pick<SkillDiscovery, "previewSkillHeaders" | "restoreSkillHeaders">;
 	read(name: string): SkillReadResult;
 }
 
@@ -121,13 +123,13 @@ export function createReadOnlySkillToolDefinition(
 		name: "skill",
 		label: "Skill (read-only)",
 		readOnly: true,
-		// The prompt names skills to load by this tool, so its schema is in every request.
+		// Keep the discovery entry point available on every request.
 		neverDefer: true,
 		description:
-			"Search and read eligible skill guidance; it cannot load, exclude or change skills. Report a skill that conflicts with owner instructions to the parent.",
+			"Skill vault: search with a specific task or exact name. Reuse a matching header already in context. Read by exact name if you need its instructions. Report any conflicts with owner instructions to the parent.",
 		promptSnippet: "Search and read skills",
 		parameters: readOnlySkillSchema,
-		async execute(_toolCallId, input) {
+		async execute(_toolCallId, input, signal) {
 			if (input.action === "search") {
 				if (!input.query?.trim()) {
 					return {
@@ -136,9 +138,9 @@ export function createReadOnlySkillToolDefinition(
 						isError: true,
 					};
 				}
-				const result = broker.search(input.query);
+				const result = await broker.search(input.query, signal);
 				return {
-					content: [{ type: "text" as const, text: searchText(result) }],
+					content: [{ type: "text" as const, text: searchText(result, broker.headers !== undefined) }],
 					details: { action: "search", result },
 				};
 			}
@@ -164,18 +166,16 @@ export function createReadOnlySkillToolDefinition(
 	};
 }
 
-function searchText(result: SkillSearchResult): string {
-	const lines =
-		result.candidates.length === 0
-			? ["skill search: no match"]
-			: result.candidates.map(
-					(candidate) =>
-						`${candidate.recommended ? "[recommended: the query names the output format this skill produces] " : ""}${candidate.name}: ${candidate.description}`,
-				);
-	// A skill the loader could not index is otherwise invisible; naming it here is what lets the
-	// model (or the owner) fix the SKILL.md instead of retrying a name that will never load.
-	for (const diagnostic of result.diagnostics ?? []) lines.push(`skipped ${diagnostic}`);
-	return lines.join("\n");
+function searchText(result: SkillSearchResult, headerInContext: boolean): string {
+	const qualifier = result.ranking === "lexical" ? " (keyword search)" : "";
+	const candidate = result.candidates[0];
+	if (result.ambiguous)
+		return `skill search${qualifier}: several matches. Use a more specific query or an exact name.`;
+	if (!candidate && result.semantic === "uncertain") return `skill search: inconclusive. Use a more specific query.`;
+	if (!candidate) return `skill search${qualifier}: no match`;
+	return headerInContext
+		? `skill search${qualifier}: ${candidate.name}`
+		: `skill search${qualifier}: ${candidate.name} — ${candidate.description}`;
 }
 
 function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
@@ -185,6 +185,9 @@ function loadText(result: Extract<SkillLoadResult, { ok: true }>): string {
 			? ` (not pinned: ${MAX_PINNED_SKILLS} pins already held; unload a pinned skill to pin this one)`
 			: "";
 	const evicted = result.evicted ? `; EVICTED: ${result.evicted.join(", ")}` : "";
+	if (result.state === "active") {
+		return `skill already active: ${result.name}${pin} (base ${result.baseDir}); expires when idle${evicted}`;
+	}
 	return `skill loaded_pending: ${result.name}${pin} (base ${result.baseDir}), activates next request; expires when idle${evicted}`;
 }
 
@@ -223,12 +226,12 @@ export function createSkillVaultToolDefinition(
 	return {
 		name: "skill",
 		label: "Skill",
-		// The prompt names skills to load by this tool, so its schema is in every request.
+		// Keep the discovery entry point available on every request.
 		neverDefer: true,
-		description: `${SKILL_VAULT_DESCRIPTION} When specialist help is useful and the skill is inactive, search and load it by exact name before the work; idle skills expire. Repair (inspect first for expectedVersion) rewrites a skill's source and works only when settings allow skill evolution.`,
+		description: `${SKILL_VAULT_DESCRIPTION} Idle skill bodies expire. Repair (inspect first for expectedVersion) rewrites a skill's source and works only when settings allow skill evolution.`,
 		promptSnippet: "Search, load and manage skills",
 		parameters: skillSchema,
-		async execute(_toolCallId, input) {
+		async execute(_toolCallId, input, signal) {
 			switch (input.action) {
 				case "search": {
 					if (!input.query?.trim()) {
@@ -239,9 +242,9 @@ export function createSkillVaultToolDefinition(
 							isError: true,
 						};
 					}
-					const result = vault.search(input.query);
+					const result = await vault.search(input.query, { signal });
 					return {
-						content: [{ type: "text" as const, text: searchText(result) }],
+						content: [{ type: "text" as const, text: searchText(result, true) }],
 						details: { action: "search" as const, result },
 					};
 				}

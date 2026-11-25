@@ -7,7 +7,11 @@
  */
 export const MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES = 32 * 1024;
 
-function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: number; exceeded: boolean } {
+export function estimateJsonLikeBytes(
+	value: unknown,
+	maxBytes: number,
+	rejectAccessors = false,
+): { bytes: number; exceeded: boolean } {
 	if (maxBytes < 0) return { bytes: 0, exceeded: true };
 	const seen = new WeakSet<object>();
 	const pending: Generator<unknown, void>[] = [];
@@ -16,22 +20,27 @@ function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: numbe
 		bytes += amount;
 		return bytes <= maxBytes;
 	};
+	const property = (holder: object, key: string): unknown => {
+		if (!rejectAccessors) return (holder as Record<string, unknown>)[key];
+		const field = Object.getOwnPropertyDescriptor(holder, key);
+		if (field && !("value" in field)) add(maxBytes + 1);
+		return field && "value" in field ? field.value : undefined;
+	};
 	function* children(objectValue: object): Generator<unknown, void> {
 		if (Array.isArray(objectValue)) {
 			for (let index = 0; index < objectValue.length; index++) {
 				if (index > 0 && !add(1)) return;
-				yield objectValue[index];
+				yield rejectAccessors ? property(objectValue, String(index)) : objectValue[index];
 			}
 			return;
 		}
 
-		const record = objectValue as Record<string, unknown>;
 		let first = true;
-		for (const key in record) {
-			if (!Object.hasOwn(record, key)) continue;
+		for (const key in objectValue) {
+			if (!Object.hasOwn(objectValue, key)) continue;
 			if (!add((first ? 0 : 1) + key.length * 4 + 3)) return;
 			first = false;
-			yield record[key];
+			yield property(objectValue, key);
 		}
 	}
 

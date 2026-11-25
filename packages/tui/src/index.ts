@@ -129,6 +129,13 @@ export {
 	type TerminalCapabilityOverrides,
 } from "./terminal-image.ts";
 export {
+	borrowComponentRows,
+	collectTerminalRows,
+	componentTerminalRows,
+	joinTerminalRows,
+	type TerminalRows,
+} from "./terminal-rows.ts";
+export {
 	type Component,
 	Container,
 	CURSOR_MARKER,

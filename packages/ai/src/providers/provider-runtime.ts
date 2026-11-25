@@ -29,7 +29,7 @@ type ProviderRetrySource = Pick<StreamOptions | ImagesOptions, "signal" | "maxRe
 	telemetry?: (telemetry: ProviderRetryTelemetry) => void;
 };
 type AssistantMessageOverrides = Partial<Pick<AssistantMessage, "stopReason" | "errorMessage">>;
-type StreamingScratchField = "index" | "partialArgs" | "partialArgsComplete" | "partialJson" | "streamIndex";
+type StreamingScratchField = "index" | "partialArgs" | "partialJson" | "streamIndex";
 
 const committedSuccessfulParses = new WeakSet<AssistantMessage>();
 const MAX_CACHE_POLICY_SCAN_BLOCKS = 2048;

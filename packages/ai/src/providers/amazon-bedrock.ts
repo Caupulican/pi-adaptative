@@ -44,7 +44,7 @@ import type {
 } from "../types.ts";
 import { normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { parseStreamingJson, stageToolArguments } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
@@ -474,9 +474,10 @@ function handleContentBlockDelta(
 			stream.push({ type: "text_delta", contentIndex: index, delta: delta.text, partial: output });
 		}
 	} else if (delta?.toolUse && block?.type === "toolCall") {
-		block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
-		block.arguments = parseStreamingJson(block.partialJson);
-		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
+		const fragment = delta.toolUse.input || "";
+		block.partialJson = (block.partialJson || "") + fragment;
+		stageToolArguments(block, block.partialJson, fragment);
+		stream.push({ type: "toolcall_delta", contentIndex: index, delta: fragment, partial: output });
 	} else if (delta?.reasoningContent) {
 		let thinkingBlock = block;
 		let thinkingIndex = index;
@@ -549,8 +550,6 @@ function handleContentBlockStop(
 			break;
 		case "toolCall":
 			block.arguments = parseStreamingJson(block.partialJson);
-			// Finalize in-place and strip the scratch buffer so replay only
-			// carries parsed arguments.
 			delete (block as Block).partialJson;
 			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
 			break;

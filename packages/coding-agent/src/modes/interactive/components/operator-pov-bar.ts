@@ -547,15 +547,19 @@ export function layoutOperatorPovSegments(
  * root model it will return to), who chose it, what System One is doing, and what the session has cost.
  */
 export class OperatorPovBarComponent implements Component {
-	private readonly source: OperatorPovSource;
+	private readonly readSegments: () => readonly OperatorPovSegment[] | undefined;
+	private readonly invalidateSegments: () => void;
 
-	constructor(source: OperatorPovSource) {
-		this.source = source;
+	constructor(readSegments: () => readonly OperatorPovSegment[] | undefined, invalidateSegments: () => void) {
+		this.readSegments = readSegments;
+		this.invalidateSegments = invalidateSegments;
 	}
 
 	render(width: number): string[] {
-		return [` ${layoutOperatorPovSegments(buildOperatorPovSegments(this.source), Math.max(0, width - 1))}`];
+		return [` ${layoutOperatorPovSegments(this.readSegments() ?? [], Math.max(0, width - 1))}`];
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.invalidateSegments();
+	}
 }

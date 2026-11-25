@@ -338,14 +338,16 @@ interface RecordedTransient {
 	readonly timestamp: number;
 }
 
+function storedTransientDigest(details: unknown): string | undefined {
+	const digest =
+		typeof details === "object" && details !== null ? (details as { digest?: unknown }).digest : undefined;
+	return typeof digest === "string" ? digest : undefined;
+}
+
 function recordedTransient(message: Extract<AgentMessage, { role: "custom" }>): RecordedTransient {
-	const stored =
-		typeof message.details === "object" && message.details !== null
-			? (message.details as { digest?: unknown }).digest
-			: undefined;
 	return {
 		content: durableTransientContent(message),
-		storedDigest: typeof stored === "string" ? stored : undefined,
+		storedDigest: storedTransientDigest(message.details),
 		record: readTransientRecordPayload(message.details),
 		timestamp: message.timestamp,
 	};
@@ -396,7 +398,7 @@ const recordedKindIndexes = new PrefixFoldByFirstItem<AgentMessage, RecordedKind
  */
 export function recordedTransientKinds(
 	messages: readonly AgentMessage[],
-): ReadonlyMap<string, { readonly content: string | undefined }> {
+): ReadonlyMap<string, Pick<RecordedTransient, "content" | "record">> {
 	return new Map(recordedKindIndexes.fold(messages));
 }
 
@@ -683,11 +685,13 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 				continue;
 			}
 			const record = readTransientRecordPayload(message.details);
+			const digest = record ? storedTransientDigest(message.details) : undefined;
 			slots.push({
 				kind: message.customType,
 				content: text,
 				...(isCumulativeTransient(message) ? { cumulative: true } : {}),
 				...(record ? { record } : {}),
+				...(digest !== undefined ? { digest } : {}),
 			});
 		} else {
 			passThrough.push(message);

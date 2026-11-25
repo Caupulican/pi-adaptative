@@ -5,7 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
+import type { AssistantMessage, ImageContent, Model } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, MarkdownTheme, SelectItem, Terminal } from "@caupulican/pi-tui";
 import {
 	applyTerminalSettings,
@@ -49,7 +49,6 @@ import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
 import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
-import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
 import { getSessionRole } from "../../core/session-role.ts";
@@ -62,8 +61,10 @@ import type {
 import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
 import { describeCause, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
-import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
+import { getUserMessageText } from "../../kernel/messages.ts";
+import type { SessionManager, TruncationResult } from "../../kernel/node.ts";
 import { ownerInputIdOf } from "../../kernel/owner-input-stamp.ts";
+import type { SessionHistoryPage } from "../../kernel/session/session-history-page.ts";
 import { turnOriginStampOf } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
@@ -116,17 +117,22 @@ import { composeEditorPlaceholder } from "./editor-placeholder.ts";
 import { type EditorSubmitHost, EditorSubmitRouter } from "./editor-submit-router.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
-import * as historyReloadMath from "./history-reload-math.ts";
 import {
-	renderPrefixHistory,
+	applyHistoryDisplayState,
+	type HistoryDisplayState,
+	readEditorHistory,
+	readReplyRoutes,
+	readStableLiveHistory,
+	renderSavedHistoryRows,
 	rootToolFailureText,
-	seedReplyBylines,
+	settleArchiveTools,
 	targetToolFailureText,
+	tuiHistoryReloadWindow,
 } from "./history-render-support.ts";
-import { findCleanHistoryPartition } from "./history-tail-partition.ts";
 import { InteractiveEventController } from "./interactive-event-controller.ts";
 import { InteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
+import { LiveTranscriptRetention, WithdrawableUserEchoRetention } from "./live-transcript-retention.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalignment-continuation.ts";
@@ -145,6 +151,7 @@ import * as signalLifecycle from "./signal-lifecycle.ts";
 import { SlashCommandController } from "./slash-command-controller.ts";
 import * as startupChecks from "./startup-checks.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
+import { WorkbenchHistoryPager } from "./workbench-history-pager.ts";
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
@@ -208,7 +215,7 @@ export class InteractiveMode {
 	private ui: TUI;
 	private chatContainer: Container;
 	/** The transcript components each owner message added, keyed by its message object. */
-	private readonly userEchoComponents = new WeakMap<AgentMessage, Component[]>();
+	private readonly userEchoes = new WithdrawableUserEchoRetention();
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -244,10 +251,6 @@ export class InteractiveMode {
 	/** Evidence for the P1m cache-miss notice: the previous turn's actual usage, not a guess. */
 	private lastCacheObservation: CacheMissObservation | undefined = undefined;
 
-	// Status line tracking (for mutating immediately-sequential status updates)
-	private lastStatusSpacer: Spacer | undefined = undefined;
-	private lastStatusText: Text | undefined = undefined;
-
 	private tuiHistoryLoaded = false;
 
 	// Active execution identity. Completed actions are owned by the transcript.
@@ -282,6 +285,8 @@ export class InteractiveMode {
 	private readonly layout: InteractiveLayout;
 	/** Owns the streaming reply and the retry/compaction escape handlers; see interactive-event-controller.ts. */
 	private readonly events: InteractiveEventController;
+	/** Owns the bounded root-chat component lifetime and sequential status row. */
+	private readonly liveTranscript: LiveTranscriptRetention;
 	/** Owns the /command handlers and their operator hosts; see slash-command-controller.ts. */
 	private readonly slashCommands: SlashCommandController;
 	/** Owns the queued owner input: steering, follow-up and after-compaction messages; see queued-message-controller.ts. */
@@ -290,6 +295,7 @@ export class InteractiveMode {
 	private readonly submitRouter: EditorSubmitRouter;
 	/** Owns the live-chat target (Brain, Bot, Team) and the bot/team chat rendering; see bot-team-chat-controller.ts. */
 	private readonly botTeamChat: BotTeamChatController;
+	private readonly historyPager: WorkbenchHistoryPager;
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -572,6 +578,7 @@ export class InteractiveMode {
 				this.extensionUiHost.showExtensionEditor(title, prefill, { exactText: true }),
 			openSelectorModal: () => this.showBotTeamSelector(),
 			onActiveTargetChanged: () => {
+				this.historyPager?.cancel();
 				this.defaultEditor.setPlaceholder(this.editorPlaceholder());
 				this.updateEditorBorderColor();
 				this.ui.requestRender();
@@ -604,9 +611,19 @@ export class InteractiveMode {
 			refreshActivityLane: () => this.refreshActivityLane(),
 			updateEditorBorderColor: () => this.updateEditorBorderColor(),
 			showError: (message) => this.showError(message),
-			addMessageToChat: (message) => this.addMessageToChat(message),
-			removeUserMessageFromChat: (message) => this.removeUserMessageFromChat(message),
+			addMessageToChat: (message) => this.addMessageToChat(message, { withdrawableEcho: true }),
+			removeUserMessageFromChat: (message) => this.userEchoes.withdraw(message, this.chatContainer),
+			reconcileUserMessageEchoes: () => this.reconcileUserMessageEchoes(),
 			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
+			trimLiveTuiHistory: () => {
+				this.reconcileUserMessageEchoes();
+				this.liveTranscript.trim();
+				if (this.pendingHistoryReload !== undefined)
+					setImmediate(() => {
+						if (!this.signals.isShuttingDown && this.pendingHistoryReload !== undefined)
+							void this.renderSessionContext(this.pendingHistoryReload);
+					});
+			},
 			attachToolExecutionComponent: (toolName, toolCallId, args, repair) =>
 				this.attachToolExecutionComponent(toolName, toolCallId, args, repair),
 			toolActivityKind: (toolName) => this.toolActivityKind(toolName),
@@ -621,11 +638,33 @@ export class InteractiveMode {
 			rebuildChatFromMessages: (options) => this.rebuildChatFromMessages(options),
 			flushCompactionQueue: (options) => this.queuedMessages.flushCompactionQueue(options),
 		});
+		this.historyPager = new WorkbenchHistoryPager({
+			root: this.chatContainer,
+			isRootActive: () => this.botTeamChat.isRootChatActive(),
+			session: () => this.sessionManager,
+			render: (page) => this.renderSavedHistoryPage(page, new Container()),
+			conversation: () => this.layout.workbench?.view.conversation,
+			repaint: () => this.ui.requestPresentationRender(),
+			report: (error) => this.reportHistoryRead(error),
+		});
+		this.liveTranscript = new LiveTranscriptRetention({
+			root: this.chatContainer,
+			streaming: () => this.events.getStreamingComponent(),
+			activeActions: () => this.activeToolCalls.activeEntries(),
+			withdrawableEchoes: () => this.userEchoes.retainedComponents(),
+			readingComponents: () => this.layout.workbench?.view.conversation.retainedComponents(this.chatContainer),
+			historyBoundary: (id, evicted) => this.historyPager.setLiveBoundary(id, evicted),
+			pagesHistory: () => this.layout.workbench !== undefined,
+			messageEntryId: (message) => this.sessionManager.getMessageEntryId(message),
+			previousEntryId: (id) => this.sessionManager.getEntry(id)?.parentId,
+			requestRender: () => this.ui.requestRender(),
+		});
 		this.layout = new InteractiveLayout({
 			hasHumanAudience: this.hasHumanAudience,
 			ciStatus: options.ciStatus,
 			ui: this.ui,
 			getActiveChatContainer: () => this.getActiveChatContainer(),
+			history: this.historyPager,
 			onInvalidateCachedConversations: () => this.botTeamChat.invalidate(),
 			headerContainer: this.headerContainer,
 			chatContainer: this.chatContainer,
@@ -661,9 +700,7 @@ export class InteractiveMode {
 				};
 			},
 			getPersistentBots: () => this.chatBots(),
-			onSelectChatTarget: (target) => {
-				void this.botTeamChat.switchTarget(target);
-			},
+			onSelectChatTarget: (target) => void this.botTeamChat.switchTarget(target),
 			onSwitchChat: () => this.showBotTeamSelector(),
 		});
 		// The edge asks here, once, with one key: an ungranted operation waits for the answer in the
@@ -1313,7 +1350,7 @@ export class InteractiveMode {
 		this.subscribeToAgent();
 		this.botTeamChat.bindSession();
 		if (this.hasHumanAudience) {
-			// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
+			this.sessionManager.enableBackgroundAppends();
 			this.layout.rebindSession();
 			this.subscribeToExtensionsChanged();
 			await this.updateAvailableProviderCount();
@@ -1374,7 +1411,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.events.discardStreaming();
-		this.clearActiveToolCallState();
+		this.clearActiveToolCalls();
 		void this.renderInitialMessages();
 	}
 
@@ -1392,6 +1429,7 @@ export class InteractiveMode {
 			if (candidate instanceof ActionTranscriptComponent) {
 				if (candidate.canAccept()) {
 					candidate.addAction(component);
+					if (container === this.chatContainer) this.liveTranscript.trim();
 					return;
 				}
 				break;
@@ -1402,6 +1440,7 @@ export class InteractiveMode {
 		const transcript = new ActionTranscriptComponent([component]);
 		transcript.setTranscriptExpanded(this.transcriptActionsExpanded);
 		container.addChild(transcript);
+		if (container === this.chatContainer) this.liveTranscript.trim();
 	}
 
 	private attachToolExecutionComponent(
@@ -1440,10 +1479,7 @@ export class InteractiveMode {
 	}
 
 	public clearActiveToolCalls(): void {
-		this.activeToolCalls.clearActive();
-	}
-
-	private clearActiveToolCallState(): void {
+		this.events.discardToolProgress();
 		this.activeToolCalls.clearActive();
 	}
 
@@ -1802,10 +1838,6 @@ export class InteractiveMode {
 	/** Extract text content from a user message */
 	// Thin `this.`-delegate to the pure formatter in ./history-reload-math.ts; kept so
 	// addMessageToChat and the prototype-based interactive-mode tests resolve it via `this`.
-	private getUserMessageText(message: Message): string {
-		return historyReloadMath.getUserMessageText(message);
-	}
-
 	/**
 	 * Prompt history rebuilt from the persisted user messages of the branch, oldest first. Each entry keeps the ranges the
 	 * owner pasted in it (`ownerPasteRestorer`, by the entry that holds it), so a recalled message is never resubmitted as typed.
@@ -1824,20 +1856,8 @@ export class InteractiveMode {
 		}
 	}
 
-	private populateEditorInputHistoryFromMessages(messages: readonly AgentMessage[]): void {
-		const history = messages
-			.filter((message): message is Message => message.role === "user")
-			.map((message) => ({
-				entryId: this.sessionManager.getMessageEntryId(message),
-				text: this.getUserMessageText(message).trim(),
-			}))
-			.filter((entry) => entry.text.length > 0)
-			.slice(-100);
-		this.setEditorInputHistory(history);
-	}
-
 	private loadTuiHistoryOnDemand(): void {
-		this.layout.workbench?.view.conversation.latest();
+		this.layout.workbench?.view.conversation.readEarlier();
 		this.ui.requestRender();
 	}
 
@@ -1895,7 +1915,7 @@ export class InteractiveMode {
 
 	private showTranscriptPager(): void {
 		openTranscriptOverlay({
-			source: this.getActiveChatContainer(),
+			source: this.historyPager.overlaySource(this.getActiveChatContainer()),
 			viewportRows: () => this.ui.terminal.rows,
 			keybindings: this.keybindings,
 			getToolsExpanded: () => this.toolOutputExpanded,
@@ -1907,33 +1927,7 @@ export class InteractiveMode {
 	}
 
 	private appendStatusToChat(message: string, options: { requestRender?: boolean } = {}): void {
-		const targetContainer = this.getActiveChatContainer();
-		if (targetContainer !== this.chatContainer) {
-			const spacer = new Spacer(1);
-			const text = new Text(theme.fg("dim", message), 1, 0);
-			targetContainer.addChild(spacer);
-			targetContainer.addChild(text);
-			if (options.requestRender ?? true) this.ui.requestRender();
-			return;
-		}
-
-		const children = this.chatContainer.children;
-		const last = children.length > 0 ? children[children.length - 1] : undefined;
-		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
-
-		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
-			this.lastStatusText.setText(theme.fg("dim", message));
-			if (options.requestRender ?? true) this.ui.requestRender();
-			return;
-		}
-
-		const spacer = new Spacer(1);
-		const text = new Text(theme.fg("dim", message), 1, 0);
-		this.chatContainer.addChild(spacer);
-		this.chatContainer.addChild(text);
-		this.lastStatusSpacer = spacer;
-		this.lastStatusText = text;
-		if (options.requestRender ?? true) this.ui.requestRender();
+		this.liveTranscript.appendStatus(this.getActiveChatContainer(), message, options.requestRender ?? true);
 	}
 
 	/**
@@ -1947,20 +1941,18 @@ export class InteractiveMode {
 		this.appendStatusToChat(message);
 	}
 
-	/** Takes an owner echo back out of the transcript: its input was never delivered and is held in the pending queue. */
-	private removeUserMessageFromChat(rawMessage: AgentMessage): void {
-		const components = this.userEchoComponents.get(rawMessage) ?? [];
-		this.userEchoComponents.delete(rawMessage);
-		for (const component of components) this.chatContainer.removeChild(component);
+	private reconcileUserMessageEchoes(): void {
+		this.userEchoes.reconcile((message) => this.sessionManager.getMessageEntryId(message) !== undefined);
 	}
 
 	private addMessageToChat(
 		rawMessage: AgentMessage,
-		options?: { populateHistory?: boolean },
+		options?: { withdrawableEcho?: boolean },
 		container = this.chatContainer,
 		bylines: ReplyBylineTracker = this.replyBylines,
 	): void {
 		// Aliases are a wire-format token optimization; the operator reads their own paths.
+		const recordStart = container.children.length;
 		const message = expandMessageForDisplay(this.session.peekPathAliasTable(), rawMessage);
 		switch (message.role) {
 			case "bashExecution": {
@@ -2005,7 +1997,7 @@ export class InteractiveMode {
 			}
 			case "user": {
 				const echoStart = container.children.length;
-				const textContent = this.getUserMessageText(message);
+				const textContent = getUserMessageText(message);
 				const origin = turnOriginStampOf(rawMessage);
 				if (
 					textContent &&
@@ -2032,11 +2024,10 @@ export class InteractiveMode {
 					} else {
 						container.addChild(new UserMessageComponent(textContent, mdTheme, this.transformMarkdownForDisplay));
 					}
-					if (options?.populateHistory) this.editor.addToHistory?.(textContent);
 				}
-				// The components this message added, so a withdrawn echo can be taken back out (see removeUserMessageFromChat).
-				if (container === this.chatContainer) {
-					this.userEchoComponents.set(rawMessage, container.children.slice(echoStart));
+				// The components this message added, so `user_message_withdrawn` can take its undelivered echo back out.
+				if (container === this.chatContainer && options?.withdrawableEcho) {
+					this.userEchoes.remember(rawMessage, container.children.slice(echoStart));
 				}
 				break;
 			}
@@ -2071,99 +2062,107 @@ export class InteractiveMode {
 				const _exhaustive: never = message;
 			}
 		}
+		if (container === this.chatContainer) {
+			if (options?.withdrawableEcho && rawMessage.role === "user") {
+				this.liveTranscript.rememberTurnStart(container.children[recordStart], rawMessage);
+			}
+			this.liveTranscript.trim();
+		}
 	}
 
-	private renderGeneration = 0;
+	private historyRead?: AbortController;
+	private pendingHistoryReload?: boolean;
 
-	/**
-	 * Render session context to chat. The tail slice paints synchronously, so no microtask can clear or
-	 * reorder the transcript before the first frame; older messages then stream in behind it.
-	 */
-	private async renderSessionContext(
-		sessionContext: SessionContext,
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
-	): Promise<void> {
-		const generation = ++this.renderGeneration;
+	private reportHistoryRead(error: unknown): void {
+		this.showError(interfaceText().notices.historyLoadFailed(error instanceof Error ? error.message : String(error)));
+	}
 
-		if (options.updateFooter) {
+	private renderSavedHistoryPage(page: SessionHistoryPage, container: Container): Container {
+		const isLive = container === this.chatContainer;
+		const pending = new Map<string, ToolExecutionComponent>();
+		const bylines = isLive ? this.replyBylines : new ReplyBylineTracker();
+		renderSavedHistoryRows(
+			page,
+			container,
+			(message) => this.renderHistoricalMessage(message, container, pending, isLive, bylines, true),
+			isLive ? (component, id) => this.liveTranscript.rememberTurnStart(component, id) : undefined,
+		);
+		settleArchiveTools(pending.values());
+		if (isLive) this.clearActiveToolCalls();
+		return container;
+	}
+
+	private async renderSessionContext(updateFooter = false): Promise<boolean> {
+		this.historyRead?.abort();
+		this.pendingHistoryReload = undefined;
+		const request = new AbortController();
+		this.historyRead = request;
+		const manager = this.sessionManager;
+		const conversation = this.layout.workbench?.view.conversation;
+		const revision = () =>
+			this.events.getStreamingComponent() || this.session.isStreaming
+				? undefined
+				: this.chatContainer.renderRevision;
+		let page: SessionHistoryPage | undefined;
+		try {
+			if (conversation) {
+				const stable = await readStableLiveHistory(manager, revision, request.signal);
+				if (request.signal.aborted || manager !== this.sessionManager) return false;
+				if (!stable || stable.leaf !== manager.getLeafId() || stable.revision !== revision()) {
+					this.pendingHistoryReload = updateFooter;
+					return false;
+				}
+				page = stable.page;
+			}
+		} catch (error) {
+			if (!request.signal.aborted && manager === this.sessionManager) this.reportHistoryRead(error);
+			return false;
+		}
+
+		if (updateFooter) {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
+			void readEditorHistory(manager, request.signal)
+				.then((entries) => {
+					if (!request.signal.aborted && manager === this.sessionManager) this.setEditorInputHistory(entries);
+				})
+				.catch((error) => {
+					if (!request.signal.aborted && manager === this.sessionManager) this.reportHistoryRead(error);
+				});
 		}
 
 		this.replyBylines.reset();
-		this.replyRoutes = new Map();
-		for (const entry of this.sessionManager.getEntries()) {
-			if (entry.type !== "custom" || entry.customType !== REPLY_ROUTE_CUSTOM_TYPE) continue;
-			const record = entry.data as ReplyRouteRecord | undefined;
-			if (record && typeof record.timestamp === "number") this.replyRoutes.set(record.timestamp, record.route);
-		}
+		this.replyRoutes = readReplyRoutes(manager);
 
-		const allMessages = sessionContext.messages;
-		if (options.populateHistory) this.populateEditorInputHistoryFromMessages(allMessages);
-		// Populated once, in one ordered pass; the per-message renders must not repeat it.
-		const renderOptions = options.populateHistory ? { ...options, populateHistory: false } : options;
-		const splitIndex = findCleanHistoryPartition(allMessages, 60);
-		const prefixMessages = allMessages.slice(0, splitIndex);
-		const tailMessages = allMessages.slice(splitIndex);
-
-		seedReplyBylines(prefixMessages, this.replyBylines);
-
+		this.liveTranscript.reset();
+		this.userEchoes.clear();
 		this.chatContainer.clear();
-		this.clearActiveToolCallState();
-		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
-
-		for (const message of tailMessages) {
-			this.renderHistoricalMessage(message, this.chatContainer, renderedPendingTools, renderOptions, true);
+		this.clearActiveToolCalls();
+		if (page) {
+			this.historyPager.reset(page.older);
+			this.renderSavedHistoryPage(page, this.chatContainer);
+		} else {
+			const { messages, notice } = tuiHistoryReloadWindow(
+				manager.buildSessionContext().messages,
+				this.toolOutputExpanded,
+			);
+			if (notice) this.chatContainer.addChild(notice);
+			const pending = new Map<string, ToolExecutionComponent>();
+			for (const message of messages) this.renderHistoricalMessage(message, this.chatContainer, pending, true);
 		}
-
+		this.liveTranscript.trim();
+		conversation?.resetContainerScroll(this.chatContainer);
+		this.tuiHistoryLoaded = true;
 		this.ui.requestRender();
-		const conversation = this.layout.workbench?.view.conversation;
-		if (this.botTeamChat.isRootChatActive()) conversation?.latest();
-		else conversation?.resetContainerScroll(this.chatContainer);
-
-		if (prefixMessages.length === 0) return;
-		void this.renderPrefixHistory(prefixMessages, generation, renderOptions);
-	}
-
-	private async renderPrefixHistory(
-		prefixMessages: readonly AgentMessage[],
-		generation: number,
-		options: { updateFooter?: boolean; populateHistory?: boolean },
-	): Promise<void> {
-		await renderPrefixHistory(prefixMessages, generation, {
-			chatContainer: this.chatContainer,
-			generation: () => this.renderGeneration,
-			displayState: () => ({
-				showImages: this.settingsManager.getShowImages(),
-				imageWidthCells: this.settingsManager.getImageWidthCells(),
-				toolsExpanded: this.toolOutputExpanded,
-				actionsExpanded: this.transcriptActionsExpanded,
-				hideThinkingBlock: this.hideThinkingBlock,
-			}),
-			renderMessage: (message, container, pending, bylines) =>
-				this.renderHistoricalMessage(message, container, pending, options, false, bylines),
-			requestRender: () => this.ui.requestRender(),
-			historyLoadFailed: (error) =>
-				this.showError(
-					interfaceText().notices.historyLoadFailed(error instanceof Error ? error.message : String(error)),
-				),
-		});
+		return true;
 	}
 
 	async renderInitialMessages(_options: { forceHistoryLoad?: boolean } = {}): Promise<void> {
-		const context = this.sessionManager.buildSessionContext();
-		this.populateEditorInputHistoryFromMessages(context.messages);
-		await this.renderSessionContext(context, {
-			updateFooter: true,
-		});
-		this.tuiHistoryLoaded = true;
+		if (!(await this.renderSessionContext(true))) return;
 
-		// Show compaction info if session was compacted
-		const allEntries = this.sessionManager.getEntries();
-		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
-		if (compactionCount > 0) {
-			this.showStatus(interfaceText().interactive.sessionCompacted(compactionCount));
-		}
+		let compactionCount = 0;
+		for (const entry of this.sessionManager.getEntries()) if (entry.type === "compaction") compactionCount++;
+		if (compactionCount > 0) this.showStatus(interfaceText().interactive.sessionCompacted(compactionCount));
 	}
 
 	/** Hands a submitted input to the turn waiting for one; otherwise it waits in the queue for the next request. */
@@ -2193,13 +2192,13 @@ export class InteractiveMode {
 		message: AgentMessage,
 		container: Container,
 		pendingTools: Map<string, ToolExecutionComponent>,
-		options?: { populateHistory?: boolean },
 		isLiveTail = false,
 		bylines: ReplyBylineTracker = this.replyBylines,
+		showOrphanResults = false,
 	): void {
 		if (message.role === "assistant") {
-			this.addMessageToChat(message, options, container, bylines);
-			const isRoot = container === this.chatContainer;
+			this.addMessageToChat(message, undefined, container, bylines);
+			const isRoot = showOrphanResults || container === this.chatContainer;
 			for (const content of message.content) {
 				if (content.type !== "toolCall") continue;
 				const component = this.attachToolExecutionComponent(
@@ -2222,14 +2221,18 @@ export class InteractiveMode {
 				}
 			}
 		} else if (message.role === "toolResult") {
-			const component = pendingTools.get(message.toolCallId);
+			const component =
+				pendingTools.get(message.toolCallId) ??
+				(showOrphanResults
+					? this.attachToolExecutionComponent(message.toolName, message.toolCallId, {}, undefined, true, container)
+					: undefined);
 			if (component) {
 				component.updateResult(message as unknown as ToolExecutionResult);
 				pendingTools.delete(message.toolCallId);
 				if (isLiveTail) this.activeToolCalls.finish(message.toolCallId);
 			}
 		} else {
-			this.addMessageToChat(message, options, container, bylines);
+			this.addMessageToChat(message, undefined, container, bylines);
 		}
 	}
 
@@ -2239,15 +2242,12 @@ export class InteractiveMode {
 		pendingToolCalls: Map<string, ToolExecutionComponent>,
 		bylines: ReplyBylineTracker,
 	): void {
-		this.renderHistoricalMessage(message, container, pendingToolCalls, undefined, false, bylines);
+		this.renderHistoricalMessage(message, container, pendingToolCalls, false, bylines);
 	}
 
 	private async rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean> {
-		// Root is rebuilt even while a bot or team chat is on screen: the Root transcript must never be
-		// left showing a superseded conversation the moment the operator switches back to it.
-		const context = this.sessionManager.buildSessionContext();
-		await this.renderSessionContext(context);
-		this.tuiHistoryLoaded = true;
+		// Rebuild Root even with a bot or team chat visible, so switching back shows the current branch.
+		if (!(await this.renderSessionContext())) return false;
 		if (!options?.checkpointWhenDeferred) this.botTeamChat.resetViews();
 		if (!this.botTeamChat.isRootChatActive()) await this.botTeamChat.refreshActiveChatView();
 		return true;
@@ -2408,18 +2408,19 @@ export class InteractiveMode {
 		this.setToolsExpanded(!this.toolOutputExpanded);
 	}
 
+	private syncTranscriptDisplay(state: Partial<HistoryDisplayState>, includeLive = true): void {
+		if (includeLive) applyHistoryDisplayState(this.chatContainer.children, state);
+		for (const page of this.historyPager.visibleArchive()) applyHistoryDisplayState(page.children, state);
+	}
+
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
 		const activeHeader = this.extensionUiHost.getCustomHeader() ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const child of this.chatContainer.children) {
-			if (isExpandable(child)) {
-				child.setExpanded(expanded);
-			}
-		}
 		this.botTeamChat?.setToolsExpanded(expanded);
+		this.syncTranscriptDisplay({ toolsExpanded: expanded });
 		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
 	}
@@ -2427,18 +2428,18 @@ export class InteractiveMode {
 	/** Image visibility is a root-only setting until now; bot and team chats keep their own cached rows. */
 	setBotTeamShowImages(show: boolean): void {
 		this.botTeamChat.setShowImages(show);
+		this.syncTranscriptDisplay({ showImages: show }, false);
 	}
 
 	setBotTeamImageWidthCells(width: number): void {
 		this.botTeamChat.setImageWidthCells(width);
+		this.syncTranscriptDisplay({ imageWidthCells: width }, false);
 	}
 
 	private setTranscriptActionsExpanded(expanded: boolean): void {
 		this.transcriptActionsExpanded = expanded;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof ActionTranscriptComponent) child.setTranscriptExpanded(expanded);
-		}
 		this.botTeamChat?.setTranscriptActionsExpanded(expanded);
+		this.syncTranscriptDisplay({ actionsExpanded: expanded });
 		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
 	}
@@ -2451,16 +2452,12 @@ export class InteractiveMode {
 	}
 
 	private updateThinkingBlockVisibility(): void {
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.hideThinkingBlock);
-			}
-		}
 		const streamingComponent = this.events.getStreamingComponent();
 		if (streamingComponent && !this.chatContainer.children.includes(streamingComponent)) {
 			streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 		}
 		this.botTeamChat?.setHideThinkingBlock(this.hideThinkingBlock);
+		this.syncTranscriptDisplay({ hideThinkingBlock: this.hideThinkingBlock });
 		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
 	}
@@ -2994,10 +2991,13 @@ export class InteractiveMode {
 			}
 		};
 		this.subscriptionGeneration++;
+		attempt(() => this.events.discardToolProgress());
 		attempt(() => this.unsubscribeHumanInputActivity?.());
 		this.unsubscribeHumanInputActivity = undefined;
 		attempt(() => this.unsubscribePersistenceFence?.());
 		this.unsubscribePersistenceFence = undefined;
+		this.historyRead?.abort();
+		this.historyPager.cancel();
 		attempt(() => this.layout.dispose());
 		attempt(() => this.botTeamChat.dispose());
 		attempt(() => {

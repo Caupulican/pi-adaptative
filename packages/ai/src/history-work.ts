@@ -12,6 +12,8 @@ export interface HistoryWork {
 	copiedRows: number;
 	/** Conversation and planner rows converted into provider-neutral messages. */
 	providerRowsConverted: number;
+	/** Provider-neutral rows normalized and reconciled for a concrete adapter. */
+	transformedRows: number;
 	/** Provider-neutral messages encoded into native Responses input. */
 	wireRowsConverted: number;
 	emittedRows: number;
@@ -33,6 +35,7 @@ export function observeHistoryWork(owner: object): HistoryWork {
 		projectedRows: 0,
 		copiedRows: 0,
 		providerRowsConverted: 0,
+		transformedRows: 0,
 		wireRowsConverted: 0,
 		emittedRows: 0,
 		fallbacks: new Map(),
@@ -94,7 +97,36 @@ export function acceptsReadOnlyProviderInput(hook: object | undefined): boolean 
 	return !hook || readOnlyHooks.has(hook);
 }
 
-export { responsesInputPrefix } from "./providers/openai-responses-history.ts";
+export function canReuseProviderInput(messages: readonly Message[], hook: object | undefined): boolean {
+	return acceptsReadOnlyProviderInput(hook) && !!providerMessagePrefix(messages);
+}
+
+/** Native wire rows reused from a specific immutable provider input array. */
+type WireInput = readonly unknown[];
+const wirePrefixes = new WeakMap<
+	WireInput,
+	{ source: readonly Message[]; count: number; previous?: WeakRef<WireInput> }
+>();
+
+export function recordProviderInput(
+	input: WireInput,
+	source: readonly Message[],
+	count: number,
+	previous?: WireInput,
+): void {
+	if (!Number.isSafeInteger(count) || count < 0 || count > Math.min(input.length, previous?.length ?? 0))
+		throw new RangeError("Invalid accepted wire prefix extent");
+	wirePrefixes.set(input, { source, count, previous: previous && new WeakRef(previous) });
+}
+
+export function providerInputPrefix(input: WireInput) {
+	const receipt = wirePrefixes.get(input);
+	if (!receipt) return undefined;
+	const previous = receipt.previous?.deref();
+	return { source: receipt.source, count: previous ? receipt.count : 0, previous };
+}
+
+export { providerInputPrefix as responsesInputPrefix };
 
 /** Freeze a privately owned JSON projection. Frozen children supplied by the caller are already immutable. */
 export function freezeOwnedJson(value: unknown): void {

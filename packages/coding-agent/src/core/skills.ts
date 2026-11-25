@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, type Stats, statSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import type { ThinkingLevel } from "../kernel/index.ts";
@@ -114,8 +114,12 @@ export interface Skill {
 	thinking?: ThinkingLevel;
 }
 
+export function isWorkerEligibleSkill(skill: { effects?: readonly SkillEffect[] }): boolean {
+	return (skill.effects?.length ?? 0) === 0;
+}
+
 export function workerEligibleSkills<T extends { effects?: readonly SkillEffect[] }>(skills: readonly T[]): T[] {
-	return skills.filter((skill) => (skill.effects?.length ?? 0) === 0);
+	return skills.filter(isWorkerEligibleSkill);
 }
 
 export function skillsForSessionRole<T extends { effects?: readonly SkillEffect[] }>(
@@ -194,7 +198,16 @@ function createSkillSourceInfo(filePath: string, baseDir: string, source: string
 	}
 }
 
+interface SkillFrontmatterFile {
+	readonly text: string;
+	readonly version: Stats;
+}
+
 export function readSkillFrontmatterFile(filePath: string): string {
+	return readSkillFrontmatterSnapshot(filePath).text;
+}
+
+function readSkillFrontmatterSnapshot(filePath: string): SkillFrontmatterFile {
 	const fileDescriptor = openSync(filePath, "r");
 	try {
 		const before = fstatSync(fileDescriptor);
@@ -217,12 +230,54 @@ export function readSkillFrontmatterFile(filePath: string): string {
 			if (!hasOpeningDelimiter || closingDelimiter !== -1 || bytesRead === 0) {
 				const after = fstatSync(fileDescriptor);
 				if (!sameFileVersion(before, after)) throw new Error("Skill changed while metadata was being read.");
-				return closingDelimiter === -1 ? prefix : prefix.slice(0, closingDelimiter + 4);
+				return { text: closingDelimiter === -1 ? prefix : prefix.slice(0, closingDelimiter + 4), version: after };
 			}
 		}
 		throw new Error(`Skill frontmatter exceeds ${MAX_SKILL_FRONTMATTER_BYTES} bytes or is unterminated.`);
 	} finally {
 		closeSync(fileDescriptor);
+	}
+}
+
+const MAX_CACHED_SKILL_HEADERS = 256;
+const MAX_CACHED_SKILL_HEADER_CHARS = 256 * 1024;
+
+interface CachedSkillFrontmatter {
+	readonly version: Stats;
+	readonly frontmatter: SkillFrontmatter;
+	readonly chars: number;
+}
+
+export class SkillFrontmatterCache {
+	private readonly entries = new Map<string, CachedSkillFrontmatter>();
+	private chars = 0;
+
+	read(filePath: string): SkillFrontmatter {
+		const cached = this.entries.get(filePath);
+		if (cached) {
+			const current = statSync(filePath, { throwIfNoEntry: false });
+			if (current?.isFile() && sameFileVersion(cached.version, current)) {
+				this.entries.delete(filePath);
+				this.entries.set(filePath, cached);
+				return cached.frontmatter;
+			}
+			this.delete(filePath, cached);
+		}
+		const { text, version } = readSkillFrontmatterSnapshot(filePath);
+		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(text);
+		this.entries.set(filePath, { frontmatter, version, chars: text.length });
+		this.chars += text.length;
+		while (this.entries.size > MAX_CACHED_SKILL_HEADERS || this.chars > MAX_CACHED_SKILL_HEADER_CHARS) {
+			const oldest = this.entries.entries().next();
+			if (oldest.done) break;
+			this.delete(...oldest.value);
+		}
+		return frontmatter;
+	}
+
+	private delete(filePath: string, entry: CachedSkillFrontmatter): void {
+		this.entries.delete(filePath);
+		this.chars -= entry.chars;
 	}
 }
 
@@ -235,12 +290,13 @@ function loadSkillsFromDirInternal(
 	dir: string,
 	source: string,
 	isPathAllowed?: (path: string) => boolean,
+	frontmatterCache?: SkillFrontmatterCache,
 ): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
 	for (const filePath of discoverSkillFiles(dir, "pi")) {
 		if (isPathAllowed && !isPathAllowed(filePath)) continue;
-		const result = loadSkillFromFile(filePath, source);
+		const result = loadSkillFromFile(filePath, source, frontmatterCache);
 		if (result.skill) skills.push(result.skill);
 		diagnostics.push(...result.diagnostics);
 	}
@@ -251,12 +307,15 @@ function loadSkillsFromDirInternal(
 function loadSkillFromFile(
 	filePath: string,
 	source: string,
+	frontmatterCache?: SkillFrontmatterCache,
 ): { skill: Skill | null; diagnostics: ResourceDiagnostic[] } {
 	const diagnostics: ResourceDiagnostic[] = [];
 	const isDeclaredSkill = basename(filePath) === "SKILL.md";
 
 	try {
-		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(readSkillFrontmatterFile(filePath));
+		const frontmatter =
+			frontmatterCache?.read(filePath) ??
+			parseFrontmatter<SkillFrontmatter>(readSkillFrontmatterFile(filePath)).frontmatter;
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
 
@@ -325,6 +384,7 @@ export interface LoadSkillsOptions {
 	skillPaths: string[];
 	includeDefaults: boolean;
 	includeProjectDefaults?: boolean;
+	frontmatterCache?: SkillFrontmatterCache;
 	isPathAllowed?: (path: string) => boolean;
 }
 
@@ -369,11 +429,23 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	}
 
 	if (includeDefaults) {
-		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", options.isPathAllowed));
+		addSkills(
+			loadSkillsFromDirInternal(
+				join(resolvedAgentDir, "skills"),
+				"user",
+				options.isPathAllowed,
+				options.frontmatterCache,
+			),
+		);
 	}
 	if (options.includeProjectDefaults ?? includeDefaults) {
 		addSkills(
-			loadSkillsFromDirInternal(resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"), "project", options.isPathAllowed),
+			loadSkillsFromDirInternal(
+				resolve(resolvedCwd, CONFIG_DIR_NAME, "skills"),
+				"project",
+				options.isPathAllowed,
+				options.frontmatterCache,
+			),
 		);
 	}
 
@@ -399,12 +471,12 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
-				addSkills(loadSkillsFromDirInternal(resolvedPath, source, options.isPathAllowed));
+				addSkills(loadSkillsFromDirInternal(resolvedPath, source, options.isPathAllowed, options.frontmatterCache));
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
 				if (options.isPathAllowed && !options.isPathAllowed(resolvedPath)) {
 					continue;
 				}
-				const result = loadSkillFromFile(resolvedPath, source);
+				const result = loadSkillFromFile(resolvedPath, source, options.frontmatterCache);
 				if (result.skill) {
 					addSkills({ skills: [result.skill], diagnostics: result.diagnostics });
 				} else {

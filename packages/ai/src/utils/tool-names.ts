@@ -11,6 +11,7 @@ export interface ToolNameMap {
 export interface IndexedToolNameMap extends ToolNameMap {
 	readonly checkpoint: number;
 	rewind(checkpoint: number): void;
+	copyAllocationsTo(target: ToolNameMap, checkpoint: number): void;
 }
 
 export interface ToolNameMapOptions {
@@ -87,6 +88,9 @@ export function createToolNameMap(tools: readonly Tool[], options?: ToolNameMapO
 				providerToOriginal.delete(name);
 				usedProviderNames.delete(name);
 			}
+		},
+		copyAllocationsTo(target, checkpoint) {
+			for (let index = initialSize; index < checkpoint; index++) target.toProviderName(allocated[index]!);
 		},
 		toProviderName(name: string): string {
 			return allocate(name);

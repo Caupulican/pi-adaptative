@@ -325,7 +325,7 @@ export function normalizeSteStrictness(value: unknown): number {
 /** The standing rule for one strictness (0 turns the style off and renders nothing). */
 export function renderExplanationStyleRule(strictness: number): string | undefined {
 	if (strictness === 0) return undefined;
-	return `Explanations: ASD-STE100, strictness ${strictness}/10 (skill ste100-writing).`;
+	return `Explanations: ASD-STE100, strictness ${strictness}/10.`;
 }
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */

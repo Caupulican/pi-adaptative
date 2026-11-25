@@ -8,6 +8,7 @@ import type {
 	ProviderRequestSnapshotContext,
 	ToolCallStartContext,
 } from "../kernel/index.ts";
+import type { SessionAppendFailure } from "../kernel/session/session-append-order.ts";
 import {
 	receiptMatchesMessageBatch,
 	SessionAppendCommittedError,
@@ -17,11 +18,13 @@ import {
 	type SessionAppendWriteIdentity,
 } from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
+import type { SessionMessageBatchCommitArgs } from "../kernel/session/session-message-batch.ts";
 import {
 	ForegroundLifecycleController,
 	type ForegroundLifecycleModelRouterDependency,
 	type ProviderRetryLifecycleEvent,
 } from "./foreground-lifecycle-controller.ts";
+import type { RoutedSessionAppendPort } from "./model-router/session-buffer.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
 import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
@@ -38,6 +41,16 @@ import { runReleaseSteps } from "./util/resource-release.ts";
 const MAX_HELD_WARNINGS = 100;
 /** Longest held warning; the same bound the host warning channel applies. */
 const MAX_HELD_WARNING_CHARS = 500;
+
+type MessageAppendPublication = Generator<SessionMessageBatchCommitArgs, string[], SessionAppendFailure | undefined>;
+
+/** The router binds before the foreground lifecycle adapter is constructed. */
+export function createForegroundAppendPort(current: () => ForegroundLifecycleAdapter): RoutedSessionAppendPort {
+	return {
+		appendSessionMessageBatch: (batch, attempt) => current().appendMessageBatch(batch, attempt),
+		appendSessionMessageBatchAwaitable: (batch, attempt) => current().appendMessageBatchAwaitable(batch, attempt),
+	};
+}
 
 export class ForegroundLifecycleAdapter {
 	private readonly agent: Agent;
@@ -185,24 +198,52 @@ export class ForegroundLifecycleAdapter {
 		}
 	}
 
-	appendMessageBatch(
+	appendMessageBatch(batch: readonly SessionMessageBatchEntry[], attempt?: symbol): string[] {
+		return this.publishMessageBatch(batch, attempt, (args, finish) =>
+			this.sessionManager.appendMessageBatchWithReceipt(args, finish),
+		);
+	}
+
+	async appendMessageBatchAwaitable(batch: readonly SessionMessageBatchEntry[], attempt?: symbol): Promise<string[]> {
+		return this.publishMessageBatch(batch, attempt, (args, finish) =>
+			this.sessionManager.appendMessageBatchAwaitable(args, finish),
+		);
+	}
+
+	private publishMessageBatch<T>(
 		batch: readonly SessionMessageBatchEntry[],
-		attempt = Symbol("foreground session append"),
-	): string[] {
+		attempt: symbol | undefined,
+		publish: (args: SessionMessageBatchCommitArgs, finish: (failure?: SessionAppendFailure) => string[]) => T,
+	): T | string[] {
 		if (batch.length === 0) return [];
+		const publication = this.messageAppendPublication(batch, attempt ?? Symbol("foreground session append"));
+		const prepared = publication.next();
+		if (prepared.done) return prepared.value;
+		return publish(prepared.value, (failure) => {
+			const result = publication.next(failure);
+			if (!result.done) throw new Error("Message receipt publication requested a second commit.");
+			return result.value;
+		});
+	}
+
+	private *messageAppendPublication(
+		batch: readonly SessionMessageBatchEntry[],
+		attempt: symbol,
+	): MessageAppendPublication {
 		const assertCurrent = this.sessionManager.captureBranchContext();
 		const submitted = batch.map((item) => Object.freeze({ ...item }));
 		assertCurrent();
 		const publication: { receipt?: SessionAppendReceipt } = {};
 		let failure: { error: unknown } | undefined;
 		try {
-			this.sessionManager.appendMessageBatch(
+			const outcome = yield [
 				submitted,
 				(receipt) => {
 					publication.receipt = receipt;
 				},
 				attempt,
-			);
+			];
+			if (outcome) throw outcome.error;
 		} catch (error) {
 			if (error instanceof SessionAppendCommittedError && error.receipt.attempt === attempt)
 				publication.receipt = error.receipt;

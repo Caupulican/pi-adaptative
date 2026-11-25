@@ -52,9 +52,7 @@ Never use `__dirname` directly for package assets.
 
 ## Debug Command
 
-`/debug` (hidden) writes to `~/.pi/agent/pi-debug.log`:
-- Rendered TUI lines with ANSI codes
-- Last messages sent to the LLM
+`/debug` writes a report under the agent's managed `work/logs/debug` directory and prints the path in the TUI. The report holds recent rendered rows and messages within 4 MiB and can include conversation text. See [diagnostic log retention](settings.md#logging).
 
 ## Testing
 

@@ -6,7 +6,7 @@
  */
 
 import { formatToolRepairStandingRule } from "@caupulican/pi-ai/tool-repair-registry";
-import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
+import { ToolArgumentValidationError, type ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import type { AgentLoopConfig, BackgroundToolCallContext } from "./loop-config.ts";
 import { sanitizeToolFailureEvidence } from "./tool-failure-memory.ts";
 import type { AgentTool, AgentToolCall, ToolCallBackgroundForms } from "./types.ts";
@@ -30,6 +30,42 @@ export function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentTo
 	if (!tool.prepareArguments) return toolCall;
 	const prepared = tool.prepareArguments(toolCall.arguments);
 	return prepared === toolCall.arguments ? toolCall : { ...toolCall, arguments: prepared as Record<string, any> };
+}
+
+export interface ToolArgumentFailure {
+	message: string;
+	toolName: string;
+	signature: string;
+	enrichment: string | (() => string);
+}
+
+export function readToolArgumentValidationError(error: unknown): ToolArgumentFailure | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		if (Reflect.get(error, "name") !== "ToolArgumentValidationError") return undefined;
+		const message = Reflect.get(error, "message");
+		const toolName = Reflect.get(error, "toolName");
+		const signature = Reflect.get(error, "signature");
+		const local = error instanceof ToolArgumentValidationError;
+		const enrichment = local ? () => error.enrichment : Reflect.get(error, "enrichment");
+		if (typeof message !== "string" || message.length === 0) return undefined;
+		if (typeof toolName !== "string" || typeof signature !== "string" || (!local && typeof enrichment !== "string")) {
+			return undefined;
+		}
+		return { message, toolName, signature, enrichment };
+	} catch {
+		return undefined;
+	}
+}
+
+export function materializeToolValidationFeedback(enrichment: ToolArgumentFailure["enrichment"]): string | undefined {
+	try {
+		const text = typeof enrichment === "function" ? enrichment() : enrichment;
+		return typeof text === "string" ? text : undefined;
+	} catch {
+		// A guidance failure cannot replace the original refused-call diagnostic.
+		return undefined;
+	}
 }
 
 export function validationFailureCorrection(

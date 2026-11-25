@@ -1,4 +1,5 @@
-import { projectMessagesForModelImageSupport } from "../image-support.ts";
+import { countHistoryWork, providerMessagePrefix } from "../history-work.ts";
+import { modelImageProjection } from "../image-support.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -31,6 +32,17 @@ export function joinTextContent(content: readonly (TextContent | ImageContent)[]
 }
 
 type NormalizeCall<TApi extends Api> = (id: string, model: Model<TApi>, source: AssistantMessage) => string;
+type MessageNormalizer = NormalizeCall<Api> | { create(): NormalizeCall<Api> };
+
+interface TransformedHistory {
+	scope: string;
+	normalizer?: MessageNormalizer;
+	normalize?: NormalizeCall<Api>;
+	cursor: MessageTransformCursor;
+	stable: Message[];
+}
+
+const transformedHistories = new WeakMap<readonly Message[], TransformedHistory>();
 
 /** Cross-message state for ID normalization, interrupted calls, and unmatched tool output. */
 export class MessageTransformCursor {
@@ -258,13 +270,38 @@ export class MessageTransformCursor {
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
-	normalizeToolCallId?: NormalizeCall<TApi>,
-): Message[] {
-	const cursor = new MessageTransformCursor();
-	const result: Message[] = [];
-	for (const message of projectMessagesForModelImageSupport(messages, model)) {
-		cursor.append(message, model, result, normalizeToolCallId);
+	normalizer?: MessageNormalizer,
+): readonly Message[] {
+	const proof = providerMessagePrefix(messages);
+	const scope = proof
+		? JSON.stringify([model.api, model.provider, model.id, model.input, model.supportedImageMimeTypes])
+		: "";
+	const previous = proof?.previous;
+	const retry = proof && transformedHistories.get(messages);
+	const predecessor = previous && proof.count === previous.length ? transformedHistories.get(previous) : undefined;
+	const matches = (frame: TransformedHistory | undefined) => frame?.scope === scope && frame.normalizer === normalizer;
+	const accepted = matches(retry) ? retry : matches(predecessor) ? predecessor : undefined;
+	const history: TransformedHistory = accepted ?? {
+		scope,
+		normalizer,
+		normalize: typeof normalizer === "function" ? normalizer : normalizer?.create(),
+		cursor: new MessageTransformCursor(),
+		stable: [],
+	};
+	// A speculative append owns the cursor from here. Edits and competing forks rebuild from source.
+	if (accepted && accepted === predecessor && previous && previous !== messages) transformedHistories.delete(previous);
+	const from = !accepted ? 0 : accepted === retry ? messages.length : proof!.count;
+	const projectImages = modelImageProjection(model);
+	for (let index = from; index < messages.length; index++) {
+		const message = messages[index]!;
+		history.cursor.append(projectImages ? projectImages(message) : message, model, history.stable, history.normalize);
 	}
-	cursor.finish(result);
+	const result = proof ? history.stable.slice() : history.stable;
+	history.cursor.finish(result);
+	countHistoryWork(messages, "transformedRows", messages.length - from);
+	if (proof) {
+		countHistoryWork(messages, "copiedRows", history.stable.length);
+		transformedHistories.set(messages, history);
+	}
 	return result;
 }

@@ -346,6 +346,15 @@ interface LayoutLine {
 	startIndex: number;
 }
 
+interface EditorLayout {
+	width: number;
+	pasteIds: string;
+	text: string[];
+	lines: TextChunk[][];
+	offsets: number[];
+	rowCount: number;
+}
+
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
@@ -409,6 +418,9 @@ export class Editor implements Component, Focusable {
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
+	private editorLayout?: EditorLayout;
+	private layoutDirty = true;
+	private layoutDirtyLine?: number;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -427,7 +439,8 @@ export class Editor implements Component, Focusable {
 	private autocompleteMaxVisible: number = 5;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
-	private autocompleteRequestTask: Promise<void> = Promise.resolve();
+	private autocompleteInFlight = 0;
+	private queuedAutocomplete?: { token: number; options: { force: boolean; explicitTab: boolean } };
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
 
@@ -505,7 +518,14 @@ export class Editor implements Component, Focusable {
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 	}
 
-	private notifyChange(): void {
+	private invalidateLayout(line?: number): void {
+		if (!this.layoutDirty) this.layoutDirtyLine = line;
+		else if (line !== this.layoutDirtyLine) this.layoutDirtyLine = undefined;
+		this.layoutDirty = true;
+	}
+
+	private notifyChange(line?: number): void {
+		this.invalidateLayout(line);
 		this.reconcilePastedRanges();
 		if (this.onChangeSummary) {
 			let firstNonWhitespace: string | undefined;
@@ -662,15 +682,15 @@ export class Editor implements Component, Focusable {
 	}
 
 	private isOnFirstVisualLine(): boolean {
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
-		const currentVisualLine = this.findCurrentVisualLine(visualLines);
+		const layout = this.getEditorLayout(this.lastWidth);
+		const currentVisualLine = this.findCurrentVisualLine(layout);
 		return currentVisualLine === 0;
 	}
 
 	private isOnLastVisualLine(): boolean {
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
-		const currentVisualLine = this.findCurrentVisualLine(visualLines);
-		return currentVisualLine === visualLines.length - 1;
+		const layout = this.getEditorLayout(this.lastWidth);
+		const currentVisualLine = this.findCurrentVisualLine(layout);
+		return currentVisualLine === layout.rowCount - 1;
 	}
 
 	private navigateHistory(direction: 1 | -1): void {
@@ -708,6 +728,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
+		this.editorLayout = undefined;
 		// Highlighted spans carry the previous theme's colors.
 		this.codeCache.clear();
 	}
@@ -775,15 +796,14 @@ export class Editor implements Component, Focusable {
 		const horizontal = this.borderColor("─");
 
 		// Layout the text
-		const layoutLines = this.layoutText(layoutWidth);
+		const layout = this.getEditorLayout(layoutWidth);
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
 
 		// Find the cursor line index in layoutLines
-		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
-		if (cursorLineIndex === -1) cursorLineIndex = 0;
+		const cursorLineIndex = this.findCurrentVisualLine(layout);
 
 		// Adjust scroll offset to keep cursor visible
 		if (cursorLineIndex < this.scrollOffset) {
@@ -793,11 +813,11 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Clamp scroll offset to valid range
-		const maxScrollOffset = Math.max(0, layoutLines.length - maxVisibleLines);
+		const maxScrollOffset = Math.max(0, layout.rowCount - maxVisibleLines);
 		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScrollOffset));
 
 		// Get visible lines slice
-		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+		const visibleLines = this.layoutVisibleLines(layout, maxVisibleLines, cursorLineIndex);
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
@@ -885,7 +905,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		// Render bottom border (with scroll indicator if more content below)
-		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
+		const linesBelow = layout.rowCount - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
 			result.push(this.borderColor(createScrollBorder("↓", linesBelow, width)));
 		} else {
@@ -1138,107 +1158,98 @@ export class Editor implements Component, Focusable {
 			this.autocompletePrefix,
 		);
 		this.state.lines = result.lines;
+		this.invalidateLayout();
 		this.state.cursorLine = result.cursorLine;
 		this.setCursorCol(result.cursorCol);
 		return true;
 	}
 
-	private layoutText(contentWidth: number): LayoutLine[] {
-		const layoutLines: LayoutLine[] = [];
+	/** Wrapping is shared by paint and navigation. Reuse unchanged logical lines across edits. */
+	private getEditorLayout(width: number): EditorLayout {
+		const previous = this.editorLayout;
+		if (previous?.width === width && !this.layoutDirty) return previous;
 
-		if (this.state.lines.length === 0 || (this.state.lines.length === 1 && this.state.lines[0] === "")) {
-			// Empty editor
-			layoutLines.push({
-				text: "",
-				hasCursor: true,
-				cursorPos: 0,
-				lineIndex: 0,
-				startIndex: 0,
-			});
-			return layoutLines;
+		const validIds = this.validPasteIds();
+		const pasteIds = [...validIds].join(",");
+		const dirtyLine = this.layoutDirtyLine;
+		this.layoutDirtyLine = undefined;
+		this.layoutDirty = false;
+		if (
+			previous?.width === width &&
+			previous.pasteIds === pasteIds &&
+			previous.lines.length === this.state.lines.length &&
+			dirtyLine !== undefined
+		) {
+			const text = this.state.lines[dirtyLine]!;
+			if (text === previous.text[dirtyLine]) return previous;
+			const chunks = this.wrapEditorLine(text, width, validIds);
+			const change = chunks.length - previous.lines[dirtyLine]!.length;
+			previous.text[dirtyLine] = text;
+			previous.lines[dirtyLine] = chunks;
+			if (change !== 0) {
+				for (let index = dirtyLine + 1; index < previous.offsets.length; index++) {
+					previous.offsets[index]! += change;
+				}
+				previous.rowCount += change;
+			}
+			return previous;
 		}
 
-		// Process each logical line
-		for (let i = 0; i < this.state.lines.length; i++) {
-			const line = this.state.lines[i] || "";
-			const isCurrentLine = i === this.state.cursorLine;
-			const lineVisibleWidth = visibleWidth(line);
-
-			if (lineVisibleWidth <= contentWidth) {
-				// Line fits in one layout line
-				if (isCurrentLine) {
-					layoutLines.push({
-						text: line,
-						hasCursor: true,
-						cursorPos: this.state.cursorCol,
-						lineIndex: i,
-						startIndex: 0,
-					});
-				} else {
-					layoutLines.push({
-						text: line,
-						hasCursor: false,
-						lineIndex: i,
-						startIndex: 0,
-					});
-				}
-			} else {
-				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, contentWidth, [...this.segment(line, "grapheme")]);
-
-				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-					const chunk = chunks[chunkIndex];
-					if (!chunk) continue;
-
-					const cursorPos = this.state.cursorCol;
-					const isLastChunk = chunkIndex === chunks.length - 1;
-
-					// Determine if cursor is in this chunk
-					// For word-wrapped chunks, we need to handle the case where
-					// cursor might be in trimmed whitespace at end of chunk
-					let hasCursorInChunk = false;
-					let adjustedCursorPos = 0;
-
-					if (isCurrentLine) {
-						if (isLastChunk) {
-							// Last chunk: cursor belongs here if >= startIndex
-							hasCursorInChunk = cursorPos >= chunk.startIndex;
-							adjustedCursorPos = cursorPos - chunk.startIndex;
-						} else {
-							// Non-last chunk: cursor belongs here if in range [startIndex, endIndex)
-							// But we need to handle the visual position in the trimmed text
-							hasCursorInChunk = cursorPos >= chunk.startIndex && cursorPos < chunk.endIndex;
-							if (hasCursorInChunk) {
-								adjustedCursorPos = cursorPos - chunk.startIndex;
-								// Clamp to text length (in case cursor was in trimmed whitespace)
-								if (adjustedCursorPos > chunk.text.length) {
-									adjustedCursorPos = chunk.text.length;
-								}
-							}
-						}
-					}
-
-					if (hasCursorInChunk) {
-						layoutLines.push({
-							text: chunk.text,
-							hasCursor: true,
-							cursorPos: adjustedCursorPos,
-							lineIndex: i,
-							startIndex: chunk.startIndex,
-						});
-					} else {
-						layoutLines.push({
-							text: chunk.text,
-							hasCursor: false,
-							lineIndex: i,
-							startIndex: chunk.startIndex,
-						});
-					}
-				}
+		const wraps = new Map<string, TextChunk[]>();
+		if (previous?.width === width) {
+			for (const [index, line] of previous.text.entries()) {
+				if (previous.pasteIds === pasteIds || !line.includes("[paste #")) wraps.set(line, previous.lines[index]!);
 			}
 		}
+		const text = this.state.lines.slice();
+		const offsets: number[] = [];
+		let rowCount = 0;
+		const lines = text.map((line) => {
+			const chunks = wraps.get(line) ?? this.wrapEditorLine(line, width, validIds);
+			wraps.set(line, chunks);
+			offsets.push(rowCount);
+			rowCount += chunks.length;
+			return chunks;
+		});
+		this.editorLayout = { width, pasteIds, text, offsets, lines, rowCount };
+		return this.editorLayout;
+	}
 
-		return layoutLines;
+	private wrapEditorLine(line: string, width: number, validIds: Set<number>): TextChunk[] {
+		return visibleWidth(line) <= width
+			? [{ text: line, startIndex: 0, endIndex: line.length }]
+			: wordWrapLine(line, width, [...segmentWithMarkers(line, graphemeSegmenter, validIds)]);
+	}
+
+	private logicalLineAt(layout: EditorLayout, row: number): number {
+		let low = 0;
+		let high = layout.offsets.length;
+		while (low + 1 < high) {
+			const middle = (low + high) >>> 1;
+			if (layout.offsets[middle]! <= row) low = middle;
+			else high = middle;
+		}
+		return low;
+	}
+
+	private layoutVisibleLines(layout: EditorLayout, height: number, cursorRow: number): LayoutLine[] {
+		const visible: LayoutLine[] = [];
+		const end = Math.min(layout.rowCount, this.scrollOffset + height);
+		let lineIndex = this.logicalLineAt(layout, this.scrollOffset);
+		for (let row = this.scrollOffset; row < end; row++) {
+			if (row === layout.offsets[lineIndex + 1]) lineIndex++;
+			const chunks = layout.lines[lineIndex]!;
+			const chunkIndex = row - layout.offsets[lineIndex]!;
+			const chunk = chunks[chunkIndex]!;
+			const hasCursor = row === cursorRow;
+			let cursorPos: number | undefined;
+			if (hasCursor) {
+				cursorPos = this.state.cursorCol - chunk.startIndex;
+				if (chunkIndex < chunks.length - 1) cursorPos = Math.min(cursorPos, chunk.text.length);
+			}
+			visible.push({ text: chunk.text, hasCursor, cursorPos, lineIndex, startIndex: chunk.startIndex });
+		}
+		return visible;
 	}
 
 	getText(): string {
@@ -1303,6 +1314,7 @@ export class Editor implements Component, Focusable {
 
 	private resetState(preserveHistory: boolean): void {
 		this.cancelAutocomplete();
+		this.editorLayout = undefined;
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
@@ -1394,7 +1406,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
-		this.notifyChange();
+		this.notifyChange(insertedLines.length === 1 ? this.state.cursorLine : undefined);
 	}
 
 	// All the editor methods from before...
@@ -1421,7 +1433,7 @@ export class Editor implements Component, Focusable {
 		this.state.lines[this.state.cursorLine] = before + char + after;
 		this.setCursorCol(this.state.cursorCol + char.length);
 
-		this.notifyChange();
+		this.notifyChange(this.state.cursorLine);
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
@@ -1608,6 +1620,7 @@ export class Editor implements Component, Focusable {
 	[DELETE_CHARACTER_BACKWARD](): void {
 		this.historyIndex = -1; // Exit history browsing mode
 		this.lastAction = null;
+		let editedLine: number | undefined;
 
 		if (this.state.cursorCol > 0) {
 			this.pushUndoSnapshot();
@@ -1647,12 +1660,13 @@ export class Editor implements Component, Focusable {
 
 			this.state.lines[this.state.cursorLine] = before + after;
 			this.setCursorCol(this.state.cursorCol - graphemeLength);
+			if (!pasteMarker) editedLine = this.state.cursorLine;
 		} else if (this.state.cursorLine > 0) {
 			this.pushUndoSnapshot();
 			this.mergeCurrentLineIntoPrevious();
 		}
 
-		this.notifyChange();
+		this.notifyChange(editedLine);
 
 		this.refreshAutocompleteAfterDeletion();
 	}
@@ -1671,13 +1685,9 @@ export class Editor implements Component, Focusable {
 	 * Move cursor to a target visual line, applying sticky column logic.
 	 * Shared by moveCursor() and pageScroll().
 	 */
-	private moveToVisualLine(
-		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
-		currentVisualLine: number,
-		targetVisualLine: number,
-	): void {
-		const currentVL = visualLines[currentVisualLine];
-		const targetVL = visualLines[targetVisualLine];
+	private moveToVisualLine(layout: EditorLayout, currentVisualLine: number, targetVisualLine: number): void {
+		const currentVL = this.getVisualLine(layout, currentVisualLine);
+		const targetVL = this.getVisualLine(layout, targetVisualLine);
 		if (!(currentVL && targetVL)) return;
 
 		// When the cursor was snapped to a segment start, resolve the pre-snap
@@ -1685,21 +1695,18 @@ export class Editor implements Component, Focusable {
 		// column even after a resize reshuffles VLs.
 		let currentVisualCol: number;
 		if (this.snappedFromCursorCol !== null) {
-			const vlIndex = this.findVisualLineAt(visualLines, currentVL.logicalLine, this.snappedFromCursorCol);
-			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex].startCol;
+			const vlIndex = this.findVisualLineAt(layout, currentVL.logicalLine, this.snappedFromCursorCol);
+			currentVisualCol =
+				this.snappedFromCursorCol - (this.getVisualLine(layout, vlIndex)?.startCol ?? currentVL.startCol);
 		} else {
 			currentVisualCol = this.state.cursorCol - currentVL.startCol;
 		}
 
 		// For non-last segments, clamp to length-1 to stay within the segment
-		const isLastSourceSegment =
-			currentVisualLine === visualLines.length - 1 ||
-			visualLines[currentVisualLine + 1]?.logicalLine !== currentVL.logicalLine;
+		const isLastSourceSegment = currentVL.last;
 		const sourceMaxVisualCol = isLastSourceSegment ? currentVL.length : Math.max(0, currentVL.length - 1);
 
-		const isLastTargetSegment =
-			targetVisualLine === visualLines.length - 1 ||
-			visualLines[targetVisualLine + 1]?.logicalLine !== targetVL.logicalLine;
+		const isLastTargetSegment = targetVL.last;
 		const targetMaxVisualCol = isLastTargetSegment ? targetVL.length : Math.max(0, targetVL.length - 1);
 
 		const moveToVisualCol = this.computeVerticalMoveColumn(currentVisualCol, sourceMaxVisualCol, targetMaxVisualCol);
@@ -1727,15 +1734,12 @@ export class Editor implements Component, Focusable {
 					// continuation VLs and land on the first VL past it.
 					const segEnd = seg.index + seg.segment.length;
 					let next = targetVisualLine + 1;
-					while (
-						next < visualLines.length &&
-						visualLines[next].logicalLine === targetVL.logicalLine &&
-						visualLines[next].startCol < segEnd
-					) {
-						next++;
-					}
-					if (next < visualLines.length) {
-						this.moveToVisualLine(visualLines, currentVisualLine, next);
+					const endOfLine = layout.offsets[targetVL.logicalLine + 1] ?? layout.rowCount;
+					const chunks = layout.lines[targetVL.logicalLine]!;
+					const offset = layout.offsets[targetVL.logicalLine]!;
+					while (next < endOfLine && chunks[next - offset]!.startIndex < segEnd) next++;
+					if (next < layout.rowCount) {
+						this.moveToVisualLine(layout, currentVisualLine, next);
 						return;
 					}
 				}
@@ -1978,6 +1982,7 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const editedLine = this.state.cursorCol < currentLine.length ? this.state.cursorLine : undefined;
 
 		if (this.state.cursorCol < currentLine.length) {
 			this.pushUndoSnapshot();
@@ -1998,86 +2003,52 @@ export class Editor implements Component, Focusable {
 			this.mergeNextLineIntoCurrent();
 		}
 
-		this.notifyChange();
+		this.notifyChange(editedLine);
 
 		this.refreshAutocompleteAfterDeletion();
 	}
 
-	/**
-	 * Build a mapping from visual lines to logical positions.
-	 * Returns an array where each element represents a visual line with:
-	 * - logicalLine: index into this.state.lines
-	 * - startCol: starting column in the logical line
-	 * - length: length of this visual line segment
-	 */
-	private buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }> {
-		const visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = [];
-
-		for (let i = 0; i < this.state.lines.length; i++) {
-			const line = this.state.lines[i] || "";
-			const lineVisWidth = visibleWidth(line);
-			if (line.length === 0) {
-				// Empty line still takes one visual line
-				visualLines.push({ logicalLine: i, startCol: 0, length: 0 });
-			} else if (lineVisWidth <= width) {
-				visualLines.push({ logicalLine: i, startCol: 0, length: line.length });
-			} else {
-				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, width, [...this.segment(line, "grapheme")]);
-				for (const chunk of chunks) {
-					visualLines.push({
-						logicalLine: i,
-						startCol: chunk.startIndex,
-						length: chunk.endIndex - chunk.startIndex,
-					});
-				}
-			}
-		}
-
-		return visualLines;
+	private getVisualLine(layout: EditorLayout, row: number) {
+		if (row < 0 || row >= layout.rowCount) return undefined;
+		const logicalLine = this.logicalLineAt(layout, row);
+		const chunks = layout.lines[logicalLine]!;
+		const index = row - layout.offsets[logicalLine]!;
+		const chunk = chunks[index]!;
+		return {
+			logicalLine,
+			startCol: chunk.startIndex,
+			length: chunk.endIndex - chunk.startIndex,
+			last: index === chunks.length - 1,
+		};
 	}
 
-	/**
-	 * Find the visual line index that contains the given logical position.
-	 */
-	private findVisualLineAt(
-		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
-		line: number,
-		col: number,
-	): number {
-		for (let i = 0; i < visualLines.length; i++) {
-			const vl = visualLines[i];
-			if (!vl || vl.logicalLine !== line) continue;
-			const offset = col - vl.startCol;
-			// Cursor is in this segment if it's within range. For the last
-			// segment of a logical line, cursor can be at length (end position)
-			const isLastSegmentOfLine = i === visualLines.length - 1 || visualLines[i + 1]?.logicalLine !== vl.logicalLine;
-			if (offset >= 0 && (offset < vl.length || (isLastSegmentOfLine && offset === vl.length))) {
-				return i;
-			}
+	private findVisualLineAt(layout: EditorLayout, line: number, col: number): number {
+		const chunks = layout.lines[line];
+		if (!chunks?.length) return layout.rowCount - 1;
+		let low = 0;
+		let high = chunks.length - 1;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (col < chunks[middle]!.endIndex) high = middle;
+			else low = middle + 1;
 		}
-		return visualLines.length - 1;
+		return layout.offsets[line]! + low;
 	}
 
-	/**
-	 * Find the visual line index for the current cursor position.
-	 */
-	private findCurrentVisualLine(
-		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
-	): number {
-		return this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
+	private findCurrentVisualLine(layout: EditorLayout): number {
+		return this.findVisualLineAt(layout, this.state.cursorLine, this.state.cursorCol);
 	}
 
 	private moveCursor(deltaLine: number, deltaCol: number): void {
 		this.lastAction = null;
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
-		const currentVisualLine = this.findCurrentVisualLine(visualLines);
+		const layout = this.getEditorLayout(this.lastWidth);
+		const currentVisualLine = this.findCurrentVisualLine(layout);
 
 		if (deltaLine !== 0) {
 			const targetVisualLine = currentVisualLine + deltaLine;
 
-			if (targetVisualLine >= 0 && targetVisualLine < visualLines.length) {
-				this.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine);
+			if (targetVisualLine >= 0 && targetVisualLine < layout.rowCount) {
+				this.moveToVisualLine(layout, currentVisualLine, targetVisualLine);
 			}
 		}
 
@@ -2097,7 +2068,7 @@ export class Editor implements Component, Focusable {
 					this.setCursorCol(0);
 				} else {
 					// At end of last line - can't move, but set preferredVisualCol for up/down navigation
-					const currentVL = visualLines[currentVisualLine];
+					const currentVL = this.getVisualLine(layout, currentVisualLine);
 					if (currentVL) {
 						this.preferredVisualCol = this.state.cursorCol - currentVL.startCol;
 					}
@@ -2128,11 +2099,11 @@ export class Editor implements Component, Focusable {
 		const terminalRows = this.tui.terminal.rows;
 		const pageSize = Math.max(5, Math.floor(terminalRows * 0.3));
 
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
-		const currentVisualLine = this.findCurrentVisualLine(visualLines);
-		const targetVisualLine = Math.max(0, Math.min(visualLines.length - 1, currentVisualLine + direction * pageSize));
+		const layout = this.getEditorLayout(this.lastWidth);
+		const currentVisualLine = this.findCurrentVisualLine(layout);
+		const targetVisualLine = Math.max(0, Math.min(layout.rowCount - 1, currentVisualLine + direction * pageSize));
 
-		this.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine);
+		this.moveToVisualLine(layout, currentVisualLine, targetVisualLine);
 	}
 
 	private moveWordBackwards(): void {
@@ -2436,23 +2407,32 @@ export class Editor implements Component, Focusable {
 		startToken: number,
 		options: { force: boolean; explicitTab: boolean },
 	): Promise<void> {
-		const previousTask = this.autocompleteRequestTask;
-		this.autocompleteRequestTask = (async () => {
-			await previousTask;
-			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
-				return;
-			}
+		if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) return;
+		// One cancelled OS request may still be returning. Let the replacement run while bounding outstanding I/O.
+		if (this.autocompleteInFlight >= 2) {
+			this.queuedAutocomplete = { token: startToken, options };
+			return;
+		}
 
+		this.autocompleteInFlight++;
+		try {
 			const controller = new AbortController();
 			this.autocompleteAbort = controller;
 			const requestId = ++this.autocompleteRequestId;
-			const snapshotText = this.getText();
-			const snapshotLine = this.state.cursorLine;
-			const snapshotCol = this.state.cursorCol;
-
-			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
-		})();
-		await this.autocompleteRequestTask;
+			await this.runAutocompleteRequest(
+				requestId,
+				controller,
+				this.getText(),
+				this.state.cursorLine,
+				this.state.cursorCol,
+				options,
+			);
+		} finally {
+			this.autocompleteInFlight--;
+			const next = this.queuedAutocomplete;
+			this.queuedAutocomplete = undefined;
+			if (next) void this.startAutocompleteRequest(next.token, next.options);
+		}
 	}
 
 	private getAutocompleteDebounceMs(options: { force: boolean; explicitTab: boolean }): number {
@@ -2476,12 +2456,17 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		if (!this.autocompleteProvider) return;
 
-		const suggestions = await this.autocompleteProvider.getSuggestions(
-			this.state.lines,
-			this.state.cursorLine,
-			this.state.cursorCol,
-			{ signal: controller.signal, force: options.force },
-		);
+		let suggestions: AutocompleteSuggestions | null;
+		try {
+			suggestions = await this.autocompleteProvider.getSuggestions(
+				this.state.lines.slice(),
+				snapshotLine,
+				snapshotCol,
+				{ signal: controller.signal, force: options.force },
+			);
+		} catch {
+			suggestions = null;
+		}
 
 		if (!this.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol)) {
 			return;
@@ -2491,7 +2476,7 @@ export class Editor implements Component, Focusable {
 
 		if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
 			this.cancelAutocomplete();
-			this.tui.requestRender();
+			this.tui.requestPresentationRender();
 			return;
 		}
 
@@ -2515,7 +2500,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		this.applyAutocompleteSuggestions(suggestions, options.force ? "force" : "regular");
-		this.tui.requestRender();
+		this.tui.requestPresentationRender();
 	}
 
 	private isAutocompleteRequestCurrent(
@@ -2548,6 +2533,7 @@ export class Editor implements Component, Focusable {
 
 	private cancelAutocompleteRequest(): void {
 		this.autocompleteStartToken += 1;
+		this.queuedAutocomplete = undefined;
 		if (this.autocompleteDebounceTimer) {
 			clearTimeout(this.autocompleteDebounceTimer);
 			this.autocompleteDebounceTimer = undefined;

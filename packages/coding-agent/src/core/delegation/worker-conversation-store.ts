@@ -100,6 +100,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { currentSynchronousFileLockScope, withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { WeakValueCache } from "../weak-value-cache.ts";
 import {
 	collectBoundedWorkerClaimChangedFiles,
 	MAX_WORKER_CLAIM_CHANGED_FILES,
@@ -294,8 +295,7 @@ const workerTranscriptCommitCursorStates = new WeakMap<
 	WorkerTranscriptCommitCursorState
 >();
 
-interface CachedWorkerConversationCore {
-	core: WorkerConversationCore;
+interface CachedWorkerConversationCore extends WorkerConversationCore {
 	resumeContext: AgentResumeContext;
 	metadataFile: string;
 	agentDir: string;
@@ -2066,7 +2066,8 @@ function assertApplicableCompactionResult(result: CompactionResult, preparation:
 
 /** Creates and reopens canonical SessionManager transcripts for logical Pi worker lanes. */
 export class WorkerConversationStore {
-	private readonly cachedCores = new Map<string, CachedWorkerConversationCore>();
+	/** Active views own an exact shared core; the durable JSONL file owns it after the last view. */
+	private readonly cachedCores = new WeakValueCache<string, CachedWorkerConversationCore>();
 
 	/** Projects an existing native binding without opening, creating or claiming its transcript. */
 	static transcriptReferenceForBinding(
@@ -2474,7 +2475,7 @@ export class WorkerConversationStore {
 
 	clearCache(): void {
 		for (const cached of this.cachedCores.values()) {
-			if (cached.core.activeTranscriptCursors > 0) {
+			if (cached.activeTranscriptCursors > 0) {
 				throw new WorkerConversationOwnershipError(
 					"Worker conversation cache cannot be cleared during an active transcript commit.",
 				);
@@ -2675,7 +2676,7 @@ export class WorkerConversationStore {
 				options.expectedLogicalAgentId,
 				birthContext.parentSessionId,
 			);
-			const previousMetadataState = cached.core.metadataState;
+			const previousMetadataState = cached.metadataState;
 			if (!previousMetadataState) {
 				throw new WorkerConversationOwnershipError("Worker conversation cached metadata state is missing.");
 			}
@@ -2684,7 +2685,7 @@ export class WorkerConversationStore {
 			const requestedReference = birthContext.birthContextForkReference;
 			let boundFirstReference = false;
 			if (requestedReference && !previousMetadataState.birthContextForkReference) {
-				if (cached.core.activeTranscriptCursors > 0) {
+				if (cached.activeTranscriptCursors > 0) {
 					throw new WorkerConversationOwnershipError(
 						"Worker conversation birth context changed while a transcript commit was active.",
 					);
@@ -2697,7 +2698,7 @@ export class WorkerConversationStore {
 					metadataState.logicalAgentId,
 					requestedReference,
 				);
-				if (cached.core.sessionManager.getEntryCount() > 0) {
+				if (cached.sessionManager.getEntryCount() > 0) {
 					throw new Error("Worker conversation cannot bind birth context after transcript use.");
 				}
 				metadata = {
@@ -2722,14 +2723,14 @@ export class WorkerConversationStore {
 					metadata = boundMetadata.metadata;
 					metadataRevision = boundMetadata.revision;
 					metadataContent = boundMetadata.content;
-					verifyWorkerBirthContextPrefix(cached.core.sessionManager, snapshot, true);
+					verifyWorkerBirthContextPrefix(cached.sessionManager, snapshot, true);
 					const boundHead = scanWorkerSessionFile(sessionFile, context.sessionId, context.cwd);
-					if (cached.core.sessionManager.getEntryCount() !== boundHead.entryCount) {
+					if (cached.sessionManager.getEntryCount() !== boundHead.entryCount) {
 						throw new WorkerConversationOwnershipError(
 							"Worker conversation bound birth context entries are invalid.",
 						);
 					}
-					assertLinearWorkerSession(cached.core.sessionManager);
+					assertLinearWorkerSession(cached.sessionManager);
 					metadataState = cloneWorkerConversationMetadataState(metadata);
 					assertWorkerConversationMetadataContent(
 						metadataFile,
@@ -2737,14 +2738,14 @@ export class WorkerConversationStore {
 						metadataContent,
 						"Worker conversation metadata changed while its birth context was bound.",
 					);
-					cached.core.head = boundHead;
-					cached.core.metadataState = metadataState;
-					cached.core.metadataRevision = metadataRevision;
-					cached.core.invalid = false;
-					cached.core.generation += 1;
+					cached.head = boundHead;
+					cached.metadataState = metadataState;
+					cached.metadataRevision = metadataRevision;
+					cached.invalid = false;
+					cached.generation += 1;
 					boundFirstReference = true;
 				} catch (error) {
-					cached.core.invalid = true;
+					cached.invalid = true;
 					this.cachedCores.delete(sessionFile);
 					throw error;
 				}
@@ -2753,25 +2754,24 @@ export class WorkerConversationStore {
 				throw new Error("Worker conversation birth context reference conflicts with the persisted transcript.");
 			}
 			const revisionChanged =
-				!cached.core.metadataRevision ||
-				!sameWorkerConversationFileRevision(cached.core.metadataRevision, metadataRevision);
+				!cached.metadataRevision || !sameWorkerConversationFileRevision(cached.metadataRevision, metadataRevision);
 			const currentSessionRevision = readWorkerConversationFileRevision(sessionFile);
 			const sessionRevisionChanged =
-				!cached.core.head || !sameWorkerConversationFileRevision(cached.core.head.revision, currentSessionRevision);
+				!cached.head || !sameWorkerConversationFileRevision(cached.head.revision, currentSessionRevision);
 			if (!revisionChanged && !boundFirstReference && !isDeepStrictEqual(previousMetadataState, metadataState)) {
 				throw new WorkerConversationOwnershipError(
 					"Worker conversation metadata content changed without a new durable revision.",
 				);
 			}
-			const previousMetadataRevision = cached.core.metadataRevision;
+			const previousMetadataRevision = cached.metadataRevision;
 			if (revisionChanged) {
-				if (cached.core.activeTranscriptCursors > 0) {
+				if (cached.activeTranscriptCursors > 0) {
 					throw new WorkerConversationOwnershipError(
 						"Worker conversation metadata changed while a transcript commit was active.",
 					);
 				}
 			}
-			if (sessionRevisionChanged && cached.core.activeTranscriptCursors > 0) {
+			if (sessionRevisionChanged && cached.activeTranscriptCursors > 0) {
 				throw new WorkerConversationOwnershipError(
 					"Worker conversation advanced while a transcript commit was active.",
 				);
@@ -2788,7 +2788,7 @@ export class WorkerConversationStore {
 				);
 				const verificationManager = sessionRevisionChanged
 					? SessionManager.openCanonical(sessionFile, cached, sessionDir)
-					: cached.core.sessionManager;
+					: cached.sessionManager;
 				const recoveredBirthSuffix = verifyWorkerBirthContextPrefix(
 					verificationManager,
 					snapshot,
@@ -2805,10 +2805,10 @@ export class WorkerConversationStore {
 						);
 					}
 					assertLinearWorkerSession(verificationManager);
-					cached.core.sessionManager = verificationManager;
-					cached.core.head = recoveredHead;
-					cached.core.invalid = false;
-					cached.core.generation += 1;
+					cached.sessionManager = verificationManager;
+					cached.head = recoveredHead;
+					cached.invalid = false;
+					cached.generation += 1;
 				}
 			}
 			assertWorkerConversationMetadataContent(
@@ -2818,27 +2818,27 @@ export class WorkerConversationStore {
 				"Worker conversation metadata changed while its cached state was opened.",
 			);
 			if (revisionChanged) {
-				cached.core.metadataState = metadataState;
-				cached.core.metadataRevision = metadataRevision;
+				cached.metadataState = metadataState;
+				cached.metadataRevision = metadataRevision;
 			}
 			const conversation = new WorkerConversation(
-				cached.core.sessionManager,
-				{ ...context, sessionDir, sessionFile, cwd: cached.core.sessionManager.getCwd() },
+				cached.sessionManager,
+				{ ...context, sessionDir, sessionFile, cwd: cached.sessionManager.getCwd() },
 				bindWorkerConversationMetadata(
 					cached.metadataFile,
 					cached.agentDir,
 					cached.orchestrationHome,
 					metadataState,
 				),
-				cached.core,
+				cached,
 				options.projectClaim,
 			);
 			try {
 				conversation.refreshCachedCoreLocked();
 			} catch (error) {
 				if (revisionChanged) {
-					cached.core.metadataState = previousMetadataState;
-					cached.core.metadataRevision = previousMetadataRevision;
+					cached.metadataState = previousMetadataState;
+					cached.metadataRevision = previousMetadataRevision;
 				}
 				throw error;
 			}
@@ -2954,7 +2954,7 @@ export class WorkerConversationStore {
 			metadataContent,
 			"Worker conversation metadata changed while its canonical state was opened.",
 		);
-		const core: WorkerConversationCore = {
+		const core: CachedWorkerConversationCore = {
 			sessionManager,
 			head: currentHead,
 			metadataRevision,
@@ -2962,6 +2962,10 @@ export class WorkerConversationStore {
 			invalid: false,
 			generation: 0,
 			activeTranscriptCursors: 0,
+			resumeContext: cloneResumeContext(context),
+			metadataFile,
+			agentDir: options.agentDir,
+			orchestrationHome: options.orchestrationHome,
 		};
 		const conversation = new WorkerConversation(
 			sessionManager,
@@ -2975,13 +2979,7 @@ export class WorkerConversationStore {
 			core,
 			options.projectClaim,
 		);
-		this.cachedCores.set(sessionFile, {
-			core,
-			resumeContext: cloneResumeContext(context),
-			metadataFile,
-			agentDir: options.agentDir,
-			orchestrationHome: options.orchestrationHome,
-		});
+		this.cachedCores.set(sessionFile, core);
 		harnessLog.debug("workers", "a worker conversation was loaded into the cache", { sessionId: context.sessionId });
 		return conversation;
 	}

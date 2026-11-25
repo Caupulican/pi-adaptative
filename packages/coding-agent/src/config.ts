@@ -2,8 +2,8 @@ import { existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
+import { getProcessDiagnosticWorkRun } from "./core/log/debug-work-run.ts";
 import { normalizePath } from "./utils/paths.ts";
-import { getProcessWorkRun } from "./utils/work-directory.ts";
 
 // =============================================================================
 // Package Detection
@@ -434,5 +434,5 @@ export function getSessionsDir(): string {
 
 /** Get the process-scoped debug log under the disposable work hierarchy. */
 export function getDebugLogPath(): string {
-	return join(getProcessWorkRun(getAgentDir(), "logs", "debug").path, `${APP_NAME}-debug.log`);
+	return join(getProcessDiagnosticWorkRun(getAgentDir(), "report").path, `${APP_NAME}-debug.log`);
 }

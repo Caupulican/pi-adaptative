@@ -10,7 +10,7 @@ import type { DecisionStage } from "../../../core/operator-projection/decision-s
 import type { WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { renderDecisionList } from "./decision-graph-list.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import { stageName } from "./decision-graph-render.ts";
+import { type DecisionGraphRows, stageName } from "./decision-graph-render.ts";
 import { renderDecisionScene } from "./decision-graph-scene.ts";
 import { renderFlowLanes } from "./flow-lanes-render.ts";
 import { SPRING_SNAPPY, SpringTable } from "./graph/spring.ts";
@@ -43,6 +43,18 @@ export class DecisionGraphPane extends WorkbenchPane {
 	private lastDrawnAt?: number;
 	/** The moment the last frame's motion is no longer needed; undefined when nothing moved. */
 	private motion?: number;
+	private settledRows?: {
+		model: DecisionGraphModel;
+		view: WorkbenchGraphView;
+		width: number;
+		selected?: DecisionStage;
+		motion: boolean;
+		rows: DecisionGraphRows;
+	};
+
+	invalidate(): void {
+		this.settledRows = undefined;
+	}
 
 	/**
 	 * When the last drawn frame needs motion until; always finite (a spring: a short lease each frame renews,
@@ -62,9 +74,9 @@ export class DecisionGraphPane extends WorkbenchPane {
 	 * A new objective starts over: no selection, no springs. So does a draw after the pane was away, so the
 	 * focus bar never slides in from where it was before the pane was hidden.
 	 */
-	private trackStage(model: DecisionGraphModel): void {
-		const away = this.lastDrawnAt !== undefined && model.nowMs - this.lastDrawnAt > STALE_DRAW_GAP_MS;
-		this.lastDrawnAt = model.nowMs;
+	private trackStage(model: DecisionGraphModel, nowMs: number): void {
+		const away = this.lastDrawnAt !== undefined && nowMs - this.lastDrawnAt > STALE_DRAW_GAP_MS;
+		this.lastDrawnAt = nowMs;
 		if (model.objectiveId !== this.seenObjective) {
 			this.seenObjective = model.objectiveId;
 			this.selectedStage = undefined;
@@ -102,19 +114,23 @@ export class DecisionGraphPane extends WorkbenchPane {
 		actions: readonly WorkbenchPaneTitleButton[],
 		motion = true,
 		interactive = true,
+		nowMs = model.nowMs,
 	): string[] {
 		const inner = Math.max(1, width - 2);
-		this.trackStage(model);
+		this.trackStage(model, nowMs);
 		// A stage that is no longer among the model's stages (evicted, or from another objective) shows no detail.
 		if (this.selectedStage !== undefined && !model.stages.some((row) => row.stage === this.selectedStage)) {
 			this.selectedStage = undefined;
 		}
+		const cached = this.settledRows;
 		const composed =
-			view === "list"
-				? renderDecisionList(model, inner, this.selectedStage)
-				: view === "lanes"
-					? renderFlowLanes(model.flow, inner, model.nowMs, motion)
-					: renderDecisionScene(model, inner, this.springs, { motion, motionClockMs: performance.now() });
+			cached?.model === model &&
+			cached.view === view &&
+			cached.width === inner &&
+			cached.selected === this.selectedStage &&
+			cached.motion === motion
+				? cached.rows
+				: this.composeRows(model, view, inner, motion, nowMs);
 		this.stageAt = composed.stageAt;
 		this.stageAtCell = composed.stageAtCell;
 		this.motion = composed.motionUntil;
@@ -131,5 +147,28 @@ export class DecisionGraphPane extends WorkbenchPane {
 			interactive,
 			composed.pinnedRows,
 		);
+	}
+
+	private composeRows(
+		model: DecisionGraphModel,
+		view: WorkbenchGraphView,
+		width: number,
+		motion: boolean,
+		nowMs: number,
+	): DecisionGraphRows {
+		const rows =
+			view === "list"
+				? renderDecisionList(model, width, this.selectedStage)
+				: view === "lanes"
+					? renderFlowLanes(model.flow, width, nowMs, motion)
+					: renderDecisionScene({ ...model, nowMs }, width, this.springs, {
+							motion,
+							motionClockMs: performance.now(),
+						});
+		this.settledRows =
+			rows.motionUntil === undefined
+				? { model, view, width, selected: this.selectedStage, motion, rows }
+				: undefined;
+		return rows;
 	}
 }

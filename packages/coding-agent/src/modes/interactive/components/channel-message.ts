@@ -1,4 +1,13 @@
-import { Box, Container, Markdown, type MarkdownTheme, Text } from "@caupulican/pi-tui";
+import {
+	Box,
+	Container,
+	componentTerminalRows,
+	joinTerminalRows,
+	Markdown,
+	type MarkdownTheme,
+	type TerminalRows,
+	Text,
+} from "@caupulican/pi-tui";
 import { parseBotMailAddress } from "../../../core/bots/bot-mail.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { plainLabel } from "../../../presentation/plain-text.ts";
@@ -41,6 +50,10 @@ export class ChannelMessageComponent extends Container {
 
 	get renderRevision(): number {
 		return this.revision;
+	}
+
+	renderRows(width: number): TerminalRows {
+		return joinTerminalRows(this.children.map((child) => componentTerminalRows(child, width)));
 	}
 
 	override invalidate(): void {

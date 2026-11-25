@@ -482,6 +482,10 @@ function customTypesWritten(writer: string, args: readonly unknown[]): string[] 
  * the writer picks itself, so the custom-type check cannot cover it: a setup is refused them outright.
  */
 const HOST_ONLY_WRITERS: ReadonlySet<string> = new Set([
+	"appendMessageBatchAwaitable",
+	"appendMessageBatchWithReceipt",
+	"enableBackgroundAppends",
+	"settleBackgroundAppends",
 	"appendCompaction",
 	"appendCompactionStart",
 	"appendCompactionEnd",

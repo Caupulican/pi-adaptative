@@ -32,11 +32,18 @@ import {
 	type DecisionPlanStepStatus,
 } from "./components/decision-graph-model.ts";
 import type { FooterComponent } from "./components/footer.ts";
-import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
+import {
+	buildOperatorPovSegments,
+	OperatorPovBarComponent,
+	type OperatorPovSegment,
+	type OperatorPovSource,
+} from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
 import { WorkbenchController } from "./workbench-controller.ts";
+import type { WorkbenchHistoryPager } from "./workbench-history-pager.ts";
+import { WorkbenchViewProjection } from "./workbench-view-projection.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface InteractiveLayoutSettingsSource {
@@ -74,6 +81,7 @@ export interface InteractiveLayoutPort {
 	findModelName(modelRef: string): string | undefined;
 	/** The active chat container (Bot, Team, or Root) */
 	getActiveChatContainer?: () => Container;
+	history?: WorkbenchHistoryPager;
 	/** Invalidate cached non-root chat containers */
 	onInvalidateCachedConversations?: () => void;
 	/** The header's conversation name (e.g. the live bot or team); absent shows the catalogue's word for it. */
@@ -124,6 +132,9 @@ export interface HumanInputTally {
  */
 export class InteractiveLayout {
 	private readonly port: InteractiveLayoutPort;
+	private readonly graphProjection: WorkbenchViewProjection<DecisionGraphModel>;
+	private statusProjection?: WorkbenchViewProjection<OperatorPovSegment[]>;
+	private rosterProjection?: WorkbenchViewProjection<WorkbenchChatRosterSnapshot | undefined>;
 	/** What actually happened in the session, recorded where it happens; the graph views draw from it. */
 	private readonly flowTrace = new FlowTrace();
 	/** Questions asked in the current objective; survives a session rebind so the graph's YOU node keeps its counts. */
@@ -147,6 +158,15 @@ export class InteractiveLayout {
 
 	constructor(port: InteractiveLayoutPort) {
 		this.port = port;
+		this.graphProjection = this.projectView(() => this.composeDecisionGraph());
+	}
+
+	private projectView<View>(compose: () => View): WorkbenchViewProjection<View> {
+		return new WorkbenchViewProjection({
+			requestedRevision: () => this.port.ui.renderRequestRevision,
+			compose,
+			publish: () => this.port.ui.requestPresentationRender(),
+		});
 	}
 
 	get workbench(): WorkbenchController | undefined {
@@ -154,7 +174,7 @@ export class InteractiveLayout {
 	}
 
 	/**
-	 * The Decision graph's model, composed per frame from the session's own live state: the operator
+	 * The Decision graph's model, sampled from the session's own live state: the operator
 	 * projection and its stage log, the System One ledger, the router's foreground snapshot, lane records, the
 	 * task's steps and the goal's requirements (what it needs), verification obligations (what it must
 	 * pass), the cycle's receipts and the lane's background tools. Nothing here is a second state machine.
@@ -335,6 +355,9 @@ export class InteractiveLayout {
 	 */
 	private subscribe(): void {
 		this.disposeOperatorProjection?.();
+		this.graphProjection.reset();
+		this.statusProjection?.reset();
+		this.rosterProjection?.reset();
 		const port = this.port;
 		const session = port.getSession();
 		// Every publish carries the objective; the objective-change and completed-goal clears run here, not in a frame.
@@ -479,6 +502,9 @@ export class InteractiveLayout {
 	/** Releases the session listeners, the input listener and the workbench. */
 	dispose(): void {
 		this.disposeOperatorProjection?.();
+		this.graphProjection.reset();
+		this.statusProjection?.reset();
+		this.rosterProjection?.reset();
 		this.workbenchInputCleanup?.();
 		this.workbenchInputCleanup = undefined;
 		this.workbenchController?.dispose();
@@ -494,10 +520,7 @@ export class InteractiveLayout {
 		// One status row when the width allows; the status band should use the width, not stack.
 		port.footer.setCompact(true);
 		port.footer.setOperatorFooter(true);
-		// The POV bar reads the session's own live state on every render: the projection, the router's
-		// foreground snapshot, the semantic plane's observed health and the cost summary. Its idle state
-		// is that state with no objective, not a literal written here.
-		const operatorStatus = new OperatorPovBarComponent({
+		const operatorStatusSource: OperatorPovSource = {
 			getProjection: () => port.getSession().operatorProjection.getProjection(),
 			getRouteSnapshot: () => port.getSession().getForegroundRouteSnapshot(),
 			getSemanticPlaneHealth: () => port.getSession().getSemanticPlaneHealth(),
@@ -519,19 +542,26 @@ export class InteractiveLayout {
 				}
 				return { running, queued };
 			},
-			getRunningBackgroundToolCount: () =>
-				port.getSession().getResourceSnapshot().backgroundToolTasks.runningTaskIds.length,
+			getRunningBackgroundToolCount: () => port.getSession().getRunningBackgroundToolCount(),
 			getCiStatus: () => port.ciStatus?.readStatus(),
 			getGoalState: () => port.getSession().getGoalStateSnapshot(),
 			getWatchCount: () => this.watchCount?.read() ?? 0,
 			getTokensPerSecond: () => this.generationRate.tokensPerSecond,
 			getCacheRemainingMs: () => this.cacheClock.remainingMs(),
 			getPeerFindingCount: () => port.getSession().getSemanticVerificationObligations().length,
-		});
+		};
+		const statusProjection = this.projectView(() => buildOperatorPovSegments(operatorStatusSource));
+		this.statusProjection = statusProjection;
+		this.rosterProjection = this.projectView(() => port.getChatRoster?.());
+		const operatorStatus = new OperatorPovBarComponent(
+			() => statusProjection.read(),
+			() => statusProjection.reset(),
+		);
 		this.subscribe();
 		const view = new WorkbenchComponent({
 			conversation: port.chatContainer,
 			activeConversation: () => port.getActiveChatContainer?.() ?? port.chatContainer,
+			history: port.history,
 			onInvalidateCachedConversations: () => port.onInvalidateCachedConversations?.(),
 			editor: port.editorContainer,
 			header: port.headerContainer,
@@ -541,7 +571,7 @@ export class InteractiveLayout {
 			title: () => port.getSessionManager().getSessionName() || path.basename(port.getSessionManager().getCwd()),
 			conversationTitle: () => port.getConversationTitle?.() ?? interfaceText().panes.conversation,
 			switchChatChip: () => port.getSwitchChatChip?.(),
-			chatRoster: () => port.getChatRoster?.(),
+			chatRoster: () => this.rosterProjection?.read(),
 			branch: () => port.footerDataProvider.getGitBranch(),
 			model: () => {
 				const { model, thinkingLevel } = port.getSession().state;
@@ -558,6 +588,7 @@ export class InteractiveLayout {
 			keybindings: port.keybindings,
 			isInteractive: () => !port.ui.hasOverlay() && port.editorContainer.children[0] === port.getEditor(),
 			requestRender: () => port.ui.requestRender(),
+			requestPresentationRender: () => port.ui.requestPresentationRender(),
 			messages: function* (): IterableIterator<AgentMessage> {
 				let sawStreaming = false;
 				const session = port.getSession();
@@ -610,7 +641,7 @@ export class InteractiveLayout {
 			},
 			// Only the operator changes the work area; what they chose last time is where it starts.
 			geometry: { save: (geometry) => port.getSettings().setWorkbenchSettings(geometry) },
-			graph: () => this.composeDecisionGraph(),
+			graph: (visible) => this.graphProjection.read(visible),
 			// A foreground receipt is the root's, on the model actually answering; the running worker
 			// (which may be `active_actors[0]`) never produces foreground receipts.
 			workingDirectory: () => port.getSessionManager().getCwd(),

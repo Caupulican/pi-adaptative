@@ -1,5 +1,5 @@
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { acceptsReadOnlyProviderInput, providerMessagePrefix } from "../history-work.ts";
+import { canReuseProviderInput } from "../history-work.ts";
 import { clampThinkingLevel, getModel } from "../models.ts";
 import type {
 	CacheRetention,
@@ -219,7 +219,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
 	const useXaiCliFormat = compat.requestFormat === "xai-cli";
-	const reusable = acceptsReadOnlyProviderInput(options?.onPayload) && !!providerMessagePrefix(context.messages);
+	const reusable = canReuseProviderInput(context.messages, options?.onPayload);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
 		requestFormat: compat.requestFormat,
 		...(reusable ? { reuseAcceptedPrefix: true } : { toolNameMap }),

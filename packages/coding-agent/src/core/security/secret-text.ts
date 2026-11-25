@@ -27,9 +27,11 @@ const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
 const QUOTED_PASSWORD =
 	/\b(?:password|passwd|passphrase)\b(?:[ \t]*[:=][ \t]*|[ \t]+(?:is[ \t]+)?)(?:"(?:\\[^\r\n]?|[^"\\\r\n])*"?|'(?:\\[^\r\n]?|[^'\\\r\n])*'?)/i;
 
+const GLOBAL_QUOTED_PASSWORD = globalPatterns([QUOTED_PASSWORD]);
+
 /** Old tool results can reach the provider again after a session is reopened. */
 export function redactQuotedPasswords(text: string): string {
-	return replaceAllMatches(text, [QUOTED_PASSWORD], "[REDACTED]");
+	return replaceAllMatches(text, GLOBAL_QUOTED_PASSWORD, "[REDACTED]");
 }
 
 /** Shapes that need surrounding words to be a credential; fine for diagnostics, too noisy for source text. */
@@ -60,11 +62,17 @@ const SECRET_LIKE_PATTERNS: readonly RegExp[] = [...TOKEN_SHAPE_PATTERNS, ...CON
  * owner's own text; diagnostics, outgoing model text and the memory write/query gates use this wider set.
  */
 const SECRET_MASK_PATTERNS: readonly RegExp[] = [...SECRET_LIKE_PATTERNS, ...OUTBOUND_ONLY_TOKEN_SHAPES];
+const GLOBAL_SECRET_MASKS = globalPatterns(SECRET_MASK_PATTERNS);
+const GLOBAL_TOKEN_SHAPES = globalPatterns([...TOKEN_SHAPE_PATTERNS, ...OUTBOUND_ONLY_TOKEN_SHAPES]);
+
+function globalPatterns(patterns: readonly RegExp[]): RegExp[] {
+	return patterns.map((pattern) => new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`));
+}
 
 function replaceAllMatches(text: string, patterns: readonly RegExp[], replacement: string): string {
 	let redacted = text;
 	for (const pattern of patterns) {
-		redacted = redacted.replace(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`), replacement);
+		redacted = redacted.replace(pattern, replacement);
 	}
 	return redacted;
 }
@@ -74,7 +82,23 @@ function replaceAllMatches(text: string, patterns: readonly RegExp[], replacemen
  * mechanical floor for text bound for a model: it needs no credential inventory and no judgment.
  */
 export function redactTokenShapes(text: string): string {
-	return replaceAllMatches(text, [...TOKEN_SHAPE_PATTERNS, ...OUTBOUND_ONLY_TOKEN_SHAPES], "[REDACTED_SECRET]");
+	return replaceAllMatches(text, GLOBAL_TOKEN_SHAPES, "[REDACTED_SECRET]");
+}
+
+/** Reuse clean token-shape checks within one session after the current credential inventory has been applied. */
+export function createTokenShapeRedactor(): (text: string) => string {
+	const checked = new Set<string>();
+	let remaining = 256 * 1024;
+	return (text) => {
+		const cacheable = text.length >= 128;
+		if (cacheable && checked.has(text)) return text;
+		const redacted = redactTokenShapes(text);
+		if (cacheable && redacted === text && checked.size < 1024 && text.length <= remaining) {
+			checked.add(text);
+			remaining -= text.length;
+		}
+		return redacted;
+	};
 }
 
 export const MAX_RETAINED_DIAGNOSTIC_CHARS = 240;
@@ -89,7 +113,7 @@ export function hasMaskableSecretText(text: string): boolean {
 }
 
 export function redactKnownSecrets(text: string): string {
-	return replaceAllMatches(text, SECRET_MASK_PATTERNS, "[REDACTED]");
+	return replaceAllMatches(text, GLOBAL_SECRET_MASKS, "[REDACTED]");
 }
 
 /**

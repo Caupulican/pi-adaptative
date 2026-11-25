@@ -25,7 +25,7 @@ import { boundedResponseFetch } from "../utils/bounded-response.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { parseStreamingJson, stageToolArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import {
@@ -79,8 +79,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 				httpClient: new HTTPClient({ fetcher: boundedResponseFetch(MISTRAL_RESPONSE_BOUNDS) }),
 			});
 
-			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
+			const transformedMessages = transformMessages(context.messages, model, mistralHistoryIds);
 
 			const payload = await applyProviderPayloadHook(
 				buildChatPayload(model, context, transformedMessages, toolNameMap, options),
@@ -126,6 +125,8 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 function createOutput(model: Model<"mistral-conversations">): AssistantMessage {
 	return createAssistantMessage(model);
 }
+
+const mistralHistoryIds = { create: createMistralToolCallIdNormalizer };
 
 function createMistralToolCallIdNormalizer(): (id: string) => string {
 	const idMap = new Map<string, string>();
@@ -193,7 +194,7 @@ function buildRequestOptions(model: Model<"mistral-conversations">, options?: Mi
 function buildChatPayload(
 	model: Model<"mistral-conversations">,
 	context: Context,
-	messages: Message[],
+	messages: readonly Message[],
 	toolNameMap: ToolNameMap,
 	options?: MistralOptions,
 ): ChatCompletionStreamRequest {
@@ -352,7 +353,7 @@ export async function consumeChatStream(
 						? JSON.stringify(toolCall.function.arguments)
 						: "";
 			block.partialArgs = (block.partialArgs || "") + argsDelta;
-			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
+			stageToolArguments(block, block.partialArgs, argsDelta);
 			stream.push({
 				type: "toolcall_delta",
 				contentIndex: toolBlocksByKey.get(key)!,
@@ -409,7 +410,7 @@ function stripSymbolKeys(value: unknown): unknown {
 }
 
 function toChatMessages(
-	messages: Message[],
+	messages: readonly Message[],
 	supportsImages: boolean,
 	toolNameMap: ToolNameMap,
 ): ChatCompletionStreamRequestMessage[] {

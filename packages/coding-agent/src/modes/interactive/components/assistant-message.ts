@@ -1,9 +1,14 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import {
+	type Component,
 	Container,
+	collectTerminalRows,
+	componentTerminalRows,
+	joinTerminalRows,
 	Markdown,
 	type MarkdownTheme,
 	Spacer,
+	type TerminalRows,
 	Text,
 	TruncatedText,
 	VisibilityContainer,
@@ -16,11 +21,8 @@ import { isModelFacingText } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { abortedTurnScreenText } from "../aborted-turn.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
+import { markPromptZone } from "./prompt-zone-rows.ts";
 import type { ReplyByline } from "./reply-byline.ts";
-
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 export interface AssistantMessageComponentOptions {
 	isStreaming?: boolean;
@@ -28,6 +30,29 @@ export interface AssistantMessageComponentOptions {
 	transformMarkdown?: MarkdownTransformFn;
 	/** Who wrote this reply, shown as one row above it (see reply-byline.ts). */
 	byline?: ReplyByline;
+}
+
+interface AssistantVisualBlock {
+	readonly kind: "text" | "thinking";
+	readonly rawText: string;
+	readonly trailingSpacer: boolean;
+}
+
+interface AssistantFinalNotice {
+	readonly kind: "aborted" | "verification" | "error" | "empty";
+	readonly text: string;
+	readonly tone: "error" | "warning" | "muted";
+}
+
+interface AssistantVisualProjection {
+	readonly blocks: readonly AssistantVisualBlock[];
+	readonly hasToolCalls: boolean;
+	readonly hasVisibleContent: boolean;
+	readonly hasVisibleText: boolean;
+	readonly visibleNonThinkingOutput: boolean;
+	readonly notice?: AssistantFinalNotice;
+	/** Content topology only. Raw Markdown stays out so growing text can reconcile in place. */
+	readonly shape: string;
 }
 
 /**
@@ -62,6 +87,8 @@ export class AssistantMessageComponent extends Container {
 	private transformMarkdown?: MarkdownTransformFn;
 	private readonly byline?: ReplyByline;
 	private markdownSlots: MarkdownTransformSlot[] = [];
+	/** Topology of the mounted visual blocks; text changes alone retain their Markdown components. */
+	private visualShape?: string;
 	/** Thinking sections retain their contents and spacing across visibility toggles. */
 	private thinkingContainers: VisibilityContainer[] = [];
 	private leadingSpacer?: VisibilityContainer;
@@ -93,13 +120,21 @@ export class AssistantMessageComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		if (this.lastMessage) {
+			// Theme and locale invalidation must recreate static, already-colored children too.
+			this.visualShape = undefined;
 			this.updateContent(this.lastMessage);
+		} else {
+			this.contentRevision++;
 		}
 	}
 
 	/** Marks whether this instance is still the live in-progress response (vs. a finalized one). */
 	setStreaming(isStreaming: boolean): void {
+		if (this.isStreaming === isStreaming) return;
 		this.isStreaming = isStreaming;
+		for (const { component } of this.markdownSlots) component.setStreaming(isStreaming);
+		// A transform receives `isStreaming`; the final pass must not be hidden behind the viewport cache.
+		this.contentRevision++;
 	}
 
 	/**
@@ -113,6 +148,7 @@ export class AssistantMessageComponent extends Container {
 	 * content tree, so thinking-only replies do not leave an empty row behind when hidden.
 	 */
 	setHideThinkingBlock(hide: boolean): void {
+		if (this.hideThinkingBlock === hide) return;
 		this.contentRevision++;
 		this.hideThinkingBlock = hide;
 		for (const container of this.thinkingContainers) container.setVisible(!hide);
@@ -126,15 +162,24 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		this.applyMarkdownTransforms(width);
-		const lines = super.render(width);
-		if (this.hasToolCalls || lines.length === 0) {
-			return lines;
-		}
+		return collectTerminalRows(this.renderRows(width));
+	}
 
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
-		return lines;
+	renderRows(width: number): TerminalRows {
+		this.applyMarkdownTransforms(width);
+		const rows = this.contentRows(this.children, width);
+		return this.hasToolCalls ? rows : markPromptZone(rows);
+	}
+
+	private contentRows(children: readonly Component[], width: number): TerminalRows {
+		return joinTerminalRows(
+			children.map((child) => {
+				if (child instanceof VisibilityContainer)
+					return child.isVisible() ? this.contentRows(child.children, width) : [];
+				if (child === this.contentContainer) return this.contentRows(this.contentContainer.children, width);
+				return componentTerminalRows(child, width);
+			}),
+		);
 	}
 
 	/**
@@ -162,32 +207,95 @@ export class AssistantMessageComponent extends Container {
 		return content.type === "thinking" && Boolean(content.thinking.trim());
 	}
 
-	updateContent(message: AssistantMessage): void {
-		this.contentRevision++;
-		this.lastMessage = message;
+	private projectContent(message: AssistantMessage): AssistantVisualProjection {
+		const readable = message.content.map((content) => this.isReadable(content));
+		const readableAfter = new Array<boolean>(readable.length + 1).fill(false);
+		for (let index = readable.length - 1; index >= 0; index--) {
+			readableAfter[index] = readable[index] === true || readableAfter[index + 1] === true;
+		}
 
-		// Clear content container
+		const blocks: AssistantVisualBlock[] = [];
+		let hasVisibleText = false;
+		let hasThinking = false;
+		for (let index = 0; index < message.content.length; index++) {
+			const content = message.content[index];
+			if (content.type === "text" && readable[index] === true) {
+				const rawText = content.text.trim();
+				if (!rawText) continue;
+				hasVisibleText = true;
+				blocks.push({ kind: "text", rawText, trailingSpacer: false });
+				continue;
+			}
+			if (content.type !== "thinking") continue;
+
+			const thinkingBlocks: string[] = [];
+			let end = index;
+			for (; end < message.content.length; end++) {
+				const thinkingContent = message.content[end];
+				if (thinkingContent.type !== "thinking") break;
+				const thinking = thinkingContent.thinking.trim();
+				if (thinking) thinkingBlocks.push(thinking);
+			}
+			index = end - 1;
+			if (thinkingBlocks.length === 0) continue;
+			hasThinking = true;
+			blocks.push({
+				kind: "thinking",
+				rawText: thinkingBlocks.join("\n\n"),
+				trailingSpacer: readableAfter[end] === true,
+			});
+		}
+
+		const hasToolCalls = message.content.some((content) => content.type === "toolCall");
+		const hasReadableContent = blocks.length > 0;
+		let notice: AssistantFinalNotice | undefined;
+		if (!hasToolCalls) {
+			if (message.stopReason === "aborted") {
+				const text =
+					abortedTurnScreenText(message.errorMessage) ??
+					(message.errorMessage
+						? ownerErrorText(message.errorMessage)
+						: interfaceText().conversation.operationAborted);
+				notice = { kind: "aborted", text, tone: "error" };
+			} else if (message.stopReason === "error" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
+				notice = {
+					kind: "verification",
+					text: interfaceText().conversation.verificationUnresolved,
+					tone: "warning",
+				};
+			} else if (message.stopReason === "error") {
+				const error = ownerErrorText(message.errorMessage || interfaceText().notices.unknownError);
+				notice = { kind: "error", text: interfaceText().notices.error(error), tone: "error" };
+			} else if (!this.isStreaming && !hasReadableContent) {
+				notice = {
+					kind: "empty",
+					text: interfaceText().conversation.noResponseReceived,
+					tone: "muted",
+				};
+			}
+		}
+
+		const hasVisibleContent = hasVisibleText || (!this.hideThinkingBlock && hasThinking);
+		return {
+			blocks,
+			hasToolCalls,
+			hasVisibleContent,
+			hasVisibleText,
+			visibleNonThinkingOutput: hasVisibleText || (!hasToolCalls && notice !== undefined),
+			...(notice ? { notice } : {}),
+			shape: JSON.stringify([
+				hasToolCalls,
+				notice ? [notice.kind, notice.text] : null,
+				blocks.map((block) => [block.kind, block.trailingSpacer]),
+			]),
+		};
+	}
+
+	private mountProjection(projection: AssistantVisualProjection): void {
 		this.contentContainer.clear();
 		this.markdownSlots = [];
 		this.thinkingContainers = [];
-		this.leadingSpacer = undefined;
-
-		const hasVisibleContent = message.content.some(
-			(c) => this.isReadable(c) && (c.type !== "thinking" || !this.hideThinkingBlock),
-		);
-		// What the turn produced, independent of the thinking toggle: a hidden thinking block is still
-		// content the operator can reveal, so it must not read as an empty turn.
-		const hasReadableContent = message.content.some((c) => this.isReadable(c));
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		this.hasVisibleText = message.content.some((c) => c.type === "text" && this.isReadable(c));
-		this.visibleNonThinkingOutput =
-			this.hasVisibleText ||
-			(!hasToolCalls &&
-				(message.stopReason === "aborted" ||
-					message.stopReason === "error" ||
-					(!this.isStreaming && !hasReadableContent)));
-
-		this.leadingSpacer = new VisibilityContainer(hasVisibleContent || Boolean(this.byline));
+		this.leadingSpacer = new VisibilityContainer(projection.hasVisibleContent || Boolean(this.byline));
 		this.leadingSpacer.addChild(new Spacer(1));
 		this.contentContainer.addChild(this.leadingSpacer);
 		if (this.byline) {
@@ -197,88 +305,69 @@ export class AssistantMessageComponent extends Container {
 			);
 		}
 
-		// Render content in order
-		for (let i = 0; i < message.content.length; i++) {
-			const content = message.content[i];
-			if (content.type === "text" && isAssistantDisplayText(content, this.showCommentary) && content.text.trim()) {
-				// Assistant text messages with no background - trim the text
-				// Set paddingY=0 to avoid extra spacing before tool executions
-				const rawText = content.text.trim();
-				const textMarkdown = new Markdown(rawText, 1, 0, this.markdownTheme);
-				this.markdownSlots.push({ component: textMarkdown, rawText, messageType: "assistant" });
-				this.contentContainer.addChild(textMarkdown);
-			} else if (content.type === "thinking") {
-				const thinkingBlocks: string[] = [];
-				for (; i < message.content.length; i++) {
-					const thinkingContent = message.content[i];
-					if (thinkingContent.type !== "thinking") break;
-					const thinking = thinkingContent.thinking.trim();
-					if (thinking) thinkingBlocks.push(thinking);
-				}
-				i--;
-				if (thinkingBlocks.length === 0) continue;
-
-				// Build the thinking block (and its spacing) regardless of current visibility, wrapped
-				// in a VisibilityContainer, so a later setHideThinkingBlock() toggle can show it
-				// in place without rebuilding this component (see setHideThinkingBlock doc above).
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content.slice(i + 1).some((c) => this.isReadable(c));
-				const thinkingRaw = thinkingBlocks.join("\n\n");
-				// Adjacent thinking blocks form one section instead of repeated visual chrome.
-				const thinkingMarkdown = new Markdown(thinkingRaw, 1, 0, this.markdownTheme, {
-					color: (text: string) => theme.fg("thinkingText", text),
-					italic: true,
-				});
-				this.markdownSlots.push({
-					component: thinkingMarkdown,
-					rawText: thinkingRaw,
-					messageType: "assistant-thinking",
-				});
-				const thinkingContainer = new VisibilityContainer(!this.hideThinkingBlock);
-				thinkingContainer.addChild(thinkingMarkdown);
-				if (hasVisibleContentAfter) {
-					thinkingContainer.addChild(new Spacer(1));
-				}
-				this.thinkingContainers.push(thinkingContainer);
-				this.contentContainer.addChild(thinkingContainer);
+		for (const block of projection.blocks) {
+			if (block.kind === "text") {
+				const markdown = new Markdown(block.rawText, 1, 0, this.markdownTheme);
+				markdown.setStreaming(this.isStreaming);
+				this.markdownSlots.push({ component: markdown, rawText: block.rawText, messageType: "assistant" });
+				this.contentContainer.addChild(markdown);
+				continue;
 			}
+
+			const markdown = new Markdown(block.rawText, 1, 0, this.markdownTheme, {
+				color: (text: string) => theme.fg("thinkingText", text),
+				italic: true,
+			});
+			markdown.setStreaming(this.isStreaming);
+			this.markdownSlots.push({
+				component: markdown,
+				rawText: block.rawText,
+				messageType: "assistant-thinking",
+			});
+			const container = new VisibilityContainer(!this.hideThinkingBlock);
+			container.addChild(markdown);
+			if (block.trailingSpacer) container.addChild(new Spacer(1));
+			this.thinkingContainers.push(container);
+			this.contentContainer.addChild(container);
 		}
 
-		// Check if aborted - show after partial content
-		// But only if there are no tool calls (tool execution components will show the error)
-		this.hasToolCalls = hasToolCalls;
-		if (!hasToolCalls) {
-			if (message.stopReason === "aborted") {
-				// The stored text is the transcript's, in English; an abort is drawn in the interface's words.
-				const abortMessage =
-					abortedTurnScreenText(message.errorMessage) ??
-					(message.errorMessage
-						? ownerErrorText(message.errorMessage)
-						: interfaceText().conversation.operationAborted);
-				if (hasVisibleContent) {
-					this.contentContainer.addChild(new Spacer(1));
-				} else {
-					this.contentContainer.addChild(new Spacer(1));
-				}
-				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
-			} else if (message.stopReason === "error" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(
-					new Text(theme.fg("warning", interfaceText().conversation.verificationUnresolved), 1, 0),
-				);
-			} else if (message.stopReason === "error") {
-				const errorMsg = ownerErrorText(message.errorMessage || interfaceText().notices.unknownError);
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", interfaceText().notices.error(errorMsg)), 1, 0));
-			} else if (!this.isStreaming && !hasReadableContent) {
-				// The placeholder reports an empty turn. A turn that produced text or a thinking block
-				// has something to read, so it never gets one.
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(
-					new Text(theme.fg("muted", interfaceText().conversation.noResponseReceived), 1, 0),
-				);
-			}
+		if (projection.notice) {
+			this.contentContainer.addChild(new Spacer(1));
+			this.contentContainer.addChild(new Text(theme.fg(projection.notice.tone, projection.notice.text), 1, 0));
 		}
+	}
+
+	/** Update mounted Markdown text without discarding caches held by unchanged visual blocks. */
+	private reconcileProjection(projection: AssistantVisualProjection): boolean {
+		let changed = false;
+		for (let index = 0; index < projection.blocks.length; index++) {
+			const block = projection.blocks[index]!;
+			const slot = this.markdownSlots[index]!;
+			if (slot.rawText === block.rawText) continue;
+			// Before the first transformed paint, the component still contains the old raw text. Record
+			// that actual baseline before advancing rawText, or an identity transform could skip the write.
+			if (this.transformMarkdown && slot.lastTransformed === undefined) slot.lastTransformed = slot.rawText;
+			slot.rawText = block.rawText;
+			// With a transformer, the component still contains the previous transformed output. Keep
+			// lastTransformed beside it so applyMarkdownTransform can compare and replace them together.
+			if (!this.transformMarkdown) slot.component.setText(block.rawText);
+			changed = true;
+		}
+		this.leadingSpacer?.setVisible(projection.hasVisibleContent || Boolean(this.byline));
+		return changed;
+	}
+
+	updateContent(message: AssistantMessage): void {
+		this.lastMessage = message;
+		const projection = this.projectContent(message);
+		const topologyChanged = projection.shape !== this.visualShape;
+		const textChanged = topologyChanged ? true : this.reconcileProjection(projection);
+		if (topologyChanged) this.mountProjection(projection);
+
+		this.visualShape = projection.shape;
+		this.hasToolCalls = projection.hasToolCalls;
+		this.hasVisibleText = projection.hasVisibleText;
+		this.visibleNonThinkingOutput = projection.visibleNonThinkingOutput;
+		if (topologyChanged || textChanged) this.contentRevision++;
 	}
 }

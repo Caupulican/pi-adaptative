@@ -28,7 +28,6 @@ import { type ThemeBg, theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge, titleBadge } from "../../../presentation/tool-title.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
-import { bumpActionTranscriptEpoch } from "../action-transcript-epoch.ts";
 import { questionConversationText } from "./question-conversation.ts";
 import { toolFailureText } from "./tool-failure-text.ts";
 import { createWorkbenchToolPreview, type PreviewAttribution } from "./workbench-tool-preview.ts";
@@ -477,7 +476,6 @@ export class ToolExecutionComponent extends Container {
 		this.displayDirty = true;
 		this.questionText = undefined;
 		this.questionRevision++;
-		bumpActionTranscriptEpoch();
 	}
 
 	/** Revision of the lazily derived presentation text; part of an `ActionTranscriptComponent`'s cache key. */
@@ -499,7 +497,15 @@ export class ToolExecutionComponent extends Container {
 		this.ui.requestRender();
 	}
 
-	updateResult(result: ToolExecutionResult, isPartial = false): void {
+	updateResult(
+		result: ToolExecutionResult,
+		isPartial = false,
+		call?: { args: unknown; repair?: ToolCallRepairInfo },
+	): void {
+		if (call) {
+			this.args = call.args;
+			this.repair = call.repair;
+		}
 		// Final results live in the chat scrollback for the rest of the process.
 		// Oversized details would pin large payloads per tool call, so retain the
 		// same compacted form a resumed session would see.
@@ -699,7 +705,6 @@ export class ToolExecutionComponent extends Container {
 	private updateDisplay(): void {
 		this.questionText = undefined;
 		this.questionRevision++;
-		bumpActionTranscriptEpoch();
 		const bgFn = (text: string) => theme.bg(this.getBackgroundColor(), text);
 		const materializedResult = this.getMaterializedResult();
 

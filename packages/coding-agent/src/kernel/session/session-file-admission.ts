@@ -143,6 +143,16 @@ function workerTranscriptRoot(file: string): string | undefined {
 	return basename(sessions) === "sessions" ? dirname(sessions) : undefined;
 }
 
+/** Claimed worker and borrowed lock scopes must keep their exact synchronous owner. */
+export function canOffloadSessionAppend(roots: SessionStorageRoots, path: string, sessionId: string): boolean {
+	const file = resolve(path);
+	return (
+		workerTranscriptRoot(file) === undefined &&
+		!currentSynchronousFileLockScope(file) &&
+		!hasCurrentSessionBundleAdmission(roots.orchestrationHome, sessionId)
+	);
+}
+
 /**
  * The file's owner in the writer's home: a worker transcript of a bundle there, else the writing session itself. A
  * worker transcript of another home's bundle is refused: its writes are admitted only against the lease of its own

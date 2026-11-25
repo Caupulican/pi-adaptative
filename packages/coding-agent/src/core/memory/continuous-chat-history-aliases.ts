@@ -18,6 +18,7 @@ import {
 	renderPathAliasLegendFrame,
 } from "../comms/host-injection-records.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../context/path-alias-table.ts";
+import { replayableDiscoveredSkill } from "../skill-header-record.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 function isSettledControl(message: Extract<AgentMessage, { role: "custom" }>): boolean {
@@ -58,7 +59,7 @@ export function replayableBodyAliases(
 	const entries: PathAliasLegendEntry[] = [];
 	for (const message of messages) {
 		if (message.role === "custom") {
-			if (isSettledControl(message)) continue;
+			if (isSettledControl(message) || replayableDiscoveredSkill(message) !== undefined) continue;
 			const aliases = replayableAliasLegend(message, false);
 			if (aliases) {
 				for (const alias of aliases) entries.push(alias);

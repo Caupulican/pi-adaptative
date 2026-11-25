@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-	appendFileSync,
 	chmodSync,
 	closeSync,
 	existsSync,
@@ -17,6 +16,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { MessageInbox } from "../messaging/inbox.ts";
 import { isWorkerSession } from "../session-role.ts";
+import { appendBoundedJsonLineSync } from "../util/bounded-jsonl.ts";
 import { CHAT_CONFIG_VERSION } from "./constants.ts";
 
 export type ChatConfig = {
@@ -238,15 +238,26 @@ export function writeChatPeers(root: string, peers: PeerRecord[]): void {
 	atomicWriteJson(getChatStatePaths(root).peers, { peers } as unknown as JsonValue);
 }
 
-/** Audit lines carry metadata only: never a message body. */
+const CHAT_AUDIT_LIMITS = {
+	maxBytes: 4 * 1024 * 1024,
+	targetBytes: 2 * 1024 * 1024,
+	maxRecords: 4096,
+	fileMode: 0o600,
+	lockRetries: 0,
+};
+
+/** Records peer delivery metadata without letting an audit failure change the delivery result. */
 export function appendChatAudit(root: string, event: { [key: string]: JsonValue }): void {
-	ensureChatStateDirs(root);
-	const paths = getChatStatePaths(root);
-	appendFileSync(paths.audit, `${JSON.stringify({ ...event, at: new Date().toISOString() })}\n`, {
-		encoding: "utf8",
-		mode: 0o600,
-	});
-	chmodBestEffort(paths.audit, 0o600);
+	try {
+		ensureChatStateDirs(root);
+		appendBoundedJsonLineSync(
+			getChatStatePaths(root).audit,
+			{ ...event, at: new Date().toISOString() },
+			CHAT_AUDIT_LIMITS,
+		);
+	} catch {
+		// Message delivery owns its outcome independently of this diagnostic.
+	}
 }
 
 export function chatStateSummary(root: string): {

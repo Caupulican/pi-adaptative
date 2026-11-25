@@ -1,6 +1,7 @@
+import type { TerminalRows } from "../terminal-rows.ts";
 import type { Component } from "../tui.ts";
 import { wrapTextWithAnsi } from "../utils.ts";
-import { CachedTextComponent, frameTextLines } from "./text-layout.ts";
+import { CachedTextComponent, frameTextRows, type PreparedTextBlock } from "./text-layout.ts";
 
 /**
  * Text component - displays multi-line text with word wrapping
@@ -18,18 +19,14 @@ export class Text extends CachedTextComponent implements Component {
 		this.renderState.invalidate();
 	}
 
-	render(width: number): string[] {
-		const start = this.renderState.begin(this.text, width, this.paddingX);
-		if (start.kind === "complete") return start.lines;
-
+	protected layoutRows(prepared: PreparedTextBlock, width: number): TerminalRows {
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(start.prepared.normalizedText, start.prepared.contentWidth);
-		const result = frameTextLines(wrappedLines, {
+		const wrappedLines = wrapTextWithAnsi(prepared.normalizedText, prepared.contentWidth);
+		return frameTextRows(wrappedLines, {
 			width,
 			paddingX: this.paddingX,
 			paddingY: this.paddingY,
 			background: this.customBgFn,
 		});
-		return this.renderState.finish(this.text, width, result);
 	}
 }

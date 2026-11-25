@@ -30,7 +30,7 @@ OUTPUT
 - Full grammar for security, irreversible actions, ambiguous order.
 - Never answer with harness protocol or failure JSON.
 - Analysis, review, evaluation: complete and structured (D decisions, O options, F findings, R risks, Q questions, A actions).
-- Complex content (diagrams, comparisons, tables): an HTML page (skill explain-html).
+- Complex content (diagrams, comparisons, tables): an HTML page.
 - An explicit instruction in the current message overrides this style.`;
 
 const piAdaptativeCoreSection = (extraPrinciples: readonly string[]): string => `

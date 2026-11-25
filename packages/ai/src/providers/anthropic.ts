@@ -5,9 +5,9 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 	RawMessageStreamEvent,
-	TextBlockParam,
 	ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
+import { canReuseProviderInput } from "../history-work.ts";
 import { acquirePromptCacheWrite, type PromptCacheWriteReservation } from "../prompt-cache-reservation.ts";
 import {
 	isToolSchemaSearchDetails,
@@ -38,13 +38,18 @@ import type {
 } from "../types.ts";
 import { type AssistantMessageDiagnostic, appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { shortHash } from "../utils/hash.ts";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { parseJsonWithRepair, parseStreamingJson, stageToolArguments } from "../utils/json-parse.ts";
 import { awaitAuthorizationInput } from "../utils/oauth/authorization-input.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
-import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import { createToolNameMap, type IndexedToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import {
+	type AnthropicCacheBoundary,
+	cacheBoundaryPrefixKey,
+	placeCacheBoundaryMarkers,
+} from "./anthropic-cache-boundary.ts";
+import { type AnthropicWireRow, prepareAnthropicHistory } from "./anthropic-history.ts";
 import { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./anthropic-identity.ts";
 import {
 	type AnthropicEffort,
@@ -75,7 +80,7 @@ import {
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
-import { joinTextContent, transformMessages } from "./transform-messages.ts";
+import { joinTextContent } from "./transform-messages.ts";
 
 const claudeCodeTools = [
 	"Read",
@@ -597,7 +602,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				);
 
 			// Identical prefixes wait for the request that writes this cache entry to start.
-			let cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options);
+			let cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options?.providerAccountKey);
 			if (cachePrefixKey !== undefined) {
 				cacheWriteReservation = await acquirePromptCacheWrite(cachePrefixKey, options?.signal);
 			}
@@ -620,7 +625,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						cacheControlFormat: "anthropic",
 						supportsLongCacheRetention: getAnthropicCompat(model).supportsLongCacheRetention,
 					});
-					cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options);
+					cachePrefixKey = cacheBoundaryPrefixKey(model, params, built.cacheBoundary, options?.providerAccountKey);
 					if (cachePrefixKey !== undefined) {
 						cacheWriteReservation = await acquirePromptCacheWrite(cachePrefixKey, options?.signal);
 					}
@@ -722,7 +727,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
 							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
+							stageToolArguments(block, block.partialJson, event.delta.partial_json);
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -1007,7 +1012,7 @@ function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
-	toolNameMap: ToolNameMap,
+	toolNameMap: IndexedToolNameMap,
 	toolDisclosure: ToolSchemaDisclosurePlan,
 	options?: AnthropicOptions,
 ): AnthropicParamsBuild {
@@ -1015,7 +1020,6 @@ function buildParams(
 		cacheControlFormat: "anthropic",
 		supportsLongCacheRetention: getAnthropicCompat(model).supportsLongCacheRetention,
 	});
-	const cacheBoundaries = new Set<TextBlockParam>();
 	const compat = getAnthropicCompat(model);
 	const sendsSearch = providerSendsToolSchemaSearch(toolDisclosure);
 	const requestTools = sendsSearch
@@ -1029,17 +1033,37 @@ function buildParams(
 	) {
 		throw new Error("Anthropic tool_search cannot be forced when deferred tool disclosure is unavailable.");
 	}
+	const scope =
+		!options?.client && canReuseProviderInput(context.messages, options?.onPayload)
+			? JSON.stringify([
+					model.provider,
+					model.id,
+					model.baseUrl,
+					model.input,
+					model.supportedImageMimeTypes,
+					isOAuthToken,
+					compat.allowEmptySignature,
+					context.tools?.map((tool) => tool.name),
+					toolDisclosure.mode,
+					toolDisclosure.mode === "native"
+						? toolDisclosure.tools.filter((tool) => toolDisclosure.deferredToolNames.has(tool.name))
+						: undefined,
+				])
+			: undefined;
+	const history = prepareAnthropicHistory(
+		context.messages,
+		model,
+		scope,
+		toolNameMap,
+		normalizeToolCallId,
+		(source, from, rows) =>
+			convertMessages(source, from, rows, toolNameMap, toolDisclosure, compat.allowEmptySignature, !!scope),
+	);
+	const messages: MessageParam[] = [];
+	for (const row of history.rows) if (row.message) messages.push(row.message);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(
-			context.messages,
-			model,
-			toolNameMap,
-			toolDisclosure,
-			cacheControl,
-			compat.allowEmptySignature,
-			cacheBoundaries,
-		),
+		messages,
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1143,88 +1167,14 @@ function buildParams(
 		}
 	}
 
-	return {
-		params,
-		cacheBoundary: placeCacheBoundaryMarkers(params, cacheBoundaries, cacheControl),
-	};
-}
-
-/** Anthropic accepts at most this many cache breakpoints per request, across system, tools and messages. */
-const ANTHROPIC_CACHE_BREAKPOINT_LIMIT = 4;
-
-interface AnthropicCacheBoundary {
-	messageIndex: number;
-	blockIndex: number;
+	const cacheBoundary = placeCacheBoundaryMarkers(params, history.rows, cacheControl, history.shared);
+	history.publish(messages);
+	return { params, cacheBoundary };
 }
 
 interface AnthropicParamsBuild {
 	params: MessageCreateParamsStreaming;
 	cacheBoundary?: AnthropicCacheBoundary;
-}
-
-/**
- * Cache-boundary blocks take the breakpoints the system and last-message markers leave, newest first (the tools marker
- * is off when the system block carries one: tools precede system in the prefix). The coordinate names the newest placed.
- */
-function placeCacheBoundaryMarkers(
-	params: MessageCreateParamsStreaming,
-	boundaries: Set<TextBlockParam>,
-	cacheControl: CacheControlEphemeral | undefined,
-): AnthropicCacheBoundary | undefined {
-	if (boundaries.size === 0) return undefined;
-	const system = Array.isArray(params.system) ? params.system : [];
-	const messageBlocks = params.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []));
-	const blocks = [...system, ...(params.tools ?? []), ...messageBlocks];
-	const existing = blocks.filter((block) => "cache_control" in block && block.cache_control).length;
-	let available = ANTHROPIC_CACHE_BREAKPOINT_LIMIT - existing;
-	let newestPlaced: AnthropicCacheBoundary | undefined;
-	for (const block of [...boundaries].reverse()) {
-		if (cacheControl && available > 0) {
-			block.cache_control = cacheControl;
-			available--;
-			newestPlaced ??= locateMessageBlock(params.messages, block);
-		}
-	}
-	return newestPlaced;
-}
-
-/**
- * Position of a projected semantic boundary in the serialized messages. The reference identity comparison is safe
- * because `convertMessages` installs the exact block objects before this lookup.
- */
-function locateMessageBlock(messages: MessageParam[], target: TextBlockParam): AnthropicCacheBoundary | undefined {
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const content = messages[messageIndex]?.content;
-		if (!Array.isArray(content)) continue;
-		const blockIndex = content.indexOf(target);
-		if (blockIndex !== -1) return { messageIndex, blockIndex };
-	}
-	return undefined;
-}
-
-/**
- * Identity of the final serialized wire prefix through the semantic view boundary. Post-boundary live state and the
- * current user message deliberately do not participate, so concurrent compactions over one view share one writer.
- */
-function cacheBoundaryPrefixKey(
-	model: Model<"anthropic-messages">,
-	params: MessageCreateParamsStreaming,
-	boundary: AnthropicCacheBoundary | undefined,
-	options?: AnthropicOptions,
-): string | undefined {
-	if (boundary === undefined) return undefined;
-	const boundaryMessage = params.messages[boundary.messageIndex];
-	if (boundaryMessage === undefined || !Array.isArray(boundaryMessage.content)) return undefined;
-	const boundaryBlock = boundaryMessage.content[boundary.blockIndex];
-	if (boundaryBlock === undefined || !("cache_control" in boundaryBlock) || !boundaryBlock.cache_control) {
-		return undefined;
-	}
-	const messages = [
-		...params.messages.slice(0, boundary.messageIndex),
-		{ ...boundaryMessage, content: boundaryMessage.content.slice(0, boundary.blockIndex + 1) },
-	];
-	const prefix = JSON.stringify([params.system, params.tools, messages]);
-	return [model.provider, model.id, options?.providerAccountKey ?? "", shortHash(prefix)].join("|");
 }
 
 // Normalize tool call IDs to match Anthropic's required pattern and length
@@ -1233,58 +1183,52 @@ function normalizeToolCallId(id: string): string {
 }
 
 function convertMessages(
-	messages: Message[],
-	model: Model<"anthropic-messages">,
-	toolNameMap: ToolNameMap,
+	transformedMessages: Message[],
+	from: number,
+	rows: AnthropicWireRow[],
+	toolNameMap: IndexedToolNameMap,
 	toolDisclosure: ToolSchemaDisclosurePlan,
-	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
-	cacheBoundaries?: Set<TextBlockParam>,
-): MessageParam[] {
-	const params: MessageParam[] = [];
-
-	// Transform messages for cross-provider compatibility
-	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
-
-	for (let i = 0; i < transformedMessages.length; i++) {
+	shared = false,
+): void {
+	const emit = (end: number, message?: MessageParam, boundaries?: number[]) => {
+		rows.push({ end, message, boundaries, names: toolNameMap.checkpoint });
+	};
+	for (let i = from; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				if (msg.content.trim().length > 0) {
-					params.push({
-						role: "user",
-						content: sanitizeSurrogates(msg.content),
-					});
+					emit(i + 1, { role: "user", content: sanitizeSurrogates(msg.content) });
 				}
 			} else {
-				const blocks: ContentBlockParam[] = msg.content.map((item) => {
+				const blocks: ContentBlockParam[] = [];
+				let boundaries: number[] | undefined;
+				for (const item of msg.content) {
 					if (item.type === "text") {
-						const block: TextBlockParam = { type: "text", text: sanitizeSurrogates(item.text) };
-						if (item.cacheBoundary) cacheBoundaries?.add(block);
-						return block;
+						const text = sanitizeSurrogates(item.text);
+						const included = text.trim().length > 0;
+						if (item.cacheBoundary) {
+							boundaries ??= [];
+							boundaries.push(included ? blocks.length : -1);
+						}
+						if (included) blocks.push({ type: "text", text });
 					} else {
-						return {
+						blocks.push({
 							type: "image",
 							source: {
 								type: "base64",
 								media_type: item.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
 								data: item.data,
 							},
-						};
+						});
 					}
-				});
-				const filteredBlocks = blocks.filter((b) => {
-					if (b.type === "text") {
-						return b.text.trim().length > 0;
-					}
-					return true;
-				});
-				if (filteredBlocks.length === 0) continue;
-				params.push({
-					role: "user",
-					content: filteredBlocks,
-				});
+				}
+				if (blocks.length || boundaries) {
+					const message: MessageParam | undefined = blocks.length ? { role: "user", content: blocks } : undefined;
+					emit(i + 1, message, boundaries);
+				}
 			}
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -1337,15 +1281,12 @@ function convertMessages(
 						type: "tool_use",
 						id: block.id,
 						name: toolNameMap.toProviderName(block.name),
-						input: block.arguments ?? {},
+						input: (shared ? structuredClone(block.arguments) : block.arguments) ?? {},
 					});
 				}
 			}
 			if (blocks.length === 0) continue;
-			params.push({
-				role: "assistant",
-				content: blocks,
-			});
+			emit(i + 1, { role: "assistant", content: blocks });
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
@@ -1375,38 +1316,9 @@ function convertMessages(
 			i = j - 1;
 
 			// Add a single user message with all tool results
-			params.push({
-				role: "user",
-				content: toolResults,
-			});
+			emit(j, { role: "user", content: toolResults });
 		}
 	}
-
-	// Add cache_control to the last user message to cache conversation history
-	if (cacheControl && params.length > 0) {
-		const lastMessage = params[params.length - 1];
-		if (lastMessage.role === "user") {
-			if (Array.isArray(lastMessage.content)) {
-				const lastBlock = lastMessage.content[lastMessage.content.length - 1];
-				if (
-					lastBlock &&
-					(lastBlock.type === "text" || lastBlock.type === "image" || lastBlock.type === "tool_result")
-				) {
-					(lastBlock as any).cache_control = cacheControl;
-				}
-			} else if (typeof lastMessage.content === "string") {
-				lastMessage.content = [
-					{
-						type: "text",
-						text: lastMessage.content,
-						cache_control: cacheControl,
-					},
-				] as any;
-			}
-		}
-	}
-
-	return params;
 }
 
 function shouldUseFineGrainedToolStreamingBeta(model: Model<"anthropic-messages">, context: Context): boolean {

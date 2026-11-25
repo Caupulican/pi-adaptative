@@ -8,8 +8,6 @@
  * read accessors) while interactive-mode keeps thin delegating wrappers.
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { Container, Keybinding, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { Markdown, Spacer, Text, visibleWidth } from "@caupulican/pi-tui";
 import { getDebugLogPath } from "../../config.ts";
@@ -26,6 +24,7 @@ import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import type { AutoLearnSettings } from "../../core/settings/settings-schema.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
+import { writeFileAtomicSync } from "../../core/util/atomic-file.ts";
 import { formatKeyText } from "../../presentation/keybinding-hints.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -461,6 +460,23 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 	host.showShortcuts(sections);
 }
 
+function recentDebugLines<T>(items: readonly T[], format: (item: T, index: number) => string): string[] {
+	let remaining = 2 * 1024 * 1024 - 4096;
+	const lines: string[] = [];
+	let index = items.length - 1;
+	for (; index >= Math.max(0, items.length - 512); index--) {
+		const item = items[index];
+		if (item === undefined) continue;
+		const line = format(item, index);
+		const bytes = Buffer.byteLength(line) + 1;
+		if (bytes > remaining) break;
+		remaining -= bytes;
+		lines.push(line);
+	}
+	if (index >= 0) lines.push(`[${index + 1} earlier or oversized entries omitted]`);
+	return lines.reverse();
+}
+
 export function handleDebugCommand(host: DebugReportHost): void {
 	const text = interfaceText().reports.debug;
 	const width = host.ui.terminal.columns;
@@ -474,19 +490,18 @@ export function handleDebugCommand(host: DebugReportHost): void {
 		text.totalLines(allLines.length),
 		"",
 		text.renderedSection,
-		...allLines.map((line, idx) => {
+		...recentDebugLines(allLines, (line, idx) => {
 			const vw = visibleWidth(line);
 			const escaped = JSON.stringify(line);
 			return `[${idx}] (w=${vw}) ${escaped}`;
 		}),
 		"",
 		text.messagesSection,
-		...host.session.messages.map((msg) => JSON.stringify(msg)),
+		...recentDebugLines(host.session.messages, (msg) => JSON.stringify(msg)),
 		"",
 	].join("\n");
 
-	fs.mkdirSync(path.dirname(debugLogPath), { recursive: true });
-	fs.writeFileSync(debugLogPath, debugData);
+	writeFileAtomicSync(debugLogPath, debugData, { mode: 0o600 });
 
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(

@@ -185,7 +185,7 @@ function toolResultText(result: ToolResultMessage): string {
 	return result.isError ? `[tool error] ${body}` : body;
 }
 
-function toWireMessages(messages: Message[], toolNameMap: ToolNameMap): CommandCodeWireMessage[] {
+function toWireMessages(messages: readonly Message[], toolNameMap: ToolNameMap): CommandCodeWireMessage[] {
 	const wire: CommandCodeWireMessage[] = [];
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];

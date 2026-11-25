@@ -1,3 +1,4 @@
+import { componentTerminalRows, joinTerminalRows, type TerminalRows } from "../terminal-rows.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, fitToWidth } from "../utils.ts";
 
@@ -74,6 +75,25 @@ export class Box implements Component {
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
+	}
+
+	renderRows(width: number): TerminalRows {
+		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		const rows = joinTerminalRows(this.children.map((child) => componentTerminalRows(child, contentWidth)));
+		if (rows.length === 0) return rows;
+		const margin = " ".repeat(this.paddingX);
+		const padding = this.paddingY;
+		const paint = (line: string) => this.applyBg(line, width);
+		const length = rows.length + 2 * padding;
+		return {
+			length,
+			at(index) {
+				if (index < 0 || index >= length) return undefined;
+				return index >= padding && index < padding + rows.length
+					? paint(margin + (rows.at(index - padding) ?? ""))
+					: paint("");
+			},
+		};
 	}
 
 	render(width: number): string[] {

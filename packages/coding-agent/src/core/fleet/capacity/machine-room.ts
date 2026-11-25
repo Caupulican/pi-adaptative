@@ -41,10 +41,12 @@ export interface MachineBaseline {
 
 export function readMachineFacts(): MachineFacts {
 	const heap = getHeapStatistics();
+	const hostMemory = totalmem();
+	const constrainedMemory = process.constrainedMemory?.() ?? 0;
 	return {
 		// libuv's available memory honors a cgroup limit and reads MemAvailable on Linux; free memory is the fallback.
 		availableMemory: typeof process.availableMemory === "function" ? process.availableMemory() : freemem(),
-		totalMemory: totalmem(),
+		totalMemory: constrainedMemory > 0 ? Math.min(hostMemory, constrainedMemory) : hostMemory,
 		rss: process.memoryUsage.rss(),
 		usedHeap: heap.used_heap_size,
 		heapLimit: process.versions.bun ? undefined : heap.heap_size_limit,

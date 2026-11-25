@@ -92,6 +92,8 @@ export const INTERACTIVE = {
 		`Older TUI history hidden to preserve FPS (${components} components). Full session remains available to the model.`,
 	historyWindow: (lines: number, omitted: number) =>
 		`Showing last ~${lines} TUI history lines; omitted ${omitted} older message${omitted === 1 ? "" : "s"}. Full session remains available to the model.`,
+	historyRecordOversized: "Large transcript entry. The full entry is retained in the saved session.",
+	historyToolResultUnavailable: "Tool result is unavailable on this page.",
 	imagesBlocked:
 		"The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker.",
 

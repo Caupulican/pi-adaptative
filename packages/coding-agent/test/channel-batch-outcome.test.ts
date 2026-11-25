@@ -272,6 +272,11 @@ it.each([TOOL_FAILURE_LEDGER_TRANSIENT_KIND, VERIFICATION_OBLIGATION_TRANSIENT_K
 		if (msg?.role !== "custom") throw new Error("Expected a custom message");
 		const setup = extensionSetupSessionManager(manager);
 		expect(() => setup.appendMessageBatch([{ kind: "custom", message: structuredClone(msg) }])).toThrow(/reserved/);
+		for (const method of ["appendMessageBatchWithReceipt", "appendMessageBatchAwaitable"] as const) {
+			expect(() => setup[method]([[{ kind: "custom", message: structuredClone(msg) }]], () => [])).toThrow(
+				/reserved by the host/,
+			);
+		}
 		expect(() =>
 			Reflect.apply(setup.appendMessageBatch, setup, [
 				[{ kind: "message", message: structuredClone(msg), origin: "local" }],

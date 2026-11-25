@@ -14,7 +14,13 @@
  */
 
 import type { AgentMessage } from "../../kernel/types.ts";
-import { expandParams, expandText, type PathAliasTable, rewriteAgentMessagesWith } from "./path-alias-table.ts";
+import {
+	expandParams,
+	expandText,
+	findAliasAppendBoundary,
+	type PathAliasTable,
+	rewriteAgentMessagesWith,
+} from "./path-alias-table.ts";
 
 /**
  * Shared walk behind {@link expandMessageForDisplay} and {@link expandMessageTextForDisplay}. One
@@ -63,6 +69,51 @@ export function expandMessageTextForDisplay<TMessage extends AgentMessage>(
 	message: TMessage,
 ): TMessage {
 	return expandMessageWith(table, message);
+}
+
+interface DisplaySpan {
+	source: string;
+	sealedThrough: number;
+	expandedPrefix: string;
+	display: string;
+}
+
+/** One response's path spellings. Only the unfinished token and newly appended text need expansion. */
+export class StreamingPathAliasDisplay {
+	private entries?: PathAliasTable["entries"];
+	private readonly spans: DisplaySpan[] = [];
+
+	clear(): void {
+		this.entries = undefined;
+		this.spans.length = 0;
+	}
+
+	expand<TMessage extends AgentMessage>(table: PathAliasTable, message: TMessage): TMessage {
+		if (this.entries !== table.entries) {
+			this.clear();
+			this.entries = table.entries;
+		}
+		if (!table.entries.length) return message;
+		let index = 0;
+		const expand = (source: string): string => {
+			const previous = this.spans[index];
+			if (previous?.source === source) {
+				index++;
+				return previous.display;
+			}
+			const append = previous && source.startsWith(previous.source) ? previous : undefined;
+			const start = append?.sealedThrough ?? 0;
+			const end = findAliasAppendBoundary(source, append?.source.length ?? 0) ?? start;
+			const expandedPrefix =
+				(append?.expandedPrefix ?? "") + (end > start ? expandText(table, source.slice(start, end)) : "");
+			const display = expandedPrefix + expandText(table, source.slice(end));
+			this.spans[index++] = { source, sealedThrough: end, expandedPrefix, display };
+			return display;
+		};
+		const [result] = rewriteAgentMessagesWith([message], { text: expand, thinkingText: expand });
+		this.spans.length = index;
+		return (result as TMessage | undefined) ?? message;
+	}
 }
 
 /** Expand aliases in streamed tool-call arguments, which arrive outside any message. */

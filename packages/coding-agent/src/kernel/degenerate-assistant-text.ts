@@ -8,6 +8,9 @@ export const DEGENERATE_STREAM_ABORT_RUN = 8;
 
 /** Shortest unit that may be an exact tiled status sentence (`Foo.Foo.` with no space). */
 export const DEGENERATE_EXACT_REPEAT_MIN = 24;
+const DEGENERATE_STREAM_MIN_CHARS = 400;
+const SENTENCE_BREAKS = /(?<=[.!?])\s+/g;
+const LINE_BREAKS = /\n/g;
 
 function collapseRepeatedUnits(units: readonly string[], joinWith: string): string {
 	if (units.length < DEGENERATE_REPEATED_LINE_MIN) return units.join(joinWith);
@@ -46,22 +49,30 @@ function collapseRepeatedUnits(units: readonly string[], joinWith: string): stri
 	return out.join(joinWith);
 }
 
-function maxRepeatedUnitRun(units: readonly string[]): number {
-	let maxRun = 1;
-	let run = 1;
-	for (let index = 1; index < units.length; index++) {
-		if (units[index] === units[index - 1] && units[index].trim() !== "") {
-			run++;
-			if (run > maxRun) maxRun = run;
-		} else {
-			run = 1;
-		}
+function hasRepeatedUnitRun(text: string, separator: RegExp): boolean {
+	separator.lastIndex = 0;
+	let start = 0;
+	let previousStart = 0;
+	let previousLength = -1;
+	let run = 0;
+	while (true) {
+		const match = separator.exec(text);
+		const end = match?.index ?? text.length;
+		const length = end - start;
+		run =
+			length === previousLength && text.startsWith(text.slice(previousStart, previousStart + length), start)
+				? run + 1
+				: 1;
+		if (run === DEGENERATE_STREAM_ABORT_RUN && text.slice(start, end).trim() !== "") return true;
+		if (!match) return false;
+		previousStart = start;
+		previousLength = length;
+		start = separator.lastIndex;
 	}
-	return units.length === 0 ? 0 : maxRun;
 }
 
 function splitSentences(text: string): string[] {
-	return text.split(/(?<=[.!?])\s+/);
+	return text.split(SENTENCE_BREAKS);
 }
 
 function isProseTile(unit: string): boolean {
@@ -108,12 +119,48 @@ export function isDegenerateRepeatedText(text: string): boolean {
 }
 
 export function shouldAbortDegenerateStream(text: string): boolean {
-	if (text.length < 400) return false;
-	const tiled = exactTiledRepeat(text);
-	if (tiled && tiled.times >= DEGENERATE_STREAM_ABORT_RUN) return true;
-	const sentences = splitSentences(text);
-	if (maxRepeatedUnitRun(sentences) >= DEGENERATE_STREAM_ABORT_RUN) return true;
-	return maxRepeatedUnitRun(text.split("\n")) >= DEGENERATE_STREAM_ABORT_RUN;
+	if (text.length < DEGENERATE_STREAM_MIN_CHARS) return false;
+	if (text.length % DEGENERATE_STREAM_ABORT_RUN === 0) {
+		const tiled = exactTiledRepeat(text);
+		if (tiled && tiled.times >= DEGENERATE_STREAM_ABORT_RUN) return true;
+	}
+	return hasRepeatedUnitRun(text, SENTENCE_BREAKS) || hasRepeatedUnitRun(text, LINE_BREAKS);
+}
+
+/** Keeps only the preceding prose fragments. Progress events can carry unchanged or replaced content. */
+export class StreamingDegenerationDetector {
+	private previous: string[] = [];
+	private scratch: string[] = [];
+	private result = false;
+
+	check(message: AssistantMessage): boolean {
+		const current = this.scratch;
+		current.length = 0;
+		let length = 0;
+		let unchanged = true;
+		for (const block of message.content) {
+			if (block.type === "toolCall") return false;
+			const text =
+				block.type === "text"
+					? block.text
+					: block.type === "thinking" && !block.redacted
+						? block.thinking
+						: undefined;
+			if (text === undefined) continue;
+			if (unchanged) unchanged = this.previous[current.length] === text;
+			if (current.length > 0) length++;
+			length += text.length;
+			current.push(text);
+		}
+		if (unchanged && current.length === this.previous.length) return this.result;
+		this.scratch = this.previous;
+		this.scratch.length = 0;
+		this.previous = current;
+		this.result =
+			length >= DEGENERATE_STREAM_MIN_CHARS &&
+			shouldAbortDegenerateStream(current.length === 1 ? current[0]! : current.join("\n"));
+		return this.result;
+	}
 }
 
 const collapsedDegenerateMessages = new WeakSet<AssistantMessage>();
@@ -192,12 +239,4 @@ function markCollapsedMessage(message: AssistantMessage, content: AssistantMessa
 /** True when this message is (or was collapsed from) a generation loop. */
 export function isCollapsedDegenerateAssistantMessage(message: AssistantMessage): boolean {
 	return collapsedDegenerateMessages.has(message);
-}
-
-export function assistantMessageText(message: AssistantMessage): string {
-	return message.content
-		.flatMap((block) =>
-			block.type === "text" ? [block.text] : block.type === "thinking" && !block.redacted ? [block.thinking] : [],
-		)
-		.join("\n");
 }

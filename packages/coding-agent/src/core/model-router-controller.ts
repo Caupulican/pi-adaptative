@@ -36,7 +36,7 @@ import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../kernel/harness-log.ts";
 import type { Agent, AgentMessage, AgentMessageOrigin, ThinkingLevel } from "../kernel/index.ts";
-import type { SessionManager, SessionMessageBatchEntry } from "../kernel/node.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -97,8 +97,10 @@ import {
 	bufferModelRouterSessionMessage,
 	createModelRouterSessionBuffer,
 	flushModelRouterSessionBuffer,
+	flushModelRouterSessionBufferAwaitable,
 	flushModelRouterSessionBufferPrefix,
 	type ModelRouterSessionBuffer,
+	type RoutedSessionAppendPort,
 } from "./model-router/session-buffer.ts";
 import { sideTripBrief, sideTripHistoryTool } from "./model-router/side-trip-brief.ts";
 import {
@@ -171,7 +173,7 @@ function persistModelRouterDecision(
 	sessionManager.appendCustomEntry(MODEL_ROUTER_DECISION_CUSTOM_TYPE, decision);
 }
 
-export interface ModelRouterControllerDeps {
+export interface ModelRouterControllerDeps extends RoutedSessionAppendPort {
 	/** Live agent — the controller reads/writes agent.state.{model,thinkingLevel,tools,systemPrompt,messages}
 	 * for the per-turn tier swap and aborts it on a mutating-tool escalation. */
 	getAgent(): Agent;
@@ -181,8 +183,6 @@ export interface ModelRouterControllerDeps {
 	getSettingsManager(): ModelRouterControllerSettingsSource;
 	/** Session log: routed-turn message buffering/persistence, decision persistence, recent-decision status. */
 	getSessionManager(): SessionManager;
-	/** Canonical host-owned mixed message batch persistence; one validated publication for lifecycle linking. */
-	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[], attempt?: symbol): string[];
 	/** Messages a routed turn read but never persisted (escalated or thrown): the owner input among them is undelivered. */
 	returnUnpersistedInput?(messages: readonly AgentMessage[]): void;
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
@@ -493,8 +493,7 @@ export class ModelRouterController {
 	 * The lifecycle adapter uses this at the tool reservation boundary: once the assistant
 	 * message is durable, later tool-result messages must go through the normal message-end
 	 * path and an escalation may continue from canonical history instead of splicing it away.
-	 * The buffer is marked committed only after every append succeeds; a failed append therefore
-	 * rejects the reservation and the tool body is never entered.
+	 * A failed append rejects the reservation before the tool body runs.
 	 */
 	commitSessionBuffer(): Map<AgentMessage, string> {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
@@ -504,7 +503,6 @@ export class ModelRouterController {
 		);
 	}
 
-	/** Commit only the prompt prefix before a provider request; keep the assistant/tool suffix buffered. */
 	commitSessionBufferPrefix(): Map<AgentMessage, string> {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
 		if (!modelRouterBuffer) return new Map();
@@ -1652,9 +1650,7 @@ export class ModelRouterController {
 					to: formatModelRouterModel(escalatedTo),
 				}));
 			} else if (bufferRoutedTurn && this._modelRouterSessionBuffer) {
-				flushModelRouterSessionBuffer(this._modelRouterSessionBuffer, (batch, attempt) =>
-					this.deps.appendSessionMessageBatch(batch, attempt),
-				);
+				await flushModelRouterSessionBufferAwaitable(this._modelRouterSessionBuffer, this.deps);
 			}
 		} catch (error) {
 			const uncertain = bufferRoutedTurn ? this._modelRouterSessionBuffer?.uncertain : undefined;

@@ -110,6 +110,7 @@ import {
 	ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE,
 	ACTIVE_SKILL_RECORD_KIND_PREFIX,
 	AUTHORITY_CONTEXT_CUSTOM_TYPE,
+	DISCOVERED_SKILL_RECORD_KIND_PREFIX,
 } from "./provider-request-context-controller.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE, REPLY_ROUTE_CUSTOM_TYPE } from "./reply-route.ts";
@@ -510,7 +511,11 @@ export function assertExtensionCustomType(customType: string): void {
  * skill's record is its own type, `active_skill_context:<name>`).
  */
 export function isHostReservedCustomType(customType: string): boolean {
-	return hostReservedCustomTypes().has(customType) || customType.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX);
+	return (
+		hostReservedCustomTypes().has(customType) ||
+		customType.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX) ||
+		customType.startsWith(DISCOVERED_SKILL_RECORD_KIND_PREFIX)
+	);
 }
 
 /**

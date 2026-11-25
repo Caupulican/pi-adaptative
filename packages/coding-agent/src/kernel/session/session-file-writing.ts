@@ -12,6 +12,7 @@ import {
 import { currentSynchronousFileLockScope, withFileLockSync } from "../storage/atomic-file.ts";
 import { sameFileVersion } from "../storage/bounded-file.ts";
 import { encodeSessionEntry } from "./lifecycle-ledger.ts";
+import type { SessionEntryFileLocation } from "./session-file-reading.ts";
 import type { FileEntry } from "./session-manager-types.ts";
 import { confirmSessionFileWrite } from "./session-write-confirmation.ts";
 
@@ -81,12 +82,22 @@ export function stageSessionFile(
 	target: string,
 	entries: Iterable<FileEntry>,
 	publish: (temporary: string) => void,
+	recordLocation?: (entry: FileEntry, location: SessionEntryFileLocation) => void,
 ): void {
 	const temporary = `${target}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 	const fd = openSync(temporary, "wx");
 	try {
 		try {
-			for (const entry of entries) writeFileSync(fd, `${encodeSessionEntry(entry)}\n`);
+			let offset = 0;
+			for (const entry of entries) {
+				const line = `${encodeSessionEntry(entry)}\n`;
+				writeFileSync(fd, line);
+				if (recordLocation) {
+					const length = Buffer.byteLength(line);
+					recordLocation(entry, { offset, length: length - 1 });
+					offset += length;
+				}
+			}
 		} finally {
 			closeSync(fd);
 		}

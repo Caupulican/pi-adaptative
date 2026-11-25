@@ -12,6 +12,7 @@ import type {
 } from "openai/resources/chat/completions.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
+	Api,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -34,7 +35,7 @@ import { parseProviderReportedCost } from "../usage.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJsonState } from "../utils/json-parse.ts";
+import { parseStreamingJsonState, stageToolArguments } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
@@ -213,7 +214,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			interface StreamingToolCallBlock extends ToolCall {
 				partialArgs?: string;
-				partialArgsComplete?: boolean;
 				streamIndex?: number;
 			}
 			interface OpenAICompatibleChoice extends ChatCompletionChunk.Choice {
@@ -257,11 +257,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				} else if (block.type === "toolCall") {
 					const parseResult = parseStreamingJsonState(block.partialArgs);
 					block.arguments = parseResult.value;
-					block.partialArgsComplete = parseResult.complete;
+					if (output.stopReason !== "toolUse" && block.partialArgs?.trim() && !parseResult.complete) {
+						block.errorMessage = `Tool call arguments were truncated before complete JSON was received (stop reason: ${output.stopReason}). Retry the tool call with complete JSON arguments.`;
+					}
 					// Finalize in-place and strip the scratch buffers so replay only
 					// carries parsed arguments.
 					delete block.partialArgs;
-					delete block.partialArgsComplete;
 					delete block.streamIndex;
 					stream.push({
 						type: "toolcall_end",
@@ -324,7 +325,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						name: toolCall.function?.name ? toolNameMap.toOriginalName(toolCall.function.name) : "",
 						arguments: {},
 						partialArgs: "",
-						partialArgsComplete: true,
 						streamIndex,
 					};
 					if (streamIndex !== undefined) {
@@ -454,9 +454,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 							if (toolCall.function?.arguments) {
 								delta = toolCall.function.arguments;
 								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								const parseResult = parseStreamingJsonState(block.partialArgs);
-								block.arguments = parseResult.value;
-								block.partialArgsComplete = parseResult.complete;
+								stageToolArguments(block, block.partialArgs, delta);
 							}
 							stream.push({
 								type: "toolcall_delta",
@@ -480,14 +478,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 								}
 							}
 						}
-					}
-				}
-			}
-
-			if (output.stopReason !== "toolUse") {
-				for (const block of blocks) {
-					if (block.type === "toolCall" && block.partialArgs?.trim() && block.partialArgsComplete === false) {
-						block.errorMessage = `Tool call arguments were truncated before complete JSON was received (stop reason: ${output.stopReason}). Retry the tool call with complete JSON arguments.`;
 					}
 				}
 			}
@@ -517,7 +507,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						? `${formatted}\n${rawMetadata}`
 						: formatted;
 				},
-				scratchFields: ["index", "partialArgs", "partialArgsComplete", "streamIndex"],
+				scratchFields: ["index", "partialArgs", "streamIndex"],
 			});
 		} finally {
 			// A response hook may fail before the SDK iterator ever acquires the response body.
@@ -810,6 +800,26 @@ function addCacheControlToTextContent(
 	return false;
 }
 
+function normalizeToolCallId(id: string, model: Model<Api>): string {
+	// Handle pipe-separated IDs from OpenAI Responses API
+	// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
+	// These come from providers like github-copilot, openai-codex, opencode
+	// Preserve the item ID because multiple calls can share a call_id while differing by item ID.
+	if (id.includes("|")) {
+		const separatorIndex = id.indexOf("|");
+		const callId = id.slice(0, separatorIndex).replace(/[^a-zA-Z0-9_-]/g, "_");
+		const itemId = id.slice(separatorIndex + 1).replace(/[^a-zA-Z0-9_-]/g, "_");
+		const combinedId = itemId.length > 0 ? `${callId}_${itemId}` : callId;
+		if (combinedId.length <= 40) return combinedId;
+		const hash = shortHash(id).slice(0, 8);
+		const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
+		return `${prefix}_${hash}`;
+	}
+
+	if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
+	return id;
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -831,27 +841,7 @@ export function convertMessages(
 	const isTextProtocolCall = (toolCall: ToolCall): boolean =>
 		textProtocolActive || toolCall.source === "text-protocol";
 
-	const normalizeToolCallId = (id: string): string => {
-		// Handle pipe-separated IDs from OpenAI Responses API
-		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
-		// These come from providers like github-copilot, openai-codex, opencode
-		// Preserve the item ID because multiple calls can share a call_id while differing by item ID.
-		if (id.includes("|")) {
-			const separatorIndex = id.indexOf("|");
-			const callId = id.slice(0, separatorIndex).replace(/[^a-zA-Z0-9_-]/g, "_");
-			const itemId = id.slice(separatorIndex + 1).replace(/[^a-zA-Z0-9_-]/g, "_");
-			const combinedId = itemId.length > 0 ? `${callId}_${itemId}` : callId;
-			if (combinedId.length <= 40) return combinedId;
-			const hash = shortHash(id).slice(0, 8);
-			const prefix = callId.slice(0, Math.max(1, 40 - hash.length - 1));
-			return `${prefix}_${hash}`;
-		}
-
-		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
-		return id;
-	};
-
-	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	// Links a toolResult message to the call it answers by id (text-protocol has no wire
 	// tool_call_id of its own - the internal ToolCall.id / ToolResultMessage.toolCallId pairing

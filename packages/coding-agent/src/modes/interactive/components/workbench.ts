@@ -13,7 +13,11 @@ import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import type { BashExecutionComponent } from "./bash-execution.ts";
 import { drawChatRosterPane, type WorkbenchChatRosterSnapshot } from "./chat-roster-pane.ts";
-import { ConversationSnapshotBuilder, ConversationWindow } from "./conversation-window.ts";
+import {
+	type ConversationWindow,
+	createRootConversationWindow,
+	type RootConversationHistoryNavigation,
+} from "./conversation-window.ts";
 import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
 import { FlowAnimator } from "./flow-animator.ts";
@@ -53,6 +57,7 @@ export type WorkbenchLeftPaneMode = "chats" | "graph";
 export interface WorkbenchOptions {
 	conversation: Container;
 	activeConversation?: () => Container;
+	history?: RootConversationHistoryNavigation;
 	onInvalidateCachedConversations?: () => void;
 	editor: Container;
 	/** Rows directly above the input, in order: transient notices, widgets, session status. */
@@ -226,9 +231,8 @@ export class WorkbenchComponent extends Container {
 	private chatTargetsByRow: readonly (ActiveChatTarget | undefined)[] = [];
 	/** What the left pane drew this frame; undefined while folded or hidden. */
 	private leftPaneKind?: WorkbenchLeftPaneMode;
-	/** Composes the Decision graph's model per frame; unset, the zone is chat only. */
-	private graphSource?: () => DecisionGraphModel | undefined;
-	/** This frame's graph model: composed once, and only when the graph is wanted and has something to show. */
+	private graphSource?: (visible: boolean) => DecisionGraphModel | undefined;
+	/** The published graph snapshot selected for this frame's layout. */
 	private frameGraphModel?: DecisionGraphModel;
 	/** This frame's chat roster: composed at most once per frame, and only when the left pane asks for it. */
 	private frameChatRoster?: WorkbenchChatRosterSnapshot;
@@ -296,13 +300,7 @@ export class WorkbenchComponent extends Container {
 		]) {
 			if (child) this.addChild(child);
 		}
-		const getActive = options.activeConversation ?? (() => options.conversation);
-		const snapshotBuilder = new ConversationSnapshotBuilder({
-			getRoot: () => options.conversation,
-			getActive,
-			getHeader: () => options.header as Container | undefined,
-		});
-		this.conversation = new ConversationWindow(() => snapshotBuilder.getSnapshot(), undefined, getSelectionStyle);
+		this.conversation = createRootConversationWindow(options, getSelectionStyle);
 	}
 
 	get isCollapsed(): boolean {
@@ -357,7 +355,7 @@ export class WorkbenchComponent extends Container {
 	}
 	/** The Decision graph's model source; the pane draws whatever it returns each frame. */
 	setDecisionGraph(
-		source: (() => DecisionGraphModel | undefined) | undefined,
+		source: ((visible: boolean) => DecisionGraphModel | undefined) | undefined,
 		clock?: (running: boolean) => void,
 		requestRender?: () => void,
 	): void {
@@ -668,6 +666,7 @@ export class WorkbenchComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.graphPane.invalidate();
 		this.frameExecutionLines.clear();
 		this.conversation.invalidate();
 		this.options.onInvalidateCachedConversations?.();
@@ -1173,8 +1172,8 @@ export class WorkbenchComponent extends Container {
 				this.graphTitleButtons(),
 				this.graphAnimator?.enabled ?? false,
 				this.mouseMode,
+				Date.now(),
 			);
-			// The frame says whether it drew a carrier: the timer runs only while one is needed.
 			const motionUntil = this.graphPane.motionUntil;
 			if (motionUntil === undefined) this.graphAnimator?.settled();
 			else this.graphAnimator?.request(motionUntil);
@@ -1264,6 +1263,9 @@ export class WorkbenchComponent extends Container {
 		// Tiny terminals cannot afford gutters. Keep native input/status bottom-anchored;
 		// oversized dialogs retain their complete cursor-bearing output, never a sliced editor.
 		if (columns < 4 || editor.length >= total - 5) {
+			this.graphSource?.(false);
+			this.graphClock?.(false);
+			this.graphAnimator?.settled();
 			this.conversationTop = this.conversationHeight = this.conversationWidth = this.upperTop = this.upperHeight = 0;
 			this.dividerRow = this.splitStart = this.splitEnd = this.columnSplitStart = this.columnSplitEnd = -1;
 			const nativeEditor = this.options.editor.render(columns);
@@ -1273,18 +1275,14 @@ export class WorkbenchComponent extends Container {
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		// The graph is earned like the work area: wanted (neither it nor the left pane hidden, wide enough for
-		// two panes) and with something to draw. It is composed once per frame; the inspector and the zone both
-		// read it. The roster is composed on first use by the left pane's fit rule.
-		if (!this.leftPaneHidden && !this.graphHidden && this.graphSource && columns >= SIDE_BY_SIDE_MIN_COLUMNS) {
-			const model = this.graphSource();
-			if (model && graphHasContent(model)) this.frameGraphModel = model;
-		}
-		// Title strip, divider, conversation header, three conversation rows, the live row and the POV
-		// row stay; the editor's rendering already carries its own two rules.
+		const model = this.graphSource?.(
+			!this.leftPaneHidden && !this.graphHidden && columns >= SIDE_BY_SIDE_MIN_COLUMNS,
+		);
+		if (model && graphHasContent(model)) this.frameGraphModel = model;
 		const dockBudget = Math.max(0, total - editor.length - 8);
-		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
-		const below = (this.options.dockBelow ?? [])
+		const above =
+			dockBudget > 0 ? this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget) : [];
+		const below = (dockBudget > above.length ? (this.options.dockBelow ?? []) : [])
 			.flatMap((component) => component.render(inner))
 			.slice(0, Math.max(0, dockBudget - above.length));
 		// The status band, the input and the status line are one panel on the surface tone, edge to edge and
