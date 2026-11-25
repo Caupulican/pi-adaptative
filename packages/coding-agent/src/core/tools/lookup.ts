@@ -163,7 +163,14 @@ function boundSection(
 	outcome: NestedCallOutcome,
 	capBytes: number,
 ): { text: string; continuation?: string } {
-	const cut = truncateHead(outcome.text, { maxBytes: capBytes, maxLines: DEFAULT_MAX_LINES });
+	// The requested range is complete. A standalone read advertises the rest of the file,
+	// but repeating that footer for every range in a batch wastes space and can suggest it was clipped.
+	const footer = outcome.completeReadRangeFooter;
+	const text =
+		outcome.status === "ok" && footer
+			? outcome.text.slice(0, footer.start) + outcome.text.slice(footer.end)
+			: outcome.text;
+	const cut = truncateHead(text, { maxBytes: capBytes, maxLines: DEFAULT_MAX_LINES });
 	if (!cut.truncated) return { text: cut.content };
 	const continuation = call.continuation(cut.outputLines, outcome);
 	const notice = `[cut: ${cut.outputLines} of ${cut.totalLines} lines shown (${formatSize(cut.outputBytes)} of ${formatSize(cut.totalBytes)}); ${continuation}]`;

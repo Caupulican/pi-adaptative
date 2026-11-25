@@ -39,6 +39,8 @@ export interface ReadToolDetails {
 	nextOffset?: number;
 	/** Consecutive source lines at the start of the returned text, before any footer. */
 	sourceLines?: { first: number; count: number };
+	/** The informational footer after a fully satisfied explicit range, in UTF-16 units. */
+	completeRangeFooter?: { start: number; end: number };
 	truncated?: true;
 	truncation?: TruncationResult;
 	/** Present for `mode: "outline"`. */

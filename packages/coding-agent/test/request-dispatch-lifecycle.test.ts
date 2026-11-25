@@ -216,6 +216,18 @@ it("retries an interrupted parent wake after an unrelated assistant answer and s
 			),
 		);
 		const wake = manager.beginParentInputWake()!;
+		expect(wake.content).toContain("pending-background-result");
+		expect(wake.content).not.toContain(wake.inputs[0]!.payloadDigest);
+		const entry = manager.getEntry(wake.entryId);
+		if (entry?.type !== "custom_message") throw new Error("Expected a durable wake.");
+		const legacyContent = `[Parent input wake ${wake.wakeId}]\nRespond to this detached batch of background inputs in the preceding canonical history. It does not continue any active goal.\n${JSON.stringify(wake.inputs)}`;
+		expect(
+			parentWakeOf({
+				...entry,
+				content: legacyContent,
+				details: { version: 1, wakeId: wake.wakeId, inputs: wake.inputs, detached: true },
+			})?.content,
+		).toBe(legacyContent);
 		const finish = (requestId: string, stopReason: "error" | "stop", text: string) => {
 			const answer = manager.appendMessage({
 				role: "assistant",

@@ -2315,7 +2315,7 @@ export class SessionManager {
 				payloadDigest: input.metadata.payloadDigest,
 			}));
 			const wakeId = createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
-			const details = { version: 1, wakeId, inputs, detached: true };
+			const details = { version: 2, wakeId, inputs, detached: true };
 			const now = new Date().toISOString();
 			this._appendParentMessage(
 				createCustomMessage(PARENT_INPUT_WAKE_CUSTOM_TYPE, parentWakeContent(wakeId, inputs), false, details, now),

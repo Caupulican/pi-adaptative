@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AssistantMessage, createEmptyUsage, type UserMessage } from "@caupulican/pi-ai";
 import { expect, it } from "vitest";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "../src/core/background-tool-handoff-text.ts";
 import { recordLiveWorkerHandoff, recordLiveWorkerReport } from "../src/core/delegation/worker-handoff-provenance.ts";
 import { ContinuousChatHost } from "../src/core/memory/continuous-chat-host.ts";
 import { CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE } from "../src/core/memory/continuous-chat-ingest.ts";
@@ -118,6 +119,33 @@ it("proves two ordered work reports against the pinned chat view and revokes the
 		expect(proof?.work?.isCurrent()).toBe(false);
 		expect(source.readLiveHandoffAttempts?.(handoff)).toBeUndefined();
 		expect(prove()).toBeUndefined();
+
+		const terminalNotice = (records: readonly { toolCallId: string; status: string }[]) => {
+			const content = "A background tool finished.";
+			const details = { records };
+			const message = createCustomMessage(
+				BACKGROUND_TOOL_COMPLETION_TYPE,
+				content,
+				true,
+				details,
+				new Date().toISOString(),
+			);
+			manager.appendCustomMessageEntry(message.customType, content, true, details, message);
+			manager.flushBufferedEntries();
+			return message;
+		};
+		const complete = { toolCallId: "test-call", status: "completed" };
+		const terminal = terminalNotice([complete]);
+		expect(source.readLiveTerminalReceipt?.(terminal)).toEqual(["test-call"]);
+		expect(source.readLiveTerminalReceipt?.({ ...terminal, content: "Edited result." })).toBeUndefined();
+		expect(source.readLiveTerminalReceipt?.(terminalNotice([complete, complete]))).toBeUndefined();
+		expect(
+			source.readLiveTerminalReceipt?.(
+				terminalNotice([complete, { toolCallId: "still-running", status: "running" }]),
+			),
+		).toBeUndefined();
+		manager.branch(parent);
+		expect(source.readLiveTerminalReceipt?.(terminal)).toBeUndefined();
 	} finally {
 		closing.abort();
 		try {

@@ -2,7 +2,7 @@
 
 import { messageContentEpoch, messageContentRevision } from "../../kernel/message-revision.ts";
 
-export const MAX_RETAINED_MESSAGES = 128;
+export const MAX_RETAINED_MESSAGES = 256;
 // Durable, sanitized, planned and provider copies plus the carried and transient records they read.
 const MAX_DEPENDENCIES = MAX_RETAINED_MESSAGES * 8;
 

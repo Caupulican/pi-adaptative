@@ -55,6 +55,7 @@ export function replayableAliasLegend(
 export function replayableBodyAliases(
 	messages: readonly AgentMessage[],
 	transient: boolean,
+	retainTerminalReceipt?: (message: AgentMessage) => boolean,
 ): PathAliasLegendEntry[] | undefined {
 	const entries: PathAliasLegendEntry[] = [];
 	for (const message of messages) {
@@ -65,6 +66,7 @@ export function replayableBodyAliases(
 				for (const alias of aliases) entries.push(alias);
 				continue;
 			}
+			if (retainTerminalReceipt?.(message)) continue;
 		}
 		if (transient || (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult"))
 			return undefined;

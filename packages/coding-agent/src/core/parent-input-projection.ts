@@ -4,11 +4,7 @@ import { messageHistoryVersion } from "../kernel/message-revision.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { VersionedMessageFilter } from "../kernel/prefix-fold.ts";
 import { isContextPlanDispatchCurrent } from "../kernel/provider-request-planner.ts";
-import {
-	parentInputMetadataOfMessage,
-	parentNoteMarker,
-	parentWakeContent,
-} from "../kernel/session/parent-input-ledger.ts";
+import { parentInputMetadataOfMessage, parentNoteMarker } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 
 /**
@@ -132,7 +128,7 @@ export function projectParentInputs(
 						...projected,
 						{
 							role: "user" as const,
-							content: parentWakeContent(wake.wakeId, wake.inputs),
+							content: wake.content,
 							timestamp: tail.timestamp,
 						},
 					]

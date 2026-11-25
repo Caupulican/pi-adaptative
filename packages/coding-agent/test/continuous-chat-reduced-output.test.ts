@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { continuousChatNoCallNode } from "../src/core/memory/continuous-chat-compaction.ts";
 import {
@@ -11,6 +14,7 @@ import {
 } from "../src/core/memory/continuous-chat-navigation.ts";
 import { reductionZoomDetails } from "../src/core/memory/continuous-chat-tool-output.ts";
 import { createLookupToolDefinition } from "../src/core/tools/lookup.ts";
+import { createReadTool } from "../src/core/tools/read.ts";
 import { readSchema } from "../src/core/tools/schemas/read.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 
@@ -152,6 +156,92 @@ describe("reduced tool output in continuous chat", () => {
 		expect(capture("lookup", { sections: [{ label: "old", truncated: true }] }, "old").toolOutput?.sections).toEqual([
 			{ index: 1, label: "old", truncated: true },
 		]);
+	});
+
+	it("omits a completed read range footer but preserves tool and result-hook diagnostics", async () => {
+		const body = "first line\nsecond line";
+		const footer = "\n\n[8 more lines in file. Use offset=3 to continue.]";
+		const note = "\n\n[Decoded using UTF-16.]";
+		const lookup = wrapToolDefinition(
+			createLookupToolDefinition({
+				resolveTool: () => ({
+					name: "read",
+					label: "read",
+					description: "read",
+					parameters: readSchema,
+					execute: async () => ({
+						content: [{ type: "text", text: body + footer + note }],
+						details: {
+							sourceLines: { first: 1, count: 2 },
+							completeRangeFooter: { start: body.length, end: body.length + footer.length },
+						},
+					}),
+				}),
+				admit: async (_parent, child) => ({
+					kind: "admitted",
+					start() {},
+					abandon() {},
+					consume() {},
+					finish: async (result, isError) =>
+						child.args.path === "rewritten"
+							? { ...result, content: [{ type: "text", text: "diagnostic: keep this" }], isError }
+							: { ...result, isError: child.args.path === "failed" || isError },
+				}),
+			}),
+		);
+		const result = await lookup.execute("batch", {
+			requests: ["complete", "rewritten", "failed"].map((path) => ({ read: { path, limit: 2 } })),
+		});
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: `[1] read complete\n${body}${note}\n\n[2] read rewritten\ndiagnostic: keep this\n\n[3] read failed\n${body}${footer}${note}`,
+			},
+		]);
+		expect(result.details?.sections.map(({ status, truncated }) => [status, truncated])).toEqual([
+			["ok", false],
+			["ok", false],
+			["error", false],
+		]);
+	});
+
+	it("preserves encoding disclosures and projected transcript ranges in native lookup reads", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-lookup-range-"));
+		try {
+			const transcriptDir = join(cwd, ".pi", "agent", "sessions");
+			mkdirSync(transcriptDir, { recursive: true });
+			const transcript = join(transcriptDir, "fixture.jsonl");
+			writeFileSync(
+				transcript,
+				["First question", "Second question", "Later question"]
+					.map((content) => JSON.stringify({ type: "message", message: { role: "user", content } }))
+					.join("\n"),
+			);
+			writeFileSync(join(cwd, "encoded.txt"), "café\nsecond line\nlater line", "latin1");
+			const read = createReadTool(cwd, { fileEncodings: [{ glob: "encoded.txt", encoding: "latin1" }] });
+			const lookup = wrapToolDefinition(
+				createLookupToolDefinition({
+					resolveTool: () => read,
+					admit: async () => ({
+						kind: "admitted",
+						start() {},
+						abandon() {},
+						consume() {},
+						finish: async (result, isError) => ({ ...result, isError }),
+					}),
+				}),
+			);
+			const result = await lookup.execute("batch", {
+				requests: [{ read: { path: "encoded.txt", limit: 2 } }, { read: { path: transcript, limit: 2 } }],
+			});
+			const output = result.content[0];
+			if (output?.type !== "text") throw new Error("Expected text from lookup.");
+			expect(output.text).toMatch(/café\nsecond line\n\[decoded as .+ per settings fileEncodings\]/);
+			expect(output.text).toContain("Pi session transcript");
+			expect(output.text).toContain("USER Second question");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("renders the same bounded range before and after publishing a tool leaf and keeps exact message zoom", async () => {

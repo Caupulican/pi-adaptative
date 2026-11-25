@@ -1091,6 +1091,16 @@ function buildReadToolDefinition(
 										? `${totalFileLines - (startLine + userLimitedLines)} more lines in file`
 										: "More content remains";
 								outputText = `${truncation.content}\n\n[${remaining}. Use offset=${nextOffset} to continue.]`;
+								if (
+									!projectSessionTranscript &&
+									userLimitedLines !== undefined &&
+									truncation.outputLines >= userLimitedLines
+								) {
+									details = {
+										...details,
+										completeRangeFooter: { start: truncation.content.length, end: outputText.length },
+									};
+								}
 							} else {
 								// No truncation and no remaining content.
 								outputText = truncation.content;

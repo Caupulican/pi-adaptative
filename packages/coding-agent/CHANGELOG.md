@@ -7,6 +7,8 @@
 - Workbench separates current failures from retained tool errors outside the current turn. The retained count is not a warning about unresolved work.
 - Watch guidance distinguishes process IDs from background task IDs that already wake the session. Python tool calls and rejected Git log limits now give clearer instructions.
 - Answer verification reads completed background checks and recognizes more static check chains. Missing evidence produces a warning without launching an automatic rerun or model consultation. Confirmed contradictions still trigger a correction.
+- Continuous chat can reuse a larger exact prompt prefix across owner turns and verified background tool completions, within the model's compaction budget.
+- Batched lookups omit redundant continuation footers for completed read ranges. Detached background wake prompts omit internal storage IDs and payload hashes.
 
 ## [0.105.0] - 2026-11-25
 

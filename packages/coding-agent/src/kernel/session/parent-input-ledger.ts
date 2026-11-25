@@ -465,6 +465,8 @@ export interface ParentInputWake {
 	readonly entryId: string;
 	readonly wakeId: string;
 	readonly inputs: readonly ParentWakeInput[];
+	/** Exact accepted text, including for a wake recovered from an older transcript. */
+	readonly content: string;
 	readonly completed?: {
 		readonly requestId: string;
 		readonly assistantMessageEntryId: string;
@@ -473,7 +475,7 @@ export interface ParentInputWake {
 }
 
 export function parentWakeContent(wakeId: string, inputs: readonly ParentWakeInput[]): string {
-	return `${parentWakeMarker(wakeId)}\nRespond to this detached batch of background inputs in the preceding canonical history. It does not continue any active goal.\n${JSON.stringify(inputs)}`;
+	return `${parentWakeMarker(wakeId)}\nRespond to these background deliveries above without continuing a goal: ${JSON.stringify(inputs.map(({ deliveryId }) => deliveryId))}`;
 }
 
 export function parentWakeMarker(wakeId: string): string {
@@ -485,7 +487,7 @@ export function parentWakeOf(entry: SessionEntry): ParentInputWake | undefined {
 	const data = entry.details;
 	if (
 		!isPlainRecord(data) ||
-		data.version !== 1 ||
+		(data.version !== 1 && data.version !== 2) ||
 		data.detached !== true ||
 		typeof data.wakeId !== "string" ||
 		!/^[a-f0-9]{64}$/.test(data.wakeId) ||
@@ -495,13 +497,13 @@ export function parentWakeOf(entry: SessionEntry): ParentInputWake | undefined {
 	)
 		throw new Error("Parent wake manifest requires inspection.");
 	const inputs = parseParentInputReferences(data.inputs);
-	if (
-		createHash("sha256").update(JSON.stringify(inputs)).digest("hex") !== data.wakeId ||
-		typeof entry.content !== "string" ||
-		entry.content !== parentWakeContent(data.wakeId, inputs)
-	)
+	const expected =
+		data.version === 1
+			? `${parentWakeMarker(data.wakeId)}\nRespond to this detached batch of background inputs in the preceding canonical history. It does not continue any active goal.\n${JSON.stringify(inputs)}`
+			: parentWakeContent(data.wakeId, inputs);
+	if (createHash("sha256").update(JSON.stringify(inputs)).digest("hex") !== data.wakeId || entry.content !== expected)
 		throw new Error("Parent wake content does not match its manifest.");
-	return { entryId: entry.id, wakeId: data.wakeId, inputs };
+	return { entryId: entry.id, wakeId: data.wakeId, inputs, content: entry.content };
 }
 
 /** SessionManager owns this incremental projection; encoded bodies are verified once per append/load. */

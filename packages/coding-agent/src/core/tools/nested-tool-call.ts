@@ -123,6 +123,7 @@ interface NestedOutputEvidence {
 	producer?: ToolOutputFidelity;
 	readContinuation?: string;
 	readSourceLines?: ReadToolDetails["sourceLines"];
+	completeReadRangeFooter?: ReadToolDetails["completeRangeFooter"];
 }
 
 export interface NestedCallOutcome extends NestedOutputEvidence {
@@ -167,6 +168,7 @@ function finalizedEvidence(
 	details: unknown,
 	content: AgentToolResult<unknown>["content"],
 	originalText: string | undefined,
+	originalRangeFooter: unknown,
 ): NestedOutputEvidence {
 	const producer = toolOutputFidelityFromResult(tool, details);
 	const evidence: NestedOutputEvidence = producer ? { producer } : {};
@@ -187,6 +189,18 @@ function finalizedEvidence(
 		return evidence;
 	const continuation = readOutputContinuation(details);
 	if (continuation) evidence.readContinuation = continuation;
+	const footer = details.completeRangeFooter;
+	if (
+		content.length === 1 &&
+		footer === originalRangeFooter &&
+		isPlainRecord(footer) &&
+		isNonNegativeSafeInteger(footer.start) &&
+		isNonNegativeSafeInteger(footer.end) &&
+		footer.start < footer.end &&
+		footer.end <= originalText.length
+	) {
+		evidence.completeReadRangeFooter = { start: footer.start, end: footer.end };
+	}
 	const source = details.sourceLines;
 	if (
 		isPlainRecord(source) &&
@@ -286,6 +300,7 @@ export async function startNestedCall(
 					result = { content: [{ type: "text", text: thrown.text }], details: undefined, isError: true };
 				}
 				const originalText = result.content[0]?.type === "text" ? result.content[0].text : undefined;
+				const originalRangeFooter = isPlainRecord(result.details) ? result.details.completeRangeFooter : undefined;
 				let content = result.content;
 				let isError = thrown !== undefined || result.isError === true;
 				let hookNote = "";
@@ -293,7 +308,7 @@ export async function startNestedCall(
 				try {
 					const finished = await admission.finish(result, isError, signal);
 					({ content, isError } = finished);
-					evidence = finalizedEvidence(toolName, finished.details, content, originalText);
+					evidence = finalizedEvidence(toolName, finished.details, content, originalText, originalRangeFooter);
 				} catch (error) {
 					// The operation ran; a failed result hook is told, not turned into a different result.
 					hookNote = `\n[result hooks failed: ${describeError(error)}]`;

@@ -6,10 +6,15 @@
  */
 
 import { existsSync } from "node:fs";
-import type { ParentInputConsumptionSource } from "../../kernel/session/parent-input-ledger.ts";
+import {
+	type ParentInputConsumptionSource,
+	parentInputOriginalDetails,
+} from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionEntriesPersistedEvent } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "../background-tool-handoff-text.ts";
+import { backgroundToolInvocationObservations } from "../background-tool-task-controller.ts";
 import { liveWorkerHandoffOf } from "../delegation/worker-handoff-provenance.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { ContinuousChatCompactionAdapterPort } from "./continuous-chat-compaction-adapter.ts";
@@ -171,6 +176,27 @@ export class ContinuousChatHost {
 				return { handle, stateText: renderContinuousChatTurnState(handle) };
 			},
 			allowsHistoryTokens,
+			readLiveTerminalReceipt: (message) => {
+				if (this.closed || sessionId() !== this.options.sessionId || message.role !== "custom") return undefined;
+				if (message.customType !== BACKGROUND_TOOL_COMPLETION_TYPE || typeof message.content !== "string")
+					return undefined;
+				const entry = this.options.readLiveBranchMessageEntry?.(message);
+				if (
+					entry?.type !== "custom_message" ||
+					entry.customType !== message.customType ||
+					entry.details !== message.details ||
+					entry.content !== message.content
+				)
+					return undefined;
+				const observations = backgroundToolInvocationObservations(
+					{
+						customType: entry.customType,
+						details: parentInputOriginalDetails(entry) ?? entry.details,
+					},
+					{ requireCompleteBatch: true },
+				);
+				return observations.length > 0 ? observations.map(({ toolCallId }) => toolCallId) : undefined;
+			},
 			readLiveHandoffAttempts: (message) => {
 				if (this.closed || sessionId() !== this.options.sessionId || message.role !== "custom") return undefined;
 				const handoff = liveWorkerHandoffOf(message.details, message.content);

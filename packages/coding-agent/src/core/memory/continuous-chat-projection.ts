@@ -333,6 +333,7 @@ export function createContinuousChatPlanWrapper(
 		? new ContinuousChatProviderHistory({
 				proveContinuation: source.proveContinuation,
 				readLiveHandoffAttempts: source.readLiveHandoffAttempts,
+				readLiveTerminalReceipt: source.readLiveTerminalReceipt,
 				allowsHistoryTokens: source.allowsHistoryTokens,
 			})
 		: undefined;
@@ -418,11 +419,11 @@ export function createContinuousChatPlanWrapper(
 					head: head.records,
 					turnMessages: plan.messages,
 					legend: frameLegend,
-					bodyAliases: (handoff) => {
-						if (!handoff) return replayableBodyAliases(plan.messages, false);
+					bodyAliases: (handoff, retainTerminalReceipt) => {
+						if (!handoff) return replayableBodyAliases(plan.messages, false, retainTerminalReceipt);
 						const first = plan.messages[0];
 						if (!first || (request.sourceMessage?.(first) ?? first) !== handoff) return undefined;
-						return replayableBodyAliases(plan.messages.slice(1), false);
+						return replayableBodyAliases(plan.messages.slice(1), false, retainTerminalReceipt);
 					},
 					verifyAliases: plan.verifyPathAliases,
 				},

@@ -10,6 +10,7 @@ import {
 import { observeHistoryWork, providerMessagePrefix, responsesInputPrefix } from "@caupulican/pi-ai/history-work";
 import { describe, expect, it } from "vitest";
 import { convertResponsesMessages } from "../../ai/src/providers/openai-responses-shared.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "../src/core/background-tool-handoff-text.ts";
 import {
 	type PathAliasLegendEntry,
 	renderPathAliasLegend,
@@ -87,6 +88,7 @@ function fixture(certified = false) {
 		handoff: undefined as AgentMessage | undefined,
 		handoffValid: true,
 		handoffRead: undefined as ((message: AgentMessage) => boolean) | undefined,
+		terminalReceipt: undefined as ((message: AgentMessage) => readonly string[] | undefined) | undefined,
 		beforeObserve: () => {},
 		budget: 48_000,
 		knowledge: "current fact",
@@ -122,6 +124,7 @@ function fixture(certified = false) {
 			controls.handoffValid && (controls.handoffRead?.(message) ?? controls.handoff === message)
 				? ["attempt"]
 				: undefined,
+		readLiveTerminalReceipt: (message) => controls.terminalReceipt?.(message),
 		allowsHistoryTokens: (_model, tokens) => tokens <= controls.budget,
 	});
 	const config: AgentLoopConfig = {
@@ -208,6 +211,73 @@ function fixture(certified = false) {
 }
 
 describe("continuous chat at the native provider boundary", () => {
+	it("keeps an owner prefix beyond the former token and row ceilings when it fits the active budget", async () => {
+		const f = fixture(true);
+		f.controls.budget = 90_000;
+		await f.begin(`Inspect this evidence:\n${"data ".repeat(42_000)}`);
+		const calls = Array.from({ length: 130 }, (_, index) => ({
+			type: "toolCall" as const,
+			name: "bash",
+			id: `tool-${index}`,
+			arguments: {},
+		}));
+		await f.send(calls);
+		for (const call of calls)
+			f.source.messages.push({
+				role: "toolResult",
+				toolName: call.name,
+				toolCallId: call.id,
+				isError: false,
+				content: [{ type: "text", text: "checked" }],
+				timestamp: 10,
+			});
+		await f.send();
+		const previous = f.wires.at(-1)!.messages;
+		expect(previous.length).toBeGreaterThan(128);
+		await f.begin("Continue using that evidence.");
+		await f.send();
+		expect(f.wires.at(-1)!.messages.slice(0, previous.length)).toEqual(previous);
+	});
+
+	it.each(["current", "edited", "replayed", "revoked"] as const)(
+		"checks exact background terminal custody before reusing a prefix (%s)",
+		async (scenario) => {
+			const f = fixture();
+			await f.begin("Start a background check.");
+			await f.send();
+			const previous = f.wires[0]!.messages;
+			const receipt = (time: number) =>
+				createCustomMessage(
+					BACKGROUND_TOOL_COMPLETION_TYPE,
+					"The background check finished.",
+					true,
+					{},
+					new Date(time).toISOString(),
+				);
+			const first = receipt(3);
+			const replay = receipt(4);
+			let valid = true;
+			f.controls.terminalReceipt = (message) =>
+				valid && (message === first || message === replay) ? ["call"] : undefined;
+			if (scenario === "edited")
+				f.controls.transform = async (messages) => [{ ...first, content: "Changed result." }, ...messages.slice(1)];
+			await f.begin(first);
+			await f.send();
+			const accepted = f.wires[1]!.messages;
+			if (scenario === "edited") {
+				expect(JSON.stringify(accepted)).not.toContain("Start a background check.");
+				return;
+			}
+			expect(accepted.slice(0, previous.length)).toEqual(previous);
+			valid = scenario !== "revoked";
+			await f.begin(scenario === "replayed" ? replay : "Summarize the check.");
+			await f.send();
+			const next = f.wires[2]!.messages;
+			if (scenario === "current") expect(next.slice(0, accepted.length)).toEqual(accepted);
+			else expect(JSON.stringify(next)).not.toContain("Start a background check.");
+		},
+	);
+
 	it.each(["unchanged", "cleared on wire", "revoked between turns", "authority changed"] as const)(
 		"retains a learned skill header without moving its accepted wire record when %s",
 		async (variant) => {

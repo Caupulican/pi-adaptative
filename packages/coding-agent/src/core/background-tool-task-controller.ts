@@ -425,7 +425,6 @@ function terminalRecordDeliveryIdentity(value: unknown): string | undefined {
 
 /** One included record's body in the wake-up: its final output inline, or the wait hint that replaces it. */
 interface TerminalOutputProjection {
-	taskId: string;
 	statusLine: string;
 	/** UTF-8 byte length of the record's final output; 0 when the task produced none. */
 	outputBytes: number;
@@ -458,7 +457,6 @@ function projectTerminalOutputs(
 		const output = record.output ?? "";
 		const outputBytes = utf8Bytes(output);
 		return {
-			taskId: record.taskId,
 			statusLine,
 			output,
 			outputBytes,
@@ -476,34 +474,25 @@ function projectTerminalOutputs(
 		if (candidate.omissionLine) total += utf8Bytes(candidate.omissionLine) + 1;
 	}
 	return candidates.map((candidate) => {
-		const { taskId, statusLine, output, outputBytes, omissionLine } = candidate;
-		if (!omissionLine) return { taskId, statusLine, outputBytes };
+		const { statusLine, output, outputBytes, omissionLine } = candidate;
+		if (!omissionLine) return { statusLine, outputBytes };
 		const delta = outputBytes - utf8Bytes(omissionLine);
-		if (total + delta > MAX_TERMINAL_MESSAGE_BYTES) return { taskId, statusLine, outputBytes, omissionLine };
+		if (total + delta > MAX_TERMINAL_MESSAGE_BYTES) return { statusLine, outputBytes, omissionLine };
 		total += delta;
-		return { taskId, statusLine, outputBytes, inlineOutput: output };
+		return { statusLine, outputBytes, inlineOutput: output };
 	});
 }
 
-function terminalMessageTailLines(wakeParent: boolean): string[] {
-	return wakeParent
-		? [
-				"Parent woke. Results above are final. Call tool_task action=wait only for a task marked output omitted; never poll.",
-			]
-		: ["Parent was not woken because the owning goal is no longer active. Wait for explicit user input."];
-}
-
-function terminalOutputProjectionsFor(
-	records: readonly BackgroundToolTaskRecord[],
-	wakeParent: boolean,
-): { included: readonly BackgroundToolTaskRecord[]; omitted: number; projections: TerminalOutputProjection[] } {
+function terminalOutputProjectionsFor(records: readonly BackgroundToolTaskRecord[], wakeParent: boolean) {
 	const included = records.slice(0, MAX_TERMINAL_HANDOFF_RECORDS);
 	const omitted = records.length - included.length;
 	const header = "Background tool terminal handoff:";
-	const tail = terminalMessageTailLines(wakeParent);
+	const tail = wakeParent
+		? "Parent woke. Final results. Use tool_task action=wait only for omitted output. Never poll."
+		: "Parent was not woken because the owning goal is no longer active. Wait for explicit user input.";
 	const overflowLine = omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : [];
-	const reservedBytes = [header, ...overflowLine, ...tail].reduce((sum, line) => sum + utf8Bytes(line) + 1, 0);
-	return { included, omitted, projections: projectTerminalOutputs(included, reservedBytes) };
+	const reservedBytes = [header, ...overflowLine, tail].reduce((sum, line) => sum + utf8Bytes(line) + 1, 0);
+	return { included, header, overflowLine, tail, projections: projectTerminalOutputs(included, reservedBytes) };
 }
 
 /**
@@ -515,14 +504,14 @@ export function backgroundToolTerminalDeliveredTaskIds(
 	records: readonly BackgroundToolTaskRecord[],
 	options?: { wakeParent?: boolean },
 ): string[] {
-	return deliveredBackgroundToolTerminals(records, options?.wakeParent ?? true).map((record) => record.taskId);
+	const { projections } = terminalOutputProjectionsFor(records, options?.wakeParent ?? true);
+	return deliveredBackgroundToolTerminals(records, projections).map((record) => record.taskId);
 }
 
 function deliveredBackgroundToolTerminals(
 	records: readonly BackgroundToolTaskRecord[],
-	wakeParent: boolean,
+	projections: readonly TerminalOutputProjection[],
 ): BackgroundToolTerminalIdentity[] {
-	const { projections } = terminalOutputProjectionsFor(records, wakeParent);
 	return projections.flatMap((projection, index) => {
 		const record = records[index];
 		return projection.omissionLine === undefined && record?.completedAt
@@ -540,11 +529,45 @@ export function projectBackgroundToolTerminalDelivery(
 	records: readonly BackgroundToolTaskRecord[],
 	options?: { wakeParent?: boolean },
 ): { message: BackgroundToolTerminalMessage; receipt: BackgroundToolTerminalDeliveryReceipt } {
+	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
 	const wakeParent = options?.wakeParent ?? true;
-	const message = createBackgroundToolTerminalMessage(records, { wakeParent });
-	const deliveredTerminals = wakeParent ? deliveredBackgroundToolTerminals(records, wakeParent) : [];
+	const { included, header, overflowLine, tail, projections } = terminalOutputProjectionsFor(records, wakeParent);
+	const deliveredTerminals = wakeParent ? deliveredBackgroundToolTerminals(included, projections) : [];
+	const projected = included.map((record, index) => {
+		const verification = retainedBackgroundToolVerification(record, record.taskId);
+		const projection = projections[index]!;
+		return {
+			taskId: record.taskId,
+			toolCallId: record.toolCallId,
+			status: record.status,
+			toolName: record.toolName,
+			outputBytes: projection.outputBytes,
+			inlined: projection.omissionLine === undefined,
+			...(record.artifactId ? { artifactId: record.artifactId } : {}),
+			...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
+			...(record.executionContext ? { executionContext: record.executionContext } : {}),
+			...(verification ? { piVerification: verification } : {}),
+		};
+	});
 	return {
-		message,
+		message: {
+			customType: BACKGROUND_TOOL_COMPLETION_TYPE,
+			content: [
+				header,
+				...projections.flatMap(({ statusLine, inlineOutput, omissionLine }) => [
+					statusLine,
+					...(inlineOutput !== undefined ? [inlineOutput] : []),
+					...(omissionLine !== undefined ? [omissionLine] : []),
+				]),
+				...overflowLine,
+				tail,
+			].join("\n"),
+			display: true,
+			details: {
+				records: projected,
+				piVerificationEvents: projected.flatMap((record) => (record.piVerification ? [record.piVerification] : [])),
+			},
+		},
 		receipt: { deliveredTaskIds: deliveredTerminals.map((record) => record.taskId), deliveredTerminals },
 	};
 }
@@ -553,45 +576,7 @@ export function createBackgroundToolTerminalMessage(
 	records: readonly BackgroundToolTaskRecord[],
 	options?: { wakeParent?: boolean },
 ): BackgroundToolTerminalMessage {
-	if (records.length === 0) throw new TypeError("Background tool terminal handoff requires at least one record");
-	const wakeParent = options?.wakeParent ?? true;
-	const { included, omitted, projections } = terminalOutputProjectionsFor(records, wakeParent);
-	const projected = included.map((record, index) => {
-		const verification = retainedBackgroundToolVerification(record, record.taskId);
-		// The projection decided what rode along; measurement reports that same decision instead of
-		// re-deriving it, so the two can never disagree. `projections` maps 1:1 over `included`.
-		const projection = projections[index];
-		return {
-			taskId: record.taskId,
-			toolCallId: record.toolCallId,
-			status: record.status,
-			toolName: record.toolName,
-			outputBytes: projection?.outputBytes ?? utf8Bytes(record.output ?? ""),
-			inlined: projection?.omissionLine === undefined,
-			...(record.artifactId ? { artifactId: record.artifactId } : {}),
-			...(record.piToolInvocation ? { piToolInvocation: retainedToolInvocation(record) } : {}),
-			...(record.executionContext ? { executionContext: record.executionContext } : {}),
-			...(verification ? { piVerification: verification } : {}),
-		};
-	});
-	return {
-		customType: BACKGROUND_TOOL_COMPLETION_TYPE,
-		content: [
-			"Background tool terminal handoff:",
-			...projections.flatMap((projection) => [
-				projection.statusLine,
-				...(projection.inlineOutput !== undefined ? [projection.inlineOutput] : []),
-				...(projection.omissionLine !== undefined ? [projection.omissionLine] : []),
-			]),
-			...(omitted > 0 ? [`- ${omitted} additional terminal tool task(s) omitted.`] : []),
-			...terminalMessageTailLines(wakeParent),
-		].join("\n"),
-		display: true,
-		details: {
-			records: projected,
-			piVerificationEvents: projected.flatMap((record) => (record.piVerification ? [record.piVerification] : [])),
-		},
-	};
+	return projectBackgroundToolTerminalDelivery(records, options).message;
 }
 
 function renderCompletionOutput(completion: BackgroundToolCallCompletion): string {
@@ -669,9 +654,10 @@ function cloneUsage(value: unknown): Usage | undefined {
 	};
 }
 
-/** Bounded projection for receipt consumers; never infer execution from rendered notification prose. */
+/** Complete batches are required for replaying their whole body. Evidence readers can recover individual records. */
 export function backgroundToolInvocationObservations(
 	message: Pick<CustomMessage, "customType" | "details">,
+	{ requireCompleteBatch = false } = {},
 ): ToolInvocationObservation[] {
 	if (message.customType !== BACKGROUND_TOOL_COMPLETION_TYPE || !isRecordObject(message.details)) return [];
 	const records = ownDataValue(message.details, "records");
@@ -679,12 +665,21 @@ export function backgroundToolInvocationObservations(
 	const observations: ToolInvocationObservation[] = [];
 	for (let index = 0; index < records.length; index++) {
 		const record = ownDataValue(records, String(index));
-		if (!isRecordObject(record)) continue;
+		if (!isRecordObject(record)) {
+			if (requireCompleteBatch) return [];
+			continue;
+		}
 		const toolCallId = ownDataValue(record, "toolCallId");
 		const status = ownDataValue(record, "status");
-		if (typeof toolCallId !== "string" || (status !== "completed" && status !== "failed" && status !== "canceled"))
+		if (typeof toolCallId !== "string" || (status !== "completed" && status !== "failed" && status !== "canceled")) {
+			if (requireCompleteBatch) return [];
 			continue;
+		}
 		observations.push({ toolCallId, isError: status === "failed", details: record });
+	}
+	if (requireCompleteBatch) {
+		const ids = observations.map(({ toolCallId }) => toolCallId);
+		if (ids.some((id) => id.length === 0 || id.length > 256) || new Set(ids).size !== ids.length) return [];
 	}
 	return observations;
 }
