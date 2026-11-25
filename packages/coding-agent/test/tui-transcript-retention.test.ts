@@ -1,5 +1,5 @@
 import { Container, Text } from "@caupulican/pi-tui";
-import { expect, it } from "vitest";
+import { beforeAll, expect, it } from "vitest";
 import type { AgentMessage } from "../src/kernel/types.ts";
 import {
 	ConversationSnapshotBuilder,
@@ -15,6 +15,9 @@ import {
 	TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS,
 	WithdrawableUserEchoRetention,
 } from "../src/modes/interactive/live-transcript-retention.ts";
+import { initTheme } from "../src/presentation/theme/theme.ts";
+
+beforeAll(() => initTheme("dark"));
 
 function retentionFor(root: Container, streaming?: Text): LiveTranscriptRetention {
 	return new LiveTranscriptRetention({

@@ -89,10 +89,6 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run check
 
-      - name: Machine models
-        if: runner.os == 'Linux'
-        run: node --conditions=pi-source scripts/check-machine-models.mjs --explore
-
       # Deterministic CI: builds are hermetic by default (see
       # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
       # catalogs instead of refetching live pricing that can drift between the release commit
@@ -116,6 +112,10 @@ jobs:
       - name: Dependency fork installation
         if: inputs.release_verification == true
         run: npm run check:sandbox-fork-install
+
+      - name: Machine models
+        if: runner.os == 'Linux'
+        run: node --conditions=pi-source scripts/check-machine-models.mjs --explore
 
       - name: Harness journeys
         run: npm run check:harness-journeys
