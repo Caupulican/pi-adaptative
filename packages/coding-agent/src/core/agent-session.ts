@@ -638,6 +638,7 @@ export class AgentSession {
 		runtimeAdmission: () => this._runtimeAdmission,
 		foregroundRecovery: () => this._foregroundRecovery,
 		foregroundLifecycle: () => this._foregroundLifecycle,
+		queueSessionMutation: (commit) => this.sessionManager.queueMutation(commit),
 		backgroundToolTasks: () => this._backgroundToolTasks,
 		agent: () => this.agent,
 		pendingNextTurnMessages: () => this._pendingNextTurnMessages,

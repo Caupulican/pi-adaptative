@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- An extension notice delivered after runtime reload releases its short foreground claim as part of the ordered commit. An owner prompt waiting on that reload can continue once the generation is available.
+
 ## [0.105.0] - 2026-11-25
 
 ### Breaking Changes

@@ -22,6 +22,7 @@ export interface AgentSessionMessageDeliveryPorts {
 	runtimeAdmission(): SessionRuntimeAdmissionController;
 	foregroundRecovery(): ForegroundRecoveryController;
 	foregroundLifecycle(): ForegroundLifecycleAdapter;
+	queueSessionMutation(commit: () => void): Promise<void>;
 	backgroundToolTasks(): BackgroundToolTaskController;
 	agent(): Agent;
 	pendingNextTurnMessages(): CustomMessage[];
@@ -68,8 +69,8 @@ export class AgentSessionMessageDelivery {
 		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
 		runtimeLease: RuntimeWorkLease,
 	): Promise<void> {
-		if (options?.deliverAs === "nextTurn") {
-			return this.deliverCustomMessage(message, options);
+		if (!options?.triggerTurn || options.deliverAs === "nextTurn") {
+			return this.deliverCustomMessage(message, options, undefined, runtimeLease);
 		}
 		const submissionLease = this.ports.foregroundRecovery().tryAcquireSubmission(runtimeLease);
 		if (!submissionLease) {
@@ -86,6 +87,7 @@ export class AgentSessionMessageDelivery {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined,
 		submissionLease?: ForegroundSubmissionLease,
+		runtimeLease?: RuntimeWorkLease,
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
@@ -97,33 +99,48 @@ export class AgentSessionMessageDelivery {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this.ports.pendingNextTurnMessages().push(appMessage);
-		} else if (
-			this.ports.getSessionWorkState().phase !== "continuation_armed" &&
-			this.ports.getSessionWorkState().foregroundBusy &&
-			!this.ports.foregroundRecovery().ownsSubmission(submissionLease)
-		) {
-			if (options?.deliverAs === "followUp") {
-				this.ports.agent().followUp(appMessage);
-			} else {
-				this.ports.agent().steer(appMessage);
-			}
 		} else if (options?.triggerTurn) {
-			await this.ports.foregroundRecovery().runAgentPrompt(appMessage, submissionLease);
-		} else if (hasRunningBackgroundedToolCall(this.ports.backgroundToolTasks().list())) {
-			// Queue rather than splice while a backgrounded call is outstanding, exactly like the
-			// isBusy branch above -- see hasRunningBackgroundedToolCall for why lease ownership is not
-			// sufficient here. Scoped to the no-trigger case; triggerTurn:true is handled above.
-			if (options?.deliverAs === "followUp") {
-				this.ports.agent().followUp(appMessage);
-			} else {
-				this.ports.agent().steer(appMessage);
-			}
+			if (this.shouldQueueForForeground(submissionLease)) this.queueCustomMessage(appMessage, options.deliverAs);
+			else await this.ports.foregroundRecovery().runAgentPrompt(appMessage, submissionLease);
 		} else {
-			await this.ports.foregroundLifecycle().appendMessageBatchAwaitable([{ kind: "custom", message: appMessage }]);
-			this.ports.agent().appendMessage(appMessage);
-			this.ports.emit({ type: "message_start", message: appMessage });
-			this.ports.emit({ type: "message_end", message: appMessage });
+			const deliverAs = options?.deliverAs;
+			await this.ports.queueSessionMutation(() => {
+				runtimeLease?.assertCurrent();
+				const foreground = this.ports.foregroundRecovery();
+				// A deferred reload notice must not reserve the foreground while waiting for an earlier write.
+				// Commit, project and release its short lease in one step before another prompt can claim it.
+				const acquired = runtimeLease && foreground.tryAcquireSubmission(runtimeLease);
+				try {
+					if (
+						this.shouldQueueForForeground(submissionLease ?? acquired) ||
+						hasRunningBackgroundedToolCall(this.ports.backgroundToolTasks().list())
+					) {
+						this.queueCustomMessage(appMessage, deliverAs);
+						return;
+					}
+					this.ports.foregroundLifecycle().appendCustomMessage(appMessage);
+					this.ports.agent().appendMessage(appMessage);
+					this.ports.emit({ type: "message_start", message: appMessage });
+					this.ports.emit({ type: "message_end", message: appMessage });
+				} finally {
+					if (acquired) foreground.releaseSubmission(acquired);
+				}
+			});
 		}
+	}
+
+	private shouldQueueForForeground(submissionLease?: ForegroundSubmissionLease): boolean {
+		const state = this.ports.getSessionWorkState();
+		return (
+			state.phase !== "continuation_armed" &&
+			state.foregroundBusy &&
+			!this.ports.foregroundRecovery().ownsSubmission(submissionLease)
+		);
+	}
+
+	private queueCustomMessage(message: CustomMessage, deliverAs?: "steer" | "followUp"): void {
+		if (deliverAs === "followUp") this.ports.agent().followUp(message);
+		else this.ports.agent().steer(message);
 	}
 
 	async deliverUserMessageWithLease(
