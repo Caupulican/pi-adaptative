@@ -304,48 +304,53 @@ export class SessionTreeNavigator {
 			// an await check. Recheck ownership after reading those values, before writes.
 			if (branchSummaryAbort.signal.aborted) return { cancelled: true, aborted: true };
 
-			// Switch leaf (with or without summary)
-			// Summary is attached at the navigation target position (newLeafId), not the old branch
-			let summaryEntry: BranchSummaryEntry | undefined;
-			let labelTargetId = targetId;
-			if (summaryText) {
-				const separateExtension = summaryUsageReceiptOwned && extensionUsage && hasReportableUsage(extensionUsage);
-				// Create summary at target position (can be null for root)
-				const summaryId = sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					separateExtension ? extensionUsage : summaryUsage,
-					branchSummaryAbort.signal,
-					separateExtension ? undefined : summaryUsageComponents,
-					summaryUsageReceiptOwned && !separateExtension ? true : undefined,
-				);
-				summaryUsageCommitted = true;
-				summaryEntry = sessionManager.getEntry(summaryId) as BranchSummaryEntry;
-				labelTargetId = summaryId;
-			} else if (newLeafId === null) {
-				// No summary, navigating to root - reset leaf
-				sessionManager.resetLeaf();
-			} else {
-				// No summary, navigating to non-root
-				sessionManager.branch(newLeafId);
-			}
+			const summaryEntry = await sessionManager.queueMutation(() => {
+				branchSummaryAbort.signal.throwIfAborted();
+				// Switch leaf (with or without summary)
+				// Summary is attached at the navigation target position (newLeafId), not the old branch
+				let summaryEntry: BranchSummaryEntry | undefined;
+				let labelTargetId = targetId;
+				if (summaryText) {
+					const separateExtension =
+						summaryUsageReceiptOwned && extensionUsage && hasReportableUsage(extensionUsage);
+					// Create summary at target position (can be null for root)
+					const summaryId = sessionManager.branchWithSummary(
+						newLeafId,
+						summaryText,
+						summaryDetails,
+						fromExtension,
+						separateExtension ? extensionUsage : summaryUsage,
+						branchSummaryAbort.signal,
+						separateExtension ? undefined : summaryUsageComponents,
+						summaryUsageReceiptOwned && !separateExtension ? true : undefined,
+					);
+					summaryUsageCommitted = true;
+					summaryEntry = sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+					labelTargetId = summaryId;
+				} else if (newLeafId === null) {
+					// No summary, navigating to root - reset leaf
+					sessionManager.resetLeaf();
+				} else {
+					// No summary, navigating to non-root
+					sessionManager.branch(newLeafId);
+				}
 
-			// Update agent state
-			const sessionContext = sessionManager.buildSessionContext();
-			const agent = this.deps.getAgent();
-			agent.state.messages = sessionContext.messages;
-			// Branch/leaf just changed: the session-scoped sanitizer mark indexes into the array we
-			// just replaced and must not survive into this different lineage (see
-			// Agent.resetSanitizerPrefixHorizon's doc comment).
-			agent.resetSanitizerPrefixHorizon();
-			this.deps.onBranchChanged();
-			releaseHistory();
+				// Update agent state
+				const sessionContext = sessionManager.buildSessionContext();
+				const agent = this.deps.getAgent();
+				agent.state.messages = sessionContext.messages;
+				// Branch/leaf just changed: the session-scoped sanitizer mark indexes into the array we
+				// just replaced and must not survive into this different lineage (see
+				// Agent.resetSanitizerPrefixHorizon's doc comment).
+				agent.resetSanitizerPrefixHorizon();
+				this.deps.onBranchChanged();
+				releaseHistory();
 
-			// The branch is already selected. Publish its model context before optional
-			// label persistence can fail; labels do not add model messages.
-			if (label) sessionManager.appendLabelChange(labelTargetId, label);
+				// The branch is already selected. Publish its model context before optional
+				// label persistence can fail; labels do not add model messages.
+				if (label) sessionManager.appendLabelChange(labelTargetId, label);
+				return summaryEntry;
+			});
 
 			// Emit session_tree event
 			await extensionRunner.emit({

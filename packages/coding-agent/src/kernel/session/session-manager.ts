@@ -60,6 +60,7 @@ import {
 	type ParentInputSessionView,
 } from "./parent-input-session-indexes.ts";
 import {
+	type AdjacentMutationReplacement,
 	finishSessionAppend,
 	type SessionAppendFailure,
 	type SessionAppendOperation,
@@ -444,7 +445,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		// Judged before this manager changes any state: a rejected file leaves the manager and the file as they were.
 		assertAdoptableSessionHeader(resolvePath(sessionFile));
 		const previousNavigationRevision = this.navigationRevision;
@@ -623,7 +624,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
-		this._assertWritable();
+		this.assertMutationReady();
 		this.navigationRevision++;
 		this.payloadsHaveStoredIds = true;
 		this.storageRevision = undefined;
@@ -693,7 +694,7 @@ export class SessionManager {
 	}
 
 	private _rewriteFile(targetFile = this.sessionFile, expected?: Stats): SessionEntriesPersistedEvent | undefined {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (!this.persist || !targetFile) return;
 		return withSessionFileMutation(
 			this.getStorageRoots(),
@@ -812,7 +813,7 @@ export class SessionManager {
 	/** Persist the buffered prefix when another durable owner is about to reference it. Nothing buffered is not a write. */
 	flushBufferedEntries(): void {
 		if (!this.persist || this.flushed) return;
-		this._assertWritable();
+		this.assertMutationReady();
 		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, []);
 		const result = this._persistEntries([], [], undefined, this._capturePersistenceContext(), {
 			flushBuffered: true,
@@ -1026,7 +1027,7 @@ export class SessionManager {
 			options = {},
 		]: SessionPersistArgs
 	): SessionAppendOperation<SessionPersistenceResult | undefined> {
-		this._assertWritable();
+		this.assertMutationReady();
 		signal?.throwIfAborted();
 		assertCurrent();
 		if (!this.persist || !this.sessionFile) return;
@@ -1143,7 +1144,7 @@ export class SessionManager {
 
 	/** Capture the exact row written by a single synchronous append without re-encoding its source. */
 	capturePersistedAppend(operation: () => string): { entryId: string; encodedEntry: string } {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (this.persistedAppendCapture) throw new Error("A persisted append is already being captured.");
 		const capture: NonNullable<SessionManager["persistedAppendCapture"]> = { writes: 0 };
 		this.persistedAppendCapture = capture;
@@ -1158,13 +1159,23 @@ export class SessionManager {
 	}
 
 	private _generateAppendId(): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		return generateId(this.byId);
 	}
 
-	private _assertWritable(): void {
-		this.#appendOrder.join();
+	assertMutationReady(): void {
+		this.#appendOrder.assertSynchronousAdmission();
 		if (this.readOnly) throw new Error("Read-only session inspection cannot mutate history.");
+	}
+
+	/** Admit a synchronous commit step after any earlier worker receipt has published. */
+	queueMutation<T>(commit: () => T, replacement?: AdjacentMutationReplacement<T>): Promise<T> {
+		const assertCurrent = this.captureBranchContext();
+		return this.#appendOrder.mutate(() => {
+			assertCurrent();
+			this.assertMutationReady();
+			return commit();
+		}, replacement);
 	}
 
 	/** Serialization can call getters; a prepared row must retain the session and branch it was built against. */
@@ -1226,7 +1237,7 @@ export class SessionManager {
 	}
 
 	_persist(entry: SessionEntry): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		const assertCurrent = this._capturePersistenceContext();
 		const identity = captureSessionAppendIdentity(this.sessionId, this.sessionFile, [entry]);
 		const encodedEntry = encodeSessionEntry(entry);
@@ -1242,7 +1253,7 @@ export class SessionManager {
 	}
 
 	private _appendEntries(...args: SessionAppendEntriesArgs): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		const first = args[0][0];
 		if (first && first.type !== "branch_summary" && first.parentId !== this.leafId)
 			throw new Error("Session leaf changed while preparing the append.");
@@ -1252,7 +1263,7 @@ export class SessionManager {
 	*#appendEntriesOperation(
 		...[entries, preencodedEntries, signal, publication]: SessionAppendEntriesArgs
 	): SessionAppendOperation<void> {
-		this._assertWritable();
+		this.assertMutationReady();
 		signal?.throwIfAborted();
 		const assertCurrent = publication?.assertCurrent ?? this._capturePersistenceContext();
 		const identity = publication?.identity ?? captureSessionAppendIdentity(this.sessionId, this.sessionFile, entries);
@@ -1330,11 +1341,7 @@ export class SessionManager {
 		if (recoveredFailure) throw new SessionAppendCommittedError(committed, recoveredFailure.error);
 	}
 
-	/**
-	 * Entry id of the persisted entry holding exactly this message object, if any. A custom message is found by the
-	 * custom_message entry it was appended as (when the appender passed its object) or materialized from by a session
-	 * context rebuild; an id this session does not hold as a custom_message entry is never returned.
-	 */
+	/** Entry holding this exact message in the current session. */
 	getMessageEntryId(message: object): string | undefined {
 		if (this.messageEntryIndex?.byId !== this.byId) {
 			const ids = new WeakMap<object, string>();
@@ -1478,10 +1485,7 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/**
-	 * Append a bounded mixed message/custom-message batch as one durable publication.
-	 * Every item is encoded before the session tree or persistence state is mutated.
-	 */
+	/** Encode a mixed batch before its one durable publication. */
 	appendMessageBatch(...args: SessionMessageBatchCommitArgs): string[] {
 		return this.#appendOrder.sync(this.#messageBatchOperation(...args));
 	}
@@ -1516,7 +1520,7 @@ export class SessionManager {
 			canOffloadSessionAppend(this.roots, this.sessionFile, this.sessionId)
 		)
 			return this.#appendOrder.run(append);
-		return this.#appendOrder.sync(append);
+		return this.#appendOrder.mutate(() => this.#appendOrder.sync(append));
 	}
 
 	*#messageBatchOperation(
@@ -1585,7 +1589,7 @@ export class SessionManager {
 		usageComponents?: readonly UsageComponent[],
 		usageReceiptOwned?: true,
 	): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (usageComponents) validateUsageComponents(usage ?? createEmptyUsage(), usageComponents);
 		const compactionParentId = this.leafId;
 		const leaf = compactionParentId ? this.byId.get(compactionParentId) : undefined;
@@ -1779,7 +1783,7 @@ export class SessionManager {
 
 	/** Append a bounded provider request snapshot before its transport starts. */
 	appendRequestSnapshot(snapshot: SessionRequestSnapshotInput): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		const entry: RequestSnapshotEntry = {
 			type: "request_snapshot",
 			id: this._generateAppendId(),
@@ -1800,7 +1804,7 @@ export class SessionManager {
 		outcome: ProviderRequestTerminalEntry["outcome"],
 		assistantMessageEntryId?: string,
 	): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		const entry: ProviderRequestTerminalEntry = {
 			type: "provider_request_terminal",
 			id: this._generateAppendId(),
@@ -1830,7 +1834,7 @@ export class SessionManager {
 
 	/** Append a bounded batch of foreground tool execution start markers in one durable publication. */
 	appendForegroundToolStarts(starts: readonly ForegroundToolStartInput[]): string[] {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (starts.length === 0) return [];
 		const entries: ForegroundToolStartEntry[] = [];
 		let parentId = this.leafId;
@@ -1871,7 +1875,7 @@ export class SessionManager {
 		outcome: ForegroundToolTerminalEntry["outcome"],
 		metadata: Pick<ForegroundToolTerminalEntry, "resultMessageEntryId" | "errorKind">,
 	): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		const entry: ForegroundToolTerminalEntry = {
 			type: "foreground_tool_terminal",
 			id: this._generateAppendId(),
@@ -2028,7 +2032,7 @@ export class SessionManager {
 	 * that is not pending on this branch.
 	 */
 	skipPendingParentInput(deliveryId: string, reason: string): boolean {
-		this._assertWritable();
+		this.assertMutationReady();
 		const held = () =>
 			this._parentInputIndex()
 				.pendingInputs("next-owner-turn")
@@ -2183,7 +2187,7 @@ export class SessionManager {
 		source: readonly AgentMessage[],
 		messages: readonly Message[],
 	): readonly string[] {
-		this._assertWritable();
+		this.assertMutationReady();
 		const selection = this.plannedParentNotes;
 		if (!selection) return [];
 		if (!selection.isCurrent()) throw new Error("Parent note selection changed before transport.");
@@ -2263,7 +2267,7 @@ export class SessionManager {
 		message: CustomMessage<unknown>,
 		withAppend?: (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt,
 	): ParentInputAppendReceipt {
-		this._assertWritable();
+		this.assertMutationReady();
 		const metadata = parentInputMetadataOfMessage(message);
 		if (!metadata) throw new Error("Parent input metadata is required.");
 		return this._withParentInputMutation(metadata.origin, () => {
@@ -2299,7 +2303,7 @@ export class SessionManager {
 
 	/** One durable detached batch, reused after restart until its exact provider answer settles it. */
 	beginParentInputWake(): ParentInputWake | undefined {
-		this._assertWritable();
+		this.assertMutationReady();
 		const existing = this._parentInputIndex().openWake();
 		if (existing) return existing;
 		const pending = this._pendingParentBatch("turn");
@@ -2332,7 +2336,7 @@ export class SessionManager {
 
 	/** Called at the actual provider boundary, after request_snapshot and before transport. */
 	recordParentInputWakeRequest(requestId: string, messages: readonly Message[]): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		const wake = this.getActiveParentInputWake();
 		if (!wake) return;
 		const contents = wake.inputs.map((input) => {
@@ -2348,7 +2352,7 @@ export class SessionManager {
 	}
 
 	settleParentInputWake(wakeId: string): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		const index = this._parentInputIndex();
 		const wake = index.openWake();
 		if (wake?.wakeId !== wakeId || !wake.completed)
@@ -2389,7 +2393,7 @@ export class SessionManager {
 	}
 
 	private _withParentInputMutation<T>(origin: ParentInputOrigin, operation: () => T): T {
-		this._assertWritable();
+		this.assertMutationReady();
 		const assertOrigin = (): void => {
 			const badFile = origin.sessionFile !== undefined && (!this.persist || origin.sessionFile !== this.sessionFile);
 			if (origin.sessionId !== this.sessionId || badFile) throw new Error("Parent input session identity changed.");
@@ -2449,10 +2453,6 @@ export class SessionManager {
 		});
 		return entry.id;
 	}
-
-	// =========================================================================
-	// Tree Traversal
-	// =========================================================================
 
 	getLeafId(): string | null {
 		return this.leafId;
@@ -2887,10 +2887,6 @@ export class SessionManager {
 		return roots;
 	}
 
-	// =========================================================================
-	// Branching
-	// =========================================================================
-
 	/**
 	 * Start a new branch from an earlier entry.
 	 * Moves the leaf pointer to the specified entry. The next appendXXX() call
@@ -2898,7 +2894,7 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -2914,7 +2910,7 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
-		this._assertWritable();
+		this.assertMutationReady();
 		this.navigationRevision++;
 		this._invalidateSessionContextCache();
 		this.leafId = null;
@@ -2936,7 +2932,7 @@ export class SessionManager {
 		usageComponents?: readonly UsageComponent[],
 		usageReceiptOwned?: true,
 	): string {
-		this._assertWritable();
+		this.assertMutationReady();
 		if (usageComponents) validateUsageComponents(usage ?? createEmptyUsage(), usageComponents);
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
@@ -2968,7 +2964,7 @@ export class SessionManager {
 	 * the caller derives (a bot's `sessions/` gives its bot's, whatever home the source was opened in).
 	 */
 	createBranchedSessionManager(leafId: string, roots: SessionStorageRoots): SessionManager {
-		this._assertWritable();
+		this.assertMutationReady();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -3049,7 +3045,7 @@ export class SessionManager {
 	 * keep this manager intact until the replacement has been constructed successfully.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
-		this._assertWritable();
+		this.assertMutationReady();
 		// Made current on this manager, whose roots are fixed: the branch stays in them.
 		const branched = this.createBranchedSessionManager(leafId, this.roots);
 		this.navigationRevision++;

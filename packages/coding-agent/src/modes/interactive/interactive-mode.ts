@@ -605,7 +605,7 @@ export class InteractiveMode {
 			isInitialized: () => this.isInitialized,
 			isThinkingHidden: () => this.hideThinkingBlock,
 			init: () => this.init(),
-			clearActiveToolCalls: () => this.clearActiveToolCalls(),
+			clearActiveToolCalls: (options) => this.clearActiveToolCalls(options),
 			updatePendingMessagesDisplay: () => this.queuedMessages.updatePendingMessagesDisplay(),
 			updateTerminalTitle: () => this.updateTerminalTitle(),
 			refreshActivityLane: () => this.refreshActivityLane(),
@@ -624,8 +624,8 @@ export class InteractiveMode {
 							void this.renderSessionContext(this.pendingHistoryReload);
 					});
 			},
-			attachToolExecutionComponent: (toolName, toolCallId, args, repair) =>
-				this.attachToolExecutionComponent(toolName, toolCallId, args, repair),
+			rememberAssistantCheckpoint: (component, message) => this.liveTranscript.rememberTurnStart(component, message),
+			attachToolExecutionComponent: (...args) => this.attachToolExecutionComponent(...args).executionState,
 			toolActivityKind: (toolName) => this.toolActivityKind(toolName),
 			toolActivityLabel: (toolName) => this.toolActivityLabel(toolName),
 			toolActivityTerminalStatus: (isError, details) => this.toolActivityTerminalStatus(isError, details),
@@ -650,7 +650,6 @@ export class InteractiveMode {
 		this.liveTranscript = new LiveTranscriptRetention({
 			root: this.chatContainer,
 			streaming: () => this.events.getStreamingComponent(),
-			activeActions: () => this.activeToolCalls.activeEntries(),
 			withdrawableEchoes: () => this.userEchoes.retainedComponents(),
 			readingComponents: () => this.layout.workbench?.view.conversation.retainedComponents(this.chatContainer),
 			historyBoundary: (id, evicted) => this.historyPager.setLiveBoundary(id, evicted),
@@ -1423,19 +1422,11 @@ export class InteractiveMode {
 	}
 
 	private appendTranscriptAction(component: ToolExecutionComponent, container = this.chatContainer): void {
-		const children = container.children;
-		for (let index = children.length - 1; index >= 0; index--) {
-			const candidate = children[index];
-			if (candidate instanceof ActionTranscriptComponent) {
-				if (candidate.canAccept()) {
-					candidate.addAction(component);
-					if (container === this.chatContainer) this.liveTranscript.trim();
-					return;
-				}
-				break;
-			}
-			if (candidate instanceof AssistantMessageComponent && !candidate.hasVisibleOutput()) continue;
-			break;
+		const candidate = container.children.at(-1);
+		if (candidate instanceof ActionTranscriptComponent && candidate.canAccept()) {
+			candidate.addAction(component);
+			if (container === this.chatContainer) this.liveTranscript.trim();
+			return;
 		}
 		const transcript = new ActionTranscriptComponent([component]);
 		transcript.setTranscriptExpanded(this.transcriptActionsExpanded);
@@ -1450,6 +1441,7 @@ export class InteractiveMode {
 		repair?: ToolCallRepairInfo,
 		deferResultUntilExpanded = false,
 		container = this.chatContainer,
+		executionState?: ToolExecutionComponent["executionState"],
 	): ToolExecutionComponent {
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
 		const component = new ToolExecutionComponent(
@@ -1461,6 +1453,7 @@ export class InteractiveMode {
 				imageWidthCells: this.settingsManager.getImageWidthCells(),
 				repair,
 				deferResultUntilExpanded,
+				executionState,
 				transformResult: (result) =>
 					expandMessageForDisplay(
 						this.session.peekPathAliasTable(),
@@ -1472,15 +1465,14 @@ export class InteractiveMode {
 			this.sessionManager.getCwd(),
 		);
 		this.appendTranscriptAction(component, container);
-		if (container === this.chatContainer) {
-			this.activeToolCalls.register(toolCallId, component);
-		}
+		if (container === this.chatContainer && !deferResultUntilExpanded)
+			this.activeToolCalls.register(toolCallId, component.executionState);
 		return component;
 	}
 
-	public clearActiveToolCalls(): void {
+	public clearActiveToolCalls(options?: { keepPendingResults?: boolean }): void {
 		this.events.discardToolProgress();
-		this.activeToolCalls.clearActive();
+		this.activeToolCalls.clearActive(options?.keepPendingResults);
 	}
 
 	private getWorkingLoaderMessage(): string {
@@ -1783,7 +1775,7 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 		this.unsubscribePersistenceFence?.();
-		this.unsubscribePersistenceFence = bindPersistenceFenceIndicator({
+		const offFence = bindPersistenceFenceIndicator({
 			sessionManager: this.sessionManager,
 			footerData: this.footerDataProvider,
 			showWarning: (message) => this.showWarning(message),
@@ -1792,6 +1784,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			},
 		});
+		const offRetain = this.sessionManager.onEntriesPersisted(({ entryIds }) => {
+			if (generation !== this.subscriptionGeneration || session !== this.session) return;
+			this.activeToolCalls.settlePersistedResults(entryIds, (id) => this.sessionManager.getEntry(id));
+			this.reconcileUserMessageEchoes();
+			if (this.liveTranscript.trim()) this.ui.requestPresentationRender();
+		});
+		this.unsubscribePersistenceFence = () => {
+			offFence();
+			offRetain();
+		};
 		this.unsubscribeHumanInputActivity?.();
 		this.unsubscribeHumanInputActivity = subscribeHumanInputActivity(this.sessionManager, (activity) => {
 			if (generation !== this.subscriptionGeneration || session !== this.session) return;
@@ -1835,9 +1837,6 @@ export class InteractiveMode {
 			await this.queuedMessages.flushCompactionQueue({ willRetry: event.willRetry });
 		}
 	}
-	/** Extract text content from a user message */
-	// Thin `this.`-delegate to the pure formatter in ./history-reload-math.ts; kept so
-	// addMessageToChat and the prototype-based interactive-mode tests resolve it via `this`.
 	/**
 	 * Prompt history rebuilt from the persisted user messages of the branch, oldest first. Each entry keeps the ranges the
 	 * owner pasted in it (`ownerPasteRestorer`, by the entry that holds it), so a recalled message is never resubmitted as typed.
@@ -2084,11 +2083,10 @@ export class InteractiveMode {
 		renderSavedHistoryRows(
 			page,
 			container,
-			(message) => this.renderHistoricalMessage(message, container, pending, isLive, bylines, true),
+			(message, id) => this.renderHistoricalMessage(message, container, pending, bylines, id),
 			isLive ? (component, id) => this.liveTranscript.rememberTurnStart(component, id) : undefined,
 		);
 		settleArchiveTools(pending.values());
-		if (isLive) this.clearActiveToolCalls();
 		return container;
 	}
 
@@ -2148,7 +2146,7 @@ export class InteractiveMode {
 			);
 			if (notice) this.chatContainer.addChild(notice);
 			const pending = new Map<string, ToolExecutionComponent>();
-			for (const message of messages) this.renderHistoricalMessage(message, this.chatContainer, pending, true);
+			for (const message of messages) this.renderHistoricalMessage(message, this.chatContainer, pending);
 		}
 		this.liveTranscript.trim();
 		conversation?.resetContainerScroll(this.chatContainer);
@@ -2192,13 +2190,12 @@ export class InteractiveMode {
 		message: AgentMessage,
 		container: Container,
 		pendingTools: Map<string, ToolExecutionComponent>,
-		isLiveTail = false,
 		bylines: ReplyBylineTracker = this.replyBylines,
-		showOrphanResults = false,
+		entryId?: string,
 	): void {
 		if (message.role === "assistant") {
 			this.addMessageToChat(message, undefined, container, bylines);
-			const isRoot = showOrphanResults || container === this.chatContainer;
+			const isRoot = entryId !== undefined || container === this.chatContainer;
 			for (const content of message.content) {
 				if (content.type !== "toolCall") continue;
 				const component = this.attachToolExecutionComponent(
@@ -2208,6 +2205,7 @@ export class InteractiveMode {
 					undefined,
 					true,
 					container,
+					this.activeToolCalls.findForEntry(content.id, entryId, this.sessionManager),
 				);
 
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
@@ -2215,7 +2213,6 @@ export class InteractiveMode {
 						? rootToolFailureText(message, this.session.retryAttempt)
 						: targetToolFailureText(message);
 					component.updateResult({ content: [{ type: "text", text: failureText }], isError: true });
-					if (isLiveTail) this.activeToolCalls.finish(content.id);
 				} else {
 					pendingTools.set(content.id, component);
 				}
@@ -2223,13 +2220,12 @@ export class InteractiveMode {
 		} else if (message.role === "toolResult") {
 			const component =
 				pendingTools.get(message.toolCallId) ??
-				(showOrphanResults
+				(entryId !== undefined
 					? this.attachToolExecutionComponent(message.toolName, message.toolCallId, {}, undefined, true, container)
 					: undefined);
 			if (component) {
-				component.updateResult(message as unknown as ToolExecutionResult);
+				if (!component.followsLiveExecution) component.updateResult(message as unknown as ToolExecutionResult);
 				pendingTools.delete(message.toolCallId);
-				if (isLiveTail) this.activeToolCalls.finish(message.toolCallId);
 			}
 		} else {
 			this.addMessageToChat(message, undefined, container, bylines);
@@ -2242,7 +2238,7 @@ export class InteractiveMode {
 		pendingToolCalls: Map<string, ToolExecutionComponent>,
 		bylines: ReplyBylineTracker,
 	): void {
-		this.renderHistoricalMessage(message, container, pendingToolCalls, false, bylines);
+		this.renderHistoricalMessage(message, container, pendingToolCalls, bylines);
 	}
 
 	private async rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean> {

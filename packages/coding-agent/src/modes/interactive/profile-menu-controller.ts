@@ -792,6 +792,11 @@ export class ProfileMenuController {
 		});
 	}
 
+	private async recordResourceProfiles(profiles: string[]): Promise<void> {
+		const manager = this.deps.getSessionManager();
+		await manager.queueMutation(() => manager.appendCustomEntry("pi.activeResourceProfiles", { profiles }));
+	}
+
 	private async applyProfile(profileName: string): Promise<void> {
 		const normalizedName = profileName.trim();
 		const normalizedLower = normalizedName.toLowerCase();
@@ -808,9 +813,7 @@ export class ProfileMenuController {
 				// Persist only after the new runtime generation passes its reload doctor.
 				this.deps.getSettingsManager().setActiveProfile(undefined, "global");
 				await this.deps.getSettingsManager().flush();
-				this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", {
-					profiles: [],
-				});
+				await this.recordResourceProfiles([]);
 				const activeProfileName = this.deps.getSettingsManager().getActiveResourceProfileNames()[0] ?? "(none)";
 				this.ui.footerDataProvider.setExtensionStatus("profile", activeProfileName);
 				this.ui.invalidateFooter();
@@ -864,9 +867,7 @@ export class ProfileMenuController {
 			// Selection survives restarts only after the new runtime generation passes its reload doctor.
 			this.deps.getSettingsManager().setActiveProfile(activeProfileRef, "global");
 			await this.deps.getSettingsManager().flush();
-			this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", {
-				profiles: [activeProfileRef],
-			});
+			await this.recordResourceProfiles([activeProfileRef]);
 			this.ui.footerDataProvider.setExtensionStatus("profile", profile.name);
 			this.ui.invalidateFooter();
 			this.ui.updateEditorBorderColor();
@@ -1105,7 +1106,7 @@ export class ProfileMenuController {
 			if (wasActive) {
 				this.deps.getSettingsManager().setActiveProfile(undefined, "global");
 				await this.deps.getSettingsManager().flush();
-				this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", { profiles: [] });
+				await this.recordResourceProfiles([]);
 				this.ui.footerDataProvider.setExtensionStatus("profile", "(none)");
 				this.ui.invalidateFooter();
 				this.ui.updateEditorBorderColor();

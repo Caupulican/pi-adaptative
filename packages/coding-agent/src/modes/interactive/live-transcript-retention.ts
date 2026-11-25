@@ -4,8 +4,6 @@ import { type Component, type Container, Spacer, Text } from "@caupulican/pi-tui
 import { interfaceText } from "../../core/language/interface-text.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
-import { ActionTranscriptComponent } from "./components/action-transcript.ts";
-import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 
 export const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 export const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
@@ -75,10 +73,9 @@ export class WithdrawableUserEchoRetention {
 interface LiveTranscriptRetentionOptions {
 	root: Container;
 	streaming(): Component | undefined;
-	activeActions(): Iterable<readonly [unknown, ToolExecutionComponent]>;
 	withdrawableEchoes(): Iterable<Component>;
 	readingComponents?(): Iterable<Component> | undefined;
-	historyBoundary?(entryId: string, evicted: readonly Component[]): void;
+	historyBoundary?(entryId: string, evicted: readonly Component[]): boolean;
 	pagesHistory?(): boolean;
 	messageEntryId?(message: AgentMessage): string | undefined;
 	previousEntryId?(entryId: string): string | null | undefined;
@@ -149,13 +146,13 @@ export class LiveTranscriptRetention {
 		if (requestRender) this.options.requestRender();
 	}
 
-	trim(): void {
+	trim(): boolean {
 		const children = this.options.root.children;
-		if (!children.includes(this.hiddenNotice as Component)) {
+		if (this.hiddenNotice && !children.includes(this.hiddenNotice)) {
 			this.hiddenNotice = undefined;
 			this.hiddenComponents = 0;
 		}
-		if (children.length <= TUI_LIVE_HISTORY_MAX_COMPONENTS) return;
+		if (children.length <= TUI_LIVE_HISTORY_MAX_COMPONENTS) return false;
 
 		const protectedComponents = new Set<Component>();
 		const paged = this.options.pagesHistory?.() ?? false;
@@ -163,17 +160,11 @@ export class LiveTranscriptRetention {
 			if (component && children.includes(component)) protectedComponents.add(component);
 		};
 		protect(this.options.streaming());
-		protect(this.lastStatusSpacer);
-		protect(this.lastStatusText);
 		for (const component of this.options.withdrawableEchoes()) protect(component);
-		if (!paged) for (const component of this.options.readingComponents?.() ?? []) protect(component);
-		for (const [, action] of this.options.activeActions()) {
-			protect(
-				children.find(
-					(child): child is ActionTranscriptComponent =>
-						child instanceof ActionTranscriptComponent && child.containsAction(action),
-				),
-			);
+		if (!paged) {
+			protect(this.lastStatusSpacer);
+			protect(this.lastStatusText);
+			for (const component of this.options.readingComponents?.() ?? []) protect(component);
 		}
 
 		const trimStart = children[0] === this.hiddenNotice ? 1 : 0;
@@ -181,8 +172,7 @@ export class LiveTranscriptRetention {
 		if (this.options.historyBoundary && paged) {
 			let end = trimStart;
 			let boundary: string | undefined;
-			// Cut before a durable owner turn. Action groups may cross assistant records, so
-			// cutting at an assistant component could strand its tool results across the seam.
+			// Checkpoints are recorded at owner turns and at assistant exchanges with their own action groups.
 			for (let index = trimStart + 1; index < children.length; index++) {
 				if (protectedComponents.has(children[index - 1]!)) break;
 				const id = this.entryId(children[index]!);
@@ -193,10 +183,11 @@ export class LiveTranscriptRetention {
 				if (end - trimStart >= removalTarget) break;
 			}
 			if (boundary !== undefined) {
-				this.options.historyBoundary(boundary, children.slice(trimStart, end));
+				if (!this.options.historyBoundary(boundary, children.slice(trimStart, end))) return false;
 				this.replaceChildren(children.slice(end));
+				return true;
 			}
-			return;
+			return false;
 		}
 		const removed: Component[] = [];
 		const retained = children.filter((component, index) => {
@@ -204,7 +195,7 @@ export class LiveTranscriptRetention {
 			removed.push(component);
 			return false;
 		});
-		if (removed.length === 0) return;
+		if (removed.length === 0) return false;
 		this.hiddenComponents += removed.length;
 
 		const text = theme.fg("dim", interfaceText().interactive.olderHistoryHidden(this.hiddenComponents));
@@ -214,5 +205,6 @@ export class LiveTranscriptRetention {
 			retained.unshift(this.hiddenNotice);
 		}
 		this.replaceChildren(retained);
+		return true;
 	}
 }

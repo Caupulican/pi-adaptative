@@ -11,7 +11,6 @@ import { defineTool } from "../../../../src/core/extensions/types.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "../../../../src/core/harness-notice.ts";
 import { getResumableHumanInputSnapshot } from "../../../../src/core/human-input.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import {
 	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 	type ReflectionController,
@@ -47,6 +46,7 @@ import { localFileMutationIntentOperations } from "../../../../src/core/tools/fi
 import { routeShellContract } from "../../../../src/core/tools/shell-contract-router.ts";
 import { wrapToolDefinition } from "../../../../src/core/tools/tool-definition-wrapper.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/kernel/session/session-entries.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { requestedBackgroundForms, toolCallForm, toolCallHandoff } from "../../../../src/kernel/tool-call-arguments.ts";
 import type { AgentTool } from "../../../../src/kernel/types.ts";

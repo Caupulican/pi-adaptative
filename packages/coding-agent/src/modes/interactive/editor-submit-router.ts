@@ -450,7 +450,7 @@ export class EditorSubmitRouter {
 			return;
 		}
 		if (text === "/name" || text.startsWith("/name ")) {
-			this.slashCommands.handleNameCommand(text);
+			await this.slashCommands.handleNameCommand(text);
 			this.host.editor.setText("");
 			return;
 		}

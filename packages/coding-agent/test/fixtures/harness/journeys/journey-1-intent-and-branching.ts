@@ -6,11 +6,11 @@ import {
 	type OrchestrationProfile,
 } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
 import {
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 	readOptionalToolIntent,
 } from "../../../../src/core/tool-applicability-gate.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/kernel/session/session-entries.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { ScriptedRequest } from "../scripted-provider.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";

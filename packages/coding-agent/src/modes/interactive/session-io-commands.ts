@@ -77,7 +77,7 @@ export interface NameCommandHost {
 	readonly sessionManager: Pick<SessionManager, "getSessionName">;
 	readonly chatContainer: { addChild: (child: Text | Spacer) => void };
 	showWarning(message: string): void;
-	readonly session: Pick<AgentSession, "setSessionName">;
+	readonly session: Pick<AgentSession, "setSessionNameAsync">;
 	readonly ui: { requestRender: () => void };
 }
 
@@ -286,7 +286,7 @@ export async function handleCopyCommand(host: CopyCommandHost): Promise<void> {
 	}
 }
 
-export function handleNameCommand(host: NameCommandHost, text: string): void {
+export async function handleNameCommand(host: NameCommandHost, text: string): Promise<void> {
 	const words = interfaceText().sessions.io;
 	const name = text.replace(/^\/name\s*/, "").trim();
 	if (!name) {
@@ -301,7 +301,7 @@ export function handleNameCommand(host: NameCommandHost, text: string): void {
 		return;
 	}
 
-	host.session.setSessionName(name);
+	await host.session.setSessionNameAsync(name);
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(new Text(theme.fg("dim", words.sessionNameSet(name)), 1, 0));
 	host.ui.requestRender();

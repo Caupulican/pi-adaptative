@@ -9,12 +9,25 @@ import {
 import type { SessionAppendWorkerRequest } from "./session-append-worker.ts";
 
 const IDLE_WORKER_MS = 15_000;
-const SYNC_JOIN_MS = 2_000;
+
+export class SessionMutationBusyError extends Error {
+	readonly code = "PI_SESSION_WRITE_BUSY";
+	constructor() {
+		super("A session write is still committing. Await the session mutation or retry after it finishes.");
+		this.name = "SessionMutationBusyError";
+	}
+}
 
 export type SessionAppendOperation<T> = Generator<SessionAppendDiskStep, T, SessionAppendDiskResult>;
 export type SessionAppendFailure = { error: unknown };
+export interface AdjacentMutationReplacement<T> {
+	readonly key: object;
+	readonly superseded: T;
+}
 
-/** Publish the caller's receipt effects before a synchronous join can change the branch. */
+type QueuedMutation = (() => void) & { replacement?: { key: object; supersede(): void } };
+
+/** Publish the caller's receipt effects before admitting another mutation. */
 export function* finishSessionAppend<T>(
 	operation: SessionAppendOperation<T>,
 	assertAdmitted: () => void,
@@ -59,12 +72,11 @@ class SessionAppendWorker {
 		for (const job of this.jobs) job.fail(error);
 	}
 
-	start(step: SessionAppendDiskStep, settle: (result: SessionAppendDiskResult) => void): () => void {
+	start(step: SessionAppendDiskStep, settle: (result: SessionAppendDiskResult) => void): void {
 		if (this.failed) throw this.failed.error;
 		clearTimeout(this.idle);
 		this.worker.ref();
 		const { port1, port2 } = new MessageChannel();
-		const state = new Int32Array(new SharedArrayBuffer(4));
 		let settled = false;
 		const finish = (result: SessionAppendDiskResult): void => {
 			if (settled) return;
@@ -98,7 +110,6 @@ class SessionAppendWorker {
 		const command: SessionAppendWorkerRequest = {
 			request: step.request,
 			port: port2,
-			signal: state.buffer as SharedArrayBuffer,
 		};
 		port1.once("message", finish);
 		port1.once("messageerror", job.fail);
@@ -109,24 +120,6 @@ class SessionAppendWorker {
 			port2.close();
 			finish({ failed: true, started: false, error });
 		}
-		return () => {
-			if (settled) return;
-			const deadline = Date.now() + SYNC_JOIN_MS;
-			while (!settled) {
-				// Observe completion before checking the port. If the worker posts between the
-				// check and wait, Atomics.wait sees a changed value and returns immediately.
-				const completion = Atomics.load(state, 0);
-				const receipt = receiveMessageOnPort(port1);
-				if (receipt) {
-					finish(receipt.message as SessionAppendDiskResult);
-					break;
-				}
-				const remaining = deadline - Date.now();
-				if (remaining <= 0)
-					throw new Error("A session write is still committing. Retry this operation when it finishes.");
-				Atomics.wait(state, 0, completion, Math.min(remaining, completion === 0 ? 20 : 1));
-			}
-		};
 	}
 }
 
@@ -138,11 +131,11 @@ function complete<T>(operation: SessionAppendOperation<T>, result: SessionAppend
 	return step.value;
 }
 
-/** A synchronous mutation can join a pending physical write before preparing against the new leaf. */
+/** Off-thread appends and awaited mutations share admission and publish in order. */
 export class SessionAppendOrder {
-	private readonly queue: (() => void)[] = [];
+	private readonly queue: QueuedMutation[] = [];
 	private readonly idleWaiters: (() => void)[] = [];
-	private pending?: { join(): void };
+	private pending = false;
 	private operationDepth = 0;
 
 	private inOperation<T>(operation: () => T): T {
@@ -168,19 +161,12 @@ export class SessionAppendOrder {
 		return new Promise((resolve) => this.idleWaiters.push(resolve));
 	}
 
-	join(): void {
-		// A synchronous callback already inside preparation or publication can keep the
-		// existing reentrant semantics. No worker request is outstanding in that scope.
-		if (this.operationDepth !== 0) return;
-		this.startNext();
-		while (this.pending) {
-			this.pending.join();
-			this.startNext();
-		}
+	assertSynchronousAdmission(): void {
+		if (this.operationDepth === 0 && (this.pending || this.queue.length > 0)) throw new SessionMutationBusyError();
 	}
 
 	sync<T>(operation: SessionAppendOperation<T>): T {
-		this.join();
+		this.assertSynchronousAdmission();
 		try {
 			return this.inOperation(() => {
 				const step = operation.next();
@@ -192,40 +178,62 @@ export class SessionAppendOrder {
 		}
 	}
 
-	run<T>(operation: SessionAppendOperation<T>): Promise<T> {
+	private enqueue<T>(
+		operation: (resolve: (value: T) => void, reject: (error: unknown) => void) => void,
+		replacement?: AdjacentMutationReplacement<T>,
+	): Promise<T> {
 		return new Promise<T>((resolve, reject) => {
-			this.queue.push(() => {
+			const queued: QueuedMutation = () => {
 				try {
-					const step = operation.next();
-					if (step.done) {
-						resolve(step.value);
-						return;
-					}
-					step.value.assertCurrent();
-					const pending = { join: () => {} };
-					this.pending = pending;
-					const finish = (result: SessionAppendDiskResult) => {
-						this.inOperation(() => {
-							if (this.pending === pending) this.pending = undefined;
-							try {
-								resolve(complete(operation, result));
-							} catch (error) {
-								reject(error);
-							}
-						});
-						this.startNext();
-					};
-					try {
-						activeWorker ??= new SessionAppendWorker();
-						pending.join = activeWorker.start(step.value, finish);
-					} catch (error) {
-						finish({ failed: true, started: false, error });
-					}
+					operation(resolve, reject);
 				} catch (error) {
 					reject(error);
 				}
-			});
+			};
+			if (replacement) {
+				queued.replacement = { key: replacement.key, supersede: () => resolve(replacement.superseded) };
+				const tail = this.queue.at(-1)?.replacement;
+				if (tail?.key === replacement.key) {
+					this.queue.pop();
+					tail.supersede();
+				}
+			}
+			this.queue.push(queued);
 			this.startNext();
+		});
+	}
+
+	/** An optional replacement may supersede only the adjacent, unstarted snapshot with its key. */
+	mutate<T>(operation: () => T, replacement?: AdjacentMutationReplacement<T>): Promise<T> {
+		return this.enqueue((resolve) => resolve(operation()), replacement);
+	}
+
+	run<T>(operation: SessionAppendOperation<T>): Promise<T> {
+		return this.enqueue((resolve, reject) => {
+			const step = operation.next();
+			if (step.done) {
+				resolve(step.value);
+				return;
+			}
+			step.value.assertCurrent();
+			this.pending = true;
+			const finish = (result: SessionAppendDiskResult) => {
+				this.inOperation(() => {
+					this.pending = false;
+					try {
+						resolve(complete(operation, result));
+					} catch (error) {
+						reject(error);
+					}
+				});
+				this.startNext();
+			};
+			try {
+				activeWorker ??= new SessionAppendWorker();
+				activeWorker.start(step.value, finish);
+			} catch (error) {
+				finish({ failed: true, started: false, error });
+			}
 		});
 	}
 }

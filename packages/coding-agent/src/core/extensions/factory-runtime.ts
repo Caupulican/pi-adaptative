@@ -51,6 +51,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
+		queueSessionMutation: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
@@ -251,9 +252,17 @@ export function createExtensionAPI(
 			runtime.assertActive();
 			runtime.appendEntry(customType, data);
 		},
+		async appendEntryAsync(customType, data) {
+			runtime.assertActive();
+			await runtime.queueSessionMutation(() => runtime.appendEntry(customType, data));
+		},
 		setSessionName(name): void {
 			runtime.assertActive();
 			runtime.setSessionName(name);
+		},
+		async setSessionNameAsync(name) {
+			runtime.assertActive();
+			await runtime.queueSessionMutation(() => runtime.setSessionName(name));
 		},
 		getSessionName() {
 			runtime.assertActive();
@@ -262,6 +271,10 @@ export function createExtensionAPI(
 		setLabel(entryId, label): void {
 			runtime.assertActive();
 			runtime.setLabel(entryId, label);
+		},
+		async setLabelAsync(entryId, label) {
+			runtime.assertActive();
+			await runtime.queueSessionMutation(() => runtime.setLabel(entryId, label));
 		},
 		exec(command: string, args: string[], options?: ExecOptions) {
 			runtime.assertActive();
@@ -337,6 +350,10 @@ export function createExtensionAPI(
 		setThinkingLevel(level): void {
 			runtime.assertActive();
 			runtime.setThinkingLevel(level);
+		},
+		async setThinkingLevelAsync(level) {
+			runtime.assertActive();
+			await runtime.queueSessionMutation(() => runtime.setThinkingLevel(level));
 		},
 		registerProvider(name, config): void {
 			runtime.assertActive();
@@ -486,6 +503,7 @@ const HOST_ONLY_WRITERS: ReadonlySet<string> = new Set([
 	"appendMessageBatchWithReceipt",
 	"enableBackgroundAppends",
 	"settleBackgroundAppends",
+	"queueMutation",
 	"appendCompaction",
 	"appendCompactionStart",
 	"appendCompactionEnd",

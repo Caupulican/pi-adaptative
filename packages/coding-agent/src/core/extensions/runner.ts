@@ -287,10 +287,10 @@ export class ExtensionRunner {
 			unregisterProvider?: (name: string) => void;
 		},
 	): void {
-		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
+		this.runtime.queueSessionMutation = actions.queueSessionMutation;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;

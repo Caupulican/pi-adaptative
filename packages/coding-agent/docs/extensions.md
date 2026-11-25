@@ -1452,6 +1452,8 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 
 ### pi.appendEntry(customType, data?)
 
+Use `await pi.appendEntryAsync(customType, data)` when an extension can write during an active turn. The same ordered session queue is available through `setSessionNameAsync`, `setLabelAsync`, and `setThinkingLevelAsync`. These promises resolve after the mutation runs on its original branch. Synchronous methods can throw `SessionMutationBusyError` with code `PI_SESSION_WRITE_BUSY` when an earlier write is pending. In that case the synchronous mutation has not started.
+
 Persist extension state (does NOT participate in LLM context).
 
 ```typescript

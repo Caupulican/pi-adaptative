@@ -225,71 +225,75 @@ export class AgentSessionEvents {
 			}
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
-				const assistantMsg = event.message as AssistantMessage;
-				this.ports.recordCacheObservation(assistantMsg);
-				// The session lane's stream closed: it idles until its next request (a tool run or the owner).
-				const sessionModel = this.ports.model();
-				if (
-					sessionModel &&
-					assistantMsg.stopReason !== "error" &&
-					assistantMsg.stopReason !== "aborted" &&
-					assistantMsg.provider === sessionModel.provider &&
-					assistantMsg.model === sessionModel.id
-				) {
-					this.ports.compaction().onLaneIdle(assistantMsg);
-				}
-				// A reply a routed model wrote keeps its route, so a reloaded conversation names the same author.
-				const route = this.ports.modelRouter().getForegroundRouteSnapshot();
-				if (route.switched) {
-					const record: ReplyRouteRecord = { timestamp: assistantMsg.timestamp, route };
-					this.ports.sessionManager().appendCustomEntry(REPLY_ROUTE_CUSTOM_TYPE, record);
-				}
-				this.ports.foregroundLifecycle().recordTransportTelemetry(assistantMsg);
-				this.ports.goals().recordExecutionUsage(assistantMsg);
-				if (messagePersisted) {
-					this.ports.pipeline().observeProviderUsage(this.ports.agent().state.messages, assistantMsg);
-				}
-				if (assistantMsg.errorMessage?.startsWith(`${NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR}:`)) {
-					this.ports.goals().markProtocolFailureBlocked(assistantMsg.errorMessage);
-				}
-				this.ports.foregroundRecovery().observeAssistant(assistantMsg);
+				await this.ports.sessionManager().queueMutation(() => {
+					const assistantMsg = event.message as AssistantMessage;
+					this.ports.recordCacheObservation(assistantMsg);
+					// The session lane's stream closed: it idles until its next request (a tool run or the owner).
+					const sessionModel = this.ports.model();
+					if (
+						sessionModel &&
+						assistantMsg.stopReason !== "error" &&
+						assistantMsg.stopReason !== "aborted" &&
+						assistantMsg.provider === sessionModel.provider &&
+						assistantMsg.model === sessionModel.id
+					) {
+						this.ports.compaction().onLaneIdle(assistantMsg);
+					}
+					// A reply a routed model wrote keeps its route, so a reloaded conversation names the same author.
+					const route = this.ports.modelRouter().getForegroundRouteSnapshot();
+					if (route.switched) {
+						const record: ReplyRouteRecord = { timestamp: assistantMsg.timestamp, route };
+						this.ports.sessionManager().appendCustomEntry(REPLY_ROUTE_CUSTOM_TYPE, record);
+					}
+					this.ports.foregroundLifecycle().recordTransportTelemetry(assistantMsg);
+					this.ports.goals().recordExecutionUsage(assistantMsg);
+					if (messagePersisted) {
+						this.ports.pipeline().observeProviderUsage(this.ports.agent().state.messages, assistantMsg);
+					}
+					if (assistantMsg.errorMessage?.startsWith(`${NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR}:`)) {
+						this.ports.goals().markProtocolFailureBlocked(assistantMsg.errorMessage);
+					}
+					this.ports.foregroundRecovery().observeAssistant(assistantMsg);
+				});
 			}
 		}
 		if (event.type === "agent_end") {
-			const willRetry = this._willRetryAfterAgentEnd(event);
-			// The end-of-run cleanups are independent: one that fails (a fenced session file refusing a write) must not skip the
-			// others, which release leases and flush handoffs. Every step runs, and every cause is kept.
-			const failures: unknown[] = [];
-			const settle = (step: () => void): void => {
-				try {
-					step();
-				} catch (error: unknown) {
-					failures.push(error);
+			await this.ports.sessionManager().queueMutation(() => {
+				const willRetry = this._willRetryAfterAgentEnd(event);
+				// The end-of-run cleanups are independent: one that fails (a fenced session file refusing a write) must not skip the
+				// others, which release leases and flush handoffs. Every step runs, and every cause is kept.
+				const failures: unknown[] = [];
+				const settle = (step: () => void): void => {
+					try {
+						step();
+					} catch (error: unknown) {
+						failures.push(error);
+					}
+				};
+				// Settle the exact cue-bearing run before completed-turn analysis can queue a later cue.
+				settle(() => this.ports.reflection().finishCurrentTurnCue(event.messages, { willRetry }));
+				if (!willRetry)
+					settle(() => {
+						const reflectionTurn = this.ports.reflection().analyzeCompletedTurn(event.messages);
+						// The shared projection excludes raw tool-result payloads and bounds both roles before any
+						// deterministic memory sync. No reflection provider request is scheduled at this boundary.
+						this.ports.memory().scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
+						if (reflectionTurn.trigger !== "none")
+							this.ports.reflection().queueCurrentTurnCue(reflectionTurn.trigger);
+					});
+				// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
+				// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
+				// steering requires one continuation; turn_end is intentionally not a flush.
+				settle(() => this.ports.terminalHandoffs().flushProviderBoundary());
+				settle(() => this.ports.durableCustomMessageTurns().flushParentSteers());
+				if (failures.length === 1) throw failures[0];
+				if (failures.length > 1) {
+					throw new AggregateError(
+						failures,
+						failures[0] instanceof Error ? failures[0].message : "The end-of-run cleanup failed.",
+					);
 				}
-			};
-			// Settle the exact cue-bearing run before completed-turn analysis can queue a later cue.
-			settle(() => this.ports.reflection().finishCurrentTurnCue(event.messages, { willRetry }));
-			if (!willRetry)
-				settle(() => {
-					const reflectionTurn = this.ports.reflection().analyzeCompletedTurn(event.messages);
-					// The shared projection excludes raw tool-result payloads and bounds both roles before any
-					// deterministic memory sync. No reflection provider request is scheduled at this boundary.
-					this.ports.memory().scheduleTurnSync(reflectionTurn.userText, reflectionTurn.assistantText);
-					if (reflectionTurn.trigger !== "none")
-						this.ports.reflection().queueCurrentTurnCue(reflectionTurn.trigger);
-				});
-			// Error/abort turns bypass the normal steering boundary, and a completion can arrive after the
-			// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
-			// steering requires one continuation; turn_end is intentionally not a flush.
-			settle(() => this.ports.terminalHandoffs().flushProviderBoundary());
-			settle(() => this.ports.durableCustomMessageTurns().flushParentSteers());
-			if (failures.length === 1) throw failures[0];
-			if (failures.length > 1) {
-				throw new AggregateError(
-					failures,
-					failures[0] instanceof Error ? failures[0].message : "The end-of-run cleanup failed.",
-				);
-			}
+			});
 		}
 	}
 

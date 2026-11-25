@@ -72,6 +72,7 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getArtifactStore: () => deps.getArtifactStore(),
 		canRetrieveTextArtifacts: () => deps.canRetrieveTextArtifacts?.() ?? true,
 		loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(deps.getSessionManager()),
+		queueMutation: (commit) => deps.getSessionManager().queueMutation(commit),
 		persist: (record, kind) => {
 			if (kind === "delivery_receipt") {
 				if (!record.completedAt) throw new Error("Background tool delivery receipt requires completion identity.");

@@ -442,8 +442,8 @@ export class SlashCommandController {
 		});
 	}
 
-	handleNameCommand(text: string): void {
-		sessionIoCommands.handleNameCommand(
+	handleNameCommand(text: string): Promise<void> {
+		return sessionIoCommands.handleNameCommand(
 			{
 				sessionManager: this.host.sessionManager,
 				chatContainer: this.host.chatContainer,
@@ -701,7 +701,7 @@ export class SlashCommandController {
 			}
 			this.host.renderCurrentSessionState();
 			if (newSessionName) {
-				this.host.session.setSessionName(newSessionName);
+				await this.host.session.setSessionNameAsync(newSessionName);
 			}
 			this.host.chatContainer.addChild(new Spacer(1));
 			const label = newSessionName

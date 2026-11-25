@@ -65,7 +65,7 @@ export async function readStableLiveHistory(
 export function renderSavedHistoryRows(
 	page: SessionHistoryPage,
 	container: Container,
-	render: (message: AgentMessage) => void,
+	render: (message: AgentMessage, id: string) => void,
 	rememberTurn?: (component: Component | undefined, id: string) => void,
 ): void {
 	for (const { id, message, oversized } of page.records) {
@@ -73,15 +73,17 @@ export function renderSavedHistoryRows(
 		if (oversized) {
 			container.addChild(new Text(theme.fg("dim", interfaceText().interactive.historyRecordOversized), 1, 0));
 		} else if (message) {
-			render(message);
-			if (message.role === "user") rememberTurn?.(container.children[start], id);
+			render(message, id);
+			if (message.role === "user" || message.role === "assistant") rememberTurn?.(container.children[start], id);
 		}
 	}
 }
 
 export function settleArchiveTools(tools: Iterable<ToolExecutionComponent>): void {
 	const text = interfaceText().interactive.historyToolResultUnavailable;
-	for (const tool of tools) tool.updateResult({ content: [{ type: "text", text }], isError: false });
+	for (const tool of tools) {
+		if (!tool.followsLiveExecution) tool.updateResult({ content: [{ type: "text", text }], isError: false });
+	}
 }
 
 /** Display state an older row must adopt, because it was built after the operator changed a toggle. */

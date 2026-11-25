@@ -526,9 +526,13 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					host.showStatus(text.statuses.httpIdleTimeout(text.valueLabels.httpIdleTimeout[value] ?? value));
 				},
 				onThinkingLevelChange: (level) => {
-					host.session.setThinkingLevel(level);
-					host.footer.invalidate();
-					host.updateEditorBorderColor();
+					void host.session
+						.setThinkingLevelAsync(level)
+						.then(() => {
+							host.footer.invalidate();
+							host.updateEditorBorderColor();
+						})
+						.catch((error: unknown) => host.showError(error instanceof Error ? error.message : String(error)));
 				},
 				onThemeChange: (themeName) => {
 					const result = setTheme(themeName, true);

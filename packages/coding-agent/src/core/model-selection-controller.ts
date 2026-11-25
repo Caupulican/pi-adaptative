@@ -101,28 +101,32 @@ export class ModelSelectionController {
 		options: { persistSettings?: boolean } = {},
 		assertCurrent?: () => void,
 	): Promise<void> {
-		const previousModel = this.deps.getModel();
-		if (this.deps.modelAccess?.().pinned && previousModel && !modelsAreEqual(previousModel, model))
-			throw new Error(
-				interfaceText().sessions.model.pinned(
-					`${previousModel.provider}/${previousModel.id}`,
-					`${model.provider}/${model.id}`,
-				),
-			);
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
+		const previousModel = await this.deps.getSessionManager().queueMutation(() => {
+			assertCurrent?.();
+			const previousModel = this.deps.getModel();
+			if (this.deps.modelAccess?.().pinned && previousModel && !modelsAreEqual(previousModel, model))
+				throw new Error(
+					interfaceText().sessions.model.pinned(
+						`${previousModel.provider}/${previousModel.id}`,
+						`${model.provider}/${model.id}`,
+					),
+				);
+			if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) {
+				throw new Error(`No API key for ${model.provider}/${model.id}`);
+			}
 
-		const persistSettings = options.persistSettings ?? true;
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.applyModel(model);
-		if (persistSettings) {
-			this.deps.getSettingsManager().setDefaultModelAndProvider(model.provider, model.id);
-		}
+			const persistSettings = options.persistSettings ?? true;
+			const thinkingLevel = this._getThinkingLevelForModelSwitch();
+			this.applyModel(model);
+			if (persistSettings) {
+				this.deps.getSettingsManager().setDefaultModelAndProvider(model.provider, model.id);
+			}
 
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel, { persistSettings });
-		this._resyncToolSurfaceForModel(assertCurrent);
+			// Re-clamp thinking level for new model's capabilities
+			this.setThinkingLevel(thinkingLevel, { persistSettings });
+			this._resyncToolSurfaceForModel(assertCurrent);
+			return previousModel;
+		});
 
 		await this._emitModelSelect(model, previousModel, "set");
 		this.deps.checkContextWindowUsageWarning();
@@ -135,6 +139,7 @@ export class ModelSelectionController {
 	 * recorded on the branch.
 	 */
 	applyModel(model: Model<Api>): void {
+		this.deps.getSessionManager().assertMutationReady();
 		this.deps.modelAccess?.().chargeMove(model);
 		this.deps.getAgent().state.model = model;
 		this.deps.getSessionManager().appendModelChange(model.provider, model.id);
@@ -210,72 +215,90 @@ export class ModelSelectionController {
 	 * @param direction - "forward" (default) or "backward"
 	 * @returns The new model info, or undefined if only one model available
 	 */
-	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+	async cycleModel(
+		direction: "forward" | "backward" = "forward",
+		assertCurrent?: () => void,
+	): Promise<ModelCycleResult | undefined> {
 		if (this.deps.getScopedModels().length > 0) {
-			return this._cycleScopedModel(direction);
+			return this._cycleScopedModel(direction, assertCurrent);
 		}
-		return this._cycleAvailableModel(direction);
+		return this._cycleAvailableModel(direction, assertCurrent);
 	}
 
-	private async _cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+	private async _cycleScopedModel(
+		direction: "forward" | "backward",
+		assertCurrent?: () => void,
+	): Promise<ModelCycleResult | undefined> {
 		const scopedModels = this.deps
 			.getScopedModels()
 			.filter((scoped) => this.deps.getModelRegistry().hasConfiguredAuth(scoped.model));
 		if (scopedModels.length <= 1) return undefined;
 
-		const currentModel = this.deps.getModel();
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
+		const { currentModel, nextModel } = await this.deps.getSessionManager().queueMutation(() => {
+			assertCurrent?.();
+			const currentModel = this.deps.getModel();
+			let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
 
-		if (currentIndex === -1) currentIndex = 0;
-		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const next = scopedModels[nextIndex];
-		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
+			if (currentIndex === -1) currentIndex = 0;
+			const len = scopedModels.length;
+			const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+			const next = scopedModels[nextIndex];
+			const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 
-		this.applyModel(next.model);
-		this.deps.getSettingsManager().setDefaultModelAndProvider(next.model.provider, next.model.id);
+			this.applyModel(next.model);
+			this.deps.getSettingsManager().setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		// Apply thinking level.
-		// - Explicit scoped model thinking level overrides current session level
-		// - Undefined scoped model thinking level inherits the current session preference
-		// setThinkingLevel clamps to model capabilities.
-		this.setThinkingLevel(thinkingLevel);
-		this._resyncToolSurfaceForModel();
+			// Apply thinking level.
+			// - Explicit scoped model thinking level overrides current session level
+			// - Undefined scoped model thinking level inherits the current session preference
+			// setThinkingLevel clamps to model capabilities.
+			this.setThinkingLevel(thinkingLevel);
+			this._resyncToolSurfaceForModel(assertCurrent);
+			return { currentModel, nextModel: next.model };
+		});
 
-		await this._emitModelSelect(next.model, currentModel, "cycle");
-
-		this.deps.checkContextWindowUsageWarning();
-		await this._warnIfManualModelChoiceIsRisky(next.model);
-
-		return { model: next.model, thinkingLevel: this.deps.getThinkingLevel(), isScoped: true };
+		return this.finishCycle(nextModel, currentModel, true);
 	}
 
-	private async _cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+	private async _cycleAvailableModel(
+		direction: "forward" | "backward",
+		assertCurrent?: () => void,
+	): Promise<ModelCycleResult | undefined> {
 		const availableModels = await this.deps.getModelRegistry().getAvailable();
 		if (availableModels.length <= 1) return undefined;
 
-		const currentModel = this.deps.getModel();
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
+		const { currentModel, nextModel } = await this.deps.getSessionManager().queueMutation(() => {
+			assertCurrent?.();
+			const currentModel = this.deps.getModel();
+			let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
 
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
+			if (currentIndex === -1) currentIndex = 0;
+			const len = availableModels.length;
+			const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+			const nextModel = availableModels[nextIndex];
 
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		this.applyModel(nextModel);
-		this.deps.getSettingsManager().setDefaultModelAndProvider(nextModel.provider, nextModel.id);
+			const thinkingLevel = this._getThinkingLevelForModelSwitch();
+			this.applyModel(nextModel);
+			this.deps.getSettingsManager().setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		// Re-clamp thinking level for new model's capabilities
-		this.setThinkingLevel(thinkingLevel);
-		this._resyncToolSurfaceForModel();
+			// Re-clamp thinking level for new model's capabilities
+			this.setThinkingLevel(thinkingLevel);
+			this._resyncToolSurfaceForModel(assertCurrent);
+			return { currentModel, nextModel };
+		});
 
+		return this.finishCycle(nextModel, currentModel, false);
+	}
+
+	private async finishCycle(
+		nextModel: Model<Api>,
+		currentModel: Model<Api> | undefined,
+		isScoped: boolean,
+	): Promise<ModelCycleResult> {
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
-
 		this.deps.checkContextWindowUsageWarning();
 		await this._warnIfManualModelChoiceIsRisky(nextModel);
-
-		return { model: nextModel, thinkingLevel: this.deps.getThinkingLevel(), isScoped: false };
+		return { model: nextModel, thinkingLevel: this.deps.getThinkingLevel(), isScoped };
 	}
 
 	/**
@@ -290,6 +313,7 @@ export class ModelSelectionController {
 		// Only persist if actually changing
 		const previousLevel = this.deps.getAgent().state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
+		if (isChanging) this.deps.getSessionManager().assertMutationReady();
 		const persistSettings = options.persistSettings ?? true;
 
 		this.deps.getAgent().state.thinkingLevel = effectiveLevel;

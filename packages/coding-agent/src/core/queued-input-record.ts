@@ -3,13 +3,14 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { basename } from "node:path";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionEntry, SessionManager } from "../kernel/node.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../kernel/session/session-entries.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
 import { normalizeOwnerRanges, type OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import { isImagePinClaimId, type SessionImageStore } from "./session-image-store.ts";
 import { isMissingFileError, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
-/**
+/*
  * The durable record of queued input (steering and follow-up messages not yet delivered), kept as a
  * session custom entry exactly like the human-input snapshots: each write is the complete queue as it
  * stands, and the latest entry on the active branch is the truth. A message leaves the record when it is
@@ -20,8 +21,6 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * entry would become that entry's parent and change the branch. A resumed session restores them held, and from then on
  * the session record holds them like any held queued input.
  */
-export const QUEUED_INPUT_CUSTOM_TYPE = "queued_owner_input";
-
 /** Most inputs one record holds; later inputs stay queued in memory only. */
 export const MAX_RECORDED_QUEUED_INPUTS = 64;
 /** Most UTF-8 text bytes one record holds across all inputs. Images are held by the session image store, not the record. */
@@ -51,6 +50,29 @@ export interface RecordableQueuedInput {
 	preservedImages?: PreservedQueuedImages;
 	/** Ranges of `text` the owner pasted rather than typed, so a restored input keeps its provenance. */
 	pasted?: readonly OwnerTextRange[];
+}
+
+/** Project the original submission, with a framed third party's words under their origin. */
+export function recordableQueuedInput({
+	inputId,
+	kind,
+	original,
+	origin,
+}: {
+	inputId: string;
+	kind: QueuedInputKind;
+	original: Omit<RecordableQueuedInput, "id" | "kind" | "origin">;
+	origin?: SendUserMessageOrigin;
+}): RecordableQueuedInput {
+	return {
+		id: inputId,
+		kind,
+		text: origin ? origin.text : original.text,
+		...(original.images ? { images: original.images } : {}),
+		...(original.preservedImages ? { preservedImages: original.preservedImages } : {}),
+		...(!origin && original.pasted?.length ? { pasted: original.pasted } : {}),
+		...(origin ? { origin: { channel: origin.channel, sender: origin.sender, verified: origin.verified } } : {}),
+	};
 }
 
 interface RecordedImage {

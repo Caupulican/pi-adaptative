@@ -221,12 +221,43 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 	 * mechanism the human-input snapshots use, so a resumed session restores exactly what was still queued.
 	 * A failed write is reported, never swallowed: the queue itself is unaffected.
 	 */
-	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
+	recordQueuedInput(inputs: readonly RecordableQueuedInput[], onCommitted: () => void): void {
 		const sessionManager = this.deps.getSessionManager();
-		if (this.deps.isDisposed() || !sessionManager.isPersisted()) return;
-		this.writeRecord("queued", (previousKey, imageStore, ownership, assertCurrent) =>
-			appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, ownership, { assertCurrent }),
-		);
+		if (this.deps.isDisposed()) return;
+		if (!sessionManager.isPersisted()) {
+			onCommitted();
+			return;
+		}
+		const assertBranch = sessionManager.captureBranchContext();
+		// A restore-specific callback has a distinct identity and keeps its own ordered receipt.
+		void sessionManager
+			.queueMutation(
+				() => {
+					if (sessionManager !== this.deps.getSessionManager()) return;
+					const committed = this.writeRecord("queued", (previousKey, imageStore, ownership, assertCurrent) =>
+						appendQueuedInputRecord(sessionManager, imageStore, inputs, previousKey, ownership, {
+							assertCurrent,
+						}),
+					);
+					if (committed && this.canReconcile(sessionManager, assertBranch)) onCommitted();
+				},
+				{ key: onCommitted, superseded: undefined },
+			)
+			.catch((error: unknown) =>
+				this.deps.emitWarning(
+					`Queued input could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
+	}
+
+	private canReconcile(sessionManager: SessionManager, assertBranch: () => void): boolean {
+		if (this.deps.isDisposed() || sessionManager !== this.deps.getSessionManager()) return false;
+		try {
+			assertBranch();
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -281,13 +312,14 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			assertCurrent: () => void,
 		) => QueuedInputRecordResult | undefined,
 		sessionFile?: string,
-	): void {
+	): boolean {
 		const previousState = record === "queued" ? this.queuedRecord : this.ownTurnRecords.get(sessionFile!);
 		const state: RecordState = previousState ?? { key: undefined, omitted: 0, ownership: "owned" };
 		const sessionManager = this.deps.getSessionManager();
 		const assertBranch = sessionManager.captureBranchContext();
 		const assertCurrent = (): void => {
-			if (this.deps.isDisposed() || this.deps.getSessionManager() !== sessionManager)
+			// Queued snapshots were admitted before shutdown and must survive it.
+			if ((record !== "queued" && this.deps.isDisposed()) || this.deps.getSessionManager() !== sessionManager)
 				throw new Error("Input recovery context changed during publication.");
 			assertBranch();
 			const current = record === "queued" ? this.queuedRecord : this.ownTurnRecords.get(sessionFile!);
@@ -296,7 +328,10 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		const { subject, one, many } = RECORD_TEXT[record];
 		try {
 			const written = write(state.key, this.deps.getSessionImageStore(), state.ownership, assertCurrent);
-			if (!written) return;
+			if (!written) {
+				assertCurrent();
+				return true;
+			}
 			// Publication is already committed. Diagnostics or obsolete-claim cleanup cannot leave this key stale.
 			const published: RecordState = { key: written.key, omitted: written.omitted, ownership: "owned" };
 			if (record === "queued") {
@@ -305,6 +340,7 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 					this.queuedRecord = published;
 				} catch {
 					this.deps.emitWarning("Queued input was recorded in its original context; the active record changed.");
+					return false;
 				}
 			} else if (this.ownTurnRecords.get(sessionFile!) === previousState) {
 				if (recordedIds(written.key).size > 0) this.ownTurnRecords.set(sessionFile!, published);
@@ -319,10 +355,12 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 				this.deps.emitWarning(
 					`${subject} was recorded, but an obsolete image claim could not be released: ${written.cleanupError}`,
 				);
+			return true;
 		} catch (error) {
 			this.deps.emitWarning(
 				`${subject} could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
 			);
+			return false;
 		}
 	}
 
@@ -360,13 +398,24 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 			if (ownTurn) this.ownTurnRecords.set(sessionFile, { key: ownTurn.key, omitted: 0, ownership: "owned" });
 			else this.ownTurnRecords.delete(sessionFile);
 		}
+		const queuedCount = queued?.inputs.length ?? 0;
 		const inputs = [...(queued?.inputs ?? []), ...(ownTurn?.inputs ?? [])];
-		this.deps.getPendingQueue().restore(inputs, (queued?.delivered ?? 0) > 0 || ownTurn !== undefined);
-		if (ownTurn) {
-			const named = recordedIds(this.queuedRecord.key);
-			if (ownTurn.inputs.every((input) => input.id !== undefined && named.has(input.id)))
-				this.recordOwnTurnInput([]);
-		}
+		const ownTurnSource = sessionFile === undefined ? undefined : this.ownTurnRecords.get(sessionFile);
+		const retireRestoredOwnTurn =
+			ownTurnSource && sessionFile !== undefined
+				? (restoredIds: readonly OwnerInputId[]) => {
+						if (
+							!this.canReconcile(sessionManager, assertCurrent) ||
+							this.ownTurnRecords.get(sessionFile) !== ownTurnSource
+						)
+							return;
+						const named = recordedIds(this.queuedRecord.key);
+						if (restoredIds.slice(queuedCount).every((id) => named.has(id))) this.recordOwnTurnInput([]);
+					}
+				: undefined;
+		this.deps
+			.getPendingQueue()
+			.restore(inputs, (queued?.delivered ?? 0) > 0 || ownTurn !== undefined, retireRestoredOwnTurn);
 		if (inputs.length === 0) return;
 		const fromPeers = inputs.filter((input) => input.origin).length;
 		const missingImages = (queued?.missingImages ?? 0) + (ownTurn?.missingImages ?? 0);
@@ -374,7 +423,6 @@ export class QueuedInputPersistenceController implements PendingInputRecord {
 		const imageReadError = [queued?.imageReadError, ownTurn?.imageReadError]
 			.filter((error) => error !== undefined)
 			.join("; ");
-		const queuedCount = queued?.inputs.length ?? 0;
 		const preparing = ownTurn?.inputs.length ?? 0;
 		const restored = [
 			...(queuedCount > 0 ? [`${queuedCount} queued message${queuedCount > 1 ? "s" : ""}`] : []),

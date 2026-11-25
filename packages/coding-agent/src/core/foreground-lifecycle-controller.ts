@@ -232,71 +232,76 @@ export class ForegroundLifecycleController {
 		context: ProviderRequestSnapshotContext,
 		signal?: AbortSignal,
 	): Promise<void> {
-		signal?.throwIfAborted();
-		this.commitRoutedPromptPrefix();
-		const requestId = context.requestId;
-		this.lastRequestId = requestId;
-		const provider = context.model.provider;
-		this.lastRequestModel = {
-			provider,
-			id: context.model.id,
-			accountKey: context.providerAccountKey ?? provider,
-		};
-		const retryOfAssistantEntryId = this.retryOfAssistantEntryId;
-		this.retryOfAssistantEntryId = undefined;
-		this.deps.sessionManager.appendRequestSnapshot({
-			...buildRequestSnapshotInput(context, this.deps.sessionManager),
-			...(retryOfAssistantEntryId ? { retryOfAssistantEntryId } : {}),
+		await this.deps.sessionManager.queueMutation(() => {
+			signal?.throwIfAborted();
+			this.commitRoutedPromptPrefix();
+			const requestId = context.requestId;
+			this.lastRequestId = requestId;
+			const provider = context.model.provider;
+			this.lastRequestModel = {
+				provider,
+				id: context.model.id,
+				accountKey: context.providerAccountKey ?? provider,
+			};
+			const retryOfAssistantEntryId = this.retryOfAssistantEntryId;
+			this.retryOfAssistantEntryId = undefined;
+			this.deps.sessionManager.appendRequestSnapshot({
+				...buildRequestSnapshotInput(context, this.deps.sessionManager),
+				...(retryOfAssistantEntryId ? { retryOfAssistantEntryId } : {}),
+			});
+			this.deps.sessionManager.recordParentInputWakeRequest(requestId, context.context.messages);
+			const deliveredNoteIds = this.deps.sessionManager.recordParentNoteRequest(
+				requestId,
+				context.sourceContext.messages,
+				context.context.messages,
+			);
+			dumpProviderRequest(requestId, context.context);
+			signal?.throwIfAborted();
+			this.deps.observeProviderRequest?.(context, deliveredNoteIds);
 		});
-		this.deps.sessionManager.recordParentInputWakeRequest(requestId, context.context.messages);
-		const deliveredNoteIds = this.deps.sessionManager.recordParentNoteRequest(
-			requestId,
-			context.sourceContext.messages,
-			context.context.messages,
-		);
-		dumpProviderRequest(requestId, context.context);
-		signal?.throwIfAborted();
-		this.deps.observeProviderRequest?.(context, deliveredNoteIds);
 	}
 
 	private async onToolCallPreflightRejected(
 		context: ToolCallPreflightRejectionContext,
 		_signal?: AbortSignal,
 	): Promise<void> {
-		const flushed = this.deps.modelRouter.commitSessionBuffer();
-		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
-		const assistantMessageEntryId = this.getPersistedMessageEntryId(context.assistantMessage);
-		if (!assistantMessageEntryId) {
-			throw new Error("Tool preflight rejection cannot be retained before the assistant message is persisted");
-		}
-		const message = boundedPreflightText(
-			context.result.content
-				.filter(
-					(block): block is Extract<(typeof context.result.content)[number], { type: "text" }> =>
-						block.type === "text",
-				)
-				.map((block) => block.text)
-				.join("\n"),
-		);
-		const invocation = retainedToolInvocation(context.result.details);
-		const failureMemory = retainedToolFailureMemory(context.result.details);
-		if (
-			invocation?.execution !== "not_started" ||
-			failureMemory?.phase !== "preflight" ||
-			failureMemory.state !== "rejected"
-		) {
-			throw new Error("Tool preflight rejection is missing its canonical failure receipt");
-		}
-		this.deps.sessionManager.appendCustomEntry(TOOL_PREFLIGHT_REJECTION_CUSTOM_TYPE, {
-			version: 1,
-			requestId: context.requestId,
-			assistantMessageEntryId,
-			callId: context.toolCall.id,
-			toolName: context.toolCall.name,
-			message: message || "Tool preflight failed before execution.",
-			invocation,
-			failureMemory,
-		} satisfies ToolPreflightRejectionRecord);
+		await this.deps.sessionManager.queueMutation(() => {
+			_signal?.throwIfAborted();
+			const flushed = this.deps.modelRouter.commitSessionBuffer();
+			for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+			const assistantMessageEntryId = this.getPersistedMessageEntryId(context.assistantMessage);
+			if (!assistantMessageEntryId) {
+				throw new Error("Tool preflight rejection cannot be retained before the assistant message is persisted");
+			}
+			const message = boundedPreflightText(
+				context.result.content
+					.filter(
+						(block): block is Extract<(typeof context.result.content)[number], { type: "text" }> =>
+							block.type === "text",
+					)
+					.map((block) => block.text)
+					.join("\n"),
+			);
+			const invocation = retainedToolInvocation(context.result.details);
+			const failureMemory = retainedToolFailureMemory(context.result.details);
+			if (
+				invocation?.execution !== "not_started" ||
+				failureMemory?.phase !== "preflight" ||
+				failureMemory.state !== "rejected"
+			) {
+				throw new Error("Tool preflight rejection is missing its canonical failure receipt");
+			}
+			this.deps.sessionManager.appendCustomEntry(TOOL_PREFLIGHT_REJECTION_CUSTOM_TYPE, {
+				version: 1,
+				requestId: context.requestId,
+				assistantMessageEntryId,
+				callId: context.toolCall.id,
+				toolName: context.toolCall.name,
+				message: message || "Tool preflight failed before execution.",
+				invocation,
+				failureMemory,
+			} satisfies ToolPreflightRejectionRecord);
+		});
 	}
 
 	/**
@@ -311,14 +316,7 @@ export class ForegroundLifecycleController {
 		if (!diagnostics || diagnostics.length === 0) return;
 		for (const diagnostic of diagnostics) {
 			if (diagnostic.type !== "provider_transport") continue;
-			try {
-				this.deps.sessionManager.appendCustomEntry(PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE, {
-					requestId: this.lastRequestId,
-					...diagnostic.details,
-				});
-			} catch {
-				// A failed diagnostic write must never fail the request it observes.
-			}
+			this.queueDiagnostic(PROVIDER_TRANSPORT_TELEMETRY_CUSTOM_TYPE, diagnostic.details);
 		}
 	}
 
@@ -353,16 +351,17 @@ export class ForegroundLifecycleController {
 							? {}
 							: { finalError: event.finalError.slice(0, MAX_RETRY_ERROR_MESSAGE_LENGTH) }),
 					};
-		try {
-			this.deps.sessionManager.appendCustomEntry(PROVIDER_RETRY_CUSTOM_TYPE, {
-				requestId: this.lastRequestId,
-				...(model ? { provider: model.provider, modelId: model.id } : {}),
-				...data,
-			});
-		} catch {
-			// A failed diagnostic write must never fail the recovery it observes.
-		}
+		this.queueDiagnostic(PROVIDER_RETRY_CUSTOM_TYPE, {
+			...(model ? { provider: model.provider, modelId: model.id } : {}),
+			...data,
+		});
 		return model;
+	}
+
+	private queueDiagnostic(type: string, data?: object): void {
+		const manager = this.deps.sessionManager;
+		const record = { requestId: this.lastRequestId, ...data };
+		void manager.queueMutation(() => manager.appendCustomEntry(type, record)).catch(() => undefined);
 	}
 
 	private async onToolCallStart(
@@ -384,72 +383,75 @@ export class ForegroundLifecycleController {
 			);
 		}
 
-		const flushed = this.deps.modelRouter.commitSessionBuffer();
-		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
-		const assistantMessage = calls[0]!.assistantMessage;
-		const assistantMessageEntryId = this.getPersistedMessageEntryId(assistantMessage);
-		if (!assistantMessageEntryId) {
-			throw new Error("Foreground tool reservation rejected: assistant message is not canonically persisted.");
-		}
-		const identities: StartedToolIdentity[] = [];
-		for (const call of calls) {
-			const identity: StartedToolIdentity = {
-				requestId,
-				assistantMessageEntryId,
-				callId: call.callId,
-				toolName: call.toolName,
-			};
-			const key = this.toolKey(identity);
-			if (this.startedTools.has(key)) throw new Error(`Duplicate foreground tool reservation: ${call.callId}.`);
-			identities.push(identity);
-		}
-		this.deps.sessionManager.appendForegroundToolStarts(
-			identities.map(
-				({ requestId: identityRequestId, assistantMessageEntryId: messageEntryId, callId, toolName }) => ({
-					requestId: identityRequestId,
-					assistantMessageEntryId: messageEntryId,
-					callId,
-					toolName,
-				}),
-			),
-		);
-		// Emission-order announcement for the whole wave, before any body starts. A mutation tool only
-		// reaches the mutation queue deep inside its own execute, so without this a sibling exclusive
-		// run (bash, python) dispatched in the same batch takes the writer lock first and runs against
-		// the pre-mutation workspace. Announcing every call -- not only the mutations -- is what lets
-		// an exclusive run find its own emission index.
-		const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
-		const mutationScope = this.deps.getMutationScope?.();
-		const announcer = this.deps.getAnnouncer?.();
-		const releases = new Map<string, () => void>();
-		const reservation: ToolCallStartReservation = {
-			release(callId) {
-				const release = releases.get(callId);
-				releases.delete(callId);
-				release?.();
-			},
-		};
-		try {
-			for (const call of calls) {
-				const kind = call.mutation
-					? "mutation"
-					: call.toolName === "bash" || call.toolName === "python"
-						? "shell"
-						: "other";
-				releases.set(
-					call.callId,
-					announceToolCall(call.callId, call.index, kind, batchId, mutationScope, announcer),
-				);
-			}
-			for (const identity of identities) this.trackStartedTool(identity);
+		return this.deps.sessionManager.queueMutation(() => {
 			signal?.throwIfAborted();
-			return reservation;
-		} catch (error) {
-			// The core cannot own a lease that this hook never returned. Durable starts remain for
-			// canonical result/repair handling; live queue dependencies must end immediately.
-			for (const callId of releases.keys()) reservation.release(callId);
-			throw error;
-		}
+			const flushed = this.deps.modelRouter.commitSessionBuffer();
+			for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
+			const assistantMessage = calls[0]!.assistantMessage;
+			const assistantMessageEntryId = this.getPersistedMessageEntryId(assistantMessage);
+			if (!assistantMessageEntryId) {
+				throw new Error("Foreground tool reservation rejected: assistant message is not canonically persisted.");
+			}
+			const identities: StartedToolIdentity[] = [];
+			for (const call of calls) {
+				const identity: StartedToolIdentity = {
+					requestId,
+					assistantMessageEntryId,
+					callId: call.callId,
+					toolName: call.toolName,
+				};
+				const key = this.toolKey(identity);
+				if (this.startedTools.has(key)) throw new Error(`Duplicate foreground tool reservation: ${call.callId}.`);
+				identities.push(identity);
+			}
+			this.deps.sessionManager.appendForegroundToolStarts(
+				identities.map(
+					({ requestId: identityRequestId, assistantMessageEntryId: messageEntryId, callId, toolName }) => ({
+						requestId: identityRequestId,
+						assistantMessageEntryId: messageEntryId,
+						callId,
+						toolName,
+					}),
+				),
+			);
+			// Emission-order announcement for the whole wave, before any body starts. A mutation tool only
+			// reaches the mutation queue deep inside its own execute, so without this a sibling exclusive
+			// run (bash, python) dispatched in the same batch takes the writer lock first and runs against
+			// the pre-mutation workspace. Announcing every call -- not only the mutations -- is what lets
+			// an exclusive run find its own emission index.
+			const batchId = `${requestId}\u0000${assistantMessageEntryId}`;
+			const mutationScope = this.deps.getMutationScope?.();
+			const announcer = this.deps.getAnnouncer?.();
+			const releases = new Map<string, () => void>();
+			const reservation: ToolCallStartReservation = {
+				release(callId) {
+					const release = releases.get(callId);
+					releases.delete(callId);
+					release?.();
+				},
+			};
+			try {
+				for (const call of calls) {
+					const kind = call.mutation
+						? "mutation"
+						: call.toolName === "bash" || call.toolName === "python"
+							? "shell"
+							: "other";
+					releases.set(
+						call.callId,
+						announceToolCall(call.callId, call.index, kind, batchId, mutationScope, announcer),
+					);
+				}
+				for (const identity of identities) this.trackStartedTool(identity);
+				signal?.throwIfAborted();
+				return reservation;
+			} catch (error) {
+				// The core cannot own a lease that this hook never returned. Durable starts remain for
+				// canonical result/repair handling; live queue dependencies must end immediately.
+				for (const callId of releases.keys()) reservation.release(callId);
+				throw error;
+			}
+		});
 	}
 
 	private toolKey(

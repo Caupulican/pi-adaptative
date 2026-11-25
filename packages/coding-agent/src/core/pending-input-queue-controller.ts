@@ -30,6 +30,7 @@ import {
 	type QueuedInputKind,
 	type QueuedInputOrigin,
 	type RecordableQueuedInput,
+	recordableQueuedInput,
 } from "./queued-input-record.ts";
 import type { RuntimeMutationHandoff, RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
@@ -107,27 +108,6 @@ interface PendingEntry extends QueuedInput {
 	held?: boolean;
 }
 
-/** An entry as its durable record holds it: as submitted, a framed third party's words under their origin. */
-function recordableInput(entry: PendingEntry): RecordableQueuedInput {
-	return {
-		id: entry.inputId,
-		kind: entry.kind,
-		text: entry.origin ? entry.origin.text : entry.original.text,
-		...(entry.original.images ? { images: entry.original.images } : {}),
-		...(entry.original.preservedImages ? { preservedImages: entry.original.preservedImages } : {}),
-		...(!entry.origin && entry.original.pasted?.length ? { pasted: entry.original.pasted } : {}),
-		...(entry.origin
-			? {
-					origin: {
-						channel: entry.origin.channel,
-						sender: entry.origin.sender,
-						verified: entry.origin.verified,
-					},
-				}
-			: {}),
-	};
-}
-
 /** How far a run's authority reaches, lowest first: a third party's, the owner's from a phone, the owner's at the terminal. */
 const AUTHORITY_RANK: Readonly<Record<TurnAuthority, number>> = { "third-party": 0, "remote-owner": 1, owner: 2 };
 
@@ -190,8 +170,8 @@ export interface PendingInputRecord {
 	beginBranch(): void;
 	/** Materialize preserved references before take-back; refusal leaves the input and its record queued. */
 	prepareInputForTake(input: QueuedInput): QueuedInput | undefined;
-	/** The set of queued inputs changed (an input arrived, was delivered, taken back or withdrawn). */
-	recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void;
+	/** Report a queue change and reconcile transferred preparations once its record is committed. */
+	recordQueuedInput(inputs: readonly RecordableQueuedInput[], onCommitted: () => void): void;
 	/** The set of prompts whose own turn is being prepared changed (`PendingInputQueueController.trackOwnTurn`). */
 	recordOwnTurnInput(inputs: readonly RecordableQueuedInput[]): void;
 	/** Whether this controller's committed queued record names `inputId`; borrowed branch history is not a transfer. */
@@ -400,7 +380,7 @@ export class PendingInputQueueController implements ForegroundInputPort {
 						uncertain.publication.sessionFile === context.sessionFile)
 				);
 			})
-			.map(recordableInput);
+			.map(recordableQueuedInput);
 	}
 
 	getSteering(): readonly string[] {
@@ -663,20 +643,29 @@ export class PendingInputQueueController implements ForegroundInputPort {
 
 	/** Retire preparation after delivery, explicit withdrawal, or a confirmed transfer to the queued record. */
 	private _leavePreparing(inputId: OwnerInputId, force = false): boolean {
-		if (this.deps.ownerInputs.stateOf(inputId) === "uncertain") return false;
 		const index = this._preparing.findIndex((entry) => entry.inputId === inputId);
-		if (index === -1) return false;
+		if (index === -1 || !this._removePreparation(index, force)) return false;
+		this._ownTurnChanged();
+		return true;
+	}
+
+	private _hasQueuedInput(inputId: OwnerInputId): boolean {
+		return [this._steering, this._followUp, this._owned, this._awaitingPersistence].some((entries) =>
+			entries.some((entry) => entry.inputId === inputId),
+		);
+	}
+
+	private _removePreparation(index: number, force: boolean): boolean {
+		const { inputId } = this._preparing[index]!;
+		if (this.deps.ownerInputs.stateOf(inputId) === "uncertain") return false;
 		if (
 			!force &&
 			this.deps.record?.keepsOwnTurnInput(inputId) &&
-			[...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].some(
-				(entry) => entry.inputId === inputId,
-			) &&
+			this._hasQueuedInput(inputId) &&
 			!this.deps.record.keepsQueuedInput(inputId)
 		)
 			return false;
 		this._preparing.splice(index, 1);
-		this._ownTurnChanged();
 		return true;
 	}
 
@@ -802,7 +791,9 @@ export class PendingInputQueueController implements ForegroundInputPort {
 			pasted?: readonly OwnerTextRange[];
 		}>,
 		recordChanged = false,
+		onCommitted?: (restoredIds: readonly OwnerInputId[]) => void,
 	): void {
+		const restoredIds: OwnerInputId[] = [];
 		for (const input of inputs) {
 			const abort = new AbortController();
 			abort.abort(PENDING_INPUT_WITHDRAWN);
@@ -821,23 +812,32 @@ export class PendingInputQueueController implements ForegroundInputPort {
 				true,
 			);
 			(input.kind === "steer" ? this._steering : this._followUp).push(entry);
+			restoredIds.push(entry.inputId);
 		}
-		if (recordChanged) this._changed();
+		if (recordChanged) this._changed(onCommitted && (() => onCommitted(restoredIds)));
 	}
 
-	/**
-	 * Report the complete undelivered queue, as submitted and in submission order, to the durable record. An input leaves
-	 * it only when it is delivered (its user entry persisted), taken back or withdrawn: one a run read but did not persist
-	 * yet is still named.
-	 */
-	private _changed(): void {
+	/** Snapshot undelivered inputs in submission order, including inputs read by a run whose user entries have yet to commit. */
+	private _changed(afterCommit?: () => void): void {
 		const entries = [...this._steering, ...this._followUp, ...this._owned, ...this._awaitingPersistence].sort(
 			(left, right) => left.id - right.id,
 		);
-		this.deps.record?.recordQueuedInput(this._recordableEntries(entries));
-		// Only transferred preparations may retire here. Failed or bounded-out writes keep the source record intact.
-		for (const entry of entries) this._leavePreparing(entry.inputId);
+		const onCommitted = afterCommit
+			? () => this._settleQueuedPreparations(afterCommit)
+			: this._settleQueuedPreparations;
+		if (this.deps.record) this.deps.record.recordQueuedInput(this._recordableEntries(entries), onCommitted);
+		else onCommitted();
 	}
+
+	private readonly _settleQueuedPreparations = (afterCommit?: () => void): void => {
+		let retired = false;
+		for (let index = this._preparing.length - 1; index >= 0; index--) {
+			if (this._hasQueuedInput(this._preparing[index]!.inputId) && this._removePreparation(index, false))
+				retired = true;
+		}
+		if (retired) this._ownTurnChanged();
+		afterCommit?.();
+	};
 
 	/**
 	 * Admit a registered input into the agent's queue, after every earlier input of its kind. Returns

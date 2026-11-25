@@ -145,14 +145,18 @@ export function createToolOnlyExtensionAPI(
 		sendMessage: () => ignore("sendMessage"),
 		sendUserMessage: () => ignore("sendUserMessage"),
 		appendEntry: () => ignore("appendEntry"),
+		appendEntryAsync: async () => ignore("appendEntryAsync"),
 		setSessionName: () => ignore("setSessionName"),
+		setSessionNameAsync: async () => ignore("setSessionNameAsync"),
 		setLabel: () => ignore("setLabel"),
+		setLabelAsync: async () => ignore("setLabelAsync"),
 		setActiveTools: () => ignore("setActiveTools"),
 		setModel: () => {
 			ignore("setModel");
 			return Promise.resolve(false);
 		},
 		setThinkingLevel: () => ignore("setThinkingLevel"),
+		setThinkingLevelAsync: async () => ignore("setThinkingLevelAsync"),
 		reportSpawnedUsage: () => ignore("reportSpawnedUsage"),
 		reportManagedLane: () => ignore("reportManagedLane"),
 		// A worker's grant is its own task's; a granted tool never re-projects owner knowledge to anyone.

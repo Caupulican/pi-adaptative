@@ -4247,7 +4247,7 @@ export class AgentSession {
 			validate();
 			await this._switchSessionModel(model, options, validate);
 			validate();
-			if (modelsAreEqual(model, this.model)) this._modelAccess.recordTalker(model, ["model selected"]);
+			await this._modelAccess.recordSelectedTalker(model, validate);
 		} finally {
 			reader?.release();
 		}
@@ -4282,8 +4282,8 @@ export class AgentSession {
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		const reader = await this._runtimeAdmission.admit("model", "model cycle");
 		try {
-			const result = await this._modelSelection.cycleModel(direction);
-			if (result?.model) this._modelAccess.recordTalker(result.model, ["model selected"]);
+			const result = await this._modelSelection.cycleModel(direction, () => reader.assertCurrent());
+			if (result) await this._modelAccess.recordSelectedTalker(result.model, () => reader.assertCurrent());
 			this._localPrefixWarm.schedule(result?.model);
 			return result;
 		} finally {
@@ -4293,6 +4293,10 @@ export class AgentSession {
 
 	setThinkingLevel(level: ThinkingLevel, options: { persistSettings?: boolean } = {}): void {
 		this._setThinkingLevel(level, options);
+	}
+
+	setThinkingLevelAsync(level: ThinkingLevel): Promise<void> {
+		return this.sessionManager.queueMutation(() => this.setThinkingLevel(level));
 	}
 
 	private _setThinkingLevel(
@@ -4314,7 +4318,8 @@ export class AgentSession {
 			validate();
 			const next = this._modelSelection.nextThinkingSelection();
 			if (!next) return undefined;
-			if (typeof next === "string") this._setThinkingLevel(next, {}, validate);
+			if (typeof next === "string")
+				await this.sessionManager.queueMutation(() => this._setThinkingLevel(next, {}, validate));
 			else await this._setModel(next, {}, validate);
 			return this.thinkingLevel;
 		} finally {
@@ -4622,10 +4627,6 @@ export class AgentSession {
 		});
 	}
 
-	// =========================================================================
-	// Bash Execution
-	// =========================================================================
-
 	/** Warm this session's shell so the first command does not pay startup. */
 	prewarmShell(): Promise<void> {
 		return this._bash.prewarmShell();
@@ -4657,15 +4658,15 @@ export class AgentSession {
 		return this._bash.hasPendingBashMessages;
 	}
 
-	// =========================================================================
-	// Session Management
-	// =========================================================================
-
 	/**
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
 		this._setSessionName(name);
+	}
+
+	setSessionNameAsync(name: string): Promise<void> {
+		return this.sessionManager.queueMutation(() => this.setSessionName(name));
 	}
 
 	private _setSessionName(name: string, assertCurrent?: () => void): void {
@@ -4678,10 +4679,6 @@ export class AgentSession {
 			assertCurrent,
 		);
 	}
-
-	// =========================================================================
-	// Tree Navigation
-	// =========================================================================
 
 	async navigateTree(
 		targetId: string,

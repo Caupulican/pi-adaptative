@@ -660,6 +660,7 @@ export {
 	shouldCompact,
 	type ThinkingLevelChangeEntry,
 } from "./kernel/node.ts";
+export { SessionMutationBusyError } from "./kernel/session/session-append-order.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage

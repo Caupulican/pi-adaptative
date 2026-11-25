@@ -313,7 +313,7 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 
 					host.renderCurrentSessionState();
 					if (newSessionName) {
-						host.session.setSessionName(newSessionName);
+						await host.session.setSessionNameAsync(newSessionName);
 					}
 					host.editor.setText(result.selectedText ?? "", result.pasted);
 					done();
@@ -455,8 +455,11 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 				finishSelectorCancellation(host, done);
 			},
 			(entryId, label) => {
-				host.sessionManager.appendLabelChange(entryId, label);
-				host.ui.requestRender();
+				const manager = host.sessionManager;
+				void manager
+					.queueMutation(() => manager.appendLabelChange(entryId, label))
+					.then(() => host.ui.requestRender())
+					.catch((error: unknown) => host.showError(error instanceof Error ? error.message : String(error)));
 			},
 			initialSelectedId,
 			initialFilterMode,
@@ -674,27 +677,26 @@ export async function showThinkingSelector(host: SessionFlowHost): Promise<void>
 	}
 
 	host.showSelector((done) => {
+		const apply = (level: ThinkingLevel, setDefault: boolean): void => {
+			const session = host.session;
+			done();
+			void host.sessionManager
+				.queueMutation(() => {
+					if (host.session !== session) return;
+					session.setThinkingLevel(level);
+					if (setDefault) host.settingsManager.setDefaultThinkingLevel(session.thinkingLevel);
+					host.footer.invalidate();
+					host.updateEditorBorderColor();
+					host.showStatus(setDefault ? words.defaultLevelSet(level) : words.levelSet(level));
+				})
+				.catch((error: unknown) => host.showError(error instanceof Error ? error.message : String(error)));
+		};
 		const selector = new ThinkingSelectorComponent(
 			currentLevel,
 			availableLevels,
-			(level) => {
-				host.session.setThinkingLevel(level);
-				host.footer.invalidate();
-				host.updateEditorBorderColor();
-				done();
-				host.showStatus(words.levelSet(level));
-			},
-			() => {
-				finishSelectorCancellation(host, done);
-			},
-			(level) => {
-				host.settingsManager.setDefaultThinkingLevel(level);
-				host.session.setThinkingLevel(level);
-				host.footer.invalidate();
-				host.updateEditorBorderColor();
-				done();
-				host.showStatus(words.defaultLevelSet(level));
-			},
+			(level) => apply(level, false),
+			() => finishSelectorCancellation(host, done),
+			(level) => apply(level, true),
 		);
 		return { component: selector, focus: selector };
 	});
@@ -715,7 +717,7 @@ export async function handleThinkingCommand(host: SessionFlowHost, arg?: string)
 	}
 
 	if (availableLevels.includes(normalized as ThinkingLevel)) {
-		host.session.setThinkingLevel(normalized as ThinkingLevel);
+		await host.session.setThinkingLevelAsync(normalized as ThinkingLevel);
 		host.footer.invalidate();
 		host.updateEditorBorderColor();
 		host.showStatus(words.levelSet(normalized));
@@ -735,7 +737,7 @@ export interface CloneCommandHost {
 	};
 	renderCurrentSessionState(): void;
 	readonly editor: { setText: (text: string) => void };
-	readonly session: { setSessionName: (name: string) => void };
+	readonly session: Pick<AgentSession, "setSessionNameAsync">;
 	showStatus(message: string): void;
 	showError(message: string): void;
 	readonly ui: { requestRender: () => void };
@@ -758,7 +760,7 @@ export async function handleCloneCommand(host: CloneCommandHost, newSessionName?
 
 		host.renderCurrentSessionState();
 		if (newSessionName) {
-			host.session.setSessionName(newSessionName);
+			await host.session.setSessionNameAsync(newSessionName);
 		}
 		host.editor.setText("");
 		host.showStatus(newSessionName ? words.cloned(newSessionName) : words.clonedUnnamed);

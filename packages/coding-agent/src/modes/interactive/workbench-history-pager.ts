@@ -63,12 +63,12 @@ export class WorkbenchHistoryPager {
 	}
 
 	/** Prefix eviction changes the seam between the saved pages and the live transcript. */
-	setLiveBoundary(older: string, evicted: readonly Component[]): void {
-		if (!this.hasCurrentBranch()) return;
-		if (this.liveOlder === older) return;
+	setLiveBoundary(older: string, evicted: readonly Component[]): boolean {
+		if (!this.hasCurrentBranch()) return false;
+		if (this.liveOlder === older) return true;
 		const previous = this.liveOlder;
 		this.liveOlder = older;
-		if (!this.liveVisible) return;
+		if (!this.liveVisible) return true;
 		this.cancel();
 		const reading = new Set(this.port.conversation()?.retainedComponents(this.port.root));
 		const newest = this.pages.at(-1);
@@ -83,6 +83,7 @@ export class WorkbenchHistoryPager {
 			const inLive = this.port.root.children.some((component) => reading.has(component));
 			this.mount(inLive ? [] : this.pages, inLive);
 		}
+		return true;
 	}
 
 	segments(): readonly Container[] {

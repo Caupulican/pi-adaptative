@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- On Linux Workbench, a synchronous extension session mutation can immediately throw `PI_SESSION_WRITE_BUSY` while an earlier write is pending. Extensions that write during a turn should await `appendEntryAsync`, `setSessionNameAsync`, `setLabelAsync`, or `setThinkingLevelAsync`.
+
+### Changed
+
+- Workbench queues session mutations behind in-flight transcript writes and pages settled assistant exchanges during long turns. A tool can keep receiving progress and results after its original row is paged out.
+
+### Fixed
+
+- Queued owner input is saved even before the first conversation message. Recovery keeps the old record and image pins until the replacement commits, and adjacent pending snapshots can be combined before writing.
+
 ## [0.104.79] - 2026-11-25
 
 ### Changed

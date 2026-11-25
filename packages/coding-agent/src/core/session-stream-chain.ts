@@ -289,11 +289,9 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 				ceiling: () => settingsManager.getFleetSettings().ceiling.running,
 			}),
 		record: (record) => {
-			try {
-				sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record);
-			} catch {
-				// A failed diagnostic write must never fail the request it observes.
-			}
+			void sessionManager
+				.queueMutation(() => sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record))
+				.catch(() => undefined);
 		},
 	});
 	Object.defineProperty(admitted, RAW_STREAM_MARKER, { value: baseStreamFn === streamSimple });

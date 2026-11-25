@@ -295,6 +295,16 @@ export class AgentSessionModelAccess {
 		this.recordTalker(model, [reason]);
 	}
 
+	async recordSelectedTalker(model: Model<Api>, assertCurrent: () => void): Promise<void> {
+		await this.ports.sessionManager().queueMutation(() => {
+			assertCurrent();
+			const selected = this.ports.agent().state.model;
+			if (selected?.provider === model.provider && selected.id === model.id) {
+				this.recordTalker(model, ["model selected"]);
+			}
+		});
+	}
+
 	/** The conversation's talker from now on: later owner messages run on it with no route judged. */
 	recordTalker(model: Model<Api>, reasons: readonly string[]): void {
 		const record: ConversationTalkerRecord = {

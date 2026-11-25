@@ -29,6 +29,7 @@ import {
 	decodeBackgroundToolImageManifest,
 	readBackgroundToolImage,
 } from "./background-tool-images.ts";
+import { BackgroundToolTaskPersistence } from "./background-tool-task-persistence.ts";
 import { runningBackgroundToolTaskCount, runningBackgroundToolTaskIds } from "./background-tool-task-views.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
@@ -305,6 +306,7 @@ export interface BackgroundToolTaskControllerDeps {
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
 	/** Snapshot writes own complete task state; delivery receipts own only the exact post-notification transition. */
 	persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind): void;
+	queueMutation?(commit: () => void): Promise<void>;
 	/**
 	 * Deliver a terminal batch. The receipt names the exact revisions whose final output the delivered
 	 * message carried in full; the controller marks exactly those observed. A notifier that
@@ -808,6 +810,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
  */
 export class BackgroundToolTaskController {
 	private readonly deps: BackgroundToolTaskControllerDeps;
+	private readonly persistence: BackgroundToolTaskPersistence;
 	private readonly tasks = new Map<string, BackgroundToolTaskState>();
 	private readonly handoffRequests = new Map<string, Set<() => void>>();
 	/** Physical completion is distinct from a fenced terminal record after cancellation. */
@@ -833,6 +836,11 @@ export class BackgroundToolTaskController {
 
 	constructor(deps: BackgroundToolTaskControllerDeps) {
 		this.deps = deps;
+		this.persistence = new BackgroundToolTaskPersistence(
+			deps,
+			(message, error) => this.reportError(message, error),
+			(error) => this.retainExecutionFailure(error),
+		);
 		this.waitTimeoutMs = deps.waitTimeoutMs ?? DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS;
 		this.maxRuntimeMs = deps.maxRuntimeMs ?? DEFAULT_BACKGROUND_TOOL_TASK_MAX_RUNTIME_MS;
 		this.cancelGraceMs = deps.cancelGraceMs ?? DEFAULT_BACKGROUND_TOOL_TASK_CANCEL_GRACE_MS;
@@ -895,7 +903,7 @@ export class BackgroundToolTaskController {
 		};
 		const state = this.createState(record, context.cancel);
 		this.tasks.set(taskId, state);
-		if (!this.persist(record)) {
+		if (!this.persistence.write(record)) {
 			this.tasks.delete(taskId);
 			return undefined;
 		}
@@ -909,8 +917,8 @@ export class BackgroundToolTaskController {
 		});
 		this.emitLiveTasks();
 		const execution = context.completion.then(
-			(completion) => this.settle(state, completion),
-			(error) => this.settleRejected(state, error),
+			(completion) => this.persistence.run(() => this.settle(state, completion)),
+			(error) => this.persistence.run(() => this.settleRejected(state, error)),
 		);
 		this.executions.set(taskId, execution);
 		void execution.then(
@@ -1137,7 +1145,15 @@ export class BackgroundToolTaskController {
 				// resume of this branch delivers this terminal through the restored pending wake-up the
 				// handoff stub promised, instead of leaving the model waiting for one that never comes.
 				try {
-					this.finishState(state, "canceled", "Session ended before the background tool completed.", undefined);
+					await this.persistence.run(() => {
+						if (state.record.status === "running")
+							this.finishState(
+								state,
+								"canceled",
+								"Session ended before the background tool completed.",
+								undefined,
+							);
+					});
 				} catch (error) {
 					this.retainExecutionFailure(error);
 					this.reportError(`Failed to retain canceled background tool task ${state.record.taskId}`, error);
@@ -1264,7 +1280,7 @@ export class BackgroundToolTaskController {
 			this.reportError("Failed to load persisted background tool tasks", error);
 			return;
 		}
-		const sessionIds = this.lineageSessionIds();
+		const sessionIds = this.persistence.lineageSessionIds();
 		const seenTaskIds = new Set<string>();
 		const latestRecords: BackgroundToolTaskRecord[] = [];
 		let highestTaskNumber = 0;
@@ -1309,13 +1325,6 @@ export class BackgroundToolTaskController {
 		this.emitLiveTasks();
 	}
 
-	private lineageSessionIds(): Set<string> {
-		const sessionId = this.deps.getSessionId();
-		const sessionIds = new Set(this.deps.getSessionLineageIds?.() ?? [sessionId]);
-		sessionIds.add(sessionId);
-		return sessionIds;
-	}
-
 	/**
 	 * The latest durable terminal snapshot of a task no longer held in `tasks`. That map is a bounded
 	 * cache (`MAX_RETAINED_TERMINAL_TASKS`); the session branch owns every task's terminal record,
@@ -1325,7 +1334,7 @@ export class BackgroundToolTaskController {
 	private loadRetiredTerminalRecord(taskId: string): BackgroundToolTaskRecord | undefined {
 		const load = this.deps.loadPersistedRecordsNewestFirst;
 		if (!load || taskNumber(taskId) === undefined) return undefined;
-		const sessionIds = this.lineageSessionIds();
+		const sessionIds = this.persistence.lineageSessionIds();
 		for (const value of load()) {
 			if (
 				!isPlainRecord(value) ||
@@ -1363,7 +1372,9 @@ export class BackgroundToolTaskController {
 		state.cancellationRequested = true;
 		const deadlineAt = new Date(this.now().getTime() + this.cancelGraceMs).toISOString();
 		state.record = { ...state.record, cancellationRequested: true, deadlineAt };
-		this.persist(state.record);
+		this.persistence.enqueue(state.record.taskId, () => {
+			if (state.record.status === "running") this.persistence.write(state.record);
+		});
 		try {
 			state.cancel();
 		} catch (error) {
@@ -1371,8 +1382,9 @@ export class BackgroundToolTaskController {
 		}
 		this.emitLiveTasks();
 		this.armTerminalWatchdog(state, this.cancelGraceMs, () => {
-			if (state.record.status !== "running") return;
-			this.finishState(state, "canceled", unsettledOutput, undefined);
+			this.persistence.enqueue(state.record.taskId, () => {
+				if (state.record.status === "running") this.finishState(state, "canceled", unsettledOutput, undefined);
+			});
 		});
 	}
 
@@ -1473,7 +1485,7 @@ export class BackgroundToolTaskController {
 			(verification.status === "passed" && !permitsPassingBackgroundVerification(status, terminalInvocation))
 		)
 			delete record.piVerification;
-		const persisted = this.persist(record);
+		const persisted = this.persistence.write(record);
 		if (!persisted && imageCapture) {
 			try {
 				imageCapture.discard();
@@ -1522,22 +1534,8 @@ export class BackgroundToolTaskController {
 		this.notify(terminalRecord, state.waitingConsumers === 0);
 	}
 
-	private persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind = "snapshot"): boolean {
-		try {
-			const durableRecord = { ...record };
-			delete durableRecord.observedAt;
-			delete durableRecord.ownerEpoch;
-			this.deps.persist(durableRecord, kind);
-			return true;
-		} catch (error) {
-			this.reportError(`Failed to persist background tool task ${record.taskId}`, error);
-			return false;
-		}
-	}
-
 	private notify(record: BackgroundToolTaskRecord, wakeParent: boolean): void {
-		// A disposed controller never drains. The terminal is already persisted `pending`, and the next
-		// resume of the branch delivers it from there, so nothing is queued that could only leak.
+		// A disposed controller leaves the persisted pending delivery for session resume.
 		if (this.disposed) return;
 		const notificationRecord = {
 			...record,
@@ -1552,7 +1550,7 @@ export class BackgroundToolTaskController {
 	private markNotificationDelivered(record: BackgroundToolTaskRecord): void {
 		if (record.terminalDelivery !== "pending") return;
 		const delivered = { ...record, terminalDelivery: "delivered" as const };
-		if (this.persist(delivered, "delivery_receipt")) {
+		if (this.persistence.write(delivered, "delivery_receipt")) {
 			const state = this.tasks.get(record.taskId);
 			if (state && sameBackgroundToolTerminal(state.record, record)) state.record = delivered;
 		}
@@ -1677,7 +1675,9 @@ export class BackgroundToolTaskController {
 			}
 			this.notificationRetryCount = 0;
 			this.lastReportedNotificationFailure = undefined;
-			for (const record of records) this.markNotificationDelivered(record);
+			await this.persistence.run(() => {
+				for (const record of records) this.markNotificationDelivered(record);
+			});
 			// The wake-up carried these outputs in full, so this delivery IS the model-facing read --
 			// the same consumption a `tool_task wait` performs. The notifier reports what its delivered
 			// message inlined (it builds that message from the records still unread at delivery, which

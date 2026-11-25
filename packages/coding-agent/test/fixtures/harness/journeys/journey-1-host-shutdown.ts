@@ -4,11 +4,12 @@ import { decisionLedgerFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type { ExtensionFactory } from "../../../../src/core/extensions/types.ts";
 import { DecisionLedgerStore } from "../../../../src/core/operator-projection/decision-ledger-store.ts";
-import { ownTurnInputRecordPath, QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/core/queued-input-record.ts";
+import { ownTurnInputRecordPath } from "../../../../src/core/queued-input-record.ts";
 import {
 	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 	readOptionalToolIntent,
 } from "../../../../src/core/tool-applicability-gate.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../../../../src/kernel/session/session-entries.ts";
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import {
@@ -1088,6 +1089,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		deliverable: 0,
 		notice: RESTORED_PREPARING_HEADLESS,
 	});
+	expect(ownTurnTexts(), "the committed queue snapshot releases the old own-turn record").toBeUndefined();
 	world.faultMatrix.witness("owner-input-preflight-restart", { control: false });
 	world.faultMatrix.witness("owner-input-preflight-restart", { control: true });
 	expect(prepNext.session.takeAllQueuedInput().followUp, "the owner takes the restored prompt back").toEqual([

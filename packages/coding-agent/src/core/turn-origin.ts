@@ -19,6 +19,7 @@ import {
 	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
 } from "../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "../kernel/session/session-entries.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { visitSessionAncestry } from "../kernel/session/session-tree.ts";
 import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
@@ -112,7 +113,6 @@ import {
 	AUTHORITY_CONTEXT_CUSTOM_TYPE,
 	DISCOVERED_SKILL_RECORD_KIND_PREFIX,
 } from "./provider-request-context-controller.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE, REPLY_ROUTE_CUSTOM_TYPE } from "./reply-route.ts";
 import { ROUTINE_COMPLETION_TYPE, ROUTINE_INTAKE_NOTICE_TYPE } from "./routines/routine-parent-input.ts";
 import { SESSION_SKILL_POLICY_CUSTOM_TYPE } from "./session-skill-policy.ts";

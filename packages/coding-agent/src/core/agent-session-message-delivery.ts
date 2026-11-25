@@ -119,7 +119,7 @@ export class AgentSessionMessageDelivery {
 				this.ports.agent().steer(appMessage);
 			}
 		} else {
-			this.ports.foregroundLifecycle().appendCustomMessage(appMessage);
+			await this.ports.foregroundLifecycle().appendMessageBatchAwaitable([{ kind: "custom", message: appMessage }]);
 			this.ports.agent().appendMessage(appMessage);
 			this.ports.emit({ type: "message_start", message: appMessage });
 			this.ports.emit({ type: "message_end", message: appMessage });

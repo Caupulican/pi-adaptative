@@ -1406,6 +1406,7 @@ export interface ExtensionAPI {
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
+	appendEntryAsync<T = unknown>(customType: string, data?: T): Promise<void>;
 
 	// =========================================================================
 	// Session Metadata
@@ -1413,12 +1414,14 @@ export interface ExtensionAPI {
 
 	/** Set the session display name (shown in session selector). */
 	setSessionName(name: string): void;
+	setSessionNameAsync(name: string): Promise<void>;
 
 	/** Get the current session name, if set. */
 	getSessionName(): string | undefined;
 
 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
 	setLabel(entryId: string, label: string | undefined): void;
+	setLabelAsync(entryId: string, label: string | undefined): Promise<void>;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1501,6 +1504,7 @@ export interface ExtensionAPI {
 
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevelAsync(level: ThinkingLevel): Promise<void>;
 
 	// =========================================================================
 	// Provider Registration
@@ -1785,6 +1789,7 @@ export interface ExtensionRuntimeState {
  * Provided to runner.initialize(), copied into the shared runtime.
  */
 export interface ExtensionActions {
+	queueSessionMutation(commit: () => void): Promise<void>;
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;

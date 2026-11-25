@@ -33,6 +33,7 @@ import { toolFailureText } from "./tool-failure-text.ts";
 import { createWorkbenchToolPreview, type PreviewAttribution } from "./workbench-tool-preview.ts";
 
 export interface ToolExecutionOptions {
+	executionState?: ToolExecutionState;
 	showImages?: boolean;
 	imageWidthCells?: number;
 	repair?: ToolCallRepairInfo;
@@ -239,7 +240,95 @@ function orchestrationConversationText(
 	return undefined;
 }
 
+/** Canonical live call state. Presentation can be collected before the terminal result arrives. */
+export class ToolExecutionState {
+	private views: WeakRef<ToolExecutionComponent>[] = [];
+	readonly timing = new ToolTimingComponent(monotonicNow);
+	repair: ToolCallRepairInfo | undefined;
+	isPartial = true;
+	executionStarted = false;
+	argsComplete = false;
+	result?: ToolExecutionResult;
+	args: unknown;
+	private readonly name: string;
+	private readonly history: boolean;
+
+	constructor(name: string, args: unknown, options: ToolExecutionOptions) {
+		this.name = name;
+		this.history = options.deferResultUntilExpanded ?? false;
+		this.args = args;
+		this.repair = options.repair;
+	}
+
+	attach(view: ToolExecutionComponent): void {
+		this.views = this.views.filter((current) => current.deref());
+		this.views.push(new WeakRef(view));
+	}
+
+	private refresh(options?: Parameters<ToolExecutionComponent["refreshExecutionView"]>[0]): void {
+		let retained = 0;
+		for (const reference of this.views) {
+			const view = reference.deref();
+			if (!view) continue;
+			this.views[retained++] = reference;
+			view.refreshExecutionView(options);
+		}
+		this.views.length = retained;
+	}
+
+	updateArgs(args: unknown, repair?: ToolCallRepairInfo): void {
+		this.args = args;
+		this.repair = repair;
+		this.refresh();
+	}
+
+	markExecutionStarted(repair?: ToolCallRepairInfo): void {
+		this.repair = repair;
+		this.executionStarted = true;
+		this.timing.start();
+		this.refresh({ repaint: true, immediate: true });
+	}
+
+	setArgsComplete(): void {
+		this.argsComplete = true;
+		this.refresh({ repaint: true, immediate: true });
+	}
+
+	updateResult(
+		result: ToolExecutionResult,
+		isPartial = false,
+		call?: { args: unknown; repair?: ToolCallRepairInfo },
+	): void {
+		if (call) {
+			this.args = call.args;
+			this.repair = call.repair;
+		}
+		if (!isPartial) {
+			this.timing.finish();
+			if (!this.mustDeferResultPayload(result)) compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
+		}
+		this.result = result;
+		this.isPartial = isPartial;
+		this.refresh({ result: true });
+	}
+
+	mustDeferResultPayload(result: ToolExecutionResult): boolean {
+		return (
+			this.history &&
+			(typeof Object.getOwnPropertyDescriptor(result, "content")?.get === "function" ||
+				typeof Object.getOwnPropertyDescriptor(result, "details")?.get === "function")
+		);
+	}
+
+	getWorkbenchPreview(by?: PreviewAttribution, cwd?: string): Component | undefined {
+		if (!this.result || this.isPartial || this.history) return undefined;
+		return createWorkbenchToolPreview(this.name, this.args, this.result, by, cwd);
+	}
+}
+
 export class ToolExecutionComponent extends Container {
+	readonly executionState: ToolExecutionState;
+	readonly followsLiveExecution: boolean;
 	private contentBox: Box;
 	private contentText: Text;
 	private selfRenderContainer: Container;
@@ -250,27 +339,20 @@ export class ToolExecutionComponent extends Container {
 	private imageSpacers: Spacer[] = [];
 	private toolName: string;
 	private toolCallId: string;
-	private args: any;
-	private repair: ToolCallRepairInfo | undefined;
 	private deferResultUntilExpanded: boolean;
 	private transformResult?: (result: ToolExecutionResult) => ToolExecutionResult;
 	private displayDirty = false;
 	private expanded = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
-	private isPartial = true;
 	private toolDefinition?: ToolDefinition<any, any>;
 	private builtInToolDefinition?: ToolDefinition<any, any>;
 	private ui: TUI;
 	private cwd: string;
-	private executionStarted = false;
-	private argsComplete = false;
-	private result?: ToolExecutionResult;
 	private materializedResult?: ToolExecutionResult;
 	/** Null reserves an index while conversion is pending; a value is ready for display. */
 	private convertedImages: Map<number, { data: string; mimeType: string } | null> = new Map();
 	private hideComponent = false;
-	private readonly timing = new ToolTimingComponent(monotonicNow);
 	private questionView?: Component;
 	private questionText?: Text;
 	private questionRevision = 0;
@@ -287,8 +369,9 @@ export class ToolExecutionComponent extends Container {
 		super();
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
-		this.args = args;
-		this.repair = options.repair;
+		this.followsLiveExecution = options.executionState !== undefined;
+		this.executionState = options.executionState ?? new ToolExecutionState(toolName, args, options);
+		this.executionState.attach(this);
 		this.deferResultUntilExpanded = options.deferResultUntilExpanded ?? false;
 		this.transformResult = options.transformResult;
 		this.toolDefinition = toolDefinition;
@@ -352,7 +435,7 @@ export class ToolExecutionComponent extends Container {
 
 	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
 		return {
-			args: this.args,
+			args: this.executionState.args,
 			toolCallId: this.toolCallId,
 			invalidate: () => {
 				this.invalidate();
@@ -361,13 +444,13 @@ export class ToolExecutionComponent extends Container {
 			lastComponent,
 			state: this.rendererState,
 			cwd: this.cwd,
-			executionStarted: this.executionStarted,
-			argsComplete: this.argsComplete,
-			isPartial: this.isPartial,
+			executionStarted: this.executionState.executionStarted,
+			argsComplete: this.executionState.argsComplete,
+			isPartial: this.executionState.isPartial,
 			expanded: this.expanded,
 			showImages: this.showImages,
-			isError: this.result?.isError ?? false,
-			repair: this.repair,
+			isError: this.executionState.result?.isError ?? false,
+			repair: this.executionState.repair,
 		};
 	}
 
@@ -390,8 +473,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private titleBadgeStatus(): "pending" | "running" | "success" | "error" {
-		if (this.result?.isError) return "error";
-		if (this.isPartial) return this.executionStarted ? "running" : "pending";
+		if (this.executionState.result?.isError) return "error";
+		if (this.executionState.isPartial) return this.executionState.executionStarted ? "running" : "pending";
 		return "success";
 	}
 
@@ -403,7 +486,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createRepairMarker(): Component | undefined {
-		return this.repair?.repaired
+		return this.executionState.repair?.repaired
 			? new Text(theme.fg("dim", interfaceText().conversation.repairedArguments), 0, 0)
 			: undefined;
 	}
@@ -424,18 +507,11 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createCollapsedResultHint(result: ToolExecutionResult): Component | undefined {
-		if (this.mustDeferResultPayload(result)) {
+		if (this.executionState.mustDeferResultPayload(result)) {
 			return new Text(formatCollapsedToolOutputHint(theme), 0, 0);
 		}
 		const resultPreview = this.createRenderedResult(result, false);
 		return resultPreview ? new CollapsedToolResultHintComponent(resultPreview) : undefined;
-	}
-
-	private mustDeferResultPayload(result: ToolExecutionResult): boolean {
-		if (!this.deferResultUntilExpanded) return false;
-		const content = Object.getOwnPropertyDescriptor(result, "content");
-		const details = Object.getOwnPropertyDescriptor(result, "details");
-		return typeof content?.get === "function" || typeof details?.get === "function";
 	}
 
 	private createRenderedResult(result: ToolExecutionResult, expanded: boolean): Component | undefined {
@@ -445,7 +521,7 @@ export class ToolExecutionComponent extends Container {
 		try {
 			const component = resultRenderer(
 				{ content: result.content as (TextContent | ImageContent)[], details: result.details },
-				{ expanded, isPartial: this.isPartial },
+				{ expanded, isPartial: this.executionState.isPartial },
 				theme,
 				this.getRenderContext(this.resultRendererComponent),
 			);
@@ -457,14 +533,8 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	updateArgs(args: any, repair?: ToolCallRepairInfo): void {
-		this.args = args;
-		this.repair = repair;
-		if (!this.expanded && this.deferResultUntilExpanded) {
-			this.deferDisplay();
-		} else {
-			this.updateDisplay();
-		}
+	updateArgs(args: unknown, repair?: ToolCallRepairInfo): void {
+		this.executionState.updateArgs(args, repair);
 	}
 
 	/**
@@ -484,17 +554,11 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	markExecutionStarted(repair?: ToolCallRepairInfo): void {
-		this.repair = repair;
-		this.timing.start();
-		this.executionStarted = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.executionState.markExecutionStarted(repair);
 	}
 
 	setArgsComplete(): void {
-		this.argsComplete = true;
-		this.updateDisplay();
-		this.ui.requestRender();
+		this.executionState.setArgsComplete();
 	}
 
 	updateResult(
@@ -502,45 +566,34 @@ export class ToolExecutionComponent extends Container {
 		isPartial = false,
 		call?: { args: unknown; repair?: ToolCallRepairInfo },
 	): void {
-		if (call) {
-			this.args = call.args;
-			this.repair = call.repair;
+		this.executionState.updateResult(result, isPartial, call);
+	}
+
+	refreshExecutionView(options: { result?: boolean; repaint?: boolean; immediate?: boolean } = {}): void {
+		if (options.result) {
+			this.materializedResult = undefined;
+			this.resetImageConversions();
 		}
-		// Final results live in the chat scrollback for the rest of the process.
-		// Oversized details would pin large payloads per tool call, so retain the
-		// same compacted form a resumed session would see.
-		if (!isPartial) {
-			this.timing.finish();
-			if (!this.mustDeferResultPayload(result)) {
-				compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
-			}
-		}
-		this.result = result;
-		this.materializedResult = undefined;
-		this.resetImageConversions();
-		this.isPartial = isPartial;
-		if (!this.expanded && this.deferResultUntilExpanded) {
-			this.deferDisplay();
-		} else {
-			this.updateDisplay();
-		}
-		if (this.shouldMaterializeResult()) this.maybeConvertImagesForKitty();
+		if (!options.immediate && !this.expanded && this.deferResultUntilExpanded) this.deferDisplay();
+		else this.updateDisplay();
+		if (options.result && this.shouldMaterializeResult()) this.maybeConvertImagesForKitty();
+		if (options.repaint) this.ui.requestRender();
 	}
 
 	private shouldMaterializeResult(): boolean {
-		return this.result !== undefined && this.expanded;
+		return this.executionState.result !== undefined && this.expanded;
 	}
 
 	private getMaterializedResult(): ToolExecutionResult | undefined {
-		if (!this.shouldMaterializeResult() || !this.result) return undefined;
+		if (!this.shouldMaterializeResult() || !this.executionState.result) return undefined;
 		if (!this.materializedResult) {
 			const base = this.deferResultUntilExpanded
 				? {
-						content: this.result.content,
-						isError: this.result.isError,
-						details: this.result.details,
+						content: this.executionState.result.content,
+						isError: this.executionState.result.isError,
+						details: this.executionState.result.details,
 					}
-				: this.result;
+				: this.executionState.result;
 			this.materializedResult = this.transformResult ? this.transformResult(base) : base;
 		}
 		return this.materializedResult;
@@ -610,23 +663,22 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	getBackgroundColor(): ThemeBg {
-		if (this.isPartial) return "toolPendingBg";
-		if (this.result?.isError) return "toolErrorBg";
+		if (this.executionState.isPartial) return "toolPendingBg";
+		if (this.executionState.result?.isError) return "toolErrorBg";
 		return "toolSuccessBg";
 	}
 
 	isToolPartial(): boolean {
-		return this.isPartial;
+		return this.executionState.isPartial;
 	}
 
 	isToolError(): boolean {
-		return this.result?.isError === true;
+		return this.executionState.result?.isError === true;
 	}
 
 	/** Requested once at the live terminal event, never while replaying retained tool history. */
 	getWorkbenchPreview(by?: PreviewAttribution, cwd?: string): Component | undefined {
-		if (!this.result || this.isPartial || this.deferResultUntilExpanded) return undefined;
-		return createWorkbenchToolPreview(this.toolName, this.args, this.result, by, cwd);
+		return this.executionState.getWorkbenchPreview(by, cwd);
 	}
 
 	/** Root-chat view of an orchestration call; the text is derived each time the view is first drawn. */
@@ -640,9 +692,9 @@ export class ToolExecutionComponent extends Container {
 				if (!action.questionText) {
 					const text = orchestrationConversationText(
 						action.toolName,
-						action.args,
-						action.result,
-						action.isPartial,
+						action.executionState.args,
+						action.executionState.result,
+						action.executionState.isPartial,
 					);
 					if (!text) return [];
 					action.questionText = new Text(text, 1, 0);
@@ -667,7 +719,11 @@ export class ToolExecutionComponent extends Container {
 			},
 			render(width) {
 				action.questionText ??= new Text(
-					questionConversationText(action.args, action.result?.content, action.result?.isError).slice(0, 16_384),
+					questionConversationText(
+						action.executionState.args,
+						action.executionState.result?.content,
+						action.executionState.result?.isError,
+					).slice(0, 16_384),
 					1,
 					0,
 				);
@@ -723,7 +779,11 @@ export class ToolExecutionComponent extends Container {
 				hasContent = true;
 			} else {
 				try {
-					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
+					const component = callRenderer(
+						this.executionState.args,
+						theme,
+						this.getRenderContext(this.callRendererComponent),
+					);
 					this.callRendererComponent = component;
 					renderContainer.addChild(component);
 					hasContent = true;
@@ -740,8 +800,8 @@ export class ToolExecutionComponent extends Container {
 				hasContent = true;
 			}
 
-			if (this.result && !this.expanded) {
-				const collapsedResultHint = this.createCollapsedResultHint(this.result);
+			if (this.executionState.result && !this.expanded) {
+				const collapsedResultHint = this.createCollapsedResultHint(this.executionState.result);
 				if (collapsedResultHint) {
 					renderContainer.addChild(collapsedResultHint);
 					hasContent = true;
@@ -755,8 +815,8 @@ export class ToolExecutionComponent extends Container {
 					hasContent = true;
 				}
 			}
-			if (this.timing.hasStarted()) {
-				renderContainer.addChild(this.timing);
+			if (this.executionState.timing.hasStarted()) {
+				renderContainer.addChild(this.executionState.timing);
 				hasContent = true;
 			}
 		} else {
@@ -815,17 +875,18 @@ export class ToolExecutionComponent extends Container {
 			label: this.getDisplayLabel(),
 			status: this.titleBadgeStatus(),
 		});
-		if (this.repair?.repaired) {
+		if (this.executionState.repair?.repaired) {
 			text += `\n${theme.fg("dim", words.repairedArguments)}`;
 		}
-		const content = JSON.stringify(this.args, null, 2);
+		const content = JSON.stringify(this.executionState.args, null, 2);
 		if (content) {
 			text += `\n\n${content}`;
 		}
 		if (
-			this.result &&
+			this.executionState.result &&
 			!this.expanded &&
-			(this.mustDeferResultPayload(this.result) || this.getTextOutput(this.result).trim().length > 0)
+			(this.executionState.mustDeferResultPayload(this.executionState.result) ||
+				this.getTextOutput(this.executionState.result).trim().length > 0)
 		) {
 			text += formatCollapsedToolOutputHint(theme);
 		}
@@ -840,7 +901,7 @@ export class ToolExecutionComponent extends Container {
 				text += `\n${output}`;
 			}
 		}
-		const timing = this.timing.getText();
+		const timing = this.executionState.timing.getText();
 		if (timing) text += `\n${theme.fg("muted", timing)}`;
 		return text;
 	}

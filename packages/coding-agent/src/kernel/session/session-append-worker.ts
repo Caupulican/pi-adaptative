@@ -5,11 +5,9 @@ import { executeSessionAppendDisk, type SessionAppendDiskRequest } from "./sessi
 export interface SessionAppendWorkerRequest {
 	readonly request: SessionAppendDiskRequest;
 	readonly port: MessagePort;
-	readonly signal: SharedArrayBuffer;
 }
 
-parentPort?.on("message", ({ request, port, signal }: SessionAppendWorkerRequest) => {
-	const state = new Int32Array(signal);
+parentPort?.on("message", ({ request, port }: SessionAppendWorkerRequest) => {
 	try {
 		const outcome = executeSessionAppendDisk(request);
 		try {
@@ -22,8 +20,6 @@ parentPort?.on("message", ({ request, port, signal }: SessionAppendWorkerRequest
 			});
 		}
 	} finally {
-		Atomics.store(state, 0, 1);
-		Atomics.notify(state, 0);
 		port.close();
 	}
 });

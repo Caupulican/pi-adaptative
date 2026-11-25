@@ -10,7 +10,7 @@ import type { AgentMessage } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { isSessionLifecycleEntry } from "./lifecycle-ledger.ts";
 import { getDefaultSessionDir, getDefaultSessionDirCandidates } from "./session-default-dirs.ts";
-import type { SessionMessageEntry } from "./session-entries.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE, type SessionMessageEntry } from "./session-entries.ts";
 import {
 	getSessionHeaderCwd,
 	parseSessionEntryLine,
@@ -350,7 +350,8 @@ export function requiresSessionFile(entry: FileEntry): boolean {
 				entry.message.role === "assistant" ||
 				entry.message.role === "bashExecution")) ||
 		isSessionLifecycleEntry(entry) ||
-		(entry.type === "custom" && entry.customType === "continuous_chat_work_report")
+		(entry.type === "custom" &&
+			(entry.customType === QUEUED_INPUT_CUSTOM_TYPE || entry.customType === "continuous_chat_work_report"))
 	);
 }
 

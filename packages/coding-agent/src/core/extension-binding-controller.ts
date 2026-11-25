@@ -374,6 +374,13 @@ export class ExtensionBindingController {
 					assertExtensionCustomType(customType);
 					this.deps.getSessionManager().appendCustomEntry(customType, data);
 				},
+				queueSessionMutation: (commit) => {
+					assertResourceMutation();
+					return this.deps.getSessionManager().queueMutation(() => {
+						assertResourceMutation();
+						commit();
+					});
+				},
 				setSessionName: (name) => {
 					assertResourceMutation();
 					this.deps.setSessionName(name, assertResourceMutation);

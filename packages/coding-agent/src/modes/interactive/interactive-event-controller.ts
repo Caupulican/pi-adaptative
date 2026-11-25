@@ -31,7 +31,7 @@ import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import { type ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
-import type { ToolExecutionComponent } from "./components/tool-execution.ts";
+import type { ToolExecutionState } from "./components/tool-execution.ts";
 import { type MisalignmentBlock, misalignmentBlock } from "./misalignment-continuation.ts";
 import type { RuntimeStatusController } from "./runtime-status-controller.ts";
 import type { WorkbenchController } from "./workbench-controller.ts";
@@ -105,7 +105,7 @@ export interface InteractiveEventPort {
 	isInitialized(): boolean;
 	isThinkingHidden(): boolean;
 	init(): Promise<void>;
-	clearActiveToolCalls(): void;
+	clearActiveToolCalls(options?: { keepPendingResults?: boolean }): void;
 	updatePendingMessagesDisplay(): void;
 	updateTerminalTitle(): void;
 	refreshActivityLane(): void;
@@ -119,12 +119,13 @@ export interface InteractiveEventPort {
 	getMarkdownThemeWithSettings(): MarkdownTheme;
 	transformMarkdownForDisplay: MarkdownTransformFn;
 	trimLiveTuiHistory(): void;
+	rememberAssistantCheckpoint(component: AssistantMessageComponent, message: AssistantMessage): void;
 	attachToolExecutionComponent(
 		toolName: string,
 		toolCallId: string,
 		args: unknown,
 		repair?: ToolCallRepairInfo,
-	): ToolExecutionComponent;
+	): ToolExecutionState;
 	toolActivityKind(toolName: string): ActivityLaneKind;
 	toolActivityLabel(toolName: string): string;
 	toolActivityTerminalStatus(isError: boolean, details: unknown): "success" | "failure" | "neutral";
@@ -161,7 +162,7 @@ export class InteractiveEventController {
 	private streamingUiUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 	private lastStreamingUiUpdateAt = 0;
 	private readonly streamingAliases = new StreamingPathAliasDisplay();
-	private readonly toolProgress = new Map<string, { component: ToolExecutionComponent; event: ToolProgress }>();
+	private readonly toolProgress = new Map<string, { component: ToolExecutionState; event: ToolProgress }>();
 	private toolProgressTimer?: ReturnType<typeof setTimeout>;
 	private retryEscapeHandler: (() => void) | undefined;
 	private retryCountdown: CountdownTimer | undefined;
@@ -193,7 +194,7 @@ export class InteractiveEventController {
 		this.toolProgress.clear();
 	}
 
-	private queueToolProgress(component: ToolExecutionComponent, event: ToolProgress): void {
+	private queueToolProgress(component: ToolExecutionState, event: ToolProgress): void {
 		this.toolProgress.set(event.toolCallId, { component, event });
 		if (this.toolProgressTimer) return;
 		this.toolProgressTimer = setTimeout(() => {
@@ -210,7 +211,7 @@ export class InteractiveEventController {
 		}, TOOL_PROGRESS_INTERVAL_MS);
 	}
 
-	private takeToolProgress(id: string, component: ToolExecutionComponent | undefined): ToolProgress | undefined {
+	private takeToolProgress(id: string, component: ToolExecutionState | undefined): ToolProgress | undefined {
 		const pending = this.toolProgress.get(id);
 		this.toolProgress.delete(id);
 		return pending && pending.component === component ? pending.event : undefined;
@@ -518,6 +519,8 @@ export class InteractiveEventController {
 					// isStreaming:false, matching the message's now-complete state.
 					streamingComponent.setStreaming(false);
 					this.applyStreamingMessageUpdate(this.streamingMessage, "end");
+					this.port.activeToolCalls.recordAssistant(event.message);
+					this.port.rememberAssistantCheckpoint(streamingComponent, event.message);
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						errorMessage ??= this.streamingMessage.errorMessage || interfaceText().notices.errorWord;
 						for (const [id, component] of this.port.activeToolCalls.activeEntries()) {
@@ -527,7 +530,7 @@ export class InteractiveEventController {
 								this.takeToolProgress(id, component),
 							);
 						}
-						this.port.clearActiveToolCalls();
+						this.port.clearActiveToolCalls({ keepPendingResults: true });
 					} else {
 						for (const [, component] of this.port.activeToolCalls.activeEntries()) component.setArgsComplete();
 					}
@@ -595,7 +598,7 @@ export class InteractiveEventController {
 				const progress = this.takeToolProgress(event.toolCallId, component);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError }, false, progress);
-					this.port.activeToolCalls.finish(event.toolCallId);
+					this.port.activeToolCalls.finish(event.toolCallId, this.port.getSessionManager().isPersisted());
 					this.port.ui.requestRender();
 				}
 				// A verification receipt changes what the inspector's Checks block shows; refresh it too.
@@ -647,7 +650,7 @@ export class InteractiveEventController {
 					this.port.chatContainer.removeChild(this.streamingComponent);
 					this.discardStreaming();
 				}
-				this.port.clearActiveToolCalls();
+				this.port.clearActiveToolCalls({ keepPendingResults: true });
 				this.port.trimLiveTuiHistory();
 				this.port.activityLane?.removeByPrefix("tool:");
 				await this.port.checkShutdownRequested();
