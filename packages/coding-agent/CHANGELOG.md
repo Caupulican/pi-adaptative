@@ -1,9 +1,3 @@
-## [Unreleased]
-
-### Fixed
-
-- An extension notice delivered after runtime reload releases its short foreground claim as part of the ordered commit. An owner prompt waiting on that reload can continue once the generation is available.
-
 ## [0.105.0] - 2026-11-25
 
 ### Breaking Changes
@@ -17,6 +11,8 @@
 ### Fixed
 
 - Queued owner input is saved even before the first conversation message. Recovery keeps the old record and image pins until the replacement commits, and adjacent pending snapshots can be combined before writing.
+
+- An extension notice delivered after runtime reload releases its short foreground claim as part of the ordered commit. An owner prompt waiting on that reload can continue once the generation is available.
 
 ## [0.104.79] - 2026-11-25
 
