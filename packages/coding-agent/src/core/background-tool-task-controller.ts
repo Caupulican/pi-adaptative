@@ -20,7 +20,7 @@ import {
 	retainedVerificationDetails,
 	type VerificationRecord,
 } from "../kernel/verification-obligations.ts";
-import { handoffStubText } from "./background-tool-handoff-text.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE, handoffStubText } from "./background-tool-handoff-text.ts";
 import {
 	type BackgroundToolImageCapture,
 	type BackgroundToolImageManifest,
@@ -257,7 +257,7 @@ export interface BackgroundToolTerminalDeliveryReceipt {
 export type BackgroundToolTerminalDeliveryResult = void | undefined | BackgroundToolTerminalDeliveryReceipt;
 
 export interface BackgroundToolTerminalMessage {
-	customType: "background-tool-completion";
+	customType: typeof BACKGROUND_TOOL_COMPLETION_TYPE;
 	content: string;
 	display: true;
 	details: {
@@ -575,7 +575,7 @@ export function createBackgroundToolTerminalMessage(
 		};
 	});
 	return {
-		customType: "background-tool-completion",
+		customType: BACKGROUND_TOOL_COMPLETION_TYPE,
 		content: [
 			"Background tool terminal handoff:",
 			...projections.flatMap((projection) => [
@@ -673,7 +673,7 @@ function cloneUsage(value: unknown): Usage | undefined {
 export function backgroundToolInvocationObservations(
 	message: Pick<CustomMessage, "customType" | "details">,
 ): ToolInvocationObservation[] {
-	if (message.customType !== "background-tool-completion" || !isRecordObject(message.details)) return [];
+	if (message.customType !== BACKGROUND_TOOL_COMPLETION_TYPE || !isRecordObject(message.details)) return [];
 	const records = ownDataValue(message.details, "records");
 	if (!Array.isArray(records) || records.length > MAX_TERMINAL_HANDOFF_RECORDS) return [];
 	const observations: ToolInvocationObservation[] = [];

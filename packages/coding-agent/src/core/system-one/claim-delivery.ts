@@ -5,9 +5,8 @@
  *
  * Receipts are mechanical facts read from the turn's tool calls and results — never model text.
  * System One answers one atomic question per claim kind ("does the answer state that X?"); code combines
- * each settled answer with the receipt for X. A claim the receipts contradict, and a claim no receipt
- * backs that the unsettled-item ladder cannot settle, go back to the agent in the one correction turn: it
- * states what happened, proves the claim with a tool run, or retracts it. Neither is an owner decision.
+ * each settled answer with the receipt for X. A contradiction buys one correction turn. Missing evidence
+ * produces a warning and does not start another turn.
  */
 
 import { isDeepStrictEqual } from "node:util";
@@ -15,8 +14,14 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "@caupulican/
 import { assistantAnswerTextParts } from "../../kernel/assistant-answer.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
-import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
+import {
+	isPassingTestVerification,
+	ownDataValue,
+	retainedVerificationDetails,
+	type VerificationRecord,
+} from "../../kernel/verification-obligations.ts";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
+import { backgroundToolInvocationObservations } from "../background-tool-task-controller.ts";
 import { settledAnswer } from "../decision/noul.ts";
 import { choiceAct } from "../decision/thresholds.ts";
 import {
@@ -28,6 +33,7 @@ import {
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { ClaimReceipts, DeliveryReceipt } from "../orchestration/claim-receipts.ts";
 import { readToolBridgeChangedPaths } from "../tools/tool-bridge-policy.ts";
+import { isRecordObject } from "../util/value-guards.ts";
 import type { WorkUnitRecord } from "../work-units.ts";
 import { EPOCH_CHANGED_PATHS_CAP } from "../worktree-sync/codes.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
@@ -118,6 +124,37 @@ function countDelivery(counts: { succeeded: number; failed: number }, ok: boolea
 	else counts.failed += 1;
 }
 
+type VerificationCounts = ReturnType<typeof emptyClaimReceipts>["checks"];
+
+function countVerification(counts: VerificationCounts, passed: boolean): void {
+	if (passed) counts.passed += 1;
+	else counts.failed += 1;
+	counts.lastPassed = passed;
+}
+
+function acceptInvocation(seenRequests: Map<string, Set<string>>, requestId: string, callId: string): boolean {
+	const seen = seenRequests.get(requestId) ?? new Set<string>();
+	if (seen.has(callId)) return false;
+	seen.add(callId);
+	seenRequests.set(requestId, seen);
+	return true;
+}
+
+function acceptBackgroundVerification(seen: Set<string>, record: VerificationRecord, details: unknown): boolean {
+	if (!isRecordObject(details)) return false;
+	const taskId = record.originTaskId;
+	const status = ownDataValue(details, "status");
+	if (
+		taskId === undefined ||
+		taskId !== ownDataValue(details, "taskId") ||
+		(status !== "completed" && status !== "failed") ||
+		seen.has(taskId)
+	)
+		return false;
+	seen.add(taskId);
+	return true;
+}
+
 /** Receipts for the messages a single turn appended. */
 export function collectClaimReceipts(
 	turnMessages: readonly AgentMessage[],
@@ -136,6 +173,7 @@ export function collectClaimReceiptEvents(
 ): ClaimReceipts {
 	const calls = new Map<string, ToolCall | undefined>();
 	const seenRequests = new Map<string, Set<string>>();
+	const seenBackgroundVerifications = new Set<string>();
 	const seenWorkerEntries = new Set<string>();
 	const workerEvidence = new Map<string, Extract<ClaimReceiptEvent, { kind: "worker" }> | undefined>();
 	for (const event of events) {
@@ -176,6 +214,25 @@ export function collectClaimReceiptEvents(
 			}
 			continue;
 		}
+		if (message.role === "custom") {
+			if (!isRecordObject(message.details) || ownDataValue(message.details, "thirdParty") === true) continue;
+			for (const result of backgroundToolInvocationObservations(message)) {
+				const invocation = retainedToolInvocation(result.details);
+				const record = retainedVerificationDetails(result.details)?.piVerification;
+				if (
+					invocation?.execution !== "completed" ||
+					record?.outcome !== "executed" ||
+					record.evidence === undefined ||
+					!acceptBackgroundVerification(seenBackgroundVerifications, record, result.details)
+				)
+					continue;
+				countVerification(
+					record.evidence === "tests" ? tests : nonTestChecks,
+					!result.isError && invocation.operationStatus === "success" && record.status === "passed",
+				);
+			}
+			continue;
+		}
 		if (message.role !== "toolResult") continue;
 		const result = message as ToolResultMessage;
 		const call = calls.get(result.toolCallId);
@@ -190,12 +247,11 @@ export function collectClaimReceiptEvents(
 		)
 			continue;
 		if (invocation?.execution === "not_started" || invocation?.execution === "running") continue;
-		if (invocation?.execution === "completed") {
-			const seen = seenRequests.get(invocation.requestId) ?? new Set<string>();
-			if (seen.has(result.toolCallId)) continue;
-			seen.add(result.toolCallId);
-			seenRequests.set(invocation.requestId, seen);
-		}
+		if (
+			invocation?.execution === "completed" &&
+			!acceptInvocation(seenRequests, invocation.requestId, result.toolCallId)
+		)
+			continue;
 		// Child write receipts describe settled operations independently of the parent Python status.
 		if (result.toolName === "python") {
 			for (const path of readToolBridgeChangedPaths(call.arguments, result.details)) {
@@ -210,9 +266,15 @@ export function collectClaimReceiptEvents(
 		let checkPassed: boolean | undefined;
 		let counts = nonTestChecks;
 		if (record?.evidence !== undefined && record.outcome === "executed") {
-			counts = record.evidence === "tests" ? tests : nonTestChecks;
-			checkPassed =
-				ok && (record.evidence === "tests" ? isPassingTestVerification(record) : record.status === "passed");
+			if (
+				record.originTaskId === undefined ||
+				(result.toolName === "tool_task" &&
+					acceptBackgroundVerification(seenBackgroundVerifications, record, result.details))
+			) {
+				counts = record.evidence === "tests" ? tests : nonTestChecks;
+				checkPassed =
+					ok && (record.evidence === "tests" ? isPassingTestVerification(record) : record.status === "passed");
+			}
 		} else if (invocation && checks.size > 0 && !Object.hasOwn(result.details as object, "piVerification")) {
 			const proof = checks.get(workerCommandReceiptId(invocation.requestId, result.toolCallId));
 			const observed = proof
@@ -262,11 +324,7 @@ export function collectClaimReceiptEvents(
 				for (const path of detail.changedPaths) if (!filesChanged.includes(path)) filesChanged.push(path);
 			}
 		}
-		if (checkPassed !== undefined) {
-			if (checkPassed) counts.passed += 1;
-			else counts.failed += 1;
-			counts.lastPassed = checkPassed;
-		}
+		if (checkPassed !== undefined) countVerification(counts, checkPassed);
 		const goalChecks = GOAL_TOOLS.has(result.toolName) ? goalCheckRuns(result.details) : undefined;
 		if (goalChecks && goalChecks.passed + goalChecks.failed > 0) {
 			// Goal requirements and cited worker commands have no executed-test provenance.
@@ -415,29 +473,14 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 	return findings;
 }
 
-/** One finding the ladder could not settle: what the answer claimed and what evidence would settle it. */
-export interface UnverifiedClaim {
-	readonly reason: string;
-	readonly missing: string;
-}
-
-/** The one correction turn a contradicted or unverifiable claim buys. */
-export function claimCorrectionPrompt(
-	findings: readonly ClaimFinding[],
-	unverified: readonly UnverifiedClaim[] = [],
-): string {
-	const contradicted = findings.filter((f) => f.verdict === "contradicted");
-	const lines = ["System One checked your last answer against this work's tool results."];
-	if (contradicted.length > 0) lines.push("Claims they contradict:", ...contradicted.map((f) => `- ${f.reason}`));
-	if (unverified.length > 0)
-		lines.push(
-			"Claims no tool result confirms or refutes:",
-			...unverified.map((claim) => `- ${claim.reason} (missing: ${claim.missing})`),
-		);
-	lines.push(
-		"Correct the answer for the user: state what actually happened, prove each unconfirmed claim with a tool run, or retract it, and finish the work if it is still needed.",
-	);
-	return lines.join("\n");
+/** The one correction turn a contradicted claim buys. */
+function claimCorrectionPrompt(findings: readonly ClaimFinding[]): string {
+	return [
+		"System One checked your last answer against this work's tool results.",
+		"Claims they contradict:",
+		...findings.map((finding) => `- ${finding.reason}`),
+		"Correct the answer using the recorded results and the owner's instructions. State what happened and retract claims the results contradict.",
+	].join("\n");
 }
 
 /** What each claim kind asserts, as a statement System One can judge against the turn's own results. */
@@ -530,10 +573,8 @@ export class AnswerClaimChecker {
 	}
 
 	/**
-	 * Returns the correction prompt when a claim is contradicted or cannot be verified; undefined otherwise. A
-	 * claim no receipt backs climbs the ladder over the work's results: confirmed, it stands; refuted, it is a
-	 * contradiction; still open, the agent is asked to prove it or retract it. An open claim is the agent's to
-	 * settle, never an owner decision.
+	 * Returns a correction only for a contradiction. Verification claims need mechanical evidence, so missing
+	 * verification evidence is reported directly. Other unsupported claims may be settled by the ladder.
 	 */
 	async resolve(
 		findings: readonly ClaimFinding[],
@@ -542,8 +583,12 @@ export class AnswerClaimChecker {
 		scope?: AnswerClaimScope,
 	): Promise<string | undefined> {
 		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
-		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");
-		const unverified: UnverifiedClaim[] = [];
+		const unsupported = findings.filter((finding) => {
+			if (finding.verdict !== "unsupported") return false;
+			if (finding.kind !== "tests_pass" && finding.kind !== "checks_pass") return true;
+			this.deps.warn(`Unverified claim: ${finding.reason}`);
+			return false;
+		});
 		if (unsupported.length > 0 && this.deps.settle) {
 			const byStatement = new Map(unsupported.map((finding) => [CLAIM_STATEMENTS[finding.kind], finding]));
 			const outcome = await this.deps.settle(
@@ -566,14 +611,11 @@ export class AnswerClaimChecker {
 			for (const entry of outcome.unsettled) {
 				const reason = byStatement.get(entry.item)?.reason ?? entry.item;
 				this.deps.warn(`Unverified claim: ${reason} (missing: ${entry.missing})`);
-				unverified.push({ reason, missing: entry.missing });
 			}
 		} else {
 			for (const finding of unsupported) this.deps.warn(`Unverified claim: ${finding.reason}`);
 		}
-		return contradicted.length > 0 || unverified.length > 0
-			? claimCorrectionPrompt(contradicted, unverified)
-			: undefined;
+		return contradicted.length > 0 ? claimCorrectionPrompt(contradicted) : undefined;
 	}
 
 	/**

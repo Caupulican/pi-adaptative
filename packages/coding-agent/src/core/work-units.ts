@@ -1,5 +1,7 @@
+import { sessionHistoryMessage } from "../kernel/session/session-context-builder.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "./background-tool-handoff-text.ts";
 
 /**
  * Session custom entry marking where a unit of work began (conversation-continuity stage 2, the
@@ -96,7 +98,10 @@ function collectWorkWindow(
 		entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
 	) {
 		if (entry.type === "message") entries.push({ kind: "message", message: entry.message });
-		else if (entry.type === "custom" && entry.customType === customType)
+		else if (entry.type === "custom_message" && entry.customType === BACKGROUND_TOOL_COMPLETION_TYPE) {
+			const message = sessionHistoryMessage(entry);
+			if (message) entries.push({ kind: "message", message });
+		} else if (entry.type === "custom" && entry.customType === customType)
 			entries.push({ kind: "custom", entryId: entry.id, data: entry.data });
 		else if (entry.type === "custom" && entry.customType === WORK_UNIT_CUSTOM_TYPE && startEntryId === undefined) {
 			const record = entry.data as WorkUnitRecord | undefined;

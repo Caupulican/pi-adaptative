@@ -85,7 +85,7 @@ const everyMsField = Type.Optional(
 );
 
 /** The authored condition's shapes in the model's words, for the descriptions of the tools that arm a watch. */
-export const WATCH_CONDITION_SHAPES = `{type:'file', path (a file, a folder or a glob), on:'changed'|'created'|'deleted'}, {type:'process', processId, on:'exited'} (a harness-managed process), {type:'pid', pid, on:'exited', everyMs?}, {type:'port', host, port, on:'open'|'closed', everyMs?}, {type:'command', command, everyMs?, timeoutMs?, expect?:{exitCode?, outputContains?}} (admitted like the owner's own shell calls) or {type:'http', url, statusIs?, bodyContains?, everyMs?} (GET only); timed checks run every ${WATCH_DEFAULT_EVERY_MS / 1_000} s unless everyMs (at least ${WATCH_MIN_EVERY_MS / 1_000} s) says otherwise`;
+export const WATCH_CONDITION_SHAPES = `{type:'file', path (a file, a folder or a glob), on:'changed'|'created'|'deleted'}, {type:'process', processId, on:'exited'} (a process-matrix ID such as worker-<session id>, not tool-task-N), {type:'pid', pid, on:'exited', everyMs?}, {type:'port', host, port, on:'open'|'closed', everyMs?}, {type:'command', command, everyMs?, timeoutMs?, expect?:{exitCode?, outputContains?}} (admitted like the owner's own shell calls) or {type:'http', url, statusIs?, bodyContains?, everyMs?} (GET only); timed checks run every ${WATCH_DEFAULT_EVERY_MS / 1_000} s unless everyMs (at least ${WATCH_MIN_EVERY_MS / 1_000} s) says otherwise`;
 
 /** The authored condition: a discriminated union on `type`. */
 export const watchConditionSchema = Type.Union([
@@ -109,7 +109,7 @@ export const watchConditionSchema = Type.Union([
 				minLength: 1,
 				maxLength: 210,
 				description:
-					"The id of a process the harness manages (a process-matrix entry such as worker-<session id>); its recorded terminal state fires the watch.",
+					"A process-matrix ID such as worker-<session id> or master-<session id>. Background tool-task IDs do not use watches; they already wake the session.",
 			}),
 			on: Type.Literal("exited"),
 		},
@@ -283,7 +283,8 @@ export function parseWatchCondition(value: unknown): WatchCondition {
 		};
 	if (value.type === "process" && hasOnlyKeys(value, ["type", "processId", "on"])) {
 		const processId = boundedText(value.processId, 210, "process id");
-		if (!PROCESS_ID_PATTERN.test(processId) || processId.includes("..")) throw invalid("names an invalid process id");
+		if (!PROCESS_ID_PATTERN.test(processId) || processId.includes(".."))
+			throw invalid("needs a master-… or worker-… ID; background tool tasks already wake the session");
 		return { type: "process", processId, on: oneOf(value.on, ["exited"], "on") };
 	}
 	if (value.type === "pid" && hasOnlyKeys(value, ["type", "pid", "on", "everyMs"])) {

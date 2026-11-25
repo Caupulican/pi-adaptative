@@ -7,11 +7,13 @@
 
 import type { BackgroundToolCallContext } from "../kernel/index.ts";
 
+export const BACKGROUND_TOOL_COMPLETION_TYPE = "background-tool-completion";
+
 export function handoffStubText(context: BackgroundToolCallContext, taskId: string, runtimeBoundMs: number): string {
 	return [
 		handoffHeadline(context, taskId),
 		`The task is stopped if it still runs after ${runtimeBound(runtimeBoundMs)}; stop it sooner with tool_task action=cancel taskId=${taskId}.`,
-		"Continue independent work; the completion wake-up carries its result. Call tool_task action=wait with taskId only when you have nothing else to do until it ends, or when the wake-up marks its output omitted; never poll.",
+		"Continue independent work or end the turn. This task wakes the session on completion; do not arm a watch for its task ID. Use tool_task action=wait only for a synchronous dependency or omitted output; never poll.",
 	].join("\n");
 }
 

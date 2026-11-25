@@ -2,6 +2,7 @@
 import { parentInputOriginalDetails } from "../kernel/session/parent-input-ledger.ts";
 import { isPlainRecord } from "../kernel/utils/value-guards.ts";
 import { isLaneTerminalStatus } from "./autonomy/lane-tracker.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "./background-tool-handoff-text.ts";
 import { backgroundToolInvocationObservations } from "./background-tool-task-controller.ts";
 import type { OrdinaryWorkEvidence } from "./ordinary-work-controller.ts";
 import { BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE, PLAN_UPDATE_CUSTOM_TYPE } from "./proof/proof-sheet.ts";
@@ -9,7 +10,7 @@ import { BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE, PLAN_UPDATE_CUSTOM_TYPE } fro
 function ordinaryCompletionType(type: string): boolean {
 	return (
 		type === BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE ||
-		type === "background-tool-completion" ||
+		type === BACKGROUND_TOOL_COMPLETION_TYPE ||
 		type === PLAN_UPDATE_CUSTOM_TYPE
 	);
 }
@@ -88,7 +89,7 @@ export function ordinaryCompletionReports({ entries, record }: Pick<OrdinaryWork
 							index,
 						);
 					}
-				} else if (entry.customType === "background-tool-completion") {
+				} else if (entry.customType === BACKGROUND_TOOL_COMPLETION_TYPE) {
 					for (const result of backgroundToolInvocationObservations({ customType: entry.customType, details })) {
 						const r = result.details;
 						const launch = tools.get(result.toolCallId);

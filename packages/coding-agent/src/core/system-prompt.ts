@@ -81,7 +81,7 @@ REFERENCE POINTS
 D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
 
 const LOOKUP_BATCH_RULE = `Batch independent reads, searches or listings with \`${LOOKUP_TOOL_NAME}\`. Reuse current results. Once they settle the decision, act or report. Read more only for a specific unresolved question.`;
-const SCRIPT_TOOLS_RULE = `For dependent or bulk tool calls, use \`python\` with \`tools\` and \`${TOOL_BRIDGE_CLIENT_MODULE}\`. Use typed edit/write for file mutations, including memory updates, so Pi records the changed files. Python and shell stdout alone cannot prove writes.`;
+const SCRIPT_TOOLS_RULE = `For dependent or bulk tool calls, pass the tool names in \`python.tools\` and start the script with \`import ${TOOL_BRIDGE_CLIENT_MODULE}\`. Use typed edit/write for file mutations, including memory updates, so Pi records the changed files. Python and shell stdout alone cannot prove writes.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;

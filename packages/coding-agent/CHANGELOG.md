@@ -4,6 +4,9 @@
 
 - Workbench shows one activity row with the live timer instead of repeating the working state. Subsecond activity animation no longer requests a fresh session projection on each frame.
 - Both sidebar chevrons hide the full left pane. `Alt+G` still works with a tall editor, and `Alt+,` / `Alt+.` let you resize the visible pane without a mouse.
+- Workbench separates current failures from retained tool errors outside the current turn. The retained count is not a warning about unresolved work.
+- Watch guidance distinguishes process IDs from background task IDs that already wake the session. Python tool calls and rejected Git log limits now give clearer instructions.
+- Answer verification reads completed background checks and recognizes more static check chains. Missing evidence produces a warning without launching an automatic rerun or model consultation. Confirmed contradictions still trigger a correction.
 
 ## [0.105.0] - 2026-11-25
 

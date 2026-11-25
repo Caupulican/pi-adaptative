@@ -173,7 +173,7 @@ export function createWatchTool(getPort: () => SessionWatchPort | undefined): To
 				if (readAgentToolPolicyDeniedError(error)) throw error;
 				const diagnostic = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
 				return {
-					content: [{ type: "text", text: `Watch ${input.action} failed: ${diagnostic ?? "unavailable"}.` }],
+					content: [{ type: "text", text: `Watch ${input.action} failed: ${diagnostic ?? "unavailable"}` }],
 					details: undefined,
 					isError: true,
 					errorKind: "operation_outcome",

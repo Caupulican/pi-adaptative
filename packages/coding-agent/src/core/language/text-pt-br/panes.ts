@@ -94,8 +94,8 @@ export const PANES = {
 		unclassified: (count: number) => `${count} sem classificação`,
 		postprocessingFaults: (count: number) => `${count} ${count === 1 ? "falha" : "falhas"} de pós-processamento`,
 		conflictingReceipts: (count: number) => `${count} ${count === 1 ? "recibo conflitante" : "recibos conflitantes"}`,
-		earlierErrorResults: (count: number) =>
-			`${count} ${count === 1 ? "resultado de erro anterior mantido" : "resultados de erro anteriores mantidos"}`,
+		otherToolErrorResults: (count: number) =>
+			`${count} ${count === 1 ? "resultado" : "resultados"} de ferramenta com erro fora deste turno`,
 		mouseUnavailable: "Este terminal não tem mouse para entregar",
 		mouseWorkbench:
 			"O painel de trabalho controla o mouse: a roda rola, arrastar copia ao soltar, arrastar as bordas redimensiona, clicar no título oculta ou maximiza, clique com o botão direito cola",

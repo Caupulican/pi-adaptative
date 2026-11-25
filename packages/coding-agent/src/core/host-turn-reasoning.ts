@@ -14,6 +14,7 @@
 import type { Api, Model, ModelThinkingLevel } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { AgentMessage } from "../kernel/index.ts";
+import { BACKGROUND_TOOL_COMPLETION_TYPE } from "./background-tool-handoff-text.ts";
 import { REASONING_LADDER, type ReasoningEffortMap, type ReasoningLevel } from "./cost-guard.ts";
 import type { ThinkingLevel } from "./settings/settings-schema.ts";
 
@@ -23,7 +24,7 @@ import type { ThinkingLevel } from "./settings/settings-schema.ts";
  */
 /** Host turns that report delegated work: a leader's question and its goal's end are worker results too. */
 export const HOST_TURN_CUSTOM_TYPES = [
-	"background-tool-completion",
+	BACKGROUND_TOOL_COMPLETION_TYPE,
 	"background-worker-completion",
 	"leader-question",
 	"leader-outcome",

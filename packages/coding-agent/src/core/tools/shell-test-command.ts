@@ -155,7 +155,13 @@ function isVerificationInvocation(invocation: string[]): boolean {
 	}
 	if (executable === "node") {
 		const script = executableName(firstNonOption(args, 1) ?? "");
-		return script === "run-tsc.mjs" || /^check-[a-z0-9-]+\.mjs$/u.test(script);
+		return (
+			script === "run-tsc.mjs" ||
+			/^check-[a-z0-9-]+\.mjs$/u.test(script) ||
+			((script === "architecture-map.mjs" || script === "vocabulary-map.mjs") &&
+				args[2] === "--check" &&
+				args.length === 3)
+		);
 	}
 	return false;
 }
@@ -213,6 +219,19 @@ function isTeeInvocation(args: string[]): boolean {
 	return executableStem(args[0] ?? "") === "tee";
 }
 
+function isWhitespaceCheck(invocation: string[]): boolean {
+	const args = verificationArguments(invocation);
+	if (executableStem(args[0] ?? "") !== "git" || args[1] !== "diff") return false;
+	const operands = args.slice(2);
+	if (!operands.includes("--check")) return false;
+	return operands.every(
+		(arg) =>
+			arg === "--check" ||
+			arg === "--cached" ||
+			/^(?:HEAD(?:[~^][0-9]*)?|[a-f0-9]{7,64})(?:\.\.(?:HEAD(?:[~^][0-9]*)?|[a-f0-9]{7,64}))?$/u.test(arg),
+	);
+}
+
 function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
 	let index = 0;
 	if (isChangeDirectoryInvocation(sequence.invocations[index] ?? [])) {
@@ -228,17 +247,19 @@ function hasOnlyVerificationStages(sequence: ShellCommandSequence): boolean {
 		index++;
 	}
 
-	// Every path out of this loop is a return: past the last stage `invocations[index]` is undefined,
-	// which is not a test invocation, so the trailing stage decides and no statement follows the loop.
+	// A supplemental whitespace check can share a run but cannot certify a static suite on its own.
+	let hasVerification = false;
 	for (; ; index++) {
-		if (!isVerificationInvocation(sequence.invocations[index] ?? [])) return false;
+		const invocation = sequence.invocations[index] ?? [];
+		if (isVerificationInvocation(invocation)) hasVerification = true;
+		else if (!isWhitespaceCheck(invocation)) return false;
 		const connector = sequence.connectors[index];
-		if (connector === undefined) return true;
+		if (connector === undefined) return hasVerification;
 		if (connector === "&&") continue;
 		if (connector === "|" && hasPipefail && isTeeInvocation(sequence.invocations[index + 1] ?? [])) {
 			const teeIndex = index + 1;
 			const afterTee = sequence.connectors[teeIndex];
-			if (afterTee === undefined) return true;
+			if (afterTee === undefined) return hasVerification;
 			if (afterTee !== "&&") return false;
 			index = teeIndex;
 			continue;

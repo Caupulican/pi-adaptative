@@ -144,6 +144,36 @@ it("drags the visible sidebar rule and saves only at release", () => {
 	expect(saved).toHaveLength(1);
 });
 
+it("shows older tool errors separately from current failures", () => {
+	const { view, controller } = setup();
+	view.toggleExecutionMaximized();
+	const execution = () => view.render(140).map(stripVTControlCharacters).join("\n");
+	const failedCall = (toolCallId: string) => ({
+		toolCallId,
+		isError: true,
+		details: {
+			piToolInvocation: {
+				version: 1,
+				requestId: "test-request",
+				execution: "completed",
+				operationStatus: "error",
+				postprocessingFailures: [],
+			},
+		},
+	});
+
+	controller.record(undefined, failedCall("first"));
+	expect(execution()).toContain("! 1 failed");
+	expect(execution()).not.toContain("outside this turn");
+
+	controller.beginCycle();
+	expect(execution()).toContain("1 tool error result outside this turn");
+	expect(execution()).not.toContain("! 1 failed");
+
+	controller.record(undefined, failedCall("second"));
+	expect(execution()).toContain("! 1 failed · 1 tool error result outside this turn");
+});
+
 it("shows the Conversation/Execution column divider at a draggable cell", () => {
 	const { view } = setup();
 	view.toggleLayout();

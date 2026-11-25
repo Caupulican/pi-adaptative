@@ -318,7 +318,11 @@ export function compileRepoReadOptions(action: RepoReadAction, options: readonly
 			joined = token.length > 2 ? token.slice(2) : undefined;
 		}
 		const rule = OPTION_RULES[name];
-		if (!rule) refuse(`option '${name}' is not on the read-only allow-list for git ${action}`);
+		if (!rule) {
+			if (action === "log" && /^-[0-9]+$/.test(token))
+				refuse(`use '-n${token.slice(1)}' instead of '${token}' to limit Git history`);
+			refuse(`option '${name}' is not on the read-only allow-list for git ${action}`);
+		}
 		if (rule.actions && !rule.actions.includes(action)) {
 			refuse(`option '${name}' is not accepted for git ${action}`);
 		}

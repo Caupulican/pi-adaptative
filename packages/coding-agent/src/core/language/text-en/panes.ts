@@ -100,7 +100,8 @@ export const PANES = {
 		unclassified: (count: number) => `${count} unclassified`,
 		postprocessingFaults: (count: number) => `${count} postprocessing faults`,
 		conflictingReceipts: (count: number) => `${count} conflicting receipts`,
-		earlierErrorResults: (count: number) => `${count} earlier error results kept`,
+		otherToolErrorResults: (count: number) =>
+			`${count} tool error ${count === 1 ? "result" : "results"} outside this turn`,
 		mouseUnavailable: "This terminal has no mouse to hand over",
 		mouseWorkbench:
 			"Workbench owns the mouse: wheel scrolls, drag copies on release, drag edges to resize, click titles to hide or maximize, right click pastes",

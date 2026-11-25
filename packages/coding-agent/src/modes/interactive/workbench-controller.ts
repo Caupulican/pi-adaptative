@@ -388,14 +388,15 @@ export class WorkbenchController {
 			...(current.unclassified ? [pane.unclassified(current.unclassified)] : []),
 			...(current.postprocessing ? [pane.postprocessingFaults(current.postprocessing)] : []),
 			...(current.conflicts ? [pane.conflictingReceipts(current.conflicts)] : []),
-			...(retained.errorResults ? [pane.earlierErrorResults(retained.errorResults)] : []),
 		];
-		const summary = problems.length
-			? theme.fg(
-					retained.errorResults || current.postprocessing || current.conflicts ? "warning" : "muted",
-					`! ${problems.join(" · ")}`,
-				)
-			: "";
+		// The retained total includes this cycle and background results without cycle ownership.
+		const otherErrors = retained.errorResults - current.errorResults;
+		const summary = [
+			...(problems.length
+				? [theme.fg(current.postprocessing || current.conflicts ? "warning" : "muted", `! ${problems.join(" · ")}`)]
+				: []),
+			...(otherErrors ? [theme.fg("muted", pane.otherToolErrorResults(otherErrors))] : []),
+		].join(" · ");
 		const completed = current.succeeded + current.negative;
 		const accounting = [
 			...(partial ? ["partial"] : []),

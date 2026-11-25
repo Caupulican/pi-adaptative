@@ -239,11 +239,12 @@ completed-success, completed-negative, unknown-effects, and unclassified results
 faults and display error results are independent dimensions, not additional failed calls. Conflicting
 terminal claims become unknown; late handoff placeholders never undo completed evidence.
 
-The workbench displays cycle-local calls and an explicitly labeled retained error-result count;
-their quotient is not a failure rate. Retained means observations since the report/UI reset, not
-every root and worker action in the durable session. A new cycle keeps the previous view labeled
-as previous until its first evidence arrives. Background terminals update the owning cycle even
-after a later cycle begins, and notification replay does not increase totals.
+The Workbench shows current-cycle outcomes separately from error results outside that cycle. The
+latter counts earlier cycles and background results without an owning cycle. It excludes current
+results and covers only observations since the report/UI reset, not every action in the durable
+session. This count is not a failure rate or an unresolved-issue count. A new cycle labels the old
+previews as previous until its first evidence arrives. Background terminals update the owning
+cycle even after a later cycle begins, and notification replay does not increase totals.
 
 Bookkeeping has a 256 KiB charged-retention budget, using bounded identities and fixed records,
 without storing output or arguments. If it saturates, counts are labeled partial and already-retained
